@@ -12,8 +12,8 @@
 pub const MIN_TERMINAL_WIDTH: u16 = 40;
 pub const MIN_TERMINAL_HEIGHT: u16 = 8;
 
-/// Below this height the composer collapses to a single input line instead of a
-/// boxed multi-line editor.
+/// The composer's inner height grows one row per wrapped input line up to
+/// this many rows, then stops growing and scrolls instead.
 pub const INPUT_BOX_THRESHOLD: u16 = 12;
 
 /// Empty columns kept at each side of the normal TUI layout so transcript,

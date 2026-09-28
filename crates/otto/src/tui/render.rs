@@ -28,6 +28,8 @@ use super::layout::{
     escape_single_line_text, footer_workspace, format_context_percentage, format_token_count,
 };
 use super::transcript;
+use crate::subagent::format::{one_line, round_to_seconds};
+use crate::subagent::tasks::{Task, TaskStatus};
 
 /// Draws one frame.
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
@@ -41,26 +43,37 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     }
 
     let content_area = side_margin(area);
-    let composer_height = composer_height(app, content_area.width);
+    let panel_tasks = visible_panel_tasks(&app.tasks);
+    let (composer_height, panel_height) = composer_and_panel_height(
+        app,
+        content_area.width,
+        content_area.height,
+        panel_row_count(panel_tasks.len()),
+    );
     let suggestions = app.suggestions();
-    // The panel may take every row the composer and footer leave except one,
-    // which the transcript keeps.
-    let suggestion_height =
-        (suggestions.len() as u16).min(content_area.height.saturating_sub(composer_height + 2));
+    // The suggestion list may take every row the composer, the panel, and
+    // the status line leave, except the one the transcript keeps.
+    let suggestion_height = (suggestions.len() as u16).min(
+        content_area
+            .height
+            .saturating_sub(composer_height + panel_height + 2),
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
-            Constraint::Length(1),
             Constraint::Length(suggestion_height),
             Constraint::Length(composer_height),
+            Constraint::Length(panel_height),
+            Constraint::Length(1),
         ])
         .split(content_area);
 
     draw_transcript(frame, app, chunks[0]);
-    draw_footer(frame, app, chunks[1]);
-    draw_suggestions(frame, app, &suggestions, chunks[2]);
-    draw_composer(frame, app, chunks[3]);
+    draw_suggestions(frame, app, &suggestions, chunks[1]);
+    draw_composer(frame, app, chunks[2]);
+    draw_panel(frame, &panel_tasks, chunks[3]);
+    draw_footer(frame, app, chunks[4]);
 
     if !app.busy()
         && let Some(approval) = &app.approval
@@ -94,13 +107,44 @@ fn side_margin(area: Rect) -> Rect {
     }
 }
 
-/// A one-line composer grows to fit wrapped input up to [`INPUT_BOX_THRESHOLD`]
-/// lines before it stops growing and scrolls instead.
-fn composer_height(app: &App, width: u16) -> u16 {
+/// The composer's inner-row floor with an empty or short value. Grows with
+/// wrapped input up to [`INPUT_BOX_THRESHOLD`] as normal; only squeezed
+/// toward 1 by [`composer_and_panel_height`] on a terminal too short to give
+/// the composer this much room even with the panel dropped.
+const COMPOSER_MIN_INNER_ROWS: u16 = 3;
+
+/// The composer box's total height (inner rows plus the two border rows) for
+/// a given inner-row floor. Grows to fit wrapped input up to
+/// [`INPUT_BOX_THRESHOLD`] lines before it stops growing and scrolls instead.
+fn composer_height(app: &App, width: u16, min_inner_rows: u16) -> u16 {
     // `width - 2` is the box's inner width, so this sizes the box from
     // exactly the rows [`draw_composer`] will put in it.
     let (lines, _, _) = composer_lines(&app.input, app.cursor, width.saturating_sub(2));
-    (lines.len() as u16).clamp(1, INPUT_BOX_THRESHOLD) + 2
+    (lines.len() as u16).clamp(min_inner_rows, INPUT_BOX_THRESHOLD) + 2
+}
+
+/// Splits the height the transcript's guaranteed row and the status line's
+/// fixed row leave between the composer and the sub-agent panel, returning
+/// `(composer_height, panel_height)`.
+///
+/// Priority order when space is short: the panel is dropped first (down to
+/// 0 rows, from `panel_rows_wanted`); only once it has reached 0 does the
+/// composer's empty-input floor shrink from [`COMPOSER_MIN_INNER_ROWS`]
+/// toward 1 inner row. `draw` already refuses to lay out below
+/// [`MIN_TERMINAL_HEIGHT`], so `height` here is always at least that.
+fn composer_and_panel_height(
+    app: &App,
+    width: u16,
+    height: u16,
+    panel_rows_wanted: u16,
+) -> (u16, u16) {
+    let budget = height.saturating_sub(1 /* transcript */ + 1 /* status line */);
+    let natural_composer = composer_height(app, width, COMPOSER_MIN_INNER_ROWS);
+    if let Some(spare) = budget.checked_sub(natural_composer) {
+        return (natural_composer, panel_rows_wanted.min(spare));
+    }
+    let shrunk_composer = composer_height(app, width, 1).min(budget).max(3);
+    (shrunk_composer, 0)
 }
 
 const STARTUP_LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/";
@@ -156,6 +200,12 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// How long one [`SPINNER_FRAMES`] frame is held. [`super::drive_turn`]
 /// redraws on this interval for as long as a turn runs.
 pub(super) const SPINNER_FRAME: Duration = Duration::from_millis(100);
+
+/// How often the idle loop (`super::run_app`) redraws just to keep the
+/// sub-agent panel's elapsed times current. Only runs while
+/// [`needs_task_clock`] is true; during a turn `drive_turn`'s existing
+/// [`SPINNER_FRAME`] cadence already covers it.
+pub(super) const TASKS_PANEL_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The line shown under the transcript while a turn is in flight: the phase
 /// (waiting for the model, reasoning, running a tool, a provider retry) and
@@ -341,6 +391,123 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     frame.set_cursor_position((inner.x + caret_column, inner.y + caret_row - scroll));
+}
+
+/// Sub-agent tasks the panel shows: queued or running, in registry order.
+/// A finished task (succeeded, failed, canceled) never appears here.
+fn visible_panel_tasks(tasks: &[Task]) -> Vec<&Task> {
+    tasks
+        .iter()
+        .filter(|task| matches!(task.status, TaskStatus::Queued | TaskStatus::Running))
+        .collect()
+}
+
+/// The panel's row count for `visible_count` eligible tasks: 0 with none,
+/// otherwise up to 4 (the 4th row becomes a "+N more" summary once there are
+/// more than 4).
+fn panel_row_count(visible_count: usize) -> u16 {
+    visible_count.min(4) as u16
+}
+
+/// Whether the sub-agent panel needs a periodic redraw to keep its elapsed
+/// times current: true iff at least one task is queued or running. Drives
+/// the idle-loop 1-second timer in [`super::run_app`]; with nothing queued
+/// or running, no timer runs.
+pub(crate) fn needs_task_clock(tasks: &[Task]) -> bool {
+    !visible_panel_tasks(tasks).is_empty()
+}
+
+/// The sub-agent panel below the composer: one row per queued/running task
+/// in registry order, capped at 4 rows with a "+N more" row once there are
+/// more. Reads only the `tasks` snapshot [`App::refresh_tasks`] already
+/// took, so drawing performs no lock or query.
+fn draw_panel(frame: &mut Frame, tasks: &[&Task], area: Rect) {
+    if area.height == 0 || tasks.is_empty() {
+        return;
+    }
+    let now = chrono::Utc::now();
+    let shown = tasks.len().min(4);
+    let overflow = tasks.len() > 4;
+    let rows = if overflow { 3 } else { shown };
+    let mut lines: Vec<Line<'static>> = tasks[..rows]
+        .iter()
+        .map(|task| panel_row_line(task, now, area.width))
+        .collect();
+    if overflow {
+        lines.push(Line::styled(
+            format!("+{} more", tasks.len() - rows),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// One panel row: a status marker (the running spinner or a static queued
+/// marker), the task id, its name (for an unnamed task, its agent, or
+/// `default` as `/agents` shows a task with no agent), how long it has been
+/// running or queued, and its description, escaped and truncated to fit the
+/// row with no wrapping. Name and agent need no escaping: both are
+/// validated to `[A-Za-z0-9_-]` when the task is created.
+fn panel_row_line(task: &Task, now: chrono::DateTime<chrono::Utc>, width: u16) -> Line<'static> {
+    let marker = panel_marker(task, now);
+    let name = [task.name.as_str(), task.agent.as_str()]
+        .into_iter()
+        .find(|label| !label.is_empty())
+        .unwrap_or("default");
+    let elapsed = panel_elapsed(task, now);
+    let prefix = format!("{marker} {} {name}  {elapsed}  ", task.id);
+    let remaining = (width as usize).saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+    let description = truncate_to_width(
+        &escape_single_line_text(&one_line(&task.description)),
+        remaining,
+    );
+    Line::raw(format!("{prefix}{description}"))
+}
+
+/// A running task's marker animates through [`SPINNER_FRAMES`] on the same
+/// cadence as the transcript's thinking line; a queued task gets a fixed,
+/// visually distinct marker instead.
+fn panel_marker(task: &Task, now: chrono::DateTime<chrono::Utc>) -> &'static str {
+    match (task.status, task.started_at) {
+        (TaskStatus::Running, Some(started)) => {
+            let elapsed_ms = now.signed_duration_since(started).num_milliseconds().max(0) as u128;
+            let frame = (elapsed_ms / SPINNER_FRAME.as_millis()) as usize;
+            SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]
+        }
+        (TaskStatus::Running, None) => SPINNER_FRAMES[0],
+        _ => "○",
+    }
+}
+
+/// `now - started_at` for a running task, `now - created_at` for a queued
+/// one, rounded the same way [`super::agents_view`]'s duration column is.
+fn panel_elapsed(task: &Task, now: chrono::DateTime<chrono::Utc>) -> String {
+    let start = match task.status {
+        TaskStatus::Running => task.started_at,
+        _ => task.created_at,
+    };
+    match start {
+        Some(start) => round_to_seconds(now.signed_duration_since(start)),
+        None => "0s".to_string(),
+    }
+}
+
+/// Truncates `value` to at most `max_width` display columns, breaking
+/// between characters rather than mid-character. No ellipsis: the panel row
+/// is meant to be scanned, not read in full, and ratatui would clip an
+/// over-width line the same way regardless.
+fn truncate_to_width(value: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in value.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
@@ -1174,6 +1341,164 @@ mod tests {
         assert!(narrow.contains("think default"), "{narrow}");
     }
 
+    /// A running task, ready to drop into `app.tasks` for the panel tests
+    /// below.
+    fn running_task(id: &str, name: &str, description: &str) -> Task {
+        Task {
+            id: id.into(),
+            name: name.into(),
+            description: description.into(),
+            status: TaskStatus::Running,
+            created_at: Some(chrono::Utc::now()),
+            started_at: Some(chrono::Utc::now()),
+            ..Task::default()
+        }
+    }
+
+    /// Layout order top to bottom: transcript, suggestions, composer,
+    /// sub-agent panel, status line. With one running task the panel takes
+    /// one row, so the composer's bottom border, the panel row, and the
+    /// status line are the frame's last three rows, in that order.
+    #[tokio::test]
+    async fn the_panel_sits_between_the_composer_and_the_last_row_status_line() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.tasks = vec![running_task("t3", "review-auth", "check the callback")];
+
+        let height = 20;
+        let rows = screen_rows(&app, 100, height);
+        assert_eq!(rows.len(), height as usize);
+
+        let composer_border_row = &rows[(height - 3) as usize];
+        let panel_row = &rows[(height - 2) as usize];
+        let status_row = &rows[(height - 1) as usize];
+
+        assert!(composer_border_row.contains('─'), "{composer_border_row:?}");
+        assert!(
+            !composer_border_row.contains("t3"),
+            "{composer_border_row:?}"
+        );
+        assert!(panel_row.contains("t3"), "{panel_row:?}");
+        assert!(panel_row.contains("review-auth"), "{panel_row:?}");
+        assert!(status_row.contains("alpha/gpt-alpha"), "{status_row:?}");
+    }
+
+    /// The composer's empty-input floor is 3 inner rows, so the box (with its
+    /// two border rows) is 5 rows tall.
+    #[tokio::test]
+    async fn empty_composer_is_five_rows_tall() {
+        let (_workspace, _sessions, app) = app_fixture().await;
+        assert_eq!(composer_height(&app, 80, COMPOSER_MIN_INNER_ROWS), 5);
+    }
+
+    /// With no queued or running task the panel takes no rows at all, and a
+    /// finished task never appears in it.
+    #[tokio::test]
+    async fn a_finished_task_leaves_no_panel_row() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.tasks = vec![Task {
+            id: "t9".into(),
+            status: TaskStatus::Succeeded,
+            ..Task::default()
+        }];
+
+        let height = 20;
+        let rows = screen_rows(&app, 100, height);
+
+        // No panel row means the composer's bottom border sits directly
+        // above the status line.
+        let composer_border_row = &rows[(height - 2) as usize];
+        assert!(composer_border_row.contains('─'), "{composer_border_row:?}");
+        assert!(!rows.join("\n").contains("t9"));
+    }
+
+    /// More than 4 queued/running tasks show only the first 3 and a
+    /// `+N more` row for the rest.
+    #[tokio::test]
+    async fn five_running_tasks_show_three_rows_and_a_more_row() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.tasks = (0..5)
+            .map(|i| running_task(&format!("t{i}"), &format!("agent{i}"), "working"))
+            .collect();
+
+        let screen = screen_rows(&app, 100, 30).join("\n");
+
+        for i in 0..3 {
+            assert!(screen.contains(&format!("t{i}")), "{screen}");
+        }
+        for i in 3..5 {
+            assert!(!screen.contains(&format!("t{i}")), "{screen}");
+        }
+        assert!(screen.contains("+2 more"), "{screen}");
+    }
+
+    /// At the minimum terminal size (40x8) with four running tasks, the rows
+    /// are transcript 1, composer 5, panel 1, status 1: the panel gives up
+    /// its rows before the composer shrinks below its 3-row minimum.
+    #[tokio::test]
+    async fn the_minimum_size_keeps_the_transcript_row_and_the_status_line() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.tasks = (1..=4)
+            .map(|i| running_task(&format!("t{i}"), "review", "check the diff"))
+            .collect();
+
+        let width = MIN_TERMINAL_WIDTH;
+        let height = MIN_TERMINAL_HEIGHT;
+        let rows = screen_rows(&app, width, height);
+        assert_eq!(rows.len(), height as usize);
+
+        // Row 0 is the transcript; the composer's titled top border is row 1
+        // and its bottom border row 5, so it kept 3 inner rows.
+        assert!(rows[1].contains("Otto"), "{rows:?}");
+        assert!(
+            rows[5].contains('─') && !rows[5].contains("Otto"),
+            "{rows:?}"
+        );
+        assert!(rows[6].contains("t1"), "{rows:?}");
+        assert!(!rows.join("\n").contains("t2"), "{rows:?}");
+        // The footer text is longer than this width, but it still starts
+        // with the profile/model field, so this confirms the status line
+        // landed on the frame's last row rather than being pushed off it.
+        assert!(rows[7].contains("alpha/gpt-alpha"), "{rows:?}");
+    }
+
+    /// An unnamed task is labeled by its agent, and by `default` when it has
+    /// no agent either.
+    #[test]
+    fn an_unnamed_panel_row_falls_back_to_the_agent() {
+        let text = |task: &Task| -> String {
+            panel_row_line(task, chrono::Utc::now(), 80)
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+        let mut task = running_task("t1", "", "check the diff");
+        task.agent = "reviewer".into();
+        assert!(text(&task).contains("t1 reviewer "), "{}", text(&task));
+        task.agent.clear();
+        assert!(text(&task).contains("t1 default "), "{}", text(&task));
+    }
+
+    /// The sub-agent panel needs the idle loop's 1-second redraw timer iff at
+    /// least one task is queued or running; a registry with nothing pending,
+    /// or only finished tasks, needs no timer.
+    #[test]
+    fn needs_task_clock_only_with_a_queued_or_running_task() {
+        assert!(!needs_task_clock(&[]));
+        assert!(!needs_task_clock(&[Task {
+            status: TaskStatus::Succeeded,
+            ..Task::default()
+        }]));
+        assert!(needs_task_clock(&[Task {
+            status: TaskStatus::Queued,
+            ..Task::default()
+        }]));
+        assert!(needs_task_clock(&[Task {
+            status: TaskStatus::Running,
+            ..Task::default()
+        }]));
+    }
+
     /// No-panic smoke test at extreme terminal sizes. Ratatui's `Buffer` makes
     /// staying within bounds structurally true (see this test module's doc
     /// comment above), so what is left to check is that drawing at these sizes
@@ -1369,7 +1694,11 @@ mod tests {
 
         let (x, y) = cursor(&app, 100, 20);
 
-        assert_eq!((x, y), (SIDE_MARGIN + 1 + 6, 20 - 2));
+        // One line of input still fills the composer's 3-row minimum, so the
+        // box is 5 rows (3 inner + 2 borders) and the caret sits on the
+        // first inner row, `composer height` rows above the bottom of the
+        // frame (the status line takes the last row; there is no panel row).
+        assert_eq!((x, y), (SIDE_MARGIN + 1 + 6, 20 - 5));
     }
 
     /// A hard line break moves the caret to the next composer row.
@@ -1381,7 +1710,9 @@ mod tests {
 
         let (x, y) = cursor(&app, 100, 20);
 
-        assert_eq!((x, y), (SIDE_MARGIN + 1 + 2, 20 - 2));
+        // Two lines still fit within the composer's 3-row minimum (5 rows
+        // including borders); the caret follows to the second inner row.
+        assert_eq!((x, y), (SIDE_MARGIN + 1 + 2, 20 - 5 + 1));
     }
 
     /// Past [`INPUT_BOX_THRESHOLD`] rows the composer stops growing, so it
@@ -1399,8 +1730,10 @@ mod tests {
         let (x, y) = cursor(&app, 100, height);
 
         assert!(content.contains("END"), "{content}");
-        // The box is `INPUT_BOX_THRESHOLD` text rows plus two borders, so
-        // its last text row is the second-to-last row of the frame.
-        assert_eq!((x, y), (SIDE_MARGIN + 1 + 3, height - 2));
+        // The box is `INPUT_BOX_THRESHOLD` text rows plus two borders. With
+        // no panel row, the composer's bottom border sits directly above the
+        // status line (the frame's last row), so its last text row is 3 rows
+        // above the bottom of the frame.
+        assert_eq!((x, y), (SIDE_MARGIN + 1 + 3, height - 3));
     }
 }

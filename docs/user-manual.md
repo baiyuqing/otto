@@ -683,8 +683,13 @@ TUI-only commands:
   succeeded, failed, canceled, and interrupted. `↑`/`↓` or `PgUp`/`PgDn`
   select, `Enter` opens the task's prompt, result or error, and child
   transcript (`↑`/`↓`/`PgUp`/`PgDn` scroll it), and `Esc` goes back one
-  level. The modal re-reads `tasks.db` every 2 seconds while it is open and
-  Otto is idle.
+  level. The modal re-reads `tasks.db` every 2 seconds while it is open,
+  including while a turn is running. `/agents` can also be opened while a
+  turn is running (streaming, or waiting on a sub-agent): typing it and
+  pressing `Enter` opens the modal instead of queuing it as the next prompt.
+  `Esc` closes the modal (or leaves its detail pane) without cancelling the
+  turn; a second `Esc`, with the modal closed, cancels the turn as it always
+  does.
 - `/image <path>` attaches one image to the next prompt. The image is stored
   inline in the session; the selected model and provider endpoint must support
   image input. Otto sends images with `detail: high`.

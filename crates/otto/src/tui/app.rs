@@ -588,12 +588,14 @@ impl App {
         if self.busy() {
             // While a turn runs, the composer is an editable draft for the
             // next input. Enter commits that draft to the transcript as the
-            // queued prompt; the run loop dispatches the committed prompt
-            // after the turn finishes successfully. Ctrl+U withdraws the
-            // committed prompt, or clears the current draft when nothing is
-            // committed. Esc/Ctrl+C are intercepted by the caller as
-            // cancellation before this method is invoked.
-            self.handle_busy_composer_key(key);
+            // queued prompt, unless the draft is `/agents`, which opens the
+            // overlay instead (see [`App::handle_turn_key`]); the run loop
+            // dispatches a committed prompt after the turn finishes
+            // successfully. Ctrl+U withdraws the committed prompt, or clears
+            // the current draft when nothing is committed. Esc/Ctrl+C are
+            // intercepted by the caller as cancellation before this method is
+            // invoked.
+            self.handle_busy_composer_key(key, controller);
             return None;
         }
         if key.code == KeyCode::Char('?') && self.input.is_empty() {
@@ -703,7 +705,14 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_busy_composer_key(&mut self, key: KeyEvent) {
+    /// Handles one composer key while a turn is busy. Enter normally commits
+    /// the draft as the queued prompt (see [`App::commit_queued_input`]); a
+    /// draft that [`commands::parse_slash_command`] resolves to
+    /// [`SlashCommandKind::Agents`] instead opens the `/agents` overlay
+    /// directly and clears the draft, without touching `queued_input` — the
+    /// overlay only reads `tasks.db`, so opening it starts no provider
+    /// request.
+    pub(crate) fn handle_busy_composer_key(&mut self, key: KeyEvent, controller: &Controller) {
         match key.code {
             KeyCode::Enter
                 if key
@@ -714,7 +723,18 @@ impl App {
                 self.cursor += 1;
                 self.edited();
             }
-            KeyCode::Enter => self.commit_queued_input(),
+            KeyCode::Enter => {
+                let draft: String = self.input.iter().collect();
+                match commands::parse_slash_command(draft.trim()) {
+                    Some((command, _)) if command.kind == SlashCommandKind::Agents => {
+                        self.agents = Some(AgentsView::open(controller));
+                        self.input.clear();
+                        self.cursor = 0;
+                        self.suggestion = 0;
+                    }
+                    _ => self.commit_queued_input(),
+                }
+            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.queued_input = None;
                 self.input.clear();
@@ -804,13 +824,39 @@ impl App {
         self.edited();
     }
 
-    /// Esc or Ctrl+C while a turn is running cancels it; the caller (which
-    /// holds the turn's `CancellationToken`) checks this before calling
-    /// [`App::handle_key`] and cancels the turn directly instead of forwarding
-    /// the key.
+    /// Esc or Ctrl+C while a turn is running cancels it. [`App::handle_turn_key`]
+    /// checks this when the `/agents` overlay is closed; while the overlay is
+    /// open it instead routes Esc to the overlay and only checks Ctrl+C here.
     pub fn is_interrupt_key(key: &KeyEvent) -> bool {
         key.code == KeyCode::Esc
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    }
+
+    /// Handles one key while a turn is running (streaming, or blocked in
+    /// `agent_wait`), returning `true` when the turn should be cancelled.
+    ///
+    /// With the `/agents` overlay open, every key except Ctrl+C goes to
+    /// [`AgentsView::handle_key`]: Esc there closes the overlay (or leaves its
+    /// detail pane) without cancelling the turn; Ctrl+C always cancels.
+    /// Without the overlay open, [`App::is_interrupt_key`] decides
+    /// cancellation and every other key goes to
+    /// [`App::handle_busy_composer_key`], whose Enter arm opens the overlay
+    /// for an `/agents` draft instead of queuing it.
+    pub(crate) fn handle_turn_key(&mut self, key: KeyEvent, controller: &Controller) -> bool {
+        if let Some(view) = &mut self.agents {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return true;
+            }
+            if !view.handle_key(key.code, controller) {
+                self.agents = None;
+            }
+            return false;
+        }
+        if Self::is_interrupt_key(&key) {
+            return true;
+        }
+        self.handle_busy_composer_key(key, controller);
+        false
     }
 
     /// The slash commands the composer's current value is a prefix of, with
@@ -2599,6 +2645,84 @@ mod tests {
         assert_eq!(app.entries.len(), before, "no command must run while busy");
         assert!(app.input.is_empty(), "queued Enter clears the composer");
         assert_eq!(app.queued_input.as_deref(), Some("/memory search vim"));
+    }
+
+    /// The reported bad experience: while a turn streamed or `agent_wait`
+    /// blocked, `/agents` + Enter queued the command like any other instead
+    /// of opening the overlay. `handle_turn_key` (what the busy turn loop
+    /// actually calls) must open it immediately and leave nothing queued.
+    #[tokio::test]
+    async fn busy_turn_key_opens_the_agents_overlay_on_an_agents_draft_instead_of_queuing_it() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.start_turn();
+        app.input = "/agents".chars().collect();
+        app.cursor = app.input.len();
+
+        let cancelled = app.handle_turn_key(key(KeyCode::Enter, KeyModifiers::NONE), &controller);
+
+        assert!(!cancelled);
+        assert!(app.agents.is_some(), "Enter on /agents opens the overlay");
+        assert!(app.queued_input.is_none());
+        assert!(app.input.is_empty());
+    }
+
+    /// Opening the overlay from a busy `/agents` draft must not disturb a
+    /// prompt already queued from an earlier Enter.
+    #[tokio::test]
+    async fn busy_turn_key_opening_the_overlay_leaves_an_earlier_queued_prompt_untouched() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.start_turn();
+        app.queued_input = Some("earlier queued prompt".to_string());
+        app.input = "/agents".chars().collect();
+        app.cursor = app.input.len();
+
+        app.handle_turn_key(key(KeyCode::Enter, KeyModifiers::NONE), &controller);
+
+        assert!(app.agents.is_some());
+        assert_eq!(app.queued_input.as_deref(), Some("earlier queued prompt"));
+    }
+
+    /// While the overlay is open during a turn, Esc closes it without
+    /// cancelling the turn; a second Esc, with the overlay now closed,
+    /// cancels the turn as it always did.
+    #[tokio::test]
+    async fn busy_turn_key_esc_closes_the_open_overlay_before_it_cancels_the_turn() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.start_turn();
+        app.agents = Some(AgentsView::open(&controller));
+
+        let cancelled = app.handle_turn_key(key(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        assert!(!cancelled, "the first Esc only closes the overlay");
+        assert!(app.agents.is_none());
+
+        let cancelled = app.handle_turn_key(key(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        assert!(cancelled, "Esc with no overlay open cancels the turn");
+    }
+
+    /// Ctrl+C cancels the turn even while the overlay is open, bypassing the
+    /// overlay entirely.
+    #[tokio::test]
+    async fn busy_turn_key_ctrl_c_cancels_the_turn_even_with_the_overlay_open() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.start_turn();
+        app.agents = Some(AgentsView::open(&controller));
+
+        let cancelled =
+            app.handle_turn_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL), &controller);
+
+        assert!(cancelled);
     }
 
     /// The completion half; the help-overlay text containment half is

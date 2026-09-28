@@ -253,6 +253,12 @@ fn to_js<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
+/// The built-in task submitted by `/init` in every frontend.
+#[wasm_bindgen(js_name = initPrompt)]
+pub fn init_prompt() -> String {
+    otto_core::agent::INIT_PROMPT.to_string()
+}
+
 /// Splits an SSE buffer into whole frames and the unparsed remainder.
 ///
 /// A chunk boundary inside a frame is safe: the partial frame comes back in

@@ -1,9 +1,14 @@
+import { initPrompt } from 'otto-web'
 import { describe, expect, it } from 'vitest'
 import { parseWebCommand, webCommandSuggestions } from './commands'
 
 describe('web slash commands', () => {
   it('parses commands backed by existing server APIs', () => {
     expect(parseWebCommand('/help')).toEqual({ kind: 'help' })
+    expect(parseWebCommand('/init')).toEqual({
+      kind: 'prompt',
+      text: initPrompt(),
+    })
     expect(parseWebCommand('/session')).toEqual({ kind: 'session' })
     expect(parseWebCommand('/new')).toEqual({ kind: 'new' })
     expect(parseWebCommand('/clear')).toEqual({ kind: 'new' })
@@ -19,6 +24,10 @@ describe('web slash commands', () => {
     expect(parseWebCommand('/task cancel t1')).toEqual({ kind: 'taskCancel', id: 't1' })
     expect(parseWebCommand('/mcp')).toEqual({ kind: 'mcp' })
     expect(parseWebCommand('/exit')).toEqual({ kind: 'exit' })
+  })
+
+  it('leaves /init with arguments as a literal prompt', () => {
+    expect(parseWebCommand('/init now')).toEqual({ kind: 'prompt', text: '/init now' })
   })
 
   it('falls through to a prompt when /mcp has an argument', () => {
@@ -47,6 +56,7 @@ describe('web slash commands', () => {
   it('suggests matching commands for slash prefixes', () => {
     expect(webCommandSuggestions('/')).toEqual([
       { name: '/help', description: 'show web commands' },
+      { name: '/init', description: 'create a repository AGENTS.md guide' },
       { name: '/session', description: 'show current session details' },
       { name: '/new', description: 'start a new session' },
       { name: '/clear', description: 'start a new session' },

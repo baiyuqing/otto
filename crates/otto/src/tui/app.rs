@@ -891,6 +891,13 @@ impl App {
                 self.show_help = true;
                 None
             }
+            SlashCommandKind::Init => {
+                if !args.is_empty() {
+                    self.push_system(format!("unknown command: {line}"));
+                    return None;
+                }
+                Some(Action::Prompt(otto_core::agent::INIT_PROMPT.to_string()))
+            }
             SlashCommandKind::Exit => {
                 if !args.is_empty() {
                     self.push_system(format!("unknown command: {line}"));
@@ -2217,6 +2224,29 @@ mod tests {
         assert_eq!(
             app.entries.last().expect("entry").raw,
             "unknown command: /clear now"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_submits_the_builtin_agent_task_and_rejects_arguments() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        let action = app.dispatch_line("/init", &controller, &cancel);
+        assert!(
+            matches!(action, Some(Action::Prompt(prompt)) if prompt == otto_core::agent::INIT_PROMPT)
+        );
+
+        assert!(
+            app.dispatch_line("/init now", &controller, &cancel)
+                .is_none()
+        );
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            "unknown command: /init now"
         );
     }
 

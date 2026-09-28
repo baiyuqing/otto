@@ -75,9 +75,15 @@ tasks only through the shared task-lister facade; children never receive
 not persisted. `agent_send` queues parent task updates in a child's private inbox
 and child agents read them only at normal agent-loop notification checkpoints;
 it does not interrupt an in-flight provider or tool call. `agent_report` is a
-child-only tool that queues progress reports in the parent's task inbox without
-finishing the task. Definitions cannot add tools outside the child tool set;
-`tools` only narrows it. `[agents]` is TOML only, like `[skills]`. Do not
+child-only tool that queues one message in the parent's task inbox without
+finishing the task; a child uses it only to answer a parent question or to
+report a blocker needing a parent decision, never for progress updates, plans,
+or interim findings. `REPORT_BUDGET` (`crates/otto/src/subagent/tasks.rs`,
+currently 10) caps it at that many calls on the child's own initiative per
+task, plus one more per `agent_send` message the parent sends; a call past
+the limit returns a tool error and delivers nothing to the parent.
+Definitions cannot add tools outside the child tool set; `tools` only
+narrows it. `[agents]` is TOML only, like `[skills]`. Do not
 document `agent_cancel` as a working feature.
 
 Keep durable workflows separate from ad-hoc sub-agent tasks. Workflow

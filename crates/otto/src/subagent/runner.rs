@@ -40,6 +40,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
@@ -56,7 +57,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::format::{comma_int, first_runes, one_line, round_to_seconds};
 use super::interrupted;
-use super::tasks::{Task, TaskError, TaskStatus, Tasks};
+use super::tasks::{REPORT_BUDGET, Task, TaskError, TaskStatus, Tasks};
 use super::{Catalog, Definition, WritePolicy, inherit_snapshot};
 use crate::failover;
 use crate::tool::registry::Registry;
@@ -82,7 +83,7 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 11] = [
 
 /// Appended to a child's system prompt under `## Sub-agent role` when it has
 /// no definition, or its definition's body is empty.
-const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result. Use agent_report to send concise progress updates, blockers, plans, or interim findings to the parent when useful; those reports do not end your task.";
+const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result. Do not send progress updates, plans, or interim findings with agent_report; put them in the final report instead. Call agent_report only to answer a question that arrives in a [parent-message], or to report a blocker that needs a parent decision while you can keep working on other parts of the task. If you cannot continue, end with a final report that states the blocker.";
 
 const DEFAULT_MAX_PARALLEL: usize = 4;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 16384;
@@ -235,10 +236,6 @@ impl Session for SharedTranscript {
     }
 }
 
-/// Child-only tool used by a running sub-agent to send a progress update to
-/// the parent without finishing the task.
-const AGENT_REPORT_DESCRIPTION: &str = "Report progress, blockers, plans, or interim findings to the parent agent without ending this sub-agent task. Use this when the parent should know what you are doing or may want to send a follow-up task update with agent_send.";
-
 /// One child's view of the shared child registry: the tools whose names are in
 /// `allowed`, in the registry's own order. `None` allows every child tool.
 pub struct ChildTools {
@@ -249,6 +246,9 @@ pub struct ChildTools {
     parent_inbox: Arc<Inbox>,
     task_id: String,
     max_output_bytes: usize,
+    /// Remaining `agent_report` calls; see [`REPORT_BUDGET`] and
+    /// [`ChildTools::report`].
+    reports_left: Arc<AtomicUsize>,
 }
 
 impl ChildTools {
@@ -285,17 +285,25 @@ impl ChildTools {
         }
     }
 
+    /// Child-only tool that sends one message to the parent without ending
+    /// this sub-agent task. Use only to answer a `[parent-message]` question
+    /// or to report a blocker needing a parent decision, never for progress
+    /// updates, plans, or interim findings. Budgeted by [`REPORT_BUDGET`]; see
+    /// [`ChildTools::report`].
     fn agent_report_definition() -> ToolDefinition {
+        let description = format!(
+            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, or interim findings; put those in your final report. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent."
+        );
         definition(
             "agent_report",
-            AGENT_REPORT_DESCRIPTION,
+            &description,
             serde_json::json!({
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
                     "message": {
                         "type": "string",
-                        "description": "Progress, blocker, plan, or interim finding to show to the parent agent."
+                        "description": "The answer to the parent's question, or the blocker and the decision it needs."
                     }
                 },
                 "required": ["message"]
@@ -303,6 +311,9 @@ impl ChildTools {
         )
     }
 
+    /// Pushes `message` to the parent's inbox, consuming one report from
+    /// [`REPORT_BUDGET`]. The caller must check and decrement `reports_left`
+    /// before calling this; see [`ChildTools::execute`].
     fn report(&self, message: &str) -> ToolResult {
         let text = capped_text_result(
             &format!("[task-report] task {}\n{}", self.task_id, message),
@@ -381,6 +392,15 @@ impl ToolExecutor for ChildTools {
             let message = args.message.trim();
             if message.is_empty() {
                 return error_result("message is required");
+            }
+            if self
+                .reports_left
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_err()
+            {
+                return error_result(
+                    "agent_report limit used up for this task; put this in your final report instead. Each [parent-message] from the parent allows one more report.",
+                );
             }
             return self.report(message);
         }
@@ -932,6 +952,11 @@ impl Runner {
             parent_inbox: Arc::clone(self.config.tasks.notifications()),
             task_id: task.id.clone(),
             max_output_bytes: self.config.max_output_bytes,
+            reports_left: self
+                .config
+                .tasks
+                .report_allowance(&task.id)
+                .unwrap_or_else(|| Arc::new(AtomicUsize::new(REPORT_BUDGET))),
         };
 
         let role_body = definition
@@ -1535,6 +1560,22 @@ mod tests {
         write_paths: Vec<String>,
         parent_inbox: Arc<Inbox>,
     ) -> ChildTools {
+        child_tools_with_budget(
+            registry,
+            write_policy,
+            write_paths,
+            parent_inbox,
+            REPORT_BUDGET,
+        )
+    }
+
+    fn child_tools_with_budget(
+        registry: Arc<Registry>,
+        write_policy: WritePolicy,
+        write_paths: Vec<String>,
+        parent_inbox: Arc<Inbox>,
+        budget: usize,
+    ) -> ChildTools {
         ChildTools {
             registry,
             allowed: None,
@@ -1543,6 +1584,7 @@ mod tests {
             parent_inbox,
             task_id: "t1".to_string(),
             max_output_bytes: 16384,
+            reports_left: Arc::new(AtomicUsize::new(budget)),
         }
     }
 
@@ -1630,6 +1672,157 @@ mod tests {
         assert_eq!(notification.kind, Some(NotificationKind::TaskReport));
         assert!(notification.text.contains("[task-report] task t1"));
         assert!(notification.text.contains("found the failing test"));
+    }
+
+    #[tokio::test]
+    async fn agent_report_errors_once_budget_is_used_up() {
+        let parent_inbox = Arc::new(Inbox::new(None));
+        let registry = Arc::new(Registry::new(vec![stub("read")]).unwrap());
+        let tools = child_tools_with_budget(
+            registry,
+            WritePolicy::SingleWriter,
+            Vec::new(),
+            Arc::clone(&parent_inbox),
+            REPORT_BUDGET,
+        );
+
+        for i in 0..REPORT_BUDGET {
+            let result = tools
+                .execute(
+                    "agent_report",
+                    &raw(&format!(r#"{{"message":"report {i}"}}"#)),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(!result.is_error, "report {i}: {result:?}");
+        }
+        assert_eq!(
+            parent_inbox.len(),
+            REPORT_BUDGET,
+            "every on-budget report should reach the parent"
+        );
+
+        let over_budget = tools
+            .execute(
+                "agent_report",
+                &raw(r#"{"message":"one too many"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(over_budget.is_error, "{over_budget:?}");
+        assert_eq!(
+            parent_inbox.len(),
+            REPORT_BUDGET,
+            "the over-budget report must not reach the parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_report_invalid_call_does_not_consume_budget() {
+        let parent_inbox = Arc::new(Inbox::new(None));
+        let registry = Arc::new(Registry::new(vec![stub("read")]).unwrap());
+        let tools = child_tools_with_budget(
+            registry,
+            WritePolicy::SingleWriter,
+            Vec::new(),
+            Arc::clone(&parent_inbox),
+            1,
+        );
+
+        let empty = tools
+            .execute(
+                "agent_report",
+                &raw(r#"{"message":""}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(empty.is_error, "{empty:?}");
+
+        let valid = tools
+            .execute(
+                "agent_report",
+                &raw(r#"{"message":"still have budget"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            !valid.is_error,
+            "the empty-message call must not have consumed the budget: {valid:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_message_grants_one_more_report() {
+        let parent_inbox = Arc::new(Inbox::new(None));
+        let tasks = Tasks::new();
+        let task = tasks
+            .add(Task::default(), None, None)
+            .expect("task registers");
+        let reports_left = tasks
+            .report_allowance(&task.id)
+            .expect("the new task has a report allowance");
+
+        let registry = Arc::new(Registry::new(vec![stub("read")]).unwrap());
+        let tools = ChildTools {
+            registry,
+            allowed: None,
+            write_policy: WritePolicy::SingleWriter,
+            write_paths: Vec::new(),
+            parent_inbox: Arc::clone(&parent_inbox),
+            task_id: task.id.clone(),
+            max_output_bytes: 16384,
+            reports_left,
+        };
+
+        for i in 0..REPORT_BUDGET {
+            let result = tools
+                .execute(
+                    "agent_report",
+                    &raw(&format!(r#"{{"message":"report {i}"}}"#)),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert!(!result.is_error, "report {i}: {result:?}");
+        }
+
+        let over_budget = tools
+            .execute(
+                "agent_report",
+                &raw(r#"{"message":"one too many"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(over_budget.is_error, "{over_budget:?}");
+        assert_eq!(
+            parent_inbox.len(),
+            REPORT_BUDGET,
+            "only the on-budget reports should have reached the parent"
+        );
+
+        tasks
+            .send_message(&task.id, "a question for you")
+            .expect("parent message delivers");
+
+        let granted = tools
+            .execute(
+                "agent_report",
+                &raw(r#"{"message":"answer to the question"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            !granted.is_error,
+            "the parent message should grant one more report: {granted:?}"
+        );
+
+        let exhausted_again = tools
+            .execute(
+                "agent_report",
+                &raw(r#"{"message":"one too many again"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(exhausted_again.is_error, "{exhausted_again:?}");
     }
 
     #[tokio::test]

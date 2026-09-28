@@ -101,6 +101,7 @@ impl Tool for MemorySearchTool {
                 content: "no matching records".into(),
                 persisted_content: Some("0 records".into()),
                 is_error: false,
+                outcome_override: None,
             };
         }
 

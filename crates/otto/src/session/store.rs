@@ -22,7 +22,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use otto_core::model::{Block, Message, Role, Usage};
+use otto_core::model::{
+    Block, EffectCertainty, Message, OperationDisposition, OperationOutcome, OperationStopReason,
+    Role, ToolResultMetadata, Usage,
+};
 use otto_core::session::compaction::{
     compaction_details_present, compaction_usage_to_pi, is_real_compaction_context_entry,
     latest_compaction_metadata, validate_compaction_checkpoint,
@@ -35,15 +38,19 @@ use otto_core::session::pi::{
     PiCompaction, PiCustom, PiEntry, PiFile, PiSessionInfo, PiThinkingLevelChange,
 };
 use otto_core::session::{
-    CURRENT_VERSION, CompactionCheckpoint, CompactionMetadata, Header, MAX_SESSION_ENTRY_BYTES,
-    MAX_SESSION_FILE_BYTES, OTTO_RUNTIME_CUSTOM_TYPE, PiError, PiErrorKind, PiRecord,
+    CURRENT_VERSION, CompactionCheckpoint, CompactionMetadata, DecodedOperationFact, Header,
+    MAX_SESSION_ENTRY_BYTES, MAX_SESSION_FILE_BYTES, OPERATION_CUSTOM_TYPE,
+    OTTO_RUNTIME_CUSTOM_TYPE, OperationFact, OperationLedger, PiError, PiErrorKind, PiRecord,
     RuntimeMetadata, Session, SessionError, Snapshot, Warning, active_context_path, build_context,
-    decode_pi_file, encode_pi_record, index_context_entries,
+    decode_operation_fact, decode_pi_file, encode_operation_fact, encode_pi_record,
+    index_context_entries,
 };
 
 use crate::failover::lease;
 
 use super::fsops;
+
+const OPERATION_RESULT_UNAVAILABLE_TEXT: &str = "tool result unavailable after prior session interruption; the durable operation outcome is recorded in session history";
 
 /// One tool call left unanswered when a session was taken over mid-turn:
 /// the name and arguments the model called with, and whether it is the one
@@ -94,6 +101,7 @@ pub(crate) struct StoreState {
     pub(crate) header: Header,
     pub(crate) root: PathBuf,
     pub(crate) messages: Vec<Message>,
+    pub(crate) operation_ledger: OperationLedger,
     pub(crate) aggregate_usage: Usage,
     pub(crate) usage_present: bool,
     pub(crate) latest_compaction: Option<CompactionMetadata>,
@@ -156,6 +164,7 @@ impl Store {
                 header,
                 root: root.as_ref().to_path_buf(),
                 messages: Vec::new(),
+                operation_ledger: OperationLedger::default(),
                 aggregate_usage: Usage::default(),
                 usage_present: false,
                 latest_compaction: None,
@@ -289,6 +298,7 @@ impl Store {
                 header: state.header,
                 root: PathBuf::new(),
                 messages: state.messages,
+                operation_ledger: state.operation_ledger,
                 aggregate_usage: state.aggregate_usage,
                 usage_present: state.usage_present,
                 latest_compaction: state.latest_compaction,
@@ -489,24 +499,48 @@ impl Store {
         Ok(())
     }
 
+    /// A snapshot of the operation facts folded along the active path.
+    pub fn operation_ledger(&self) -> OperationLedger {
+        self.lock().expect("session mutex").operation_ledger.clone()
+    }
+
+    /// Appends a validated operation fact and commits its in-memory ledger
+    /// state only after the custom entry has been fsynced.
+    pub fn append_operation_fact(&self, fact: OperationFact) -> Result<(), PiError> {
+        let mut state = self.lock()?;
+        state.writable()?;
+        let mut candidate = state.operation_ledger.clone();
+        candidate
+            .apply(fact.clone())
+            .map_err(|error| PiError::invalid(error.to_string()))?;
+        let encoded =
+            encode_operation_fact(&fact).map_err(|error| PiError::invalid(error.to_string()))?;
+        state.append_custom_entry_unchecked(OPERATION_CUSTOM_TYPE, &encoded)?;
+        state.operation_ledger = candidate;
+        Ok(())
+    }
+
     /// Appends a `custom` entry with the given `customType` and pre-encoded
     /// JSON `data`, unconditionally (unlike [`Store::update_runtime`], which
     /// skips the write when nothing changed). The
     /// [`Session::append_custom`](otto_core::session::Session::append_custom)
     /// override for `Store` calls this.
     pub fn append_custom_entry(&self, custom_type: &str, data: &str) -> Result<(), PiError> {
+        if custom_type == OPERATION_CUSTOM_TYPE {
+            return match decode_operation_fact(data)
+                .map_err(|error| PiError::invalid(error.to_string()))?
+            {
+                DecodedOperationFact::Fact(fact) => self.append_operation_fact(fact),
+                DecodedOperationFact::Unsupported { .. } => {
+                    let mut state = self.lock()?;
+                    state.writable()?;
+                    state.append_custom_entry_unchecked(custom_type, data)
+                }
+            };
+        }
         let mut state = self.lock()?;
         state.writable()?;
-        state.ensure_file_fatal()?;
-
-        let timestamp = format_persisted_timestamp(Utc::now(), "custom entry")?;
-        let entry_id = state.new_entry_id("custom")?;
-        let mut entry = PiEntry::new("custom", &entry_id, state.leaf_id.clone(), &timestamp);
-        entry.custom = Some(PiCustom {
-            custom_type: custom_type.to_owned(),
-            data: Some(raw_value(data.to_owned())?),
-        });
-        state.append_entry(entry, entry_id)
+        state.append_custom_entry_unchecked(custom_type, data)
     }
 
     /// Records a new display name for the session.
@@ -617,6 +651,7 @@ impl Store {
         state.entry_ids.insert(entry_id.clone());
         state.leaf_id = Some(entry_id);
         state.messages = resolved.messages;
+        state.operation_ledger = resolved.operation_ledger;
         state.aggregate_usage = resolved.usage;
         state.usage_present = resolved.usage_present;
         state.file_bytes += record_bytes;
@@ -650,19 +685,79 @@ impl Store {
         Ok(())
     }
 
-    /// Appends a stand-in error result for each tool call a session that
-    /// ended mid-turn left unanswered at the end of its history.
-    ///
-    /// Only that trailing run is repaired here, because only it can be
-    /// repaired in an append-only file. A call left unanswered with history
-    /// after it is repaired in memory on every resolve instead; see
-    /// `otto_core::session::context::build_context`.
+    /// Repairs trailing tool calls according to their durable operation facts.
+    /// A terminal fact is always persisted before its synthetic result.
     fn repair_dangling_tool_calls(&self) -> Result<(Vec<Warning>, Vec<UnansweredCall>), PiError> {
         let pending = pending_tool_calls(&self.messages())?;
         let repaired = unanswered_calls_from(&pending);
-        let stand_ins = missing_tool_results(&pending);
+        let legacy_stand_ins = missing_tool_results(&pending);
         let mut warnings = Vec::new();
-        for (call, block) in pending.into_iter().zip(stand_ins) {
+        for (index, call) in pending.into_iter().enumerate() {
+            let record = self
+                .lock()?
+                .operation_ledger
+                .operation_for_tool_call(&call.tool_call_id)
+                .cloned();
+            let block = match record {
+                Some(record) => {
+                    if record.corrupt {
+                        warnings.push(Warning::new(format!(
+                            "operation history for tool call {} is corrupt; effects are unknown",
+                            call.tool_call_id
+                        )));
+                    }
+                    let operation_id = record.operation_id.clone();
+                    let outcome = if record.corrupt {
+                        OperationOutcome {
+                            disposition: OperationDisposition::Interrupted,
+                            effect_certainty: EffectCertainty::Unknown,
+                            stop_reason: Some(OperationStopReason::ProcessLost),
+                        }
+                    } else {
+                        record.terminal.clone().unwrap_or(OperationOutcome {
+                            disposition: OperationDisposition::Interrupted,
+                            effect_certainty: EffectCertainty::Unknown,
+                            stop_reason: Some(OperationStopReason::ProcessLost),
+                        })
+                    };
+                    if record.terminal.is_none() {
+                        let terminal = OperationFact::terminal(
+                            operation_id.clone(),
+                            record.attempts,
+                            record.tool_call_id,
+                            record.tool_name,
+                            outcome.clone(),
+                        );
+                        if let Err(error) = self.append_operation_fact(terminal) {
+                            if !record.corrupt {
+                                return Err(error.context(format!(
+                                    "repair operation for dangling tool call {:?}",
+                                    call.tool_call_id
+                                )));
+                            }
+                            warnings.push(Warning::new(format!(
+                                "could not settle corrupt operation for tool call {}; effects are unknown",
+                                call.tool_call_id
+                            )));
+                        }
+                    }
+                    Block {
+                        block_type: otto_core::model::BlockType::ToolResult,
+                        text: OPERATION_RESULT_UNAVAILABLE_TEXT.into(),
+                        tool_call_id: call.tool_call_id.clone(),
+                        tool_name: call.tool_name.clone(),
+                        is_error: true,
+                        operation_metadata: Some(ToolResultMetadata {
+                            operation_id: Some(operation_id),
+                            disposition: outcome.disposition,
+                            effect_certainty: outcome.effect_certainty,
+                            stop_reason: outcome.stop_reason,
+                        }),
+                        ..Block::default()
+                    }
+                }
+                None => legacy_stand_ins[index].clone(),
+            };
             let message = Message {
                 role: Role::Tool,
                 created_at: Utc::now(),
@@ -700,6 +795,22 @@ impl Drop for Store {
 }
 
 impl StoreState {
+    fn append_custom_entry_unchecked(
+        &mut self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), PiError> {
+        self.ensure_file_fatal()?;
+        let timestamp = format_persisted_timestamp(Utc::now(), "custom entry")?;
+        let entry_id = self.new_entry_id("custom")?;
+        let mut entry = PiEntry::new("custom", &entry_id, self.leaf_id.clone(), &timestamp);
+        entry.custom = Some(PiCustom {
+            custom_type: custom_type.to_owned(),
+            data: Some(raw_value(data.to_owned())?),
+        });
+        self.append_entry(entry, entry_id)
+    }
+
     /// Rejects a write on a closed or poisoned store.
     pub(crate) fn writable(&self) -> Result<(), PiError> {
         if self.closed {
@@ -968,6 +1079,15 @@ impl Session for Store {
             .map_err(|error| SessionError::Persist(error.to_string()))
     }
 
+    fn append_operation_fact(&self, fact: OperationFact) -> Result<(), SessionError> {
+        Store::append_operation_fact(self, fact)
+            .map_err(|error| SessionError::Persist(error.to_string()))
+    }
+
+    fn operation_ledger(&self) -> OperationLedger {
+        Store::operation_ledger(self)
+    }
+
     fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         Store::append_custom_entry(self, custom_type, data)
             .map_err(|error| SessionError::Persist(error.to_string()))
@@ -1024,6 +1144,7 @@ pub(crate) struct ResolvedStoreState {
     pub(crate) session_name: Option<String>,
     pub(crate) entry_ids: HashSet<String>,
     pub(crate) leaf_id: Option<String>,
+    pub(crate) operation_ledger: OperationLedger,
     pub(crate) warnings: Vec<Warning>,
 }
 
@@ -1058,6 +1179,7 @@ pub(crate) fn resolve_pi_store_state(decoded: &PiFile) -> Result<ResolvedStoreSt
         session_name,
         entry_ids,
         leaf_id,
+        operation_ledger: resolved.operation_ledger,
         warnings,
     })
 }

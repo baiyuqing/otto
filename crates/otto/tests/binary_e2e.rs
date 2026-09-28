@@ -108,7 +108,8 @@ fn the_binary_runs_one_prompt_turn_with_bash_and_write_under_seatbelt() {
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("[tool result] wrote notes.txt (21 bytes)"),
+        stdout.contains("[tool result] Completed (operation op_")
+            && stdout.contains("): wrote notes.txt (21 bytes)"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(stdout.contains("all done"), "stdout:\n{stdout}");

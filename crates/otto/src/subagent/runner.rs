@@ -49,7 +49,7 @@ use otto_core::agent::{Agent, CompactionSettings, Event, EventSink, Options};
 use otto_core::model::{Message, Role, ToolDefinition};
 use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
 use otto_core::session::{MemorySession, Session};
-use otto_core::tool::{ToolExecutor, ToolResult};
+use otto_core::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tokio::sync::Semaphore;
@@ -375,42 +375,61 @@ impl ToolExecutor for ChildTools {
         definitions
     }
 
-    async fn execute(
-        &self,
-        name: &str,
-        arguments: &RawValue,
-        cancel: &CancellationToken,
-    ) -> ToolResult {
-        if name == "agent_report" {
+    async fn execute(&self, call: ToolCall<'_>, cancel: &CancellationToken) -> ToolExecution {
+        let local = |mut result: ToolResult| {
+            let outcome =
+                result
+                    .outcome_override
+                    .take()
+                    .unwrap_or(otto_core::model::OperationOutcome {
+                        disposition: if result.is_error {
+                            otto_core::model::OperationDisposition::Error
+                        } else {
+                            otto_core::model::OperationDisposition::Succeeded
+                        },
+                        effect_certainty: if result.is_error {
+                            otto_core::model::EffectCertainty::NotStarted
+                        } else {
+                            otto_core::model::EffectCertainty::Completed
+                        },
+                        stop_reason: None,
+                    });
+            ToolExecution { result, outcome }
+        };
+        if call.name == "agent_report" {
             if cancel.is_cancelled() {
-                return error_result(CONTEXT_CANCELED);
+                return local(error_result(CONTEXT_CANCELED).cancelled_not_started());
             }
-            let args: AgentReportArgs = match decode_strict_json(arguments.get(), &["message"]) {
+            let args: AgentReportArgs = match decode_strict_json(call.arguments.get(), &["message"])
+            {
                 Ok(args) => args,
-                Err(message) => return error_result(message),
+                Err(message) => return local(error_result(message).not_started()),
             };
             let message = args.message.trim();
             if message.is_empty() {
-                return error_result("message is required");
+                return local(error_result("message is required").not_started());
             }
             if self
                 .reports_left
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_err()
             {
-                return error_result(
-                    "agent_report limit used up for this task; put this in your final report instead. Each [parent-message] from the parent allows one more report.",
+                return local(
+                    error_result(
+                        "agent_report limit used up for this task; put this in your final report instead. Each [parent-message] from the parent allows one more report.",
+                    )
+                    .not_started(),
                 );
             }
-            return self.report(message);
+            return local(self.report(message));
         }
-        if !self.permits(name) {
-            return ToolResult::unknown_tool(name);
+        if !self.permits(call.name) {
+            return local(ToolResult::unknown_tool(call.name));
         }
-        if let Err(message) = self.permits_write_tool(name, arguments) {
-            return crate::tool::error_result(message);
+        if let Err(message) = self.permits_write_tool(call.name, call.arguments) {
+            return local(crate::tool::error_result(message).not_started());
         }
-        self.registry.execute(name, arguments, cancel).await
+        self.registry.execute(call, cancel).await
     }
 }
 
@@ -424,6 +443,8 @@ pub struct OptionsTemplate {
     pub request_sizer: Option<Arc<dyn RequestSizer + Send + Sync>>,
     pub now: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     pub new_id: Arc<dyn Fn() -> String + Send + Sync>,
+    pub new_operation_id:
+        Arc<dyn Fn() -> Result<otto_core::model::OperationId, String> + Send + Sync>,
 }
 
 impl Default for OptionsTemplate {
@@ -436,6 +457,9 @@ impl Default for OptionsTemplate {
             request_sizer: None,
             now: Arc::new(Utc::now),
             new_id: Arc::new(String::new),
+            new_operation_id: Arc::new(|| {
+                otto_core::model::OperationId::new("op_test").map_err(|error| error.to_string())
+            }),
         }
     }
 }
@@ -973,6 +997,7 @@ impl Runner {
         let template = &self.config.template;
         let now_clock = Arc::clone(&template.now);
         let new_id = Arc::clone(&template.new_id);
+        let new_operation_id = Arc::clone(&template.new_operation_id);
         let child_inbox = self
             .config
             .tasks
@@ -985,6 +1010,7 @@ impl Runner {
             thinking: redactor.redact_string(&template.thinking),
             now: Box::new(move || now_clock()),
             new_id: Box::new(move || new_id()),
+            new_operation_id: Box::new(move || new_operation_id()),
             request_sizer: template.request_sizer.clone(),
             compaction: template.compaction,
             // A child gets no memory binding, no registry of its own, and a
@@ -1588,6 +1614,22 @@ mod tests {
         }
     }
 
+    async fn execute_child(tools: &ChildTools, name: &str, arguments: &str) -> ToolExecution {
+        let operation_id = otto_core::model::OperationId::new("op_test").expect("operation id");
+        let arguments = raw(arguments);
+        tools
+            .execute(
+                ToolCall {
+                    operation_id: &operation_id,
+                    name,
+                    arguments: &arguments,
+                    attempt: 1,
+                },
+                &CancellationToken::new(),
+            )
+            .await
+    }
+
     #[tokio::test]
     async fn write_policy_denies_mutation_tools_before_execution() {
         let registry = Arc::new(Registry::new(vec![stub("read"), stub("write")]).unwrap());
@@ -1598,16 +1640,10 @@ mod tests {
             Arc::new(Inbox::new(None)),
         );
 
-        let result = tools
-            .execute(
-                "write",
-                &raw(r#"{"path":"src/lib.rs","content":"x"}"#),
-                &CancellationToken::new(),
-            )
-            .await;
+        let result = execute_child(&tools, "write", r#"{"path":"src/lib.rs","content":"x"}"#).await;
 
-        assert!(result.is_error, "{result:?}");
-        assert!(result.content.contains("propose_only"), "{result:?}");
+        assert!(result.result.is_error, "{result:?}");
+        assert!(result.result.content.contains("propose_only"), "{result:?}");
     }
 
     #[tokio::test]
@@ -1620,24 +1656,22 @@ mod tests {
             Arc::new(Inbox::new(None)),
         );
 
-        let allowed = tools
-            .execute(
-                "write",
-                &raw(r#"{"path":"crates/otto/src/lib.rs","content":"x"}"#),
-                &CancellationToken::new(),
-            )
-            .await;
-        assert!(!allowed.is_error, "{allowed:?}");
+        let allowed = execute_child(
+            &tools,
+            "write",
+            r#"{"path":"crates/otto/src/lib.rs","content":"x"}"#,
+        )
+        .await;
+        assert!(!allowed.result.is_error, "{allowed:?}");
 
-        let denied = tools
-            .execute(
-                "write",
-                &raw(r#"{"path":"crates/otto-core/src/lib.rs","content":"x"}"#),
-                &CancellationToken::new(),
-            )
-            .await;
-        assert!(denied.is_error, "{denied:?}");
-        assert!(denied.content.contains("owned_paths"), "{denied:?}");
+        let denied = execute_child(
+            &tools,
+            "write",
+            r#"{"path":"crates/otto-core/src/lib.rs","content":"x"}"#,
+        )
+        .await;
+        assert!(denied.result.is_error, "{denied:?}");
+        assert!(denied.result.content.contains("owned_paths"), "{denied:?}");
     }
 
     #[tokio::test]
@@ -1655,16 +1689,15 @@ mod tests {
             "child definitions should include agent_report"
         );
 
-        let result = tools
-            .execute(
-                "agent_report",
-                &raw(r#"{"message":"found the failing test"}"#),
-                &CancellationToken::new(),
-            )
-            .await;
+        let result = execute_child(
+            &tools,
+            "agent_report",
+            r#"{"message":"found the failing test"}"#,
+        )
+        .await;
 
-        assert!(!result.is_error, "{result:?}");
-        assert_eq!(result.content, "report sent to parent");
+        assert!(!result.result.is_error, "{result:?}");
+        assert_eq!(result.result.content, "report sent to parent");
         let notification = parent_inbox
             .remove("t1", NotificationKind::TaskReport)
             .expect("a task report was queued");
@@ -1687,14 +1720,13 @@ mod tests {
         );
 
         for i in 0..REPORT_BUDGET {
-            let result = tools
-                .execute(
-                    "agent_report",
-                    &raw(&format!(r#"{{"message":"report {i}"}}"#)),
-                    &CancellationToken::new(),
-                )
-                .await;
-            assert!(!result.is_error, "report {i}: {result:?}");
+            let result = execute_child(
+                &tools,
+                "agent_report",
+                &format!(r#"{{"message":"report {i}"}}"#),
+            )
+            .await;
+            assert!(!result.result.is_error, "report {i}: {result:?}");
         }
         assert_eq!(
             parent_inbox.len(),
@@ -1702,14 +1734,13 @@ mod tests {
             "every on-budget report should reach the parent"
         );
 
-        let over_budget = tools
-            .execute(
-                "agent_report",
-                &raw(r#"{"message":"one too many"}"#),
-                &CancellationToken::new(),
-            )
-            .await;
-        assert!(over_budget.is_error, "{over_budget:?}");
+        let over_budget =
+            execute_child(&tools, "agent_report", r#"{"message":"one too many"}"#).await;
+        assert!(over_budget.result.is_error, "{over_budget:?}");
+        assert_eq!(
+            over_budget.outcome.effect_certainty,
+            otto_core::model::EffectCertainty::NotStarted
+        );
         assert_eq!(
             parent_inbox.len(),
             REPORT_BUDGET,
@@ -1729,24 +1760,13 @@ mod tests {
             1,
         );
 
-        let empty = tools
-            .execute(
-                "agent_report",
-                &raw(r#"{"message":""}"#),
-                &CancellationToken::new(),
-            )
-            .await;
-        assert!(empty.is_error, "{empty:?}");
+        let empty = execute_child(&tools, "agent_report", r#"{"message":""}"#).await;
+        assert!(empty.result.is_error, "{empty:?}");
 
-        let valid = tools
-            .execute(
-                "agent_report",
-                &raw(r#"{"message":"still have budget"}"#),
-                &CancellationToken::new(),
-            )
-            .await;
+        let valid =
+            execute_child(&tools, "agent_report", r#"{"message":"still have budget"}"#).await;
         assert!(
-            !valid.is_error,
+            !valid.result.is_error,
             "the empty-message call must not have consumed the budget: {valid:?}"
         );
     }
@@ -1775,24 +1795,18 @@ mod tests {
         };
 
         for i in 0..REPORT_BUDGET {
-            let result = tools
-                .execute(
-                    "agent_report",
-                    &raw(&format!(r#"{{"message":"report {i}"}}"#)),
-                    &CancellationToken::new(),
-                )
-                .await;
-            assert!(!result.is_error, "report {i}: {result:?}");
-        }
-
-        let over_budget = tools
-            .execute(
+            let result = execute_child(
+                &tools,
                 "agent_report",
-                &raw(r#"{"message":"one too many"}"#),
-                &CancellationToken::new(),
+                &format!(r#"{{"message":"report {i}"}}"#),
             )
             .await;
-        assert!(over_budget.is_error, "{over_budget:?}");
+            assert!(!result.result.is_error, "report {i}: {result:?}");
+        }
+
+        let over_budget =
+            execute_child(&tools, "agent_report", r#"{"message":"one too many"}"#).await;
+        assert!(over_budget.result.is_error, "{over_budget:?}");
         assert_eq!(
             parent_inbox.len(),
             REPORT_BUDGET,
@@ -1803,26 +1817,24 @@ mod tests {
             .send_message(&task.id, "a question for you")
             .expect("parent message delivers");
 
-        let granted = tools
-            .execute(
-                "agent_report",
-                &raw(r#"{"message":"answer to the question"}"#),
-                &CancellationToken::new(),
-            )
-            .await;
+        let granted = execute_child(
+            &tools,
+            "agent_report",
+            r#"{"message":"answer to the question"}"#,
+        )
+        .await;
         assert!(
-            !granted.is_error,
+            !granted.result.is_error,
             "the parent message should grant one more report: {granted:?}"
         );
 
-        let exhausted_again = tools
-            .execute(
-                "agent_report",
-                &raw(r#"{"message":"one too many again"}"#),
-                &CancellationToken::new(),
-            )
-            .await;
-        assert!(exhausted_again.is_error, "{exhausted_again:?}");
+        let exhausted_again = execute_child(
+            &tools,
+            "agent_report",
+            r#"{"message":"one too many again"}"#,
+        )
+        .await;
+        assert!(exhausted_again.result.is_error, "{exhausted_again:?}");
     }
 
     #[tokio::test]

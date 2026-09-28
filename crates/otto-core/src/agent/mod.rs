@@ -18,6 +18,7 @@
 //! error, so a frontend that only watches events sees every failure.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde_json::value::RawValue;
@@ -48,10 +49,14 @@ pub use events::{
     CompactionSettings, Event, EventSink,
 };
 
-use crate::model::{Block, BlockType, ContextMetadata, Message, Role, ToolDefinition, zero_time};
+use crate::model::{
+    Block, BlockType, ContextMetadata, EffectCertainty, Message, OperationDisposition, OperationId,
+    OperationOutcome, OperationStopReason, Role, ToolDefinition, ToolResultMetadata, zero_time,
+};
 use crate::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamEvent};
 use crate::session::Session;
-use crate::tool::{ToolExecutor, ToolResult};
+use crate::session::operation::OperationFact;
+use crate::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
 
 use inbox::Inbox;
 use memory::{DEFAULT_RECALL_LIMIT, DEFAULT_RECALL_TOKEN_BUDGET, MemoryRecall};
@@ -81,6 +86,10 @@ pub struct Options {
     pub now: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     /// Returns a fresh message identifier. Must not repeat within a session.
     pub new_id: Box<dyn Fn() -> String + Send + Sync>,
+    /// Returns a fresh logical-operation identifier. Unlike `new_id`, this is
+    /// persisted before a tool dispatch and must be valid and unique within
+    /// the session.
+    pub new_operation_id: Box<dyn Fn() -> Result<OperationId, String> + Send + Sync>,
     /// Measures the serialized size of a request. Compaction needs it to
     /// bound the summary request; without it, compaction cannot run.
     pub request_sizer: Option<Arc<dyn RequestSizer + Send + Sync>>,
@@ -104,6 +113,7 @@ pub struct Options {
 /// randomness of its own, so a real caller must replace both.
 impl Default for Options {
     fn default() -> Self {
+        let operation_counter = AtomicU64::new(0);
         Self {
             model: String::new(),
             provider_name: String::new(),
@@ -112,6 +122,10 @@ impl Default for Options {
             thinking: String::new(),
             now: Box::new(zero_time),
             new_id: Box::new(String::new),
+            new_operation_id: Box::new(move || {
+                let next = operation_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                OperationId::new(format!("op_{next}")).map_err(|error| error.to_string())
+            }),
             request_sizer: None,
             compaction: CompactionSettings::default(),
             memory: None,
@@ -384,39 +398,110 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             // delivery for the terminal event of the single active call.
             for block in tool_calls {
                 let arguments = block.arguments.clone().unwrap_or_else(empty_object);
+                let operation_id = match (self.options.new_operation_id)() {
+                    Ok(id) => id,
+                    Err(message) => {
+                        return Err(self.fail(emit, AgentError::OperationIdentity { message }));
+                    }
+                };
+                let attempt = 1;
+                let attempt_fact = OperationFact::attempt(
+                    operation_id.clone(),
+                    attempt,
+                    block.tool_call_id.clone(),
+                    block.tool_name.clone(),
+                );
+                if let Err(source) = self.session.append_operation_fact(attempt_fact) {
+                    return Err(self.fail(
+                        emit,
+                        AgentError::Persist {
+                            kind: format!(
+                                "operation attempt for {}",
+                                quote_go(&block.tool_call_id)
+                            ),
+                            source,
+                        },
+                    ));
+                }
                 emit(Event::ToolCallStarted {
+                    operation_id: operation_id.clone(),
+                    attempt,
                     tool_name: block.tool_name.clone(),
                     tool_call_id: block.tool_call_id.clone(),
                     arguments: arguments.get().to_owned(),
                 });
-                let mut result = if cancel.is_cancelled() {
-                    ToolResult::error(ProviderError::Cancelled.to_string())
+                let mut execution = if cancel.is_cancelled() {
+                    ToolExecution {
+                        result: ToolResult::error(ProviderError::Cancelled.to_string()),
+                        outcome: OperationOutcome {
+                            disposition: OperationDisposition::Cancelled,
+                            effect_certainty: EffectCertainty::NotStarted,
+                            stop_reason: Some(OperationStopReason::UserCancellation),
+                        },
+                    }
                 } else {
                     self.tools
-                        .execute(&block.tool_name, &arguments, cancel)
+                        .execute(
+                            ToolCall {
+                                operation_id: &operation_id,
+                                name: &block.tool_name,
+                                arguments: &arguments,
+                                attempt,
+                            },
+                            cancel,
+                        )
                         .await
                 };
-                result.content = self.redactor.redact_string(&result.content);
-                result.persisted_content = result
+                execution.result.content = self.redactor.redact_string(&execution.result.content);
+                execution.result.persisted_content = execution
+                    .result
                     .persisted_content
                     .as_deref()
                     .map(|text| self.redactor.redact_string(text));
-                let persisted_text = match &result.persisted_content {
+                let persisted_text = match &execution.result.persisted_content {
                     Some(persisted) => {
                         // The stored text is a placeholder, so the live text
                         // is kept for this turn's provider requests only.
                         state
                             .tool_result_overlay
-                            .insert(block.tool_call_id.clone(), result.content.clone());
+                            .insert(block.tool_call_id.clone(), execution.result.content.clone());
                         persisted.clone()
                     }
-                    None => result.content.clone(),
+                    None => execution.result.content.clone(),
                 };
-                let is_error = result.is_error;
+                let is_error = execution.result.is_error;
+                let terminal = OperationFact::terminal(
+                    operation_id.clone(),
+                    attempt,
+                    block.tool_call_id.clone(),
+                    block.tool_name.clone(),
+                    execution.outcome.clone(),
+                );
+                if let Err(source) = self.session.append_operation_fact(terminal) {
+                    return Err(self.fail(
+                        emit,
+                        AgentError::Persist {
+                            kind: format!(
+                                "operation terminal for {}",
+                                quote_go(&block.tool_call_id)
+                            ),
+                            source,
+                        },
+                    ));
+                }
+                let operation_metadata = ToolResultMetadata {
+                    operation_id: Some(operation_id.clone()),
+                    disposition: execution.outcome.disposition,
+                    effect_certainty: execution.outcome.effect_certainty,
+                    stop_reason: execution.outcome.stop_reason,
+                };
                 emit(Event::ToolCallFinished {
+                    operation_id: operation_id.clone(),
+                    attempt,
                     tool_name: block.tool_name.clone(),
                     tool_call_id: block.tool_call_id.clone(),
-                    result,
+                    result: execution.result,
+                    outcome: execution.outcome,
                 });
                 let stored = Message {
                     id: (self.options.new_id)(),
@@ -428,6 +513,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         tool_call_id: block.tool_call_id.clone(),
                         tool_name: block.tool_name.clone(),
                         is_error,
+                        operation_metadata: Some(operation_metadata),
                         ..Block::default()
                     }],
                     ..Message::default()
@@ -984,18 +1070,25 @@ mod tests {
 
         async fn execute(
             &self,
-            name: &str,
-            arguments: &RawValue,
+            call: crate::tool::ToolCall<'_>,
             _cancel: &CancellationToken,
-        ) -> ToolResult {
-            if name != "echo" {
-                return ToolResult::unknown_tool(name);
+        ) -> crate::tool::ToolExecution {
+            if call.name != "echo" {
+                return crate::tool::ToolExecution {
+                    result: ToolResult::unknown_tool(call.name),
+                    outcome: crate::model::OperationOutcome {
+                        disposition: crate::model::OperationDisposition::Error,
+                        effect_certainty: crate::model::EffectCertainty::NotStarted,
+                        stop_reason: None,
+                    },
+                };
             }
-            ToolResult {
-                content: arguments.get().to_owned(),
+            crate::tool::ToolExecution::completed(ToolResult {
+                content: call.arguments.get().to_owned(),
                 persisted_content: None,
                 is_error: false,
-            }
+                outcome_override: None,
+            })
         }
     }
 
@@ -1075,17 +1168,27 @@ mod tests {
                     present: true,
                 },
                 Event::ToolCallStarted {
+                    operation_id: OperationId::new("op_1").expect("operation id"),
+                    attempt: 1,
                     tool_name: "echo".into(),
                     tool_call_id: "call-1".into(),
                     arguments: r#"{"value":1}"#.into(),
                 },
                 Event::ToolCallFinished {
+                    operation_id: OperationId::new("op_1").expect("operation id"),
+                    attempt: 1,
                     tool_name: "echo".into(),
                     tool_call_id: "call-1".into(),
                     result: ToolResult {
                         content: r#"{"value":1}"#.into(),
                         persisted_content: None,
                         is_error: false,
+                        outcome_override: None,
+                    },
+                    outcome: crate::model::OperationOutcome {
+                        disposition: crate::model::OperationDisposition::Succeeded,
+                        effect_certainty: crate::model::EffectCertainty::Completed,
+                        stop_reason: None,
                     },
                 },
                 Event::TextDelta {
@@ -1131,15 +1234,15 @@ mod tests {
             }
             async fn execute(
                 &self,
-                _name: &str,
-                _arguments: &RawValue,
+                _call: crate::tool::ToolCall<'_>,
                 _cancel: &CancellationToken,
-            ) -> ToolResult {
-                ToolResult {
+            ) -> crate::tool::ToolExecution {
+                crate::tool::ToolExecution::completed(ToolResult {
                     content: "live".into(),
                     persisted_content: Some("stored".into()),
                     is_error: false,
-                }
+                    outcome_override: None,
+                })
             }
         }
 

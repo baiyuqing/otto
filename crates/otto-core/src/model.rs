@@ -11,16 +11,190 @@
 //!
 //! Errors: `validate` returns [`ValidationError`].
 
+use std::fmt;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
 /// A rejected value at a trust boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct ValidationError(pub &'static str);
+
+/// Opaque identity shared by every attempt of one logical operation.
+///
+/// The wire value is 1 to 128 ASCII bytes and may contain only alphanumeric
+/// characters plus `.`, `_`, `:`, and `-`. Consumers must not parse meaning
+/// from the identifier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OperationId(String);
+
+impl OperationId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ValidationError> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > 128
+            || bytes.iter().any(|byte| {
+                !byte.is_ascii_alphanumeric() && !matches!(byte, b'.' | b'_' | b':' | b'-')
+            })
+        {
+            return Err(ValidationError(
+                "operation id must be 1 to 128 permitted ASCII bytes",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for OperationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Serialize for OperationId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for OperationId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// What the operation's caller observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationDisposition {
+    Succeeded,
+    Error,
+    Cancelled,
+    DeadlineExceeded,
+    Interrupted,
+}
+
+/// What Otto can prove about externally visible effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectCertainty {
+    NotStarted,
+    KnownNoEffect,
+    Completed,
+    Unknown,
+}
+
+/// Why execution stopped when that reason must cross an API boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationStopReason {
+    UserCancellation,
+    Deadline,
+    Shutdown,
+    Migration,
+    TransportLost,
+    ProcessLost,
+}
+
+/// Typed operation outcome attached to a tool result.
+///
+/// `operation_id` is absent for legacy history whose logical operation was
+/// never recorded. The remaining fields still make the interruption outcome
+/// machine-readable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<OperationId>,
+    pub disposition: OperationDisposition,
+    pub effect_certainty: EffectCertainty,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<OperationStopReason>,
+}
+
+impl ToolResultMetadata {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        OperationOutcome {
+            disposition: self.disposition,
+            effect_certainty: self.effect_certainty,
+            stop_reason: self.stop_reason,
+        }
+        .validate()
+    }
+}
+
+/// The implementation-owned safety of repeating an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrySafety {
+    ReadOnly,
+    Idempotent,
+    IdempotentWithKey,
+    NonIdempotent,
+}
+
+/// Durable terminal classification, intentionally excluding output and errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationOutcome {
+    pub disposition: OperationDisposition,
+    pub effect_certainty: EffectCertainty,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<OperationStopReason>,
+}
+
+impl OperationOutcome {
+    /// Rejects combinations whose fields make contradictory claims.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        use EffectCertainty::{Completed, NotStarted};
+        use OperationDisposition::{Cancelled, DeadlineExceeded, Error, Interrupted, Succeeded};
+        use OperationStopReason::{
+            Deadline, Migration, ProcessLost, Shutdown, TransportLost, UserCancellation,
+        };
+
+        if self.disposition == Succeeded && self.effect_certainty != Completed {
+            return Err(ValidationError(
+                "successful operation must have completed effects",
+            ));
+        }
+        if self.effect_certainty == Completed && !matches!(self.disposition, Succeeded | Error) {
+            return Err(ValidationError(
+                "completed effects require a definitive disposition",
+            ));
+        }
+        if self.effect_certainty == NotStarted && self.disposition == Succeeded {
+            return Err(ValidationError("an unstarted operation cannot succeed"));
+        }
+        let valid_reason = match self.stop_reason {
+            None => true,
+            Some(UserCancellation) => self.disposition == Cancelled,
+            Some(Deadline) => self.disposition == DeadlineExceeded,
+            Some(Shutdown | Migration | TransportLost | ProcessLost) => {
+                self.disposition == Interrupted
+            }
+        };
+        if !valid_reason {
+            return Err(ValidationError(
+                "operation disposition and stop reason are inconsistent",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// The timestamp stored sessions carry for an unset time,
 /// `0001-01-01T00:00:00Z`.
@@ -169,7 +343,7 @@ impl From<FinishReason> for String {
 ///
 /// `arguments` is provider JSON passed through verbatim. Keeping it as
 /// [`RawValue`] preserves number literals exactly.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Block {
     #[serde(rename = "type")]
     pub block_type: BlockType,
@@ -187,6 +361,81 @@ pub struct Block {
     pub arguments: Option<Box<RawValue>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_error: bool,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub operation_metadata: Option<ToolResultMetadata>,
+}
+
+impl<'de> Deserialize<'de> for Block {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireBlock {
+            #[serde(rename = "type")]
+            block_type: BlockType,
+            #[serde(default)]
+            text: String,
+            #[serde(default)]
+            data: String,
+            #[serde(default)]
+            mime_type: String,
+            #[serde(default)]
+            tool_call_id: String,
+            #[serde(default)]
+            tool_name: String,
+            #[serde(default)]
+            arguments: Option<Box<RawValue>>,
+            #[serde(default)]
+            is_error: bool,
+            #[serde(default)]
+            operation_id: Option<OperationId>,
+            #[serde(default)]
+            disposition: Option<OperationDisposition>,
+            #[serde(default)]
+            effect_certainty: Option<EffectCertainty>,
+            #[serde(default)]
+            stop_reason: Option<OperationStopReason>,
+        }
+
+        let wire = WireBlock::deserialize(deserializer)?;
+        let has_metadata = wire.operation_id.is_some()
+            || wire.disposition.is_some()
+            || wire.effect_certainty.is_some()
+            || wire.stop_reason.is_some();
+        let operation_metadata = if has_metadata {
+            let metadata = ToolResultMetadata {
+                operation_id: wire.operation_id,
+                disposition: wire
+                    .disposition
+                    .ok_or_else(|| serde::de::Error::custom("operation disposition is required"))?,
+                effect_certainty: wire.effect_certainty.ok_or_else(|| {
+                    serde::de::Error::custom("operation effect certainty is required")
+                })?,
+                stop_reason: wire.stop_reason,
+            };
+            metadata.validate().map_err(serde::de::Error::custom)?;
+            Some(metadata)
+        } else {
+            None
+        };
+        if operation_metadata.is_some() && wire.block_type != BlockType::ToolResult {
+            return Err(serde::de::Error::custom(
+                "operation metadata is only valid on tool-result blocks",
+            ));
+        }
+        Ok(Self {
+            block_type: wire.block_type,
+            text: wire.text,
+            data: wire.data,
+            mime_type: wire.mime_type,
+            tool_call_id: wire.tool_call_id,
+            tool_name: wire.tool_name,
+            arguments: wire.arguments,
+            is_error: wire.is_error,
+            operation_metadata,
+        })
+    }
 }
 
 impl PartialEq for Block {
@@ -202,6 +451,7 @@ impl PartialEq for Block {
             && self.arguments.as_ref().map(|raw| raw.get())
                 == other.arguments.as_ref().map(|raw| raw.get())
             && self.is_error == other.is_error
+            && self.operation_metadata == other.operation_metadata
     }
 }
 
@@ -244,6 +494,7 @@ impl Block {
                     || !self.tool_name.is_empty()
                     || self.arguments.is_some()
                     || self.is_error
+                    || self.operation_metadata.is_some()
                 {
                     return Err(ValidationError("text block contains incompatible fields"));
                 }
@@ -254,6 +505,7 @@ impl Block {
                     || !self.tool_name.is_empty()
                     || self.arguments.is_some()
                     || self.is_error
+                    || self.operation_metadata.is_some()
                     || !valid_image(&self.data, &self.mime_type)
                 {
                     return Err(ValidationError("image block is malformed"));
@@ -266,6 +518,7 @@ impl Block {
                     || !self.data.is_empty()
                     || !self.mime_type.is_empty()
                     || self.is_error
+                    || self.operation_metadata.is_some()
                     || !is_json_object(self.arguments.as_deref())
                 {
                     return Err(ValidationError("tool-call block is malformed"));
@@ -280,6 +533,9 @@ impl Block {
                 {
                     return Err(ValidationError("tool-result block is malformed"));
                 }
+                if let Some(metadata) = self.operation_metadata.as_ref() {
+                    metadata.validate()?;
+                }
             }
             BlockType::Reasoning => {
                 if self.text.is_empty()
@@ -289,6 +545,7 @@ impl Block {
                     || !self.tool_name.is_empty()
                     || self.arguments.is_some()
                     || self.is_error
+                    || self.operation_metadata.is_some()
                 {
                     return Err(ValidationError("reasoning block is malformed"));
                 }
@@ -619,6 +876,96 @@ mod tests {
             arguments: raw(arguments),
             ..Block::default()
         }
+    }
+
+    fn operation_metadata() -> ToolResultMetadata {
+        ToolResultMetadata {
+            operation_id: Some(OperationId::new("op-1").expect("valid operation id")),
+            disposition: OperationDisposition::Interrupted,
+            effect_certainty: EffectCertainty::Unknown,
+            stop_reason: Some(OperationStopReason::ProcessLost),
+        }
+    }
+
+    #[test]
+    fn operation_contract_json_and_validation() {
+        assert_eq!(
+            serde_json::to_string(&RetrySafety::IdempotentWithKey).expect("encode"),
+            r#""idempotent_with_key""#
+        );
+        for valid in ["a", "op_1.test:part-2", &"x".repeat(128)] {
+            assert_eq!(OperationId::new(valid).expect("valid").as_str(), valid);
+        }
+        for invalid in ["", "has space", "é", &"x".repeat(129)] {
+            assert!(OperationId::new(invalid).is_err(), "accepted {invalid:?}");
+        }
+        let valid = OperationOutcome {
+            disposition: OperationDisposition::Cancelled,
+            effect_certainty: EffectCertainty::NotStarted,
+            stop_reason: Some(OperationStopReason::UserCancellation),
+        };
+        valid.validate().expect("valid cancellation");
+        assert_eq!(
+            serde_json::to_string(&valid).expect("encode"),
+            r#"{"disposition":"cancelled","effectCertainty":"not_started","stopReason":"user_cancellation"}"#
+        );
+        assert!(
+            OperationOutcome {
+                disposition: OperationDisposition::Succeeded,
+                effect_certainty: EffectCertainty::Unknown,
+                stop_reason: None,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            OperationOutcome {
+                disposition: OperationDisposition::DeadlineExceeded,
+                effect_certainty: EffectCertainty::Unknown,
+                stop_reason: Some(OperationStopReason::UserCancellation),
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn tool_result_operation_metadata_is_flattened_and_type_checked() {
+        let result = Block {
+            block_type: BlockType::ToolResult,
+            text: "unavailable".into(),
+            tool_call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            is_error: true,
+            operation_metadata: Some(operation_metadata()),
+            ..Block::default()
+        };
+        result.validate().expect("valid tool result metadata");
+        let encoded = serde_json::to_value(&result).expect("encode");
+        assert_eq!(encoded["operation_id"], "op-1");
+        assert_eq!(encoded["disposition"], "interrupted");
+        assert_eq!(encoded["effect_certainty"], "unknown");
+        assert_eq!(encoded["stop_reason"], "process_lost");
+        assert!(encoded.get("operation_metadata").is_none());
+        let decoded: Block = serde_json::from_value(encoded).expect("decode");
+        assert_eq!(decoded, result);
+
+        assert!(
+            Block {
+                operation_metadata: Some(operation_metadata()),
+                ..Block::text("not a result")
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(serde_json::from_str::<Block>(
+            r#"{"type":"text","text":"x","disposition":"interrupted","effect_certainty":"unknown"}"#,
+        )
+        .is_err());
+        assert!(serde_json::from_str::<Block>(
+            r#"{"type":"tool_result","tool_call_id":"c1","tool_name":"read","disposition":"interrupted"}"#,
+        )
+        .is_err());
     }
 
     #[test]

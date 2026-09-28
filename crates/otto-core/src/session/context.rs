@@ -17,11 +17,15 @@ use regex::Regex;
 use serde_json::value::RawValue;
 
 use crate::model::{
-    Block, BlockType, ContextMetadata, FinishReason, Message, Role, Usage, zero_time,
+    Block, BlockType, ContextMetadata, EffectCertainty, FinishReason, Message,
+    OperationDisposition, OperationStopReason, Role, ToolResultMetadata, Usage, zero_time,
 };
 
 use super::compaction::{
     compaction_aware_path, compaction_has_retained_tail, safe_context_token_count,
+};
+use super::operation::{
+    DecodedOperationFact, OPERATION_CUSTOM_TYPE, OperationLedger, decode_operation_raw,
 };
 use super::pi::{
     PiContentBlock, PiCustomMessage, PiEntry, PiMessage, PiOttoDetails, PiUsage,
@@ -63,6 +67,7 @@ pub struct ResolvedContext {
     pub usage_present: bool,
     pub session_name: String,
     pub thinking_level: String,
+    pub operation_ledger: OperationLedger,
 }
 
 impl Default for ResolvedContext {
@@ -74,6 +79,7 @@ impl Default for ResolvedContext {
             usage_present: false,
             session_name: String::new(),
             thinking_level: "off".into(),
+            operation_ledger: OperationLedger::default(),
         }
     }
 }
@@ -198,6 +204,19 @@ pub fn build_context(
                     .ok_or_else(|| PiError::invalid("custom payload is required"))?;
                 if custom.custom_type == OTTO_RUNTIME_CUSTOM_TYPE {
                     latest_runtime = Some(decode_runtime_metadata(custom.data.as_deref())?);
+                } else if custom.custom_type == OPERATION_CUSTOM_TYPE {
+                    match decode_operation_raw(custom.data.as_deref()).map_err(|error| {
+                        PiError::invalid(format!("invalid otto.operation fact: {error}"))
+                    })? {
+                        DecodedOperationFact::Fact(fact) => {
+                            let warning_count = resolved.operation_ledger.warnings().len();
+                            resolved.operation_ledger.fold_history([fact]);
+                            for warning in &resolved.operation_ledger.warnings()[warning_count..] {
+                                collector.add(warning.clone());
+                            }
+                        }
+                        DecodedOperationFact::Unsupported { .. } => {}
+                    }
                 }
             }
             "session_info" => {
@@ -228,7 +247,8 @@ pub fn build_context(
             .messages
             .extend(pi_entry_to_context_messages(&entry)?);
     }
-    for repair in repair_interrupted_tool_calls(&mut resolved.messages) {
+    for repair in repair_interrupted_tool_calls(&mut resolved.messages, &resolved.operation_ledger)
+    {
         collector.add(repair);
     }
     pending_tool_calls(&resolved.messages)?;
@@ -468,6 +488,18 @@ fn pi_message_to_context_message(
             {
                 return Err(PiError::invalid("tool-result message is malformed"));
             }
+            let operation_metadata =
+                decode_pi_otto_details(wire.details.as_deref())?.and_then(|details| {
+                    match (details.disposition, details.effect_certainty) {
+                        (Some(disposition), Some(effect_certainty)) => Some(ToolResultMetadata {
+                            operation_id: details.operation_id,
+                            disposition,
+                            effect_certainty,
+                            stop_reason: details.stop_reason,
+                        }),
+                        _ => None,
+                    }
+                });
             message.role = Role::Tool;
             message.blocks = vec![Block {
                 block_type: BlockType::ToolResult,
@@ -478,6 +510,7 @@ fn pi_message_to_context_message(
                 tool_name: wire.tool_name.clone(),
                 arguments: None,
                 is_error: wire.is_error.unwrap_or(false),
+                operation_metadata,
             }];
         }
         "custom" => {
@@ -572,6 +605,7 @@ fn pi_context_text_and_tool_blocks(message: &PiMessage, role: Role) -> Result<Ve
                     tool_name: block.name.clone(),
                     arguments: block.arguments.clone(),
                     is_error: false,
+                    operation_metadata: None,
                 });
             }
             "image" => {
@@ -800,8 +834,8 @@ pub fn model_message_to_pi_entry(
             let usage = model_usage_to_pi(message.usage.as_ref())?;
             if message.usage == Some(Usage::default()) {
                 wire.details = Some(encode_pi_otto_details(&PiOttoDetails {
-                    task_id: String::new(),
                     usage_present: true,
+                    ..PiOttoDetails::default()
                 })?);
             }
             wire.api = "openai-completions".into();
@@ -832,6 +866,18 @@ pub fn model_message_to_pi_entry(
             wire.tool_call_id = block.tool_call_id.clone();
             wire.tool_name = block.tool_name.clone();
             wire.is_error = Some(block.is_error);
+            if let Some(metadata) = block.operation_metadata.as_ref() {
+                metadata.validate().map_err(|error| {
+                    PiError::invalid(format!("invalid operation metadata: {error}"))
+                })?;
+                wire.details = Some(encode_pi_otto_details(&PiOttoDetails {
+                    operation_id: metadata.operation_id.clone(),
+                    disposition: Some(metadata.disposition),
+                    effect_certainty: Some(metadata.effect_certainty),
+                    stop_reason: metadata.stop_reason,
+                    ..PiOttoDetails::default()
+                })?);
+            }
         }
         _ => return Err(PiError::invalid("unsupported message role")),
     }
@@ -903,7 +949,7 @@ fn model_context_message_to_pi_entry(
     if let Some(metadata) = message.context_metadata.as_ref() {
         custom.details = Some(encode_pi_otto_details(&PiOttoDetails {
             task_id: metadata.task_id.clone(),
-            usage_present: false,
+            ..PiOttoDetails::default()
         })?);
     }
     let entry = PiEntry {
@@ -1196,6 +1242,16 @@ pub fn missing_tool_results(calls: &[Block]) -> Vec<Block> {
                 tool_call_id: call.tool_call_id.clone(),
                 tool_name: call.tool_name.clone(),
                 is_error: true,
+                operation_metadata: Some(ToolResultMetadata {
+                    operation_id: None,
+                    disposition: OperationDisposition::Interrupted,
+                    effect_certainty: if index == 0 {
+                        EffectCertainty::Unknown
+                    } else {
+                        EffectCertainty::NotStarted
+                    },
+                    stop_reason: Some(OperationStopReason::ProcessLost),
+                }),
                 ..Block::default()
             }
         })
@@ -1216,11 +1272,15 @@ pub fn missing_tool_results(calls: &[Block]) -> Vec<Block> {
 /// Damage no repair can describe -- a duplicate call id, a result with no
 /// call, a tool message carrying something else -- is left untouched for
 /// [`pending_tool_calls`] to reject.
-fn repair_interrupted_tool_calls(messages: &mut Vec<Message>) -> Vec<String> {
+fn repair_interrupted_tool_calls(
+    messages: &mut Vec<Message>,
+    operation_ledger: &OperationLedger,
+) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut pending: Vec<Block> = Vec::new();
     let mut anchor = Message::default();
     let mut splices: Vec<(usize, Vec<Message>)> = Vec::new();
+    let mut repairs = Vec::new();
 
     for (index, message) in messages.iter().enumerate() {
         if message.role == Role::Tool {
@@ -1239,10 +1299,10 @@ fn repair_interrupted_tool_calls(messages: &mut Vec<Message>) -> Vec<String> {
             continue;
         }
         if !pending.is_empty() {
-            splices.push((
-                index,
-                stand_in_results(&anchor, std::mem::take(&mut pending)),
-            ));
+            let (stand_ins, warnings) =
+                stand_in_results(&anchor, std::mem::take(&mut pending), operation_ledger);
+            splices.push((index, stand_ins));
+            repairs.extend(warnings);
         }
         if message.role != Role::Assistant {
             continue;
@@ -1259,7 +1319,6 @@ fn repair_interrupted_tool_calls(messages: &mut Vec<Message>) -> Vec<String> {
         anchor = message.clone();
     }
 
-    let mut repairs = Vec::new();
     for (_, stand_ins) in &splices {
         for message in stand_ins {
             for block in &message.blocks {
@@ -1280,18 +1339,55 @@ fn repair_interrupted_tool_calls(messages: &mut Vec<Message>) -> Vec<String> {
 /// One stand-in tool message per unanswered `call`, carrying ids derived from
 /// the message that made the calls the way a compaction's retained tail
 /// derives its own.
-fn stand_in_results(anchor: &Message, calls: Vec<Block>) -> Vec<Message> {
-    missing_tool_results(&calls)
+fn stand_in_results(
+    anchor: &Message,
+    calls: Vec<Block>,
+    operation_ledger: &OperationLedger,
+) -> (Vec<Message>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let messages = missing_tool_results(&calls)
         .into_iter()
         .enumerate()
-        .map(|(index, block)| Message {
-            id: format!("{}-repair-{index}", anchor.id),
-            role: Role::Tool,
-            created_at: anchor.created_at,
-            blocks: vec![block],
-            ..Message::default()
+        .map(|(index, mut block)| {
+            if let Some(record) = operation_ledger.operation_for_tool_call(&block.tool_call_id) {
+                block.operation_metadata = Some(if record.corrupt {
+                    warnings.push(format!(
+                        "operation history for dangling tool call {} is corrupt; projected effect certainty as unknown",
+                        block.tool_call_id
+                    ));
+                    interrupted_tool_result_metadata(Some(record.operation_id.clone()))
+                } else if let Some(outcome) = record.terminal.as_ref() {
+                    ToolResultMetadata {
+                        operation_id: Some(record.operation_id.clone()),
+                        disposition: outcome.disposition,
+                        effect_certainty: outcome.effect_certainty,
+                        stop_reason: outcome.stop_reason,
+                    }
+                } else {
+                    interrupted_tool_result_metadata(Some(record.operation_id.clone()))
+                });
+            }
+            Message {
+                id: format!("{}-repair-{index}", anchor.id),
+                role: Role::Tool,
+                created_at: anchor.created_at,
+                blocks: vec![block],
+                ..Message::default()
+            }
         })
-        .collect()
+        .collect();
+    (messages, warnings)
+}
+
+fn interrupted_tool_result_metadata(
+    operation_id: Option<crate::model::OperationId>,
+) -> ToolResultMetadata {
+    ToolResultMetadata {
+        operation_id,
+        disposition: OperationDisposition::Interrupted,
+        effect_certainty: EffectCertainty::Unknown,
+        stop_reason: Some(OperationStopReason::ProcessLost),
+    }
 }
 
 /// Walks a message list and returns the tool calls that are still unanswered.
@@ -1642,6 +1738,56 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_operation_metadata_round_trips_in_pi_details_and_fails_closed() {
+        let metadata = ToolResultMetadata {
+            operation_id: Some(crate::model::OperationId::new("op-1").expect("valid id")),
+            disposition: OperationDisposition::Interrupted,
+            effect_certainty: EffectCertainty::Unknown,
+            stop_reason: Some(OperationStopReason::ProcessLost),
+        };
+        let message = Message {
+            role: Role::Tool,
+            blocks: vec![Block {
+                block_type: BlockType::ToolResult,
+                text: "unavailable".into(),
+                tool_call_id: "call-1".into(),
+                tool_name: "bash".into(),
+                is_error: true,
+                operation_metadata: Some(metadata.clone()),
+                ..Block::default()
+            }],
+            created_at: DateTime::from_timestamp(1, 0).expect("in range"),
+            ..Message::default()
+        };
+        let (entry, _) =
+            model_message_to_pi_entry(&message, "e1", None, &Header::default()).expect("encode");
+        let details = entry
+            .message
+            .as_ref()
+            .expect("message")
+            .details
+            .as_ref()
+            .expect("details")
+            .get();
+        assert!(details.contains(r#""operationId":"op-1""#), "{details}");
+        assert!(
+            details.contains(r#""effectCertainty":"unknown""#),
+            "{details}"
+        );
+        let decoded = pi_entry_to_context_messages(&entry).expect("decode");
+        assert_eq!(decoded[0].blocks[0].operation_metadata, Some(metadata));
+
+        let mut malformed = tool_result_entry("e2", None, "call-1", "bash", "bad");
+        malformed.message.as_mut().expect("message").details = Some(
+            RawValue::from_string(
+                r#"{"otto":{"operationId":"op-1","disposition":"interrupted"}}"#.into(),
+            )
+            .expect("raw details"),
+        );
+        assert!(pi_entry_to_context_messages(&malformed).is_err());
+    }
+
+    #[test]
     fn assistant_reasoning_round_trips_as_pi_thinking() {
         let message = Message {
             id: "m1".into(),
@@ -1738,6 +1884,15 @@ mod tests {
         let root = user_entry(root_id, None, "root");
         let assistant = tool_call_entry(assistant_id, Some(root_id), &[("call-1", "read")]);
         (root, assistant)
+    }
+
+    fn operation_entry(id: &str, parent_id: Option<&str>, data: &str) -> PiEntry {
+        let mut built = entry("custom", id, parent_id);
+        built.custom = Some(PiCustom {
+            custom_type: OPERATION_CUSTOM_TYPE.into(),
+            data: Some(RawValue::from_string(data.into()).expect("valid JSON")),
+        });
+        built
     }
 
     fn runtime_entry(id: &str, parent_id: Option<&str>, metadata: &RuntimeMetadata) -> PiEntry {
@@ -2124,6 +2279,72 @@ mod tests {
         let (_, warnings) =
             build_context(&[inactive, root], "60000001").expect("build context");
         assert_eq!(warnings.len(), 1, "warnings = {warnings:?}");
+    });
+
+    test!(build_context_folds_only_active_operation_facts {
+        let root = user_entry("60000101", None, "root");
+        let active = operation_entry(
+            "60000102",
+            Some("60000101"),
+            r#"{"event":"attempt","schemaVersion":1,"operationId":"op_active","attempt":1,"kind":"tool_call","toolCallId":"call-active","toolName":"read"}"#,
+        );
+        let leaf = user_entry("60000103", Some("60000102"), "leaf");
+        let inactive = operation_entry(
+            "60000104",
+            Some("60000101"),
+            r#"{"event":"attempt","schemaVersion":1,"operationId":"op_inactive","attempt":1,"kind":"tool_call","toolCallId":"call-inactive","toolName":"write"}"#,
+        );
+        let (context, _) = build_context(&[root, active, leaf, inactive], "60000103")
+            .expect("build context");
+        assert_eq!(texts(&context.messages), ["root", "leaf"]);
+        assert!(context
+            .operation_ledger
+            .operation_for_tool_call("call-active")
+            .is_some());
+        assert!(context
+            .operation_ledger
+            .operation_for_tool_call("call-inactive")
+            .is_none());
+    });
+
+    test!(build_context_ignores_unknown_operation_schema_but_rejects_malformed_v1 {
+        let root = user_entry("60000111", None, "root");
+        let future = operation_entry(
+            "60000112",
+            Some("60000111"),
+            r#"{"schemaVersion":2,"future":true}"#,
+        );
+        build_context(&[root.clone(), future], "60000112").expect("future schema ignored");
+
+        let malformed = operation_entry(
+            "60000113",
+            Some("60000111"),
+            r#"{"schemaVersion":1,"event":"attempt"}"#,
+        );
+        let error = build_context(&[root, malformed], "60000113")
+            .expect_err("malformed known schema accepted");
+        assert_eq!(error.kind(), PiErrorKind::Invalid);
+    });
+
+    test!(build_context_warns_and_marks_operation_conflicts_corrupt {
+        let root = operation_entry(
+            "60000121",
+            None,
+            r#"{"event":"attempt","schemaVersion":1,"operationId":"op_1","attempt":1,"kind":"tool_call","toolCallId":"call-1","toolName":"read"}"#,
+        );
+        let conflict = operation_entry(
+            "60000122",
+            Some("60000121"),
+            r#"{"event":"attempt","schemaVersion":1,"operationId":"op_2","attempt":1,"kind":"tool_call","toolCallId":"call-1","toolName":"read"}"#,
+        );
+        let (context, warnings) =
+            build_context(&[root, conflict], "60000122").expect("tolerant fold");
+        assert_warning_contains(&warnings, "different operation");
+        let record = context
+            .operation_ledger
+            .operation_for_tool_call("call-1")
+            .expect("first operation retained");
+        assert!(record.corrupt);
     });
 
     test!(build_context_preserves_tool_call_result_pairing {
@@ -2539,6 +2760,204 @@ mod tests {
                 ("call-3", NOT_EXECUTED_TOOL_RESULT_TEXT),
             ]
         );
+    });
+
+    test!(build_context_projects_dangling_repairs_from_the_operation_ledger {
+        let cases = [
+            (
+                "terminal",
+                vec![
+                    user_entry("63200001", None, "root"),
+                    tool_call_entry("63200002", Some("63200001"), &[("call-1", "read")]),
+                    operation_entry(
+                        "63200003",
+                        Some("63200002"),
+                        r#"{"event":"attempt","schemaVersion":1,"operationId":"op_terminal","attempt":1,"kind":"tool_call","toolCallId":"call-1","toolName":"read"}"#,
+                    ),
+                    operation_entry(
+                        "63200004",
+                        Some("63200003"),
+                        r#"{"event":"terminal","schemaVersion":1,"operationId":"op_terminal","attempt":1,"kind":"tool_call","toolCallId":"call-1","toolName":"read","disposition":"succeeded","effectCertainty":"completed"}"#,
+                    ),
+                    user_entry("63200005", Some("63200004"), "next"),
+                ],
+                "63200005",
+                Some("op_terminal"),
+                OperationDisposition::Succeeded,
+                EffectCertainty::Completed,
+                None,
+                None,
+            ),
+            (
+                "attempt",
+                vec![
+                    user_entry("63200011", None, "root"),
+                    tool_call_entry("63200012", Some("63200011"), &[("call-1", "read")]),
+                    operation_entry(
+                        "63200013",
+                        Some("63200012"),
+                        r#"{"event":"attempt","schemaVersion":1,"operationId":"op_attempt","attempt":1,"kind":"tool_call","toolCallId":"call-1","toolName":"read"}"#,
+                    ),
+                    user_entry("63200014", Some("63200013"), "next"),
+                ],
+                "63200014",
+                Some("op_attempt"),
+                OperationDisposition::Interrupted,
+                EffectCertainty::Unknown,
+                Some(OperationStopReason::ProcessLost),
+                None,
+            ),
+            (
+                "legacy",
+                vec![
+                    user_entry("63200021", None, "root"),
+                    tool_call_entry(
+                        "63200022",
+                        Some("63200021"),
+                        &[("call-1", "read"), ("call-2", "write")],
+                    ),
+                    user_entry("63200023", Some("63200022"), "next"),
+                ],
+                "63200023",
+                None,
+                OperationDisposition::Interrupted,
+                EffectCertainty::Unknown,
+                Some(OperationStopReason::ProcessLost),
+                None,
+            ),
+            (
+                "corrupt",
+                vec![
+                    user_entry("63200031", None, "root"),
+                    tool_call_entry("63200032", Some("63200031"), &[("call-1", "read")]),
+                    operation_entry(
+                        "63200033",
+                        Some("63200032"),
+                        r#"{"event":"attempt","schemaVersion":1,"operationId":"op_corrupt","attempt":1,"kind":"tool_call","toolCallId":"call-1","toolName":"read"}"#,
+                    ),
+                    operation_entry(
+                        "63200034",
+                        Some("63200033"),
+                        r#"{"event":"attempt","schemaVersion":1,"operationId":"op_corrupt","attempt":3,"kind":"tool_call","toolCallId":"call-1","toolName":"read"}"#,
+                    ),
+                    user_entry("63200035", Some("63200034"), "next"),
+                ],
+                "63200035",
+                Some("op_corrupt"),
+                OperationDisposition::Interrupted,
+                EffectCertainty::Unknown,
+                Some(OperationStopReason::ProcessLost),
+                Some("corrupt"),
+            ),
+        ];
+
+        for (
+            name,
+            entries,
+            leaf,
+            operation_id,
+            disposition,
+            effect_certainty,
+            stop_reason,
+            warning,
+        ) in cases
+        {
+            let (context, warnings) =
+                build_context(&entries, leaf).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let repairs: Vec<&Block> = context
+                .messages
+                .iter()
+                .filter(|message| message.role == Role::Tool)
+                .flat_map(|message| &message.blocks)
+                .collect();
+            let metadata = repairs[0]
+                .operation_metadata
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: missing operation metadata"));
+            assert_eq!(
+                metadata.operation_id.as_ref().map(|id| id.as_str()),
+                operation_id,
+                "{name}"
+            );
+            assert_eq!(metadata.disposition, disposition, "{name}");
+            assert_eq!(metadata.effect_certainty, effect_certainty, "{name}");
+            assert_eq!(metadata.stop_reason, stop_reason, "{name}");
+            if name == "legacy" {
+                assert_eq!(repairs.len(), 2);
+                let second = repairs[1].operation_metadata.as_ref().expect("metadata");
+                assert_eq!(second.operation_id, None);
+                assert_eq!(second.effect_certainty, EffectCertainty::NotStarted);
+            }
+            if let Some(warning) = warning {
+                assert_warning_contains(&warnings, warning);
+            }
+        }
+    });
+
+    test!(build_context_correlates_dangling_repairs_across_branch_and_compaction_views {
+        let root = user_entry("63300001", None, "root");
+        let assistant = tool_call_entry("63300002", Some("63300001"), &[("branch-call", "read")]);
+        let attempt = operation_entry(
+            "63300003",
+            Some("63300002"),
+            r#"{"event":"attempt","schemaVersion":1,"operationId":"op_branch","attempt":1,"kind":"tool_call","toolCallId":"branch-call","toolName":"read"}"#,
+        );
+        let mut branch = entry("branch_summary", "63300004", Some("63300003"));
+        branch.branch_summary = Some(Box::new(PiBranchSummary {
+            from_id: "63300001".into(),
+            summary: "branch moved on".into(),
+            ..PiBranchSummary::default()
+        }));
+        let inactive = operation_entry(
+            "63300005",
+            Some("63300001"),
+            r#"{"event":"attempt","schemaVersion":1,"operationId":"op_inactive","attempt":1,"kind":"tool_call","toolCallId":"branch-call","toolName":"read"}"#,
+        );
+        let (branch_context, _) = build_context(
+            &[root, assistant, attempt, branch, inactive],
+            "63300004",
+        )
+        .expect("branch context");
+        let branch_metadata = branch_context.messages[2].blocks[0]
+            .operation_metadata
+            .as_ref()
+            .expect("branch repair metadata");
+        assert_eq!(
+            branch_metadata.operation_id.as_ref().map(|id| id.as_str()),
+            Some("op_branch")
+        );
+
+        let attempt = operation_entry(
+            "63300011",
+            None,
+            r#"{"event":"attempt","schemaVersion":1,"operationId":"op_compacted","attempt":1,"kind":"tool_call","toolCallId":"retained-call","toolName":"bash"}"#,
+        );
+        let retained = tool_call_entry("ignored01", None, &[("retained-call", "bash")])
+            .message
+            .expect("retained message");
+        let mut compaction = entry("compaction", "63300012", Some("63300011"));
+        compaction.compaction = Some(Box::new(PiCompaction {
+            summary: "summary".into(),
+            retained_tail: Some(vec![*retained]),
+            ..PiCompaction::default()
+        }));
+        let next = user_entry("63300013", Some("63300012"), "next");
+        let (compacted, _) = build_context(&[attempt, compaction, next], "63300013")
+            .expect("compacted context");
+        let repair = compacted
+            .messages
+            .iter()
+            .find(|message| message.role == Role::Tool)
+            .expect("retained-tail repair");
+        let metadata = repair.blocks[0]
+            .operation_metadata
+            .as_ref()
+            .expect("compacted repair metadata");
+        assert_eq!(
+            metadata.operation_id.as_ref().map(|id| id.as_str()),
+            Some("op_compacted")
+        );
+        assert_eq!(metadata.effect_certainty, EffectCertainty::Unknown);
     });
 
     test!(build_context_leaves_a_trailing_tool_call_for_the_durable_repair {

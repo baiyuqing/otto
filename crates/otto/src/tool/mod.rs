@@ -89,6 +89,11 @@ pub(crate) fn error_result(message: impl std::fmt::Display) -> ToolResult {
     ToolResult::error(message.to_string())
 }
 
+/// An error established before a tool crosses its effectful boundary.
+pub(crate) fn preflight_error(message: impl std::fmt::Display) -> ToolResult {
+    error_result(message).not_started()
+}
+
 /// The in-band success result for `content`.
 pub(crate) fn text_result(content: impl Into<String>) -> ToolResult {
     ToolResult {

@@ -109,6 +109,27 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    use otto_core::model::{EffectCertainty, OperationDisposition, OperationId, ToolDefinition};
+    use otto_core::tool::{ToolCall, ToolExecutor, ToolResult};
+    use serde_json::value::RawValue;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::tool::registry::Registry;
+    use crate::tool::{Tool, definition, text_result};
+
+    struct FakeTool;
+
+    #[async_trait::async_trait]
+    impl Tool for FakeTool {
+        fn definition(&self) -> ToolDefinition {
+            definition("write", "", serde_json::json!({"type": "object"}))
+        }
+
+        async fn execute(&self, _arguments: &RawValue, _cancel: &CancellationToken) -> ToolResult {
+            text_result("wrote")
+        }
+    }
+
     fn no_lease() -> LeaseSource {
         Arc::new(|| None)
     }
@@ -152,6 +173,41 @@ mod tests {
 
         assert!(guard.after().is_ok());
         assert!(SYNCED.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn sync_failure_settles_the_registry_call_as_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lease = lease::Lease::for_test(tmp.path());
+        let source: LeaseSource = Arc::new(move || Some(Arc::clone(&lease)));
+        fn failing_sync(_p: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("disk full"))
+        }
+        let registry = Registry::new(vec![Box::new(FakeTool)])
+            .unwrap()
+            .with_guard(Arc::new(CommitGuard::with_sync(
+                source,
+                PathBuf::from("/workspace"),
+                failing_sync,
+            )));
+        let operation_id: OperationId = serde_json::from_str(r#""op_commit_guard_test""#).unwrap();
+        let arguments = RawValue::from_string("{}".to_owned()).unwrap();
+
+        let execution = registry
+            .execute(
+                ToolCall {
+                    operation_id: &operation_id,
+                    name: "write",
+                    arguments: &arguments,
+                    attempt: 1,
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert!(execution.result.is_error);
+        assert_eq!(execution.outcome.disposition, OperationDisposition::Error);
+        assert_eq!(execution.outcome.effect_certainty, EffectCertainty::Unknown);
     }
 
     #[test]

@@ -35,6 +35,36 @@ describe('reduce', () => {
     expect(items).toEqual([{ kind: 'tool', id: 'c9', name: 'read', args: '', result: 'x', isError: true }])
   })
 
+  it('preserves typed operation outcome from live events', () => {
+    const items = apply([
+      '{"type":"tool_call_started","tool_call_id":"c1","tool_name":"bash","operation_id":"op_1","attempt":1,"tool_args":{"command":"touch marker"}}',
+      '{"type":"tool_call_finished","tool_call_id":"c1","tool_name":"bash","result":{"content":"lost","is_error":true,"operation_id":"op_1","disposition":"interrupted","effect_certainty":"unknown","stop_reason":"transport_lost"}}',
+    ])
+    expect(items).toEqual([
+      {
+        kind: 'tool',
+        id: 'c1',
+        name: 'bash',
+        args: '{\n  "command": "touch marker"\n}',
+        result: 'lost',
+        isError: true,
+        operation_id: 'op_1',
+        disposition: 'interrupted',
+        effect_certainty: 'unknown',
+        stop_reason: 'transport_lost',
+      },
+    ])
+  })
+
+  it('does not infer typed outcome for a legacy live event', () => {
+    const items = apply([
+      '{"type":"tool_call_finished","tool_call_id":"c1","tool_name":"bash","result":{"content":"Outcome unknown — check effects before retrying","is_error":true}}',
+    ])
+    expect(items).toEqual([
+      { kind: 'tool', id: 'c1', name: 'bash', args: '', result: 'Outcome unknown — check effects before retrying', isError: true },
+    ])
+  })
+
   it('does not mutate the previous transcript', () => {
     const before: Item[] = [{ kind: 'assistant', text: 'a' }]
     const after = reduce(before, '{"type":"text_delta","text":"b"}')
@@ -76,6 +106,42 @@ describe('fromHistory', () => {
     { id: '5', role: 'context', created_at: '', display: true, blocks: [{ type: 'text', text: 'Task t1 finished' }] },
     { id: '6', role: 'assistant', created_at: '', blocks: [{ type: 'text', text: 'One file.' }] },
   ])
+
+  it('preserves typed outcome from reopened history', () => {
+    const typed = JSON.stringify([
+      {
+        role: 'assistant',
+        blocks: [{ type: 'tool_call', tool_call_id: 'c1', tool_name: 'read', arguments: { path: 'README.md' } }],
+      },
+      {
+        role: 'tool',
+        blocks: [
+          {
+            type: 'tool_result',
+            tool_call_id: 'c1',
+            tool_name: 'read',
+            text: 'ok',
+            operation_id: 'op_2',
+            disposition: 'succeeded',
+            effect_certainty: 'completed',
+          },
+        ],
+      },
+    ])
+    expect(fromHistory(typed)).toEqual([
+      {
+        kind: 'tool',
+        id: 'c1',
+        name: 'read',
+        args: '{\n  "path": "README.md"\n}',
+        result: 'ok',
+        isError: false,
+        operation_id: 'op_2',
+        disposition: 'succeeded',
+        effect_certainty: 'completed',
+      },
+    ])
+  })
 
   it('pairs tool results and shows only display context', () => {
     expect(fromHistory(messages)).toEqual([

@@ -36,6 +36,11 @@ use common::{Script, serve, text_reply};
 const WIDTH: usize = 120;
 const HEIGHT: usize = 30;
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The text both busy composer titles end with (`draw_composer` in
+/// `src/tui/render.rs`): "Working — type, then Enter to queue next input ·
+/// Esc cancels turn" and "Queued next input · Ctrl+U withdraw · Esc cancels
+/// turn".
+const BUSY_TITLE: &str = "Esc cancels turn";
 
 /// A minimal terminal screen, built only for the ANSI vocabulary ratatui's
 /// crossterm backend can emit (see the module doc). Fragmentation-tolerant:
@@ -267,11 +272,9 @@ fn wait_for_screen_text(shared: &Shared, needle: &str) {
     });
 }
 
-/// Waits for `needle` to stop appearing on screen. Used to detect the
-/// composer leaving its "Working (Esc to cancel)" busy title: while a turn
-/// runs, `App::handle_key` drops every key except Ctrl+C/Ctrl+O (see
-/// `app.rs`), so typing ahead (e.g. `/exit`) during that window is silently
-/// swallowed rather than queued.
+/// Waits for `needle` to stop appearing on screen. Returns at once if
+/// `needle` was never drawn, so a caller that needs it to have appeared
+/// first checks that separately (see [`wait_for_raw_bytes`]).
 fn wait_for_screen_text_gone(shared: &Shared, needle: &str) {
     wait_until(
         shared,
@@ -423,10 +426,14 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     wait_for_screen_text(&shared, REPLY);
     eprintln!("[tui_pty] saw reply; waiting for the turn to finish (busy title to clear)");
     // The reply text lands on screen mid-turn (the streaming sink redraws on
-    // every event), while the composer still shows "Working (Esc to
-    // cancel)" and drops keys other than Ctrl+C/Ctrl+O. Typing `/exit`
-    // before that title clears would be silently swallowed.
-    wait_for_screen_text_gone(&shared, "Working (Esc to cancel)");
+    // every event), while the composer still shows a busy title. Enter
+    // during a turn queues the line (`App::handle_busy_composer_key`) and
+    // runs it after the turn, so `/exit` typed now would take the queued
+    // path instead of the idle one this test covers. The raw-bytes wait
+    // fails if the busy title was never drawn, e.g. after its text changes,
+    // instead of letting the screen wait below return at once.
+    wait_for_raw_bytes(&shared, BUSY_TITLE.as_bytes());
+    wait_for_screen_text_gone(&shared, BUSY_TITLE);
     eprintln!("[tui_pty] turn finished");
     // The composer was cleared on Enter, so the only thing that can still
     // put the prompt on screen is the transcript entry the submission

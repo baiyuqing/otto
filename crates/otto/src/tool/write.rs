@@ -140,6 +140,21 @@ pub(crate) fn write_file_atomic(
         let _ = root.remove(&temporary_path);
         return Err(error.to_string());
     }
+    // The rename is durable only once the directory entry itself is on stable
+    // storage: `fsync` on the temporary file covers the file's data and
+    // metadata but not the directory that now points the destination name at
+    // it. Without this, a host crash after a reported success can revert the
+    // rename and bring back the old file content or make the file disappear.
+    if let Err(error) = root
+        .open_file(
+            &directory,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY,
+            Mode::empty(),
+        )
+        .and_then(|directory_handle| directory_handle.sync_all())
+    {
+        return Err(format!("file replaced but directory sync failed: {error}"));
+    }
     Ok(())
 }
 

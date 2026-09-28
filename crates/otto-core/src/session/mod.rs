@@ -185,6 +185,14 @@ pub trait Session {
         &self,
         checkpoint: CompactionCheckpoint,
     ) -> Result<CompactionMetadata, SessionError>;
+
+    /// Appends a `custom` entry with the given `customType` and JSON-encoded
+    /// `data`, outside the message/context path: [`pi_entry_to_context_messages`]
+    /// never turns a bare `custom` entry into a context message, the same way
+    /// it already ignores `otto.runtime`.
+    ///
+    /// [`pi_entry_to_context_messages`]: crate::session::context::pi_entry_to_context_messages
+    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError>;
 }
 
 /// Tool calls from the most recent assistant message that have no result yet.
@@ -413,6 +421,12 @@ impl Session for MemorySession {
         state.seen_ids.insert(checkpoint_id);
         state.latest_compaction = Some(metadata.clone());
         Ok(metadata)
+    }
+
+    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        // Nothing durable to append to: an in-memory session has no file.
+        let _ = (custom_type, data);
+        Ok(())
     }
 }
 

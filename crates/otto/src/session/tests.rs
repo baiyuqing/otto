@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, TimeZone, Utc};
 use otto_core::model::{Block, BlockType, FinishReason, Message, Role, Usage};
+use otto_core::session::context::{MAY_HAVE_RUN_TOOL_RESULT_TEXT, NOT_EXECUTED_TOOL_RESULT_TEXT};
 use otto_core::session::{
     CURRENT_VERSION, CompactionCheckpoint, CompactionDetails, Header, PiErrorKind, RuntimeMetadata,
 };
@@ -108,6 +109,27 @@ fn tool_call(id: &str, name: &str) -> Message {
             ),
             ..Block::default()
         }],
+        created_at: created_at(),
+        finish_reason: Some(FinishReason::ToolCalls),
+        ..Message::default()
+    }
+}
+
+fn tool_calls(calls: &[(&str, &str)]) -> Message {
+    Message {
+        role: Role::Assistant,
+        blocks: calls
+            .iter()
+            .map(|(id, name)| Block {
+                block_type: BlockType::ToolCall,
+                tool_call_id: (*id).into(),
+                tool_name: (*name).into(),
+                arguments: Some(
+                    serde_json::value::RawValue::from_string("{}".into()).expect("valid JSON"),
+                ),
+                ..Block::default()
+            })
+            .collect(),
         created_at: created_at(),
         finish_reason: Some(FinishReason::ToolCalls),
         ..Message::default()
@@ -424,6 +446,42 @@ fn store_round_trips_pi_messages_and_parent_chain() {
     assert_eq!(messages[0].role, Role::User);
     assert_eq!(messages[1].blocks[0].tool_call_id, "call-1");
     assert_eq!(messages[2].role, Role::Tool);
+    reopened.close().expect("close");
+}
+
+#[test]
+fn append_custom_entry_is_excluded_from_messages() {
+    // otto.task_spec and otto.task_result (crates/otto/src/subagent/runner.rs)
+    // are custom entries, the same mechanism as otto.runtime. This asserts
+    // that mechanism keeps them out of messages() the same way it already
+    // keeps otto.runtime out, so a reader building context over a child
+    // transcript sees the same messages with or without them.
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    store.append_message(&user("hello")).expect("append user");
+    store
+        .append_custom_entry("otto.task_spec", "{\"id\":\"t1\"}")
+        .expect("append task_spec");
+    store
+        .append_message(&assistant("done"))
+        .expect("append assistant");
+    store
+        .append_custom_entry("otto.task_result", "{\"status\":\"succeeded\"}")
+        .expect("append task_result");
+    let path = store.path();
+    store.close().expect("close");
+
+    let lines = json_lines(Path::new(&path));
+    assert_eq!(lines.len(), 6, "header, otto.runtime, and the four appends");
+    assert_eq!(lines[3]["customType"], "otto.task_spec");
+    assert_eq!(lines[5]["customType"], "otto.task_result");
+
+    let (reopened, warnings) = Store::open(&path).expect("open");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let messages = reopened.messages();
+    assert_eq!(messages.len(), 2, "custom entries produce no messages");
+    assert_eq!(messages[0].role, Role::User);
+    assert_eq!(messages[1].role, Role::Assistant);
     reopened.close().expect("close");
 }
 
@@ -863,15 +921,46 @@ fn open_repairs_dangling_tool_call_durably() {
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1].role, Role::Tool);
     assert!(messages[1].blocks[0].is_error);
-    assert_eq!(
-        messages[1].blocks[0].text,
-        "tool result missing from prior session"
-    );
+    assert_eq!(messages[1].blocks[0].text, MAY_HAVE_RUN_TOOL_RESULT_TEXT);
     reopened.close().expect("close");
 
     let (again, warnings) = Store::open(&path).expect("reopen");
     assert!(warnings.is_empty(), "repair must be durable: {warnings:?}");
     assert_eq!(again.messages().len(), 2);
+    again.close().expect("close");
+}
+
+#[test]
+fn open_marks_only_the_first_dangling_call_as_possibly_run_durably() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    store
+        .append_message(&tool_calls(&[
+            ("call-1", "read"),
+            ("call-2", "bash"),
+            ("call-3", "write"),
+        ]))
+        .expect("append calls");
+    store
+        .append_message(&tool_result("call-1", "read", "ok"))
+        .expect("append result");
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, warnings) = Store::open(&path).expect("open");
+    assert_eq!(warnings.len(), 2);
+    let messages = reopened.messages();
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[2].blocks[0].tool_call_id, "call-2");
+    assert_eq!(messages[2].blocks[0].text, MAY_HAVE_RUN_TOOL_RESULT_TEXT);
+    assert!(messages[2].blocks[0].is_error);
+    assert_eq!(messages[3].blocks[0].tool_call_id, "call-3");
+    assert_eq!(messages[3].blocks[0].text, NOT_EXECUTED_TOOL_RESULT_TEXT);
+    assert!(messages[3].blocks[0].is_error);
+    reopened.close().expect("close");
+
+    let (again, warnings) = Store::open(&path).expect("reopen");
+    assert!(warnings.is_empty(), "repair must be durable: {warnings:?}");
     again.close().expect("close");
 }
 
@@ -1684,6 +1773,23 @@ fn archive_deletes_the_reminder_sidecar() {
     assert!(!sidecar.exists());
     let archived = Path::new(&result.path).with_extension("reminders.json");
     assert!(!archived.exists(), "archiving disables outstanding timers");
+}
+
+#[test]
+fn archive_deletes_the_inbox_sidecar() {
+    let temp = TempDir::new();
+    let (root, workspace, paths) = seeded_workspace(&temp, 1);
+    let sidecar = Path::new(&paths[0]).with_extension("inbox.json");
+    fs::write(&sidecar, b"[]").expect("sidecar");
+
+    let result =
+        archive(&root, &workspace.to_string_lossy(), Path::new(&paths[0])).expect("archive");
+    assert!(!sidecar.exists());
+    let archived = Path::new(&result.path).with_extension("inbox.json");
+    assert!(
+        !archived.exists(),
+        "archiving ends the session, so its queued notifications end with it"
+    );
 }
 
 #[test]

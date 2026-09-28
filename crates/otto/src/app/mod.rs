@@ -1696,6 +1696,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_session_resumed_from_the_archive_keeps_its_timers_beside_it() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        controller
+            .current_session()
+            .append(user("hello"))
+            .await
+            .expect("append");
+        let archived = controller.archive_current_session().await.expect("archive");
+        // The same open sequence as `--resume PATH` in `cli::run`.
+        let builder = builder(workspace.path(), sessions.path());
+        let runtime = initial_runtime(&builder);
+        let (store, _) = crate::session::Prepared::prepare(Path::new(&archived.path))
+            .expect("prepare archived")
+            .activate()
+            .expect("activate archived");
+        let session = SharedSession::new(Arc::new(store));
+        let runner = builder
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        let info = builder.runtime_info(&runtime);
+        let reopened = Controller::new(builder, true, session, runner, info);
+
+        reopened
+            .reminders()
+            .expect("timer registry")
+            .schedule(std::time::Duration::from_secs(60), "outstanding".into())
+            .expect("schedule");
+
+        assert!(
+            Path::new(&archived.path)
+                .with_extension("reminders.json")
+                .exists(),
+            "the timer sidecar is written beside the archived session file"
+        );
+    }
+
+    #[tokio::test]
     async fn a_session_with_no_file_cannot_be_archived() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");

@@ -748,7 +748,27 @@ Notes:
   moves its transcript directory into `archive/` with it. Under
   `--no-session`, children stay in memory. `/task <id|name>` prints the file
   as a `transcript:` line, and the task JSON carries it as `session_path`. If
-  a child transcript cannot be created, only that task fails.
+  a child transcript cannot be created, only that task fails. A transcript
+  starts with an `otto.task_spec` custom entry (task id, name, description,
+  model, `context` (`fresh` or `inherit`), and the agent definition if one
+  was used) and ends with an `otto.task_result` custom entry (`status`
+  `succeeded`, `failed`, or `canceled`, and the error text). Otto does not
+  add these entries to the child's model context. Task ids continue from the
+  highest `t<N>` in the transcript directory, so a resumed session does not
+  reuse an id.
+- **Undelivered notifications** (a finished or reporting sub-agent, a fired
+  `remind` timer, a `[feishu]` message) are written to
+  `<session-id>.inbox.json` beside the session file, mode `0600`, and removed
+  from it once delivered to the model. Reopening the session restores them,
+  and the REPL, the TUI, and `otto serve` start a wake turn to deliver them.
+  Delivery is at least once: a notification appended to the session just
+  before Otto exits can be delivered again after the session is reopened.
+  Archiving the session deletes the file. A write failure is not reported.
+  `--no-session` keeps notifications in memory only.
+- When a session is reopened after an exit in the middle of a tool call, the
+  first call in the last assistant message that has no result is recorded as
+  an error result saying the call may have run; the calls after it are
+  recorded as not executed. The model sees these results on its next turn.
 - Manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
   bounded file metadata.
@@ -857,7 +877,8 @@ canonical workspace, even when `--sandbox off` is selected:
   default, 10000 maximum).
 - `ls` lists one directory level in sorted order; directories end in `/` and
   symlinks in `@`.
-- `write` writes a complete file atomically.
+- `write` writes a complete file atomically and syncs the file and its
+  directory to disk before it reports success.
 - `edit` replaces one or more unique text matches and shares the 64 MiB size
   limit with `read`. When `old_text` has no exact match, `edit` retries with a
   match that ignores trailing whitespace and treats curly quotes, dashes, and
@@ -898,7 +919,8 @@ operations as `GET /v1/sessions/{id}/timers` and
 
 File-backed sessions keep outstanding timers across a restart; opening that
 session restores them, and a timer that is already due fires as soon as Otto
-is idle. `/new` starts a different session without them. `--no-session`
+is idle. A timer that fired just before Otto exited can fire again after the
+restart. `/new` starts a different session without them. `--no-session`
 timers live only in the current process. Archiving a session cancels its
 outstanding timers permanently: the stored timers are deleted with the
 archive, so resuming the archived session does not bring them back. Child

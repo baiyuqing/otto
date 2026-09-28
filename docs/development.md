@@ -308,20 +308,6 @@ baseline for unchanged failures, and never weaken validation or safety checks
 to obtain a pass. Preserve unrelated behavioral assertions when migrating test
 fixtures.
 
-### Manual failover acceptance on NFSv4
-
-The automated tests run the lease on a local file system. This run checks session failover on a network file system. It is manual and not part of `make check`. Record the Otto commit, both kernel versions, the NFS server, the mount options, and the result of each step.
-
-Setup:
-1. An NFSv4 server exports one directory with `sync`. Two Linux hosts (or VMs), A and B, each mount it at the same path, for example `mount -t nfs4 -o vers=4.2,hard server:/otto /mnt/otto`. Two containers on one kernel share that kernel's NFS client and page cache, so they do not test what one host's writes look like to another host.
-2. On each host, run one container from the same image with an Otto Linux build, `--init` (so `SIGTERM` reaches `otto` and not a PID 1 that ignores it), `-v /mnt/otto/sessions:/root/.otto/sessions`, and `-v /mnt/otto/work:/work`, with `/work` as the working directory on both, so both compute the same workspace key. Each container has `~/.otto/config.toml` with `[failover] enabled = true` and a provider; the API key comes from the environment. Linux has no sandbox, so start Otto with `--sandbox off`.
-
-Steps:
-1. Planned migration. In A's REPL, send a prompt that makes the model start a sub-agent that runs `sleep 120` and itself run `sleep 120`. While both run, `docker kill --signal=TERM <A>`. Expect: A exits `0` within a few seconds; `<id>.lease/heartbeat` has `"released":true`; the parent log and the child transcript have a result for every call; the child transcript ends with `otto.task_result` `interrupted`. On B, `otto --sandbox off --resume <id>` opens at once, creates `epoch-2`, creates no `fenced-1.jsonl`, and runs a wake turn that starts with `This session was moved` and lists the task. A `resume` call on the task continues it.
-2. Lost host. In A, start a prompt that runs `sleep 120`, then `docker kill --signal=KILL <A>`. On B, resume: the open waits 7/6 of `lease_seconds`, moves the log to `fenced-<n>.jsonl`, and the recovery notification marks the call "may have run".
-3. Suspended holder. In A, start a long prompt, `docker pause <A>`, resume the session on B and let it take over, then `docker unpause <A>`. A exits with status `75`, and the session log on B has no record written by A after the takeover.
-4. Workspace durability. In A, have the model `write` a file in `/work`, then `docker kill --signal=KILL <A>` right after the result is in the log. On B, the file exists with the written content.
-
 ## Secrets, safety, and documentation
 
 - Never add `--api-key`; API keys come only from environment variables, and ChatGPT credentials only from `otto login`.

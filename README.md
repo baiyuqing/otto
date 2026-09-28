@@ -165,12 +165,17 @@ Interactive task commands:
 /task cancel <id|name> cancel a queued or running task
 ```
 
-Child agents cannot start nested agents. They can use their child-only
-`agent_report` tool to send progress updates, blockers, plans, or interim
-findings to the parent before they finish. The parent can send a follow-up
-task update to a queued or running child with the `agent_send` tool; the child
-reads it at the next safe checkpoint, not by interrupting an in-flight provider
-or tool call. Child transcripts are not persisted.
+Child agents cannot start nested agents. Their child-only `agent_report` tool
+sends one message to the parent without ending the task; children use it only
+to answer a parent question or to report a blocker that needs a parent
+decision, never for progress updates, plans, or interim findings, which go in
+the final report instead. Each task allows 10 `agent_report` calls on the
+child's own initiative, plus one more for each `agent_send` message the
+parent sends; a call past that limit returns an error instead of reaching the
+parent. The parent can send a follow-up task update to a queued or running
+child with the `agent_send` tool; the child reads it at the next safe
+checkpoint, not by interrupting an in-flight provider or tool call. Child
+transcripts are not persisted.
 
 ### Run a durable workflow
 
@@ -224,10 +229,12 @@ never retried automatically.
   deletion, or search.
 - No automatic memory extraction or memory backup/restore/verify commands.
 - No per-skill `allowed-tools` enforcement.
-- No nested sub-agent delegation; child agents can send in-progress reports to
-  the parent with `agent_report`; parent-to-child `agent_send` delivery waits
-  for the child's next safe checkpoint and does not interrupt an in-flight
-  provider or tool call; child transcripts are not persisted.
+- No nested sub-agent delegation; `agent_report` sends the parent an answer to
+  its question or a blocker needing its decision, limited to 10 calls on the
+  child's own initiative per task plus one more per `agent_send` message,
+  with a call past the limit returning an error; parent-to-child `agent_send`
+  delivery waits for the child's next safe checkpoint and does not interrupt
+  an in-flight provider or tool call; child transcripts are not persisted.
 - Durable workflows are acyclic: no loops, conditions, group chat, nested
   workflows, or automatic retry. Static `handoff` steps can pass control to a
   named next agent; `fork` creates a new run from a committed step boundary

@@ -11,9 +11,10 @@
 //! Concurrency: `complete` takes `&self`; the token source serializes its own
 //! refreshes, so one client can serve a parent agent and its sub-agents.
 //!
-//! Cancellation: the token fetch, the request send, and every body read race
-//! the caller's [`CancellationToken`]. A cancelled call returns
-//! [`ProviderError::Cancelled`].
+//! Operation control: the token fetch, request send, and every body read observe
+//! the caller's cancellation token. Deadline and user cancellation remain
+//! distinct, while a fully received and validated response wins a simultaneous
+//! stop.
 //!
 //! Errors: every failure outside the stream decoder is one of three fixed
 //! strings, so no endpoint text and no credential can reach the caller. A
@@ -21,8 +22,7 @@
 //! the account id redacted.
 //!
 //! Two deliberate decisions:
-//!   - ponytail: no retry on 429/5xx, so the status is returned on the first
-//!     attempt.
+//!   - no retry on 429/5xx, so the status is returned on the first attempt.
 //!   - reqwest exposes no cap on the size of a response header block, so no
 //!     bound is enforced on it. The same gap exists in
 //!     [`crate::provider::openaicompat`].
@@ -30,17 +30,17 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::auth::token::TokenSource;
 use futures_util::TryStreamExt;
 use otto_core::agent::redactor::{Redactor, StreamRedactor};
-use otto_core::model::Message;
+use otto_core::model::{EffectCertainty, Message, OperationStopReason};
 use otto_core::openairesponses::protocol::{build_request, serialized_request_size};
 use otto_core::openairesponses::stream::StreamAssembler;
+use otto_core::operation::OperationControl;
 use otto_core::provider::{
-    Provider, ProviderError, Request, RequestSizer, Response, StreamEvent, StreamSink,
+    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, Response, StreamEvent,
+    StreamSink,
 };
-use tokio_util::sync::CancellationToken;
-
-use crate::auth::token::TokenSource;
 
 /// The ChatGPT backend that serves subscription traffic.
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -97,43 +97,74 @@ impl Client {
 #[async_trait::async_trait]
 impl Provider for Client {
     /// Sends one request to the Responses backend and assembles the stream.
-    ///
-    /// There is no retry: a 429 or a 5xx is reported on the first attempt.
+    /// There is no retry: every failure is reported on the first attempt.
     async fn complete(
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
-    ) -> Result<Response, ProviderError> {
+        control: &dyn OperationControl,
+    ) -> ProviderSettlement {
+        if let Err(error) = check_running(control) {
+            return chatgpt_failure(error, 0, EffectCertainty::NotStarted, control);
+        }
         let http = match &self.http {
             Ok(http) => http,
-            Err(error) => return Err(ProviderError::Other(error.clone())),
+            Err(error) => {
+                return ProviderSettlement::failed(
+                    ProviderError::Other(error.clone()),
+                    0,
+                    EffectCertainty::NotStarted,
+                );
+            }
         };
-        let credentials = match self.tokens.token(cancel).await {
-            Ok(credentials) => credentials,
-            // The token source has its own fixed errors; none of them is
-            // inspected, so nothing it saw can reach the caller.
-            Err(_) if cancel.is_cancelled() => return Err(ProviderError::Cancelled),
-            Err(_) => return Err(ProviderError::Other(AUTHORIZATION_FAILED.to_owned())),
-        };
+        let credentials =
+            match await_control(control, self.tokens.token(control.cancellation_token())).await {
+                Ok(Ok(credentials)) => credentials,
+                Ok(Err(_)) => {
+                    if let Err(error) = check_running(control) {
+                        return chatgpt_failure(error, 0, EffectCertainty::NotStarted, control);
+                    }
+                    return ProviderSettlement::failed(
+                        ProviderError::Other(AUTHORIZATION_FAILED.to_owned()),
+                        0,
+                        EffectCertainty::NotStarted,
+                    );
+                }
+                Err(error) => {
+                    return chatgpt_failure(error, 0, EffectCertainty::NotStarted, control);
+                }
+            };
         let access_token = credentials.access_token;
         if access_token.trim().is_empty() || self.account_id.trim().is_empty() {
-            if cancel.is_cancelled() {
-                return Err(ProviderError::Cancelled);
-            }
-            return Err(ProviderError::Other(AUTHORIZATION_FAILED.to_owned()));
+            return ProviderSettlement::failed(
+                ProviderError::Other(AUTHORIZATION_FAILED.to_owned()),
+                0,
+                EffectCertainty::NotStarted,
+            );
         }
 
-        // The redactor is built before anything is sent, so a credential that
-        // cannot be redacted stops the request instead of streaming output
-        // that could carry it.
         let redactor = Redactor::new(&[access_token.clone(), self.account_id.clone()]);
         if !redactor.allows_dynamic_content() {
-            return Err(ProviderError::Other(REQUEST_FAILED.to_owned()));
+            return ProviderSettlement::failed(
+                ProviderError::Other(REQUEST_FAILED.to_owned()),
+                0,
+                EffectCertainty::NotStarted,
+            );
         }
 
-        let payload = serde_json::to_vec(&build_request(request))
-            .map_err(|error| ProviderError::Other(format!("encode responses request: {error}")))?;
+        let payload = match serde_json::to_vec(&build_request(request)) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return ProviderSettlement::failed(
+                    ProviderError::Other(format!("encode responses request: {error}")),
+                    0,
+                    EffectCertainty::NotStarted,
+                );
+            }
+        };
+        if let Err(error) = check_running(control) {
+            return chatgpt_failure(error, 0, EffectCertainty::NotStarted, control);
+        }
 
         let send = http
             .post(format!("{}/responses", self.base_url))
@@ -145,61 +176,109 @@ impl Provider for Client {
             .header("originator", ORIGINATOR)
             .body(payload)
             .send();
-        let response = match with_cancel(cancel, send).await {
-            None => return Err(ProviderError::Cancelled),
-            Some(Ok(response)) => response,
-            Some(Err(_)) => return Err(ProviderError::Other(REQUEST_FAILED.to_owned())),
+        let response = match await_control(control, send).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => {
+                if let Err(error) = check_running(control) {
+                    return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
+                }
+                return ProviderSettlement::failed(
+                    ProviderError::Other(REQUEST_FAILED.to_owned()),
+                    1,
+                    EffectCertainty::Unknown,
+                );
+            }
+            Err(error) => return chatgpt_failure(error, 1, EffectCertainty::Unknown, control),
         };
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            // The body is never read, so no part of it can reach the error.
-            return Err(ProviderError::Other(format!(
-                "chatgpt responses HTTP {status}"
-            )));
+            return ProviderSettlement::failed(
+                ProviderError::Other(format!("chatgpt responses HTTP {status}")),
+                1,
+                EffectCertainty::Completed,
+            );
         }
 
         let mut events = EventRedactor::new(&redactor);
         let mut assembler = StreamAssembler::new();
         let mut body = Box::pin(response.bytes_stream());
-        let result = loop {
-            if assembler.is_done() {
-                break Ok(());
-            }
-            let chunk = match with_cancel(cancel, body.try_next()).await {
-                None => return Err(ProviderError::Cancelled),
-                Some(Ok(Some(chunk))) => chunk,
-                Some(Ok(None)) => break Ok(()),
-                // A read failure reports the fixed request failure, never the
-                // transport's own text.
-                Some(Err(_)) => break Err(ProviderError::Other(REQUEST_FAILED.to_owned())),
+        loop {
+            let chunk = match await_control(control, body.try_next()).await {
+                Ok(Ok(Some(chunk))) => chunk,
+                Ok(Ok(None)) => break,
+                Ok(Err(_)) => {
+                    if let Err(error) = check_running(control) {
+                        return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
+                    }
+                    return ProviderSettlement::failed(
+                        ProviderError::Other(REQUEST_FAILED.to_owned()),
+                        1,
+                        EffectCertainty::Unknown,
+                    );
+                }
+                Err(error) => {
+                    return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
+                }
             };
             if let Err(error) = assembler.push(&chunk, &mut |event| events.emit(event, &mut *emit))
             {
-                break Err(ProviderError::Other(
-                    redactor.redact_string(&error.to_string()),
-                ));
+                if let Err(stop) = check_running(control) {
+                    return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
+                }
+                return ProviderSettlement::failed(
+                    ProviderError::Other(redactor.redact_string(&error.to_string())),
+                    1,
+                    EffectCertainty::Completed,
+                );
+            }
+            if assembler.is_done() {
+                let response = match assembler.finish(&mut |event| events.emit(event, &mut *emit)) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if let Err(stop) = check_running(control) {
+                            return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
+                        }
+                        return ProviderSettlement::failed(
+                            ProviderError::Other(redactor.redact_string(&error.to_string())),
+                            1,
+                            EffectCertainty::Completed,
+                        );
+                    }
+                };
+                events.flush(&mut *emit);
+                return ProviderSettlement::succeeded(
+                    Response {
+                        message: redact_message(&redactor, response.message),
+                    },
+                    1,
+                );
+            }
+            if let Err(error) = check_running(control) {
+                return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
+            }
+        }
+
+        let response = match assembler.finish(&mut |event| events.emit(event, &mut *emit)) {
+            Ok(response) => response,
+            Err(error) => {
+                if let Err(stop) = check_running(control) {
+                    return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
+                }
+                return ProviderSettlement::failed(
+                    ProviderError::Other(redactor.redact_string(&error.to_string())),
+                    1,
+                    EffectCertainty::Completed,
+                );
             }
         };
-        if let Err(error) = result {
-            if cancel.is_cancelled() {
-                return Err(ProviderError::Cancelled);
-            }
-            return Err(error);
-        }
-        let response = assembler
-            .finish(&mut |event| events.emit(event, &mut *emit))
-            .map_err(|error| {
-                if cancel.is_cancelled() {
-                    ProviderError::Cancelled
-                } else {
-                    ProviderError::Other(redactor.redact_string(&error.to_string()))
-                }
-            })?;
         events.flush(&mut *emit);
-        Ok(Response {
-            message: redact_message(&redactor, response.message),
-        })
+        ProviderSettlement::succeeded(
+            Response {
+                message: redact_message(&redactor, response.message),
+            },
+            1,
+        )
     }
 }
 
@@ -343,16 +422,68 @@ impl<'a> EventRedactor<'a> {
     }
 }
 
-/// Races `future` against the cancellation token. `None` means the token was
-/// cancelled and `future` was dropped without completing.
-async fn with_cancel<T>(
-    cancel: &CancellationToken,
+fn chatgpt_failure(
+    error: ProviderError,
+    attempts: u32,
+    certainty: EffectCertainty,
+    control: &dyn OperationControl,
+) -> ProviderSettlement {
+    match control.stop_reason() {
+        Some(reason) => ProviderSettlement::stopped(
+            error,
+            attempts,
+            if attempts == 0 {
+                EffectCertainty::NotStarted
+            } else {
+                EffectCertainty::Unknown
+            },
+            reason,
+        ),
+        None if attempts > 0 && certainty == EffectCertainty::Unknown => {
+            ProviderSettlement::transport_lost(error, attempts)
+        }
+        None => ProviderSettlement::failed(error, attempts, certainty),
+    }
+}
+
+fn stop_error(control: &dyn OperationControl) -> Option<ProviderError> {
+    control.stop_reason().map(|reason| match reason {
+        OperationStopReason::Deadline => ProviderError::DeadlineExceeded,
+        OperationStopReason::UserCancellation
+        | OperationStopReason::Shutdown
+        | OperationStopReason::Migration
+        | OperationStopReason::TransportLost
+        | OperationStopReason::ProcessLost => ProviderError::Cancelled,
+    })
+}
+
+fn check_running(control: &dyn OperationControl) -> Result<(), ProviderError> {
+    match control.admission_stop_reason().map(|reason| match reason {
+        OperationStopReason::Deadline => ProviderError::DeadlineExceeded,
+        OperationStopReason::UserCancellation
+        | OperationStopReason::Shutdown
+        | OperationStopReason::Migration
+        | OperationStopReason::TransportLost
+        | OperationStopReason::ProcessLost => ProviderError::Cancelled,
+    }) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Runs one await against the operation token. A ready future wins the token
+/// race; callers still inspect the stop reason before accepting partial work.
+async fn await_control<T>(
+    control: &dyn OperationControl,
     future: impl std::future::Future<Output = T>,
-) -> Option<T> {
+) -> Result<T, ProviderError> {
+    check_running(control)?;
     tokio::select! {
         biased;
-        () = cancel.cancelled() => None,
-        value = future => Some(value),
+        value = future => Ok(value),
+        () = control.cancellation_token().cancelled() => {
+            Err(stop_error(control).unwrap_or(ProviderError::Cancelled))
+        }
     }
 }
 
@@ -379,6 +510,37 @@ mod tests {
     use crate::auth::testserver::{self, sse_response};
     use otto_core::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
     use otto_core::provider::StreamEvent;
+    use tokio_util::sync::CancellationToken;
+
+    struct StoppedControl {
+        token: CancellationToken,
+        reason: OperationStopReason,
+    }
+
+    impl StoppedControl {
+        fn deadline() -> Self {
+            let token = CancellationToken::new();
+            token.cancel();
+            Self {
+                token,
+                reason: OperationStopReason::Deadline,
+            }
+        }
+    }
+
+    impl OperationControl for StoppedControl {
+        fn cancellation_token(&self) -> &CancellationToken {
+            &self.token
+        }
+
+        fn remaining(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
+        }
+
+        fn stop_reason(&self) -> Option<OperationStopReason> {
+            Some(self.reason)
+        }
+    }
 
     const CANNED_STREAM: &str = concat!(
         "event: response.output_text.delta\n",
@@ -442,7 +604,7 @@ mod tests {
     async fn complete(
         client: &Client,
         request: &Request,
-    ) -> (Result<Response, ProviderError>, Vec<StreamEvent>) {
+    ) -> (otto_core::provider::ProviderSettlement, Vec<StreamEvent>) {
         let mut events = Vec::new();
         let result = {
             let mut sink = |event: StreamEvent| events.push(event);
@@ -460,8 +622,8 @@ mod tests {
         let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;
         let client = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1");
 
-        let (result, events) = complete(&client, &model_request()).await;
-        let response = result.unwrap();
+        let (settlement, events) = complete(&client, &model_request()).await;
+        let response = settlement.result.unwrap();
 
         let sent = server.requests();
         assert_eq!(sent.len(), 1);
@@ -522,8 +684,8 @@ mod tests {
         ] {
             let server = testserver::spawn(move |_| sse_response(body)).await;
             let client = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1");
-            let (result, _) = complete(&client, &Request::default()).await;
-            assert_eq!(result.unwrap().message.usage, want, "{name}");
+            let (settlement, _) = complete(&client, &Request::default()).await;
+            assert_eq!(settlement.result.unwrap().message.usage, want, "{name}");
         }
     }
 
@@ -584,8 +746,8 @@ mod tests {
         let server = testserver::spawn(move |_| sse_response(&stream)).await;
         let client = Client::with_base_url(&server.url, static_tokens(&access_token), account_id);
 
-        let (result, events) = complete(&client, &Request::default()).await;
-        let response = result.unwrap();
+        let (settlement, events) = complete(&client, &Request::default()).await;
+        let response = settlement.result.unwrap();
         assert!(!events.is_empty());
 
         let call = &response.message.blocks[1];
@@ -630,8 +792,8 @@ mod tests {
         let server = testserver::spawn(move |_| sse_response(&stream)).await;
         let client = Client::with_base_url(&server.url, static_tokens("token"), account_id);
 
-        let (result, events) = complete(&client, &Request::default()).await;
-        let response = result.unwrap();
+        let (settlement, events) = complete(&client, &Request::default()).await;
+        let response = settlement.result.unwrap();
 
         let reasoning: String = events
             .iter()
@@ -659,8 +821,8 @@ mod tests {
         let server = testserver::spawn(move |_| testserver::status_response(401, &body)).await;
         let client = Client::with_base_url(&server.url, static_tokens(access_token), account_id);
 
-        let (result, _) = complete(&client, &Request::default()).await;
-        let error = result.unwrap_err();
+        let (settlement, _) = complete(&client, &Request::default()).await;
+        let error = settlement.result.unwrap_err();
         assert_eq!(error.to_string(), "chatgpt responses HTTP 401");
     }
 
@@ -676,9 +838,9 @@ mod tests {
             "redirect-account-id",
         );
 
-        let (result, _) = complete(&client, &model_request()).await;
+        let (settlement, _) = complete(&client, &model_request()).await;
         assert_eq!(
-            result.unwrap_err().to_string(),
+            settlement.result.unwrap_err().to_string(),
             "chatgpt responses HTTP 307"
         );
         assert_eq!(source.count(), 1);
@@ -706,8 +868,8 @@ mod tests {
         );
         for tokens in [expired, static_tokens("")] {
             let client = Client::with_base_url("http://127.0.0.1:1", tokens, "acct-secret");
-            let (result, events) = complete(&client, &Request::default()).await;
-            let error = result.unwrap_err();
+            let (settlement, events) = complete(&client, &Request::default()).await;
+            let error = settlement.result.unwrap_err();
             assert_eq!(
                 error.to_string(),
                 "chatgpt authorization failed; run 'otto login'"
@@ -723,9 +885,9 @@ mod tests {
     #[tokio::test]
     async fn an_empty_account_id_reports_a_fixed_authorization_error() {
         let client = Client::with_base_url("http://127.0.0.1:1", static_tokens("token"), "  ");
-        let (result, _) = complete(&client, &Request::default()).await;
+        let (settlement, _) = complete(&client, &Request::default()).await;
         assert_eq!(
-            result.unwrap_err().to_string(),
+            settlement.result.unwrap_err().to_string(),
             "chatgpt authorization failed; run 'otto login'"
         );
     }
@@ -736,18 +898,43 @@ mod tests {
         let oversized = "x".repeat(otto_core::safetext::MAX_DYNAMIC_VALUE_BYTES + 1);
         let client = Client::with_base_url(&server.url, static_tokens(&oversized), "acct-1");
 
-        let (result, events) = complete(&client, &Request::default()).await;
-        assert_eq!(result.unwrap_err().to_string(), "chatgpt request failed");
+        let (settlement, events) = complete(&client, &Request::default()).await;
+        assert_eq!(
+            settlement.result.unwrap_err().to_string(),
+            "chatgpt request failed"
+        );
         assert_eq!(server.count(), 0);
         assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rate_limits_and_server_errors_are_not_retried() {
+        for status in [429, 503] {
+            let server = testserver::spawn(move |_| {
+                testserver::status_response(status, "provider body is not exposed")
+            })
+            .await;
+            let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+
+            let (settlement, events) = complete(&client, &Request::default()).await;
+            assert_eq!(
+                settlement.result.unwrap_err().to_string(),
+                format!("chatgpt responses HTTP {status}")
+            );
+            assert_eq!(server.count(), 1, "status {status}");
+            assert!(events.is_empty());
+        }
     }
 
     /// A connection that is refused carries no provider text into the error.
     #[tokio::test]
     async fn a_transport_failure_reports_a_fixed_request_failure() {
         let client = Client::with_base_url("http://127.0.0.1:1", static_tokens("token"), "acct-1");
-        let (result, _) = complete(&client, &Request::default()).await;
-        assert_eq!(result.unwrap_err().to_string(), "chatgpt request failed");
+        let (settlement, _) = complete(&client, &Request::default()).await;
+        assert_eq!(
+            settlement.result.unwrap_err().to_string(),
+            "chatgpt request failed"
+        );
     }
 
     /// A body cut short reports the fixed request failure, with no token or
@@ -764,8 +951,8 @@ mod tests {
             static_tokens("stream-token-secret"),
             "stream-account-secret",
         );
-        let (result, _) = complete(&client, &Request::default()).await;
-        let error = result.unwrap_err().to_string();
+        let (settlement, _) = complete(&client, &Request::default()).await;
+        let error = settlement.result.unwrap_err().to_string();
         assert_eq!(error, "chatgpt request failed");
     }
 
@@ -778,11 +965,32 @@ mod tests {
         })
         .await;
         let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
-        let (result, _) = complete(&client, &Request::default()).await;
+        let (settlement, _) = complete(&client, &Request::default()).await;
         assert_eq!(
-            result.unwrap_err().to_string(),
+            settlement.result.unwrap_err().to_string(),
             "responses stream ended without response.completed"
         );
+    }
+
+    #[tokio::test]
+    async fn a_deadline_stopped_call_reports_deadline_exceeded() {
+        let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let mut sink = |_: StreamEvent| panic!("no event is emitted after deadline");
+        let settlement = client
+            .complete(&Request::default(), &mut sink, &StoppedControl::deadline())
+            .await;
+        assert_eq!(settlement.attempts, 0);
+        assert_eq!(
+            settlement.outcome.effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        let error = settlement.result.unwrap_err();
+        assert!(
+            matches!(error, ProviderError::DeadlineExceeded),
+            "{error:?}"
+        );
+        assert_eq!(server.count(), 0);
     }
 
     /// The per-call token, not a process-level one, decides that the turn is
@@ -794,10 +1002,15 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let mut sink = |_: StreamEvent| panic!("no event is emitted after cancellation");
-        let error = client
+        let settlement = client
             .complete(&Request::default(), &mut sink, &cancel)
-            .await
-            .unwrap_err();
+            .await;
+        assert_eq!(settlement.attempts, 0);
+        assert_eq!(
+            settlement.outcome.effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        let error = settlement.result.unwrap_err();
         assert!(matches!(error, ProviderError::Cancelled), "{error:?}");
         assert_eq!(server.count(), 0);
     }

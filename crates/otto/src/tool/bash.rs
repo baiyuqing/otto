@@ -28,7 +28,9 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
-use crate::sandbox::{CommandExecutor, Error, ExitStatus, Request, Streams};
+use crate::sandbox::{
+    CommandExecutor, DEFAULT_CANCELLATION_GRACE, Error, ExitStatus, Request, Streams,
+};
 use otto_core::safetext::{dynamic_redaction_marker, secret_forms};
 
 use super::result::{
@@ -186,6 +188,7 @@ pub struct BashTool {
     shell: String,
     environment: Vec<String>,
     timeout: Duration,
+    cancellation_grace: Duration,
     max_output_bytes: usize,
     redact_values: Vec<String>,
     redaction_marker: String,
@@ -224,7 +227,7 @@ impl BashTool {
     ///
     /// Errors: [`InvalidConfiguration`] when the workspace root no longer
     /// resolves to itself as a directory, the shell is blank or contains NUL,
-    /// the timeout is zero, or the output cap is zero.
+    /// the timeout or cancellation grace is zero, or the output cap is zero.
     pub fn new(
         workspace: &Workspace,
         executor: Arc<dyn CommandExecutor>,
@@ -234,10 +237,36 @@ impl BashTool {
         max_output_bytes: usize,
         redaction_values: &[String],
     ) -> Result<Self, InvalidConfiguration> {
+        Self::new_with_grace(
+            workspace,
+            executor,
+            shell,
+            environment,
+            timeout,
+            DEFAULT_CANCELLATION_GRACE,
+            max_output_bytes,
+            redaction_values,
+        )
+    }
+
+    /// Binds the tool to one executor with a caller-selected process
+    /// termination grace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_grace(
+        workspace: &Workspace,
+        executor: Arc<dyn CommandExecutor>,
+        shell: &str,
+        environment: Vec<String>,
+        timeout: Duration,
+        cancellation_grace: Duration,
+        max_output_bytes: usize,
+        redaction_values: &[String],
+    ) -> Result<Self, InvalidConfiguration> {
         if !valid_workspace(workspace)
             || shell.trim().is_empty()
             || shell.contains('\0')
             || timeout.is_zero()
+            || cancellation_grace.is_zero()
             || max_output_bytes == 0
         {
             return Err(InvalidConfiguration);
@@ -257,6 +286,7 @@ impl BashTool {
             shell: shell.to_owned(),
             environment,
             timeout,
+            cancellation_grace,
             max_output_bytes,
             redact_values,
             redaction_marker,
@@ -300,7 +330,12 @@ impl BashTool {
     ) -> (ExitStatus, Result<(), Error>, bool) {
         let child = cancel.child_token();
         let streams = Streams { stdout, stderr };
-        let execute = executor.execute(self.request(command, environment), streams, &child);
+        let execute = executor.execute_with_grace(
+            self.request(command, environment),
+            streams,
+            &child,
+            self.cancellation_grace,
+        );
         let mut execute = std::pin::pin!(execute);
         let sleep = tokio::time::sleep(self.timeout);
         let mut sleep = std::pin::pin!(sleep);

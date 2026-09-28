@@ -10,8 +10,9 @@
 //! (rejects `server/discover` with `-32601`), `unsupported` (rejects it
 //! with `-32020` and no modern version in `supported`), `garbage` (mixes
 //! invalid lines and stderr output into a working `modern`-shaped session),
-//! `exit` (exits when its one tool, `die`, is called), `stubborn` (ignores
-//! EOF and SIGTERM until SIGKILL).
+//! `exit` (exits when its one tool, `die`, is called),
+//! `exit-with-descendant` (the leader exits while a stubborn process-group
+//! descendant retains its pipes), `stubborn` (ignores EOF and SIGTERM until SIGKILL).
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -57,6 +58,7 @@ fn main() {
     run!(test_cancelled_call_returns_promptly);
     run!(test_call_timeout);
     run!(test_server_exit_fails_pending_and_later_calls);
+    run!(test_natural_leader_exit_kills_stubborn_process_group);
     run!(test_close_terminates_child_and_is_idempotent);
     run!(test_close_escalates_stubborn_child_promptly);
     run!(test_env_restriction);
@@ -93,6 +95,29 @@ async fn connect_client(
         Box::new(transport),
         connect_timeout,
         call_timeout,
+        &cancel,
+    )
+    .await
+}
+
+async fn connect_client_with_grace(
+    mode: &str,
+    extra_env: &[(String, String)],
+    connect_timeout: Duration,
+    call_timeout: Duration,
+    cancellation_grace: Duration,
+) -> Result<Client, CallError> {
+    let (command, env) = fake_server_command(mode, extra_env);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let transport =
+        StdioTransport::spawn_with_grace(&command, &[], &env, &cwd, cancellation_grace).await?;
+    let cancel = CancellationToken::new();
+    Client::connect_with_grace(
+        "test-server".to_string(),
+        Box::new(transport),
+        connect_timeout,
+        call_timeout,
+        cancellation_grace,
         &cancel,
     )
     .await
@@ -305,11 +330,13 @@ async fn test_cancelled_call_returns_promptly() -> Result<(), String> {
         .to_str()
         .expect("utf8 marker path")
         .to_string();
-    let client = connect_client(
+    let grace = Duration::from_millis(100);
+    let client = connect_client_with_grace(
         "modern",
         &[("OTTO_MCP_CANCEL_MARKER".to_string(), marker_path.clone())],
         Duration::from_secs(5),
         Duration::from_secs(30),
+        grace,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -330,8 +357,25 @@ async fn test_cancelled_call_returns_promptly() -> Result<(), String> {
         format!("expected Cancelled, got {result:?}"),
     )?;
     check(
+        elapsed >= grace,
+        format!("stdio cancel returned before grace elapsed: {elapsed:?}"),
+    )?;
+    check(
         elapsed < Duration::from_secs(1),
         format!("cancel took too long: {elapsed:?}"),
+    )?;
+    check(
+        matches!(
+            client
+                .call(
+                    "echo",
+                    json!({"message": "later"}),
+                    &CancellationToken::new()
+                )
+                .await,
+            Err(CallError::Stopping)
+        ),
+        "stdio client accepted a call after cancellation cleanup",
     )?;
 
     check(
@@ -410,6 +454,60 @@ async fn test_server_exit_fails_pending_and_later_calls() -> Result<(), String> 
     Ok(())
 }
 
+async fn test_natural_leader_exit_kills_stubborn_process_group() -> Result<(), String> {
+    let marker = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    let marker_path = marker
+        .path()
+        .to_str()
+        .expect("utf8 marker path")
+        .to_string();
+    let grace = Duration::from_millis(100);
+    let client = connect_client_with_grace(
+        "exit-with-descendant",
+        &[(
+            "OTTO_MCP_DESCENDANT_MARKER".to_string(),
+            marker_path.clone(),
+        )],
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        grace,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let result = client
+        .call("die", json!({}), &CancellationToken::new())
+        .await;
+    check(
+        matches!(result, Err(CallError::Transport(_))),
+        format!("natural leader exit should be Transport, got {result:?}"),
+    )?;
+    let descendant_pid: i32 = std::fs::read_to_string(&marker_path)
+        .map_err(|e| e.to_string())?
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid descendant pid: {e}"))?;
+    let descendant_deadline = Instant::now() + Duration::from_secs(1);
+    while !matches!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(descendant_pid), None),
+        Err(nix::errno::Errno::ESRCH)
+    ) && Instant::now() < descendant_deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    check(
+        matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(descendant_pid), None),
+            Err(nix::errno::Errno::ESRCH)
+        ),
+        format!("descendant pid {descendant_pid} survived natural leader cleanup"),
+    )?;
+    tokio::time::timeout(Duration::from_secs(1), client.close())
+        .await
+        .map_err(|_| "close hung after natural-exit cleanup".to_string())?;
+    Ok(())
+}
+
 async fn test_close_terminates_child_and_is_idempotent() -> Result<(), String> {
     let (command, env) = fake_server_command("modern", &[]);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -432,7 +530,8 @@ async fn test_close_terminates_child_and_is_idempotent() -> Result<(), String> {
 async fn test_close_escalates_stubborn_child_promptly() -> Result<(), String> {
     let (command, env) = fake_server_command("stubborn", &[]);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let transport = StdioTransport::spawn(&command, &[], &env, &cwd)
+    let grace = Duration::from_millis(100);
+    let transport = StdioTransport::spawn_with_grace(&command, &[], &env, &cwd, grace)
         .await
         .map_err(|e| e.to_string())?;
     let pid = transport.pid();
@@ -496,6 +595,15 @@ async fn test_env_restriction() -> Result<(), String> {
 
 fn run_fake_server() {
     let mode = std::env::var("OTTO_MCP_FAKE_SERVER").expect("mode already checked present");
+    if mode == "exit-with-descendant" {
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; while :; do sleep 30; done"])
+            .spawn()
+            .expect("spawn stubborn descendant");
+        let marker = std::env::var("OTTO_MCP_DESCENDANT_MARKER").expect("descendant marker");
+        std::fs::write(marker, child.id().to_string()).expect("write descendant pid");
+        std::mem::forget(child);
+    }
     if mode == "stubborn" {
         ignore_sigterm_for_stubborn_test();
         loop {
@@ -597,7 +705,7 @@ fn handle_message(
                 }
             } else {
                 let names: &[&str] = match mode {
-                    "exit" => &["die"],
+                    "exit" | "exit-with-descendant" => &["die"],
                     _ => &[],
                 };
                 let tools: Vec<Value> = names.iter().map(|name| tool_desc(name)).collect();

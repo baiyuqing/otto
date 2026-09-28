@@ -11,6 +11,7 @@ pub mod config;
 pub mod model;
 pub mod openaicompat;
 pub mod openairesponses;
+pub mod operation;
 pub mod provider;
 pub mod safetext;
 pub mod session;

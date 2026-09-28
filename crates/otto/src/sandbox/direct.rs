@@ -6,10 +6,13 @@
 //! [`super::process`].
 
 use async_trait::async_trait;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::process::{Manager, Spec};
-use super::{Capabilities, Driver, DriverId, Error, ExitStatus, Request, Streams};
+use super::{
+    Capabilities, DEFAULT_CANCELLATION_GRACE, Driver, DriverId, Error, ExitStatus, Request, Streams,
+};
 
 /// The identifier this driver reports.
 pub const ID: &str = "direct";
@@ -45,6 +48,17 @@ impl Driver for DirectDriver {
         streams: Streams<'_>,
         cancel: &CancellationToken,
     ) -> (ExitStatus, Result<(), Error>) {
+        self.execute_with_grace(request, streams, cancel, DEFAULT_CANCELLATION_GRACE)
+            .await
+    }
+
+    async fn execute_with_grace(
+        &self,
+        request: Request,
+        streams: Streams<'_>,
+        cancel: &CancellationToken,
+        cancellation_grace: Duration,
+    ) -> (ExitStatus, Result<(), Error>) {
         let Some((path, args)) = request.argv.split_first() else {
             return (ExitStatus::default(), Err(Error::InvalidRequest));
         };
@@ -54,7 +68,10 @@ impl Driver for DirectDriver {
             directory: request.dir,
             environment: request.env,
         };
-        let (outcome, result) = self.processes.run(spec, streams, cancel).await;
+        let (outcome, result) = self
+            .processes
+            .run_with_grace(spec, streams, cancel, cancellation_grace)
+            .await;
         let status = ExitStatus {
             code: outcome.code,
             signaled: outcome.signaled,

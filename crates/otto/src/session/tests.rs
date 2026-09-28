@@ -13,10 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, TimeZone, Utc};
-use otto_core::model::{Block, BlockType, FinishReason, Message, Role, Usage};
+use otto_core::model::{
+    Block, BlockType, EffectCertainty, FinishReason, Message, OperationDisposition, OperationId,
+    OperationOutcome, OperationStopReason, Role, ToolResultMetadata, Usage,
+};
 use otto_core::session::context::{MAY_HAVE_RUN_TOOL_RESULT_TEXT, NOT_EXECUTED_TOOL_RESULT_TEXT};
 use otto_core::session::{
-    CURRENT_VERSION, CompactionCheckpoint, CompactionDetails, Header, PiErrorKind, RuntimeMetadata,
+    CURRENT_VERSION, CompactionCheckpoint, CompactionDetails, Header, OPERATION_CUSTOM_TYPE,
+    OperationFact, PiErrorKind, RuntimeMetadata,
 };
 
 use super::fsops;
@@ -148,6 +152,36 @@ fn tool_result(id: &str, name: &str, text: &str) -> Message {
         }],
         created_at: created_at(),
         ..Message::default()
+    }
+}
+
+fn interrupted_outcome() -> OperationOutcome {
+    OperationOutcome {
+        disposition: OperationDisposition::Interrupted,
+        effect_certainty: EffectCertainty::Unknown,
+        stop_reason: Some(OperationStopReason::ProcessLost),
+    }
+}
+
+fn known_no_effect_error_outcome() -> OperationOutcome {
+    OperationOutcome {
+        disposition: OperationDisposition::Error,
+        effect_certainty: EffectCertainty::KnownNoEffect,
+        stop_reason: None,
+    }
+}
+
+fn operation_id(value: &str) -> OperationId {
+    OperationId::new(value).expect("valid operation id")
+}
+
+fn result_metadata(operation_id: Option<&str>, outcome: OperationOutcome) -> ToolResultMetadata {
+    ToolResultMetadata {
+        operation_id: operation_id
+            .map(|value| OperationId::new(value).expect("valid operation id")),
+        disposition: outcome.disposition,
+        effect_certainty: outcome.effect_certainty,
+        stop_reason: outcome.stop_reason,
     }
 }
 
@@ -902,6 +936,325 @@ fn open_rejects_malformed_non_final_line_without_mutation() {
 
     Store::open(&path).expect_err("must reject");
     assert_eq!(fs::read(&path).expect("read"), before);
+}
+
+#[test]
+fn operation_attempt_repair_writes_terminal_before_unavailable_result_and_reopens_idempotently() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    store
+        .append_message(&tool_call("call-1", "bash"))
+        .expect("append call");
+    store
+        .append_operation_fact(OperationFact::attempt(
+            operation_id("op-1"),
+            1,
+            "call-1",
+            "bash",
+        ))
+        .expect("append attempt");
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, warnings) = Store::open(&path).expect("repair");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.message.contains("call-1"))
+    );
+    let lines = json_lines(Path::new(&path));
+    let terminal = lines
+        .iter()
+        .position(|line| {
+            line["customType"] == OPERATION_CUSTOM_TYPE && line["data"]["event"] == "terminal"
+        })
+        .expect("terminal fact");
+    let result = lines
+        .iter()
+        .position(|line| line["message"]["role"] == "toolResult")
+        .expect("synthetic result");
+    assert!(terminal < result, "terminal must be durable before result");
+    assert_eq!(lines[terminal]["data"]["disposition"], "interrupted");
+    assert_eq!(lines[terminal]["data"]["effectCertainty"], "unknown");
+    assert_eq!(lines[terminal]["data"]["stopReason"], "process_lost");
+    assert_eq!(lines[result]["message"]["isError"], true);
+    assert_eq!(
+        lines[result]["message"]["details"]["otto"]["operationId"],
+        "op-1"
+    );
+    assert_eq!(
+        lines[result]["message"]["details"]["otto"]["effectCertainty"],
+        "unknown"
+    );
+    assert_eq!(
+        reopened.messages().last().expect("result").blocks[0].operation_metadata,
+        Some(result_metadata(Some("op-1"), interrupted_outcome()))
+    );
+    assert_eq!(
+        reopened
+            .operation_ledger()
+            .operation(&operation_id("op-1"))
+            .expect("operation")
+            .terminal,
+        Some(interrupted_outcome())
+    );
+    reopened.close().expect("close repaired");
+
+    let before = fs::read(&path).expect("read repaired");
+    let (again, warnings) = Store::open(&path).expect("reopen");
+    assert!(
+        warnings.is_empty(),
+        "repair must be idempotent: {warnings:?}"
+    );
+    again.close().expect("close again");
+    assert_eq!(fs::read(&path).expect("read again"), before);
+}
+
+#[test]
+fn operation_terminal_without_result_gets_only_unavailable_result() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    store
+        .append_message(&tool_call("call-1", "read"))
+        .expect("append call");
+    store
+        .append_operation_fact(OperationFact::attempt(
+            operation_id("op-1"),
+            1,
+            "call-1",
+            "read",
+        ))
+        .expect("append attempt");
+    store
+        .append_operation_fact(OperationFact::terminal(
+            operation_id("op-1"),
+            1,
+            "call-1",
+            "read",
+            known_no_effect_error_outcome(),
+        ))
+        .expect("append terminal");
+    let path = store.path();
+    store.close().expect("close");
+
+    let terminal_count_before = json_lines(Path::new(&path))
+        .iter()
+        .filter(|line| line["data"]["event"] == "terminal")
+        .count();
+    let (reopened, _) = Store::open(&path).expect("repair");
+    let messages = reopened.messages();
+    assert!(messages.last().expect("result").blocks[0].is_error);
+    assert_eq!(
+        messages.last().expect("result").blocks[0].operation_metadata,
+        Some(result_metadata(
+            Some("op-1"),
+            known_no_effect_error_outcome(),
+        ))
+    );
+    reopened.close().expect("close repaired");
+    let lines = json_lines(Path::new(&path));
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line["data"]["event"] == "terminal")
+            .count(),
+        terminal_count_before,
+        "an existing terminal must not be synthesized again"
+    );
+}
+
+#[test]
+fn corrupt_terminal_history_repairs_tail_as_unknown() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    store
+        .append_message(&tool_call("call-1", "write"))
+        .expect("append call");
+    store
+        .append_operation_fact(OperationFact::attempt(
+            operation_id("op-1"),
+            1,
+            "call-1",
+            "write",
+        ))
+        .expect("append attempt");
+    store
+        .append_operation_fact(OperationFact::terminal(
+            operation_id("op-1"),
+            1,
+            "call-1",
+            "write",
+            OperationOutcome {
+                disposition: OperationDisposition::Succeeded,
+                effect_certainty: EffectCertainty::Completed,
+                stop_reason: None,
+            },
+        ))
+        .expect("append terminal");
+    let path = store.path();
+    store.close().expect("close");
+
+    let parent = json_lines(Path::new(&path))
+        .last()
+        .and_then(|line| line["id"].as_str())
+        .expect("leaf id")
+        .to_string();
+    let conflicting = serde_json::json!({
+        "type": "custom",
+        "id": "deadbeef",
+        "parentId": parent,
+        "timestamp": "2026-09-28T00:00:00Z",
+        "customType": OPERATION_CUSTOM_TYPE,
+        "data": {
+            "event": "terminal",
+            "schemaVersion": 1,
+            "operationId": "op-1",
+            "attempt": 1,
+            "kind": "tool_call",
+            "toolCallId": "call-1",
+            "toolName": "write",
+            "disposition": "interrupted",
+            "effectCertainty": "unknown",
+            "stopReason": "process_lost"
+        }
+    });
+    append_raw(&path, format!("{}\n", conflicting).as_bytes());
+
+    let (reopened, warnings) = Store::open(&path).expect("repair corrupt history");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.message.contains("effects are unknown")),
+        "{warnings:?}"
+    );
+    let metadata = reopened.messages().last().expect("synthetic result").blocks[0]
+        .operation_metadata
+        .clone()
+        .expect("typed metadata");
+    assert_eq!(metadata.operation_id, Some(operation_id("op-1")));
+    assert_eq!(metadata.disposition, OperationDisposition::Interrupted);
+    assert_eq!(metadata.effect_certainty, EffectCertainty::Unknown);
+    assert_eq!(metadata.stop_reason, Some(OperationStopReason::ProcessLost));
+    reopened.close().expect("close");
+}
+
+#[test]
+fn legacy_multi_call_repair_never_fabricates_operation_facts() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    store
+        .append_message(&tool_calls(&[("call-1", "read"), ("call-2", "bash")]))
+        .expect("append calls");
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, _) = Store::open(&path).expect("repair");
+    let messages = reopened.messages();
+    assert_eq!(messages[1].blocks[0].text, MAY_HAVE_RUN_TOOL_RESULT_TEXT);
+    assert_eq!(
+        messages[1].blocks[0].operation_metadata,
+        Some(result_metadata(None, interrupted_outcome()))
+    );
+    assert_eq!(messages[2].blocks[0].text, NOT_EXECUTED_TOOL_RESULT_TEXT);
+    assert_eq!(
+        messages[2].blocks[0].operation_metadata,
+        Some(result_metadata(
+            None,
+            OperationOutcome {
+                disposition: OperationDisposition::Interrupted,
+                effect_certainty: EffectCertainty::NotStarted,
+                stop_reason: Some(OperationStopReason::ProcessLost),
+            },
+        ))
+    );
+    assert!(reopened.operation_ledger().operations().next().is_none());
+    reopened.close().expect("close");
+    assert!(
+        json_lines(Path::new(&path))
+            .iter()
+            .all(|line| line["customType"] != OPERATION_CUSTOM_TYPE)
+    );
+}
+
+#[test]
+fn generic_operation_custom_uses_strict_typed_path_and_malformed_fails_closed() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    let malformed_before = fs::read(store.path()).expect("read before malformed");
+    store
+        .append_custom_entry(
+            OPERATION_CUSTOM_TYPE,
+            r#"{"schemaVersion":1,"event":"attempt"}"#,
+        )
+        .expect_err("known malformed fact must fail");
+    assert_eq!(
+        fs::read(store.path()).expect("read after malformed"),
+        malformed_before
+    );
+
+    let fact = OperationFact::attempt(operation_id("op-1"), 1, "call-1", "read");
+    let encoded = otto_core::session::encode_operation_fact(&fact).expect("encode");
+    store
+        .append_custom_entry(OPERATION_CUSTOM_TYPE, &encoded)
+        .expect("generic typed append");
+    let before_conflict = fs::read(store.path()).expect("read before conflict");
+    store
+        .append_custom_entry(OPERATION_CUSTOM_TYPE, &encoded)
+        .expect_err("duplicate attempt must fail strict validation");
+    assert_eq!(
+        fs::read(store.path()).expect("read after conflict"),
+        before_conflict
+    );
+    assert_eq!(
+        store
+            .operation_ledger()
+            .operation(&operation_id("op-1"))
+            .expect("operation")
+            .attempts,
+        1
+    );
+    store.close().expect("close");
+}
+
+#[test]
+fn failed_operation_fact_write_does_not_commit_candidate_ledger() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    let before = fs::read(store.path()).expect("read before");
+    store.lock().expect("lock").fail_writes = true;
+    let error = store
+        .append_operation_fact(OperationFact::attempt(
+            operation_id("op-1"),
+            1,
+            "call-1",
+            "bash",
+        ))
+        .expect_err("injected failure");
+    assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
+    assert!(store.operation_ledger().operations().next().is_none());
+    assert_eq!(fs::read(store.path()).expect("read after"), before);
+}
+
+#[test]
+fn operation_ledger_survives_reopen_with_multiple_calls() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    for (operation, call, tool) in [("op-1", "call-1", "read"), ("op-2", "call-2", "bash")] {
+        store
+            .append_operation_fact(OperationFact::attempt(
+                operation_id(operation),
+                1,
+                call,
+                tool,
+            ))
+            .expect("append attempt");
+    }
+    let path = store.path();
+    store.close().expect("close");
+    let (reopened, warnings) = Store::open(&path).expect("reopen");
+    assert!(warnings.is_empty());
+    assert_eq!(reopened.operation_ledger().operations().count(), 2);
+    reopened.close().expect("close reopened");
 }
 
 #[test]

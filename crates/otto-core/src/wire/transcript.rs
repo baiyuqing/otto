@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+use crate::model::{EffectCertainty, OperationDisposition, OperationStopReason};
+
 use super::events::WireEvent;
 
 /// One rendered transcript entry.
@@ -46,6 +48,14 @@ pub enum Item {
         result: Option<String>,
         #[serde(rename = "isError", default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disposition: Option<OperationDisposition>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effect_certainty: Option<EffectCertainty>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<OperationStopReason>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         created_at: String,
     },
@@ -92,6 +102,14 @@ pub struct HistoryBlock {
     pub arguments: Option<Box<RawValue>>,
     #[serde(default)]
     pub is_error: bool,
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    #[serde(default)]
+    pub disposition: Option<OperationDisposition>,
+    #[serde(default)]
+    pub effect_certainty: Option<EffectCertainty>,
+    #[serde(default)]
+    pub stop_reason: Option<OperationStopReason>,
 }
 
 fn message_created_at(message: &HistoryMessage) -> String {
@@ -219,11 +237,21 @@ pub fn from_history_messages(messages: &[HistoryMessage]) -> Vec<Item> {
                         .map(|(_, index)| *index);
                     if let Some(index) = found
                         && let Item::Tool {
-                            result, is_error, ..
+                            result,
+                            is_error,
+                            operation_id,
+                            disposition,
+                            effect_certainty,
+                            stop_reason,
+                            ..
                         } = &mut items[index]
                     {
                         *result = Some(block.text.clone());
                         *is_error = Some(block.is_error);
+                        *operation_id = block.operation_id.clone();
+                        *disposition = block.disposition;
+                        *effect_certainty = block.effect_certainty;
+                        *stop_reason = block.stop_reason;
                     }
                 }
                 "tool_call" => {
@@ -234,6 +262,10 @@ pub fn from_history_messages(messages: &[HistoryMessage]) -> Vec<Item> {
                         args: format_args(block.arguments.as_deref()),
                         result: None,
                         is_error: None,
+                        operation_id: None,
+                        disposition: None,
+                        effect_certainty: None,
+                        stop_reason: None,
                         created_at: message_created_at(message),
                     });
                 }
@@ -376,6 +408,10 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
                 args: format_args(event.tool_args.as_deref()),
                 result: None,
                 is_error: None,
+                operation_id: (!event.operation_id.is_empty()).then(|| event.operation_id.clone()),
+                disposition: None,
+                effect_certainty: None,
+                stop_reason: None,
                 created_at: String::new(),
             });
             next
@@ -391,6 +427,19 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
                 .as_ref()
                 .map(|result| result.is_error)
                 .unwrap_or(false);
+            let operation_id = event
+                .result
+                .as_ref()
+                .and_then(|result| {
+                    (!result.operation_id.is_empty()).then(|| result.operation_id.clone())
+                })
+                .or_else(|| (!event.operation_id.is_empty()).then(|| event.operation_id.clone()));
+            let disposition = event.result.as_ref().and_then(|result| result.disposition);
+            let effect_certainty = event
+                .result
+                .as_ref()
+                .and_then(|result| result.effect_certainty);
+            let stop_reason = event.result.as_ref().and_then(|result| result.stop_reason);
             let mut next = items.to_vec();
             let found = next.iter().rposition(
                 |item| matches!(item, Item::Tool { id, .. } if *id == event.tool_call_id),
@@ -398,11 +447,23 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
             match found {
                 Some(index) => {
                     if let Item::Tool {
-                        result, is_error, ..
+                        result,
+                        is_error,
+                        operation_id: item_operation_id,
+                        disposition: item_disposition,
+                        effect_certainty: item_effect_certainty,
+                        stop_reason: item_stop_reason,
+                        ..
                     } = &mut next[index]
                     {
                         *result = Some(content);
                         *is_error = Some(errored);
+                        if operation_id.is_some() {
+                            *item_operation_id = operation_id;
+                        }
+                        *item_disposition = disposition;
+                        *item_effect_certainty = effect_certainty;
+                        *item_stop_reason = stop_reason;
                     }
                 }
                 // Seen when attaching mid-turn with ?after=N past the start
@@ -413,6 +474,10 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
                     args: String::new(),
                     result: Some(content),
                     is_error: Some(errored),
+                    operation_id,
+                    disposition,
+                    effect_certainty,
+                    stop_reason,
                     created_at: String::new(),
                 }),
             }
@@ -509,6 +574,10 @@ mod tests {
             args: args.into(),
             result: result.map(str::to_string),
             is_error,
+            operation_id: None,
+            disposition: None,
+            effect_certainty: None,
+            stop_reason: None,
             created_at: String::new(),
         }
     }
@@ -582,6 +651,71 @@ mod tests {
             r#"{"type":"tool_call_finished","tool_call_id":"c9","tool_name":"read","result":{"content":"x","is_error":true}}"#,
         ]);
         assert_eq!(items, vec![tool("c9", "read", "", Some("x"), Some(true))]);
+    }
+
+    #[test]
+    fn preserves_typed_tool_outcome_from_live_events() {
+        let items = apply(&[
+            r#"{"type":"tool_call_started","tool_call_id":"c1","tool_name":"bash","operation_id":"op_1","attempt":1,"tool_args":{"command":"touch marker"}}"#,
+            r#"{"type":"tool_call_finished","tool_call_id":"c1","tool_name":"bash","operation_id":"op_1","attempt":1,"result":{"content":"transport lost","is_error":true,"operation_id":"op_1","disposition":"interrupted","effect_certainty":"unknown","stop_reason":"transport_lost"}}"#,
+        ]);
+        let Item::Tool {
+            operation_id,
+            disposition,
+            effect_certainty,
+            stop_reason,
+            ..
+        } = &items[0]
+        else {
+            panic!("expected tool")
+        };
+        assert_eq!(operation_id.as_deref(), Some("op_1"));
+        assert_eq!(*disposition, Some(OperationDisposition::Interrupted));
+        assert_eq!(*effect_certainty, Some(EffectCertainty::Unknown));
+        assert_eq!(*stop_reason, Some(OperationStopReason::TransportLost));
+    }
+
+    #[test]
+    fn reopened_history_preserves_typed_tool_outcome() {
+        let items = from_history(
+            r#"[{"role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"c1","tool_name":"read","arguments":{"path":"README.md"}}]},{"role":"tool","blocks":[{"type":"tool_result","tool_call_id":"c1","tool_name":"read","text":"ok","operation_id":"op_2","disposition":"succeeded","effect_certainty":"completed"}]}]"#,
+        )
+        .expect("history decodes");
+        let Item::Tool {
+            operation_id,
+            disposition,
+            effect_certainty,
+            stop_reason,
+            ..
+        } = &items[0]
+        else {
+            panic!("expected tool")
+        };
+        assert_eq!(operation_id.as_deref(), Some("op_2"));
+        assert_eq!(*disposition, Some(OperationDisposition::Succeeded));
+        assert_eq!(*effect_certainty, Some(EffectCertainty::Completed));
+        assert_eq!(*stop_reason, None);
+    }
+
+    #[test]
+    fn legacy_tool_result_does_not_infer_typed_outcome() {
+        let items = apply(&[
+            r#"{"type":"tool_call_finished","tool_call_id":"c1","tool_name":"bash","result":{"content":"failed","is_error":true}}"#,
+        ]);
+        let Item::Tool {
+            operation_id,
+            disposition,
+            effect_certainty,
+            stop_reason,
+            ..
+        } = &items[0]
+        else {
+            panic!("expected tool")
+        };
+        assert_eq!(operation_id, &None);
+        assert_eq!(disposition, &None);
+        assert_eq!(effect_certainty, &None);
+        assert_eq!(stop_reason, &None);
     }
 
     #[test]

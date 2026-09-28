@@ -21,6 +21,7 @@ use crate::model::{BlockType, Message, Role, ValidationError};
 pub mod codec;
 pub mod compaction;
 pub mod context;
+pub mod operation;
 pub mod pi;
 pub mod types;
 
@@ -29,6 +30,11 @@ pub use context::{
     BRANCH_CONTEXT_TYPE, COMPACTION_CONTEXT_TYPE, ContextEntryIndex, OTTO_RUNTIME_CUSTOM_TYPE,
     ResolvedContext, active_context_path, build_context, index_context_entries, is_pi_entry_id,
     new_context_message,
+};
+pub use operation::{
+    DecodedOperationFact, OPERATION_CUSTOM_TYPE, OPERATION_SCHEMA_VERSION, OperationFact,
+    OperationFactError, OperationKind, OperationLedger, OperationRecord, decode_operation_fact,
+    encode_operation_fact,
 };
 pub use pi::{
     MAX_SESSION_ENTRY_BYTES, MAX_SESSION_FILE_BYTES, PI_SESSION_VERSION, PiBranchSummary,
@@ -156,6 +162,9 @@ pub enum SessionError {
     /// The message is well formed but breaks the tool-call ordering rule.
     #[error("{0}")]
     Sequence(&'static str),
+    /// An operation fact is malformed or conflicts with prior history.
+    #[error(transparent)]
+    Operation(#[from] OperationFactError),
     /// The message is well formed but could not be persisted. Only a
     /// file-backed session produces this; [`MemorySession`] never does.
     #[error("{0}")]
@@ -186,6 +195,24 @@ pub trait Session {
         checkpoint: CompactionCheckpoint,
     ) -> Result<CompactionMetadata, SessionError>;
 
+    /// Appends one typed operation fact after strict history validation.
+    fn append_operation_fact(&self, fact: OperationFact) -> Result<(), SessionError> {
+        let encoded = encode_operation_fact(&fact)?;
+        self.append_custom(OPERATION_CUSTOM_TYPE, &encoded)
+    }
+
+    /// Typed operation facts in append order. Stores that support operation
+    /// recovery override this; compatibility wrappers may return no history.
+    fn operation_history(&self) -> Vec<OperationFact> {
+        Vec::new()
+    }
+
+    /// A snapshot of the validated operation ledger. Stores that support
+    /// operation recovery override this.
+    fn operation_ledger(&self) -> OperationLedger {
+        OperationLedger::default()
+    }
+
     /// Appends a `custom` entry with the given `customType` and JSON-encoded
     /// `data`, outside the message/context path: [`pi_entry_to_context_messages`]
     /// never turns a bare `custom` entry into a context message, the same way
@@ -210,6 +237,8 @@ struct State {
     /// appended without one. An in-memory session has no file to share ids
     /// with, so a counter is enough and keeps tests deterministic.
     checkpoint_counter: u64,
+    operation_facts: Vec<OperationFact>,
+    operation_ledger: OperationLedger,
 }
 
 impl State {
@@ -423,10 +452,39 @@ impl Session for MemorySession {
         Ok(metadata)
     }
 
-    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
-        // Nothing durable to append to: an in-memory session has no file.
-        let _ = (custom_type, data);
+    fn append_operation_fact(&self, fact: OperationFact) -> Result<(), SessionError> {
+        let mut state = self.state.lock().expect("session mutex");
+        let mut candidate = state.operation_ledger.clone();
+        candidate.apply(fact.clone())?;
+        state.operation_ledger = candidate;
+        state.operation_facts.push(fact);
         Ok(())
+    }
+
+    fn operation_history(&self) -> Vec<OperationFact> {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .operation_facts
+            .clone()
+    }
+
+    fn operation_ledger(&self) -> OperationLedger {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .operation_ledger
+            .clone()
+    }
+
+    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        if custom_type != OPERATION_CUSTOM_TYPE {
+            return Ok(());
+        }
+        match operation::decode_operation_fact(data)? {
+            DecodedOperationFact::Fact(fact) => self.append_operation_fact(fact),
+            DecodedOperationFact::Unsupported { .. } => Ok(()),
+        }
     }
 }
 
@@ -520,6 +578,56 @@ mod tests {
             .await
             .expect("append");
         assert_eq!(session.messages().len(), 2);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn operation_custom_is_stored_without_interrupting_tool_sequence() {
+        let session = MemorySession::new();
+        session
+            .append(assistant_with_call("c1", "read"))
+            .await
+            .expect("append call");
+        let json = r#"{"event":"attempt","schemaVersion":1,"operationId":"op_1","attempt":1,"kind":"tool_call","toolCallId":"c1","toolName":"read"}"#;
+        session
+            .append_custom(OPERATION_CUSTOM_TYPE, json)
+            .expect("append fact");
+        session
+            .append(tool_result("c1", "read"))
+            .await
+            .expect("custom must not interrupt sequence");
+        assert_eq!(session.messages().len(), 2);
+        assert_eq!(session.operation_history().len(), 1);
+        assert!(
+            session
+                .operation_ledger()
+                .operation_for_tool_call("c1")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn operation_custom_known_malformed_is_rejected_atomically() {
+        let session = MemorySession::new();
+        assert!(
+            session
+                .append_custom(
+                    OPERATION_CUSTOM_TYPE,
+                    r#"{"schemaVersion":1,"event":"attempt"}"#,
+                )
+                .is_err()
+        );
+        assert!(session.operation_history().is_empty());
+        session
+            .append_custom(
+                OPERATION_CUSTOM_TYPE,
+                r#"{"schemaVersion":2,"future":true}"#,
+            )
+            .expect("future schema ignored");
+        assert!(session.operation_history().is_empty());
+        session
+            .append_custom("other.custom", "not json")
+            .expect("other custom unchanged");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

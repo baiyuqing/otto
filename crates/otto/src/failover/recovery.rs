@@ -206,7 +206,7 @@ fn render_body(
 
 fn render_call(call: &UnansweredCall) -> String {
     let status = if call.may_have_run {
-        "may have run"
+        "effects unknown; may have run; do not retry automatically"
     } else {
         "not executed"
     };
@@ -325,6 +325,7 @@ mod tests {
         assert!(text.contains("started: true"), "{text}");
         assert!(text.contains("bash"), "{text}");
         assert!(text.contains("may have run"), "{text}");
+        assert!(text.contains("do not retry automatically"), "{text}");
         assert!(text.contains(&"z".repeat(10)), "{text}");
         assert!(
             !text.contains(&"z".repeat(11)),

@@ -42,13 +42,85 @@ use tokio_util::sync::CancellationToken;
 use crate::subagent::format::round_to_seconds;
 
 use super::result::decode_strict_json;
-use super::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
+use super::{CONTEXT_CANCELED, Tool, definition, error_result, preflight_error, text_result};
 
 const MIN_SECONDS: i64 = 1;
 const MAX_SECONDS: i64 = 3600;
 const MAX_MESSAGE_CHARS: usize = 500;
 const MAX_OUTSTANDING: usize = 8;
 const STATE_MUTEX: &str = "reminder state mutex";
+
+type DirectorySync = fn(&std::fs::File) -> std::io::Result<()>;
+
+fn sync_directory(directory: &std::fs::File) -> std::io::Result<()> {
+    directory.sync_all()
+}
+
+/// Which side of the externally visible filesystem mutation failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistPhase {
+    BeforeEffect,
+    AfterEffect,
+}
+
+#[derive(Debug)]
+struct PersistError {
+    phase: PersistPhase,
+    message: String,
+}
+
+impl PersistError {
+    fn before(message: impl Into<String>) -> Self {
+        Self {
+            phase: PersistPhase::BeforeEffect,
+            message: message.into(),
+        }
+    }
+
+    fn after(message: impl Into<String>) -> Self {
+        Self {
+            phase: PersistPhase::AfterEffect,
+            message: message.into(),
+        }
+    }
+
+    fn into_tool_result(self) -> ToolResult {
+        match self.phase {
+            PersistPhase::BeforeEffect => preflight_error(self.message),
+            PersistPhase::AfterEffect => error_result(self.message).transport_unknown(),
+        }
+    }
+}
+
+impl std::fmt::Display for PersistError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+#[derive(Debug)]
+enum ReminderError {
+    NotStarted(String),
+    Persist(PersistError),
+}
+
+impl ReminderError {
+    fn into_tool_result(self) -> ToolResult {
+        match self {
+            Self::NotStarted(message) => preflight_error(message),
+            Self::Persist(error) => error.into_tool_result(),
+        }
+    }
+}
+
+impl std::fmt::Display for ReminderError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotStarted(message) => formatter.write_str(message),
+            Self::Persist(error) => error.fmt(formatter),
+        }
+    }
+}
 /// What `remind_status` and `/timers` print for an empty registry, in the
 /// shape `agent_status` and `/tasks` use for theirs.
 pub const NO_TIMERS: &str = "no timers in this session";
@@ -99,12 +171,13 @@ struct Inner {
     path: Option<PathBuf>,
     armed: Mutex<Vec<Armed>>,
     next_id: AtomicUsize,
+    sync_directory: DirectorySync,
 }
 
 impl Inner {
     /// Mirrors `armed` to disk. The caller holds the lock and passes the list
     /// so the file never disagrees with the registry.
-    fn save(&self, armed: &[Armed]) -> Result<(), String> {
+    fn save(&self, armed: &[Armed]) -> Result<(), PersistError> {
         let Some(path) = self.path.as_ref() else {
             return Ok(());
         };
@@ -119,21 +192,31 @@ impl Inner {
             return Ok(());
         }
         if armed.is_empty() {
-            if let Err(error) = std::fs::remove_file(path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                return Err(format!("remove reminders: {error}"));
-            }
-            return Ok(());
+            let removed = match std::fs::remove_file(path) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(PersistError::before(format!("remove reminders: {error}")));
+                }
+            };
+            return sync_parent_directory(path, self.sync_directory).map_err(|error| {
+                let message = format!("sync reminder directory: {error}");
+                if removed {
+                    PersistError::after(message)
+                } else {
+                    PersistError::before(message)
+                }
+            });
         }
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("create reminder directory: {error}"))?;
+            std::fs::create_dir_all(parent).map_err(|error| {
+                PersistError::before(format!("create reminder directory: {error}"))
+            })?;
         }
         let items: Vec<&StoredReminder> = armed.iter().map(|entry| &entry.item).collect();
         let body = serde_json::to_vec_pretty(&items)
-            .map_err(|error| format!("encode reminders: {error}"))?;
-        replace_private(path, &body)
+            .map_err(|error| PersistError::before(format!("encode reminders: {error}")))?;
+        replace_private_typed(path, &body, self.sync_directory)
     }
 
     /// Delivers the timer, unless it was cancelled while its sleep was
@@ -190,17 +273,29 @@ pub(crate) fn write_private(path: &Path, body: &[u8]) -> Result<(), String> {
 /// `write_inbox_file` in `cli::wiring`), so the temporary-file/fsync/rename
 /// pattern exists in exactly one place.
 pub(crate) fn replace_private(path: &Path, body: &[u8]) -> Result<(), String> {
+    replace_private_typed(path, body, sync_directory).map_err(|error| error.to_string())
+}
+
+fn replace_private_typed(
+    path: &Path,
+    body: &[u8],
+    sync: DirectorySync,
+) -> Result<(), PersistError> {
     let mut tmp = path.to_path_buf();
     tmp.as_mut_os_string().push(".tmp");
-    write_private(&tmp, body)?;
-    std::fs::rename(&tmp, path).map_err(|error| format!("persist reminders: {error}"))?;
+    write_private(&tmp, body).map_err(PersistError::before)?;
+    std::fs::rename(&tmp, path)
+        .map_err(|error| PersistError::before(format!("persist reminders: {error}")))?;
+    sync_parent_directory(path, sync)
+        .map_err(|error| PersistError::after(format!("sync reminder directory: {error}")))
+}
+
+fn sync_parent_directory(path: &Path, sync: DirectorySync) -> std::io::Result<()> {
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    std::fs::File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| format!("sync reminder directory: {error}"))
+    std::fs::File::open(directory).and_then(|file| sync(&file))
 }
 
 /// Whether the session `sidecar` belongs to still has its own `<id>.jsonl`
@@ -257,12 +352,21 @@ impl Reminders {
     }
 
     fn create(inbox: Arc<Inbox>, path: Option<PathBuf>) -> Self {
+        Self::create_with_directory_sync(inbox, path, sync_directory)
+    }
+
+    fn create_with_directory_sync(
+        inbox: Arc<Inbox>,
+        path: Option<PathBuf>,
+        sync_directory: DirectorySync,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 inbox,
                 path,
                 armed: Mutex::new(Vec::new()),
                 next_id: AtomicUsize::new(0),
+                sync_directory,
             }),
             token: CancellationToken::new(),
         }
@@ -278,14 +382,21 @@ impl Reminders {
 
     /// Stops one timer: it never fires and is removed from the file.
     pub fn cancel(&self, id: &str) -> Result<StoredReminder, String> {
+        self.cancel_typed(id).map_err(|error| error.to_string())
+    }
+
+    fn cancel_typed(&self, id: &str) -> Result<StoredReminder, ReminderError> {
         let entry = {
             let mut armed = self.inner.armed.lock().expect(STATE_MUTEX);
             let index = armed
                 .iter()
                 .position(|entry| entry.item.id == id)
-                .ok_or_else(|| format!("unknown timer: {id}"))?;
+                .ok_or_else(|| ReminderError::NotStarted(format!("unknown timer: {id}")))?;
             let entry = armed.remove(index);
-            let _ = self.inner.save(&armed);
+            if let Err(error) = self.inner.save(&armed) {
+                armed.insert(index, entry);
+                return Err(ReminderError::Persist(error));
+            }
             entry
         };
         entry.token.cancel();
@@ -308,11 +419,21 @@ impl Reminders {
 
     /// Arms a new timer and records it. `pub(crate)` so lifecycle tests can
     /// put one in flight without going through the tool.
+    #[cfg(test)]
     pub(crate) fn schedule(
         &self,
         delay: Duration,
         message: String,
     ) -> Result<StoredReminder, String> {
+        self.schedule_typed(delay, message)
+            .map_err(|error| error.to_string())
+    }
+
+    fn schedule_typed(
+        &self,
+        delay: Duration,
+        message: String,
+    ) -> Result<StoredReminder, ReminderError> {
         let id = format!("r{}", self.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1);
         let fire_at = Utc::now() + chrono::Duration::from_std(delay).unwrap_or_default();
         let item = StoredReminder {
@@ -324,12 +445,14 @@ impl Reminders {
         Ok(item)
     }
 
-    fn arm(&self, item: StoredReminder, write: bool) -> Result<(), String> {
+    fn arm(&self, item: StoredReminder, write: bool) -> Result<(), ReminderError> {
         let token = self.token.child_token();
         {
             let mut armed = self.inner.armed.lock().expect(STATE_MUTEX);
             if armed.len() >= MAX_OUTSTANDING {
-                return Err(format!("too many reminders (max {MAX_OUTSTANDING})"));
+                return Err(ReminderError::NotStarted(format!(
+                    "too many reminders (max {MAX_OUTSTANDING})"
+                )));
             }
             armed.push(Armed {
                 item: item.clone(),
@@ -337,7 +460,7 @@ impl Reminders {
             });
             if write && let Err(error) = self.inner.save(&armed) {
                 armed.pop();
-                return Err(error);
+                return Err(ReminderError::Persist(error));
             }
         }
         let delay = delay_until(item.fire_at);
@@ -484,26 +607,26 @@ impl Tool for RemindTool {
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
         let args: RemindArgs = match decode_strict_json(arguments.get(), &["seconds", "message"]) {
             Ok(args) => args,
-            Err(message) => return error_result(message),
+            Err(message) => return preflight_error(message),
         };
         if cancel.is_cancelled() {
-            return error_result(CONTEXT_CANCELED);
+            return error_result(CONTEXT_CANCELED).cancelled_not_started();
         }
         let message = args.message.trim();
         if message.is_empty() {
-            return error_result("message is required");
+            return preflight_error("message is required");
         }
         if message.chars().count() > MAX_MESSAGE_CHARS {
-            return error_result(format!(
+            return preflight_error(format!(
                 "message is longer than {MAX_MESSAGE_CHARS} characters"
             ));
         }
         if args.seconds < MIN_SECONDS || args.seconds > MAX_SECONDS {
-            return error_result(format!(
+            return preflight_error(format!(
                 "seconds must be between {MIN_SECONDS} and {MAX_SECONDS}"
             ));
         }
-        match self.reminders.schedule(
+        match self.reminders.schedule_typed(
             Duration::from_secs(args.seconds as u64),
             message.to_string(),
         ) {
@@ -511,7 +634,7 @@ impl Tool for RemindTool {
                 "scheduled {} in {}s: {message}",
                 item.id, args.seconds
             )),
-            Err(error) => error_result(error),
+            Err(error) => error.into_tool_result(),
         }
     }
 }
@@ -558,14 +681,14 @@ impl Tool for RemindCancelTool {
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
         let args: RemindCancelArgs = match decode_strict_json(arguments.get(), &["id"]) {
             Ok(args) => args,
-            Err(message) => return error_result(message),
+            Err(message) => return preflight_error(message),
         };
         if cancel.is_cancelled() {
-            return error_result(CONTEXT_CANCELED);
+            return error_result(CONTEXT_CANCELED).cancelled_not_started();
         }
-        match self.reminders.cancel(args.id.trim()) {
+        match self.reminders.cancel_typed(args.id.trim()) {
             Ok(item) => text_result(format!("canceled {}: {}", item.id, item.message)),
-            Err(error) => error_result(error),
+            Err(error) => error.into_tool_result(),
         }
     }
 }
@@ -576,6 +699,18 @@ mod tests {
 
     use super::*;
     use crate::tool::testutil::{run, run_cancelled};
+    use otto_core::model::{EffectCertainty, OperationDisposition, OperationStopReason};
+
+    fn fail_directory_sync(_directory: &std::fs::File) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected directory sync failure"))
+    }
+
+    fn outcome(result: &ToolResult) -> &otto_core::model::OperationOutcome {
+        result
+            .outcome_override
+            .as_ref()
+            .expect("typed outcome override")
+    }
 
     fn tool_and_inbox() -> (RemindTool, Arc<Reminders>, Arc<Inbox>) {
         let inbox = Arc::new(Inbox::default());
@@ -670,8 +805,195 @@ mod tests {
                 "{arguments} => {}",
                 result.content
             );
+            assert_eq!(
+                outcome(&result).effect_certainty,
+                EffectCertainty::NotStarted,
+                "{arguments}"
+            );
         }
         assert!(inbox.is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_remind_and_cancel_arguments_are_not_started() {
+        let (remind, reminders, _inbox) = tool_and_inbox();
+        let cancel = RemindCancelTool { reminders };
+
+        for result in [
+            run(&remind, r#"{"seconds":1}"#).await,
+            run(&cancel, "{}").await,
+        ] {
+            assert!(result.is_error, "{result:?}");
+            assert_eq!(
+                outcome(&result).effect_certainty,
+                EffectCertainty::NotStarted
+            );
+            assert_eq!(outcome(&result).disposition, OperationDisposition::Error);
+        }
+    }
+
+    #[tokio::test]
+    async fn predispatch_cancellation_is_cancelled_not_started() {
+        let (remind, reminders, _inbox) = tool_and_inbox();
+        let cancel = RemindCancelTool { reminders };
+
+        for result in [
+            run_cancelled(&remind, r#"{"seconds":1,"message":"nope"}"#).await,
+            run_cancelled(&cancel, r#"{"id":"r1"}"#).await,
+        ] {
+            assert!(result.is_error, "{result:?}");
+            assert_eq!(result.content, CONTEXT_CANCELED);
+            assert_eq!(
+                outcome(&result).effect_certainty,
+                EffectCertainty::NotStarted
+            );
+            assert_eq!(
+                outcome(&result).disposition,
+                OperationDisposition::Cancelled
+            );
+            assert_eq!(
+                outcome(&result).stop_reason,
+                Some(OperationStopReason::UserCancellation)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_directory_sync_failure_is_unknown_and_rolls_back_memory() {
+        let (_directory, path, inbox) = persist_setup();
+        let reminders = Arc::new(Reminders::create_with_directory_sync(
+            Arc::clone(&inbox),
+            Some(path.clone()),
+            fail_directory_sync,
+        ));
+        let tool = RemindTool {
+            reminders: Arc::clone(&reminders),
+        };
+
+        let result = run(&tool, r#"{"seconds":60,"message":"uncertain"}"#).await;
+
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(outcome(&result).disposition, OperationDisposition::Error);
+        assert_eq!(outcome(&result).effect_certainty, EffectCertainty::Unknown);
+        assert!(
+            reminders.list().is_empty(),
+            "failed schedule must roll back"
+        );
+        let stored = persisted(&path);
+        assert_eq!(stored.len(), 1, "the rename may already be visible");
+        assert_eq!(stored[0].message, "uncertain");
+    }
+
+    #[test]
+    fn empty_save_without_a_sidecar_still_syncs_the_directory_before_reporting_failure() {
+        let (_directory, path, inbox) = persist_setup();
+        let reminders = Reminders::create_with_directory_sync(
+            Arc::clone(&inbox),
+            Some(path),
+            fail_directory_sync,
+        );
+        let armed = reminders.inner.armed.lock().expect(STATE_MUTEX);
+
+        let error = reminders.inner.save(&armed).expect_err("sync must fail");
+
+        assert_eq!(error.phase, PersistPhase::BeforeEffect);
+        assert!(error.message.contains("injected directory sync failure"));
+    }
+
+    #[tokio::test]
+    async fn cancel_remove_directory_sync_failure_is_unknown_and_restores_timer() {
+        let (_directory, path, inbox) = persist_setup();
+        let reminders = Arc::new(Reminders::create_with_directory_sync(
+            Arc::clone(&inbox),
+            Some(path.clone()),
+            fail_directory_sync,
+        ));
+        let item = StoredReminder {
+            id: "r1".into(),
+            fire_at: Utc::now() + TimeDelta::minutes(1),
+            message: "keep armed".into(),
+        };
+        std::fs::write(&path, serde_json::to_vec_pretty(&[&item]).unwrap()).unwrap();
+        reminders.arm(item, false).expect("arm without persistence");
+        let cancel = RemindCancelTool {
+            reminders: Arc::clone(&reminders),
+        };
+
+        let result = run(&cancel, r#"{"id":"r1"}"#).await;
+
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(outcome(&result).disposition, OperationDisposition::Error);
+        assert_eq!(outcome(&result).effect_certainty, EffectCertainty::Unknown);
+        assert!(!path.exists(), "the remove may already be visible");
+        let armed = reminders.inner.armed.lock().expect(STATE_MUTEX);
+        assert_eq!(armed.len(), 1, "cancel must restore memory");
+        assert!(
+            !armed[0].token.is_cancelled(),
+            "rollback must keep timer armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_directory_sync_failure_is_unknown_and_restores_entry_and_token() {
+        let (_directory, path, inbox) = persist_setup();
+        let reminders = Arc::new(Reminders::create_with_directory_sync(
+            Arc::clone(&inbox),
+            Some(path.clone()),
+            fail_directory_sync,
+        ));
+        let fire_at = Utc::now() + TimeDelta::minutes(1);
+        let items = [
+            StoredReminder {
+                id: "r1".into(),
+                fire_at,
+                message: "first".into(),
+            },
+            StoredReminder {
+                id: "r2".into(),
+                fire_at,
+                message: "keep armed".into(),
+            },
+            StoredReminder {
+                id: "r3".into(),
+                fire_at,
+                message: "third".into(),
+            },
+        ];
+        std::fs::write(&path, serde_json::to_vec_pretty(&items).unwrap()).unwrap();
+        for item in items {
+            reminders.arm(item, false).expect("arm without persistence");
+        }
+        let cancel = RemindCancelTool {
+            reminders: Arc::clone(&reminders),
+        };
+
+        let result = run(&cancel, r#"{"id":"r2"}"#).await;
+
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(outcome(&result).disposition, OperationDisposition::Error);
+        assert_eq!(outcome(&result).effect_certainty, EffectCertainty::Unknown);
+        let stored = persisted(&path);
+        assert_eq!(
+            stored
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r1", "r3"],
+            "the replacement may already be visible"
+        );
+        let armed = reminders.inner.armed.lock().expect(STATE_MUTEX);
+        assert_eq!(
+            armed
+                .iter()
+                .map(|entry| entry.item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r1", "r2", "r3"],
+            "cancel must restore the original index"
+        );
+        assert!(
+            !armed[1].token.is_cancelled(),
+            "rollback must keep timer armed"
+        );
     }
 
     #[tokio::test]
@@ -697,6 +1019,14 @@ mod tests {
         let result = run_cancelled(&tool, r#"{"seconds":1,"message":"nope"}"#).await;
         assert!(result.is_error, "{result:?}");
         assert_eq!(result.content, CONTEXT_CANCELED);
+        assert_eq!(
+            outcome(&result).effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        assert_eq!(
+            outcome(&result).disposition,
+            OperationDisposition::Cancelled
+        );
         assert!(inbox.is_empty());
     }
 
@@ -1012,6 +1342,10 @@ mod tests {
         let unknown = run(&cancel, r#"{"id":"r1"}"#).await;
         assert!(unknown.is_error, "{unknown:?}");
         assert_eq!(unknown.content, "unknown timer: r1");
+        assert_eq!(
+            outcome(&unknown).effect_certainty,
+            EffectCertainty::NotStarted
+        );
     }
 
     #[test]

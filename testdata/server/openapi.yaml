@@ -237,7 +237,10 @@ components:
       required: [sessions]
     Message:
       type: object
-      description: otto_core::model::Message; see crates/otto-core/src/model.rs for the full shape.
+      description: >
+        otto_core::model::Message; see crates/otto-core/src/model.rs for the full shape.
+        Tool-result blocks may additionally carry optional operation_id, disposition,
+        effect_certainty, and stop_reason fields.
     TurnSummary:
       type: object
       properties:
@@ -553,6 +556,11 @@ components:
           type: string
         tool_call_id:
           type: string
+        operation_id:
+          type: string
+        attempt:
+          type: integer
+          minimum: 1
         tool_args: {}
         result:
           type: object
@@ -561,6 +569,17 @@ components:
               type: string
             is_error:
               type: boolean
+            operation_id:
+              type: string
+            disposition:
+              type: string
+              enum: [succeeded, error, cancelled, deadline_exceeded, interrupted]
+            effect_certainty:
+              type: string
+              enum: [not_started, known_no_effect, completed, unknown]
+            stop_reason:
+              type: string
+              enum: [user_cancellation, deadline, shutdown, migration, transport_lost, process_lost]
         usage:
           $ref: "#/components/schemas/Usage"
         usage_present:

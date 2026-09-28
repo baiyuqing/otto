@@ -81,6 +81,45 @@ describe('TranscriptView item metadata', () => {
     expect(container.textContent).toContain('08:15:45')
   })
 
+  it('renders typed tool outcomes and gives unknown precedence over isError', () => {
+    const items: Item[] = [
+      { kind: 'tool', id: 'c1', name: 'read', args: '', result: '', isError: true, disposition: 'error', effect_certainty: 'not_started' },
+      { kind: 'tool', id: 'c2', name: 'read', args: '', result: 'ok', isError: false, disposition: 'succeeded', effect_certainty: 'completed' },
+      { kind: 'tool', id: 'c3', name: 'bash', args: '', result: 'exit 1', isError: true, disposition: 'error', effect_certainty: 'completed' },
+      { kind: 'tool', id: 'c4', name: 'bash', args: '', result: 'lost', isError: true, disposition: 'interrupted', effect_certainty: 'unknown' },
+      { kind: 'tool', id: 'c5', name: 'mcp', args: '', result: 'rejected', isError: true, disposition: 'error', effect_certainty: 'known_no_effect' },
+    ]
+    const { container } = render(createElement(TranscriptView, { activeSession: true, items }))
+    const states = Array.from(container.querySelectorAll('.tool-state')).map((node) => node.textContent?.trim())
+
+    expect(states).toEqual([
+      'Did not run',
+      'Completed',
+      'Failed with a known result',
+      'Outcome unknown — check effects before retrying',
+      'Known no effect',
+    ])
+    const unknown = container.querySelectorAll('details.item.tool')[3]
+    expect(unknown.classList.contains('outcome-unknown')).toBe(true)
+    expect(unknown.classList.contains('error')).toBe(false)
+  })
+
+  it('does not parse legacy result prose as typed uncertainty', () => {
+    const item: Item = {
+      kind: 'tool',
+      id: 'legacy',
+      name: 'bash',
+      args: '',
+      result: 'Outcome unknown — check effects before retrying',
+      isError: true,
+    }
+    const { container } = render(createElement(TranscriptView, { activeSession: true, items: [item] }))
+    const tool = container.querySelector('details.item.tool')
+    expect(tool?.classList.contains('error')).toBe(true)
+    expect(tool?.classList.contains('outcome-unknown')).toBe(false)
+    expect(container.querySelector('.tool-state')?.textContent).toContain('Failed: Outcome unknown')
+  })
+
   it('summarizes structured tool arguments instead of only showing the tool name', () => {
     const items: Item[] = [
       {

@@ -16,6 +16,7 @@ use std::io::{BufRead, Read, Write};
 use std::sync::Arc;
 
 use otto_core::agent::{AgentError, CompactionResult, Event};
+use otto_core::model::{EffectCertainty, OperationDisposition, OperationOutcome};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -771,9 +772,26 @@ fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -
             let _ = writeln!(stdout, "\n[tool] {tool_name} ({tool_call_id})");
         }
         Event::ToolCallFinished {
-            tool_name, result, ..
+            operation_id,
+            tool_name,
+            result,
+            outcome,
+            ..
         } => {
-            let _ = writeln!(stdout, "[tool result] {}", first_line(&result.content));
+            let label = tool_outcome_label(outcome);
+            if outcome.effect_certainty == EffectCertainty::Unknown {
+                let _ = writeln!(
+                    stdout,
+                    "[tool warning] {label} (operation {operation_id}): {}",
+                    first_line(&result.content)
+                );
+            } else {
+                let _ = writeln!(
+                    stdout,
+                    "[tool result] {label} (operation {operation_id}): {}",
+                    first_line(&result.content)
+                );
+            }
             // A bash approval request puts the /approve command, the command,
             // and the justification on their own lines after the first.
             if tool_name == "bash" && result.is_error {
@@ -802,6 +820,19 @@ fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -
         _ => {}
     }
     false
+}
+
+fn tool_outcome_label(outcome: &OperationOutcome) -> &'static str {
+    match outcome.effect_certainty {
+        EffectCertainty::Unknown => "Outcome unknown — check effects before retrying",
+        EffectCertainty::NotStarted => "Did not run",
+        EffectCertainty::KnownNoEffect => "Known no effect",
+        EffectCertainty::Completed => match outcome.disposition {
+            OperationDisposition::Succeeded => "Completed",
+            OperationDisposition::Error => "Failed with a known result",
+            _ => "Completed",
+        },
+    }
 }
 
 fn compaction_line(result: &CompactionResult) -> String {
@@ -978,7 +1009,10 @@ mod tests {
     use crate::subagent::tasks::Tasks;
     use otto_core::agent::inbox::Notification;
     use otto_core::agent::{CompactionResult, Event};
-    use otto_core::model::{Block, BlockType, FinishReason, Message, Role};
+    use otto_core::model::{
+        Block, BlockType, EffectCertainty, FinishReason, Message, OperationDisposition,
+        OperationId, OperationOutcome, Role,
+    };
     use otto_core::provider::{
         Provider, ProviderError, Request as ProviderRequest, Response as ProviderResponse,
         StreamEvent, StreamSink,
@@ -987,6 +1021,18 @@ mod tests {
     use otto_core::tool::ToolResult;
     use std::io::{Cursor, Read};
     use std::sync::{Arc, Condvar, Mutex};
+
+    fn operation_id() -> OperationId {
+        OperationId::new("op_test").expect("operation id")
+    }
+
+    fn completed(disposition: OperationDisposition) -> OperationOutcome {
+        OperationOutcome {
+            disposition,
+            effect_certainty: EffectCertainty::Completed,
+            stop_reason: None,
+        }
+    }
 
     #[derive(Clone, Default)]
     struct Buffer(Arc<Mutex<Vec<u8>>>);
@@ -1577,6 +1623,8 @@ mod tests {
             &mut stdout,
             &mut stderr,
             &Event::ToolCallFinished {
+                operation_id: operation_id(),
+                attempt: 1,
                 tool_name: "bash".to_string(),
                 tool_call_id: "call-1".to_string(),
                 result: ToolResult {
@@ -1589,15 +1637,51 @@ The command did not run."
                     is_error: true,
                     ..ToolResult::default()
                 },
+                outcome: OperationOutcome {
+                    disposition: OperationDisposition::Error,
+                    effect_certainty: EffectCertainty::NotStarted,
+                    stop_reason: None,
+                },
             },
         );
         assert_eq!(
             stdout.text(),
-            "[tool result] approval required for unsandboxed bash execution.\n\
+            "[tool result] Did not run (operation op_test): approval required for unsandboxed bash execution.\n\
 Approve in Otto: /approve approval-1\n\
 Command: \"git push\"\n\
 Justification: \"push branch\"\n"
         );
+    }
+
+    #[test]
+    fn unknown_tool_outcome_uses_stable_warning_with_operation_id() {
+        let mut stdout = Buffer::default();
+        let mut stderr = Buffer::default();
+        render_event(
+            &mut stdout,
+            &mut stderr,
+            &Event::ToolCallFinished {
+                operation_id: operation_id(),
+                attempt: 1,
+                tool_name: "bash".to_string(),
+                tool_call_id: "call-1".to_string(),
+                result: ToolResult {
+                    content: "connection lost".to_string(),
+                    is_error: true,
+                    ..ToolResult::default()
+                },
+                outcome: OperationOutcome {
+                    disposition: OperationDisposition::Interrupted,
+                    effect_certainty: EffectCertainty::Unknown,
+                    stop_reason: None,
+                },
+            },
+        );
+        assert_eq!(
+            stdout.text(),
+            "[tool warning] Outcome unknown — check effects before retrying (operation op_test): connection lost\n"
+        );
+        assert_eq!(stderr.text(), "");
     }
 
     #[test]
@@ -1609,17 +1693,22 @@ Justification: \"push branch\"\n"
                 text: "done".to_string(),
             },
             Event::ToolCallStarted {
+                operation_id: operation_id(),
+                attempt: 1,
                 tool_name: "read".to_string(),
                 tool_call_id: "call-1".to_string(),
                 arguments: String::new(),
             },
             Event::ToolCallFinished {
+                operation_id: operation_id(),
+                attempt: 1,
                 tool_name: "read".to_string(),
                 tool_call_id: "call-1".to_string(),
                 result: ToolResult {
                     content: "read README.md\nfull output must not render".to_string(),
                     ..ToolResult::default()
                 },
+                outcome: completed(OperationDisposition::Succeeded),
             },
             Event::Notification {
                 task_id: "t-1".to_string(),
@@ -1635,7 +1724,7 @@ Justification: \"push branch\"\n"
         assert!(!rendered_error);
         assert_eq!(
             stdout.text(),
-            "done\n[tool] read (call-1)\n[tool result] read README.md\n\n[task-notification] done\n"
+            "done\n[tool] read (call-1)\n[tool result] Completed (operation op_test): read README.md\n\n[task-notification] done\n"
         );
         assert_eq!(stderr.text(), "");
 

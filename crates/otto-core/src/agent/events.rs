@@ -9,7 +9,7 @@
 //! Errors: [`AgentError`] is what [`super::Agent::run`] returns and what
 //! [`Event::AgentError`] reports. The two always agree.
 
-use crate::model::Usage;
+use crate::model::{OperationId, OperationOutcome, Usage};
 use crate::provider::ProviderError;
 use crate::session::SessionError;
 use crate::tool::ToolResult;
@@ -136,15 +136,20 @@ pub enum Event {
         text: String,
     },
     ToolCallStarted {
+        operation_id: OperationId,
+        attempt: u32,
         tool_name: String,
         tool_call_id: String,
         /// The raw JSON arguments as the provider sent them.
         arguments: String,
     },
     ToolCallFinished {
+        operation_id: OperationId,
+        attempt: u32,
         tool_name: String,
         tool_call_id: String,
         result: ToolResult,
+        outcome: OperationOutcome,
     },
     ProviderUsage {
         usage: Usage,
@@ -245,6 +250,8 @@ pub enum AgentError {
         kind: String,
         source: SessionError,
     },
+    #[error("generate operation id: {message}")]
+    OperationIdentity { message: String },
     #[error("invalid provider response: {0}")]
     InvalidResponse(String),
     /// There was no safe historic prefix to summarize. A successful no-op for a
@@ -350,15 +357,24 @@ mod tests {
             }
             .name(),
             Event::ToolCallStarted {
+                operation_id: OperationId::new("op_test").expect("operation id"),
+                attempt: 1,
                 tool_name: String::new(),
                 tool_call_id: String::new(),
                 arguments: String::new(),
             }
             .name(),
             Event::ToolCallFinished {
+                operation_id: OperationId::new("op_test").expect("operation id"),
+                attempt: 1,
                 tool_name: String::new(),
                 tool_call_id: String::new(),
                 result: ToolResult::default(),
+                outcome: OperationOutcome {
+                    disposition: crate::model::OperationDisposition::Succeeded,
+                    effect_certainty: crate::model::EffectCertainty::Completed,
+                    stop_reason: None,
+                },
             }
             .name(),
             Event::ProviderUsage {

@@ -930,6 +930,8 @@ mod tests {
         app.start_turn();
         let busy = rendered(&app, 50, 10);
         app.apply_event(Event::ToolCallStarted {
+            operation_id: otto_core::model::OperationId::new("op_test").expect("operation id"),
+            attempt: 1,
             tool_name: "bash".into(),
             tool_call_id: "c1".into(),
             arguments: r#"{"command":"ls"}"#.into(),

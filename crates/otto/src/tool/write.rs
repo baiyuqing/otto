@@ -23,7 +23,7 @@ use super::gopath::{bytes, dir, path_from};
 use super::result::decode_strict_json;
 use super::root::is_dir;
 use super::workspace::Workspace;
-use super::{Tool, definition, error_result, text_result};
+use super::{Tool, definition, error_result, preflight_error, text_result};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,11 +37,29 @@ struct WriteArgs {
 /// Writes a workspace file.
 pub struct WriteTool<'a> {
     workspace: &'a Workspace,
+    sync_directory: DirectorySync,
+}
+
+pub(crate) type DirectorySync = fn(&std::fs::File) -> std::io::Result<()>;
+
+pub(crate) fn sync_directory(directory: &std::fs::File) -> std::io::Result<()> {
+    directory.sync_all()
 }
 
 impl<'a> WriteTool<'a> {
     pub fn new(workspace: &'a Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            sync_directory,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_directory_sync(workspace: &'a Workspace, sync_directory: DirectorySync) -> Self {
+        Self {
+            workspace,
+            sync_directory,
+        }
     }
 }
 
@@ -77,19 +95,23 @@ impl Tool for WriteTool<'_> {
     async fn execute(&self, arguments: &RawValue, _cancel: &CancellationToken) -> ToolResult {
         let args: WriteArgs = match decode_strict_json(arguments.get(), &["path", "content"]) {
             Ok(args) => args,
-            Err(message) => return error_result(message),
+            Err(message) => return preflight_error(message),
         };
         if args.path.is_empty() {
-            return error_result("missing required argument: path");
+            return preflight_error("missing required argument: path");
         }
         let relative = match self.workspace.write_relative(Path::new(&args.path)) {
             Ok(relative) => relative,
-            Err(error) => return error_result(error),
+            Err(error) => return preflight_error(error),
         };
         let _guard = self.workspace.lock_path(&relative).await;
-        if let Err(message) = write_file_atomic(self.workspace, &relative, args.content.as_bytes())
-        {
-            return error_result(message);
+        if let Err(error) = write_file_atomic(
+            self.workspace,
+            &relative,
+            args.content.as_bytes(),
+            self.sync_directory,
+        ) {
+            return error.into_tool_result();
         }
         text_result(format!(
             "wrote {} ({} bytes)",
@@ -105,25 +127,31 @@ pub(crate) fn write_file_atomic(
     workspace: &Workspace,
     path: &Path,
     content: &[u8],
-) -> Result<(), String> {
+    sync_directory: DirectorySync,
+) -> Result<(), AtomicWriteError> {
+    let before_rename = |error: String| AtomicWriteError::BeforeRename(error);
     let root = workspace.root_fs();
     let directory = path_from(dir(bytes(path)));
     root.mkdir_all(&directory, Mode::from_bits_truncate(0o755))
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| before_rename(error.to_string()))?;
 
     let mut mode = 0o644u32;
     match root.stat(path) {
         Ok(stat) => {
             if is_dir(&stat) {
-                return Err(format!("path is a directory: {}", path.display()));
+                return Err(before_rename(format!(
+                    "path is a directory: {}",
+                    path.display()
+                )));
             }
             mode = super::root::mode_bits(&stat) & 0o777;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(before_rename(error.to_string())),
     }
 
-    let (temporary_path, mut temporary) = create_workspace_temp(workspace, &directory, mode)?;
+    let (temporary_path, mut temporary) =
+        create_workspace_temp(workspace, &directory, mode).map_err(before_rename)?;
     let result = (|| -> std::io::Result<()> {
         temporary.set_permissions(std::fs::Permissions::from_mode(mode))?;
         temporary.write_all(content)?;
@@ -133,12 +161,12 @@ pub(crate) fn write_file_atomic(
     if let Err(error) = result {
         drop(temporary);
         let _ = root.remove(&temporary_path);
-        return Err(error.to_string());
+        return Err(before_rename(error.to_string()));
     }
     drop(temporary);
     if let Err(error) = root.rename(&temporary_path, path) {
         let _ = root.remove(&temporary_path);
-        return Err(error.to_string());
+        return Err(before_rename(error.to_string()));
     }
     // The rename is durable only once the directory entry itself is on stable
     // storage: `fsync` on the temporary file covers the file's data and
@@ -151,11 +179,30 @@ pub(crate) fn write_file_atomic(
             OFlag::O_RDONLY | OFlag::O_DIRECTORY,
             Mode::empty(),
         )
-        .and_then(|directory_handle| directory_handle.sync_all())
+        .and_then(|directory_handle| sync_directory(&directory_handle))
     {
-        return Err(format!("file replaced but directory sync failed: {error}"));
+        return Err(AtomicWriteError::AfterRename(format!(
+            "file replaced but directory sync failed: {error}"
+        )));
     }
     Ok(())
+}
+
+/// A failed atomic write distinguishes failures after the destination rename,
+/// where the visible effect can no longer be established by the caller.
+#[derive(Debug)]
+pub(crate) enum AtomicWriteError {
+    BeforeRename(String),
+    AfterRename(String),
+}
+
+impl AtomicWriteError {
+    pub(crate) fn into_tool_result(self) -> ToolResult {
+        match self {
+            Self::BeforeRename(message) => error_result(message),
+            Self::AfterRename(message) => error_result(message).transport_unknown(),
+        }
+    }
 }
 
 use std::os::unix::fs::PermissionsExt;
@@ -198,7 +245,12 @@ fn random_suffix() -> std::io::Result<String> {
 mod tests {
     use super::*;
     use crate::tool::testutil::{run, workspace};
+    use otto_core::model::{EffectCertainty, OperationDisposition};
     use std::os::unix::fs::PermissionsExt;
+
+    fn fail_directory_sync(_directory: &std::fs::File) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected directory sync failure"))
+    }
 
     #[tokio::test]
     async fn unknown_fields_and_a_missing_path_are_rejected() {
@@ -213,12 +265,39 @@ mod tests {
             unknown.is_error && unknown.content.contains("unknown field"),
             "{unknown:?}"
         );
+        assert_eq!(
+            unknown.outcome_override.unwrap().effect_certainty,
+            EffectCertainty::NotStarted
+        );
 
         let missing = run(&tool, r#"{"content":"hello"}"#).await;
         assert!(
             missing.is_error && missing.content.contains("path"),
             "{missing:?}"
         );
+        assert_eq!(
+            missing.outcome_override.unwrap().effect_certainty,
+            EffectCertainty::NotStarted
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_sync_failure_after_rename_is_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file.txt");
+        std::fs::write(&path, "before").unwrap();
+        let workspace = workspace(root.path());
+        let tool = WriteTool::with_directory_sync(&workspace, fail_directory_sync);
+
+        let result = run(&tool, r#"{"path":"file.txt","content":"after"}"#).await;
+
+        assert!(result.is_error, "{result:?}");
+        let outcome = result
+            .outcome_override
+            .expect("post-rename failure override");
+        assert_eq!(outcome.disposition, OperationDisposition::Error);
+        assert_eq!(outcome.effect_certainty, EffectCertainty::Unknown);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "after");
     }
 
     #[tokio::test]

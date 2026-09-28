@@ -102,6 +102,10 @@ export interface TurnSummary {
   finished_at?: string
 }
 
+export type OperationDisposition = 'succeeded' | 'error' | 'cancelled' | 'deadline_exceeded' | 'interrupted'
+export type EffectCertainty = 'not_started' | 'known_no_effect' | 'completed' | 'unknown'
+export type OperationStopReason = 'user_cancellation' | 'deadline' | 'shutdown' | 'migration' | 'transport_lost' | 'process_lost'
+
 export interface Block {
   type: 'text' | 'image' | 'tool_call' | 'tool_result'
   text?: string
@@ -111,6 +115,10 @@ export interface Block {
   tool_name?: string
   arguments?: unknown
   is_error?: boolean
+  operation_id?: string
+  disposition?: OperationDisposition
+  effect_certainty?: EffectCertainty
+  stop_reason?: OperationStopReason
 }
 
 export interface Message {
@@ -155,8 +163,17 @@ export interface WireEvent {
   text?: string
   tool_name?: string
   tool_call_id?: string
+  operation_id?: string
+  attempt?: number
   tool_args?: unknown
-  result?: { content: string; is_error: boolean }
+  result?: {
+    content: string
+    is_error: boolean
+    operation_id?: string
+    disposition?: OperationDisposition
+    effect_certainty?: EffectCertainty
+    stop_reason?: OperationStopReason
+  }
   usage?: Usage
   usage_present?: boolean
   compaction?: Compaction
@@ -236,7 +253,7 @@ export type Item =
   | { kind: 'image'; data: string; mime_type: string; created_at?: string }
   | { kind: 'assistant'; text: string; created_at?: string }
   | { kind: 'reasoning'; text: string; created_at?: string }
-  | { kind: 'tool'; id: string; name: string; args: string; result?: string; isError?: boolean; created_at?: string }
+  | { kind: 'tool'; id: string; name: string; args: string; result?: string; isError?: boolean; operation_id?: string; disposition?: OperationDisposition; effect_certainty?: EffectCertainty; stop_reason?: OperationStopReason; created_at?: string }
   | { kind: 'notice'; text: string }
   | { kind: 'error'; text: string }
 "#;

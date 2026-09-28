@@ -1120,10 +1120,12 @@ pub async fn serve(
                 .with_graceful_shutdown(graceful)
                 .await
         }
-        listen::Listener::Unix(bound) => {
-            axum::serve(bound, router)
+        listen::Listener::Unix(bound, socket_file) => {
+            let result = axum::serve(bound, router)
                 .with_graceful_shutdown(graceful)
-                .await
+                .await;
+            drop(socket_file);
+            result
         }
     }
     .map_err(|error| error.to_string())

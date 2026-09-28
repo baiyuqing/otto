@@ -386,4 +386,8 @@ fn sigterm_without_a_lease_shuts_serve_down_cleanly() {
         "status: {status:?}, signal: {:?}",
         status.signal()
     );
+
+    let error = std::fs::symlink_metadata(&socket)
+        .expect_err("the socket file should be removed at shutdown");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
 }

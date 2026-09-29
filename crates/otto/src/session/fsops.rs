@@ -71,20 +71,35 @@ pub fn open_no_follow(path: &Path, flags: libc::c_int) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+/// How long [`lock_session_exclusive`] retries a busy `flock`.
+///
+/// `fork`, including the `clone` inside Linux `posix_spawn`, duplicates every
+/// open file description into the child. The session descriptor is
+/// `CLOEXEC`, so that duplicate disappears at `exec`, but until then a
+/// non-blocking lock still returns `EWOULDBLOCK` even though no other Otto
+/// process holds the session. A genuine holder keeps the lock for the whole
+/// time the session is open, which is longer than this grace.
+pub(crate) const SESSION_LOCK_SPAWN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Acquires the session's non-blocking advisory write lock.
 pub fn lock_session_exclusive(file: &File) -> Result<(), PiError> {
-    // SAFETY: the borrowed descriptor stays open through this call.
-    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if result == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    if error.kind() == io::ErrorKind::WouldBlock {
-        Err(PiError::other(
-            "session is already open by another Otto process",
-        ))
-    } else {
-        Err(PiError::other(format!("lock session file: {error}")))
+    let deadline = std::time::Instant::now() + SESSION_LOCK_SPAWN_GRACE;
+    loop {
+        // SAFETY: the borrowed descriptor stays open through this call.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::WouldBlock {
+            return Err(PiError::other(format!("lock session file: {error}")));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(PiError::other(
+                "session is already open by another Otto process",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 

@@ -7,7 +7,7 @@
 //! Ownership: [`Manager`] owns the set of running children. A [`Manager`] is
 //! shared behind `&self` and is safe to use from any task.
 //!
-//! Cancellation: cancelling the token passed to [`Manager::run`] starts
+//! Cancellation: cancelling the token passed to [`Manager::run_with_grace`] starts
 //! cooperative cleanup and makes the call return [`Error::Cancelled`] if it
 //! wins the race with leader completion. The final child status is still
 //! reported.
@@ -245,6 +245,11 @@ impl Manager {
     /// Returns [`Error::Closed`] once [`Manager::close`] has begun, and
     /// [`Error::Cancelled`] when `cancel` fires. In the cancelled case the
     /// returned [`Outcome`] still describes how the child died.
+    ///
+    /// The macOS Seatbelt driver is the only library caller. Other drivers
+    /// pass an explicit grace to [`Self::run_with_grace`], so this wrapper is
+    /// omitted from those library builds. Tests in this module still compile it.
+    #[cfg(any(test, target_os = "macos"))]
     pub(crate) async fn run(
         &self,
         spec: Spec,

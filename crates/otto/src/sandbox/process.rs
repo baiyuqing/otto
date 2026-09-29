@@ -154,7 +154,9 @@ impl Entry {
             && state.term_deadline.is_some_and(|deadline| now >= deadline)
         {
             match nix::sys::signal::kill(Pid::from_raw(-self.pid), Signal::SIGKILL) {
-                Ok(()) => {
+                // Darwin answers `EPERM` for an unreaped zombie in the group;
+                // keep observing for `ESRCH` instead of failing immediately.
+                Ok(()) | Err(Errno::EPERM) => {
                     state.kill_sent = true;
                     state.observation_deadline = Some(now + GROUP_OBSERVATION_DEADLINE);
                 }
@@ -213,7 +215,11 @@ impl Entry {
 
 fn signal_group(pid: i32, signal: Signal, state: &mut Termination) {
     match nix::sys::signal::kill(Pid::from_raw(-pid), signal) {
-        Ok(()) => {}
+        // `EPERM` matches the null-signal probes: the group still has a
+        // member we cannot (or need not) signal, typically an unreaped
+        // Darwin zombie between leader exit and `wait`. Failing here would
+        // stick [`Error::ChildTerminate`] even after the group later vanishes.
+        Ok(()) | Err(Errno::EPERM) => {}
         Err(Errno::ESRCH) => state.group_gone = true,
         Err(_) => state.failure = Some(Error::ChildTerminate),
     }
@@ -222,6 +228,9 @@ fn signal_group(pid: i32, signal: Signal, state: &mut Termination) {
 fn settle_cleanup(state: &mut Termination) {
     if state.leader_reaped && state.group_gone {
         state.settled = true;
+        // The group-gone postcondition was met; drop a transient signal error
+        // from the unreaped-zombie window.
+        state.failure = None;
     }
 }
 

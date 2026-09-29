@@ -238,11 +238,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn footer_text(app: &App) -> String {
-    let profile = escape_single_line_text(&app.info.profile);
     let model = escape_single_line_text(&app.info.model);
-    let profile_model = match (profile.is_empty(), model.is_empty()) {
-        (true, true) => "unknown/unknown".to_string(),
-        _ => format!("{profile}/{model}").trim_matches('/').to_string(),
+    let profile_model = if model.is_empty() {
+        "unknown".to_string()
+    } else {
+        model
     };
     let thinking = if app.info.thinking.is_empty() {
         "default".to_string()
@@ -250,8 +250,8 @@ fn footer_text(app: &App) -> String {
         escape_single_line_text(&app.info.thinking)
     };
     let mut text = format!(
-        "{profile_model} | think {thinking} | {} | {} | tokens {}/{}",
-        app.info.sandbox.summary(),
+        "{profile_model} | {thinking} | {} | {} | tokens {}/{}",
+        app.info.sandbox.status_summary(),
         escape_single_line_text(&footer_workspace(&app.info.workspace)),
         format_token_count(app.usage.input_tokens),
         format_token_count(app.usage.output_tokens)
@@ -923,6 +923,26 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn footer_omits_the_profile_and_uses_compact_status_labels() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.info.profile = "terra".to_string();
+        app.info.model = "gpt-5.6-terra".to_string();
+        app.info.thinking.clear();
+        app.info.sandbox = testutil::seatbelt_info(crate::cli::info::SandboxNetwork::Allowed);
+
+        let footer = footer_text(&app);
+
+        assert!(
+            footer.starts_with("gpt-5.6-terra | default | sb · write · net | "),
+            "{footer}"
+        );
+        assert!(!footer.contains("terra/gpt-5.6-terra"), "{footer}");
+        assert!(!footer.contains("think default"), "{footer}");
+        assert!(!footer.contains("workspace-write"), "{footer}");
+        assert!(!footer.contains("network allowed"), "{footer}");
     }
 
     #[tokio::test]

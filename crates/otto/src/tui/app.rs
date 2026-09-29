@@ -16,6 +16,7 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use otto_core::agent::inbox::NotificationKind;
 use otto_core::agent::{CompactionResult, Event};
 use otto_core::model::Usage;
 use otto_core::session::types::SessionInfo;
@@ -247,10 +248,12 @@ pub(crate) struct App {
     /// draft; Enter commits it to [`App::queued_input`] and clears the box.
     pub input: Vec<char>,
     pub cursor: usize,
-    /// A next prompt submitted while the current turn is still running. It is
-    /// drawn in the transcript immediately, but is not written to prompt
-    /// history or dispatched until the current turn finishes successfully.
+    /// Input submitted while the current turn is still running. Ordinary text
+    /// is queued in the agent inbox for its next safe checkpoint; slash
+    /// commands remain local until the turn finishes.
     pub queued_input: Option<String>,
+    /// Whether `queued_input` is already in the running agent's inbox.
+    pub queued_input_sent: bool,
     /// Bash-style prompt history for the composer's Up/Down keys.
     history: History,
     /// `None` follows the bottom of the transcript; `Some(top)` pins the view
@@ -314,6 +317,7 @@ impl App {
             input: Vec::new(),
             cursor: 0,
             queued_input: None,
+            queued_input_sent: false,
             history,
             scroll: None,
             max_scroll: Cell::new(0),
@@ -606,11 +610,11 @@ impl App {
         if self.busy() {
             // While a turn runs, the composer is an editable draft for the
             // next input. Enter commits that draft to the transcript as the
-            // queued prompt, unless the draft is `/agents`, which opens the
-            // overlay instead (see [`App::handle_turn_key`]); the run loop
-            // dispatches a committed prompt after the turn finishes
-            // successfully. Ctrl+U withdraws the committed prompt, or clears
-            // the current draft when nothing is committed. Esc/Ctrl+C are
+            // queued input, unless the draft is `/agents`, which opens the
+            // overlay instead (see [`App::handle_turn_key`]). Ordinary text
+            // goes to the running agent's next safe checkpoint; slash
+            // commands wait for the turn to finish. Ctrl+U withdraws the
+            // committed prompt, or clears the current draft. Esc/Ctrl+C are
             // intercepted by the caller as cancellation before this method is
             // invoked.
             self.handle_busy_composer_key(key, controller);
@@ -724,7 +728,7 @@ impl App {
     }
 
     /// Handles one composer key while a turn is busy. Enter normally commits
-    /// the draft as the queued prompt (see [`App::commit_queued_input`]); a
+    /// the draft as queued input (see [`App::commit_queued_input`]); a
     /// draft that [`commands::parse_slash_command`] resolves to
     /// [`SlashCommandKind::Agents`] instead opens the `/agents` overlay
     /// directly and clears the draft, without touching `queued_input` — the
@@ -750,11 +754,15 @@ impl App {
                         self.cursor = 0;
                         self.suggestion = 0;
                     }
-                    _ => self.commit_queued_input(),
+                    _ => self.commit_queued_input(controller),
                 }
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.queued_input_sent && !controller.withdraw_user_message() {
+                    return;
+                }
                 self.queued_input = None;
+                self.queued_input_sent = false;
                 self.input.clear();
                 self.cursor = 0;
                 self.edited();
@@ -786,8 +794,8 @@ impl App {
         }
     }
 
-    fn commit_queued_input(&mut self) {
-        if self.input.is_empty() {
+    fn commit_queued_input(&mut self, controller: &Controller) {
+        if self.input.is_empty() || self.queued_input_sent {
             return;
         }
         let line = std::mem::take(&mut self.input)
@@ -800,6 +808,7 @@ impl App {
         if line.is_empty() {
             return;
         }
+        self.queued_input_sent = !line.starts_with('/') && controller.queue_user_message(&line);
         self.queued_input = Some(line);
         self.scroll = None;
     }
@@ -809,9 +818,19 @@ impl App {
         controller: &Controller,
         cancel: &CancellationToken,
     ) -> Option<Action> {
+        if self.queued_input_sent {
+            return None;
+        }
         let queued = self.queued_input.take()?;
         self.history.remember(&queued);
         self.dispatch_line(&queued, controller, cancel)
+    }
+
+    pub(crate) fn defer_queued_input(&mut self, controller: &Controller) {
+        if self.queued_input_sent {
+            controller.withdraw_user_message();
+            self.queued_input_sent = false;
+        }
     }
 
     pub(crate) fn submit_input(
@@ -1342,6 +1361,23 @@ impl App {
                 self.push_system(message);
                 true
             }
+            Event::Notification {
+                kind: Some(NotificationKind::UserMessage),
+                text,
+                ..
+            } => {
+                let queued = self.queued_input.take().unwrap_or(text);
+                self.queued_input_sent = false;
+                self.history.remember(&queued);
+                self.entries.push(Entry {
+                    id: format!("user-{}", self.entries.len()),
+                    kind: Some(EntryKind::User),
+                    raw: queued,
+                    ..Entry::default()
+                });
+                self.scroll = None;
+                false
+            }
             Event::Notification { task_id, text, .. } => {
                 self.push_system(format!("[task {task_id}] {text}"));
                 false
@@ -1770,6 +1806,7 @@ mod tests {
             input: Vec::new(),
             cursor: 0,
             queued_input: None,
+            queued_input_sent: false,
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
@@ -1801,6 +1838,7 @@ mod tests {
             input: "hello".chars().collect(),
             cursor: 5,
             queued_input: None,
+            queued_input_sent: false,
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
@@ -1860,6 +1898,104 @@ mod tests {
             app.entries.is_empty(),
             "queued input is a pending transcript item, not persisted history"
         );
+    }
+
+    #[tokio::test]
+    async fn busy_composer_queues_user_input_for_the_running_turn() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let _admission = controller.begin_operation().expect("active turn");
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        app.start_turn();
+        app.insert_text("change course");
+
+        let action = app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(action.is_none());
+        assert!(app.queued_input_sent);
+        assert_eq!(app.queued_input.as_deref(), Some("change course"));
+        assert!(controller.current_runner().is_some_and(|runner| {
+            runner.inbox().snapshot().iter().any(|notification| {
+                notification.kind == Some(otto_core::agent::inbox::NotificationKind::UserMessage)
+                    && notification.text == "change course"
+            })
+        }));
+
+        app.apply_event(Event::Notification {
+            kind: None,
+            task_id: String::new(),
+            text: "not the queued input".into(),
+            usage: Usage::default(),
+            present: false,
+        });
+        assert!(
+            app.queued_input_sent,
+            "an untyped notification is not user input"
+        );
+        assert_eq!(app.queued_input.as_deref(), Some("change course"));
+
+        app.apply_event(Event::Notification {
+            kind: Some(NotificationKind::UserMessage),
+            task_id: String::new(),
+            text: "change course".into(),
+            usage: Usage::default(),
+            present: false,
+        });
+        assert!(!app.queued_input_sent);
+        assert!(app.queued_input.is_none());
+        assert_eq!(
+            app.entries.last().expect("user entry").kind,
+            Some(EntryKind::User)
+        );
+        assert_eq!(app.history.previous(""), Some("change course".to_string()));
+    }
+
+    #[tokio::test]
+    async fn failed_turn_defers_queued_input_without_running_it() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let admission = controller.begin_operation().expect("active turn");
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        app.start_turn();
+        app.insert_text("follow up");
+        app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        drop(admission);
+
+        app.defer_queued_input(&controller);
+
+        assert!(!app.queued_input_sent);
+        assert_eq!(app.queued_input.as_deref(), Some("follow up"));
+        assert!(controller.current_runner().is_some_and(|runner| {
+            runner
+                .inbox()
+                .snapshot()
+                .iter()
+                .all(|item| item.kind != Some(NotificationKind::UserMessage))
+        }));
+
+        let mut slash = App::new(&controller);
+        slash.start_turn();
+        slash.insert_text("/memory search vim");
+        slash.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        slash.defer_queued_input(&controller);
+        assert_eq!(slash.queued_input.as_deref(), Some("/memory search vim"));
+        assert!(slash.entries.is_empty(), "the slash command did not run");
     }
 
     #[tokio::test]
@@ -1947,6 +2083,7 @@ mod tests {
             input: "abc".chars().collect(),
             cursor: 3,
             queued_input: None,
+            queued_input_sent: false,
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
@@ -1981,6 +2118,7 @@ mod tests {
             input: "abcd".chars().collect(),
             cursor: 2,
             queued_input: None,
+            queued_input_sent: false,
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),

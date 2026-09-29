@@ -250,6 +250,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         self.options.tasks.as_ref()
     }
 
+    /// The inbox shared with producers that can add context to this agent.
+    pub fn inbox(&self) -> &Arc<Inbox> {
+        &self.options.inbox
+    }
+
     /// Releases the memory binding and cancels every tracked task.
     ///
     /// Returns the memory binding's error; the tasks are closed either way.
@@ -573,6 +578,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
 
             if !had_tool_call {
+                if self.options.inbox.queued().iter().any(|entry| {
+                    entry.notification.kind == Some(inbox::NotificationKind::UserMessage)
+                }) {
+                    if let Err(error) = self.deliver_notifications(emit).await {
+                        return Err(self.fail(emit, error));
+                    }
+                    continue;
+                }
                 emit(Event::AgentFinished);
                 return Ok(());
             }
@@ -599,15 +612,25 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         for entry in self.options.inbox.queued() {
             let notification = entry.notification;
             let text = self.redactor.redact_string(&notification.text);
+            let user_message = notification.kind == Some(inbox::NotificationKind::UserMessage);
             let metadata = ContextMetadata {
                 task_id: notification.task_id.clone(),
             };
-            let context_metadata = metadata.validate().is_ok().then_some(metadata);
+            let context_metadata =
+                (!user_message && metadata.validate().is_ok()).then_some(metadata);
             let message = Message {
                 id: (self.options.new_id)(),
-                role: Role::Context,
-                context_type: notification.context_type().to_owned(),
-                display: true,
+                role: if user_message {
+                    Role::User
+                } else {
+                    Role::Context
+                },
+                context_type: if user_message {
+                    String::new()
+                } else {
+                    notification.context_type().to_owned()
+                },
+                display: !user_message,
                 created_at: (self.options.now)(),
                 usage: notification.usage,
                 context_metadata,
@@ -623,6 +646,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 })?;
             self.options.inbox.remove_seq(entry.seq);
             emit(Event::Notification {
+                kind: notification.kind,
                 task_id: notification.task_id,
                 text,
                 usage: notification.usage.unwrap_or_default(),

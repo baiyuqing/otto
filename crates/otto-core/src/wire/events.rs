@@ -194,6 +194,7 @@ pub fn to_wire(event: &Event) -> WireEvent {
             wire.usage_present = Some(*present);
         }
         Event::Notification {
+            kind: _,
             task_id,
             text,
             usage,
@@ -368,6 +369,7 @@ mod tests {
     fn notification_carries_task_id_text_and_usage() {
         assert_eq!(
             json(&Event::Notification {
+                kind: None,
                 task_id: "t1".into(),
                 text: "done".into(),
                 usage: Usage {

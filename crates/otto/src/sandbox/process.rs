@@ -29,7 +29,9 @@ use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{DEFAULT_CANCELLATION_GRACE, Error, Streams};
+#[cfg(any(test, target_os = "macos"))]
+use super::DEFAULT_CANCELLATION_GRACE;
+use super::{Error, Streams};
 
 /// Bounds how long the post-exit drain waits for a descendant that inherited
 /// the child's pipe. Signals are sent before it, so it only limits how long a

@@ -7,7 +7,7 @@
 //! Ownership: [`Manager`] owns the set of running children. A [`Manager`] is
 //! shared behind `&self` and is safe to use from any task.
 //!
-//! Cancellation: cancelling the token passed to [`Manager::run`] starts
+//! Cancellation: cancelling the token passed to [`Manager::run_with_grace`] starts
 //! cooperative cleanup and makes the call return [`Error::Cancelled`] if it
 //! wins the race with leader completion. The final child status is still
 //! reported.
@@ -29,7 +29,9 @@ use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{DEFAULT_CANCELLATION_GRACE, Error, Streams};
+#[cfg(any(test, target_os = "macos"))]
+use super::DEFAULT_CANCELLATION_GRACE;
+use super::{Error, Streams};
 
 /// Bounds how long the post-exit drain waits for a descendant that inherited
 /// the child's pipe. Signals are sent before it, so it only limits how long a
@@ -152,7 +154,9 @@ impl Entry {
             && state.term_deadline.is_some_and(|deadline| now >= deadline)
         {
             match nix::sys::signal::kill(Pid::from_raw(-self.pid), Signal::SIGKILL) {
-                Ok(()) => {
+                // Darwin answers `EPERM` for an unreaped zombie in the group;
+                // keep observing for `ESRCH` instead of failing immediately.
+                Ok(()) | Err(Errno::EPERM) => {
                     state.kill_sent = true;
                     state.observation_deadline = Some(now + GROUP_OBSERVATION_DEADLINE);
                 }
@@ -211,7 +215,11 @@ impl Entry {
 
 fn signal_group(pid: i32, signal: Signal, state: &mut Termination) {
     match nix::sys::signal::kill(Pid::from_raw(-pid), signal) {
-        Ok(()) => {}
+        // `EPERM` matches the null-signal probes: the group still has a
+        // member we cannot (or need not) signal, typically an unreaped
+        // Darwin zombie between leader exit and `wait`. Failing here would
+        // stick [`Error::ChildTerminate`] even after the group later vanishes.
+        Ok(()) | Err(Errno::EPERM) => {}
         Err(Errno::ESRCH) => state.group_gone = true,
         Err(_) => state.failure = Some(Error::ChildTerminate),
     }
@@ -220,6 +228,9 @@ fn signal_group(pid: i32, signal: Signal, state: &mut Termination) {
 fn settle_cleanup(state: &mut Termination) {
     if state.leader_reaped && state.group_gone {
         state.settled = true;
+        // The group-gone postcondition was met; drop a transient signal error
+        // from the unreaped-zombie window.
+        state.failure = None;
     }
 }
 
@@ -245,6 +256,11 @@ impl Manager {
     /// Returns [`Error::Closed`] once [`Manager::close`] has begun, and
     /// [`Error::Cancelled`] when `cancel` fires. In the cancelled case the
     /// returned [`Outcome`] still describes how the child died.
+    ///
+    /// The macOS Seatbelt driver is the only library caller. Other drivers
+    /// pass an explicit grace to [`Self::run_with_grace`], so this wrapper is
+    /// omitted from those library builds. Tests in this module still compile it.
+    #[cfg(any(test, target_os = "macos"))]
     pub(crate) async fn run(
         &self,
         spec: Spec,

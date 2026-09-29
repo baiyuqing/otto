@@ -667,6 +667,10 @@ impl Runner {
         self.agent.context_report()
     }
 
+    pub fn inbox(&self) -> &Arc<otto_core::agent::inbox::Inbox> {
+        self.agent.inbox()
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.definitions.clone()
     }

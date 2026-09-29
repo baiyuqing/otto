@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use otto_core::agent::inbox::NotificationKind;
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
 use serde::Deserialize;
@@ -32,7 +33,7 @@ const MAX_WAIT_TIMEOUT_SECONDS: i64 = 3600;
 
 const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
 
-const AGENT_WAIT_DESCRIPTION: &str = "Wait for a sub-agent task to finish. With task_id, waits for that task; without it, waits for every task that is queued or running. Blocks up to timeout_seconds (default 600, max 3600) and returns each task's completion report. Errors if the wait times out or is canceled, naming the tasks still running, or if task_id is unknown.";
+const AGENT_WAIT_DESCRIPTION: &str = "Wait for a sub-agent task to finish. With task_id, waits for that task; without it, waits for every task that is queued or running. Blocks up to timeout_seconds (default 600, max 3600) and returns each task's completion report. New user input ends the wait early so the current turn can handle it. Errors if the wait times out or is canceled, naming the tasks still running, or if task_id is unknown.";
 
 const AGENT_STATUS_DESCRIPTION: &str = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error.";
 
@@ -406,6 +407,14 @@ fn still_running(tasks: &Tasks, ids: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn has_user_message(tasks: &Tasks) -> bool {
+    tasks
+        .notifications()
+        .snapshot()
+        .iter()
+        .any(|notification| notification.kind == Some(NotificationKind::UserMessage))
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentWaitArgs {
@@ -457,20 +466,47 @@ impl Tool for AgentWaitTool {
             }
         };
 
-        let timeout = std::time::Duration::from_secs(timeout_seconds as u64);
-        let outcome = tokio::select! {
-            outcome = wait_tasks(tasks, &ids, self.runner.max_output_bytes(), cancel) => outcome,
-            () = tokio::time::sleep(timeout) => Err(still_running(tasks, &ids)),
+        enum WaitOutcome {
+            Tasks(Result<String, Vec<String>>),
+            Timeout,
+            UserMessage,
+        }
+
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(timeout_seconds as u64));
+        let wait = wait_tasks(tasks, &ids, self.runner.max_output_bytes(), cancel);
+        let mut updates = tasks.updates();
+        tokio::pin!(timeout, wait);
+        let outcome = loop {
+            if has_user_message(tasks) && !still_running(tasks, &ids).is_empty() {
+                break WaitOutcome::UserMessage;
+            }
+            tokio::select! {
+                biased;
+                outcome = &mut wait => break WaitOutcome::Tasks(outcome),
+                () = &mut timeout => break WaitOutcome::Timeout,
+                changed = updates.changed() => {
+                    if changed.is_err() {
+                        break WaitOutcome::Tasks(wait.await);
+                    }
+                }
+            }
         };
         match outcome {
-            Ok(text) => text_result(text),
-            Err(remaining) if cancel.is_cancelled() => error_result(format!(
+            WaitOutcome::Tasks(Ok(text)) => text_result(text),
+            WaitOutcome::Tasks(Err(remaining)) if cancel.is_cancelled() => error_result(format!(
                 "wait canceled; still running: {}",
                 remaining.join(", ")
             )),
-            Err(remaining) => error_result(format!(
-                "timed out after {timeout_seconds}s; still running: {}",
-                remaining.join(", ")
+            WaitOutcome::Tasks(Err(_)) | WaitOutcome::Timeout => {
+                let remaining = still_running(tasks, &ids);
+                error_result(format!(
+                    "timed out after {timeout_seconds}s; still running: {}",
+                    remaining.join(", ")
+                ))
+            }
+            WaitOutcome::UserMessage => text_result(format!(
+                "wait paused for new user input; still running: {}",
+                still_running(tasks, &ids).join(", ")
             )),
         }
     }
@@ -926,6 +962,45 @@ mod tests {
         let result = wait_tool.execute(&raw("{}"), &call).await;
         assert!(result.is_error, "{}", result.content);
         assert_eq!(result.content, "wait canceled; still running: t1");
+
+        tasks.cancel("t1").expect("cancel succeeds");
+        wait_final(&tasks, "t1").await;
+    }
+
+    #[tokio::test]
+    async fn agent_wait_yields_to_new_user_input_without_canceling_the_task() {
+        let provider = FakeProvider::new();
+        provider.set_hook(block_until(CancellationToken::new()));
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+
+        let wait_tool = tool_named(&runner, "agent_wait");
+        let inbox = Arc::clone(tasks.notifications());
+        let handle = tokio::spawn(async move { run(wait_tool.as_ref(), "{}").await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        inbox.push(otto_core::agent::inbox::Notification {
+            kind: Some(NotificationKind::UserMessage),
+            text: "change course".into(),
+            ..Default::default()
+        });
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("wait did not yield")
+            .expect("wait task panicked");
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            result.content,
+            "wait paused for new user input; still running: t1"
+        );
+        assert_eq!(tasks.get("t1").expect("t1").status, TaskStatus::Running);
 
         tasks.cancel("t1").expect("cancel succeeds");
         wait_final(&tasks, "t1").await;

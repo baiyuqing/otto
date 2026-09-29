@@ -14,6 +14,8 @@ use crate::provider::ProviderError;
 use crate::session::SessionError;
 use crate::tool::ToolResult;
 
+use super::inbox::NotificationKind;
+
 /// The outcome the agent records for one provider HTTP call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiStatus {
@@ -194,6 +196,7 @@ pub enum Event {
     },
     /// One inbox notification was delivered into the transcript.
     Notification {
+        kind: Option<NotificationKind>,
         task_id: String,
         text: String,
         usage: Usage,
@@ -429,6 +432,7 @@ mod tests {
             }
             .name(),
             Event::Notification {
+                kind: None,
                 task_id: String::new(),
                 text: String::new(),
                 usage: Usage::default(),

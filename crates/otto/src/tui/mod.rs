@@ -449,7 +449,7 @@ async fn run_app<B: Backend>(
             match current_action {
                 Action::Exit => return Ok(()),
                 Action::Prompt(line) => {
-                    if let Err(error) = run_turn(
+                    let result = run_turn(
                         &mut app,
                         terminal,
                         keys,
@@ -458,10 +458,23 @@ async fn run_app<B: Backend>(
                         line,
                         pending_image.take(),
                     )
-                    .await
-                    {
+                    .await;
+                    if let Err(error) = result {
+                        app.defer_queued_input(controller);
                         propagate_turn_error(error)?;
-                    } else {
+                        continue;
+                    }
+                    if app.queued_input_sent {
+                        if let Err(error) =
+                            run_wake(&mut app, terminal, keys, controller, cancel).await
+                        {
+                            propagate_turn_error(error)?;
+                        }
+                        if app.queued_input_sent {
+                            app.defer_queued_input(controller);
+                        }
+                    }
+                    if app.queued_input.is_some() {
                         action = app.submit_queued_input(controller, cancel);
                     }
                 }

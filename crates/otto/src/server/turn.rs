@@ -351,6 +351,7 @@ mod tests {
             present: true,
         });
         emit(Event::Notification {
+            kind: None,
             task_id: "t1".to_string(),
             text: "[task-notification] task t1 succeeded".to_string(),
             usage: usage(10, 20, 1),

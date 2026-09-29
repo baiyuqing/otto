@@ -1711,6 +1711,7 @@ Justification: \"push branch\"\n"
                 outcome: completed(OperationDisposition::Succeeded),
             },
             Event::Notification {
+                kind: None,
                 task_id: "t-1".to_string(),
                 text: "[task-notification] done".to_string(),
                 usage: Default::default(),

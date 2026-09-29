@@ -506,6 +506,52 @@ async fn the_inbox_is_drained_again_before_the_next_provider_request() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn user_input_queued_during_a_provider_call_continues_the_same_turn() {
+    let inbox = Arc::new(Inbox::default());
+    let provider = FakeProvider::new(vec![Turn::text("first"), Turn::text("second")]);
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            inbox: inbox.clone(),
+            ..options()
+        },
+    );
+    let queued = AtomicUsize::new(0);
+    agent
+        .run(
+            "start",
+            &mut |event| {
+                if matches!(event, Event::TextDelta { .. })
+                    && queued.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    inbox.push(Notification {
+                        kind: Some(NotificationKind::UserMessage),
+                        text: "change course".into(),
+                        ..Notification::default()
+                    });
+                }
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+    let messages = agent.session().messages();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| &message.role)
+            .collect::<Vec<_>>(),
+        [&Role::User, &Role::Assistant, &Role::User, &Role::Assistant]
+    );
+    assert_eq!(messages[2].text(), "change course");
+    assert_eq!(agent.provider().normal_requests().len(), 2);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn empty_text_without_notifications_fails() {
     let provider = FakeProvider::new(Vec::new());
     let agent = Agent::new(

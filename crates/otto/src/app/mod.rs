@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
-use otto_core::agent::inbox::Notification;
+use otto_core::agent::inbox::{Notification, NotificationKind};
 use otto_core::agent::{AgentError, CompactionResult, EventSink};
 use otto_core::config::resolve::Runtime;
 use otto_core::model::{Block, Message, Usage};
@@ -1030,7 +1030,7 @@ impl Controller {
         state.current.as_ref()?.runner.reminders.clone()
     }
 
-    /// Claims a turn only when the runner has pending task notifications.
+    /// Claims a turn only when the runner has pending inbox messages.
     pub fn prepare_wake(&self) -> Result<Option<WakeOperation<'_>>, String> {
         let pending = {
             let state = self.lock();
@@ -1043,9 +1043,7 @@ impl Controller {
             let Some(current) = state.current.as_ref() else {
                 return Err(CLOSED.to_string());
             };
-            tasks::task_view(current.runner.as_ref())
-                .map(|view| view.pending())
-                .unwrap_or(0)
+            current.runner.inbox().len()
         };
         if pending == 0 {
             return Ok(None);
@@ -1075,6 +1073,45 @@ impl Controller {
         };
         tasks.notifications().push(notification);
         true
+    }
+
+    /// Queues user input for the active turn's next safe checkpoint.
+    pub fn queue_user_message(&self, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        let runner = {
+            let state = self.lock();
+            if state.closed || !state.busy {
+                return false;
+            }
+            let Some(current) = state.current.as_ref() else {
+                return false;
+            };
+            Arc::clone(&current.runner)
+        };
+        runner.inbox().push(Notification {
+            kind: Some(NotificationKind::UserMessage),
+            text: text.to_string(),
+            ..Notification::default()
+        });
+        true
+    }
+
+    /// Withdraws the TUI's one pending in-turn user message, if still queued.
+    pub fn withdraw_user_message(&self) -> bool {
+        let runner = {
+            let state = self.lock();
+            let Some(current) = state.current.as_ref() else {
+                return false;
+            };
+            Arc::clone(&current.runner)
+        };
+        runner
+            .inbox()
+            .remove("", NotificationKind::UserMessage)
+            .is_some()
     }
 
     pub async fn reload_sandbox(&self) -> Result<SandboxInfo, String> {
@@ -2354,8 +2391,14 @@ mod tests {
 
         assert!(controller.tasks().is_none());
         assert!(controller.prepare_wake().expect("prepare").is_none());
-        // No claim was taken, so an operation is still admissible.
-        controller.begin_operation().expect("admit");
+        let operation = controller.begin_operation().expect("admit");
+        assert!(controller.queue_user_message("change course"));
+        drop(operation);
+        controller
+            .prepare_wake()
+            .expect("prepare")
+            .expect("queued user input claims a wake")
+            .cancel();
     }
 
     /// The registry is reachable through the view, and an empty inbox still

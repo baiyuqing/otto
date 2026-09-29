@@ -300,6 +300,81 @@ fn session_file_descriptors_are_not_inherited_by_spawned_children() {
 }
 
 #[test]
+fn reopening_a_session_during_spawn_does_not_look_like_another_process() {
+    let hold = fsops::SESSION_LOCK_SPAWN_GRACE / 2;
+    assert!(
+        hold < fsops::SESSION_LOCK_SPAWN_GRACE,
+        "the child must release the descriptor before the lock grace expires"
+    );
+    let secs = libc::time_t::try_from(hold.as_secs()).expect("hold seconds");
+    let nanos = libc::c_long::from(hold.subsec_nanos());
+
+    let temp = TempDir::new();
+    let workspace = temp.join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    let root = temp.join("root");
+    let store = Store::create(&root, test_header(&workspace)).expect("create store");
+    let path = store.path();
+
+    // The child writes one byte from pre_exec, then sleeps while it still
+    // holds the inherited session descriptor. Reopening after that byte
+    // arrives is the fork/exec window a concurrent spawn leaves behind.
+    let mut pipes = [0; 2];
+    // SAFETY: pipe stores two fresh descriptors in `pipes`.
+    assert_eq!(unsafe { libc::pipe(pipes.as_mut_ptr()) }, 0, "pipe");
+    let read_fd = pipes[0];
+    let write_fd = pipes[1];
+
+    let (go_tx, go_rx) = std::sync::mpsc::channel();
+    let spawner = std::thread::spawn(move || {
+        go_rx.recv().expect("start signal");
+        let mut command = std::process::Command::new("/usr/bin/true");
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // SAFETY: runs in the forked child before exec. `write` and
+        // `nanosleep` are async-signal-safe. The sleep holds the inherited
+        // session descriptor open across the parent's close and reopen.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(move || {
+                let marker = 1u8;
+                libc::write(write_fd, std::ptr::from_ref(&marker).cast(), 1);
+                let request = libc::timespec {
+                    tv_sec: secs,
+                    tv_nsec: nanos,
+                };
+                libc::nanosleep(&request, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn");
+        assert!(child.wait().expect("wait child").success());
+    });
+
+    go_tx.send(()).expect("signal spawner");
+    let mut marker = [0u8; 1];
+    // SAFETY: `read_fd` is the read end of the pipe above and outlives this call.
+    assert_eq!(
+        unsafe { libc::read(read_fd, marker.as_mut_ptr().cast(), 1) },
+        1,
+        "child entered pre_exec"
+    );
+    // SAFETY: both ends were opened above and are closed once here.
+    unsafe {
+        libc::close(read_fd);
+        libc::close(write_fd);
+    }
+
+    store.close().expect("close");
+    let (reopened, _) =
+        Store::open(&path).expect("reopen while a pre-exec child still holds the descriptor");
+    reopened.close().expect("close reopened");
+    spawner.join().expect("spawner thread");
+}
+
+#[test]
 fn create_rejects_invalid_headers() {
     let temp = TempDir::new();
     let workspace = temp.join("workspace");

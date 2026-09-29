@@ -16,6 +16,7 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use otto_core::agent::inbox::NotificationKind;
 use otto_core::agent::{CompactionResult, Event};
 use otto_core::model::Usage;
 use otto_core::session::types::SessionInfo;
@@ -825,6 +826,13 @@ impl App {
         self.dispatch_line(&queued, controller, cancel)
     }
 
+    pub(crate) fn defer_queued_input(&mut self, controller: &Controller) {
+        if self.queued_input_sent {
+            controller.withdraw_user_message();
+            self.queued_input_sent = false;
+        }
+    }
+
     pub(crate) fn submit_input(
         &mut self,
         controller: &Controller,
@@ -1353,20 +1361,24 @@ impl App {
                 self.push_system(message);
                 true
             }
+            Event::Notification {
+                kind: Some(NotificationKind::UserMessage),
+                text,
+                ..
+            } => {
+                let queued = self.queued_input.take().unwrap_or(text);
+                self.queued_input_sent = false;
+                self.history.remember(&queued);
+                self.entries.push(Entry {
+                    id: format!("user-{}", self.entries.len()),
+                    kind: Some(EntryKind::User),
+                    raw: queued,
+                    ..Entry::default()
+                });
+                self.scroll = None;
+                false
+            }
             Event::Notification { task_id, text, .. } => {
-                if self.queued_input_sent && task_id.is_empty() {
-                    let queued = self.queued_input.take().unwrap_or(text);
-                    self.queued_input_sent = false;
-                    self.history.remember(&queued);
-                    self.entries.push(Entry {
-                        id: format!("user-{}", self.entries.len()),
-                        kind: Some(EntryKind::User),
-                        raw: queued,
-                        ..Entry::default()
-                    });
-                    self.scroll = None;
-                    return false;
-                }
                 self.push_system(format!("[task {task_id}] {text}"));
                 false
             }
@@ -1916,6 +1928,20 @@ mod tests {
         }));
 
         app.apply_event(Event::Notification {
+            kind: None,
+            task_id: String::new(),
+            text: "not the queued input".into(),
+            usage: Usage::default(),
+            present: false,
+        });
+        assert!(
+            app.queued_input_sent,
+            "an untyped notification is not user input"
+        );
+        assert_eq!(app.queued_input.as_deref(), Some("change course"));
+
+        app.apply_event(Event::Notification {
+            kind: Some(NotificationKind::UserMessage),
             task_id: String::new(),
             text: "change course".into(),
             usage: Usage::default(),
@@ -1928,6 +1954,48 @@ mod tests {
             Some(EntryKind::User)
         );
         assert_eq!(app.history.previous(""), Some("change course".to_string()));
+    }
+
+    #[tokio::test]
+    async fn failed_turn_defers_queued_input_without_running_it() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let admission = controller.begin_operation().expect("active turn");
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        app.start_turn();
+        app.insert_text("follow up");
+        app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        drop(admission);
+
+        app.defer_queued_input(&controller);
+
+        assert!(!app.queued_input_sent);
+        assert_eq!(app.queued_input.as_deref(), Some("follow up"));
+        assert!(controller.current_runner().is_some_and(|runner| {
+            runner
+                .inbox()
+                .snapshot()
+                .iter()
+                .all(|item| item.kind != Some(NotificationKind::UserMessage))
+        }));
+
+        let mut slash = App::new(&controller);
+        slash.start_turn();
+        slash.insert_text("/memory search vim");
+        slash.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        slash.defer_queued_input(&controller);
+        assert_eq!(slash.queued_input.as_deref(), Some("/memory search vim"));
+        assert!(slash.entries.is_empty(), "the slash command did not run");
     }
 
     #[tokio::test]

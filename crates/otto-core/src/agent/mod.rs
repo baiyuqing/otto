@@ -646,6 +646,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 })?;
             self.options.inbox.remove_seq(entry.seq);
             emit(Event::Notification {
+                kind: notification.kind,
                 task_id: notification.task_id,
                 text,
                 usage: notification.usage.unwrap_or_default(),

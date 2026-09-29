@@ -460,13 +460,18 @@ async fn run_app<B: Backend>(
                     )
                     .await;
                     if let Err(error) = result {
+                        app.defer_queued_input(controller);
                         propagate_turn_error(error)?;
+                        continue;
                     }
-                    while app.queued_input_sent {
+                    if app.queued_input_sent {
                         if let Err(error) =
                             run_wake(&mut app, terminal, keys, controller, cancel).await
                         {
                             propagate_turn_error(error)?;
+                        }
+                        if app.queued_input_sent {
+                            app.defer_queued_input(controller);
                         }
                     }
                     if app.queued_input.is_some() {

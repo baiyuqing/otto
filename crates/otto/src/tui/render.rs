@@ -150,9 +150,14 @@ const STARTUP_LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = transcript::lines(&app.entries, app.show_details, area.width as usize);
     if let Some(queued) = &app.queued_input {
+        let label = if app.queued_input_sent {
+            "Queued for current turn"
+        } else {
+            "Queued next input"
+        };
         let queued = Entry {
             kind: Some(super::entries::EntryKind::User),
-            raw: format!("Queued for current turn: {queued}"),
+            raw: format!("{label}: {queued}"),
             ..Entry::default()
         };
         if !lines.is_empty() {
@@ -359,10 +364,12 @@ fn composer_lines(input: &[char], cursor: usize, width: u16) -> (Vec<String>, u1
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     let (title, style) = if app.busy() && app.queued_input.is_some() {
-        (
-            "Queued for next checkpoint · Ctrl+U withdraw · Esc cancels turn",
-            Style::default().fg(Color::Cyan),
-        )
+        let title = if app.queued_input_sent {
+            "Queued for next checkpoint · Ctrl+U withdraw · Esc cancels turn"
+        } else {
+            "Queued next input · Ctrl+U withdraw · Esc cancels turn"
+        };
+        (title, Style::default().fg(Color::Cyan))
     } else if app.busy() {
         (
             "Working — Enter queues for this turn · Esc cancels turn",
@@ -1014,8 +1021,21 @@ mod tests {
     async fn committed_queued_input_draws_in_transcript_not_composer() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
         app.start_turn();
-        app.queued_input = Some("follow up".to_string());
+        app.queued_input = Some("/memory search vim".to_string());
 
+        let screen = rendered(&app, 72, 12);
+
+        assert!(
+            screen.contains("❯ Queued next input: /memory search vim"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Queued next input · Ctrl+U withdraw"),
+            "{screen}"
+        );
+
+        app.queued_input = Some("follow up".to_string());
+        app.queued_input_sent = true;
         let screen = rendered(&app, 72, 12);
 
         assert!(

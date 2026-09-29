@@ -556,8 +556,10 @@ OTTO_UI=repl otto
 - Entries are separated by a blank line.
 - While a turn is running, an animated status line is shown under the
   transcript, and the composer title reads `Working — Enter queues for this
-  turn · Esc cancels turn` (or, once input is queued, `Queued for next
-  checkpoint · Ctrl+U withdraw · Esc cancels turn`). Ordinary input is
+  turn · Esc cancels turn` (or, once ordinary input is queued, `Queued for
+  next checkpoint · Ctrl+U withdraw · Esc cancels turn`). A queued slash
+  command instead reads `Queued next input`, because it remains local until
+  the active turn succeeds. Ordinary input is
   delivered within the same turn after the current provider response or tool
   call finishes; `agent_wait` yields immediately. Slash commands still wait
   until the turn finishes. The status line reads

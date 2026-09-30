@@ -1199,23 +1199,18 @@ mod tests {
     fn concurrent_acquire_with_races_exactly_one_winner() {
         let tmp = tempfile::tempdir().unwrap();
         let session_path = tmp.path().join("s.jsonl");
-        create_lease_dir(&session_path, 6).unwrap();
+        // Use a real, minimum lease window: a loser must wait long enough to
+        // observe the winning thread's first heartbeat. Advancing a fake clock
+        // instantly made this test depend on the winner receiving a scheduler
+        // slice during a fixed 35 ms wall-clock delay, which CI can exceed.
+        create_lease_dir(&session_path, 1).unwrap();
         let session_path = Arc::new(session_path);
 
         let mut handles = Vec::new();
         for _ in 0..4 {
             let session_path = Arc::clone(&session_path);
             handles.push(std::thread::spawn(move || {
-                // A losing thread's wait loop advances a `FakeClock`
-                // instantly; without a real delay on each tick it could
-                // finish waiting out the liveness window before the
-                // winning thread's `finish_acquire` (real syscalls) gets a
-                // scheduler slice to write its heartbeat, and wrongly treat
-                // the winner's epoch as abandoned.
-                let clock = FakeClock::with_on_sleep(|| {
-                    std::thread::sleep(Duration::from_millis(5));
-                });
-                acquire_with(&session_path, &clock, no_op_keeper2())
+                acquire_with(&session_path, &RealClock, no_op_keeper2())
             }));
         }
         fn no_op_keeper2() -> &'static Arc<Keeper> {

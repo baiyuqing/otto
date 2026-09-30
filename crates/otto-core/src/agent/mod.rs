@@ -815,7 +815,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     /// The messages are clones, so the overlay substitution and the memory
     /// message never reach the session.
     fn build_normal_provider_request(&self, state: &RunDispatchState) -> (Request, i64) {
-        let mut messages = self.session.messages();
+        let mut messages = self.session.model_messages();
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
         if !state.memory_context.is_empty() {
             let current_user = messages

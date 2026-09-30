@@ -1,4 +1,4 @@
-//! The standalone `otto memory status|forget <id>` CLI.
+//! The standalone `otto memory status|list|show <id>|forget <id>` CLI.
 //!
 //! It is dispatched before the main flag set is parsed, because its argument
 //! grammar is its own, and it builds only the memory service: no provider,
@@ -17,7 +17,7 @@ use otto_core::config::resolve_memory;
 
 use super::boundary::{self, BoundaryInputs};
 use super::run::fail;
-use crate::memory::{ForgetRequest, RecordRef, Scope, Service};
+use crate::memory::{ForgetRequest, ListRequest, MAX_PAGE_SIZE, RecordRef, Scope, Service};
 
 const STORE_UNAVAILABLE_WARNING: &str =
     "warning: memory store unavailable, continuing without memory";
@@ -32,6 +32,9 @@ struct Flags {
     config_path: String,
     explicit_config: bool,
     cwd: String,
+    scope: String,
+    limit: usize,
+    cursor: String,
 }
 
 /// Parses `--config PATH` and `--cwd PATH` in either `--name value` or
@@ -41,6 +44,9 @@ fn parse_flags(args: &[String]) -> Result<Flags, ()> {
         config_path: String::new(),
         explicit_config: false,
         cwd: ".".into(),
+        scope: "current".into(),
+        limit: 20,
+        cursor: String::new(),
     };
     let mut index = 0;
     while index < args.len() {
@@ -50,7 +56,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, ()> {
             None => (argument, None),
         };
         let name = name.trim_start_matches('-');
-        if !matches!(name, "config" | "cwd") {
+        if !matches!(name, "config" | "cwd" | "scope" | "limit" | "cursor") {
             return Err(());
         }
         let value = match inline {
@@ -63,8 +69,20 @@ fn parse_flags(args: &[String]) -> Result<Flags, ()> {
         if name == "config" {
             flags.explicit_config = !value.is_empty();
             flags.config_path = value;
-        } else {
+        } else if name == "cwd" {
             flags.cwd = value;
+        } else if name == "scope" {
+            if !matches!(value.as_str(), "current" | "user" | "workspace" | "all") {
+                return Err(());
+            }
+            flags.scope = value;
+        } else if name == "limit" {
+            flags.limit = value.parse().map_err(|_| ())?;
+            if !(1..=MAX_PAGE_SIZE).contains(&flags.limit) {
+                return Err(());
+            }
+        } else {
+            flags.cursor = value;
         }
         index += 1;
     }
@@ -81,13 +99,13 @@ pub fn run(
     let Some(subcommand) = args.first().cloned() else {
         return fail(
             stderr,
-            "usage: otto memory status|forget <id> [--config PATH] [--cwd PATH]",
+            "usage: otto memory status|list|show <id>|forget <id> [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] [--config PATH] [--cwd PATH]",
         );
     };
     let mut rest = &args[1..];
 
     let mut record_id = String::new();
-    if subcommand == "forget" {
+    if matches!(subcommand.as_str(), "forget" | "show") {
         match rest.first() {
             Some(first) if !first.starts_with('-') => {
                 record_id = first.clone();
@@ -96,7 +114,9 @@ pub fn run(
             _ => {
                 return fail(
                     stderr,
-                    "usage: otto memory forget <id> [--config PATH] [--cwd PATH]",
+                    &format!(
+                        "usage: otto memory {subcommand} <id> [--scope current|user|workspace] [--config PATH] [--cwd PATH]"
+                    ),
                 );
             }
         }
@@ -143,6 +163,25 @@ pub fn run(
 
     match subcommand.as_str() {
         "status" => status(&memory_config, &secret_values, stdout, stderr),
+        "list" => list(
+            &memory_config,
+            &secret_values,
+            &flags.cwd,
+            &flags.scope,
+            flags.limit,
+            &flags.cursor,
+            stdout,
+            stderr,
+        ),
+        "show" => show(
+            &memory_config,
+            &secret_values,
+            &flags.cwd,
+            &flags.scope,
+            &record_id,
+            stdout,
+            stderr,
+        ),
         "forget" => {
             let Ok(workspace) = super::sandbox_runtime::canonical_directory(Path::new(&flags.cwd))
             else {
@@ -187,6 +226,147 @@ fn status(
     }
     let _ = service.close();
     0
+}
+
+fn list(
+    config: &MemoryRuntime,
+    secret_values: &[String],
+    cwd: &str,
+    scope: &str,
+    limit: usize,
+    cursor: &str,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+) -> i32 {
+    let Ok(workspace) = super::sandbox_runtime::canonical_directory(Path::new(cwd)) else {
+        return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
+    };
+    let mut warning = Vec::new();
+    let Ok((service, user_scope, usable)) =
+        super::wiring::open_memory_service(config, secret_values, &mut warning)
+    else {
+        return fail(stderr, BACKEND_UNAVAILABLE);
+    };
+    if !usable {
+        let _ = service.close();
+        return fail(stderr, "memory is not usable");
+    }
+    let workspace_scope =
+        match super::wiring::workspace_memory_scope(config, &workspace.to_string_lossy()) {
+            Ok(scope) => scope,
+            Err(_) => {
+                let _ = service.close();
+                return fail(stderr, WORKSPACE_UNAVAILABLE);
+            }
+        };
+    let (all_scopes, scopes) = match scope {
+        "current" => (false, vec![user_scope, workspace_scope]),
+        "user" => (false, vec![user_scope]),
+        "workspace" => (false, vec![workspace_scope]),
+        "all" => (true, Vec::new()),
+        _ => return fail(stderr, "invalid memory scope"),
+    };
+    let result = service.list(&ListRequest {
+        all_scopes,
+        scopes,
+        kinds: Vec::new(),
+        labels: Vec::new(),
+        limit,
+        cursor: cursor.to_string(),
+        now: chrono::Utc::now(),
+        include_expired: true,
+    });
+    let _ = service.close();
+    match result {
+        Ok(page) => {
+            for record in page.records {
+                let _ = writeln!(
+                    stdout,
+                    "id={} scope={}/{} kind={} key={} revision={} created_at={} updated_at={} text={}",
+                    record.id,
+                    record.scope.namespace,
+                    record.scope.id,
+                    record.kind,
+                    record.key,
+                    record.revision,
+                    record.created_at,
+                    record.updated_at,
+                    record.text
+                );
+            }
+            if !page.next_cursor.is_empty() {
+                let _ = writeln!(stdout, "next_cursor={}", page.next_cursor);
+            }
+            0
+        }
+        Err(error) => fail(stderr, &error.to_string()),
+    }
+}
+
+fn show(
+    config: &MemoryRuntime,
+    secret_values: &[String],
+    cwd: &str,
+    scope: &str,
+    id: &str,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+) -> i32 {
+    if scope == "all" {
+        return fail(stderr, "show requires --scope current, user, or workspace");
+    }
+    let Ok(workspace) = super::sandbox_runtime::canonical_directory(Path::new(cwd)) else {
+        return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
+    };
+    let mut warning = Vec::new();
+    let Ok((service, user_scope, usable)) =
+        super::wiring::open_memory_service(config, secret_values, &mut warning)
+    else {
+        return fail(stderr, BACKEND_UNAVAILABLE);
+    };
+    if !usable {
+        let _ = service.close();
+        return fail(stderr, "memory is not usable");
+    }
+    let workspace_scope =
+        match super::wiring::workspace_memory_scope(config, &workspace.to_string_lossy()) {
+            Ok(scope) => scope,
+            Err(_) => return fail(stderr, WORKSPACE_UNAVAILABLE),
+        };
+    let scopes = match scope {
+        "current" => vec![user_scope, workspace_scope],
+        "user" => vec![user_scope],
+        "workspace" => vec![workspace_scope],
+        _ => unreachable!("scope was parsed"),
+    };
+    let record = scopes.into_iter().find_map(|scope| {
+        service
+            .get(&RecordRef {
+                scope,
+                id: id.to_string(),
+            })
+            .ok()
+    });
+    let _ = service.close();
+    match record {
+        Some(record) => {
+            let _ = writeln!(
+                stdout,
+                "id={} scope={}/{} kind={} key={} revision={} created_at={} updated_at={} text={}",
+                record.id,
+                record.scope.namespace,
+                record.scope.id,
+                record.kind,
+                record.key,
+                record.revision,
+                record.created_at,
+                record.updated_at,
+                record.text
+            );
+            0
+        }
+        None => fail(stderr, &format!("record {id} not found")),
+    }
 }
 
 fn forget(
@@ -371,6 +551,71 @@ mod tests {
     }
 
     #[test]
+    fn list_pages_all_scopes_only_when_requested() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let other_workspace = tempfile::tempdir().expect("other workspace");
+        let store = tempfile::tempdir().expect("store");
+        let db_path = store
+            .path()
+            .join("memory.db")
+            .to_string_lossy()
+            .into_owned();
+        let config = memory_config(home.path(), &db_path);
+        let runtime = MemoryRuntime {
+            enabled: true,
+            backend: "sqlite".into(),
+            sqlite_path: db_path,
+            ..MemoryRuntime::default()
+        };
+        let (service, user, usable) =
+            super::super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+                .expect("open");
+        assert!(usable);
+        let current = super::super::wiring::workspace_memory_scope(
+            &runtime,
+            &workspace.path().to_string_lossy(),
+        )
+        .expect("current scope");
+        let other = super::super::wiring::workspace_memory_scope(
+            &runtime,
+            &other_workspace.path().to_string_lossy(),
+        )
+        .expect("other scope");
+        for (scope, key) in [
+            (user, "user-record"),
+            (current, "current-record"),
+            (other, "other-record"),
+        ] {
+            service
+                .remember(&RememberRequest {
+                    scope,
+                    kind: "note".into(),
+                    key: key.into(),
+                    text: key.into(),
+                    ..RememberRequest::default()
+                })
+                .expect("remember");
+        }
+        service.close().expect("close");
+        let cwd = workspace.path().to_string_lossy().into_owned();
+        let (code, default_output, stderr) =
+            memory(&["list", "--config", &config, "--cwd", &cwd], home.path());
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(default_output.contains("user-record"));
+        assert!(default_output.contains("current-record"));
+        assert!(!default_output.contains("other-record"));
+        let (code, output, stderr) = memory(
+            &[
+                "list", "--scope", "all", "--limit", "1", "--config", &config, "--cwd", &cwd,
+            ],
+            home.path(),
+        );
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(output.contains("next_cursor="), "output = {output:?}");
+    }
+
+    #[test]
     fn forget_removes_a_record_from_the_workspace_scope() {
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
@@ -456,7 +701,7 @@ mod tests {
         assert_eq!(code, 1);
         assert_eq!(
             stderr,
-            "otto: usage: otto memory status|forget <id> [--config PATH] [--cwd PATH]\n"
+            "otto: usage: otto memory status|list|show <id>|forget <id> [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] [--config PATH] [--cwd PATH]\n"
         );
     }
 

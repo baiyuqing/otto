@@ -594,7 +594,7 @@ impl Store {
                 {
                     return Err(Error::new(ErrorKind::Conflict));
                 }
-                if request.scopes.is_empty() {
+                if !request.all_scopes && request.scopes.is_empty() {
                     return Ok((generation, Vec::new()));
                 }
                 let statement = build_list_query(request, cursor.as_ref());
@@ -1064,6 +1064,60 @@ mod tests {
     }
 
     #[test]
+    fn all_scope_listing_is_explicit_and_pages_across_scopes() {
+        let (_directory, store) = open_temp();
+        let user = user_scope(&store);
+        let workspace = Scope::new("workspace", "other-workspace");
+        for (id, scope, updated) in [
+            ("rec-user", user.clone(), 1),
+            ("rec-workspace", workspace, 2),
+        ] {
+            let mut record = sample_record(id, &scope, id, "text");
+            record.created_at = at(0);
+            record.updated_at = at(updated);
+            store
+                .upsert(&UpsertRequest {
+                    record,
+                    expected_revision: None,
+                })
+                .expect("create");
+        }
+        let denied = store
+            .list(&ListRequest {
+                all_scopes: false,
+                scopes: Vec::new(),
+                kinds: Vec::new(),
+                labels: Vec::new(),
+                limit: 10,
+                cursor: String::new(),
+                now: at(3),
+                include_expired: true,
+            })
+            .expect("empty explicit scopes");
+        assert!(denied.records.is_empty());
+        let request = ListRequest {
+            all_scopes: true,
+            scopes: Vec::new(),
+            kinds: Vec::new(),
+            labels: Vec::new(),
+            limit: 1,
+            cursor: String::new(),
+            now: at(3),
+            include_expired: true,
+        };
+        let first = store.list(&request).expect("first page");
+        assert_eq!(first.records[0].id, "rec-workspace");
+        let second = store
+            .list(&ListRequest {
+                cursor: first.next_cursor,
+                ..request
+            })
+            .expect("second page");
+        assert_eq!(second.records[0].id, "rec-user");
+        assert!(second.next_cursor.is_empty());
+    }
+
+    #[test]
     fn listing_pages_by_cursor_and_rejects_a_cursor_from_another_query() {
         let (_directory, store) = open_temp();
         let scope = user_scope(&store);
@@ -1084,6 +1138,7 @@ mod tests {
                 .expect("create");
         }
         let request = ListRequest {
+            all_scopes: false,
             scopes: vec![scope.clone()],
             kinds: Vec::new(),
             labels: Vec::new(),

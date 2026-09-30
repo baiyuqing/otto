@@ -47,6 +47,31 @@ If you only want a local copy in the checkout, run `make build` and then
 
 ## Quick start
 
+Run `otto setup` after installation to create a default profile. It stores no
+API key and leaves shell commands sandboxed by default. Choose a model ID
+available to your own account or provider; Otto does not select one for you.
+
+```bash
+./otto setup
+```
+
+For ChatGPT, sign in and then start Otto:
+
+```bash
+./otto login
+./otto
+```
+
+For an OpenAI-compatible provider, export the environment variable selected by
+setup, then start Otto:
+
+```bash
+export OPENAI_API_KEY=your-key
+./otto
+```
+
+You can still run with one-off provider flags instead of creating a profile.
+
 ### ChatGPT sign-in
 
 Sign in, then choose a model available to your account (replace `YOUR_MODEL_ID`):

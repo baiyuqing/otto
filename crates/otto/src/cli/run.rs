@@ -8,7 +8,7 @@
 //! [`SandboxSwitch`], so `/sandbox reload`, `POST /v1/sandbox/reload` and the
 //! TUI all re-point bash at a new runtime without restarting the process.
 //!
-//! `sandbox`, `memory`, `login`, `logout` and `trust` dispatch before flag
+//! `sandbox`, `memory`, `login`, `logout`, `setup` and `trust` dispatch before flag
 //! parsing, because their argument grammars are their own; nothing is left
 //! unported.
 //!
@@ -259,6 +259,19 @@ pub async fn run(
             Err(message) => return fail(stderr, &message),
         };
         return super::login::run_auth_command(args, stdout, stderr, &home, cancel).await;
+    }
+    if let Some(first) = args.first()
+        && first == "setup"
+    {
+        let host_entries = match capture_environment(environment_entries) {
+            Ok(entries) => entries,
+            Err(message) => return fail(stderr, &message),
+        };
+        let lookup = match environment_lookup(&host_entries) {
+            Ok(lookup) => lookup,
+            Err(message) => return fail(stderr, &message),
+        };
+        return super::setup::run(&args[1..], &mut stdin, stdout, stderr, &lookup);
     }
     if let Some(first) = args.first()
         && first == "trust"
@@ -568,6 +581,12 @@ pub async fn run(
         &builder.overrides,
     ) {
         Ok(runtime) => runtime,
+        Err(error) if error.to_string() == "missing provider" => {
+            return fail(
+                stderr,
+                "no provider configured; run `otto setup` to create one, or pass --provider and --model",
+            );
+        }
         Err(error) => return fail(stderr, &builder.redact_error(&error.to_string(), None)),
     };
 
@@ -1733,6 +1752,36 @@ driver = "off"
             "{stderr}"
         );
         assert!(!stderr.contains("startup total:"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn an_empty_implicit_configuration_points_to_setup() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let args = vec![
+            "--cwd".to_string(),
+            workspace.path().to_string_lossy().into_owned(),
+            "--no-session".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            &args,
+            Box::new(Cursor::new(Vec::new())),
+            &mut stdout,
+            &mut stderr,
+            entries(&[&format!("HOME={}", home.path().to_string_lossy())]),
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+            &crate::cli::terminate::Terminate::new(),
+        )
+        .await;
+
+        assert_eq!(code, 1);
+        assert_eq!(
+            String::from_utf8_lossy(&stderr),
+            "otto: no provider configured; run `otto setup` to create one, or pass --provider and --model\n"
+        );
     }
 
     #[tokio::test]

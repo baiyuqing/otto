@@ -247,7 +247,7 @@ never retried automatically.
   a VM and does not prevent destructive changes inside the writable workspace.
 - In an interactive parent session, Otto can request one-time unsandboxed Bash
   execution. Review the exact command and run `/approve <id>` to grant it once;
-  the request expires after five minutes and never changes `config.toml`.
+  the request remains pending until it is replaced, consumed, or Otto exits, and never changes `config.toml`.
 - Session files may contain workspace files, prompts, images, and tool results. Treat
   them as sensitive.
 - No plugins, automatic project-local config discovery, session trees/forks,

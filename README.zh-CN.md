@@ -39,6 +39,28 @@ otto --help
 
 ## 快速开始
 
+安装后运行 `otto setup` 创建默认 profile。它不会保存 API key，Shell 命令默认仍在沙箱中运行。模型 ID 必须由你从自己的账号或服务商中选择，Otto 不会预设模型。
+
+```bash
+./otto setup
+```
+
+使用 ChatGPT 时，接着登录并启动 Otto：
+
+```bash
+./otto login
+./otto
+```
+
+使用 OpenAI-compatible 服务商时，导出 setup 选择的环境变量后启动：
+
+```bash
+export OPENAI_API_KEY=your-key
+./otto
+```
+
+也可以不创建 profile，继续使用一次性的 provider 参数。
+
 ### ChatGPT 登录
 
 登录后，将 `YOUR_MODEL_ID` 替换为你的账号可用的模型名称：

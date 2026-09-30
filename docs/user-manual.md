@@ -83,7 +83,15 @@ make install
 `make install` builds Otto and installs it to `~/.local/bin/otto`; make sure
 `~/.local/bin` is on your `PATH`.
 
-Create `~/.config/otto/config.toml`:
+For a persistent default profile, run the interactive setup command. It stores
+no API key; choose a model ID available to your account or provider. For a
+ChatGPT profile, run `otto login` after setup before starting Otto.
+
+```bash
+otto setup
+```
+
+To configure the file manually instead, create `~/.config/otto/config.toml`:
 
 ```toml
 default_profile = "deepseek"
@@ -199,6 +207,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto logout` | Remove stored ChatGPT credentials. |
 | `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
 | `otto sandbox setup [--config PATH] [--cwd PATH]` | Choose shell sandbox permissions interactively. See [Interactive sandbox setup](#interactive-sandbox-setup). |
+| `otto setup [--config PATH]` | Create an initial provider profile without storing credentials. See [Quick start](#quick-start). |
 | `otto workflow run <name> [--input TEXT]` | Start a durable workflow and wait until it finishes or needs approval. |
 | `otto workflow status <run-id>` | Print one workflow run and its approval requests as JSON. |
 | `otto workflow resume <run-id> [--retry <step-id>]` | Resume safe pending work, or explicitly retry one interrupted step. |

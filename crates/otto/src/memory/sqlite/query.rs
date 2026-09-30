@@ -245,13 +245,15 @@ pub fn build_list_query(
 ) -> Statement {
     let mut clauses = vec!["state='active'".to_string()];
     let mut arguments: Vec<Value> = Vec::new();
-    let mut scopes = Vec::new();
-    for scope in &request.scopes {
-        scopes.push("(scope_namespace=? AND scope_id=?)".to_string());
-        arguments.push(text(&scope.namespace));
-        arguments.push(text(&scope.id));
+    if !request.all_scopes {
+        let mut scopes = Vec::new();
+        for scope in &request.scopes {
+            scopes.push("(scope_namespace=? AND scope_id=?)".to_string());
+            arguments.push(text(&scope.namespace));
+            arguments.push(text(&scope.id));
+        }
+        clauses.push(format!("({})", scopes.join(" OR ")));
     }
-    clauses.push(format!("({})", scopes.join(" OR ")));
     if !request.kinds.is_empty() {
         clauses.push(format!("kind IN ({})", placeholders(request.kinds.len())));
         arguments.extend(request.kinds.iter().map(|kind| text(kind)));

@@ -141,6 +141,12 @@ impl Service {
         self.ready()?.get_by_key(key)
     }
 
+    /// Lists active records with a stable, generation-bound cursor. `all_scopes`
+    /// is explicit so an accidentally empty scope set cannot disclose the store.
+    pub fn list(&self, request: &ListRequest) -> Result<super::RecordPage> {
+        self.ready()?.list(request)
+    }
+
     pub fn get_tombstone(&self, reference: &RecordRef) -> Result<Tombstone> {
         self.ready()?.get_tombstone(reference)
     }
@@ -157,6 +163,7 @@ impl Service {
 
         let (records, next_cursor) = if request.query.is_empty() {
             let page = store.list(&ListRequest {
+                all_scopes: false,
                 scopes: request.scopes.clone(),
                 kinds: request.kinds.clone(),
                 labels: request.labels.clone(),

@@ -2011,7 +2011,7 @@ mod tests {
 /// warnings, [`Builder::boundary_catalog_definitions`] for the redaction
 /// boundary, and `resolve_sandbox_settings` for the Seatbelt read paths. A full
 /// `skill` tool call/result round trip belongs to `skill::tool`'s own tests and
-/// the section's position after `## Environment` to `system_prompt_for`, so
+/// the section's XML position after `<environment>` to `system_prompt_for`, so
 /// neither is repeated here.
 #[cfg(test)]
 mod catalog_tests {
@@ -2104,7 +2104,7 @@ mod catalog_tests {
 
         let (wiring, tools, warnings) = catalogs(&fixture.builder);
         assert!(
-            wiring.skill_section.contains("\n\n## Skills\n"),
+            wiring.skill_section.contains("\n<skills>\n"),
             "{:?}",
             wiring.skill_section
         );
@@ -2230,7 +2230,7 @@ mod catalog_tests {
         let (wiring, _, warnings) = catalogs(&fixture.builder);
         assert!(wiring.agents.enabled);
         assert!(
-            wiring.agent_section.contains("\n\n## Agents\n"),
+            wiring.agent_section.contains("\n<agents>\n"),
             "{:?}",
             wiring.agent_section
         );

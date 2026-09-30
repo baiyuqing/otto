@@ -23,7 +23,9 @@ use chrono::Utc;
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, fcntl};
 
-use otto_core::config::{ConfigError, File};
+use otto_core::config::{
+    ConfigError, File, Overrides, PROVIDER_CHATGPT, PROVIDER_OPENAI_COMPATIBLE, SessionDefaults,
+};
 
 /// An error from the native config layer: either an I/O failure opening,
 /// reading, or writing the file, or a [`ConfigError`] from otto-core's pure
@@ -330,6 +332,117 @@ fn io_error(message: &'static str) -> NativeConfigError {
     NativeConfigError::Io(io::Error::other(message))
 }
 
+/// Creates a new configuration file containing one default provider profile.
+///
+/// The destination must not exist, including as an empty file or symlink. The
+/// final install is create-only, so a non-Otto writer that wins a race is never
+/// overwritten.
+pub(crate) fn create_initial_profile(
+    path: &Path,
+    profile: &str,
+    provider: &str,
+    model: &str,
+    base_url: &str,
+    api_key_env: &str,
+) -> Result<(), String> {
+    let content = initial_profile_content(profile, provider, model, base_url, api_key_env)?;
+    create_bytes_if_absent(path, content.as_bytes()).map_err(str::to_string)
+}
+
+/// Renders and validates the complete non-secret configuration `otto setup`
+/// proposes before a user confirms its creation.
+pub(crate) fn initial_profile_content(
+    profile: &str,
+    provider: &str,
+    model: &str,
+    base_url: &str,
+    api_key_env: &str,
+) -> Result<String, String> {
+    if !matches!(provider, PROVIDER_CHATGPT | PROVIDER_OPENAI_COMPATIBLE) {
+        return Err("unsupported provider; no changes made".to_string());
+    }
+    let mut profile_table = toml::Table::new();
+    profile_table.insert(
+        "provider".to_string(),
+        toml::Value::String(provider.to_string()),
+    );
+    profile_table.insert("model".to_string(), toml::Value::String(model.to_string()));
+    if provider == PROVIDER_OPENAI_COMPATIBLE {
+        profile_table.insert(
+            "base_url".to_string(),
+            toml::Value::String(base_url.to_string()),
+        );
+        profile_table.insert(
+            "api_key_env".to_string(),
+            toml::Value::String(api_key_env.to_string()),
+        );
+    }
+    let mut profiles = toml::Table::new();
+    profiles.insert(profile.to_string(), toml::Value::Table(profile_table));
+    let mut root = toml::Table::new();
+    root.insert(
+        "default_profile".to_string(),
+        toml::Value::String(profile.to_string()),
+    );
+    root.insert("profiles".to_string(), toml::Value::Table(profiles));
+    let content = toml::to_string(&root).map_err(|_| "cannot create configuration".to_string())?;
+    let parsed = otto_core::config::parse(&content)
+        .map_err(|_| "cannot create configuration".to_string())?;
+    let mut environment = HashMap::new();
+    if provider == PROVIDER_OPENAI_COMPATIBLE {
+        environment.insert(api_key_env.to_string(), "configured".to_string());
+    }
+    otto_core::config::resolve(
+        &parsed,
+        &environment,
+        &SessionDefaults::default(),
+        &Overrides::default(),
+    )
+    .map_err(|error| format!("invalid setup values: {error}"))?;
+    Ok(content)
+}
+
+/// Atomically installs `contents` only if `path` does not exist. It never
+/// replaces an existing filesystem object and keeps no backup because there is
+/// no replaced configuration.
+fn create_bytes_if_absent(path: &Path, contents: &[u8]) -> Result<(), &'static str> {
+    let _process_lock = CONFIG_WRITE_LOCK
+        .lock()
+        .map_err(|_| "cannot lock configuration")?;
+    let _lock = lock_config(path)?;
+    if fs::symlink_metadata(path).is_ok() {
+        return Err("configuration already exists; no changes made");
+    }
+    let directory = parent_directory(path);
+    let suffix = crate::cli::runtime_builder::random_id()
+        .map_err(|_| "cannot create temporary configuration")?;
+    let temp = directory.join(format!(".otto-config-{suffix}"));
+    let result = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|_| "cannot create temporary configuration")
+        .and_then(|mut file| {
+            file.write_all(contents)
+                .and_then(|()| file.sync_all())
+                .map_err(|_| "cannot write configuration")
+        })
+        .and_then(|()| match fs::hard_link(&temp, path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                Err("configuration already exists; no changes made")
+            }
+            Err(_) => Err("cannot create configuration"),
+        })
+        .and_then(|()| fs::remove_file(&temp).map_err(|_| "cannot create configuration"))
+        .and_then(|()| sync_directory(directory));
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
 /// Sets `path`'s `default_profile` to `profile`, after checking the profile
 /// exists in the file, changing only that value.
 pub fn set_default_profile_file(path: &Path, profile: &str) -> Result<(), NativeConfigError> {
@@ -444,6 +557,44 @@ mod tests {
 
     fn profile_file(name: &str) -> Vec<u8> {
         format!("default_profile = \"{name}\"\n").into_bytes()
+    }
+
+    #[test]
+    fn create_initial_profile_refuses_an_existing_empty_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("config.toml");
+        fs::write(&path, b"").expect("empty config");
+
+        let error = create_initial_profile(&path, "default", PROVIDER_CHATGPT, "my-model", "", "")
+            .expect_err("must not replace an existing config");
+
+        assert_eq!(error, "configuration already exists; no changes made");
+        assert_eq!(fs::read(&path).expect("read"), b"");
+        assert!(backups(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn create_initial_profile_writes_only_non_secret_fields() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("config.toml");
+
+        create_initial_profile(
+            &path,
+            "default",
+            PROVIDER_OPENAI_COMPATIBLE,
+            "cheap-model",
+            "https://api.example/v1",
+            "EXAMPLE_KEY",
+        )
+        .expect("create");
+
+        let content = fs::read_to_string(&path).expect("read");
+        assert!(
+            content.contains("api_key_env = \"EXAMPLE_KEY\""),
+            "{content}"
+        );
+        assert!(!content.contains("configured"), "{content}");
+        assert!(backups(directory.path()).is_empty());
     }
 
     #[test]

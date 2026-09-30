@@ -260,6 +260,7 @@ const USAGE: &str = r"Usage: otto [options]
        otto mcp list|add|remove|enable|disable|login|logout ...
        otto workflow run|status|resume|fork|approve|reject|cancel ...
        otto sandbox setup [--config PATH] [--cwd PATH]
+       otto setup [--config PATH]
 
 Sandbox: on macOS, auto -> Seatbelt; elsewhere there is no confined driver.
 If one cannot be established, bash is disabled and the file tools remain.

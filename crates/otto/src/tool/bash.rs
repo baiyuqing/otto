@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
@@ -61,12 +61,9 @@ enum SandboxPermissions {
     RequireEscalated,
 }
 
-const APPROVAL_LIFETIME: Duration = Duration::from_secs(5 * 60);
-
 struct Approval {
     id: String,
     command: String,
-    created_at: Instant,
     granted: bool,
 }
 
@@ -79,42 +76,25 @@ struct ApprovalState {
 /// Process-local, one-shot permission grants for exact Bash commands.
 ///
 /// One mutex serializes requests across sessions. A session keeps only its
-/// newest request; approval expires after five minutes and is removed before
-/// the matching command starts, so failure or cancellation cannot reuse it.
+/// newest request. A grant is removed before the matching command starts, so
+/// failure or cancellation cannot reuse it.
 pub struct BashApprovals {
     executor: Arc<dyn CommandExecutor>,
     environment: Vec<String>,
-    lifetime: Duration,
     state: Mutex<ApprovalState>,
 }
 
 impl BashApprovals {
     pub fn new(executor: Arc<dyn CommandExecutor>, environment: Vec<String>) -> Self {
-        Self::with_lifetime(executor, environment, APPROVAL_LIFETIME)
-    }
-
-    fn with_lifetime(
-        executor: Arc<dyn CommandExecutor>,
-        environment: Vec<String>,
-        lifetime: Duration,
-    ) -> Self {
         Self {
             executor,
             environment,
-            lifetime,
             state: Mutex::new(ApprovalState::default()),
         }
     }
 
-    fn retain_fresh(&self, state: &mut ApprovalState) {
-        state
-            .requests
-            .retain(|_, request| request.created_at.elapsed() < self.lifetime);
-    }
-
     fn request(&self, session_id: &str, command: &str) -> String {
         let mut state = self.state.lock().expect("bash approval mutex");
-        self.retain_fresh(&mut state);
         if let Some(request) = state
             .requests
             .get(session_id)
@@ -129,7 +109,6 @@ impl BashApprovals {
             Approval {
                 id: id.clone(),
                 command: command.to_owned(),
-                created_at: Instant::now(),
                 granted: false,
             },
         );
@@ -139,28 +118,24 @@ impl BashApprovals {
     /// Grants one pending command for `session_id`.
     pub fn approve(&self, session_id: &str, id: &str) -> Result<(), &'static str> {
         let mut state = self.state.lock().expect("bash approval mutex");
-        self.retain_fresh(&mut state);
         let request = state
             .requests
             .get_mut(session_id)
             .filter(|request| request.id == id)
-            .ok_or("approval request not found or expired")?;
+            .ok_or("approval request not found")?;
         request.granted = true;
         Ok(())
     }
 
-    /// Unexpired pending approvals for `session_id`: 0 or 1, since a session
-    /// keeps only its newest request. Applies the same expiry filter as
-    /// [`BashApprovals::approve`].
+    /// Pending approvals for `session_id`: 0 or 1, since a session keeps only
+    /// its newest request.
     pub fn pending_count(&self, session_id: &str) -> usize {
-        let mut state = self.state.lock().expect("bash approval mutex");
-        self.retain_fresh(&mut state);
+        let state = self.state.lock().expect("bash approval mutex");
         usize::from(state.requests.contains_key(session_id))
     }
 
     fn take(&self, session_id: &str, command: &str) -> bool {
         let mut state = self.state.lock().expect("bash approval mutex");
-        self.retain_fresh(&mut state);
         let granted = state
             .requests
             .get(session_id)
@@ -926,38 +901,12 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
     }
 
     #[test]
-    fn expired_approval_requests_cannot_be_granted() {
-        let approvals = BashApprovals::with_lifetime(
-            Arc::new(FakeExecutor::default()),
-            Vec::new(),
-            Duration::ZERO,
-        );
-        let id = approvals.request("session-1", "git push");
-        assert_eq!(
-            approvals.approve("session-1", &id),
-            Err("approval request not found or expired")
-        );
-    }
-
-    #[test]
-    fn pending_count_counts_unexpired_entries_only() {
-        let approvals = BashApprovals::with_lifetime(
-            Arc::new(FakeExecutor::default()),
-            Vec::new(),
-            Duration::from_secs(60),
-        );
+    fn pending_count_counts_entries_for_its_session() {
+        let approvals = BashApprovals::new(Arc::new(FakeExecutor::default()), Vec::new());
         assert_eq!(approvals.pending_count("session-1"), 0);
         approvals.request("session-1", "git push");
         assert_eq!(approvals.pending_count("session-1"), 1);
         assert_eq!(approvals.pending_count("other-session"), 0);
-
-        let expired = BashApprovals::with_lifetime(
-            Arc::new(FakeExecutor::default()),
-            Vec::new(),
-            Duration::ZERO,
-        );
-        expired.request("session-1", "git push");
-        assert_eq!(expired.pending_count("session-1"), 0);
     }
 
     /// The captured stdout body.

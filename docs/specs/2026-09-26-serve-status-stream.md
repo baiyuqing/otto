@@ -40,7 +40,7 @@ Status values per session, decided for this step:
 | Field | Meaning | Source |
 | --- | --- | --- |
 | `turn` | `running`, or the last finished turn's `ok` / `error` / `canceled`, or `null` if the session has had no turn since it was opened | `SessionState.turn` summary status |
-| `approvals` | number of unexpired pending Bash approvals | `BashApprovals` |
+| `approvals` | number of pending Bash approvals | `BashApprovals` |
 | `tasks` | number of sub-agent tasks in `queued` or `running` | `Controller::tasks()` |
 
 Out of scope:
@@ -89,17 +89,15 @@ the same pattern `Turn` uses. It is bumped at:
 5. `POST /v1/sessions/{id}/approvals/{approval_id}` after a grant.
 
 A new pending approval is created during a running turn, and the bump at that
-turn's finish reports it. An approval that expires after 5 minutes produces no
-bump; the next snapshot for any other reason drops it.
-ponytail: expiry is observed lazily; add a timer if a stale approval count
-matters.
+turn's finish reports it. Pending approvals remain in the count until they are
+replaced, consumed, or Otto exits.
 
 Each connection's stream waits on `status_changed.subscribe().changed()`,
 builds the snapshot from `all_sessions()`, and sends it if it differs from the
 previous one. `watch` coalesces bursts, so a client never falls behind.
 
-`BashApprovals` gains `pending_count(session_id) -> usize`, which applies the
-same expiry filter as `approve`.
+`BashApprovals` gains `pending_count(session_id) -> usize`, which counts the
+session's pending request.
 
 ## Web UI
 
@@ -129,7 +127,7 @@ Rust, `crates/otto/src/server` tests with the existing fake factory:
    a failing turn produces `"error"`.
 5. A session in a second workspace appears with that workspace.
 6. Closing a session removes it from the next snapshot.
-7. `BashApprovals::pending_count` counts unexpired entries only.
+7. `BashApprovals::pending_count` counts pending entries only.
 8. Two identical snapshots in a row are sent once.
 
 UI (vitest):

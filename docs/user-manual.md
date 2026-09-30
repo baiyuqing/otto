@@ -694,7 +694,7 @@ Shared commands:
   place.
 - `/approve <id>` grants one pending elevated Bash command and immediately asks
   Otto to retry it. The grant is tied to the current session and exact command,
-  is consumed once, and expires after five minutes.
+  is consumed once, and remains pending until it is replaced, consumed, or Otto exits.
 - `/skills` lists the skills available in the current session.
 - `/skill <name>` displays one skill's description, location, and instructions.
 - `/mcp` shows every configured MCP server and its connection state.
@@ -1163,8 +1163,8 @@ does not run the command; it returns an approval ID. Review the exact command
 and reason, then enter `/approve <id>`. The matching command runs once through
 the existing unconfined driver with the same filtered environment rules as
 other Bash commands. Approval is never automatic, is unavailable to child
-agents and one-shot `--prompt` runs, expires after five minutes, and does not
-modify sandbox configuration.
+agents and one-shot `--prompt` runs, remains pending until it is replaced,
+consumed, or Otto exits, and does not modify sandbox configuration.
 
 ### Seatbelt limitations
 
@@ -1504,13 +1504,13 @@ are served at the root. Request and error bodies are JSON.
 | `DELETE /v1/workspaces?path=...` | Unload a workspace and remove it from `~/.otto/serve-workspaces.json`. `204` on success; `404 WORKSPACE_NOT_FOUND`, `409 WORKSPACE_IS_STARTUP`, or `409 WORKSPACE_IN_USE` otherwise. |
 | `GET /v1/workspaces/diff?workspace=<path>` | Read-only changes of a working directory (default the startup workspace) against `HEAD`, or the empty tree before the first commit: staged, unstaged, and untracked files under that directory, ignored files excluded. `{"workspace", "repository", "branch", "files": [{"path", "old_path", "status", "binary", "patch", "truncated"}...], "truncated"}`. `status` is `modified`, `added`, `deleted`, `renamed`, or `untracked`; paths are relative to the directory. `repository:false` when the directory is not in a git work tree. git runs through the workspace's sandbox with external diff and textconv drivers disabled. Limits: 256 KiB of patch per file, about 1 MiB in total, patches for the first 200 untracked files, 10 s for all git commands. `400`/`403` as `POST /v1/workspaces`; `501 diff_unavailable` without a usable sandbox; `500 git_failed`; `504 git_timeout`. |
 | `POST /v1/sessions` | Create a session (`{}`, optionally `"workspace":"<path>"`, default the startup workspace) or attach to one already open in this process (`{"resume":"<id>"}`, searched in `workspace` if given, else every loaded workspace). `201` for a new session, `200` for an already-open one. Returns the session object. |
-| `GET /v1/status` | `text/event-stream` of `event: status` snapshots of every session open in this process, in every loaded workspace: `{"sessions":[{"id","workspace","turn","approvals","tasks"}...]}`, sorted by workspace, then id. `turn` is `running`, the last finished turn's `ok`, `error`, or `canceled`, or `null` before the first turn; `approvals` counts unexpired pending Bash approvals; `tasks` counts queued or running sub-agent tasks. The current snapshot is sent on connect and again whenever it changes; there is no replay. An approval that expires is dropped from the count at the next change for any other reason. The stream ends when the server shuts down. |
+| `GET /v1/status` | `text/event-stream` of `event: status` snapshots of every session open in this process, in every loaded workspace: `{"sessions":[{"id","workspace","turn","approvals","tasks"}...]}`, sorted by workspace, then id. `turn` is `running`, the last finished turn's `ok`, `error`, or `canceled`, or `null` before the first turn; `approvals` counts pending Bash approvals; `tasks` counts queued or running sub-agent tasks. The current snapshot is sent on connect and again whenever it changes; there is no replay. The stream ends when the server shuts down. |
 | `GET /v1/sessions?workspace=<path>` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`. Without `workspace`, every loaded workspace; with it, that workspace only. |
 | `GET /v1/sessions/{id}` | Return one open session's info. `404` if the session is not open. |
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
 | `GET /v1/sessions/{id}/history` | Return the session's message history. |
-| `POST /v1/sessions/{id}/approvals/{approval_id}` | Grant one pending elevated Bash command and return the retry prompt to submit as the next turn. `409` when the approval is unknown, expired, or a turn is active. |
+| `POST /v1/sessions/{id}/approvals/{approval_id}` | Grant one pending elevated Bash command and return the retry prompt to submit as the next turn. `409` when the approval is unknown or a turn is active. |
 | `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. Only the session's most recent turn is retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |

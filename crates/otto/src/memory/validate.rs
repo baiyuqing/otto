@@ -522,6 +522,9 @@ fn validate_now(now: DateTime<Utc>, include_expired: bool) -> Result<()> {
 }
 
 pub fn validate_list_request(request: &ListRequest) -> Result<()> {
+    if request.all_scopes && !request.scopes.is_empty() {
+        return Err(invalid_request("all scopes with explicit scopes"));
+    }
     validate_scopes(&request.scopes, true, false)?;
     validate_filters(&request.kinds, &request.labels)?;
     validate_page(request.limit, &request.cursor, MAX_PAGE_SIZE)?;

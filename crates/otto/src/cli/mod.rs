@@ -21,6 +21,7 @@ pub mod sandbox_runtime;
 pub mod sandbox_setup;
 pub mod sandbox_switch;
 pub mod serve;
+pub mod setup;
 pub mod terminate;
 #[cfg(test)]
 pub mod testutil;

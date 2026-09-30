@@ -1431,8 +1431,8 @@ mod tests {
 
         let content = rendered(&app, 160, MIN_TERMINAL_HEIGHT);
 
-        assert!(content.contains("alpha/gpt-alpha"), "{content}");
-        assert!(content.contains("think default"), "{content}");
+        assert!(content.contains("gpt-alpha"), "{content}");
+        assert!(content.contains("default"), "{content}");
         assert!(
             content.contains("bash disabled · sandbox unavailable"),
             "{content}"
@@ -1441,8 +1441,8 @@ mod tests {
         assert!(content.contains(&session_id), "{content}");
 
         let narrow = rendered(&app, MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
-        assert!(narrow.contains("alpha/gpt-alpha"), "{narrow}");
-        assert!(narrow.contains("think default"), "{narrow}");
+        assert!(narrow.contains("gpt-alpha"), "{narrow}");
+        assert!(narrow.contains("default"), "{narrow}");
     }
 
     /// A running task, ready to drop into `app.tasks` for the panel tests
@@ -1483,7 +1483,7 @@ mod tests {
         );
         assert!(panel_row.contains("t3"), "{panel_row:?}");
         assert!(panel_row.contains("review-auth"), "{panel_row:?}");
-        assert!(status_row.contains("alpha/gpt-alpha"), "{status_row:?}");
+        assert!(status_row.contains("gpt-alpha"), "{status_row:?}");
     }
 
     /// The composer's empty-input floor is 1 inner row, so the box (with its
@@ -1562,9 +1562,9 @@ mod tests {
         assert!(rows[6].contains("t3"), "{rows:?}");
         assert!(!rows.join("\n").contains("t4"), "{rows:?}");
         // The footer text is longer than this width, but it still starts
-        // with the profile/model field, so this confirms the status line
-        // landed on the frame's last row rather than being pushed off it.
-        assert!(rows[7].contains("alpha/gpt-alpha"), "{rows:?}");
+        // with the model field, confirming the status line landed on the
+        // frame's last row rather than being pushed off it.
+        assert!(rows[7].contains("gpt-alpha"), "{rows:?}");
     }
 
     /// An unnamed task is labeled by its agent, and by `default` when it has

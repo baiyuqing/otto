@@ -40,8 +40,7 @@ const DEFAULT_KIND: &str = "note";
 /// `pub(crate)` so the TUI's `tui::app` dispatch can assert on the exact usage
 /// text it reuses via [`repl_memory_command`]/[`repl_remember_command`] instead
 /// of duplicating the literal.
-pub(crate) const MEMORY_USAGE: &str =
-    "usage: /memory search <query> | /memory forget <id> | /memory review <id> accept|reject";
+pub(crate) const MEMORY_USAGE: &str = "usage: /memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject";
 pub(crate) const REMEMBER_USAGE: &str =
     "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>";
 pub(crate) const MEMORY_UNAVAILABLE: &str = "memory is not available";
@@ -180,6 +179,76 @@ fn render_search_result(result: &SearchResult) -> String {
         );
     }
     content.trim_end_matches('\n').to_string()
+}
+
+fn render_list_result(records: &[crate::memory::Record], next_cursor: &str) -> String {
+    if records.is_empty() {
+        return "no records".to_string();
+    }
+    let mut content = format!("{} records:\n", records.len());
+    for record in records {
+        let _ = writeln!(
+            content,
+            "id={} scope={}/{} kind={} key={} revision={} created_at={} updated_at={} text={}",
+            record.id,
+            record.scope.namespace,
+            record.scope.id,
+            record.kind,
+            record.key,
+            record.revision,
+            record.created_at,
+            record.updated_at,
+            record.text
+        );
+    }
+    if !next_cursor.is_empty() {
+        let _ = writeln!(content, "next_cursor={next_cursor}");
+    }
+    content.trim_end_matches('\n').to_string()
+}
+
+fn list_arguments(
+    rest: &[&str],
+    user: Scope,
+    workspace: Scope,
+) -> Option<(bool, Vec<Scope>, usize, String)> {
+    let (mut all_scopes, mut scopes, mut limit, mut cursor) = (
+        false,
+        vec![user.clone(), workspace.clone()],
+        20,
+        String::new(),
+    );
+    let mut index = 0;
+    while index < rest.len() {
+        let value = *rest.get(index)?;
+        index += 1;
+        match value {
+            "--scope" => match *rest.get(index)? {
+                "current" => {
+                    all_scopes = false;
+                    scopes = vec![user.clone(), workspace.clone()];
+                }
+                "user" => {
+                    all_scopes = false;
+                    scopes = vec![user.clone()];
+                }
+                "workspace" => {
+                    all_scopes = false;
+                    scopes = vec![workspace.clone()];
+                }
+                "all" => {
+                    all_scopes = true;
+                    scopes.clear();
+                }
+                _ => return None,
+            },
+            "--limit" => limit = rest.get(index)?.parse().ok()?,
+            "--cursor" => cursor = (*rest.get(index)?).to_string(),
+            _ => return None,
+        }
+        index += 1;
+    }
+    Some((all_scopes, scopes, limit, cursor))
 }
 
 /// Renders one skill's catalog line, plus its automatic contract check
@@ -390,9 +459,56 @@ pub(crate) fn repl_memory_command(
         let _ = writeln!(stderr, "{MEMORY_USAGE}");
         return Ok(());
     };
-    let scopes = vec![user_scope, workspace_scope];
+    let scopes = vec![user_scope.clone(), workspace_scope.clone()];
 
     match *subcommand {
+        "list" => {
+            let Some((all_scopes, scopes, limit, cursor)) =
+                list_arguments(rest, user_scope.clone(), workspace_scope.clone())
+            else {
+                let _ = writeln!(stderr, "{MEMORY_USAGE}");
+                return Ok(());
+            };
+            let page = service
+                .list(&crate::memory::ListRequest {
+                    all_scopes,
+                    scopes,
+                    kinds: Vec::new(),
+                    labels: Vec::new(),
+                    limit,
+                    cursor,
+                    now: Utc::now(),
+                    include_expired: true,
+                })
+                .map_err(|error| command_error("/memory list", error))?;
+            let _ = writeln!(
+                stdout,
+                "{}",
+                render_list_result(&page.records, &page.next_cursor)
+            );
+        }
+        "show" if rest.len() == 1 => {
+            let id = rest[0];
+            let record = scopes.iter().find_map(|scope| {
+                service
+                    .get(&RecordRef {
+                        scope: scope.clone(),
+                        id: id.to_string(),
+                    })
+                    .ok()
+            });
+            match record {
+                Some(record) => {
+                    let _ = writeln!(stdout, "{}", render_list_result(&[record], ""));
+                }
+                None => {
+                    return Err(command_error(
+                        "/memory show",
+                        format!("record {id} not found"),
+                    ));
+                }
+            }
+        }
         "search" => {
             let result = service
                 .search(&SearchRequest {

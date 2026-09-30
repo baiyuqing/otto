@@ -299,6 +299,7 @@ fn a_rust_written_database_round_trips_through_a_fresh_open() {
     );
     let page = reopened
         .list(&ListRequest {
+            all_scopes: false,
             scopes: vec![scope],
             kinds: Vec::new(),
             labels: Vec::new(),

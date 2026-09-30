@@ -81,7 +81,9 @@ fn digest(canonical: &str) -> String {
 /// `now` participates only when expired records are excluded, because that is
 /// the only case where it changes the result set.
 pub fn fingerprint_list(request: &ListRequest) -> String {
-    let mut canonical = String::from("{\"domain\":\"records\",\"scopes\":");
+    let mut canonical = String::from("{\"domain\":\"records\",\"all_scopes\":");
+    canonical.push_str(if request.all_scopes { "true" } else { "false" });
+    canonical.push_str(",\"scopes\":");
     canonical.push_str(&encode_scopes(&request.scopes));
     canonical.push_str(",\"kinds\":");
     canonical.push_str(&encode_sorted_strings(&request.kinds));
@@ -369,6 +371,7 @@ mod tests {
 
     fn list_request() -> ListRequest {
         ListRequest {
+            all_scopes: false,
             scopes: vec![Scope::new("user", "u1")],
             kinds: vec!["preference".into()],
             labels: Vec::new(),

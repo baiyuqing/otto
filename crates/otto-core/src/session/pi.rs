@@ -77,6 +77,7 @@ pub struct PiEntry {
     pub branch_summary: Option<Box<PiBranchSummary>>,
     pub custom: Option<PiCustom>,
     pub custom_message: Option<Box<PiCustomMessage>>,
+    pub context_edit: Option<PiContextEdit>,
     pub label: Option<PiLabel>,
     pub session_info: Option<PiSessionInfo>,
 }
@@ -330,6 +331,24 @@ pub struct PiCustomMessage {
     pub content_text: Option<String>,
     #[serde(skip)]
     pub content_blocks: Vec<PiContentBlock>,
+}
+
+/// The payload of a `context_edit` entry. It changes only the target's
+/// contribution to future model context; the original entry remains immutable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PiContextEdit {
+    #[serde(rename = "targetId")]
+    pub target_id: String,
+    /// `None` represents the required wire value `null`, which omits the
+    /// target from model context. A value is a `{ "content": ... }` object.
+    pub replacement: Option<Box<RawValue>>,
+    /// The inner `replacement.content` JSON value, absent for an omission.
+    #[serde(skip)]
+    pub replacement_content: Option<Box<RawValue>>,
+    #[serde(skip)]
+    pub replacement_text: Option<String>,
+    #[serde(skip)]
+    pub replacement_blocks: Vec<PiContentBlock>,
 }
 
 /// The payload of a `label` entry.

@@ -21,8 +21,9 @@ use serde_json::value::RawValue;
 
 use super::pi::{
     MAX_SESSION_ENTRY_BYTES, MAX_SESSION_FILE_BYTES, PI_SESSION_VERSION, PiBranchSummary,
-    PiCompaction, PiContentBlock, PiCost, PiCustom, PiCustomMessage, PiEntry, PiFile, PiHeader,
-    PiLabel, PiMessage, PiModelChange, PiSessionInfo, PiThinkingLevelChange, PiUsage,
+    PiCompaction, PiContentBlock, PiContextEdit, PiCost, PiCustom, PiCustomMessage, PiEntry,
+    PiFile, PiHeader, PiLabel, PiMessage, PiModelChange, PiSessionInfo, PiThinkingLevelChange,
+    PiUsage,
 };
 use super::{PiError, PiErrorKind};
 
@@ -185,6 +186,9 @@ pub fn decode_pi_entry(raw: &[u8]) -> Result<PiEntry, PiError> {
         "custom" => entry.custom = Some(decode_pi_custom(&object)?),
         "custom_message" => {
             entry.custom_message = Some(Box::new(decode_pi_custom_message(&object)?));
+        }
+        "context_edit" => {
+            entry.context_edit = decode_pi_context_edit(&object).ok();
         }
         "label" => entry.label = Some(decode_pi_label(&object)?),
         "session_info" => entry.session_info = Some(decode_pi_session_info(&object)?),
@@ -469,6 +473,39 @@ fn decode_pi_custom_message(object: &Object) -> Result<PiCustomMessage, PiError>
     })
 }
 
+fn decode_pi_context_edit(object: &Object) -> Result<PiContextEdit, PiError> {
+    let target_id = required_string(object, "targetId", "context_edit.targetId")?;
+    let Some(replacement) = object.get("replacement") else {
+        return Err(invalid_field(
+            "context_edit.replacement",
+            "null or an object with content",
+        ));
+    };
+    if is_json_null(replacement) {
+        return Ok(PiContextEdit {
+            target_id,
+            ..PiContextEdit::default()
+        });
+    }
+    let replacement_object =
+        decode_object(replacement.get().as_bytes(), "context_edit.replacement")?;
+    let Some(content) = replacement_object.get("content") else {
+        return Err(invalid_field(
+            "context_edit.replacement.content",
+            "a string or content array",
+        ));
+    };
+    let (replacement_text, replacement_blocks) =
+        decode_content(content, "context_edit.replacement.content", true)?;
+    Ok(PiContextEdit {
+        target_id,
+        replacement: Some(replacement.clone()),
+        replacement_content: Some(content.clone()),
+        replacement_text,
+        replacement_blocks,
+    })
+}
+
 fn decode_pi_label(object: &Object) -> Result<PiLabel, PiError> {
     Ok(PiLabel {
         target_id: required_string(object, "targetId", "label.targetId")?,
@@ -735,6 +772,7 @@ fn encode_pi_entry(entry: &PiEntry) -> Result<Vec<u8>, PiError> {
         "branch_summary" => entry.branch_summary.as_ref().map(to_raw).transpose()?,
         "custom" => entry.custom.as_ref().map(to_raw).transpose()?,
         "custom_message" => entry.custom_message.as_ref().map(to_raw).transpose()?,
+        "context_edit" => entry.context_edit.as_ref().map(to_raw).transpose()?,
         "label" => entry.label.as_ref().map(to_raw).transpose()?,
         "session_info" => entry.session_info.as_ref().map(to_raw).transpose()?,
         _ => {

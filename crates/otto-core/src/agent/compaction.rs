@@ -109,7 +109,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(AgentError::NothingToCompact);
         }
 
-        let messages = self.session.messages();
+        let messages = self.session.model_messages();
         let latest = self.session.latest_compaction();
         let tools = self.tools.definitions();
         let tokens_before = estimate_request(

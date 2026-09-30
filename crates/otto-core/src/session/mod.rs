@@ -38,9 +38,9 @@ pub use operation::{
 };
 pub use pi::{
     MAX_SESSION_ENTRY_BYTES, MAX_SESSION_FILE_BYTES, PI_SESSION_VERSION, PiBranchSummary,
-    PiCompaction, PiContentBlock, PiCost, PiCustom, PiCustomMessage, PiEntry, PiFile, PiHeader,
-    PiLabel, PiMessage, PiModelChange, PiOttoDetails, PiSessionInfo, PiThinkingLevelChange,
-    PiUsage, decode_pi_otto_details, encode_pi_otto_details,
+    PiCompaction, PiContentBlock, PiContextEdit, PiCost, PiCustom, PiCustomMessage, PiEntry,
+    PiFile, PiHeader, PiLabel, PiMessage, PiModelChange, PiOttoDetails, PiSessionInfo,
+    PiThinkingLevelChange, PiUsage, decode_pi_otto_details, encode_pi_otto_details,
 };
 pub use types::{
     CURRENT_VERSION, CompactionCheckpoint, CompactionDetails, CompactionMetadata, Header,
@@ -177,6 +177,12 @@ pub enum SessionError {
 pub trait Session {
     /// A copy of the transcript in append order.
     fn messages(&self) -> Vec<Message>;
+
+    /// Model-visible projection. File-backed Pi sessions override this for
+    /// append-only `context_edit`; ordinary sessions use their transcript.
+    fn model_messages(&self) -> Vec<Message> {
+        self.messages()
+    }
 
     /// Appends one message after validating it and the tool-call ordering
     /// rule. Nothing is stored when the call returns an error.

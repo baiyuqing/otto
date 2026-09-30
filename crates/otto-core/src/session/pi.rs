@@ -341,8 +341,10 @@ pub struct PiContextEdit {
     pub target_id: String,
     /// `None` represents the required wire value `null`, which omits the
     /// target from model context. A value is a `{ "content": ... }` object.
-    #[serde(default)]
     pub replacement: Option<Box<RawValue>>,
+    /// The inner `replacement.content` JSON value, absent for an omission.
+    #[serde(skip)]
+    pub replacement_content: Option<Box<RawValue>>,
     #[serde(skip)]
     pub replacement_text: Option<String>,
     #[serde(skip)]

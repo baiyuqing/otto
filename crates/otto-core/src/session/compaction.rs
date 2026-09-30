@@ -244,6 +244,24 @@ pub fn latest_compaction_metadata(
     }))
 }
 
+pub fn project_compaction_metadata(
+    metadata: &mut CompactionMetadata,
+    messages: &[crate::model::Message],
+) {
+    let Some(checkpoint) = messages
+        .iter()
+        .position(|message| message.id == metadata.id)
+    else {
+        return;
+    };
+    metadata.first_post_checkpoint_message_id = messages
+        .iter()
+        .skip(checkpoint + 1)
+        .map(|message| message.id.clone())
+        .next()
+        .unwrap_or_default();
+}
+
 /// Resolves where the retained context starts. Returns the first-kept entry
 /// id and whether the checkpoint uses the synthetic retained tail instead.
 pub fn resolve_compaction_boundary(

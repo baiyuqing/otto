@@ -187,7 +187,9 @@ pub fn decode_pi_entry(raw: &[u8]) -> Result<PiEntry, PiError> {
         "custom_message" => {
             entry.custom_message = Some(Box::new(decode_pi_custom_message(&object)?));
         }
-        "context_edit" => entry.context_edit = Some(decode_pi_context_edit(&object)?),
+        "context_edit" => {
+            entry.context_edit = decode_pi_context_edit(&object).ok();
+        }
         "label" => entry.label = Some(decode_pi_label(&object)?),
         "session_info" => entry.session_info = Some(decode_pi_session_info(&object)?),
         _ => {}
@@ -498,6 +500,7 @@ fn decode_pi_context_edit(object: &Object) -> Result<PiContextEdit, PiError> {
     Ok(PiContextEdit {
         target_id,
         replacement: Some(replacement.clone()),
+        replacement_content: Some(content.clone()),
         replacement_text,
         replacement_blocks,
     })

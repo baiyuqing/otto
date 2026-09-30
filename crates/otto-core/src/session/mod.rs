@@ -178,6 +178,12 @@ pub trait Session {
     /// A copy of the transcript in append order.
     fn messages(&self) -> Vec<Message>;
 
+    /// Model-visible projection. File-backed Pi sessions override this for
+    /// append-only `context_edit`; ordinary sessions use their transcript.
+    fn model_messages(&self) -> Vec<Message> {
+        self.messages()
+    }
+
     /// Appends one message after validating it and the tool-call ordering
     /// rule. Nothing is stored when the call returns an error.
     async fn append(&self, message: Message) -> Result<(), SessionError>;

@@ -61,7 +61,12 @@ pub fn is_pi_entry_id(id: &str) -> bool {
 /// Everything a frontend needs after replaying one session's active branch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedContext {
+    /// The unmodified active transcript, used for history, recovery, and
+    /// sequencing checks.
     pub messages: Vec<Message>,
+    /// The active transcript after Pi `context_edit` projection, used only
+    /// for provider context and compaction.
+    pub model_messages: Vec<Message>,
     pub runtime: RuntimeMetadata,
     pub usage: Usage,
     pub usage_present: bool,
@@ -74,6 +79,7 @@ impl Default for ResolvedContext {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
+            model_messages: Vec::new(),
             runtime: RuntimeMetadata::default(),
             usage: Usage::default(),
             usage_present: false,
@@ -243,108 +249,119 @@ pub fn build_context(
     }
 
     let context_path = compaction_aware_path(&path)?;
-    let edits = context_edits(&path)?;
-    for entry in context_path {
-        if entry.type_name == "context_edit" {
-            continue;
-        }
-        let projected = match edits.get(&entry.id) {
-            Some(edit) => project_context_edit(&entry, edit)?,
-            None => entry,
-        };
+    for entry in &context_path {
         resolved
             .messages
-            .extend(pi_entry_to_context_messages(&projected)?);
+            .extend(pi_entry_to_context_messages(entry)?);
     }
     for repair in repair_interrupted_tool_calls(&mut resolved.messages, &resolved.operation_ledger)
     {
         collector.add(repair);
     }
     pending_tool_calls(&resolved.messages)?;
+
+    let edits = context_edits(&path, &context_path, &mut collector);
+    for entry in context_path {
+        let entry_id = entry.id.clone();
+        let Some(projected) = project_context_edit(entry, edits.get(&entry_id))? else {
+            continue;
+        };
+        resolved
+            .model_messages
+            .extend(pi_entry_to_context_messages(&projected)?);
+    }
     Ok((resolved, collector.warnings))
 }
 
-fn context_edits(path: &[PiEntry]) -> Result<HashMap<String, PiContextEdit>, PiError> {
+fn context_edits<'a>(
+    path: &'a [PiEntry],
+    context_path: &[PiEntry],
+    collector: &mut WarningCollector,
+) -> HashMap<String, &'a PiContextEdit> {
     let editable: HashMap<&str, &PiEntry> = path
         .iter()
         .filter(|entry| context_entry_is_editable(entry))
         .map(|entry| (entry.id.as_str(), entry))
         .collect();
+    let retained_ids: HashSet<&str> = context_path.iter().map(|entry| entry.id.as_str()).collect();
     let mut edits = HashMap::new();
     for entry in path {
         if entry.type_name != "context_edit" {
             continue;
         }
-        let edit = entry
-            .context_edit
-            .as_ref()
-            .ok_or_else(|| PiError::invalid("context_edit payload is required"))?;
-        if !is_pi_entry_id(&edit.target_id) {
-            return Err(PiError::invalid("context_edit target id is invalid"));
-        }
-        if !editable.contains_key(edit.target_id.as_str()) {
-            return Err(PiError::invalid(
-                "context_edit target does not contribute editable model content",
+        let Some(edit) = entry.context_edit.as_ref() else {
+            collector.add(format!("ignored malformed context_edit entry {}", entry.id));
+            continue;
+        };
+        if !is_pi_entry_id(&edit.target_id) || !editable.contains_key(edit.target_id.as_str()) {
+            collector.add(format!(
+                "ignored context_edit entry {} with an unsupported target",
+                entry.id
             ));
+            continue;
         }
-        edits.insert(edit.target_id.clone(), edit.clone());
+        if !retained_ids.contains(edit.target_id.as_str()) {
+            collector.add(format!(
+                "ignored context_edit entry {} because its target is not retained after compaction",
+                entry.id
+            ));
+            continue;
+        }
+        edits.insert(edit.target_id.clone(), edit);
     }
-    Ok(edits)
+    edits
 }
 
 fn context_entry_is_editable(entry: &PiEntry) -> bool {
     match entry.type_name.as_str() {
         "custom_message" => true,
         "message" => matches!(
-            entry
-                .message
-                .as_deref()
-                .map(|message| message.role.as_str()),
-            Some("user" | "assistant" | "toolResult")
+            entry.message.as_deref(),
+            Some(message)
+                if matches!(message.role.as_str(), "user" | "custom")
+                    || (message.role == "assistant"
+                        && !message
+                            .content_blocks
+                            .iter()
+                            .any(|block| block.type_name == "toolCall"))
         ),
         _ => false,
     }
 }
 
-fn project_context_edit(entry: &PiEntry, edit: &PiContextEdit) -> Result<PiEntry, PiError> {
-    let Some(replacement) = edit.replacement.as_ref() else {
-        let mut omitted = entry.clone();
-        omitted.type_name = "context_edit_omitted".into();
-        return Ok(omitted);
+fn project_context_edit(
+    mut entry: PiEntry,
+    edit: Option<&&PiContextEdit>,
+) -> Result<Option<PiEntry>, PiError> {
+    let Some(edit) = edit else {
+        return Ok((entry.type_name != "context_edit").then_some(entry));
     };
-    let mut projected = entry.clone();
-    match projected.type_name.as_str() {
+    let Some(_replacement) = edit.replacement.as_ref() else {
+        return Ok(None);
+    };
+    match entry.type_name.as_str() {
         "message" => {
-            let message = projected
+            let message = entry
                 .message
                 .as_mut()
                 .ok_or_else(|| PiError::invalid("message payload is required"))?;
-            message.content = Some(replacement.clone());
+            message.content = edit.replacement_content.clone();
             message.content_text = edit.replacement_text.clone();
             message.content_blocks = edit.replacement_blocks.clone();
-            if matches!(message.role.as_str(), "assistant" | "toolResult")
-                && message.content_text.is_some()
-            {
-                message.content_blocks = vec![PiContentBlock {
-                    type_name: "text".into(),
-                    text: message.content_text.clone().unwrap_or_default(),
-                    ..PiContentBlock::default()
-                }];
-                message.content_text = None;
-            }
         }
         "custom_message" => {
-            let custom = projected
+            let custom = entry
                 .custom_message
                 .as_mut()
                 .ok_or_else(|| PiError::invalid("custom_message payload is required"))?;
-            custom.content = Some(replacement.clone());
+            custom.content = edit.replacement_content.clone();
             custom.content_text = edit.replacement_text.clone();
             custom.content_blocks = edit.replacement_blocks.clone();
         }
-        _ => return Err(PiError::invalid("context_edit target is not editable")),
+        _ => return Ok(Some(entry)),
     }
-    Ok(projected)
+    entry.raw.clear();
+    Ok(Some(entry))
 }
 
 pub fn index_context_entries(
@@ -1843,6 +1860,8 @@ mod tests {
                 serde_json::value::to_raw_value(&serde_json::json!({ "content": text }))
                     .expect("replacement encodes")
             }),
+            replacement_content: replacement
+                .map(|text| serde_json::value::to_raw_value(text).expect("content encodes")),
             replacement_text: replacement.map(str::to_owned),
             ..PiContextEdit::default()
         });
@@ -3100,12 +3119,14 @@ mod tests {
         let (replaced, _) =
             build_context(&[root.clone(), replace.clone()], "ce000002").expect("replace");
         assert_eq!(replaced.messages.len(), 1);
-        assert_eq!(replaced.messages[0].text(), "new");
+        assert_eq!(replaced.messages[0].text(), "original");
+        assert_eq!(replaced.model_messages[0].text(), "new");
         assert_eq!(root.message.as_ref().unwrap().content_text.as_deref(), Some("original"));
 
         let (omitted, _) =
             build_context(&[root, replace, omit.clone()], "ce000003").expect("omit");
-        assert!(omitted.messages.is_empty());
+        assert!(omitted.model_messages.is_empty());
+        assert_eq!(omitted.messages[0].text(), "original");
         assert!(omit.context_edit.as_ref().unwrap().replacement.is_none());
     });
 
@@ -3120,11 +3141,11 @@ mod tests {
             "ce100003",
         )
         .expect("latest edit");
-        assert_eq!(latest.messages[0].text(), "second");
+        assert_eq!(latest.model_messages[0].text(), "second");
 
         let (other_branch, _) = build_context(&[root, branch], "ce100004").expect("branch");
-        assert_eq!(other_branch.messages[0].text(), "original");
-        assert_eq!(other_branch.messages[1].text(), "branch");
+        assert_eq!(other_branch.model_messages[0].text(), "original");
+        assert_eq!(other_branch.model_messages[1].text(), "branch");
     });
 
     test!(context_edit_rejects_a_noneditable_or_inactive_target {
@@ -3135,16 +3156,55 @@ mod tests {
             label: Some("x".into()),
         });
         let invalid = context_edit_entry("ce200003", Some("ce200002"), "ce200002", None);
-        let error = build_context(&[root.clone(), label, invalid], "ce200003")
-            .expect_err("label target accepted");
-        assert!(error.to_string().contains("editable model content"), "{error}");
+        let (_, warnings) = build_context(&[root.clone(), label, invalid], "ce200003")
+            .expect("label target is skipped");
+        assert_warning_contains(&warnings, "unsupported target");
 
-        let inactive = context_edit_entry("ce200004", Some("ce200001"), "ce200001", None);
+        let inactive = user_entry("ce200004", Some("ce200001"), "inactive");
         let active = user_entry("ce200005", Some("ce200001"), "active");
         let invalid = context_edit_entry("ce200006", Some("ce200005"), "ce200004", None);
-        let error = build_context(&[root, inactive, active, invalid], "ce200006")
-            .expect_err("inactive target accepted");
-        assert!(error.to_string().contains("editable model content"), "{error}");
+        let (_, warnings) = build_context(&[root, inactive, active, invalid], "ce200006")
+            .expect("inactive target is skipped");
+        assert_warning_contains(&warnings, "unsupported target");
+    });
+
+    test!(context_edit_skips_tool_call_and_result_targets_without_affecting_recovery {
+        let root = user_entry("ce400001", None, "root");
+        let assistant = tool_call_entry("ce400002", Some("ce400001"), &[("call-1", "read")]);
+        let result = tool_result_entry(
+            "ce400003",
+            Some("ce400002"),
+            "call-1",
+            "read",
+            "done",
+        );
+        let edit = context_edit_entry("ce400004", Some("ce400003"), "ce400003", None);
+        let (context, warnings) =
+            build_context(&[root, assistant, result, edit], "ce400004").expect("build context");
+        assert_eq!(context.messages.len(), 3);
+        assert_eq!(context.model_messages.len(), 3);
+        assert_eq!(context.model_messages[2].blocks[0].text, "done");
+        assert!(warnings.iter().any(|warning| warning.message.contains("unsupported target")));
+    });
+
+    test!(context_edit_skips_a_target_removed_by_compaction {
+        let root = user_entry("ce500001", None, "old");
+        let edit = context_edit_entry("ce500002", Some("ce500001"), "ce500001", None);
+        let mut compaction = entry("compaction", "ce500003", Some("ce500002"));
+        compaction.compaction = Some(Box::new(PiCompaction {
+            summary: "summary".into(),
+            first_kept_entry_id: None,
+            tokens_before: 1,
+            retained_tail: Some(Vec::new()),
+            ..PiCompaction::default()
+        }));
+        let (context, warnings) =
+            build_context(&[root, edit, compaction], "ce500003").expect("build context");
+        assert_eq!(context.model_messages.len(), 1);
+        assert_eq!(context.model_messages[0].context_type, COMPACTION_CONTEXT_TYPE);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.message.contains("not retained after compaction")));
     });
 
     test!(context_edit_uses_pi_replacement_shape_and_round_trips {

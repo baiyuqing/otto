@@ -441,6 +441,9 @@ pub struct CandidatePage {
 
 #[derive(Debug, Clone)]
 pub struct ListRequest {
+    /// An explicit administrative request to enumerate every stored scope.
+    /// An empty `scopes` list without this flag remains an empty result.
+    pub all_scopes: bool,
     pub scopes: Vec<Scope>,
     pub kinds: Vec<String>,
     pub labels: Vec<String>,

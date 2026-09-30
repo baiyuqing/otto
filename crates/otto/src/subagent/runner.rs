@@ -18,7 +18,7 @@
 //! also never receives `remind`, which wakes the parent session. A definition's
 //! `tools` list can only narrow the set the runner already built, never widen
 //! it. Definition bodies are untrusted text, appended to the child's system
-//! prompt under a fixed `## Sub-agent role` heading.
+//! prompt inside a fixed `<subagent_role>` element.
 //!
 //! Shapes forced by the ownership contracts:
 //!
@@ -86,7 +86,7 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 11] = [
     "remind_cancel",
 ];
 
-/// Appended to a child's system prompt under `## Sub-agent role` when it has
+/// Appended to a child's system prompt inside `<subagent_role>` when it has
 /// no definition, or its definition's body is empty.
 const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result. Do not send progress updates, plans, or interim findings with agent_report; put them in the final report instead. Call agent_report only to answer a question that arrives in a [parent-message], or to report a blocker that needs a parent decision while you can keep working on other parts of the task. If you cannot continue, end with a final report that states the blocker.";
 
@@ -1113,8 +1113,9 @@ impl Runner {
             .unwrap_or(GENERIC_SUBAGENT_INSTRUCTION);
         let redactor = self.redactor();
         let system_prompt = redactor.redact_string(&format!(
-            "{}\n\n## Sub-agent role\n{role_body}",
-            (self.config.prompt_for)(&tools.definitions())
+            "{}\n<subagent_role>\n{}\n</subagent_role>\n</otto_system_prompt>",
+            (self.config.prompt_for)(&tools.definitions()),
+            crate::skill::prompt::escape_html(role_body),
         ));
 
         let template = &self.config.template;
@@ -2050,7 +2051,8 @@ mod tests {
             prompt.starts_with(&test_prompt_for(&runner.child_definitions())),
             "system prompt does not start with the parent prompt:\n{prompt}"
         );
-        assert!(prompt.contains("## Sub-agent role"), "{prompt}");
+        assert!(prompt.contains("<subagent_role>"), "{prompt}");
+        assert!(prompt.ends_with("</otto_system_prompt>"), "{prompt}");
         assert!(prompt.contains(GENERIC_SUBAGENT_INSTRUCTION), "{prompt}");
     }
 
@@ -2990,7 +2992,7 @@ mod tests {
 
         let prompt = provider.requests()[0].system_prompt.clone();
         assert!(
-            prompt.contains("## Sub-agent role\nYou are a reviewer."),
+            prompt.contains("<subagent_role>\nYou are a reviewer.\n</subagent_role>"),
             "{prompt}"
         );
         assert!(!prompt.contains(GENERIC_SUBAGENT_INSTRUCTION), "{prompt}");

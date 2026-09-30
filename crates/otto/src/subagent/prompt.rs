@@ -1,4 +1,4 @@
-//! The `## Agents` system-prompt section.
+//! The `<agents>` system-prompt section.
 //!
 //! The escaping and whitespace rules are shared with the skills section, so
 //! this module reuses [`crate::skill::prompt`]'s helpers rather than repeating
@@ -45,13 +45,13 @@ impl Detail {
 }
 
 const AGENTS_HEADER: &str = concat!(
-    "\n\n## Agents\n",
-    "Named sub-agent definitions for the `agent` tool (`agent` parameter):\n",
+    "\n<agents>\n",
+    "<usage>Named sub-agent definitions for the agent tool (agent parameter).</usage>\n",
     "<available_agents>\n",
 );
 
 /// No trailing newline: the footer ends the section exactly here.
-const AGENTS_FOOTER: &str = "</available_agents>";
+const AGENTS_FOOTER: &str = "</available_agents>\n</agents>";
 
 /// Renders the section, or `""` when `catalog` is empty.
 ///
@@ -198,12 +198,13 @@ mod tests {
         assert_eq!(
             section,
             concat!(
-                "\n\n## Agents\n",
-                "Named sub-agent definitions for the `agent` tool (`agent` parameter):\n",
+                "\n<agents>\n",
+                "<usage>Named sub-agent definitions for the agent tool (agent parameter).</usage>\n",
                 "<available_agents>\n",
                 "<agent name=\"alpha\">desc for alpha</agent>\n",
                 "<agent name=\"beta\">desc for beta</agent>\n",
-                "</available_agents>",
+                "</available_agents>\n",
+                "</agents>",
             )
         );
     }
@@ -225,12 +226,13 @@ mod tests {
         assert_eq!(
             section,
             concat!(
-                "\n\n## Agents\n",
-                "Named sub-agent definitions for the `agent` tool (`agent` parameter):\n",
+                "\n<agents>\n",
+                "<usage>Named sub-agent definitions for the agent tool (agent parameter).</usage>\n",
                 "<available_agents>\n",
                 "<agent name=\"alpha\">desc for alpha</agent>\n",
                 "<agent name=\"beta\" context=\"inherit\">desc for beta</agent>\n",
-                "</available_agents>",
+                "</available_agents>\n",
+                "</agents>",
             )
         );
     }

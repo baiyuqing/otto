@@ -1353,7 +1353,8 @@ impl Builder {
             &endpoint_host,
             &runtime.model,
         );
-        let system_prompt = base_prompt.clone() + &prompt_tail + &parent_agent_section;
+        let system_prompt =
+            base_prompt.clone() + &prompt_tail + &parent_agent_section + "</otto_system_prompt>";
         let (environment, instructions) = split_workspace_instructions(&environment);
         let system_prompt_parts: Vec<(String, String)> = [
             ("Base", base_prompt),
@@ -1364,6 +1365,7 @@ impl Builder {
             ),
             ("Skills", redactor.redact_string(&catalogs.skill_section)),
             ("Agents", parent_agent_section),
+            ("Document end", "</otto_system_prompt>".to_string()),
         ]
         .into_iter()
         .filter(|(_, text)| !text.is_empty())
@@ -2218,11 +2220,12 @@ mod tests {
             .await
             .expect("runner");
         let prompt = runner.system_prompt();
-        assert!(prompt.starts_with("You are Otto, a concise coding agent."));
+        assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "Usable tools: read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel."
+            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel</available_tools>"
         ));
-        assert!(prompt.contains("<workspace-instructions"), "{prompt}");
+        assert!(prompt.contains("<workspace_instructions"), "{prompt}");
+        assert!(prompt.ends_with("</otto_system_prompt>"), "{prompt}");
         assert!(prompt.contains("house rules"), "{prompt}");
         assert!(!prompt.contains("sk-secret-value"), "{prompt}");
 
@@ -2231,7 +2234,12 @@ mod tests {
         let labels: Vec<&str> = parts.iter().map(|part| part.label.as_str()).collect();
         assert_eq!(
             labels,
-            ["Base", "Environment", "Workspace instructions"],
+            [
+                "Base",
+                "Environment",
+                "Workspace instructions",
+                "Document end"
+            ],
             "the parts must concatenate to the prompt, or the report falls back to one part"
         );
         assert!(parts[2].text.contains("house rules"));

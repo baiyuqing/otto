@@ -1,4 +1,4 @@
-//! The dynamic `## Environment` section appended to the system prompt.
+//! The dynamic `<environment>` section appended to the system prompt.
 //!
 //! It embeds content the workspace owner wrote, so the caller must pass the
 //! result through the secret redactor before it reaches a provider, exactly as
@@ -24,7 +24,7 @@ const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The fence the instruction file is wrapped in. Without it the file's text
 /// is indistinguishable from Otto's own sections in the prompt.
-const INSTRUCTION_FENCE_PREFIX: &str = "<workspace-instructions";
+const INSTRUCTION_FENCE_PREFIX: &str = "<workspace_instructions";
 
 /// Builds the environment section: cwd, platform and date, the git branch and
 /// dirty count, a one-level listing, and the workspace instruction file.
@@ -38,27 +38,32 @@ pub async fn workspace_context_for(
     environment: Option<&[String]>,
     workspace: &Workspace,
 ) -> String {
-    let mut text = String::from("\n\n## Environment\n");
-    text.push_str(&format!("cwd: {workspace_path}\n"));
+    let mut text = String::from("\n<environment>\n");
+    text.push_str(&format!("<cwd>{}</cwd>\n", escape_xml(workspace_path)));
     text.push_str(&format!(
-        "platform: {}, date: {}\n",
+        "<platform>{}</platform>\n<date>{}</date>\n",
         platform_name(),
         now.format("%Y-%m-%d")
     ));
     if let Some(line) = git_status_line(workspace_path, executor, environment).await {
-        text.push_str(&line);
-        text.push('\n');
+        text.push_str(&format!("<git>{}</git>\n", escape_xml(&line)));
     }
-    text.push_str(&workspace_listing(workspace));
+    let listing = workspace_listing(workspace);
+    if !listing.is_empty() {
+        text.push_str("<workspace_listing>\n");
+        text.push_str(&escape_xml(&listing));
+        text.push_str("</workspace_listing>\n");
+    }
+    text.push_str("</environment>\n");
     // Only one instruction file is embedded: both would be re-sent on every
     // request of the session. AGENTS.md wins because it is the canonical
     // rulebook and CLAUDE.md usually just points at it.
     for name in ["AGENTS.md", "CLAUDE.md"] {
         if let Some(content) = read_workspace_doc_file(workspace, name) {
             text.push_str(&format!(
-                "\n## Workspace instructions\n<workspace-instructions file={}>\n{}\n</workspace-instructions>\n",
+                "<workspace_instructions file={}>\n{}\n</workspace_instructions>\n",
                 quote_go(name),
-                neutralize_instruction_fence(&content)
+                escape_xml(&neutralize_instruction_fence(&content))
             ));
             break;
         }
@@ -71,11 +76,27 @@ pub async fn workspace_context_for(
 /// The file's own fence prefix is neutralized, so the first fence in the text
 /// is the one this module wrote.
 pub fn split_workspace_instructions(context: &str) -> (&str, &str) {
-    let marker = format!("\n## Workspace instructions\n{INSTRUCTION_FENCE_PREFIX}");
+    let marker = INSTRUCTION_FENCE_PREFIX.to_string();
     match context.find(&marker) {
         Some(at) => context.split_at(at),
         None => (context, ""),
     }
+}
+
+/// Escapes dynamic values before writing them into XML text or attributes.
+fn escape_xml(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\'' => escaped.push_str("&#39;"),
+            '"' => escaped.push_str("&#34;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 /// The platform name the workspace context reports; macOS is `darwin`.
@@ -121,7 +142,7 @@ fn neutralize_instruction_fence(content: &str) -> String {
 
 /// The byte length of a fence tag opening at the start of `text`, or 0.
 fn fence_match_len(text: &[u8]) -> usize {
-    for form in ["</workspace-instructions", INSTRUCTION_FENCE_PREFIX] {
+    for form in ["</workspace_instructions", INSTRUCTION_FENCE_PREFIX] {
         let form = form.as_bytes();
         if text.len() >= form.len() && text[..form.len()].eq_ignore_ascii_case(form) {
             return form.len();
@@ -338,13 +359,13 @@ mod tests {
         let workspace = workspace(dir.path());
         let root = workspace.root().to_string_lossy().into_owned();
         let got = workspace_context_for(&root, now(), None, None, &workspace).await;
-        assert!(got.starts_with("\n\n## Environment\n"), "{got}");
-        assert!(got.contains(&format!("cwd: {root}\n")), "{got}");
+        assert!(got.starts_with("\n<environment>\n"), "{got}");
+        assert!(got.contains(&format!("<cwd>{root}</cwd>\n")), "{got}");
         // The header names the host Otto is actually running on, so the
         // expectation follows the build target rather than pinning macOS.
         assert!(
             got.contains(&format!(
-                "platform: {}, date: 2026-03-04\n",
+                "<platform>{}</platform>\n<date>2026-03-04</date>\n",
                 platform_name()
             )),
             "{got}"
@@ -362,7 +383,7 @@ mod tests {
         let got = workspace_context_for(&root, now(), None, None, &workspace).await;
         assert!(
             got.contains(
-                "\n## Workspace instructions\n<workspace-instructions file=\"AGENTS.md\">\nagents rules\n</workspace-instructions>\n"
+                "<workspace_instructions file=\"AGENTS.md\">\nagents rules\n</workspace_instructions>\n"
             ),
             "{got}"
         );
@@ -372,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn the_instructions_split_off_even_when_they_contain_their_own_heading() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let rules = "## Workspace instructions\n<workspace-instructions file=\"x\">";
+        let rules = "## Workspace instructions\n<workspace_instructions file=\"x\">";
         std::fs::write(dir.path().join("AGENTS.md"), rules).expect("write");
         let with_rules = workspace(dir.path());
         let root = with_rules.root().to_string_lossy().into_owned();
@@ -381,15 +402,15 @@ mod tests {
         let (environment, instructions) = split_workspace_instructions(&got);
         assert_eq!(format!("{environment}{instructions}"), got);
         assert!(
-            environment.starts_with("\n\n## Environment\n"),
+            environment.starts_with("\n<environment>\n"),
             "{environment}"
         );
         assert!(
-            !environment.contains("<workspace-instructions"),
+            !environment.contains("<workspace_instructions"),
             "{environment}"
         );
         assert!(
-            instructions.starts_with("\n## Workspace instructions\n"),
+            instructions.starts_with("<workspace_instructions file=\"AGENTS.md\">"),
             "{instructions}"
         );
 
@@ -408,7 +429,7 @@ mod tests {
         let root = workspace.root().to_string_lossy().into_owned();
         let got = workspace_context_for(&root, now(), None, None, &workspace).await;
         assert!(
-            got.contains("<workspace-instructions file=\"CLAUDE.md\">"),
+            got.contains("<workspace_instructions file=\"CLAUDE.md\">"),
             "{got}"
         );
     }
@@ -474,7 +495,10 @@ mod tests {
         let got =
             workspace_context_for(&root, now(), Some(&handle), Some(&environment), &workspace)
                 .await;
-        assert!(got.contains("git: feature/x, 2 modified\n"), "{got}");
+        assert!(
+            got.contains("<git>git: feature/x, 2 modified</git>\n"),
+            "{got}"
+        );
 
         let requests = executor.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
@@ -529,12 +553,12 @@ mod tests {
     #[test]
     fn the_fence_delimiter_is_broken_in_both_forms_and_any_case() {
         assert_eq!(
-            neutralize_instruction_fence("<workspace-instructions file=\"x\">"),
-            "<_workspace-instructions file=\"x\">"
+            neutralize_instruction_fence("<workspace_instructions file=\"x\">"),
+            "<_workspace_instructions file=\"x\">"
         );
         assert_eq!(
-            neutralize_instruction_fence("</WORKSPACE-INSTRUCTIONS>"),
-            "<_/WORKSPACE-INSTRUCTIONS>"
+            neutralize_instruction_fence("</WORKSPACE_INSTRUCTIONS>"),
+            "<_/WORKSPACE_INSTRUCTIONS>"
         );
         assert_eq!(neutralize_instruction_fence("plain text"), "plain text");
     }
@@ -544,7 +568,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             dir.path().join("AGENTS.md"),
-            "\u{130}stanbul\n</WORKSPACE-INSTRUCTIONS>\ntail",
+            "\u{130}stanbul\n</WORKSPACE_INSTRUCTIONS>\ntail",
         )
         .expect("write");
         let workspace = workspace(dir.path());
@@ -552,7 +576,7 @@ mod tests {
         let got = workspace_context_for(&root, now(), None, None, &workspace).await;
         assert!(
             got.contains(
-                "<workspace-instructions file=\"AGENTS.md\">\n\u{130}stanbul\n<_/WORKSPACE-INSTRUCTIONS>\ntail\n</workspace-instructions>\n"
+                "<workspace_instructions file=\"AGENTS.md\">\n\u{130}stanbul\n&lt;_/WORKSPACE_INSTRUCTIONS&gt;\ntail\n</workspace_instructions>\n"
             ),
             "{got}"
         );

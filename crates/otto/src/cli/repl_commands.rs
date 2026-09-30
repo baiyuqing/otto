@@ -164,7 +164,21 @@ fn render_search_result(result: &SearchResult) -> String {
     if result.records.is_empty() {
         return "no matching records".to_string();
     }
-    render_list_result(&result.records, &result.next_cursor)
+    let mut content = format!("{} records:\n", result.records.len());
+    for record in &result.records {
+        let _ = writeln!(
+            content,
+            "id={} scope={}/{} kind={} key={} revision={} text={}",
+            record.id,
+            record.scope.namespace,
+            record.scope.id,
+            record.kind,
+            record.key,
+            record.revision,
+            record.text
+        );
+    }
+    content.trim_end_matches('\n').to_string()
 }
 
 fn render_list_result(records: &[crate::memory::Record], next_cursor: &str) -> String {

@@ -641,7 +641,12 @@ impl Store {
         let mut metadata = latest_compaction_metadata(&candidate, &entry_id)?
             .filter(|metadata| metadata.id == entry_id)
             .ok_or_else(|| PiError::invalid("candidate compaction did not become active"))?;
-        project_compaction_metadata(&mut metadata, &resolved.model_messages);
+        project_compaction_metadata(
+            &mut metadata,
+            &candidate,
+            &entry_id,
+            &resolved.model_messages,
+        )?;
 
         let encoded = encode_pi_record(PiRecord::Entry(&entry))?;
         let record_bytes = state.reserve(&encoded)?;
@@ -1170,7 +1175,7 @@ pub(crate) fn resolve_pi_store_state(decoded: &PiFile) -> Result<ResolvedStoreSt
     let (resolved, warnings) = build_context(&decoded.entries, &leaf)?;
     let mut latest_compaction = latest_compaction_metadata(&decoded.entries, &leaf)?;
     if let Some(metadata) = latest_compaction.as_mut() {
-        project_compaction_metadata(metadata, &resolved.model_messages);
+        project_compaction_metadata(metadata, &decoded.entries, &leaf, &resolved.model_messages)?;
     }
     let session_name = (!resolved.session_name.is_empty()).then(|| resolved.session_name.clone());
     let thinking_level = pi_level_to_thinking(&resolved.thinking_level)?;

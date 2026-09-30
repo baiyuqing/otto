@@ -246,20 +246,26 @@ pub fn latest_compaction_metadata(
 
 pub fn project_compaction_metadata(
     metadata: &mut CompactionMetadata,
+    entries: &[PiEntry],
+    leaf_id: &str,
     messages: &[crate::model::Message],
-) {
-    let Some(checkpoint) = messages
-        .iter()
-        .position(|message| message.id == metadata.id)
-    else {
-        return;
+) -> Result<(), PiError> {
+    let (index, _) = index_context_entries(entries)?;
+    let path = active_context_path(entries, leaf_id, &index)?;
+    let Some(checkpoint) = path.iter().position(|entry| entry.id == metadata.id) else {
+        return Ok(());
     };
-    metadata.first_post_checkpoint_message_id = messages
+    metadata.first_post_checkpoint_message_id = path[checkpoint + 1..]
         .iter()
-        .skip(checkpoint + 1)
-        .map(|message| message.id.clone())
-        .next()
+        .filter(|entry| is_real_compaction_context_entry(entry))
+        .find_map(|entry| {
+            messages
+                .iter()
+                .any(|message| message.id == entry.id)
+                .then(|| entry.id.clone())
+        })
         .unwrap_or_default();
+    Ok(())
 }
 
 /// Resolves where the retained context starts. Returns the first-kept entry

@@ -1915,9 +1915,16 @@ What's wired:
 - Recall before each turn into a request-local, untrusted context block that is
   never written to Pi session JSONL, compaction summaries, or logs.
 - Agent tools: `memory_search`, `remember`, `forget`.
-- Human commands in both frontends: `/memory search`, `/memory forget`,
+- Human commands in both frontends: `/memory list`, `/memory show`, `/memory search`, `/memory forget`,
   `/memory review`, and `/remember`.
-- Standalone CLI: `otto memory status` and `otto memory forget <id>`.
+- Standalone CLI: `otto memory status`, `otto memory list`, `otto memory show <id>`, and
+  `otto memory forget <id>`.
+
+`/memory list` and `otto memory list` page active records in stable update-time order. They
+show the current user and workspace scopes by default; use `--scope user` or `--scope workspace`
+to narrow that set, or explicit `--scope all` to inventory every stored workspace. A page prints
+`next_cursor=...` when another page exists; pass that value back with `--cursor`. `show` reads one
+record from the current scopes (or the selected user/workspace scope).
 
 Model-originated writes always land as pending candidates for human review.
 Human `/remember` and `/memory forget` apply immediately.

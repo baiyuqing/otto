@@ -263,6 +263,10 @@ impl Session for SharedTranscript {
         self.0.messages()
     }
 
+    fn model_messages(&self) -> Vec<Message> {
+        self.0.model_messages()
+    }
+
     async fn append(&self, message: Message) -> Result<(), otto_core::session::SessionError> {
         self.0.append(message).await
     }

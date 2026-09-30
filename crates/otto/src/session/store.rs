@@ -28,7 +28,7 @@ use otto_core::model::{
 };
 use otto_core::session::compaction::{
     compaction_details_present, compaction_usage_to_pi, is_real_compaction_context_entry,
-    latest_compaction_metadata, validate_compaction_checkpoint,
+    latest_compaction_metadata, project_compaction_metadata, validate_compaction_checkpoint,
 };
 use otto_core::session::context::{
     add_resolved_usage, format_persisted_timestamp, format_rfc3339_nano, missing_tool_results,
@@ -638,9 +638,15 @@ impl Store {
         let last = candidate.len() - 1;
         candidate[last] = entry.clone();
 
-        let metadata = latest_compaction_metadata(&candidate, &entry_id)?
+        let mut metadata = latest_compaction_metadata(&candidate, &entry_id)?
             .filter(|metadata| metadata.id == entry_id)
             .ok_or_else(|| PiError::invalid("candidate compaction did not become active"))?;
+        project_compaction_metadata(
+            &mut metadata,
+            &candidate,
+            &entry_id,
+            &resolved.model_messages,
+        )?;
 
         let encoded = encode_pi_record(PiRecord::Entry(&entry))?;
         let record_bytes = state.reserve(&encoded)?;
@@ -1062,6 +1068,15 @@ impl Session for Store {
         Store::messages(self)
     }
 
+    fn model_messages(&self) -> Vec<Message> {
+        let state = self.lock().expect("session mutex");
+        let leaf = state.leaf_id.as_deref().unwrap_or_default();
+        build_context(&state.entries, leaf)
+            .expect("stored session remains a valid context")
+            .0
+            .model_messages
+    }
+
     async fn append(&self, message: Message) -> Result<(), SessionError> {
         self.append_message(&message)
             .map_err(|error| SessionError::Persist(error.to_string()))
@@ -1158,7 +1173,10 @@ pub(crate) fn resolve_pi_store_state(decoded: &PiFile) -> Result<ResolvedStoreSt
     let leaf_id = decoded.entries.last().map(|entry| entry.id.clone());
     let leaf = leaf_id.clone().unwrap_or_default();
     let (resolved, warnings) = build_context(&decoded.entries, &leaf)?;
-    let latest_compaction = latest_compaction_metadata(&decoded.entries, &leaf)?;
+    let mut latest_compaction = latest_compaction_metadata(&decoded.entries, &leaf)?;
+    if let Some(metadata) = latest_compaction.as_mut() {
+        project_compaction_metadata(metadata, &decoded.entries, &leaf, &resolved.model_messages)?;
+    }
     let session_name = (!resolved.session_name.is_empty()).then(|| resolved.session_name.clone());
     let thinking_level = pi_level_to_thinking(&resolved.thinking_level)?;
     Ok(ResolvedStoreState {

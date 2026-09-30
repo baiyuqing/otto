@@ -28,7 +28,7 @@ use super::operation::{
     DecodedOperationFact, OPERATION_CUSTOM_TYPE, OperationLedger, decode_operation_raw,
 };
 use super::pi::{
-    PiContentBlock, PiCustomMessage, PiEntry, PiMessage, PiOttoDetails, PiUsage,
+    PiContentBlock, PiContextEdit, PiCustomMessage, PiEntry, PiMessage, PiOttoDetails, PiUsage,
     decode_pi_otto_details, encode_pi_otto_details,
 };
 use super::types::{Header, RuntimeMetadata, Snapshot, Warning};
@@ -242,10 +242,19 @@ pub fn build_context(
         resolved.runtime = runtime;
     }
 
-    for entry in compaction_aware_path(&path)? {
+    let context_path = compaction_aware_path(&path)?;
+    let edits = context_edits(&path)?;
+    for entry in context_path {
+        if entry.type_name == "context_edit" {
+            continue;
+        }
+        let projected = match edits.get(&entry.id) {
+            Some(edit) => project_context_edit(&entry, edit)?,
+            None => entry,
+        };
         resolved
             .messages
-            .extend(pi_entry_to_context_messages(&entry)?);
+            .extend(pi_entry_to_context_messages(&projected)?);
     }
     for repair in repair_interrupted_tool_calls(&mut resolved.messages, &resolved.operation_ledger)
     {
@@ -253,6 +262,89 @@ pub fn build_context(
     }
     pending_tool_calls(&resolved.messages)?;
     Ok((resolved, collector.warnings))
+}
+
+fn context_edits(path: &[PiEntry]) -> Result<HashMap<String, PiContextEdit>, PiError> {
+    let editable: HashMap<&str, &PiEntry> = path
+        .iter()
+        .filter(|entry| context_entry_is_editable(entry))
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect();
+    let mut edits = HashMap::new();
+    for entry in path {
+        if entry.type_name != "context_edit" {
+            continue;
+        }
+        let edit = entry
+            .context_edit
+            .as_ref()
+            .ok_or_else(|| PiError::invalid("context_edit payload is required"))?;
+        if !is_pi_entry_id(&edit.target_id) {
+            return Err(PiError::invalid("context_edit target id is invalid"));
+        }
+        if !editable.contains_key(edit.target_id.as_str()) {
+            return Err(PiError::invalid(
+                "context_edit target does not contribute editable model content",
+            ));
+        }
+        edits.insert(edit.target_id.clone(), edit.clone());
+    }
+    Ok(edits)
+}
+
+fn context_entry_is_editable(entry: &PiEntry) -> bool {
+    match entry.type_name.as_str() {
+        "custom_message" => true,
+        "message" => matches!(
+            entry
+                .message
+                .as_deref()
+                .map(|message| message.role.as_str()),
+            Some("user" | "assistant" | "toolResult")
+        ),
+        _ => false,
+    }
+}
+
+fn project_context_edit(entry: &PiEntry, edit: &PiContextEdit) -> Result<PiEntry, PiError> {
+    let Some(replacement) = edit.replacement.as_ref() else {
+        let mut omitted = entry.clone();
+        omitted.type_name = "context_edit_omitted".into();
+        return Ok(omitted);
+    };
+    let mut projected = entry.clone();
+    match projected.type_name.as_str() {
+        "message" => {
+            let message = projected
+                .message
+                .as_mut()
+                .ok_or_else(|| PiError::invalid("message payload is required"))?;
+            message.content = Some(replacement.clone());
+            message.content_text = edit.replacement_text.clone();
+            message.content_blocks = edit.replacement_blocks.clone();
+            if matches!(message.role.as_str(), "assistant" | "toolResult")
+                && message.content_text.is_some()
+            {
+                message.content_blocks = vec![PiContentBlock {
+                    type_name: "text".into(),
+                    text: message.content_text.clone().unwrap_or_default(),
+                    ..PiContentBlock::default()
+                }];
+                message.content_text = None;
+            }
+        }
+        "custom_message" => {
+            let custom = projected
+                .custom_message
+                .as_mut()
+                .ok_or_else(|| PiError::invalid("custom_message payload is required"))?;
+            custom.content = Some(replacement.clone());
+            custom.content_text = edit.replacement_text.clone();
+            custom.content_blocks = edit.replacement_blocks.clone();
+        }
+        _ => return Err(PiError::invalid("context_edit target is not editable")),
+    }
+    Ok(projected)
 }
 
 pub fn index_context_entries(
@@ -748,6 +840,7 @@ fn known_pi_entry_type(entry_type: &str) -> bool {
             | "branch_summary"
             | "custom"
             | "custom_message"
+            | "context_edit"
             | "label"
             | "session_info"
     )
@@ -1668,7 +1761,7 @@ mod tests {
     use crate::session::codec::decode_pi_entry;
     use crate::session::codec::tests::read_pi_fixture;
     use crate::session::pi::{
-        PiBranchSummary, PiCompaction, PiCustom, PiModelChange, PiSessionInfo,
+        PiBranchSummary, PiCompaction, PiContextEdit, PiCustom, PiModelChange, PiSessionInfo,
     };
 
     macro_rules! test {
@@ -1734,6 +1827,25 @@ mod tests {
             timestamp: 1,
             ..PiMessage::default()
         }));
+        built
+    }
+
+    fn context_edit_entry(
+        id: &str,
+        parent_id: Option<&str>,
+        target_id: &str,
+        replacement: Option<&str>,
+    ) -> PiEntry {
+        let mut built = entry("context_edit", id, parent_id);
+        built.context_edit = Some(PiContextEdit {
+            target_id: target_id.into(),
+            replacement: replacement.map(|text| {
+                serde_json::value::to_raw_value(&serde_json::json!({ "content": text }))
+                    .expect("replacement encodes")
+            }),
+            replacement_text: replacement.map(str::to_owned),
+            ..PiContextEdit::default()
+        });
         built
     }
 
@@ -2978,5 +3090,86 @@ mod tests {
         let error = build_context(&[root, orphan], "63120002").expect_err("must reject");
 
         assert_eq!(error.kind(), PiErrorKind::Invalid);
+    });
+
+    test!(context_edit_omits_replaces_and_keeps_raw_history {
+        let root = user_entry("ce000001", None, "original");
+        let replace = context_edit_entry("ce000002", Some("ce000001"), "ce000001", Some("new"));
+        let omit = context_edit_entry("ce000003", Some("ce000002"), "ce000001", None);
+
+        let (replaced, _) =
+            build_context(&[root.clone(), replace.clone()], "ce000002").expect("replace");
+        assert_eq!(replaced.messages.len(), 1);
+        assert_eq!(replaced.messages[0].text(), "new");
+        assert_eq!(root.message.as_ref().unwrap().content_text.as_deref(), Some("original"));
+
+        let (omitted, _) =
+            build_context(&[root, replace, omit.clone()], "ce000003").expect("omit");
+        assert!(omitted.messages.is_empty());
+        assert!(omit.context_edit.as_ref().unwrap().replacement.is_none());
+    });
+
+    test!(context_edit_is_latest_wins_and_branch_relative {
+        let root = user_entry("ce100001", None, "original");
+        let first = context_edit_entry("ce100002", Some("ce100001"), "ce100001", Some("first"));
+        let second = context_edit_entry("ce100003", Some("ce100002"), "ce100001", Some("second"));
+        let branch = user_entry("ce100004", Some("ce100001"), "branch");
+
+        let (latest, _) = build_context(
+            &[root.clone(), first, second],
+            "ce100003",
+        )
+        .expect("latest edit");
+        assert_eq!(latest.messages[0].text(), "second");
+
+        let (other_branch, _) = build_context(&[root, branch], "ce100004").expect("branch");
+        assert_eq!(other_branch.messages[0].text(), "original");
+        assert_eq!(other_branch.messages[1].text(), "branch");
+    });
+
+    test!(context_edit_rejects_a_noneditable_or_inactive_target {
+        let root = user_entry("ce200001", None, "root");
+        let mut label = entry("label", "ce200002", Some("ce200001"));
+        label.label = Some(crate::session::PiLabel {
+            target_id: "ce200001".into(),
+            label: Some("x".into()),
+        });
+        let invalid = context_edit_entry("ce200003", Some("ce200002"), "ce200002", None);
+        let error = build_context(&[root.clone(), label, invalid], "ce200003")
+            .expect_err("label target accepted");
+        assert!(error.to_string().contains("editable model content"), "{error}");
+
+        let inactive = context_edit_entry("ce200004", Some("ce200001"), "ce200001", None);
+        let active = user_entry("ce200005", Some("ce200001"), "active");
+        let invalid = context_edit_entry("ce200006", Some("ce200005"), "ce200004", None);
+        let error = build_context(&[root, inactive, active, invalid], "ce200006")
+            .expect_err("inactive target accepted");
+        assert!(error.to_string().contains("editable model content"), "{error}");
+    });
+
+    test!(context_edit_uses_pi_replacement_shape_and_round_trips {
+        let raw = br#"{"type":"context_edit","id":"ce300001","parentId":null,"timestamp":"2026-08-27T12:00:00Z","targetId":"ce300000","replacement":{"content":"replacement"}}"#;
+        let entry = decode_pi_entry(raw).expect("decode");
+        let edit = entry.context_edit.as_ref().expect("payload");
+        assert_eq!(edit.target_id, "ce300000");
+        assert_eq!(edit.replacement_text.as_deref(), Some("replacement"));
+        let encoded = crate::session::encode_pi_record(crate::session::PiRecord::Entry(&entry))
+            .expect("encode raw");
+        assert_eq!(encoded, raw);
+
+        let mut typed = entry;
+        typed.raw.clear();
+        let encoded = crate::session::encode_pi_record(crate::session::PiRecord::Entry(&typed))
+            .expect("encode typed");
+        let round_trip = decode_pi_entry(&encoded).expect("decode typed record");
+        assert_eq!(
+            round_trip
+                .context_edit
+                .as_ref()
+                .expect("typed payload")
+                .replacement_text
+                .as_deref(),
+            Some("replacement")
+        );
     });
 }

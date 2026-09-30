@@ -163,16 +163,16 @@ pub fn run(
 
     match subcommand.as_str() {
         "status" => status(&memory_config, &secret_values, stdout, stderr),
-        "list" => list(
-            &memory_config,
-            &secret_values,
-            &flags.cwd,
-            &flags.scope,
-            flags.limit,
-            &flags.cursor,
+        "list" => list(ListInput {
+            config: &memory_config,
+            secret_values: &secret_values,
+            cwd: &flags.cwd,
+            scope: &flags.scope,
+            limit: flags.limit,
+            cursor: &flags.cursor,
             stdout,
             stderr,
-        ),
+        }),
         "show" => show(
             &memory_config,
             &secret_values,
@@ -228,16 +228,28 @@ fn status(
     0
 }
 
-fn list(
-    config: &MemoryRuntime,
-    secret_values: &[String],
-    cwd: &str,
-    scope: &str,
+struct ListInput<'a> {
+    config: &'a MemoryRuntime,
+    secret_values: &'a [String],
+    cwd: &'a str,
+    scope: &'a str,
     limit: usize,
-    cursor: &str,
-    stdout: &mut (dyn Write + Send),
-    stderr: &mut (dyn Write + Send),
-) -> i32 {
+    cursor: &'a str,
+    stdout: &'a mut (dyn Write + Send),
+    stderr: &'a mut (dyn Write + Send),
+}
+
+fn list(input: ListInput<'_>) -> i32 {
+    let ListInput {
+        config,
+        secret_values,
+        cwd,
+        scope,
+        limit,
+        cursor,
+        stdout,
+        stderr,
+    } = input;
     let Ok(workspace) = super::sandbox_runtime::canonical_directory(Path::new(cwd)) else {
         return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
     };

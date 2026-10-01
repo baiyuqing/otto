@@ -3,6 +3,7 @@
 
 BINARY := otto
 INSTALL_DIR ?= $(HOME)/.local/bin
+SKILLS_INSTALL_DIR ?= $(HOME)/.otto/skills
 
 DESKTOP_DIR := desktop/src-tauri
 DESKTOP_TARGET := aarch64-apple-darwin
@@ -19,9 +20,11 @@ build: ui ## build the Web UI and compile the Rust binary (release) to ./$(BINAR
 	cargo build --release
 	cp target/release/$(BINARY) ./$(BINARY)
 
-install: build ## install the Otto binary to $(INSTALL_DIR)
+install: build ## install Otto and bundled skills
 	install -d "$(INSTALL_DIR)"
 	install -m 0755 ./$(BINARY) "$(INSTALL_DIR)/$(BINARY)"
+	install -d "$(SKILLS_INSTALL_DIR)/sandbox-setup"
+	install -m 0644 .otto/skills/sandbox-setup/SKILL.md "$(SKILLS_INSTALL_DIR)/sandbox-setup/SKILL.md"
 
 rust-fmt: ## fail if any Rust file is not rustfmt-formatted
 	cargo fmt --all -- --check

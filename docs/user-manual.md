@@ -80,8 +80,9 @@ Install the binary:
 make install
 ```
 
-`make install` builds Otto and installs it to `~/.local/bin/otto`; make sure
-`~/.local/bin` is on your `PATH`.
+`make install` builds Otto, installs it to `~/.local/bin/otto`, and installs
+bundled skills under `~/.otto/skills/`; make sure `~/.local/bin` is on your
+`PATH`.
 
 For a persistent default profile, run the interactive setup command. It stores
 no API key; choose a model ID available to your account or provider. For a
@@ -1943,7 +1944,9 @@ and workspace `.otto/skills` directories. A skill is a directory containing
 `SKILL.md` with YAML frontmatter and Markdown body, following the Agent Skills
 format.
 
-Config (`[skills]` in TOML; all keys optional):
+Config (`[skills]` in TOML; all keys optional). Bundled skills installed by
+`make install` go to `~/.otto/skills`, so they are available from every
+workspace after starting a new Otto session:
 
 ```toml
 [skills]

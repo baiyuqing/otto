@@ -723,6 +723,14 @@ impl App {
                 self.cursor = self.input.len();
                 None
             }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor = self.line_start();
+                None
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor = self.line_end();
+                None
+            }
             KeyCode::Up => {
                 let current: String = self.input.iter().collect();
                 if let Some(line) = self.history.previous(&current) {
@@ -805,6 +813,12 @@ impl App {
             KeyCode::Right => self.cursor = (self.cursor + 1).min(self.input.len()),
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.input.len(),
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor = self.line_start();
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor = self.line_end();
+            }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.insert_text(&ch.to_string());
             }
@@ -984,6 +998,22 @@ impl App {
                 description: "choose a skill to set".to_string(),
             })
             .collect()
+    }
+
+    /// Index of the first char of the composer line holding the cursor.
+    fn line_start(&self) -> usize {
+        self.input[..self.cursor]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map_or(0, |i| i + 1)
+    }
+
+    /// Index of the newline ending the cursor's composer line, or the input length.
+    fn line_end(&self) -> usize {
+        self.input[self.cursor..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(self.input.len(), |i| self.cursor + i)
     }
 
     /// Records a composer edit: the suggestion selection returns to the
@@ -2110,6 +2140,42 @@ mod tests {
         assert_eq!(app.cursor, 0);
         assert!(app.history.previous("").is_none());
         assert!(app.entries.is_empty());
+    }
+
+    async fn assert_ctrl_a_e_move_within_line(busy: bool) {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        if busy {
+            app.start_turn();
+        }
+        app.insert_text("ab\ncd");
+        let press = |app: &mut App, ch: char, from: usize| {
+            app.cursor = from;
+            app.handle_key(
+                key(KeyCode::Char(ch), KeyModifiers::CONTROL),
+                &controller,
+                &cancel,
+            );
+            app.cursor
+        };
+        assert_eq!(press(&mut app, 'a', 4), 3);
+        assert_eq!(press(&mut app, 'e', 4), 5);
+        assert_eq!(press(&mut app, 'e', 1), 2);
+        assert_eq!(press(&mut app, 'a', 1), 0);
+        assert_eq!(app.input.iter().collect::<String>(), "ab\ncd");
+    }
+
+    #[tokio::test]
+    async fn idle_composer_ctrl_a_and_ctrl_e_move_within_the_current_line() {
+        assert_ctrl_a_e_move_within_line(false).await;
+    }
+
+    #[tokio::test]
+    async fn busy_composer_ctrl_a_and_ctrl_e_move_within_the_current_line() {
+        assert_ctrl_a_e_move_within_line(true).await;
     }
 
     #[tokio::test]

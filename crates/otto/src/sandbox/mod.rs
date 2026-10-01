@@ -143,6 +143,9 @@ pub struct Request {
     pub argv: Vec<String>,
     pub dir: PathBuf,
     pub env: Vec<String>,
+    /// Asks the driver to report what the sandbox denied when the command
+    /// fails. Drivers that cannot report ignore it.
+    pub report_denials: bool,
 }
 
 /// Where the child's output goes.
@@ -167,6 +170,19 @@ pub struct ExitStatus {
     pub code: i32,
     pub signaled: bool,
     pub signal: String,
+    /// Operations the sandbox refused while the command ran, in first-seen
+    /// order. Empty unless the driver reports denials and the request asked.
+    pub denials: Vec<Denial>,
+    /// Unique denials beyond those in `denials`.
+    pub denials_omitted: usize,
+}
+
+/// One refused sandbox operation: the operation name (for example
+/// `file-read-data`) and its target (a path, or an address for the network).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Denial {
+    pub operation: String,
+    pub target: String,
 }
 
 /// The persisted sandbox configuration of a session.
@@ -638,6 +654,7 @@ mod tests {
             argv: vec!["sh".into(), "-c".into(), "exit 0".into()],
             dir: workspace.to_path_buf(),
             env: vec!["VALUE=original".into(), "EMPTY=".into()],
+            ..Default::default()
         }
     }
 

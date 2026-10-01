@@ -514,6 +514,7 @@ async fn report_check(
                 ],
                 dir: workspace.to_path_buf(),
                 env: runtime.environment.clone().unwrap_or_default(),
+                ..Default::default()
             },
             Streams {
                 stdout: &mut std::io::sink(),

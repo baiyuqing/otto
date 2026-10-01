@@ -31,6 +31,8 @@ pub(crate) const READ_MARKER: &str = "@@OTTO_PROFILE_READ_RULES@@";
 pub(crate) const WRITE_MARKER: &str = "@@OTTO_PROFILE_WRITE_RULES@@";
 pub(crate) const NETWORK_MARKER: &str = "@@OTTO_PROFILE_NETWORK_RULES@@";
 pub(crate) const SHELL_MARKER: &str = "@@OTTO_PROFILE_SHELL_RULE@@";
+/// Replaced at every template deny with `(with message "<tag>")`.
+pub(crate) const DENY_MESSAGE_MARKER: &str = "@@OTTO_DENY_MESSAGE@@";
 
 /// Directories that are read-only for every session when they exist.
 pub(crate) const REVIEWED_AUTOMATIC_PATHS: &[&str] = &[
@@ -194,7 +196,14 @@ pub(crate) fn generate_with(
     let metadata = metadata_ancestors(&writable, &roots, &resolved.shell);
 
     let read_rules = render_read_rules(&metadata, &writable, &roots)?;
-    let write_rules = render_write_rules(&writable, &resolved.workspace)?;
+    let tag = options
+        .directories
+        .root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(Rejected)?;
+    let deny_message = format!("(with message {})", string_literal(tag)?);
+    let write_rules = render_write_rules(&writable, &resolved.workspace, &deny_message)?;
     let network_rules = render_network_rules(resolved.network);
     let shell_rule = render_shell_rule(&resolved.shell)?;
 
@@ -203,6 +212,9 @@ pub(crate) fn generate_with(
         if template.matches(marker).count() != 1 {
             return Err(Rejected);
         }
+    }
+    if template.matches(DENY_MESSAGE_MARKER).count() != 5 {
+        return Err(Rejected);
     }
     // One left-to-right pass over the template, so generated text is never
     // rescanned for markers.
@@ -213,6 +225,7 @@ pub(crate) fn generate_with(
             (WRITE_MARKER, write_rules.as_str()),
             (NETWORK_MARKER, network_rules.as_str()),
             (SHELL_MARKER, shell_rule.as_str()),
+            (DENY_MESSAGE_MARKER, deny_message.as_str()),
         ],
     ))
 }
@@ -618,7 +631,7 @@ fn render_read_rules(
             path: path.clone(),
         })
         .collect();
-    write_rule(&mut builder, "allow", "file-read-metadata", &literals)?;
+    write_rule(&mut builder, "allow", "file-read-metadata", &literals, None)?;
     builder.push_str("; OTTO-DYNAMIC-METADATA-END\n");
     builder.push_str("; OTTO-DYNAMIC-READ-DATA-BEGIN\n");
     let mut filters: Vec<Filter> = Vec::with_capacity(writable.len() + roots.len());
@@ -638,13 +651,17 @@ fn render_read_rules(
             path: root.path.clone(),
         });
     }
-    write_rule(&mut builder, "allow", "file-read*", &filters)?;
+    write_rule(&mut builder, "allow", "file-read*", &filters, None)?;
     builder.push_str("; OTTO-DYNAMIC-READ-DATA-END\n");
     builder.push_str("; OTTO-DYNAMIC-READ-END");
     Ok(builder)
 }
 
-fn render_write_rules(writable: &[String], workspace: &str) -> Result<String, Rejected> {
+fn render_write_rules(
+    writable: &[String],
+    workspace: &str,
+    deny_message: &str,
+) -> Result<String, Rejected> {
     let mut builder = String::new();
     builder.push_str("; OTTO-DYNAMIC-WRITE-BEGIN\n");
     let filters: Vec<Filter> = writable
@@ -654,7 +671,7 @@ fn render_write_rules(writable: &[String], workspace: &str) -> Result<String, Re
             path: path.clone(),
         })
         .collect();
-    write_rule(&mut builder, "allow", "file-write*", &filters)?;
+    write_rule(&mut builder, "allow", "file-write*", &filters, None)?;
     // Git runs hooks and the configuration's program settings outside the
     // sandbox, so these workspace paths are read-only. Seatbelt applies the
     // last matching rule: the deny must follow the workspace allow above (a
@@ -672,7 +689,13 @@ fn render_write_rules(writable: &[String], workspace: &str) -> Result<String, Re
         git("/commondir", FilterKind::Literal),
         git("/hooks", FilterKind::Subpath),
     ];
-    write_rule(&mut builder, "deny", "file-write*", &protected)?;
+    write_rule(
+        &mut builder,
+        "deny",
+        "file-write*",
+        &protected,
+        Some(deny_message),
+    )?;
     builder.push_str("; OTTO-DYNAMIC-WRITE-END");
     Ok(builder)
 }
@@ -719,6 +742,7 @@ fn render_shell_rule(shell: &str) -> Result<String, Rejected> {
             kind: FilterKind::Literal,
             path: shell.to_string(),
         }],
+        None,
     )?;
     builder.push_str("; OTTO-DYNAMIC-SHELL-END");
     Ok(builder)
@@ -752,6 +776,7 @@ fn write_rule(
     action: &str,
     operation: &str,
     filters: &[Filter],
+    message: Option<&str>,
 ) -> Result<(), Rejected> {
     if filters.is_empty() {
         return Err(Rejected);
@@ -768,6 +793,11 @@ fn write_rule(
         builder.push(' ');
         builder.push_str(&literal);
         builder.push_str(")\n");
+    }
+    if let Some(message) = message {
+        builder.push_str("  ");
+        builder.push_str(message);
+        builder.push('\n');
     }
     builder.push_str(")\n");
     Ok(())
@@ -1196,7 +1226,7 @@ mod tests {
 
         let profile = fixture.render();
         assert!(
-            profile.starts_with("(version 1)\n(deny default)\n"),
+            profile.starts_with("(version 1)\n(deny default (with message "),
             "profile does not begin closed by default:\n{profile}"
         );
         for unfiltered in [
@@ -1257,8 +1287,9 @@ mod tests {
         let fixture = new_fixture();
         let workspace = fixture.options.workspace.clone();
         let profile = fixture.render();
+        let tag = tag_message(&fixture);
         let deny = format!(
-            "(deny file-write*\n  (literal {})\n  (literal {})\n  (literal {})\n  (literal {})\n  (subpath {})\n)\n",
+            "(deny file-write*\n  (literal {})\n  (literal {})\n  (literal {})\n  (literal {})\n  (subpath {})\n  {tag}\n)\n",
             quote(&format!("{workspace}/.git")),
             quote(&format!("{workspace}/.git/config")),
             quote(&format!("{workspace}/.git/config.worktree")),
@@ -1273,6 +1304,47 @@ mod tests {
             last_allow < deny_at,
             "git deny precedes an allow file-write* rule"
         );
+    }
+
+    fn tag_message(fixture: &Fixture) -> String {
+        let root = std::path::Path::new(&fixture.options.directories.root);
+        let tag = root.file_name().and_then(|name| name.to_str()).unwrap();
+        assert!(tag.starts_with(state::LEAF_PREFIX));
+        format!("(with message {})", quote(tag))
+    }
+
+    #[test]
+    fn every_deny_form_carries_the_message_tag() {
+        let fixture = new_fixture();
+        let message = tag_message(&fixture);
+        let profile = fixture.render();
+        let mut forms = 0;
+        for (at, _) in profile.match_indices("(deny ") {
+            // A deny form ends at its balanced closing parenthesis.
+            let mut depth = 0;
+            let mut end = at;
+            for (offset, character) in profile[at..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    end = at + offset;
+                    break;
+                }
+            }
+            let form = &profile[at..=end];
+            assert!(
+                form.strip_suffix(')')
+                    .unwrap()
+                    .trim_end()
+                    .ends_with(&message),
+                "deny form lacks the message tag as its last element:\n{form}"
+            );
+            forms += 1;
+        }
+        assert_eq!(forms, 6, "expected five template denies and the git deny");
     }
 
     #[test]
@@ -1387,7 +1459,8 @@ mod tests {
     #[test]
     fn denies_system_volumes_read_aliases() {
         let profile = new_fixture().render();
-        const CARVE_OUT: &str = "(deny file-read*\n  (subpath \"/System/Volumes\"))";
+        const CARVE_OUT: &str =
+            "(deny file-read*\n  (subpath \"/System/Volumes\")\n  (with message ";
         assert_eq!(
             count(&profile, CARVE_OUT),
             1,
@@ -1437,7 +1510,10 @@ mod tests {
     #[test]
     fn explicitly_denies_apple_events_and_launch_services() {
         let profile = new_fixture().render();
-        for rule in ["(deny appleevent-send)", "(deny lsopen)"] {
+        for rule in [
+            "(deny appleevent-send (with message ",
+            "(deny lsopen (with message ",
+        ] {
             assert!(
                 profile.contains(rule),
                 "profile lacks explicit escape-broker denial {rule}"
@@ -1841,7 +1917,7 @@ mod tests {
             "spaces, Unicode, quotes, backslashes, or profile punctuation were not safely represented"
         );
         assert!(
-            count(&profile, "(deny default)") == 1
+            count(&profile, "(deny default") == 1
                 && !profile.contains("(allow network-outbound)\n"),
             "dynamic path injected an SBPL form"
         );
@@ -1917,7 +1993,7 @@ mod tests {
         }
         assert!(
             count(&first, "(version 1)") == 1
-                && count(&first, "(deny default)") == 1
+                && count(&first, "(deny default") == 1
                 && !first.contains("(allow network-outbound)\n"),
             "marker-like path text injected or changed fixed profile forms"
         );

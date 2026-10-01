@@ -76,6 +76,7 @@ impl Driver for DirectDriver {
             code: outcome.code,
             signaled: outcome.signaled,
             signal: outcome.signal,
+            ..Default::default()
         };
         (status, result)
     }
@@ -173,6 +174,7 @@ mod tests {
                     argv: vec!["/bin/sh".into(), "-c".into(), "kill -TERM $$".into()],
                     dir: workspace.clone(),
                     env: vec!["PATH=/usr/bin:/bin".into(), "LC_ALL=C".into()],
+                    ..Default::default()
                 },
                 Streams {
                     stdout: &mut out,
@@ -198,6 +200,7 @@ mod tests {
                     ],
                     dir: workspace.clone(),
                     env: vec!["SECRET_VALUE=secret-environment-value".into()],
+                    ..Default::default()
                 },
                 Streams {
                     stdout: &mut stdout,
@@ -244,6 +247,7 @@ mod tests {
                             argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
                             dir: workspace,
                             env: vec!["PATH=/usr/bin:/bin".into()],
+                            ..Default::default()
                         },
                         Streams {
                             stdout: &mut out,
@@ -278,6 +282,7 @@ mod tests {
                     argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
                     dir: workspace,
                     env: vec!["PATH=/usr/bin:/bin".into()],
+                    ..Default::default()
                 },
                 Streams {
                     stdout: &mut out,
@@ -307,6 +312,7 @@ mod tests {
                     ],
                     dir: workspace,
                     env: vec!["DIRECT_VALUE=original".into()],
+                    ..Default::default()
                 },
                 Streams {
                     stdout: &mut stdout,
@@ -356,6 +362,7 @@ mod contract {
                 argv,
                 dir: fixture.workspace.clone(),
                 env: fixture.environment.clone(),
+                ..Default::default()
             }
         }
 

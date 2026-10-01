@@ -371,11 +371,50 @@ external side effect did not occur.
   driver at all, so `auto` and `seatbelt` fail closed the same way; see
   [platform support](#platform-support).
 
-  `/sandbox reload` applies edits to `driver`, `network`, and `read_paths` to
-  the running process (see [Slash commands](#slash-commands)). Two changes
-  still need a restart: `allow_env`, because the shell environment is fixed
-  when the `bash` tool is built, and any change made when the sandbox was
-  already unavailable at startup, because there is no `bash` tool to re-point.
+  `excluded_commands` (optional list of strings, default empty) names programs
+  that run outside the sandbox:
+
+  ```toml
+  [sandbox]
+  excluded_commands = ["lark-cli *", "gh auth status"]
+  ```
+
+  An entry `prefix *` matches the command `prefix` alone and any command that
+  starts with `prefix` followed by a space or tab. Any other entry matches only
+  a command whose text, with leading and trailing whitespace removed, equals the
+  entry. An entry must be non-empty, have no leading or trailing whitespace or
+  control character, use `*` only as the final ` *`, be a simple command by the
+  rule below, and appear once; otherwise the configuration is invalid.
+
+  Only a simple command can match. A command stays sandboxed when it has an
+  unterminated quote, an unquoted `;`, `&`, `|`, `<`, `>`, `(`, `)`, `#`, or
+  line feed, or a `$` or backtick outside single quotes (including inside
+  double quotes). `lark-cli im +messages-send --text 'a; b'` matches
+  `lark-cli *`; `lark-cli auth status && rm -rf x`, `lark-cli $(cat f)`, and
+  `cd x; lark-cli` do not.
+
+  A matched command runs through the executor `/approve` uses: no Seatbelt, the
+  real `HOME`, network allowed, and the same filtered environment (provider API
+  key names removed; sensitive names only when listed in `allow_env`). It runs
+  without an approval request. An excluded program has your full user access:
+  list only programs you trust with that, such as `lark-cli`, which keeps its
+  configuration in `~/.lark-cli` and its secret in the keychain.
+
+  The list is read only from the config file Otto loads
+  (`~/.config/otto/config.toml` or `--config`); a workspace cannot add entries.
+  It applies to the parent session, child agents, and `otto --prompt` runs
+  whenever the sandbox mode is Seatbelt. With `--sandbox off`
+  every command is already unconfined. If the unconfined environment cannot be
+  built with complete redactions, the list has no effect and commands stay
+  sandboxed. `/sandbox exclude` and `/approve <id> always` add entries from a
+  running session.
+
+  `/sandbox reload` applies edits to `driver`, `network`, `read_paths`, and
+  `excluded_commands` to the running process (see
+  [Slash commands](#slash-commands)). Two changes still need a restart:
+  `allow_env`, because the shell environment is fixed when the `bash` tool is
+  built, and any change made when the sandbox was already unavailable at
+  startup, because there is no `bash` tool to re-point.
 
 - `[skills]` discovers reusable instruction sets from configured roots and
   registers the `skill` tool when at least one skill is found. Config keys are
@@ -511,8 +550,8 @@ not backed up — Otto only sees the change when it next reads the file.
 
 Each command changes only the key or table it is about in the file's text:
 `default_profile`, one profile's `thinking`, one `[mcp.servers.<name>]`
-table or its `enabled` key, the four `[sandbox]` keys, or one appended
-`[projects."<path>"]` table. Comments, blank lines, key order, and every other
+table or its `enabled` key, the `[sandbox]` keys (`excluded_commands` only
+when the list is non-empty), or one appended `[projects."<path>"]` table. Comments, blank lines, key order, and every other
 table keep their exact bytes. The command then parses the result and compares
 it with the intended change; if the target is written in a form it cannot edit
 in place, such as dotted keys (`sandbox.network = "deny"`) or an inline table
@@ -691,12 +730,25 @@ Shared commands:
 - `/sandbox network allow|deny` sets `[sandbox].network` the same way. In the
   TUI, `/sandbox network` without a mode opens a picker with the current mode
   marked.
-- If either change is written but the sandbox rejects it, the configuration
+- `/sandbox exclude <entry>` appends one entry to `[sandbox].excluded_commands`
+  and reloads. The entry is validated first, and an entry already in the list is
+  not repeated. Removing an entry has no command: edit the config file and run
+  `/sandbox reload`.
+- If any of these changes is written but the sandbox rejects it, the configuration
   file is rolled back to what it held before and the previous sandbox stays in
   place.
 - `/approve <id>` grants one pending elevated Bash command and immediately asks
   Otto to retry it. The grant is tied to the current session and exact command,
   is consumed once, and remains pending until it is replaced, consumed, or Otto exits.
+- `/approve <id> always` first adds `<program> *` to `[sandbox].excluded_commands`
+  (see [`[sandbox]`](#configuration)) and reloads the sandbox, then grants the
+  pending command once as `/approve <id>` does. `<program>` is the first word of
+  the pending command. The pending command must be a simple command whose first
+  word has no quote, backslash, or `=`. Otto refuses, and writes nothing, when
+  that program runs another command: shells and command runners such as `sh`,
+  `bash`, `env`, `sudo`, `xargs`, and `python3`. Use `/approve <id>` for those.
+  Later simple commands that start with the program run unconfined with no
+  approval, in this and later sessions.
 - `/skills` lists every available skill name in the current session; use `/skill <name>` for its description, location, contract-check status, and instructions.
 - `/skill <name>` displays one skill's description, location, and instructions.
 - `/mcp` shows every configured MCP server and its connection state.
@@ -1166,7 +1218,14 @@ and reason, then enter `/approve <id>`. The matching command runs once through
 the existing unconfined driver with the same filtered environment rules as
 other Bash commands. Approval is never automatic, is unavailable to child
 agents and one-shot `--prompt` runs, remains pending until it is replaced,
-consumed, or Otto exits, and does not modify sandbox configuration.
+consumed, or Otto exits. `/approve <id>` does not modify sandbox
+configuration; `/approve <id> always` also adds the program to
+`[sandbox].excluded_commands`.
+
+Commands matching `[sandbox].excluded_commands` run through the same unconfined
+driver without an approval. They apply to child agents and `otto --prompt`
+runs as well, and only to simple commands; see
+[`[sandbox]`](#configuration) for the entry syntax and the rule.
 
 ### Seatbelt limitations
 

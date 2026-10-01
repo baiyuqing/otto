@@ -208,6 +208,7 @@ async fn run_git(
         argv,
         dir: Path::new(dir).to_path_buf(),
         env: environment.to_vec(),
+        ..Default::default()
     };
     let mut out: Vec<u8> = Vec::new();
     let mut discard = std::io::sink();

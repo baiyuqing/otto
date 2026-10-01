@@ -26,19 +26,21 @@
 //! variant of its own, surfacing as [`UnavailableReason::RuntimeFailure`].
 
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use super::state;
 use super::{profile, selftest};
+use super::{state, violations};
 use crate::sandbox::process::{Manager, Outcome, Spec};
 use crate::sandbox::{
     Capabilities, DEFAULT_CANCELLATION_GRACE, Driver, DriverId, Error, ExitStatus, NetworkMode,
     PrivateDirectories, Request, Streams, UnavailableReason,
 };
 
+/// How long a failed command waits for the log stream to deliver denials.
+const DENIAL_DELIVERY_WAIT: Duration = Duration::from_millis(300);
 /// The only binary this driver ever executes.
 const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
 
@@ -100,6 +102,8 @@ pub struct SeatbeltDriver {
     processes: Manager,
     inner: Mutex<Inner>,
     progress: Condvar,
+    /// Streams the sandbox's denial events; `None` when `log` cannot start.
+    monitor: Option<violations::Monitor>,
 }
 
 impl std::fmt::Debug for SeatbeltDriver {
@@ -234,6 +238,12 @@ impl SeatbeltDriver {
         }
 
         let profile_path = private.profile_path.clone();
+        let monitor = private
+            .directories
+            .root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(violations::Monitor::start);
         let driver = Self {
             workspace,
             profile: Mutex::new(Active {
@@ -245,11 +255,13 @@ impl SeatbeltDriver {
             processes: Manager::default(),
             inner: Mutex::new(Inner::default()),
             progress: Condvar::new(),
+            monitor,
         };
         match driver.run_startup_self_test(cancel).await {
             Ok(()) => Ok(driver),
             Err(error) => {
                 let _ = driver.processes.close();
+                driver.close_monitor();
                 Err((driver.state, error))
             }
         }
@@ -572,6 +584,12 @@ impl SeatbeltDriver {
         args
     }
 
+    fn close_monitor(&self) {
+        if let Some(monitor) = &self.monitor {
+            monitor.close();
+        }
+    }
+
     /// Marks the sandbox itself as broken so no later execution runs.
     fn poison(&self) {
         let mut inner = self.inner.lock().expect("seatbelt driver state");
@@ -677,6 +695,8 @@ impl Driver for SeatbeltDriver {
             return (ExitStatus::default(), Err(error));
         }
 
+        let report_denials = request.report_denials;
+        let started = Instant::now();
         let spec = Spec {
             path: SANDBOX_EXEC_PATH.to_string(),
             args: self.sandbox_exec_args(request.argv.into_iter()),
@@ -707,10 +727,11 @@ impl Driver for SeatbeltDriver {
         if infrastructure {
             self.poison();
         }
-        let status = ExitStatus {
+        let mut status = ExitStatus {
             code: outcome.code,
             signaled: outcome.signaled,
             signal: outcome.signal,
+            ..Default::default()
         };
         if check_cancelled(cancel).is_err() {
             return (status, Err(Error::Cancelled));
@@ -720,6 +741,16 @@ impl Driver for SeatbeltDriver {
                 ExitStatus::default(),
                 Err(Error::unavailable(UnavailableReason::RuntimeFailure)),
             );
+        }
+        if report_denials
+            && result.is_ok()
+            && (status.code != 0 || status.signaled)
+            && let Some(monitor) = self.monitor.as_ref().filter(|monitor| monitor.running())
+        {
+            // Log delivery lags the denied syscall.
+            tokio::time::sleep(DENIAL_DELIVERY_WAIT).await;
+            (status.denials, status.denials_omitted) =
+                violations::summarize(monitor.since(started));
         }
         (status, bounded_execution_error(result))
     }
@@ -735,6 +766,7 @@ impl Driver for SeatbeltDriver {
         inner.closed = true;
         drop(inner);
 
+        self.close_monitor();
         let manager = self.processes.close();
         let cleanup = self.state.close();
         let result = match (manager, cleanup) {
@@ -1127,6 +1159,7 @@ mod contract {
                 argv,
                 dir: fixture.workspace.clone(),
                 env: fixture.environment.clone(),
+                ..Default::default()
             }
         }
 
@@ -1316,6 +1349,7 @@ mod tests {
                         "PATH=/usr/bin:/bin".to_string(),
                         format!("HOME={}", directories.home.display()),
                     ],
+                    ..Default::default()
                 },
                 Streams {
                     stdout: &mut stdout,
@@ -1488,5 +1522,74 @@ mod tests {
         let alias = format!("cat '/System/Volumes/Data{}'", path.display());
         let (readable, output) = run_script(&fixture, &alias).await;
         assert!(!readable, "the alias read the file: {output:?}");
+    }
+
+    /// Runs `script` and returns the exit status it produced.
+    #[cfg(target_os = "macos")]
+    async fn run_status(
+        fixture: &Reconfigure,
+        script: &str,
+        report_denials: bool,
+    ) -> crate::sandbox::ExitStatus {
+        use crate::sandbox::{Driver as _, Request, Streams};
+
+        let directories = fixture.driver.private_directories();
+        let (status, result) = fixture
+            .driver
+            .execute(
+                Request {
+                    argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+                    dir: fixture.workspace.clone(),
+                    env: vec![
+                        "PATH=/usr/bin:/bin".to_string(),
+                        format!("HOME={}", directories.home.display()),
+                    ],
+                    report_denials,
+                },
+                Streams {
+                    stdout: &mut Vec::new(),
+                    stderr: &mut Vec::new(),
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        status
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_failed_command_reports_the_denied_read_only_when_asked() {
+        let Some(fixture) = reconfigure_fixture().await else {
+            return;
+        };
+        if !fixture.driver.monitor.as_ref().is_some_and(|m| m.running()) {
+            eprintln!("skipping: `log stream` could not start");
+            return;
+        }
+        let path = fixture.outside.join("note");
+        let cat = format!("cat '{}'", path.display());
+        // `log stream` needs time to start, so early denials can be missed.
+        let mut status = crate::sandbox::ExitStatus::default();
+        for _ in 0..10 {
+            status = run_status(&fixture, &cat, true).await;
+            if !status.denials.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        assert_ne!(status.code, 0);
+        let target = path.to_str().expect("path");
+        assert!(
+            status
+                .denials
+                .iter()
+                .any(|d| d.operation.starts_with("file-read") && d.target == target),
+            "no read denial for {target}: {:?}",
+            status.denials
+        );
+        let status = run_status(&fixture, &cat, false).await;
+        assert_ne!(status.code, 0);
+        assert!(status.denials.is_empty(), "{:?}", status.denials);
     }
 }

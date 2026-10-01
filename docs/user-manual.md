@@ -1262,6 +1262,34 @@ private HOME).
 To run one of the failing commands, the model sets `sandbox_permissions` to
 `require_escalated`, and you enter `/approve <id>`.
 
+### A failed command lists what the sandbox denied
+
+When a `bash` command exits non-zero or is killed by a signal, its result can
+include a `sandbox_denied:` section between the stderr block and the
+`exit_code:` line. Each line is one refused operation and its target, for
+example `file-read-data /Users/me/.ssh/config` or
+`file-write-create /path/to/workspace/.git/hooks/pre-commit`. The system
+prompt instructs the model to answer a denied read outside the workspace by
+suggesting `/sandbox allow <path>`, and a denied write to `.git` metadata or
+outside the workspace by requesting `require_escalated`.
+
+Limits:
+
+- Only commands with a non-zero exit code or a signal get the section. A
+  command that exits 0 is not delayed and has none.
+- Otto waits 300 ms after the exit for the macOS log to deliver events, so a
+  denial that arrives later is missed.
+- At most 20 distinct (operation, target) pairs are listed, followed by
+  `[N more omitted]` when there are more. The driver keeps the latest 256
+  events; older ones are dropped.
+- Denials are attributed to a command by time window. Commands of one session
+  that run at the same time can show each other's denials.
+- The section needs `/usr/bin/log`, which does not run when Otto itself runs
+  inside a sandbox. In that case no section appears and nothing else reports
+  it.
+- Commands that run outside the sandbox (`--sandbox off`, excluded or approved
+  commands) have no section.
+
 ### Seatbelt limitations
 
 Otto depends on Apple's deprecated `/usr/bin/sandbox-exec`. It improves

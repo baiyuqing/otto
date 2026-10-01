@@ -1,15 +1,16 @@
 (version 1)
-(deny default)
+(deny default @@OTTO_DENY_MESSAGE@@)
 
 ; /System is a reviewed runtime root, but its Data-volume subtree aliases host
 ; files outside that root. This narrow deny wins over the later /System allow.
 (deny file-read*
-  (subpath "/System/Volumes"))
+  (subpath "/System/Volumes")
+  @@OTTO_DENY_MESSAGE@@)
 
 ; These broker operations are explicit because they can ask an unsandboxed
 ; application to act on the child's behalf even when ordinary IPC is closed.
-(deny appleevent-send)
-(deny lsopen)
+(deny appleevent-send @@OTTO_DENY_MESSAGE@@)
+(deny lsopen @@OTTO_DENY_MESSAGE@@)
 
 ; Descendants inherit this policy. Signals stay within the same policy.
 (allow process-fork)
@@ -21,7 +22,8 @@
 (deny process-exec
   (literal "/usr/bin/open")
   (literal "/usr/bin/osascript")
-  (literal "/usr/bin/sandbox-exec"))
+  (literal "/usr/bin/sandbox-exec")
+  @@OTTO_DENY_MESSAGE@@)
 
 ; Exact host facts used by common compilers and runtimes.
 (allow sysctl-read

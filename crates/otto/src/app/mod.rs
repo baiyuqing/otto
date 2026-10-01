@@ -744,7 +744,7 @@ impl Controller {
             runtime.thinking = normalize_thinking_arg(thinking);
             (current.session.clone(), runtime)
         };
-        let runner = Arc::new(self.builder.build_runner(&session, &runtime).await?);
+        let runner = Arc::new(self.builder.build_runner_quiet(&session, &runtime).await?);
         session
             .update_thinking_level(&runtime.thinking)
             .map_err(|error| self.builder.redact_error(&error, Some(&runtime)))?;
@@ -847,7 +847,7 @@ impl Controller {
             .as_ref()
             .map(|current| current.session.clone())
             .ok_or_else(|| CLOSED.to_string())?;
-        let runner = Arc::new(self.builder.build_runner(&session, &runtime).await?);
+        let runner = Arc::new(self.builder.build_runner_quiet(&session, &runtime).await?);
         if let Err(error) = self.builder.update_session_runtime(&session, &runtime) {
             runner.close();
             return Err(error);
@@ -1324,7 +1324,7 @@ async fn attach_runner(
     session: SharedSession,
     runtime: &Runtime,
 ) -> Result<Current, String> {
-    let runner = match builder.build_runner(&session, runtime).await {
+    let runner = match builder.build_runner_quiet(&session, runtime).await {
         Ok(runner) => Arc::new(runner),
         Err(error) => {
             let _ = session.close();

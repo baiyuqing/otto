@@ -32,7 +32,7 @@ use crate::cli::login;
 use crate::cli::repl_commands;
 
 use super::agents_view::AgentsView;
-use super::commands::{self, SlashCommand, SlashCommandKind};
+use super::commands::{self, Completion, SlashCommandKind};
 use super::context_view::ContextView;
 use super::entries::{self, Entry, EntryKind};
 use super::layout;
@@ -304,6 +304,19 @@ pub(crate) struct App {
     /// ([`super::render`]) reads only this field, never the registry itself,
     /// so rendering performs no lock or query.
     pub tasks: Vec<crate::subagent::tasks::Task>,
+    /// Snapshot of discovered names used by skill completions.
+    skill_names: Vec<String>,
+}
+
+fn skill_state_completions(name: &str, prefix: &str) -> Vec<Completion> {
+    ["enabled", "disabled"]
+        .into_iter()
+        .filter(|state| state.starts_with(prefix))
+        .map(|state| Completion {
+            replacement: format!("/skill set {name} {state}"),
+            description: "set skill state".to_string(),
+        })
+        .collect()
 }
 
 impl App {
@@ -334,6 +347,7 @@ impl App {
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
+            skill_names: Vec::new(),
         };
         app.refresh_tasks(controller);
         app
@@ -347,6 +361,13 @@ impl App {
             .subagent_tasks()
             .map(|tasks| tasks.list())
             .unwrap_or_default();
+        self.skill_names = controller
+            .skills()
+            .skills()
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
+        self.skill_names.sort();
     }
 
     /// Marks a turn as started. [`super::run_turn`]/[`super::run_compact`]/
@@ -640,7 +661,7 @@ impl App {
                     return None;
                 }
                 KeyCode::Tab => {
-                    self.set_input(suggestions[selected].name);
+                    self.set_input(&suggestions[selected].replacement);
                     return None;
                 }
                 KeyCode::Enter
@@ -649,7 +670,7 @@ impl App {
                         .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
                 {
                     // Falls through to the Enter arm below, which submits it.
-                    self.set_input(suggestions[selected].name);
+                    self.set_input(&suggestions[selected].replacement);
                 }
                 _ => {}
             }
@@ -913,7 +934,7 @@ impl App {
     /// The slash commands the composer's current value is a prefix of, with
     /// [`App::suggestion`] indexing the highlighted one. An open overlay hides
     /// the panel. [`super::render`] draws exactly this list.
-    pub(super) fn suggestions(&self) -> Vec<SlashCommand> {
+    pub(super) fn suggestions(&self) -> Vec<Completion> {
         if self.show_help
             || self.picker.is_some()
             || self.context.is_some()
@@ -923,7 +944,60 @@ impl App {
             return Vec::new();
         }
         let value: String = self.input.iter().collect();
+        if let Some(argument) = value.strip_prefix("/skill") {
+            return self.skill_completions(argument);
+        }
         commands::matching_slash_commands(&value)
+            .into_iter()
+            .map(Completion::from)
+            .collect()
+    }
+
+    fn skill_completions(&self, argument: &str) -> Vec<Completion> {
+        let fields: Vec<&str> = argument.split_whitespace().collect();
+        let ends_in_space = argument.ends_with(char::is_whitespace);
+        match (fields.as_slice(), ends_in_space) {
+            ([], false) => vec![Completion {
+                replacement: "/skill".to_string(),
+                description: "list skills, show one, or set enabled state".to_string(),
+            }],
+            ([], true) => self
+                .skill_name_completions("")
+                .into_iter()
+                .chain(std::iter::once(Completion {
+                    replacement: "/skill set <name> enabled|disabled".to_string(),
+                    description: "set a skill enabled state".to_string(),
+                }))
+                .collect(),
+            ([prefix], false) => self.skill_name_completions(prefix),
+            (["set"], true) => self.skill_name_completions_for_set(""),
+            (["set", prefix], false) => self.skill_name_completions_for_set(prefix),
+            (["set", name], true) => skill_state_completions(name, ""),
+            (["set", name, prefix], false) => skill_state_completions(name, prefix),
+            _ => Vec::new(),
+        }
+    }
+
+    fn skill_name_completions(&self, prefix: &str) -> Vec<Completion> {
+        self.skill_names
+            .iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| Completion {
+                replacement: format!("/skill {name}"),
+                description: "show skill details".to_string(),
+            })
+            .collect()
+    }
+
+    fn skill_name_completions_for_set(&self, prefix: &str) -> Vec<Completion> {
+        self.skill_names
+            .iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| Completion {
+                replacement: format!("/skill set {name}"),
+                description: "choose a skill to set".to_string(),
+            })
+            .collect()
     }
 
     /// Index of the first char of the composer line holding the cursor.
@@ -1203,14 +1277,6 @@ impl App {
                     repl_commands::timers_report(controller, &args)
                         .unwrap_or_else(|message| message),
                 );
-                None
-            }
-            SlashCommandKind::Skills => {
-                if !args.is_empty() {
-                    self.push_system(format!("unknown command: {line}"));
-                    return None;
-                }
-                self.push_system(repl_commands::skills_report(controller));
                 None
             }
             SlashCommandKind::Skill => {
@@ -1853,6 +1919,7 @@ mod tests {
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
+            skill_names: Vec::new(),
         };
         assert!(app.handle_ctrl_c().is_none());
         assert_eq!(app.status.as_deref(), Some(CTRL_C_EXIT_STATUS));
@@ -1885,6 +1952,7 @@ mod tests {
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
+            skill_names: Vec::new(),
         };
         assert!(app.handle_ctrl_c().is_none());
         assert!(app.input.is_empty());
@@ -2166,6 +2234,7 @@ mod tests {
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
+            skill_names: Vec::new(),
         };
         let event = key(KeyCode::Char('?'), KeyModifiers::NONE);
         // No controller is available in a unit test; '?' with pending text
@@ -2201,6 +2270,7 @@ mod tests {
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
+            skill_names: Vec::new(),
         };
 
         app.insert_text("one\ntwo");
@@ -2579,7 +2649,7 @@ mod tests {
         let mut app = App::new(&controller);
         let cancel = CancellationToken::new();
 
-        app.dispatch_line("/skills", &controller, &cancel);
+        app.dispatch_line("/skill", &controller, &cancel);
         assert_eq!(
             app.entries.last().expect("entry").raw,
             "Available skills:\n- api-review\n- release-notes [contract]\n- rust-helper"
@@ -2603,12 +2673,79 @@ mod tests {
             app.entries.last()
         );
 
+        app.dispatch_line("/skills", &controller, &cancel);
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            "unknown command: /skills"
+        );
+
         app.dispatch_line("/skill rust-helper", &controller, &cancel);
         let detail = &app.entries.last().expect("entry").raw;
         assert!(detail.contains("Skill: rust-helper"), "{detail}");
         assert!(
             detail.contains("Use small focused Rust changes."),
             "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_suggestions_are_context_sensitive_and_use_full_replacements() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        testutil::write_skill(workspace.path(), "release-notes", "Notes", "Write notes.");
+        testutil::write_skill(workspace.path(), "set", "A named set", "Detail body.");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+
+        let suggestions = |value: &str, app: &mut App| {
+            app.input = value.chars().collect();
+            app.cursor = app.input.len();
+            app.suggestions()
+        };
+        let rows = suggestions("/skill ", &mut app);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.replacement.as_str(), row.description.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("/skill release-notes", "show skill details"),
+                ("/skill set", "show skill details"),
+                (
+                    "/skill set <name> enabled|disabled",
+                    "set a skill enabled state"
+                ),
+            ]
+        );
+        let rows = suggestions("/skill rel", &mut app);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.replacement.as_str())
+                .collect::<Vec<_>>(),
+            ["/skill release-notes"]
+        );
+        let rows = suggestions("/skill set ", &mut app);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.replacement.as_str())
+                .collect::<Vec<_>>(),
+            ["/skill set release-notes", "/skill set set"]
+        );
+        let rows = suggestions("/skill set release-notes ", &mut app);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.replacement.as_str(), row.description.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("/skill set release-notes enabled", "set skill state"),
+                ("/skill set release-notes disabled", "set skill state"),
+            ]
+        );
+        let rows = suggestions("/skill set", &mut app);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.replacement.as_str())
+                .collect::<Vec<_>>(),
+            ["/skill set"]
         );
     }
 
@@ -3147,12 +3284,12 @@ mod tests {
         app.cursor = app.input.len();
 
         app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
-        assert_eq!(app.suggestion, 1, "/skill then /skills");
+        assert_eq!(app.suggestion, 0, "only /skill matches");
         assert_eq!(app.scroll, None, "the transcript must not scroll");
         app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
         assert_eq!(app.suggestion, 0, "selection wraps");
         app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
-        assert_eq!(app.suggestion, 1);
+        assert_eq!(app.suggestion, 0);
     }
 
     #[tokio::test]

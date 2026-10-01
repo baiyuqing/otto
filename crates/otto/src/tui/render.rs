@@ -21,7 +21,7 @@ use ratatui::widgets::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, ApprovalDialog, TurnStatus};
-use super::commands::{SLASH_COMMANDS, SlashCommand};
+use super::commands::{Completion, SLASH_COMMANDS};
 use super::entries::Entry;
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN, escape_plain_text,
@@ -287,7 +287,7 @@ fn footer_text(app: &App) -> String {
 /// A [`List`] rather than a [`Paragraph`] so that ratatui's own [`ListState`]
 /// scrolls the selected row into view when the match list is longer than the
 /// rows [`draw`] could give the panel.
-fn draw_suggestions(frame: &mut Frame, app: &App, suggestions: &[SlashCommand], area: Rect) {
+fn draw_suggestions(frame: &mut Frame, app: &App, suggestions: &[Completion], area: Rect) {
     if area.height == 0 || suggestions.is_empty() {
         return;
     }
@@ -296,11 +296,11 @@ fn draw_suggestions(frame: &mut Frame, app: &App, suggestions: &[SlashCommand], 
         .map(|command| {
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!("{:<12}", command.name),
+                    format!("{:<12}", command.replacement),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::styled(
-                    command.description,
+                    &command.description,
                     Style::default().add_modifier(Modifier::DIM),
                 ),
             ]))

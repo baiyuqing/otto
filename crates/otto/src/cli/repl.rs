@@ -30,7 +30,7 @@ pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/init     create a repository AGENTS.md guide\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/sandbox allow <path> let sandboxed commands read a path\n/sandbox network allow|deny set sandboxed network access\n/approve <id> allow one exact elevated Bash command\n/memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/agents   list the latest 50 recorded sub-agent tasks, any session\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
+const HELP: &str = "/help     show commands\n/init     create a repository AGENTS.md guide\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/sandbox allow <path> let sandboxed commands read a path\n/sandbox network allow|deny set sandboxed network access\n/approve <id> allow one exact elevated Bash command\n/memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skill [name] show skills or one skill; /skill set <name> enabled|disabled change a skill state\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/agents   list the latest 50 recorded sub-agent tasks, any session\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
 
 /// Why the loop stopped.
 #[derive(Debug)]
@@ -437,13 +437,6 @@ impl<'a> Repl<'a> {
                 }
                 "remember" => {
                     self.remember_command(args)?;
-                    Some(false)
-                }
-                "skills" => {
-                    if !args.is_empty() {
-                        break 'dispatch None;
-                    }
-                    self.skills_command();
                     Some(false)
                 }
                 "skill" => {
@@ -1207,7 +1200,7 @@ mod tests {
         let controller = controller(workspace.path(), sessions.path()).await;
 
         let (stdout, stderr, result) = session(
-            "/skills\n/skill rust-helper\n/skill missing\n/skill\n/exit\n",
+            "/skill rust-helper\n/skill missing\n/skill\n/skills\n/exit\n",
             &controller,
         )
         .await;
@@ -1225,10 +1218,7 @@ mod tests {
             "{stdout}"
         );
         assert!(stderr.contains("unknown skill: missing"), "{stderr}");
-        assert!(
-            stderr.contains(crate::cli::repl_commands::SKILL_USAGE),
-            "{stderr}"
-        );
+        assert!(stderr.contains("unknown command: /skills"), "{stderr}");
     }
 
     #[tokio::test]
@@ -1282,8 +1272,7 @@ mod tests {
             "/compact [focus] compact context",
             "/sandbox [reload]",
             "/approve <id>",
-            "/skills   list available skills",
-            "/skill <name> show a skill",
+            "/skill [name] show skills or one skill; /skill set <name> enabled|disabled change a skill state",
         ] {
             assert!(
                 stdout.contains(expected),

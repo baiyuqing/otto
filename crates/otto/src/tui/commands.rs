@@ -5,6 +5,22 @@
 //! `cli::repl_commands`'s free functions, the same code the line-oriented REPL
 //! uses.
 
+/// A composer suggestion, including the complete text accepting it inserts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    pub replacement: String,
+    pub description: String,
+}
+
+impl From<SlashCommand> for Completion {
+    fn from(command: SlashCommand) -> Self {
+        Self {
+            replacement: command.name.to_string(),
+            description: command.description.to_string(),
+        }
+    }
+}
+
 /// One entry in the slash-command table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlashCommand {
@@ -38,7 +54,6 @@ pub enum SlashCommandKind {
     Context,
     Timers,
     Skill,
-    Skills,
     Sandbox,
     Approve,
     Mcp,
@@ -174,13 +189,8 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/skill",
-        description: "show a skill by name",
+        description: "list skills, show one, or set enabled state",
         kind: SlashCommandKind::Skill,
-    },
-    SlashCommand {
-        name: "/skills",
-        description: "list available skills",
-        kind: SlashCommandKind::Skills,
     },
 ];
 
@@ -228,7 +238,7 @@ mod tests {
             .iter()
             .map(|c| c.name)
             .collect();
-        assert_eq!(names, ["/session", "/sandbox", "/skill", "/skills"]);
+        assert_eq!(names, ["/session", "/sandbox", "/skill"]);
     }
 
     #[test]
@@ -283,12 +293,12 @@ mod tests {
     }
 
     #[test]
-    fn a_prefix_matches_the_skill_commands() {
+    fn a_prefix_matches_the_skill_command() {
         let names: Vec<&str> = matching_slash_commands("/ski")
             .iter()
             .map(|c| c.name)
             .collect();
-        assert_eq!(names, ["/skill", "/skills"]);
+        assert_eq!(names, ["/skill"]);
     }
 
     #[test]

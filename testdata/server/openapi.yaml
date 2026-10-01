@@ -410,6 +410,34 @@ components:
           items:
             $ref: "#/components/schemas/McpServer"
       required: [servers]
+    Skill:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        location:
+          type: string
+      required: [name, description, location]
+    SkillList:
+      type: object
+      properties:
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/Skill"
+      required: [skills]
+    SkillMutation:
+      type: object
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+        restart_required:
+          type: boolean
+      required: [name, enabled, restart_required]
     TaskWithHistory:
       allOf:
         - $ref: "#/components/schemas/Task"
@@ -1282,6 +1310,78 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/skills:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: List skills active for this session
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillList"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/skills/{name}:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get one active skill's metadata
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Skill"
+        "404":
+          description: Session or skill not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/skills/{name}/enable:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Persistently enable one skill; restart Otto to apply it
+      responses:
+        "200":
+          description: Persisted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillMutation"
+  /v1/sessions/{id}/skills/{name}/disable:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Persistently disable one skill; restart Otto to apply it
+      responses:
+        "200":
+          description: Persisted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillMutation"
   /v1/sessions/{id}/compact:
     parameters:
       - $ref: "#/components/parameters/sessionID"

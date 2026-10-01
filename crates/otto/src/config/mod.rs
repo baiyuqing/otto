@@ -443,6 +443,40 @@ fn create_bytes_if_absent(path: &Path, contents: &[u8]) -> Result<(), &'static s
     result
 }
 
+/// Adds or removes one exact name from `[skills].disabled`, preserving every
+/// other configuration byte and using the normal CAS-backed atomic writer.
+pub fn set_skill_disabled_file(
+    path: &Path,
+    name: &str,
+    disabled: bool,
+) -> Result<(), NativeConfigError> {
+    if name.is_empty() {
+        return Err(ConfigError::new("missing skill name").into());
+    }
+    let (original, mut file) = load_with_bytes(path, &default_path())?;
+    if disabled {
+        file.skills.disabled.insert(name.to_string());
+    } else {
+        file.skills.disabled.remove(name);
+    }
+    let values: Vec<toml::Value> = file
+        .skills
+        .disabled
+        .iter()
+        .map(|name| toml::Value::String(name.clone()))
+        .collect();
+    let value = toml::Value::Array(values.clone()).to_string();
+    let content = String::from_utf8_lossy(&original);
+    let updated = if content.contains("[skills]") {
+        otto_core::config::edit::set_value(&content, &["skills"], "disabled", Some(&value))?
+    } else {
+        let mut table = toml::Table::new();
+        table.insert("disabled".to_string(), toml::Value::Array(values));
+        otto_core::config::edit::insert_table(&content, &["skills"], table)?
+    };
+    write_bytes(path, &original, updated.as_bytes()).map_err(io_error)
+}
+
 /// Sets `path`'s `default_profile` to `profile`, after checking the profile
 /// exists in the file, changing only that value.
 pub fn set_default_profile_file(path: &Path, profile: &str) -> Result<(), NativeConfigError> {

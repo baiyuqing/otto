@@ -19,6 +19,7 @@ pub mod listen;
 pub mod mcp;
 pub mod metrics;
 pub mod sandbox;
+pub mod skills;
 pub mod tasks;
 pub mod timers;
 pub mod turn;
@@ -561,6 +562,16 @@ impl Server {
                 post(timers::cancel),
             )
             .route("/v1/sessions/{id}/mcp", get(mcp::list))
+            .route("/v1/sessions/{id}/skills", get(skills::list))
+            .route("/v1/sessions/{id}/skills/{name}", get(skills::get))
+            .route(
+                "/v1/sessions/{id}/skills/{name}/enable",
+                post(skills::enable),
+            )
+            .route(
+                "/v1/sessions/{id}/skills/{name}/disable",
+                post(skills::disable),
+            )
             .route("/v1/sandbox/reload", post(sandbox::reload))
             .route("/v1/tasks", get(agents::list))
             .route("/v1/tasks/{parent_session}/{task_id}", get(agents::get))
@@ -4040,6 +4051,10 @@ mod tests {
         "/v1/sessions/{id}/timers",
         "/v1/sessions/{id}/timers/{timer_id}/cancel",
         "/v1/sessions/{id}/mcp",
+        "/v1/sessions/{id}/skills",
+        "/v1/sessions/{id}/skills/{name}",
+        "/v1/sessions/{id}/skills/{name}/enable",
+        "/v1/sessions/{id}/skills/{name}/disable",
         "/v1/sandbox/reload",
         "/v1/tasks",
         "/v1/tasks/{parent_session}/{task_id}",
@@ -4081,7 +4096,8 @@ mod tests {
                 .replace("{turn_id}", "nope")
                 .replace("{task_id}", "nope")
                 .replace("{timer_id}", "nope")
-                .replace("{approval_id}", "nope");
+                .replace("{approval_id}", "nope")
+                .replace("{name}", "nope");
             // An unmatched path logs the route label "unmatched"; a matched
             // one logs its own pattern. That is the reachability check.
             let before = harness.logged().len();

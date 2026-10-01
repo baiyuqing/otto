@@ -367,7 +367,8 @@ impl Builder {
         stderr: &mut dyn Write,
     ) -> Result<CatalogWiring, BuildError> {
         let skills = resolve_skills(&self.config, &self.environment, &self.workspace_path);
-        let (catalog, mut warnings) = skill::Catalog::discover(&roots(&skills.roots));
+        let (discovered_catalog, mut warnings) = skill::Catalog::discover(&roots(&skills.roots));
+        let catalog = discovered_catalog.without_names(&skills.disabled);
 
         let agents = resolve_agents(&self.config, &self.environment, &self.workspace_path)
             .map_err(|error| error.to_string())?;

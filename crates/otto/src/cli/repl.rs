@@ -1214,9 +1214,10 @@ mod tests {
 
         assert!(result.is_ok(), "{result:?}");
         assert!(
-            stdout.contains("Available skills:\n- rust-helper: Rust guidance"),
+            stdout.contains("Available skills:\n- rust-helper"),
             "{stdout}"
         );
+        assert!(!stdout.contains("- rust-helper: Rust guidance"), "{stdout}");
         assert!(stdout.contains("Skill: rust-helper"), "{stdout}");
         assert!(stdout.contains("Description: Rust guidance"), "{stdout}");
         assert!(

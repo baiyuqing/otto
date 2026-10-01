@@ -2496,6 +2496,19 @@ mod tests {
             "Rust guidance",
             "Use small focused Rust changes.",
         );
+        testutil::write_skill(
+            workspace.path(),
+            "api-review",
+            "A deliberately long description that must not enter the skills list.",
+            "Review APIs.",
+        );
+        let contract_dir = workspace.path().join(".otto/skills/release-notes");
+        std::fs::create_dir_all(&contract_dir).expect("contract skill directory");
+        std::fs::write(
+            contract_dir.join("SKILL.md"),
+            "---\nname: release-notes\ndescription: A contract skill.\ninput: changes\noutput: notes\n---\nWrite notes.\n",
+        )
+        .expect("contract skill");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let mut app = App::new(&controller);
         let cancel = CancellationToken::new();
@@ -2503,7 +2516,25 @@ mod tests {
         app.dispatch_line("/skills", &controller, &cancel);
         assert_eq!(
             app.entries.last().expect("entry").raw,
-            "Available skills:\n- rust-helper: Rust guidance"
+            "Available skills:\n- api-review\n- release-notes [contract]\n- rust-helper"
+        );
+        assert!(
+            !app.entries
+                .last()
+                .expect("entry")
+                .raw
+                .contains("Rust guidance"),
+            "{:?}",
+            app.entries.last()
+        );
+        assert!(
+            !app.entries
+                .last()
+                .expect("entry")
+                .raw
+                .contains("deliberately long description"),
+            "{:?}",
+            app.entries.last()
         );
 
         app.dispatch_line("/skill rust-helper", &controller, &cancel);

@@ -242,6 +242,9 @@ never retried automatically.
 - File tools stay within the selected workspace. Shell commands use Seatbelt by
   default; `--sandbox off` explicitly disables shell sandboxing. Seatbelt is not
   a VM and does not prevent destructive changes inside the writable workspace.
+  The workspace's `.git` entry, `.git/config` and `.git/hooks` are read-only
+  under Seatbelt; see
+  [the user manual](docs/user-manual.md#git-metadata-is-read-only-in-the-seatbelt-sandbox).
 - In an interactive parent session, Otto can request one-time unsandboxed Bash
   execution. Review the exact command and run `/approve <id>` to grant it once;
   the request remains pending until it is replaced, consumed, or Otto exits, and never changes `config.toml`.

@@ -1174,32 +1174,61 @@ impl Controller {
         }
     }
 
-    /// Grants one pending elevated Bash command for the current session.
-    pub fn approve_bash(&self, id: &str) -> Result<String, String> {
-        let session_id = {
-            let state = self.lock();
-            if state.closed {
-                return Err(CLOSED.to_string());
-            }
-            if state.busy {
-                return Err(PROMPT_ACTIVE.to_string());
-            }
-            state
-                .current
-                .as_ref()
-                .ok_or_else(|| CLOSED.to_string())?
-                .session
-                .header()
-                .id
-        };
-        let approvals = self
-            .builder
+    /// The current session id, once no turn is running.
+    fn idle_session_id(&self) -> Result<String, String> {
+        let state = self.lock();
+        if state.closed {
+            return Err(CLOSED.to_string());
+        }
+        if state.busy {
+            return Err(PROMPT_ACTIVE.to_string());
+        }
+        Ok(state
+            .current
+            .as_ref()
+            .ok_or_else(|| CLOSED.to_string())?
+            .session
+            .header()
+            .id)
+    }
+
+    fn bash_approvals(&self) -> Result<&Arc<crate::tool::bash::BashApprovals>, String> {
+        self.builder
             .bash_approvals
             .as_ref()
-            .ok_or_else(|| "temporary elevation is unavailable".to_string())?;
-        approvals.approve(&session_id, id).map_err(str::to_string)?;
+            .ok_or_else(|| "temporary elevation is unavailable".to_string())
+    }
+
+    /// Grants one pending elevated Bash command for the current session.
+    pub fn approve_bash(&self, id: &str) -> Result<String, String> {
+        let session_id = self.idle_session_id()?;
+        self.bash_approvals()?
+            .approve(&session_id, id)
+            .map_err(str::to_string)?;
         Ok(format!(
             "The user approved {id} for one exact command. Retry the same elevated Bash command now."
+        ))
+    }
+
+    /// Excludes the pending command's program from the sandbox, then grants the
+    /// pending command once. Nothing is written when the command is not a
+    /// single program invocation.
+    pub async fn approve_bash_always(&self, id: &str) -> Result<String, String> {
+        let session_id = self.idle_session_id()?;
+        let approvals = self.bash_approvals()?;
+        let command = approvals
+            .pending_command(&session_id, id)
+            .ok_or_else(|| "approval request not found".to_string())?;
+        let entry =
+            otto_core::config::sandbox::excluded_command_entry(&command).ok_or_else(|| {
+                "the command is not a single program invocation; use /approve <id> instead"
+                    .to_string()
+            })?;
+        self.amend_sandbox(SandboxChange::ExcludeCommand(entry.clone()))
+            .await?;
+        approvals.approve(&session_id, id).map_err(str::to_string)?;
+        Ok(format!(
+            "The user approved {id} and excluded '{entry}' from the sandbox. Retry the same Bash command now."
         ))
     }
 
@@ -1433,6 +1462,56 @@ fn clean(path: &Path) -> String {
     sessionfs::clean_go_path(&path.to_string_lossy())
 }
 
+/// A controller whose builder carries bash approvals and a sandbox control,
+/// for the frontends' `/approve <id> always` tests. Returns the approvals so a
+/// test can create a pending request, the reload counter, and the approvals'
+/// session id.
+#[cfg(test)]
+pub(crate) async fn controller_with_approvals(
+    workspace: &std::path::Path,
+    sessions: &std::path::Path,
+) -> (
+    Controller,
+    Arc<crate::tool::bash::BashApprovals>,
+    Arc<Mutex<usize>>,
+) {
+    use crate::cli::info::SandboxNetwork;
+    use crate::cli::testutil::{FakeSandbox, builder, initial_runtime, seatbelt_info};
+    use crate::sandbox::direct::DirectDriver;
+    use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
+
+    let executor = Executor::new(
+        Arc::new(DirectDriver::new()),
+        Policy {
+            filesystem: FilesystemMode::Unconfined,
+            network: NetworkMode::Allow,
+        },
+        workspace,
+    )
+    .expect("elevated executor");
+    let approvals = Arc::new(crate::tool::bash::BashApprovals::new(
+        Arc::new(executor),
+        Vec::new(),
+    ));
+    let mut builder = builder(workspace, sessions);
+    builder.bash_approvals = Some(Arc::clone(&approvals));
+    let runtime = initial_runtime(&builder);
+    let session = builder.create_session(&runtime).expect("session");
+    let runner = builder
+        .build_runner(&session, &runtime)
+        .await
+        .expect("runner");
+    let info = builder.runtime_info(&runtime);
+    let (control, calls) = FakeSandbox::new(
+        seatbelt_info(SandboxNetwork::Allowed),
+        seatbelt_info(SandboxNetwork::Denied),
+        None,
+    );
+    let controller =
+        Controller::new(builder, true, session, runner, info).with_sandbox_control(control);
+    (controller, approvals, calls)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1495,6 +1574,73 @@ mod tests {
             controller.approve_bash("approval-1"),
             Err(PROMPT_ACTIVE.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn approve_always_excludes_the_program_reloads_and_grants_the_request() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, approvals, calls) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let session_id = controller.info().session_id;
+        let id = approvals.request(&session_id, "lark-cli auth status");
+
+        let message = controller.approve_bash_always(&id).await.expect("approve");
+
+        assert_eq!(
+            message,
+            format!(
+                "The user approved {id} and excluded 'lark-cli *' from the sandbox. Retry the same Bash command now."
+            )
+        );
+        assert_eq!(*calls.lock().expect("calls"), 1);
+        let written = std::fs::read_to_string(controller.config_path()).expect("read config");
+        assert!(
+            written.contains("excluded_commands = ['lark-cli *']"),
+            "{written}"
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_always_refuses_commands_that_are_not_one_program_invocation() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, approvals, calls) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let session_id = controller.info().session_id;
+
+        for command in ["git push; rm -rf x", "bash -c 'lark-cli x'", "sudo ls"] {
+            let id = approvals.request(&session_id, command);
+            let error = controller
+                .approve_bash_always(&id)
+                .await
+                .expect_err(command);
+            assert!(error.contains("use /approve <id> instead"), "{error}");
+        }
+
+        assert_eq!(*calls.lock().expect("calls"), 0);
+        assert!(!controller.config_path().exists());
+    }
+
+    #[tokio::test]
+    async fn approve_always_refuses_an_unknown_id_and_a_busy_controller() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, approvals, _) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let session_id = controller.info().session_id;
+        let id = approvals.request(&session_id, "lark-cli auth status");
+
+        assert_eq!(
+            controller.approve_bash_always("approval-99").await,
+            Err("approval request not found".to_string())
+        );
+        let _admission = controller.begin_operation().expect("admit turn");
+        assert_eq!(
+            controller.approve_bash_always(&id).await,
+            Err(PROMPT_ACTIVE.to_string())
+        );
+        assert!(!controller.config_path().exists());
     }
 
     #[tokio::test]

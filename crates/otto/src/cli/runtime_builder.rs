@@ -895,6 +895,7 @@ pub struct Builder {
     pub workspace_path: String,
     pub command_executor: Option<Arc<dyn CommandExecutor>>,
     pub bash_approvals: Option<Arc<bash::BashApprovals>>,
+    pub excluded_commands: Option<Arc<bash::ExcludedCommands>>,
     pub sandbox_environment: Option<Vec<String>>,
     pub sandbox_info: SandboxInfo,
     pub sandbox_secrets: Vec<String>,
@@ -945,6 +946,7 @@ impl Builder {
             workspace_path,
             command_executor: None,
             bash_approvals: None,
+            excluded_commands: None,
             sandbox_environment: None,
             sandbox_info: SandboxInfo::default(),
             sandbox_secrets,
@@ -1291,6 +1293,9 @@ impl Builder {
             .map_err(|error| format!("create bash tool: {error}"))?;
             if let Some(approvals) = &self.bash_approvals {
                 tool = tool.with_approvals(session.header().id, Arc::clone(approvals));
+            }
+            if let Some(excluded) = &self.excluded_commands {
+                tool = tool.with_excluded_commands(Arc::clone(excluded));
             }
             tools.push(Box::new(tool));
         }
@@ -2234,6 +2239,52 @@ mod tests {
                 .expect("schema")
                 .get()
                 .contains("require_escalated")
+        );
+    }
+
+    #[tokio::test]
+    async fn child_bash_tools_run_excluded_commands_unconfined() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut builder = builder(dir.path());
+        with_bash(&mut builder, dir.path());
+        let unconfined = Executor::new(
+            Arc::new(DirectDriver::new()),
+            Policy {
+                filesystem: FilesystemMode::Unconfined,
+                network: NetworkMode::Allow,
+            },
+            dir.path(),
+        )
+        .expect("unconfined executor");
+        builder.excluded_commands = Some(Arc::new(bash::ExcludedCommands::new(
+            Arc::new(unconfined),
+            vec![
+                "PATH=/usr/bin:/bin".to_string(),
+                "MARK=excluded".to_string(),
+            ],
+            vec!["printenv *".to_string()],
+        )));
+
+        let tools = builder
+            .child_tools(&runtime(), 65536, &[], &Catalog::default())
+            .expect("child tools");
+        let bash = tools
+            .iter()
+            .find(|tool| tool.definition().name == "bash")
+            .expect("child bash");
+        let excluded =
+            crate::tool::testutil::run(bash.as_ref(), r#"{"command":"printenv MARK"}"#).await;
+        assert!(
+            excluded.content.contains("excluded"),
+            "{}",
+            excluded.content
+        );
+        let compound =
+            crate::tool::testutil::run(bash.as_ref(), r#"{"command":"printenv MARK | cat"}"#).await;
+        assert!(
+            !compound.content.contains("excluded"),
+            "{}",
+            compound.content
         );
     }
 

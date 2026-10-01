@@ -124,12 +124,12 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/sandbox",
-        description: "show state, allow <path>, network allow|deny, or reload",
+        description: "show state, allow <path>, exclude <entry>, network allow|deny, or reload",
         kind: SlashCommandKind::Sandbox,
     },
     SlashCommand {
         name: "/approve",
-        description: "allow one exact elevated Bash command",
+        description: "allow one exact elevated Bash command; <id> always also excludes its program",
         kind: SlashCommandKind::Approve,
     },
     SlashCommand {

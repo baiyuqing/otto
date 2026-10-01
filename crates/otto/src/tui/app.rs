@@ -30,6 +30,7 @@ use crate::app::{Controller, Info, PROFILE_SWITCH_UNAVAILABLE};
 use crate::cli::info::SandboxNetwork;
 use crate::cli::login;
 use crate::cli::repl_commands;
+use crate::cli::sandbox_setup::parse_exclude_entry;
 
 use super::agents_view::AgentsView;
 use super::commands::{self, Completion, SlashCommandKind};
@@ -153,7 +154,11 @@ pub(crate) enum Action {
     SandboxAllow(String),
     /// The sandbox network mode, `allow` or `deny`.
     SandboxNetwork(String),
+    /// One validated-later `excluded_commands` entry to add.
+    SandboxExclude(String),
     Approve(String),
+    /// Approve the pending command and exclude its program from the sandbox.
+    ApproveAlways(String),
     Login(String),
     McpLogin(String),
 }
@@ -1249,20 +1254,27 @@ impl App {
                     ("network", mode @ ("allow" | "deny")) => {
                         Some(Action::SandboxNetwork(mode.to_string()))
                     }
+                    ("exclude", entry) => match parse_exclude_entry(entry) {
+                        Ok(entry) => Some(Action::SandboxExclude(entry)),
+                        Err(message) => {
+                            self.push_system(format!("/sandbox exclude: {message}"));
+                            None
+                        }
+                    },
                     _ => {
                         self.push_system(format!("unknown command: /sandbox {args}"));
                         None
                     }
                 }
             }
-            SlashCommandKind::Approve => {
-                if args.is_empty() || args.contains(char::is_whitespace) {
+            SlashCommandKind::Approve => match args.split_whitespace().collect::<Vec<_>>()[..] {
+                [id] => Some(Action::Approve(id.to_string())),
+                [id, "always"] => Some(Action::ApproveAlways(id.to_string())),
+                _ => {
                     self.push_system(format!("unknown command: {line}"));
                     None
-                } else {
-                    Some(Action::Approve(args))
                 }
-            }
+            },
             SlashCommandKind::Login => Some(Action::Login(args)),
             SlashCommandKind::Mcp => {
                 let fields: Vec<&str> = args.split_whitespace().collect();
@@ -3561,6 +3573,64 @@ mod tests {
             let entry = app.entries.last().expect("entry");
             assert_eq!(entry.kind, Some(EntryKind::System));
             assert!(entry.raw.starts_with("/sandbox allow:"), "{}", entry.raw);
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_exclude_dispatches_the_entry_without_a_confirmation() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        for line in [
+            "/sandbox exclude lark-cli *",
+            "/sandbox exclude 'lark-cli *'",
+            "/sandbox exclude \"lark-cli *\"",
+        ] {
+            let action = app.dispatch_line(line, &controller, &cancel);
+            assert!(
+                matches!(&action, Some(Action::SandboxExclude(entry)) if entry == "lark-cli *"),
+                "{line}"
+            );
+            assert!(app.picker.is_none(), "{line}");
+        }
+
+        let action = app.dispatch_line("/sandbox exclude", &controller, &cancel);
+        assert!(action.is_none());
+        let entry = app.entries.last().expect("entry");
+        assert!(
+            entry.raw.starts_with("/sandbox exclude: usage:"),
+            "{}",
+            entry.raw
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_dispatches_the_always_form_and_refuses_other_arguments() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        let action = app.dispatch_line("/approve approval-1", &controller, &cancel);
+        assert!(matches!(&action, Some(Action::Approve(id)) if id == "approval-1"));
+        let action = app.dispatch_line("/approve approval-1 always", &controller, &cancel);
+        assert!(matches!(&action, Some(Action::ApproveAlways(id)) if id == "approval-1"));
+
+        for line in [
+            "/approve",
+            "/approve approval-1 sometimes",
+            "/approve a b always",
+        ] {
+            assert!(
+                app.dispatch_line(line, &controller, &cancel).is_none(),
+                "{line}"
+            );
+            let entry = app.entries.last().expect("entry");
+            assert!(entry.raw.starts_with("unknown command:"), "{}", entry.raw);
         }
     }
 

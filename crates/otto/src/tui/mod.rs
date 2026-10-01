@@ -575,6 +575,32 @@ async fn run_app<B: Backend>(
                         propagate_turn_error(error)?;
                     }
                 }
+                Action::SandboxExclude(entry) => {
+                    if let Err(error) = amend_sandbox(
+                        &mut app,
+                        terminal,
+                        keys,
+                        controller,
+                        cancel,
+                        SandboxChange::ExcludeCommand(entry),
+                    )
+                    .await
+                    {
+                        propagate_turn_error(error)?;
+                    }
+                }
+                Action::ApproveAlways(id) => match controller.approve_bash_always(&id).await {
+                    Ok(prompt) => {
+                        app.push_system(format!("Approved {id} for one command."));
+                        if let Err(error) =
+                            run_turn(&mut app, terminal, keys, controller, cancel, prompt, None)
+                                .await
+                        {
+                            propagate_turn_error(error)?;
+                        }
+                    }
+                    Err(message) => app.push_system(format!("/approve: {message}")),
+                },
                 Action::Approve(id) => match controller.approve_bash(&id) {
                     Ok(prompt) => {
                         app.push_system(format!("Approved {id} for one command."));
@@ -980,6 +1006,8 @@ async fn amend_sandbox<B: Backend>(
     let widens = match &change {
         SandboxChange::AllowReadPath(_) => true,
         SandboxChange::Network(mode) => mode == "allow",
+        // A listed command runs outside the sandbox.
+        SandboxChange::ExcludeCommand(_) => true,
     };
     let summary = change.summary();
     let info = match controller.amend_sandbox(change).await {

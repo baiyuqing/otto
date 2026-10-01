@@ -1260,9 +1260,10 @@ pub(super) fn resolve_sandbox_settings(
 
 /// The sandbox artifacts one workspace's composition produces: the switch
 /// wired into `builder.command_executor`, the elevated bash-approval
-/// executor (`None` when `elevate` was false, the sandbox is not Seatbelt, or
-/// elevation failed), and the reloader `/sandbox reload` uses to reopen this
-/// workspace's own sandbox (`None` without a usable sandbox).
+/// executor, also used for `[sandbox].excluded_commands` (`None` when the
+/// sandbox is not Seatbelt or the unconfined executor could not be built),
+/// and the reloader `/sandbox reload` uses to reopen this workspace's own
+/// sandbox (`None` without a usable sandbox).
 pub(super) struct WorkspaceSandbox {
     pub(super) control: Arc<SandboxSwitch>,
     pub(super) approval_executor: Option<Arc<Executor>>,
@@ -1272,13 +1273,13 @@ pub(super) struct WorkspaceSandbox {
 /// Opens one workspace's sandbox and, when eligible, its elevated
 /// bash-approval executor, filling in `builder`'s sandbox-derived fields
 /// (`command_executor`, `sandbox_environment`, `sandbox_info`,
-/// `sandbox_secrets*`, `bash_approvals`) along the way.
+/// `sandbox_secrets*`, `excluded_commands`, `bash_approvals`) along the way.
 ///
 /// Shared by `run`'s startup composition and `load_workspace`, so a workspace
 /// admitted after startup gets the same `--sandbox` override, `/approve`
 /// support, and `/sandbox reload` wiring as the startup workspace — see
 /// `docs/specs/2026-09-26-serve-multiple-workspaces.md` ("Server structure").
-/// `elevate` gates the approval executor; `sandbox_settings`, `config_path`,
+/// `elevate` gates `bash_approvals`; `sandbox_settings`, `config_path`,
 /// `explicit_config`, `driver_override`, and `api_key_env` are inputs the two
 /// callers resolve differently (startup from CLI flags and a resumed
 /// session's metadata, `load_workspace` from `Shared` alone), so they stay
@@ -1325,7 +1326,7 @@ pub(super) async fn compose_workspace_sandbox(
         builder.sandbox_secrets_complete && redactions_complete && merged_complete;
 
     let mut approval_executor: Option<Arc<Executor>> = None;
-    if elevate && sandbox_info.mode == super::info::SandboxMode::Seatbelt {
+    if sandbox_info.mode == super::info::SandboxMode::Seatbelt {
         let elevated_environment = resolve_environment(&EnvironmentOptions {
             host_entries: builder.host_entries.clone(),
             provider_names: sandbox_provider_environment_names(&builder.config, api_key_env),
@@ -1346,10 +1347,17 @@ pub(super) async fn compose_workspace_sandbox(
         {
             let executor = Arc::new(executor);
             let command_executor: Arc<dyn crate::sandbox::CommandExecutor> = executor.clone();
-            builder.bash_approvals = Some(Arc::new(crate::tool::bash::BashApprovals::new(
-                command_executor,
+            builder.excluded_commands = Some(Arc::new(crate::tool::bash::ExcludedCommands::new(
+                command_executor.clone(),
                 entries.to_vec(),
+                sandbox_settings.excluded_commands.clone(),
             )));
+            if elevate {
+                builder.bash_approvals = Some(Arc::new(crate::tool::bash::BashApprovals::new(
+                    command_executor,
+                    entries.to_vec(),
+                )));
+            }
             let (merged, complete) =
                 merge_redactions(&builder.sandbox_secrets, snapshot.redaction_values());
             builder.sandbox_secrets = merged;
@@ -1372,6 +1380,7 @@ pub(super) async fn compose_workspace_sandbox(
             api_key_env: api_key_env.to_string(),
             reopen: open_options,
             cancel: cancel.child_token(),
+            excluded: builder.excluded_commands.clone(),
         })
     });
 

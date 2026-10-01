@@ -455,7 +455,7 @@ pub fn bash_definition_with_approvals() -> ToolDefinition {
                 },
                 "justification": {
                     "type": "string",
-                    "description": "Why unsandboxed execution is required"
+                    "description": "Why unsandboxed execution is required: one short sentence, under 80 characters"
                 }
             },
             "required": ["command"]

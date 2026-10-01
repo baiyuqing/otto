@@ -1195,12 +1195,45 @@ impl Builder {
     }
 
     /// Composes one runnable agent.
+    ///
+    /// This convenience entry point preserves the command/server behavior of
+    /// reporting non-fatal discovery and MCP warnings to stderr. Interactive
+    /// frontends must use [`Self::build_runner_quiet`] while they own the
+    /// terminal screen.
     pub async fn build_runner(
         &self,
         session: &SharedSession,
         runtime: &Runtime,
     ) -> Result<Runner, BuildError> {
-        self.build_runner_inner(session, runtime, None, true)
+        let mut warnings = std::io::stderr();
+        self.build_runner_with_warnings(session, runtime, &mut warnings)
+            .await
+    }
+
+    /// Composes a runner without writing diagnostics to the process terminal.
+    ///
+    /// The caller that owns an interactive terminal must not let a background
+    /// or replacement build write ordinary text while the TUI has an alternate
+    /// screen active: stdout and stderr commonly share the same terminal.
+    pub async fn build_runner_quiet(
+        &self,
+        session: &SharedSession,
+        runtime: &Runtime,
+    ) -> Result<Runner, BuildError> {
+        let mut warnings = std::io::sink();
+        self.build_runner_with_warnings(session, runtime, &mut warnings)
+            .await
+    }
+
+    /// Composes one runnable agent, writing non-fatal build diagnostics to
+    /// `warnings`.
+    pub async fn build_runner_with_warnings(
+        &self,
+        session: &SharedSession,
+        runtime: &Runtime,
+        warnings: &mut (dyn std::io::Write + Send),
+    ) -> Result<Runner, BuildError> {
+        self.build_runner_inner(session, runtime, None, true, warnings)
             .await
             .map(|(runner, _)| runner)
     }
@@ -1212,7 +1245,9 @@ impl Builder {
         trace: bool,
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let trace = trace.then(BuildTrace::new);
-        self.build_runner_inner(session, runtime, trace, true).await
+        let mut warnings = std::io::stderr();
+        self.build_runner_inner(session, runtime, trace, true, &mut warnings)
+            .await
     }
 
     pub async fn build_runner_without_mcp_with_trace(
@@ -1222,7 +1257,8 @@ impl Builder {
         trace: bool,
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let trace = trace.then(BuildTrace::new);
-        self.build_runner_inner(session, runtime, trace, false)
+        let mut warnings = std::io::stderr();
+        self.build_runner_inner(session, runtime, trace, false, &mut warnings)
             .await
     }
 
@@ -1232,6 +1268,7 @@ impl Builder {
         runtime: &Runtime,
         mut trace: Option<BuildTrace>,
         connect_mcp: bool,
+        warnings: &mut (dyn std::io::Write + Send),
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let redaction_values = self.secret_values(Some(runtime));
         let max_output = output_cap(runtime.max_output_bytes);
@@ -1257,18 +1294,17 @@ impl Builder {
             }
             tools.push(Box::new(tool));
         }
-        let mut warnings = std::io::stderr();
         if self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
             tools.extend(self.memory_tools(max_output));
         }
         mark_build_trace(&mut trace, "runner/setup");
-        let catalogs = self.build_catalogs(&mut tools, max_output, &mut warnings)?;
+        let catalogs = self.build_catalogs(&mut tools, max_output, warnings)?;
         mark_build_trace(&mut trace, "runner/catalogs");
         let (mcp_tools, mcp_connected, mcp_servers) = if connect_mcp {
             self.connect_mcp_with_grace(
                 max_output,
                 runtime.resilience.deadlines.cancellation_grace,
-                &mut warnings,
+                warnings,
             )
             .await
         } else {
@@ -1338,7 +1374,7 @@ impl Builder {
             session,
             self.child_prompt_for(runtime, &endpoint_host, &prompt_tail),
             child_tools,
-            &mut warnings,
+            warnings,
         )?;
         mark_build_trace(&mut trace, "runner/subagents");
 
@@ -1967,6 +2003,33 @@ mod tests {
             .into_iter()
             .map(|definition| definition.name)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn runner_build_writes_discovery_warnings_to_the_supplied_sink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let skill = dir.path().join(".otto/skills/bad");
+        std::fs::create_dir_all(&skill).expect("skill directory");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: other\ndescription: Invalid skill.\n---\nbody\n",
+        )
+        .expect("skill file");
+
+        let builder = builder(dir.path());
+        let session = SharedSession::memory(Header::default());
+        let mut warnings = std::io::Cursor::new(Vec::new());
+        builder
+            .build_runner_with_warnings(&session, &runtime(), &mut warnings)
+            .await
+            .expect("runner");
+
+        let warnings = String::from_utf8(warnings.into_inner()).expect("utf-8 warnings");
+        assert!(warnings.starts_with("warning: skill "), "{warnings:?}");
+        assert!(
+            warnings.contains("does not match directory \"bad\""),
+            "{warnings:?}"
+        );
     }
 
     #[tokio::test]

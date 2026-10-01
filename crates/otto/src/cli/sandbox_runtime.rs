@@ -22,6 +22,7 @@ use otto_core::config::sandbox::{
 use otto_core::safetext::SecretCollector;
 use tokio_util::sync::CancellationToken;
 
+use crate::sandbox::PrivateDirectories;
 use crate::sandbox::direct::DirectDriver;
 use crate::sandbox::environment::{EnvironmentOptions, EnvironmentSnapshot, resolve_environment};
 #[cfg(target_os = "macos")]
@@ -76,9 +77,129 @@ pub struct SandboxRuntime {
     /// redactor does not know about would otherwise reach the model verbatim.
     pub redactions_complete: bool,
     closer: Closer,
+    /// The Seatbelt driver behind `executor`, kept so a reload can rewrite its
+    /// profile in place. `None` for every other driver and for an unusable
+    /// runtime.
+    #[cfg(target_os = "macos")]
+    seatbelt: Option<Arc<SeatbeltDriver>>,
+}
+
+/// Why [`SandboxRuntime::reconfigure`] did not apply the new settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconfigureError {
+    /// The new settings resolve to a different child environment or redaction
+    /// set. Consumers hold the old environment by value, so it cannot change.
+    EnvironmentChanged,
+    Failed(SandboxReason),
 }
 
 impl SandboxRuntime {
+    /// Applies new `read_paths` and `network` to the current Seatbelt driver
+    /// without opening a new one.
+    ///
+    /// The driver keeps its private state tree, so the child environment and
+    /// redaction values stay byte-identical and consumers that copied them at
+    /// build time remain valid. A change that alters either is refused with
+    /// [`ReconfigureError::EnvironmentChanged`] before the driver is touched.
+    ///
+    /// `None` means this does not apply: the runtime has no Seatbelt driver, or
+    /// `options` asks for another driver. The caller opens a replacement
+    /// runtime instead. The caller must hold off every command for the whole
+    /// call; see [`SeatbeltDriver::reconfigure`].
+    #[cfg(target_os = "macos")]
+    pub async fn reconfigure(
+        &mut self,
+        options: &OpenOptions,
+        cancel: &CancellationToken,
+    ) -> Option<Result<(), ReconfigureError>> {
+        let driver = Arc::clone(self.seatbelt.as_ref()?);
+        let network = options.settings.network?;
+        if options.settings.driver == DriverMode::Off {
+            return None;
+        }
+        Some(
+            self.reconfigure_driver(&driver, options, network, cancel)
+                .await,
+        )
+    }
+
+    /// See the macOS definition above.
+    #[cfg(not(target_os = "macos"))]
+    pub async fn reconfigure(
+        &mut self,
+        _options: &OpenOptions,
+        _cancel: &CancellationToken,
+    ) -> Option<Result<(), ReconfigureError>> {
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn reconfigure_driver(
+        &mut self,
+        driver: &Arc<SeatbeltDriver>,
+        options: &OpenOptions,
+        network: NetworkMode,
+        cancel: &CancellationToken,
+    ) -> Result<(), ReconfigureError> {
+        use ReconfigureError::{EnvironmentChanged, Failed};
+
+        if cancel.is_cancelled() {
+            return Err(Failed(SandboxReason::RuntimeFailure));
+        }
+        let host = resolve_host(options);
+        let child = resolve_child(
+            options,
+            Some(driver.private_directories()),
+            &host.redactions,
+            host.complete,
+        );
+        if !host.usable || !child.usable || !child.complete {
+            return Err(Failed(SandboxReason::EnvironmentRejected));
+        }
+        if child.entries != self.environment || child.redactions != self.redaction_values {
+            return Err(EnvironmentChanged);
+        }
+
+        let previous = (
+            driver.read_paths(),
+            driver.network().unwrap_or(NetworkMode::Deny),
+        );
+        if let Err(error) = driver
+            .reconfigure(options.settings.read_paths.clone(), network, cancel)
+            .await
+        {
+            return Err(Failed(reconfigure_reason(&error, cancel)));
+        }
+        let workspace = self
+            .executor
+            .as_ref()
+            .map(|executor| executor.workspace().to_path_buf())
+            .unwrap_or_default();
+        let policy = Policy {
+            filesystem: FilesystemMode::WorkspaceWrite,
+            network,
+        };
+        let executor =
+            match Executor::new(Arc::clone(driver) as Arc<dyn Driver>, policy, &workspace) {
+                Ok(executor) => Arc::new(executor),
+                Err(error) => {
+                    let reason = executor_reason(&error);
+                    // The driver already runs the new profile; restore the old one
+                    // so it matches the executor that stays in service.
+                    let _ = driver
+                        .reconfigure(previous.0, previous.1, &CancellationToken::new())
+                        .await;
+                    return Err(Failed(reason));
+                }
+            };
+        self.info = seatbelt_sandbox_info(network);
+        self.closer = Closer::Executor(Arc::clone(&executor));
+        // The replaced executor is dropped without `close`: closing it would
+        // close the driver both executors share and delete the private tree.
+        self.executor = Some(executor);
+        Ok(())
+    }
+
     /// Shuts the sandbox down. Idempotent: [`Executor::close`] runs the
     /// driver's close once and returns the same result to every caller.
     pub fn close(&self) -> Result<(), CloseError> {
@@ -130,25 +251,15 @@ pub async fn open_sandbox_runtime(
     // Classify the host environment before opening anything: a host that
     // cannot be classified safely must not reach a child at all, and the
     // partial redaction set is still worth keeping.
-    let host = resolve_environment(&EnvironmentOptions {
-        host_entries: options.host_entries.clone(),
-        provider_names: options.provider_names.clone(),
-        allow_names: options.settings.allow_env.clone(),
-        private_directories: None,
-    });
-    let (host_snapshot, host_ok) = match &host {
-        Ok(snapshot) => (snapshot, true),
-        Err(rejected) => (rejected.snapshot(), false),
-    };
-    let host_redactions = host_snapshot.redaction_values().to_vec();
-    let host_complete = host_snapshot.redactions_complete();
-    if !host_ok || host_snapshot.entries().is_none() {
+    let host = resolve_host(options);
+    if !host.usable {
         return unavailable(
             SandboxReason::EnvironmentRejected,
-            host_redactions,
-            host_complete,
+            host.redactions,
+            host.complete,
         );
     }
+    let (host_redactions, host_complete) = (host.redactions, host.complete);
     if cancel.is_cancelled() {
         return unavailable(
             SandboxReason::RuntimeFailure,
@@ -267,43 +378,41 @@ async fn open_seatbelt(
         );
     }
 
-    let private_directories = driver.private_directories();
-    let resolved = resolve_environment(&EnvironmentOptions {
-        host_entries: options.host_entries.clone(),
-        provider_names: options.provider_names.clone(),
-        allow_names: options.settings.allow_env.clone(),
-        private_directories: Some(private_directories),
-    });
-    let (snapshot, resolved_ok) = match &resolved {
-        Ok(snapshot) => (snapshot, true),
-        Err(rejected) => (rejected.snapshot(), false),
-    };
-    let (redactions, complete) = merged_redactions(&host_redactions, snapshot, host_complete);
-    let entries = snapshot.entries().map(<[String]>::to_vec);
-    if !resolved_ok || entries.is_none() || cancel.is_cancelled() {
+    let child = resolve_child(
+        options,
+        Some(driver.private_directories()),
+        &host_redactions,
+        host_complete,
+    );
+    if !child.usable || cancel.is_cancelled() {
         let cleanup = driver.close();
         let reason = if cancel.is_cancelled() {
             SandboxReason::RuntimeFailure
         } else {
             SandboxReason::EnvironmentRejected
         };
-        return after_cleanup(reason, redactions, complete, cleanup);
+        return after_cleanup(reason, child.redactions, child.complete, cleanup);
     }
 
     let policy = Policy {
         filesystem: FilesystemMode::WorkspaceWrite,
         network,
     };
-    finish(
-        Arc::new(driver) as Arc<dyn Driver>,
+    let driver = Arc::new(driver);
+    let mut runtime = finish(
+        Arc::clone(&driver) as Arc<dyn Driver>,
         policy,
         &workspace,
         seatbelt_sandbox_info(network),
-        entries,
-        redactions,
-        complete,
+        child.entries,
+        child.redactions,
+        child.complete,
         cancel,
-    )
+    );
+    if runtime.executor.is_some() {
+        runtime.seatbelt = Some(driver);
+    }
+    runtime
 }
 
 async fn open_direct(
@@ -332,23 +441,20 @@ async fn open_direct(
         );
     }
 
-    let resolved = resolve_environment(&EnvironmentOptions {
-        host_entries: options.host_entries.clone(),
-        provider_names: options.provider_names.clone(),
-        allow_names: options.settings.allow_env.clone(),
-        private_directories: None,
-    });
-    let (snapshot, resolved_ok) = match &resolved {
-        Ok(snapshot) => (snapshot, true),
-        Err(rejected) => (rejected.snapshot(), false),
-    };
-    let (redactions, complete) = merged_redactions(&host_redactions, snapshot, host_complete);
-    let entries = snapshot.entries().map(<[String]>::to_vec);
-    if !resolved_ok || entries.is_none() {
-        return unavailable(SandboxReason::EnvironmentRejected, redactions, complete);
+    let child = resolve_child(options, None, &host_redactions, host_complete);
+    if !child.usable {
+        return unavailable(
+            SandboxReason::EnvironmentRejected,
+            child.redactions,
+            child.complete,
+        );
     }
     if cancel.is_cancelled() {
-        return unavailable(SandboxReason::RuntimeFailure, redactions, complete);
+        return unavailable(
+            SandboxReason::RuntimeFailure,
+            child.redactions,
+            child.complete,
+        );
     }
 
     let policy = Policy {
@@ -366,9 +472,9 @@ async fn open_direct(
         policy,
         &workspace,
         info,
-        entries,
-        redactions,
-        complete,
+        child.entries,
+        child.redactions,
+        child.complete,
         cancel,
     )
 }
@@ -409,6 +515,8 @@ fn finish(
         redaction_values: redactions,
         redactions_complete: complete,
         closer: Closer::Executor(executor),
+        #[cfg(target_os = "macos")]
+        seatbelt: None,
     }
 }
 
@@ -435,6 +543,10 @@ pub fn normalize_sandbox_runtime(mut runtime: SandboxRuntime) -> SandboxRuntime 
     };
     runtime.executor = None;
     runtime.environment = None;
+    #[cfg(target_os = "macos")]
+    {
+        runtime.seatbelt = None;
+    }
     runtime
 }
 
@@ -470,6 +582,8 @@ fn unavailable(reason: SandboxReason, redactions: Vec<String>, complete: bool) -
         redaction_values: redactions,
         redactions_complete: complete,
         closer: Closer::Nothing,
+        #[cfg(target_os = "macos")]
+        seatbelt: None,
     }
 }
 
@@ -484,6 +598,71 @@ fn after_cleanup(
         runtime.closer = Closer::AlreadyFailed;
     }
     runtime
+}
+
+/// The host environment classified before any driver opens.
+struct HostEnvironment {
+    /// False when the host cannot be classified safely or yields no entries.
+    usable: bool,
+    redactions: Vec<String>,
+    complete: bool,
+}
+
+fn resolve_host(options: &OpenOptions) -> HostEnvironment {
+    let resolved = resolve_environment(&EnvironmentOptions {
+        host_entries: options.host_entries.clone(),
+        provider_names: options.provider_names.clone(),
+        allow_names: options.settings.allow_env.clone(),
+        private_directories: None,
+    });
+    let (snapshot, ok) = match &resolved {
+        Ok(snapshot) => (snapshot, true),
+        Err(rejected) => (rejected.snapshot(), false),
+    };
+    HostEnvironment {
+        usable: ok && snapshot.entries().is_some(),
+        redactions: snapshot.redaction_values().to_vec(),
+        complete: snapshot.redactions_complete(),
+    }
+}
+
+/// The child environment and the merged redaction set for one open.
+struct ChildEnvironment {
+    /// False when resolution was rejected or produced no entries.
+    usable: bool,
+    entries: Option<Vec<String>>,
+    redactions: Vec<String>,
+    complete: bool,
+}
+
+/// Resolves the child environment, with `private_directories` when a driver
+/// owns a private tree, and merges its redactions with the host's. The open
+/// path and [`SandboxRuntime::reconfigure`] both call this, so they cannot
+/// compute different environments for the same options.
+fn resolve_child(
+    options: &OpenOptions,
+    private_directories: Option<PrivateDirectories>,
+    host_redactions: &[String],
+    host_complete: bool,
+) -> ChildEnvironment {
+    let resolved = resolve_environment(&EnvironmentOptions {
+        host_entries: options.host_entries.clone(),
+        provider_names: options.provider_names.clone(),
+        allow_names: options.settings.allow_env.clone(),
+        private_directories,
+    });
+    let (snapshot, ok) = match &resolved {
+        Ok(snapshot) => (snapshot, true),
+        Err(rejected) => (rejected.snapshot(), false),
+    };
+    let (redactions, complete) = merged_redactions(host_redactions, snapshot, host_complete);
+    let entries = snapshot.entries().map(<[String]>::to_vec);
+    ChildEnvironment {
+        usable: ok && entries.is_some(),
+        entries,
+        redactions,
+        complete,
+    }
 }
 
 /// Merges the host redaction set with the child's, keeping the union bounded.
@@ -526,6 +705,15 @@ fn open_reason(error: &Error) -> SandboxReason {
         Error::Unavailable(reason) => SandboxReason::from(*reason),
         Error::UnsupportedPolicy => SandboxReason::PolicyUnsupported,
         _ => SandboxReason::RuntimeFailure,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn reconfigure_reason(error: &Error, cancel: &CancellationToken) -> SandboxReason {
+    if cancel.is_cancelled() {
+        SandboxReason::RuntimeFailure
+    } else {
+        open_reason(error)
     }
 }
 
@@ -733,6 +921,8 @@ mod tests {
             redaction_values: vec!["secret".to_string()],
             redactions_complete: false,
             closer: Closer::Nothing,
+            #[cfg(target_os = "macos")]
+            seatbelt: None,
         };
         let normalized = normalize_sandbox_runtime(runtime);
         assert_eq!(normalized.info.mode, SandboxMode::Unavailable);
@@ -756,6 +946,8 @@ mod tests {
             redaction_values: Vec::new(),
             redactions_complete: true,
             closer: Closer::Nothing,
+            #[cfg(target_os = "macos")]
+            seatbelt: None,
         };
         let normalized = normalize_sandbox_runtime(runtime);
         assert_eq!(normalized.info.reason_code(), "runtime-failure");

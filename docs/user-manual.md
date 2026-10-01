@@ -409,11 +409,12 @@ external side effect did not occur.
   sandboxed. `/sandbox exclude` and `/approve <id> always` add entries from a
   running session.
 
-  `/sandbox reload` applies edits to `driver`, `network`, `read_paths`, and
+  `/sandbox reload` applies edits to `network`, `read_paths`, and
   `excluded_commands` to the running process (see
-  [Slash commands](#slash-commands)). Two changes still need a restart:
+  [Slash commands](#slash-commands)). Three changes still need a restart:
   `allow_env`, because the shell environment is fixed when the `bash` tool is
-  built, and any change made when the sandbox was already unavailable at
+  built; `driver`, because switching between Seatbelt and `off` changes that
+  environment; and any change made when the sandbox was already unavailable at
   startup, because there is no `bash` tool to re-point.
 
 - `[skills]` discovers reusable instruction sets from configured roots and
@@ -718,8 +719,8 @@ Shared commands:
 - `/sandbox` shows the sandbox state now in effect. `/sandbox reload` re-reads
   `[sandbox]` from the config file and applies it to the running process,
   printing the new state. It is rejected while a turn is in flight, and a
-  failed reload keeps the previous sandbox in place. `allow_env` changes and a
-  sandbox that was unavailable at startup still need a restart.
+  failed reload keeps the previous sandbox in place. `allow_env` and `driver`
+  changes, and a sandbox that was unavailable at startup, still need a restart.
 - `/sandbox allow <path>` adds one path to `read_paths` and reloads, so a
   command that the sandbox denied can read it. The path is resolved to an
   absolute, symlink-free path first and must exist; it is written to

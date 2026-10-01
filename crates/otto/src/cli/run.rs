@@ -1915,16 +1915,28 @@ driver = "off"
         );
     }
 
-    /// On a host where Seatbelt actually comes up, a workspace loaded at
-    /// runtime gets the same elevated `/approve` executor startup builds for
-    /// its own workspace. Skips (rather than failing) when this host cannot
-    /// open Seatbelt, the same accommodation `open_sandbox_runtime` itself
-    /// makes for a host missing the entitlement or Command Line Tools
-    /// (`docs/development.md`).
+    /// A workspace loaded at runtime under Seatbelt gets the same elevated
+    /// `/approve` executor startup builds for its own workspace. Skips only
+    /// when `sandbox-exec` itself cannot run on this host; once it can, a
+    /// runtime that does not come up is a failure.
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn load_workspace_seatbelt_gets_bash_approvals() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if let Some(reason) = crate::sandbox::seatbelt::driver::unavailable_reason() {
+            eprintln!("skipping: {reason}");
+            return;
+        }
         let shared_root = tempfile::tempdir().expect("shared root");
+        // The Seatbelt private tree is created under `$HOME/Library/Caches`;
+        // without it the driver does not open.
+        let caches = shared_root.path().join("Library/Caches");
+        std::fs::create_dir_all(&caches).expect("cache base");
+        for directory in [caches.parent().expect("library"), caches.as_path()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .expect("cache mode");
+        }
         let workspace = tempfile::tempdir().expect("workspace");
         let canonical = canonical_directory(workspace.path()).expect("canonical");
         let shared = shared_with_sandbox_driver_override(shared_root.path(), "seatbelt");
@@ -1936,13 +1948,12 @@ driver = "off"
                 .await
                 .expect("load workspace");
 
-        if builder.sandbox_info.mode != super::super::info::SandboxMode::Seatbelt {
-            eprintln!(
-                "skipping: Seatbelt did not come up on this host: {}",
-                String::from_utf8_lossy(&stderr)
-            );
-            return;
-        }
+        assert_eq!(
+            builder.sandbox_info.mode,
+            super::super::info::SandboxMode::Seatbelt,
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
         assert!(builder.bash_approvals.is_some());
         assert!(reloader.is_some());
     }

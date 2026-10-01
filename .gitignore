@@ -10,6 +10,10 @@ ui/dist/*
 ui/node_modules/
 .DS_Store
 .otto/
+!.otto/
+!.otto/skills/
+!.otto/skills/sandbox-setup/
+!.otto/skills/sandbox-setup/SKILL.md
 *.test
 
 # Rust build artifacts and the generated wasm package.

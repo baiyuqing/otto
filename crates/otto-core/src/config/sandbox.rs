@@ -200,6 +200,7 @@ const COMMAND_RUNNERS: &[&str] = &[
     "perl",
     "ruby",
     "node",
+    "git",
 ];
 
 fn valid_excluded_command(entry: &str) -> bool {
@@ -386,7 +387,12 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn excluded_command_entries_are_validated() {
         let mut raw = SandboxConfig {
-            excluded_commands: entries(&["lark-cli *", "gh auth status", "/opt/bin/tool *"]),
+            excluded_commands: entries(&[
+                "lark-cli *",
+                "gh auth status",
+                "/opt/bin/tool *",
+                "git *",
+            ]),
             ..SandboxConfig::default()
         };
         let got = resolve_sandbox(&raw, None).expect("resolve");
@@ -435,6 +441,8 @@ mod tests {
             "/usr/bin/env lark-cli",
             "sudo lark-cli",
             "python3 script.py",
+            "git status",
+            "/usr/bin/git log",
             "",
         ] {
             assert_eq!(excluded_command_entry(command), None, "{command:?}");

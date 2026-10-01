@@ -747,9 +747,14 @@ Shared commands:
   the pending command. The pending command must be a simple command whose first
   word has no quote, backslash, or `=`. Otto refuses, and writes nothing, when
   that program runs another command: shells and command runners such as `sh`,
-  `bash`, `env`, `sudo`, `xargs`, and `python3`. Use `/approve <id>` for those.
-  Later simple commands that start with the program run unconfined with no
-  approval, in this and later sessions.
+  `bash`, `env`, `sudo`, `xargs`, and `python3`. `git` is also refused: git runs
+  programs named by aliases (`alias.<name> = !...`) and by its configuration, so
+  `git *` would take arbitrary commands out of the sandbox. Use `/approve <id>`
+  for those. Later simple commands that start with the program run unconfined
+  with no approval, in this and later sessions. `/sandbox exclude 'git *'` is
+  accepted, and it removes the protection described in
+  [Git metadata is read-only](#git-metadata-is-read-only-in-the-seatbelt-sandbox)
+  for git commands.
 - `/skills` lists every available skill name in the current session; use `/skill <name>` for its description, location, contract-check status, and instructions.
 - `/skill <name>` displays one skill's description, location, and instructions.
 - `/mcp` shows every configured MCP server and its connection state.
@@ -1227,6 +1232,35 @@ Commands matching `[sandbox].excluded_commands` run through the same unconfined
 driver without an approval. They apply to child agents and `otto --prompt`
 runs as well, and only to simple commands; see
 [`[sandbox]`](#configuration) for the entry syntax and the rule.
+
+### Git metadata is read-only in the Seatbelt sandbox
+
+Git runs hooks and the programs named in its configuration outside the
+sandbox, so a sandboxed command must not write them. Under Seatbelt, these
+paths are read-only, whether or not they exist, and no setting turns this off:
+
+- `<workspace>/.git` (the entry itself, so it cannot be renamed or removed)
+- `<workspace>/.git/config`
+- `<workspace>/.git/config.worktree`
+- `<workspace>/.git/commondir`
+- `<workspace>/.git/hooks` and everything below it
+
+The rule applies to the workspace root only. Repositories below it (nested
+clones, submodules, and linked worktrees inside the workspace) are not covered.
+
+Commands that fail in the sandbox because they write these paths: `git init`
+in the workspace, `git config` without `--global`, `git remote add` and
+`set-url`, `git push -u`, `git branch --set-upstream-to`, creating a branch
+that tracks a remote branch, `git submodule init`, and hook installers such as
+`pre-commit install`.
+
+Commands that are not affected: `git commit`, `checkout`, `branch` without
+tracking, `fetch`, `pull`, `merge`, `rebase`, `stash`, `worktree add`,
+`clone` into a subdirectory, and `git config --global` (which writes the
+private HOME).
+
+To run one of the failing commands, the model sets `sandbox_permissions` to
+`require_escalated`, and you enter `/approve <id>`.
 
 ### Seatbelt limitations
 

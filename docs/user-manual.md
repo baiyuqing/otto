@@ -637,6 +637,7 @@ OTTO_UI=repl otto
 | Left-button drag | Select visible text and copy it to the clipboard on release |
 | Mouse wheel, `PgUp` / `PgDn` | Scroll the transcript |
 | `Home` / `End` | Move the cursor to the start or end of the composer |
+| `Ctrl+A` / `Ctrl+E` | Move the cursor to the start or end of the current composer line |
 | `Esc` | Cancel the active turn or close the current overlay |
 | `Ctrl+C` | Cancel; a second press within one second clears and quits |
 

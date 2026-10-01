@@ -31,8 +31,9 @@ otto --help
 ```
 
 `make install` 会先刷新并嵌入 Web UI，构建 release 二进制，然后安装到
-`~/.local/bin/otto`。请确认 `~/.local/bin` 已在 `PATH` 中。若直接运行
-`cargo build` 且此前未执行 `make ui`，二进制中只会嵌入一行占位文本。
+`~/.local/bin/otto`，并将随附 skills 安装到 `~/.otto/skills/`。请确认
+`~/.local/bin` 已在 `PATH` 中。若直接运行 `cargo build` 且此前未执行
+`make ui`，二进制中只会嵌入一行占位文本。
 
 如果只想在当前 checkout 中保留本地二进制，可运行 `make build`，然后执行
 `./otto --help`。

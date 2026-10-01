@@ -9,7 +9,7 @@ use std::fs::{File, Metadata};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use otto_core::session::context::{last_user_text, preview_text};
+use otto_core::session::context::preview_text;
 use otto_core::session::{ListResult, PiError, SessionInfo, Warning, build_context};
 
 use super::fsops::{self, Dir};
@@ -242,7 +242,7 @@ pub(crate) fn inspect_opened_session(
         .map(|entry| entry.id.clone())
         .unwrap_or_default();
     let (resolved, warnings) = build_context(&decoded.entries, &leaf_id)?;
-    let preview = preview_text(&last_user_text(&resolved.messages));
+    let preview = preview_text(&first_user_text(&resolved.messages));
     let name = match preview_text(&resolved.session_name) {
         name if name.is_empty() => preview.clone(),
         name => name,
@@ -265,6 +265,14 @@ pub(crate) fn inspect_opened_session(
         },
         warnings,
     ))
+}
+
+fn first_user_text(messages: &[otto_core::model::Message]) -> String {
+    messages
+        .iter()
+        .find(|message| message.role == otto_core::model::Role::User)
+        .map(otto_core::model::Message::text)
+        .unwrap_or_default()
 }
 
 fn pi_level_to_thinking(thinking: &str) -> Result<String, PiError> {

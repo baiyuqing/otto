@@ -695,7 +695,7 @@ Shared commands:
 - `/approve <id>` grants one pending elevated Bash command and immediately asks
   Otto to retry it. The grant is tied to the current session and exact command,
   is consumed once, and remains pending until it is replaced, consumed, or Otto exits.
-- `/skills` lists the skills available in the current session.
+- `/skills` lists every available skill name in the current session; use `/skill <name>` for its description, location, contract-check status, and instructions.
 - `/skill <name>` displays one skill's description, location, and instructions.
 - `/mcp` shows every configured MCP server and its connection state.
   `/mcp login <server>` signs in to one HTTP server that uses OAuth. See
@@ -1988,7 +1988,7 @@ What's wired:
   `AGENT.md` definition of the same name wins, and the clash is reported.
   Registration is skipped entirely when `[agents]` is disabled, and a skill
   is never marked `exec="agent"` unless it really was registered.
-- `/skills` lists the skills available in the current session.
+- `/skills` lists every available skill name in the current session; use `/skill <name>` for its description, location, contract-check status, and instructions.
 - `/skill <name>` displays one skill's description, location, and Markdown body.
 - Discovery runs at startup and on `/new`, `/resume`, `/model`; the catalog is
   fixed within a session. A loaded body is a normal tool result stored in the
@@ -2012,7 +2012,7 @@ the skill's instructions are self-contained and its declared contract
 matches what the body does. A skill flagged by a local pattern check (for
 example, an `output` field too vague to be useful) is judged locally and
 never sent. Results are stored in `~/.otto/skill-checks.db` (SQLite,
-append-only) and shown per skill in `/skills`.
+append-only) and shown in `/skill <name>` for contract skills.
 
 Enable it with all three of:
 

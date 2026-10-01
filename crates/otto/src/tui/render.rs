@@ -651,11 +651,25 @@ fn approval_lines(approval: &ApprovalDialog, width: u16) -> Vec<Line<'static>> {
             APPROVAL_REASON_LINES,
         ));
     }
-    lines.push(Line::from(vec![
-        Span::styled("y = yes", accent.add_modifier(Modifier::BOLD)),
-        Span::raw("  ·  "),
-        Span::styled("n/Esc = no", accent.add_modifier(Modifier::BOLD)),
-    ]));
+    lines.push(Line::default());
+    for (label, is_yes) in [
+        ("Yes, run it outside the sandbox", true),
+        ("No, cancel", false),
+    ] {
+        let selected = approval.approve_selected == is_yes;
+        lines.push(if selected {
+            Line::from(Span::styled(
+                format!("❯ {label}"),
+                accent.add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(format!("  {label}"))
+        });
+    }
+    lines.push(Line::from(Span::styled(
+        "↑/↓ select · Enter confirm · Esc cancel",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
     lines
 }
 
@@ -1251,6 +1265,7 @@ mod tests {
             id: "approval-1".to_string(),
             command: long_command.clone(),
             justification: "publish the reviewed branch".to_string(),
+            ..Default::default()
         });
 
         let screen = rendered(&app, 80, 16);
@@ -1264,8 +1279,9 @@ mod tests {
             screen.contains("Reason:  publish the reviewed branch"),
             "{screen}"
         );
-        assert!(screen.contains("y = yes"), "{screen}");
-        assert!(screen.contains("n/Esc = no"), "{screen}");
+        assert!(screen.contains("❯ No, cancel"), "{screen}");
+        assert!(screen.contains("  Yes, run it"), "{screen}");
+        assert!(screen.contains("Enter confirm"), "{screen}");
     }
 
     #[tokio::test]
@@ -1277,6 +1293,7 @@ mod tests {
             justification:
                 "needs network access to verify the merged pull request and remove the worktree"
                     .to_string(),
+            ..Default::default()
         });
 
         let rows = screen_rows(&app, 60, 20);
@@ -1289,9 +1306,9 @@ mod tests {
         // The long reason wraps instead of being cut off.
         assert!(rows.join("\n").contains("remove the worktree"), "{rows:?}");
         assert_ne!(at("needs network"), at("remove the worktree"));
-        // The choices are the last thing above the composer's top border,
+        // The key hint is the last thing above the composer's top border,
         // below the panel's own border, and the composer follows directly.
-        let choices = at("y = yes");
+        let choices = at("Enter confirm");
         assert!(rows[choices + 1].contains('└'), "{rows:?}");
         assert!(rows[choices + 2].contains('┌'), "{rows:?}");
         assert!(at("Approval") < at("Command:"));

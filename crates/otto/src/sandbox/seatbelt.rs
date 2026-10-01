@@ -15,6 +15,7 @@ pub mod driver;
 pub(crate) mod profile;
 pub(crate) mod selftest;
 pub(crate) mod state;
+pub(crate) mod violations;
 
 pub use driver::{Options, SeatbeltDriver};
 

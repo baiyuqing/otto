@@ -1456,7 +1456,7 @@ fn picker_command_name(kind: PickerKind) -> &'static str {
 
 fn session_row(session: &SessionInfo) -> PickerRow {
     let marker = if session.current { " (current)" } else { "" };
-    let name = if session.name.is_empty() {
+    let label = if session.name.is_empty() {
         &session.id
     } else {
         &session.name
@@ -1469,7 +1469,7 @@ fn session_row(session: &SessionInfo) -> PickerRow {
         .map(|directory| format!(" [{}]", directory.to_string_lossy()))
         .unwrap_or_default();
     PickerRow {
-        label: format!("{name}{marker} — {}{workspace}", session.last_user_text),
+        label: format!("{label}{marker}{workspace}"),
         value: session.path.clone(),
     }
 }
@@ -1761,7 +1761,7 @@ mod tests {
             cwd: "/Users/u/Work/code/otto".into(),
             ..SessionInfo::default()
         });
-        assert_eq!(row.label, "review — check the diff [otto]");
+        assert_eq!(row.label, "review [otto]");
 
         let current = session_row(&SessionInfo {
             name: "review".into(),
@@ -1769,13 +1769,13 @@ mod tests {
             current: true,
             ..SessionInfo::default()
         });
-        assert_eq!(current.label, "review (current) —  [otto]");
+        assert_eq!(current.label, "review (current) [otto]");
 
         let unrecorded = session_row(&SessionInfo {
             name: "review".into(),
             ..SessionInfo::default()
         });
-        assert_eq!(unrecorded.label, "review — ");
+        assert_eq!(unrecorded.label, "review");
     }
 
     #[test]

@@ -1923,6 +1923,46 @@ fn inspect_derives_metadata_and_name_override() {
 }
 
 #[test]
+fn inspect_uses_the_first_prompt_as_the_unnamed_session_label() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    store
+        .append_message(&user("first prompt"))
+        .expect("append first user message");
+    store
+        .append_message(&assistant("first reply"))
+        .expect("append assistant message");
+    store
+        .append_message(&user("later prompt"))
+        .expect("append later user message");
+    let path = store.path();
+
+    let (info, warnings) = list::inspect(Path::new(&path)).expect("inspect");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(info.name, "first prompt");
+    assert_eq!(info.last_user_text, "first prompt");
+
+    store.close().expect("close");
+}
+
+#[test]
+fn inspect_truncates_the_first_prompt_for_the_unnamed_session_label() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    store
+        .append_message(&user(&"x".repeat(121)))
+        .expect("append user message");
+    let path = store.path();
+
+    let (info, warnings) = list::inspect(Path::new(&path)).expect("inspect");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(info.name, format!("{}...", "x".repeat(120)));
+    assert_eq!(info.last_user_text, format!("{}...", "x".repeat(120)));
+
+    store.close().expect("close");
+}
+
+#[test]
 fn inspect_leaves_repairable_files_untouched() {
     let temp = TempDir::new();
     let (store, _) = new_store(&temp);

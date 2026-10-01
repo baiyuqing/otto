@@ -89,9 +89,10 @@ and git commands that write them need `require_escalated`.
 
 The mechanism follows Claude Code's sandbox-runtime:
 
-- Each Seatbelt driver has a tag, `otto-<32 hex>` (the hex of its private
-  directory name). Every deny in the profile, including `(deny default)`,
-  carries `(with message "<tag>")`.
+- Each Seatbelt driver has a tag: the leaf name of its private directory,
+  `otto-sandbox-<32 hex>`. It does not change on reconfigure, which keeps the
+  same private directory. Every deny in the profile, including
+  `(deny default)`, carries `(with message "<tag>")`.
 - When the driver opens, it starts `/usr/bin/log stream --style ndjson` with
   a predicate on the tag. The driver owns the process and kills it in
   `close`.
@@ -101,8 +102,12 @@ The mechanism follows Claude Code's sandbox-runtime:
   address). It skips lines that are not JSON; `log stream` writes one such
   header line (`Filtering the log data using …`) first. It keeps at most 256
   entries with their receive time.
-- When a command exits with a non-zero code, the driver waits up to 300 ms
-  for log delivery. It then attaches to the exit status the denials received
+- Reports are requested per command: `Request` gains `report_denials`
+  (default `false`), and only the bash tool sets it. Otto's own git calls
+  (`cli/workspace_context.rs`, `server/diff.rs`) exit non-zero in a workspace
+  that is not a repository and must not pay the wait below.
+- When a command with `report_denials` exits with a non-zero code and the
+  monitor is running, the driver waits 300 ms for log delivery. It then attaches to the exit status the denials received
   between the command's start and that point, deduplicated by operation and
   path, at most 20, with a count of the rest. The bash tool appends them after
   stderr:
@@ -122,7 +127,8 @@ The mechanism follows Claude Code's sandbox-runtime:
   mislabel results.
 - If `log` cannot start or exits (for example when Otto itself runs inside a
   sandbox, where `log` returns "Cannot run while sandboxed"), the driver runs
-  without reports and results have no section. One warning goes to the log.
+  without reports and results have no section. Otto has no diagnostic log, so
+  nothing else records this.
 
 The system prompt states what the section means: for a denied read outside
 the workspace, tell the user about `/sandbox allow <path>`; for a denied

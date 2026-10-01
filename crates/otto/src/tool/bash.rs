@@ -342,6 +342,7 @@ impl BashTool {
             ],
             dir: self.workspace_root.clone(),
             env: environment.to_vec(),
+            report_denials: true,
         }
     }
 
@@ -441,8 +442,18 @@ impl BashTool {
             summary.push_str("; signal: ");
             summary.push_str(&status.signal);
         }
+        let mut denied = String::new();
+        if !status.denials.is_empty() {
+            denied.push_str("sandbox_denied:\n");
+            for denial in &status.denials {
+                denied.push_str(&format!("{} {}\n", denial.operation, denial.target));
+            }
+            if status.denials_omitted > 0 {
+                denied.push_str(&format!("[{} more omitted]\n", status.denials_omitted));
+            }
+        }
         let formatted = format!(
-            "{}\n{}\n{summary}",
+            "{}\n{}\n{denied}{summary}",
             format_stream("stdout", stdout),
             format_stream("stderr", stderr)
         );
@@ -1096,6 +1107,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                 argv: strings(&["/bin/sh", SHELL_FLAGS, command]),
                 dir: workspace.root().to_path_buf(),
                 env: strings(&["FIRST=original", "SECOND=preserved"]),
+                report_denials: true,
             })
             .collect();
         assert_eq!(executor.requests(), expected);
@@ -1110,6 +1122,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                     code: 7,
                     signaled: false,
                     signal: "must-be-ignored".to_owned(),
+                    ..Default::default()
                 },
             ),
         );
@@ -1129,6 +1142,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
             code: -1,
             signaled: true,
             signal: "killed".to_owned(),
+            ..Default::default()
         }));
         let tool = bash(&workspace, executor, &[], 1024, &[]);
         let result = run(&tool, "ignored").await;
@@ -1139,6 +1153,66 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
         );
     }
 
+    fn denied_status(count: usize, omitted: usize, target: &str) -> ExitStatus {
+        ExitStatus {
+            code: 1,
+            denials: (0..count)
+                .map(|i| crate::sandbox::Denial {
+                    operation: "file-read-data".to_owned(),
+                    target: format!("{target}{i}"),
+                })
+                .collect(),
+            denials_omitted: omitted,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn denials_render_between_stderr_and_the_summary() {
+        let (_dir, workspace) = temp_workspace();
+        let executor = Arc::new(FakeExecutor::default().with_status(denied_status(2, 0, "/x/")));
+        let tool = bash(&workspace, executor, &[], 1024, &[]);
+        let result = run(&tool, "ignored").await;
+        assert_eq!(
+            result.content,
+            "stdout:\n\nstderr:\n\nsandbox_denied:\nfile-read-data /x/0\nfile-read-data /x/1\nexit_code: 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn omitted_denials_are_counted() {
+        let (_dir, workspace) = temp_workspace();
+        let executor = Arc::new(FakeExecutor::default().with_status(denied_status(1, 3, "/x/")));
+        let tool = bash(&workspace, executor, &[], 1024, &[]);
+        let result = run(&tool, "ignored").await;
+        assert!(
+            result
+                .content
+                .contains("file-read-data /x/0\n[3 more omitted]\nexit_code: 1"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_denials_render_no_section() {
+        let (_dir, workspace) = temp_workspace();
+        let executor = Arc::new(FakeExecutor::default().with_status(denied_status(0, 0, "")));
+        let tool = bash(&workspace, executor, &[], 1024, &[]);
+        let result = run(&tool, "ignored").await;
+        assert_eq!(result.content, "stdout:\n\nstderr:\n\nexit_code: 1");
+    }
+
+    #[tokio::test]
+    async fn denial_targets_are_redacted() {
+        let (_dir, workspace) = temp_workspace();
+        const SECRET: &str = "denied-secret-value";
+        let executor = Arc::new(FakeExecutor::default().with_status(denied_status(1, 0, SECRET)));
+        let tool = bash(&workspace, executor, &[], 1024, &[SECRET]);
+        let result = run(&tool, "ignored").await;
+        assert!(!result.content.contains(SECRET), "{result:?}");
+        assert!(result.content.contains("sandbox_denied:"), "{result:?}");
+    }
+
     #[tokio::test]
     async fn the_signal_text_is_redacted_too() {
         let (_dir, workspace) = temp_workspace();
@@ -1147,6 +1221,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
             code: -1,
             signaled: true,
             signal: format!("killed-{SECRET}"),
+            ..Default::default()
         }));
         let tool = bash(&workspace, executor, &[], 1024, &[SECRET]);
         let result = run(&tool, "ignored").await;
@@ -1233,6 +1308,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                     code: -1,
                     signaled: true,
                     signal: format!("signal-{}", values[0]),
+                    ..Default::default()
                 }),
             );
             let tool = bash(&workspace, executor, &[], 1024, values);
@@ -1401,6 +1477,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                     code: -1,
                     signaled: true,
                     signal: "signal-TOKEN".to_owned(),
+                    ..Default::default()
                 },
             ));
             bash(&workspace, executor, &[], cap, &borrowed)
@@ -1690,6 +1767,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                             code: -1,
                             signaled: true,
                             signal: "killed".to_owned(),
+                            ..Default::default()
                         },
                         Err(Error::Cancelled),
                     )
@@ -1735,6 +1813,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                         code: -1,
                         signaled: true,
                         signal: "killed".to_owned(),
+                        ..Default::default()
                     },
                     Err(Error::Cancelled),
                 )
@@ -1768,6 +1847,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                         code: -1,
                         signaled: true,
                         signal: "killed".to_owned(),
+                        ..Default::default()
                     },
                     Ok(()),
                 )
@@ -1802,6 +1882,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                         code: -1,
                         signaled: true,
                         signal: "killed".to_owned(),
+                        ..Default::default()
                     },
                     Err(Error::Cancelled),
                 )
@@ -1890,6 +1971,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                             code: -1,
                             signaled: true,
                             signal: "killed".to_owned(),
+                            ..Default::default()
                         },
                         Err(Error::ChildTerminate),
                     )

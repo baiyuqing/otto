@@ -305,6 +305,7 @@ mod tests {
                     ],
                     dir: std::fs::canonicalize(home.path()).expect("canonical home"),
                     env: vec!["PATH=/usr/bin:/bin".to_string()],
+                    ..Default::default()
                 },
                 Streams {
                     stdout: &mut stdout,
@@ -592,6 +593,7 @@ mod tests {
                     argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
                     dir: std::fs::canonicalize(workspace.path()).expect("canonical workspace"),
                     env: environment.to_vec(),
+                    ..Default::default()
                 },
                 Streams {
                     stdout: &mut stdout,

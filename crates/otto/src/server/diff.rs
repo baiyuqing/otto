@@ -140,6 +140,7 @@ impl GitRunner {
             argv,
             dir: PathBuf::from(&self.dir),
             env: environment,
+            ..Default::default()
         };
         let mut out: Vec<u8> = Vec::new();
         let mut discard = std::io::sink();

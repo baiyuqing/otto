@@ -54,7 +54,8 @@ pub(crate) const TIMERS_USAGE: &str = "usage: /timers [cancel <id>]";
 /// What `/timers` reports when the runner registers no timer tools, in the
 /// shape [`SUBAGENTS_UNAVAILABLE`] uses for `/tasks`.
 pub(crate) const TIMERS_UNAVAILABLE: &str = "timers are not available";
-pub(crate) const SKILL_USAGE: &str = "usage: /skill <name>";
+pub(crate) const SKILL_USAGE: &str =
+    "usage: /skill | /skill <name> | /skill set <name> enabled|disabled";
 pub(crate) const MCP_USAGE: &str = "usage: /mcp | /mcp login <server>";
 
 impl Controller {
@@ -251,7 +252,7 @@ fn list_arguments(
     Some((all_scopes, scopes, limit, cursor))
 }
 
-/// Renders one compact catalog row. `/skills` deliberately lists every
+/// Renders one compact catalog row. Bare `/skill` deliberately lists every
 /// available name, but leaves potentially long descriptions and the
 /// per-skill contract-check lookup to `/skill <name>` so the TUI does not
 /// retain a large, expensive-to-render transcript entry.
@@ -278,6 +279,22 @@ pub(crate) fn skills_report(controller: &Controller) -> String {
 
 pub(crate) fn skill_report(controller: &Controller, args: &str) -> String {
     let fields: Vec<&str> = args.split_whitespace().collect();
+    if fields.is_empty() {
+        return skills_report(controller);
+    }
+    if let ["set", name, state] = fields.as_slice() {
+        if !matches!(*state, "enabled" | "disabled") {
+            return SKILL_USAGE.to_string();
+        }
+        return match crate::config::set_skill_disabled_file(
+            &controller.builder().config_path,
+            name,
+            *state == "disabled",
+        ) {
+            Ok(()) => format!("skill {name} is {state}; restart Otto to apply the active catalog"),
+            Err(error) => format!("skill {name}: {error}"),
+        };
+    }
     if fields.len() != 1 {
         return SKILL_USAGE.to_string();
     }
@@ -611,10 +628,6 @@ impl Repl<'_> {
 
     pub(super) fn remember_command(&mut self, args: &str) -> Result<(), Error> {
         repl_remember_command(self.controller, args, &mut *self.stdout, &mut *self.stderr)
-    }
-
-    pub(super) fn skills_command(&mut self) {
-        let _ = writeln!(self.stdout, "{}", skills_report(self.controller));
     }
 
     pub(super) fn skill_command(&mut self, args: &str) {

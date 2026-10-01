@@ -146,6 +146,17 @@ impl Catalog {
         )
     }
 
+    /// Removes skills whose names are in `names`, preserving name order.
+    pub fn without_names(&self, names: &std::collections::BTreeSet<String>) -> Self {
+        Self {
+            skills: self
+                .skills
+                .iter()
+                .filter(|skill| !names.contains(&skill.name))
+                .cloned()
+                .collect(),
+        }
+    }
     /// The catalog's skills, sorted by name.
     pub fn skills(&self) -> &[Skill] {
         &self.skills

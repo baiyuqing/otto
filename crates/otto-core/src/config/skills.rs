@@ -1,6 +1,6 @@
 //! The `[skills]` table and its resolution.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,11 @@ const DEFAULT_SKILLS_PATHS: [&str; 2] = ["~/.otto/skills", ".otto/skills"];
 pub struct Skills {
     pub enabled: Option<bool>,
     pub paths: Option<Vec<String>>,
+    /// Exact skill names excluded from the active prompt, tool registry, and
+    /// skill-derived sub-agent definitions. They remain discoverable to local
+    /// management surfaces so they can be enabled again.
+    #[serde(default)]
+    pub disabled: BTreeSet<String>,
 }
 
 /// The resolved `[skills]` configuration for one runner build.
@@ -25,6 +30,8 @@ pub struct SkillsRuntime {
     /// Absolute, cleaned skill root directories in configured order. Later
     /// entries win on a name conflict during discovery.
     pub roots: Vec<String>,
+    /// Names excluded from the active catalog after discovery.
+    pub disabled: BTreeSet<String>,
 }
 
 /// Resolves `[skills]` into roots ready for skill discovery. Never errors: an
@@ -39,6 +46,7 @@ pub fn resolve_skills(
         return SkillsRuntime {
             enabled: false,
             roots: Vec::new(),
+            disabled: file.skills.disabled.clone(),
         };
     }
 
@@ -47,6 +55,7 @@ pub fn resolve_skills(
     SkillsRuntime {
         enabled: true,
         roots: resolve_roots(configured, env, workspace_path),
+        disabled: file.skills.disabled.clone(),
     }
 }
 

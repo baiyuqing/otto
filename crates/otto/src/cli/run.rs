@@ -884,7 +884,11 @@ fn spawn_mcp_runner_swap(
             return;
         };
         let session_id = session.header().id;
-        let mut runner = match controller.builder().build_runner(&session, &runtime).await {
+        let mut runner = match controller
+            .builder()
+            .build_runner_quiet(&session, &runtime)
+            .await
+        {
             Ok(runner) => runner,
             Err(_) => return,
         };
@@ -908,7 +912,11 @@ fn spawn_mcp_runner_swap(
                     if session.header().id != session_id {
                         return;
                     }
-                    runner = match controller.builder().build_runner(&session, &runtime).await {
+                    runner = match controller
+                        .builder()
+                        .build_runner_quiet(&session, &runtime)
+                        .await
+                    {
                         Ok(next) => next,
                         Err(_) => return,
                     };

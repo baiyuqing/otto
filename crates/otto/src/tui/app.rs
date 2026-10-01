@@ -689,6 +689,10 @@ impl App {
             }
         }
 
+        if self.handle_history_key(&key) {
+            return None;
+        }
+
         match key.code {
             KeyCode::Enter
                 if key
@@ -777,6 +781,10 @@ impl App {
     /// overlay only reads `tasks.db`, so opening it starts no provider
     /// request.
     pub(crate) fn handle_busy_composer_key(&mut self, key: KeyEvent, controller: &Controller) {
+        if self.handle_history_key(&key) {
+            return;
+        }
+
         match key.code {
             KeyCode::Enter
                 if key
@@ -835,10 +843,32 @@ impl App {
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.insert_text(&ch.to_string());
             }
-            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Up | KeyCode::Down => {
+            KeyCode::PageUp | KeyCode::PageDown => {
                 self.handle_scroll_key(&key);
             }
             _ => {}
+        }
+    }
+
+    /// Handles the composer's shared history keys. Both idle and busy
+    /// composers call this before their state-specific key handling, so
+    /// Up/Down cannot drift between the two input paths.
+    fn handle_history_key(&mut self, key: &KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up => {
+                let current: String = self.input.iter().collect();
+                if let Some(line) = self.history.previous(&current) {
+                    self.set_input(&line);
+                }
+                true
+            }
+            KeyCode::Down => {
+                if let Some(line) = self.history.next() {
+                    self.set_input(&line);
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -2010,6 +2040,31 @@ mod tests {
             app.entries.is_empty(),
             "queued input is a pending transcript item, not persisted history"
         );
+    }
+
+    #[tokio::test]
+    async fn busy_composer_arrow_keys_recall_history_and_restore_the_draft() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.history.remember("first prompt");
+        app.history.remember("latest prompt");
+        app.input = "draft".chars().collect();
+        app.cursor = app.input.len();
+        app.max_scroll.set(10);
+        app.start_turn();
+
+        assert!(!app.handle_turn_key(key(KeyCode::Up, KeyModifiers::NONE), &controller));
+        assert_eq!(app.input.iter().collect::<String>(), "latest prompt");
+        assert_eq!(app.scroll, None, "Up must not scroll during an active turn");
+
+        assert!(!app.handle_turn_key(key(KeyCode::Up, KeyModifiers::NONE), &controller));
+        assert_eq!(app.input.iter().collect::<String>(), "first prompt");
+        assert!(!app.handle_turn_key(key(KeyCode::Down, KeyModifiers::NONE), &controller));
+        assert_eq!(app.input.iter().collect::<String>(), "latest prompt");
+        assert!(!app.handle_turn_key(key(KeyCode::Down, KeyModifiers::NONE), &controller));
+        assert_eq!(app.input.iter().collect::<String>(), "draft");
     }
 
     #[tokio::test]

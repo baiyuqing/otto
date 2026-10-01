@@ -1948,6 +1948,7 @@ Config (`[skills]` in TOML; all keys optional):
 [skills]
 enabled = true                              # default true
 paths = ["~/.otto/skills", ".otto/skills"]  # default; later entries win on name conflict
+disabled = []                               # skill names disabled without removing their files
 ```
 
 What's wired:
@@ -1959,6 +1960,9 @@ What's wired:
   only omitted when even the bare names overflow, and that warning names the
   omitted skills, because a skill the model never sees cannot be called by
   name. The sub-agent listing follows the same rule.
+- A skill name in `disabled` remains on disk but is excluded from the model-visible
+  listing, the `skill` tool, and skill-derived sub-agent definitions after Otto
+  restarts. Use `/skill set <name> enabled|disabled` to maintain this list.
 - The `skill` tool for the model to load instructions by name or read supporting
   files.
 - Automatic appending of existing skill roots to Seatbelt read paths at process
@@ -1988,8 +1992,9 @@ What's wired:
   `AGENT.md` definition of the same name wins, and the clash is reported.
   Registration is skipped entirely when `[agents]` is disabled, and a skill
   is never marked `exec="agent"` unless it really was registered.
-- `/skills` lists every available skill name in the current session; use `/skill <name>` for its description, location, contract-check status, and instructions.
-- `/skill <name>` displays one skill's description, location, and Markdown body.
+- `/skill` lists every available skill; `/skill <name>` displays its description,
+  location, contract-check status, and instructions; `/skill set <name>
+  enabled|disabled` persists its state change. `/skills` is not a command.
 - Discovery runs at startup and on `/new`, `/resume`, `/model`; the catalog is
   fixed within a session. A loaded body is a normal tool result stored in the
   session and re-sent on every later request until compaction.

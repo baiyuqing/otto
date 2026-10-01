@@ -3,7 +3,9 @@
 //! The composition root in [`super::run`] opens one sandbox and hands it to a
 //! [`SandboxSwitch`]; the bash tool captures the switch as its executor, so
 //! `/sandbox reload`, `POST /v1/sandbox/reload` and the TUI all replace the
-//! runtime underneath a live session instead of restarting the process.
+//! runtime underneath a live session instead of restarting the process. A
+//! Seatbelt runtime that stays Seatbelt is reconfigured in place; any other
+//! reload opens a replacement runtime.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,12 +20,13 @@ use crate::sandbox::{CommandExecutor, Error as SandboxError, ExitStatus, Request
 
 use super::info::SandboxInfo;
 use super::sandbox_runtime::{
-    CloseError, OpenOptions, SandboxRuntime, normalize_sandbox_runtime, open_sandbox_runtime,
-    settings_from_config,
+    CloseError, OpenOptions, ReconfigureError, SandboxRuntime, normalize_sandbox_runtime,
+    open_sandbox_runtime, settings_from_config,
 };
 
 const RELOAD_UNAVAILABLE: &str = "sandbox reload requires a usable sandbox; restart otto";
-const RELOAD_ENVIRONMENT: &str = "sandbox reload cannot apply allow_env changes; restart otto";
+const RELOAD_ENVIRONMENT: &str =
+    "sandbox reload cannot apply allow_env or driver changes; restart otto";
 const RELOAD_FAILED: &str = "sandbox reload failed";
 
 // ---- the sandbox switch ----
@@ -60,6 +63,38 @@ impl SandboxSwitch {
             .info
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Applies `options` to the current Seatbelt runtime in place, holding the
+    /// write lock for the whole call so no command runs while the profile is
+    /// rewritten.
+    ///
+    /// `None` when there is nothing to reconfigure: the switch is closed, the
+    /// current runtime is not usable, or [`SandboxRuntime::reconfigure`] does
+    /// not apply. The caller then opens a replacement runtime and calls
+    /// [`SandboxSwitch::reload`].
+    pub async fn reconfigure(
+        &self,
+        options: &OpenOptions,
+        cancel: &CancellationToken,
+    ) -> Option<Result<SandboxInfo, String>> {
+        let mut guard = self.current.write().await;
+        let runtime = guard.as_mut().filter(|runtime| usable(runtime))?;
+        let result = runtime.reconfigure(options, cancel).await?;
+        Some(match result {
+            Ok(()) => {
+                let info = runtime.info;
+                *self
+                    .info
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = info;
+                Ok(info)
+            }
+            Err(ReconfigureError::EnvironmentChanged) => Err(RELOAD_ENVIRONMENT.to_string()),
+            Err(ReconfigureError::Failed(reason)) => {
+                Err(format!("{RELOAD_FAILED}: {}", reason.as_str()))
+            }
+        })
     }
 
     /// Installs `next` when it can replace the current runtime in place. The
@@ -143,8 +178,9 @@ fn reload_reason(info: &SandboxInfo) -> &'static str {
 
 // ---- the reloader ----
 
-/// Re-reads the configuration file and replaces the process sandbox with the
-/// result. Everything except the `[sandbox]` table is fixed at startup: the
+/// Re-reads the configuration file and applies the result to the process
+/// sandbox: in place for a Seatbelt runtime that stays Seatbelt, by replacing
+/// the runtime otherwise. Everything except the `[sandbox]` table is fixed at startup: the
 /// workspace, shell, home, host environment, and the provider key name the
 /// sandbox environment was resolved from.
 pub struct SandboxReloader {
@@ -173,21 +209,22 @@ impl SandboxControl for SandboxReloader {
             &self.reopen.workspace,
             self.driver_override.as_deref(),
         )?;
-        let next = normalize_sandbox_runtime(
-            open_sandbox_runtime(
-                &OpenOptions {
-                    settings: settings_from_config(&settings),
-                    provider_names: super::run::sandbox_provider_environment_names(
-                        &file,
-                        &self.api_key_env,
-                    ),
-                    ..self.reopen.clone()
-                },
-                &self.cancel,
-            )
-            .await,
-        );
-        let info = self.control.reload(next).await?;
+        let options = OpenOptions {
+            settings: settings_from_config(&settings),
+            provider_names: super::run::sandbox_provider_environment_names(
+                &file,
+                &self.api_key_env,
+            ),
+            ..self.reopen.clone()
+        };
+        let info = match self.control.reconfigure(&options, &self.cancel).await {
+            Some(result) => result?,
+            None => {
+                let next =
+                    normalize_sandbox_runtime(open_sandbox_runtime(&options, &self.cancel).await);
+                self.control.reload(next).await?
+            }
+        };
         if let Some(excluded) = &self.excluded {
             excluded.set_entries(settings.excluded_commands.clone());
         }
@@ -483,5 +520,179 @@ mod tests {
         SandboxControl::reload(&bad).await.expect_err("invalid");
         assert!(list.matches("lark-cli x"));
         control.close().await.expect("close");
+    }
+
+    /// A real Seatbelt runtime over `/usr/bin/sandbox-exec`, or `None` with a
+    /// printed reason when the host cannot run it.
+    #[cfg(target_os = "macos")]
+    struct Seatbelt {
+        workspace: TempDir,
+        home: TempDir,
+        options: OpenOptions,
+    }
+
+    #[cfg(target_os = "macos")]
+    fn seatbelt_fixture() -> Option<Seatbelt> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if let Some(reason) = crate::sandbox::seatbelt::driver::unavailable_reason() {
+            eprintln!("skipping: {reason}");
+            return None;
+        }
+        let workspace = TempDir::new().expect("workspace");
+        let home = TempDir::new().expect("home");
+        let canonical = |dir: &TempDir| {
+            std::fs::canonicalize(dir.path())
+                .expect("canonical directory")
+                .to_string_lossy()
+                .into_owned()
+        };
+        let caches = std::path::Path::new(&canonical(&home)).join("Library/Caches");
+        std::fs::create_dir_all(&caches).expect("cache base");
+        for directory in [caches.parent().expect("library"), caches.as_path()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .expect("cache mode");
+        }
+        let options = OpenOptions {
+            settings: Settings {
+                driver: DriverMode::Seatbelt,
+                network: Some(NetworkMode::Deny),
+                read_paths: Vec::new(),
+                allow_env: Vec::new(),
+            },
+            workspace: canonical(&workspace),
+            shell: "/bin/sh".to_string(),
+            home: canonical(&home),
+            host_entries: vec![
+                b"PATH=/usr/bin:/bin".to_vec(),
+                b"GH_TOKEN=token-value".to_vec(),
+            ],
+            provider_names: vec!["OTTO_API_KEY".to_string()],
+        };
+        Some(Seatbelt {
+            workspace,
+            home,
+            options,
+        })
+    }
+
+    /// Runs `script` through the switch with `environment` and returns its
+    /// stdout.
+    #[cfg(target_os = "macos")]
+    async fn run_in(
+        control: &SandboxSwitch,
+        workspace: &TempDir,
+        environment: &[String],
+        script: &str,
+    ) -> String {
+        let mut stdout = Vec::new();
+        let (status, result) = control
+            .execute(
+                Request {
+                    argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+                    dir: std::fs::canonicalize(workspace.path()).expect("canonical workspace"),
+                    env: environment.to_vec(),
+                },
+                Streams {
+                    stdout: &mut stdout,
+                    stderr: &mut Vec::new(),
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(status.code, 0, "{script}");
+        String::from_utf8_lossy(&stdout).into_owned()
+    }
+
+    /// The regression: every reload used to open a runtime with a new private
+    /// tree, so the environment and redactions always differed and the reload
+    /// was refused as an `allow_env` change.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_seatbelt_reload_reconfigures_in_place_and_keeps_the_environment() {
+        let Some(fixture) = seatbelt_fixture() else {
+            return;
+        };
+        let runtime = normalize_sandbox_runtime(
+            open_sandbox_runtime(&fixture.options, &CancellationToken::new()).await,
+        );
+        assert!(runtime.info.bash_available, "{:?}", runtime.info);
+        let control = SandboxSwitch::new(runtime);
+        let (environment, redactions) = {
+            let current = control.current.read().await;
+            let runtime = current.as_ref().expect("runtime");
+            (
+                runtime.environment.clone().expect("environment"),
+                runtime.redaction_values.clone(),
+            )
+        };
+        let private_home = environment
+            .iter()
+            .find_map(|entry| entry.strip_prefix("HOME="))
+            .map(std::path::PathBuf::from)
+            .expect("HOME entry");
+        assert!(private_home.is_dir());
+        let list = excluded(Arc::clone(&control), &[]);
+        let path = fixture.home.path().join("config.toml");
+        let reload_with = |config: &str| {
+            std::fs::write(&path, config).expect("write config");
+            SandboxReloader {
+                control: Arc::clone(&control),
+                config_path: path.clone(),
+                explicit_config: true,
+                driver_override: Some("seatbelt".to_string()),
+                environment: HashMap::from([(
+                    "HOME".to_string(),
+                    fixture.home.path().to_string_lossy().into_owned(),
+                )]),
+                api_key_env: "OTTO_API_KEY".to_string(),
+                reopen: fixture.options.clone(),
+                cancel: CancellationToken::new(),
+                excluded: Some(list.clone()),
+            }
+        };
+
+        let reloader =
+            reload_with("[sandbox]\nnetwork = 'allow'\nexcluded_commands = ['lark-cli *']\n");
+        let info = SandboxControl::reload(&reloader).await.expect("reload");
+        assert_eq!(
+            info.network,
+            super::super::info::SandboxNetwork::Allowed,
+            "{info:?}"
+        );
+        assert_eq!(control.info(), info);
+        {
+            let current = control.current.read().await;
+            let runtime = current.as_ref().expect("runtime");
+            assert_eq!(runtime.environment.as_ref(), Some(&environment));
+            assert_eq!(runtime.redaction_values, redactions);
+        }
+        let output = run_in(
+            &control,
+            &fixture.workspace,
+            &environment,
+            r#"printf reloaded > "$HOME/probe" && cat "$HOME/probe""#,
+        )
+        .await;
+        assert_eq!(output, "reloaded");
+        assert!(list.matches("lark-cli x"));
+
+        let reloader = reload_with(
+            "[sandbox]\nnetwork = 'allow'\nallow_env = ['GH_TOKEN']\nexcluded_commands = ['other *']\n",
+        );
+        let error = SandboxControl::reload(&reloader)
+            .await
+            .expect_err("an allow_env change is refused");
+        assert_eq!(error, RELOAD_ENVIRONMENT);
+        assert!(list.matches("lark-cli x"), "a failed reload keeps the list");
+        let output = run_in(&control, &fixture.workspace, &environment, "printf ok").await;
+        assert_eq!(output, "ok");
+
+        control.close().await.expect("close");
+        assert!(
+            !private_home.exists(),
+            "closing the switch removes the private tree"
+        );
     }
 }

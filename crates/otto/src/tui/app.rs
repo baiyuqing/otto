@@ -112,12 +112,18 @@ impl Picker {
     }
 }
 
-/// A pending elevated Bash approval shown as an interactive modal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A pending elevated Bash approval shown above the composer.
+///
+/// The choice is made with the arrow keys and Enter, so it works under any
+/// input method; `y`/`n` and `1`/`2` are shortcuts for the same two options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ApprovalDialog {
     pub id: String,
     pub command: String,
     pub justification: String,
+    /// Whether "Yes" is the highlighted option. Starts on "No" so a stray
+    /// Enter never grants an unsandboxed command.
+    pub approve_selected: bool,
 }
 
 /// Async work [`App::handle_key`] cannot start itself (every
@@ -530,19 +536,26 @@ impl App {
             return self.handle_ctrl_c();
         }
 
-        if let Some(approval) = &self.approval {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    let id = approval.id.clone();
-                    self.approval = None;
-                    return Some(Action::Approve(id));
-                }
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.approval = None;
+        if let Some(approval) = &mut self.approval {
+            let approve = match key.code {
+                KeyCode::Char('y' | 'Y' | '1') => true,
+                KeyCode::Esc | KeyCode::Char('n' | 'N' | '2') => false,
+                KeyCode::Enter => approval.approve_selected,
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Char('k' | 'j' | 'h' | 'l') => {
+                    approval.approve_selected = !approval.approve_selected;
                     return None;
                 }
                 _ => return None,
-            }
+            };
+            let id = approval.id.clone();
+            self.approval = None;
+            return approve.then_some(Action::Approve(id));
         }
 
         if self.show_help {
@@ -1521,6 +1534,7 @@ fn bash_approval_request(tool_name: &str, result: &ToolResult) -> Option<Approva
         id: id.to_string(),
         command,
         justification,
+        ..Default::default()
     })
 }
 
@@ -1530,7 +1544,7 @@ fn decode_approval_field(value: &str) -> String {
 
 fn approval_hint(approval: &ApprovalDialog) -> String {
     let mut hint =
-        "Bash approval requested. Review the popup, then press y to approve or n/Esc to cancel."
+        "Bash approval requested. Choose Yes or No above the input box (arrows + Enter, or y/n)."
             .to_string();
     if !approval.command.is_empty() {
         hint.push_str("\nCommand: ");
@@ -2423,7 +2437,7 @@ mod tests {
             Some(otto_core::model::EffectCertainty::NotStarted)
         );
         assert_eq!(added[1].kind, Some(EntryKind::System));
-        assert!(added[1].raw.contains("press y"), "{}", added[1].raw);
+        assert!(added[1].raw.contains("arrows + Enter"), "{}", added[1].raw);
         assert!(added[1].raw.contains("git push"), "{}", added[1].raw);
         let approval = app.approval.as_ref().expect("approval dialog");
         assert_eq!(approval.id, "approval-1");
@@ -2432,45 +2446,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_dialog_requires_y_and_escape_closes() {
+    async fn approval_dialog_selects_with_arrows_and_enter_and_escape_cancels() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let cancel = CancellationToken::new();
         let mut app = App::new(&controller);
-        app.approval = Some(ApprovalDialog {
-            id: "approval-1".to_string(),
+        let dialog = |id: &str| ApprovalDialog {
+            id: id.to_string(),
             command: "git push".to_string(),
             justification: "push branch".to_string(),
-        });
+            ..Default::default()
+        };
+        let press = |app: &mut App, code| {
+            app.handle_key(key(code, KeyModifiers::NONE), &controller, &cancel)
+        };
 
-        let action = app.handle_key(
-            key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
-            &cancel,
-        );
+        // Enter on the default option ("No") cancels; nothing is granted.
+        app.approval = Some(dialog("approval-1"));
+        assert!(press(&mut app, KeyCode::Enter).is_none());
+        assert!(app.approval.is_none(), "Enter on No closes the prompt");
 
-        assert!(action.is_none());
-        assert!(app.approval.is_some(), "Enter must not approve implicitly");
-
-        let action = app.handle_key(
-            key(KeyCode::Char('y'), KeyModifiers::NONE),
-            &controller,
-            &cancel,
-        );
-
-        assert!(matches!(action, Some(Action::Approve(id)) if id == "approval-1"));
+        // An arrow moves to "Yes"; Enter then grants. No letter key needed.
+        app.approval = Some(dialog("approval-2"));
+        assert!(press(&mut app, KeyCode::Up).is_none());
+        assert!(app.approval.is_some());
+        let action = press(&mut app, KeyCode::Enter);
+        assert!(matches!(action, Some(Action::Approve(id)) if id == "approval-2"));
         assert!(app.approval.is_none());
 
-        app.approval = Some(ApprovalDialog {
-            id: "approval-2".to_string(),
-            command: "rm -rf /tmp/nope".to_string(),
-            justification: "demo".to_string(),
-        });
-        let action = app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &controller, &cancel);
+        // Moving twice returns to "No".
+        app.approval = Some(dialog("approval-3"));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Tab);
+        assert!(press(&mut app, KeyCode::Enter).is_none());
 
-        assert!(action.is_none());
+        // Shortcuts still work, and Esc cancels.
+        app.approval = Some(dialog("approval-4"));
+        let action = press(&mut app, KeyCode::Char('y'));
+        assert!(matches!(action, Some(Action::Approve(id)) if id == "approval-4"));
+        app.approval = Some(dialog("approval-5"));
+        let action = press(&mut app, KeyCode::Char('1'));
+        assert!(matches!(action, Some(Action::Approve(id)) if id == "approval-5"));
+        app.approval = Some(dialog("approval-6"));
+        assert!(press(&mut app, KeyCode::Esc).is_none());
         assert!(app.approval.is_none());
+
+        // Unrelated keys, such as typing under an IME, leave it open.
+        app.approval = Some(dialog("approval-7"));
+        assert!(press(&mut app, KeyCode::Char('是')).is_none());
+        assert!(app.approval.is_some());
     }
 
     #[test]

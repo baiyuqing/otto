@@ -16,7 +16,8 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Row, Table, TableState,
+    Wrap,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -50,10 +51,21 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
         content_area.height,
         panel_row_count(panel_tasks.len()),
     );
-    let suggestions = app.suggestions();
-    // The suggestion list may take every row the composer, the panel, and
-    // the status line leave, except the one the transcript keeps.
-    let suggestion_height = (suggestions.len() as u16).min(
+    // A pending approval sits directly above the composer, where the eyes are,
+    // in the slot the suggestion list would use.
+    let approval = app.approval.as_ref().filter(|_| !app.busy());
+    let suggestions = if approval.is_some() {
+        Vec::new()
+    } else {
+        app.suggestions()
+    };
+    // The suggestion list or approval panel may take every row the composer,
+    // the panel, and the status line leave, except the one the transcript keeps.
+    let slot_rows = match approval {
+        Some(approval) => approval_lines(approval, content_area.width).len() as u16 + 2,
+        None => suggestions.len() as u16,
+    };
+    let suggestion_height = slot_rows.min(
         content_area
             .height
             .saturating_sub(composer_height + panel_height + 2),
@@ -70,16 +82,15 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
         .split(content_area);
 
     draw_transcript(frame, app, chunks[0]);
-    draw_suggestions(frame, app, &suggestions, chunks[1]);
+    match approval {
+        Some(approval) => draw_approval(frame, chunks[1], approval),
+        None => draw_suggestions(frame, app, &suggestions, chunks[1]),
+    }
     draw_composer(frame, app, chunks[2]);
     draw_panel(frame, &panel_tasks, chunks[3]);
     draw_footer(frame, app, chunks[4]);
 
-    if !app.busy()
-        && let Some(approval) = &app.approval
-    {
-        draw_approval(frame, area, approval);
-    } else if app.show_help {
+    if app.show_help {
         draw_help(frame, area);
     } else if let Some(view) = &app.context {
         draw_context(frame, area, view);
@@ -611,51 +622,122 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
     frame.render_stateful_widget(list, popup, &mut state);
 }
 
-fn draw_approval(frame: &mut Frame, area: Rect, approval: &ApprovalDialog) {
-    let popup = centered_rect_sized(76, 8, area);
-    frame.render_widget(Clear, popup);
-    let inner_width = popup.width.saturating_sub(4) as usize;
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "Run elevated Bash?",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("This command would run outside the sandbox."),
-    ];
+/// Longest `Command:` / `Reason:` value the approval dialog shows, in lines.
+const APPROVAL_COMMAND_LINES: usize = 3;
+const APPROVAL_REASON_LINES: usize = 2;
+
+/// Content rows of the approval panel for a panel `width` columns wide.
+fn approval_lines(approval: &ApprovalDialog, width: u16) -> Vec<Line<'static>> {
+    // Border (1) + padding (1) on each side.
+    let inner_width = width.saturating_sub(4) as usize;
+    let accent = Style::default().fg(Color::Yellow);
+    let mut lines = vec![Line::from(Span::styled(
+        "Run Bash outside the sandbox?",
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
     if !approval.command.is_empty() {
-        lines.push(label_value_line(
+        lines.extend(label_value_lines(
             "Command: ",
             &approval.command,
             inner_width,
+            APPROVAL_COMMAND_LINES,
         ));
     }
     if !approval.justification.is_empty() {
-        lines.push(label_value_line(
-            "Reason: ",
+        lines.extend(label_value_lines(
+            "Reason:  ",
             &approval.justification,
             inner_width,
+            APPROVAL_REASON_LINES,
         ));
     }
     lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled("y = yes", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" · "),
-        Span::styled("n/Esc = no", Style::default().add_modifier(Modifier::BOLD)),
-    ]));
-
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title("Approval"));
-    frame.render_widget(paragraph, popup);
+    for (label, is_yes) in [
+        ("Yes, run it outside the sandbox", true),
+        ("No, cancel", false),
+    ] {
+        let selected = approval.approve_selected == is_yes;
+        lines.push(if selected {
+            Line::from(Span::styled(
+                format!("❯ {label}"),
+                accent.add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(format!("  {label}"))
+        });
+    }
+    lines.push(Line::from(Span::styled(
+        "↑/↓ select · Enter confirm · Esc cancel",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    lines
 }
 
-fn label_value_line<'a>(label: &'static str, value: &str, width: usize) -> Line<'a> {
+/// The approval prompt, drawn in `area` just above the composer.
+fn draw_approval(frame: &mut Frame, area: Rect, approval: &ApprovalDialog) {
+    let accent = Style::default().fg(Color::Yellow);
+    frame.render_widget(Clear, area);
+    let paragraph = Paragraph::new(approval_lines(approval, area.width)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(accent)
+            .padding(Padding::horizontal(1))
+            .title(Span::styled(
+                " Approval ",
+                accent.add_modifier(Modifier::BOLD),
+            )),
+    );
+    frame.render_widget(paragraph, area);
+}
+
+/// `label` followed by `value` wrapped to `width` columns over at most
+/// `max_lines` lines. Continuation lines align under the value; when the value
+/// does not fit, the last line ends in `...`.
+fn label_value_lines<'a>(
+    label: &'static str,
+    value: &str,
+    width: usize,
+    max_lines: usize,
+) -> Vec<Line<'a>> {
     let label_width = UnicodeWidthStr::width(label);
-    let value_width = width.saturating_sub(label_width);
-    Line::from(vec![
-        Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(ellipsis_single_line(value, value_width)),
-    ])
+    let value_width = width.saturating_sub(label_width).max(1);
+    let escaped = escape_single_line_text(value);
+    let mut chunks: Vec<String> = Vec::new();
+    let mut rest = escaped.as_str();
+    while !rest.is_empty() {
+        if chunks.len() + 1 == max_lines {
+            chunks.push(ellipsis_single_line(rest, value_width));
+            break;
+        }
+        let mut end = 0;
+        let mut used = 0;
+        for ch in rest.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if used + ch_width > value_width {
+                break;
+            }
+            used += ch_width;
+            end += ch.len_utf8();
+        }
+        if end == 0 {
+            // A single character wider than the column: take it anyway.
+            end = rest.chars().next().map_or(0, char::len_utf8);
+        }
+        chunks.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let lead = if index == 0 {
+                Span::styled(label, Style::default().add_modifier(Modifier::BOLD))
+            } else {
+                Span::raw(" ".repeat(label_width))
+            };
+            Line::from(vec![lead, Span::raw(chunk)])
+        })
+        .collect()
 }
 
 fn ellipsis_single_line(value: &str, max_width: usize) -> String {
@@ -833,27 +915,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_y) / 2),
             Constraint::Percentage(percent_y),
             Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
-}
-
-fn centered_rect_sized(percent_x: u16, height: u16, area: Rect) -> Rect {
-    let height = height.min(area.height);
-    let top = area.height.saturating_sub(height) / 2;
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(top),
-            Constraint::Length(height),
-            Constraint::Min(0),
         ])
         .split(area);
     Layout::default()
@@ -1204,22 +1265,53 @@ mod tests {
             id: "approval-1".to_string(),
             command: long_command.clone(),
             justification: "publish the reviewed branch".to_string(),
+            ..Default::default()
         });
 
         let screen = rendered(&app, 80, 16);
 
-        assert!(screen.contains("Run elevated Bash?"), "{screen}");
-        assert!(screen.contains("outside the sandbox"), "{screen}");
+        assert!(screen.contains("Run Bash outside the sandbox?"), "{screen}");
         assert!(screen.contains("Command:"), "{screen}");
         assert!(screen.contains("git push"), "{screen}");
         assert!(screen.contains("..."), "{screen}");
         assert!(!screen.contains(&long_command), "{screen}");
         assert!(
-            screen.contains("Reason: publish the reviewed branch"),
+            screen.contains("Reason:  publish the reviewed branch"),
             "{screen}"
         );
-        assert!(screen.contains("y = yes"), "{screen}");
-        assert!(screen.contains("n/Esc = no"), "{screen}");
+        assert!(screen.contains("❯ No, cancel"), "{screen}");
+        assert!(screen.contains("  Yes, run it"), "{screen}");
+        assert!(screen.contains("Enter confirm"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn approval_panel_sits_above_the_composer_and_wraps_a_long_reason() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.approval = Some(ApprovalDialog {
+            id: "approval-1".to_string(),
+            command: "git fetch origin main".to_string(),
+            justification:
+                "needs network access to verify the merged pull request and remove the worktree"
+                    .to_string(),
+            ..Default::default()
+        });
+
+        let rows = screen_rows(&app, 60, 20);
+        let at = |needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} not drawn:\n{}", rows.join("\n")))
+        };
+
+        // The long reason wraps instead of being cut off.
+        assert!(rows.join("\n").contains("remove the worktree"), "{rows:?}");
+        assert_ne!(at("needs network"), at("remove the worktree"));
+        // The key hint is the last thing above the composer's top border,
+        // below the panel's own border, and the composer follows directly.
+        let choices = at("Enter confirm");
+        assert!(rows[choices + 1].contains('└'), "{rows:?}");
+        assert!(rows[choices + 2].contains('┌'), "{rows:?}");
+        assert!(at("Approval") < at("Command:"));
     }
 
     #[tokio::test]

@@ -83,10 +83,18 @@ struct Inner {
     close_result: Option<Result<(), Error>>,
 }
 
+/// The profile options in effect and the text generated from them.
+#[derive(Debug)]
+struct Active {
+    options: profile::Options,
+    text: String,
+}
+
 /// Runs commands under `/usr/bin/sandbox-exec`.
 pub struct SeatbeltDriver {
     workspace: String,
-    network: NetworkMode,
+    /// The profile options and text now in the profile file.
+    profile: Mutex<Active>,
     state: state::State,
     profile_path: String,
     processes: Manager,
@@ -98,7 +106,7 @@ impl std::fmt::Debug for SeatbeltDriver {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SeatbeltDriver")
-            .field("network", &self.network)
+            .field("network", &self.network())
             .finish_non_exhaustive()
     }
 }
@@ -199,7 +207,7 @@ impl SeatbeltDriver {
         if let Err(error) = check_cancelled(cancel) {
             return Err((private, error));
         }
-        let generated = profile::generate(&profile::Options {
+        let profile_options = profile::Options {
             workspace: workspace.clone(),
             directories: private.directories.clone(),
             shell,
@@ -207,7 +215,8 @@ impl SeatbeltDriver {
             host_entries: options.host_entries.clone(),
             read_paths: options.read_paths.clone(),
             network: Some(network),
-        });
+        };
+        let generated = profile::generate(&profile_options);
         let Ok(text) = generated else {
             return Err((
                 private,
@@ -227,7 +236,10 @@ impl SeatbeltDriver {
         let profile_path = private.profile_path.clone();
         let driver = Self {
             workspace,
-            network,
+            profile: Mutex::new(Active {
+                options: profile_options,
+                text,
+            }),
             state: private,
             profile_path,
             processes: Manager::default(),
@@ -241,6 +253,101 @@ impl SeatbeltDriver {
                 Err((driver.state, error))
             }
         }
+    }
+
+    /// The read paths in the profile now in effect.
+    pub fn read_paths(&self) -> Vec<String> {
+        self.profile
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .options
+            .read_paths
+            .clone()
+    }
+
+    /// The network mode in the profile now in effect.
+    pub fn network(&self) -> Option<NetworkMode> {
+        self.profile
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .options
+            .network
+    }
+
+    /// Rewrites the profile for new read paths and network mode, keeping the
+    /// private state tree. The private directories, and so
+    /// [`SeatbeltDriver::private_directories`], do not change.
+    ///
+    /// The profile is generated first, so a rejected input writes nothing. The
+    /// new profile is then written and the startup self-test runs under it; a
+    /// failure writes the previous text back, and poisons the driver if that
+    /// write fails too.
+    ///
+    /// The caller must guarantee that no `execute` runs concurrently and that
+    /// calls to this method are not concurrent with each other.
+    /// `sandbox-exec` reads the profile file when each child starts, so a child
+    /// that starts during the truncate-and-write can read a partial profile,
+    /// and the resulting `sandbox-exec:` diagnostic poisons the driver.
+    /// `SandboxSwitch` guarantees this by holding its write lock for the whole
+    /// call.
+    pub async fn reconfigure(
+        &self,
+        read_paths: Vec<String>,
+        network: NetworkMode,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        {
+            let inner = self.inner.lock().expect("seatbelt driver state");
+            if inner.closed {
+                return Err(Error::Closed);
+            }
+            if inner.poisoned {
+                return Err(Error::unavailable(UnavailableReason::RuntimeFailure));
+            }
+        }
+        check_cancelled(cancel)?;
+
+        let (previous_options, previous_text) = {
+            let active = self
+                .profile
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            (active.options.clone(), active.text.clone())
+        };
+        let next_options = profile::Options {
+            read_paths,
+            network: Some(network),
+            ..previous_options
+        };
+        let next_text = profile::generate(&next_options)
+            .map_err(|_| Error::unavailable(UnavailableReason::SelfTestFailed))?;
+        if next_text != previous_text {
+            let restore = |driver: &Self| {
+                if driver
+                    .state
+                    .write_profile(previous_text.as_bytes())
+                    .is_err()
+                {
+                    driver.poison();
+                }
+            };
+            if self.state.write_profile(next_text.as_bytes()).is_err() {
+                restore(self);
+                return Err(Error::unavailable(UnavailableReason::SelfTestFailed));
+            }
+            if let Err(error) = self.run_startup_self_test(cancel).await {
+                restore(self);
+                return Err(error);
+            }
+        }
+        *self
+            .profile
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Active {
+            options: next_options,
+            text: next_text,
+        };
+        Ok(())
     }
 
     /// The private directories the child sees as `HOME` and `TMPDIR`.
@@ -526,8 +633,8 @@ impl Driver for SeatbeltDriver {
             read_confinement: true,
             write_confinement: true,
             unix_socket_deny: true,
-            network_allow: self.network == NetworkMode::Allow,
-            network_deny: self.network == NetworkMode::Deny,
+            network_allow: self.network() == Some(NetworkMode::Allow),
+            network_deny: self.network() == Some(NetworkMode::Deny),
         }
     }
 
@@ -931,6 +1038,26 @@ fn could_begin_diagnostic(value: &[u8]) -> bool {
     }
 }
 
+#[cfg(test)]
+/// The availability probe: a nested or Linux host has `sandbox-exec` absent
+/// or refusing the most permissive profile there is.
+pub(crate) fn unavailable_reason() -> Option<String> {
+    if !std::path::Path::new(SANDBOX_EXEC_PATH).exists() {
+        return Some(format!("{SANDBOX_EXEC_PATH} is absent"));
+    }
+    let probe = std::process::Command::new(SANDBOX_EXEC_PATH)
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .output();
+    match probe {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(format!(
+            "{SANDBOX_EXEC_PATH} rejected the permissive probe profile: {}",
+            output.status
+        )),
+        Err(error) => Some(format!("{SANDBOX_EXEC_PATH} could not run: {error}")),
+    }
+}
+
 /// The shared driver contract, run against Seatbelt in both network modes.
 ///
 /// Every check skips with a printed reason when the host cannot run
@@ -944,28 +1071,9 @@ mod contract {
     use async_trait::async_trait;
     use tokio_util::sync::CancellationToken;
 
-    use super::{Options, SANDBOX_EXEC_PATH, SeatbeltDriver};
+    use super::{Options, SeatbeltDriver, unavailable_reason};
     use crate::sandbox::conformance::{Contract, Fixture};
     use crate::sandbox::{Driver, NetworkMode, Request};
-
-    /// The availability probe: a nested or Linux host has `sandbox-exec` absent
-    /// or refusing the most permissive profile there is.
-    fn unavailable_reason() -> Option<String> {
-        if !std::path::Path::new(SANDBOX_EXEC_PATH).exists() {
-            return Some(format!("{SANDBOX_EXEC_PATH} is absent"));
-        }
-        let probe = std::process::Command::new(SANDBOX_EXEC_PATH)
-            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
-            .output();
-        match probe {
-            Ok(output) if output.status.success() => None,
-            Ok(output) => Some(format!(
-                "{SANDBOX_EXEC_PATH} rejected the permissive probe profile: {}",
-                output.status
-            )),
-            Err(error) => Some(format!("{SANDBOX_EXEC_PATH} could not run: {error}")),
-        }
-    }
 
     /// Creates `name` under the fixture base at mode 0700 and canonicalizes it.
     fn private_directory(fixture: &Fixture, name: &str) -> String {
@@ -1105,5 +1213,205 @@ mod tests {
             error,
             Error::unavailable(UnavailableReason::PolicyUnsupported)
         );
+    }
+
+    /// Real `sandbox-exec` fixtures for [`SeatbeltDriver::reconfigure`]: the
+    /// workspace, the host home and the cache base are separate 0700 canonical
+    /// directories, and `outside` holds a file the default profile denies.
+    #[cfg(target_os = "macos")]
+    struct Reconfigure {
+        _root: tempfile::TempDir,
+        workspace: std::path::PathBuf,
+        outside: std::path::PathBuf,
+        driver: SeatbeltDriver,
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn reconfigure_fixture() -> Option<Reconfigure> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if let Some(reason) = super::unavailable_reason() {
+            eprintln!("skipping: {reason}");
+            return None;
+        }
+        let root = tempfile::TempDir::new().expect("temp root");
+        let base = std::fs::canonicalize(root.path()).expect("canonical root");
+        let directory = |name: &str| {
+            let path = base.join(name);
+            std::fs::create_dir_all(&path).expect("directory");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("directory mode");
+            path
+        };
+        let workspace = directory("workspace");
+        let outside = directory("outside");
+        std::fs::write(outside.join("note"), "outside-contents").expect("outside file");
+        let driver = SeatbeltDriver::open(
+            Options {
+                workspace: workspace.to_str().expect("workspace").to_string(),
+                shell: "/bin/sh".to_string(),
+                home: directory("host-home").to_str().expect("home").to_string(),
+                cache_base: directory("user-cache").to_str().expect("cache").to_string(),
+                host_entries: vec!["PATH=/usr/bin:/bin".to_string()],
+                read_paths: Vec::new(),
+                network: Some(NetworkMode::Deny),
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("seatbelt open");
+        Some(Reconfigure {
+            _root: root,
+            workspace,
+            outside,
+            driver,
+        })
+    }
+
+    /// Runs `script` under the driver and returns whether it exited 0 and its
+    /// stdout.
+    #[cfg(target_os = "macos")]
+    async fn run_script(fixture: &Reconfigure, script: &str) -> (bool, String) {
+        use crate::sandbox::{Driver as _, Request, Streams};
+
+        let directories = fixture.driver.private_directories();
+        let mut stdout = Vec::new();
+        let (status, result) = fixture
+            .driver
+            .execute(
+                Request {
+                    argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+                    dir: fixture.workspace.clone(),
+                    env: vec![
+                        "PATH=/usr/bin:/bin".to_string(),
+                        format!("HOME={}", directories.home.display()),
+                    ],
+                },
+                Streams {
+                    stdout: &mut stdout,
+                    stderr: &mut Vec::new(),
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        (
+            status.code == 0 && !status.signaled,
+            String::from_utf8_lossy(&stdout).into_owned(),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn reconfigure_applies_new_read_paths_and_network_in_the_same_private_tree() {
+        use crate::sandbox::Driver as _;
+
+        let Some(fixture) = reconfigure_fixture().await else {
+            return;
+        };
+        let cat = format!("cat '{}'", fixture.outside.join("note").display());
+        let (readable, _) = run_script(&fixture, &cat).await;
+        assert!(!readable, "the profile must deny a file outside its roots");
+        assert!(fixture.driver.capabilities().network_deny);
+        let private = fixture.driver.private_directories();
+
+        fixture
+            .driver
+            .reconfigure(
+                vec![fixture.outside.to_str().expect("outside").to_string()],
+                NetworkMode::Allow,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("reconfigure");
+
+        assert_eq!(fixture.driver.private_directories(), private);
+        let capabilities = fixture.driver.capabilities();
+        assert!(capabilities.network_allow && !capabilities.network_deny);
+        let (readable, output) = run_script(&fixture, &cat).await;
+        assert!(readable, "the new read path must be readable");
+        assert_eq!(output, "outside-contents");
+        let (written, output) = run_script(
+            &fixture,
+            r#"printf kept > "$HOME/probe" && cat "$HOME/probe""#,
+        )
+        .await;
+        assert!(written, "the private HOME must stay writable");
+        assert_eq!(output, "kept");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn reconfigure_with_unchanged_settings_leaves_the_profile_file_alone() {
+        let Some(fixture) = reconfigure_fixture().await else {
+            return;
+        };
+        let cancel = CancellationToken::new();
+        let read_paths = vec![fixture.outside.to_str().expect("outside").to_string()];
+        fixture
+            .driver
+            .reconfigure(read_paths.clone(), NetworkMode::Allow, &cancel)
+            .await
+            .expect("first");
+        let written = std::fs::read(&fixture.driver.profile_path).expect("profile");
+
+        fixture
+            .driver
+            .reconfigure(read_paths, NetworkMode::Allow, &cancel)
+            .await
+            .expect("second");
+
+        assert_eq!(
+            std::fs::read(&fixture.driver.profile_path).expect("profile"),
+            written
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_rejected_reconfigure_keeps_the_previous_profile_and_the_driver_running() {
+        use crate::sandbox::Driver as _;
+
+        let Some(fixture) = reconfigure_fixture().await else {
+            return;
+        };
+        let before = std::fs::read(&fixture.driver.profile_path).expect("profile");
+
+        let error = fixture
+            .driver
+            .reconfigure(
+                vec!["/otto-reconfigure-missing-directory".to_string()],
+                NetworkMode::Allow,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a missing read path is rejected");
+
+        assert_eq!(error, Error::unavailable(UnavailableReason::SelfTestFailed));
+        assert_eq!(
+            std::fs::read(&fixture.driver.profile_path).expect("profile"),
+            before
+        );
+        assert!(fixture.driver.capabilities().network_deny);
+        let (ok, output) = run_script(&fixture, "printf ok").await;
+        assert!(ok);
+        assert_eq!(output, "ok");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn reconfigure_on_a_closed_driver_is_refused() {
+        use crate::sandbox::Driver as _;
+
+        let Some(fixture) = reconfigure_fixture().await else {
+            return;
+        };
+        fixture.driver.close().expect("close");
+        let error = fixture
+            .driver
+            .reconfigure(Vec::new(), NetworkMode::Deny, &CancellationToken::new())
+            .await
+            .expect_err("closed");
+        assert_eq!(error, Error::Closed);
     }
 }

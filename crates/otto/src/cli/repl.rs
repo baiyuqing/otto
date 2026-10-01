@@ -23,14 +23,14 @@ use tokio_util::sync::CancellationToken;
 use crate::subagent::tasks::{TaskError, Tasks};
 
 use super::controller::{Controller, PROFILE_SWITCH_UNAVAILABLE};
-use super::sandbox_setup::SandboxChange;
+use super::sandbox_setup::{SandboxChange, parse_exclude_entry};
 
 /// The longest line the REPL accepts.
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/init     create a repository AGENTS.md guide\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/sandbox allow <path> let sandboxed commands read a path\n/sandbox network allow|deny set sandboxed network access\n/approve <id> allow one exact elevated Bash command\n/memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skill [name] show skills or one skill; /skill set <name> enabled|disabled change a skill state\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/agents   list the latest 50 recorded sub-agent tasks, any session\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
+const HELP: &str = "/help     show commands\n/init     create a repository AGENTS.md guide\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/sandbox allow <path> let sandboxed commands read a path\n/sandbox network allow|deny set sandboxed network access\n/sandbox exclude <entry> run matching commands outside the sandbox\n/approve <id> allow one exact elevated Bash command\n/approve <id> always run the command's program outside the sandbox from now on\n/memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skill [name] show skills or one skill; /skill set <name> enabled|disabled change a skill state\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/agents   list the latest 50 recorded sub-agent tasks, any session\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
 
 /// Why the loop stopped.
 #[derive(Debug)]
@@ -388,17 +388,21 @@ impl<'a> Repl<'a> {
                 }
                 "sandbox" => self.sandbox(args).await?.then_some(false),
                 "approve" => {
-                    if args.is_empty() || args.contains(char::is_whitespace) {
-                        break 'dispatch None;
-                    }
-                    let retry =
-                        self.controller
-                            .approve_bash(args)
-                            .map_err(|message| Error::Command {
-                                command: "/approve".to_string(),
-                                message,
-                            })?;
-                    let _ = writeln!(self.stdout, "Approved {args} for one command.");
+                    let (id, always) = match args.split_whitespace().collect::<Vec<_>>()[..] {
+                        [id] => (id, false),
+                        [id, "always"] => (id, true),
+                        _ => break 'dispatch None,
+                    };
+                    let approved = if always {
+                        self.controller.approve_bash_always(id).await
+                    } else {
+                        self.controller.approve_bash(id)
+                    };
+                    let retry = approved.map_err(|message| Error::Command {
+                        command: "/approve".to_string(),
+                        message,
+                    })?;
+                    let _ = writeln!(self.stdout, "Approved {id} for one command.");
                     self.prompt(&retry, cancel).await?;
                     Some(false)
                 }
@@ -618,7 +622,7 @@ impl<'a> Repl<'a> {
 
     /// False means "unknown command".
     ///
-    /// `allow` and `network` write the `[sandbox]` table and reload it, the
+    /// `allow`, `network` and `exclude` write the `[sandbox]` table and reload it, the
     /// same amendment the TUI confirms through a picker; here the typed
     /// command is the confirmation.
     async fn sandbox(&mut self, args: &str) -> Result<bool, Error> {
@@ -657,6 +661,16 @@ impl<'a> Repl<'a> {
                 let info = self
                     .controller
                     .amend_sandbox(SandboxChange::Network(mode.to_string()))
+                    .await
+                    .map_err(sandbox_error)?;
+                self.print_sandbox(info);
+                Ok(true)
+            }
+            ("exclude", entry) => {
+                let entry = parse_exclude_entry(entry).map_err(sandbox_error)?;
+                let info = self
+                    .controller
+                    .amend_sandbox(SandboxChange::ExcludeCommand(entry))
                     .await
                     .map_err(sandbox_error)?;
                 self.print_sandbox(info);
@@ -1272,6 +1286,8 @@ mod tests {
             "/compact [focus] compact context",
             "/sandbox [reload]",
             "/approve <id>",
+            "/sandbox exclude <entry> run matching commands outside the sandbox",
+            "/approve <id> always",
             "/skill [name] show skills or one skill; /skill set <name> enabled|disabled change a skill state",
         ] {
             assert!(
@@ -1541,6 +1557,92 @@ mod tests {
             std::fs::read_to_string(workspace.path().join("config.toml")).expect("config");
         assert!(written.contains("read_paths"), "{written}");
         assert!(written.contains("cache"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn sandbox_exclude_writes_the_entry_and_reloads() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, calls) =
+            reloading_controller(workspace.path(), sessions.path(), None).await;
+
+        let (_, stderr, result) = session(
+            "/sandbox exclude 'lark-cli *'\n/sandbox exclude lark-cli *\n/exit\n",
+            &controller,
+        )
+        .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(stderr, "");
+        assert_eq!(*calls.lock().expect("calls"), 2);
+        let written =
+            std::fs::read_to_string(workspace.path().join("config.toml")).expect("config");
+        assert!(
+            written.contains("excluded_commands = ['lark-cli *']"),
+            "{written}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_exclude_without_an_entry_or_with_an_invalid_one_writes_nothing() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, calls) =
+            reloading_controller(workspace.path(), sessions.path(), None).await;
+
+        let (_, _, result) = session("/sandbox exclude\n", &controller).await;
+        let error = result.expect_err("no entry");
+        assert!(is_command_error(&error, "/sandbox"), "{error:?}");
+        assert!(
+            error.to_string().starts_with("usage: /sandbox exclude"),
+            "{error}"
+        );
+
+        let (_, _, result) = session("/sandbox exclude a; b\n", &controller).await;
+        let error = result.expect_err("invalid entry");
+        assert!(
+            error.to_string().contains("invalid excluded command"),
+            "{error}"
+        );
+
+        assert_eq!(*calls.lock().expect("calls"), 0);
+        assert!(!workspace.path().join("config.toml").exists());
+    }
+
+    /// The success path starts a provider turn, so it is covered at the
+    /// controller (`approve_always_excludes_the_program_reloads_and_grants_the_request`);
+    /// here only the dispatch and the refusals, which end before any turn.
+    #[tokio::test]
+    async fn approve_always_dispatches_to_the_controller_and_refuses_extra_words() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, approvals, calls) =
+            crate::app::controller_with_approvals(workspace.path(), sessions.path()).await;
+        let session_id = controller.info().session_id;
+        let id = approvals.request(&session_id, "git push; rm -rf x");
+
+        let (_, stderr, result) =
+            session(&format!("/approve {id} always now\n/exit\n"), &controller).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            stderr,
+            format!("unknown command: /approve {id} always now\n")
+        );
+
+        let (_, _, result) = session("/approve approval-99 always\n", &controller).await;
+        let error = result.expect_err("unknown id");
+        assert!(is_command_error(&error, "/approve"), "{error:?}");
+        assert_eq!(error.to_string(), "approval request not found");
+
+        let (_, _, result) = session(&format!("/approve {id} always\n"), &controller).await;
+        let error = result.expect_err("compound command");
+        assert!(
+            error.to_string().contains("use /approve <id> instead"),
+            "{error}"
+        );
+
+        assert_eq!(*calls.lock().expect("calls"), 0);
+        assert!(!workspace.path().join("config.toml").exists());
     }
 
     #[tokio::test]

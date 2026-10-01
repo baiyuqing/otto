@@ -28,12 +28,15 @@ pub enum SandboxNetworkMode {
 /// The resolved, validated `[sandbox]` settings, ready to convert into a
 /// native `sandbox::Settings`. `read_paths` and `allow_env` are sorted and
 /// own their storage independently of the input `SandboxConfig`.
+/// `excluded_commands` keeps the configured order and is not part of the
+/// native `sandbox::Settings`: the bash tool applies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxSettings {
     pub driver: SandboxDriverMode,
     pub network: SandboxNetworkMode,
     pub read_paths: Vec<String>,
     pub allow_env: Vec<String>,
+    pub excluded_commands: Vec<String>,
 }
 
 /// Resolves `raw` (the `[sandbox]` table) and an optional `--sandbox` CLI
@@ -75,12 +78,137 @@ pub fn resolve_sandbox(
     }
     allow_env.sort();
 
+    let mut seen: std::collections::HashSet<&str> =
+        std::collections::HashSet::with_capacity(raw.excluded_commands.len());
+    for entry in &raw.excluded_commands {
+        if !valid_excluded_command(entry) || !seen.insert(entry.as_str()) {
+            return Err(ConfigError::new("invalid sandbox excluded_commands"));
+        }
+    }
+
     Ok(SandboxSettings {
         driver,
         network,
         read_paths,
         allow_env,
+        excluded_commands: raw.excluded_commands.clone(),
     })
+}
+
+/// Whether `command` matches one of `entries` and is a simple command, so the
+/// bash tool may run it outside the sandbox.
+///
+/// An entry `prefix *` matches `prefix` alone or `prefix` followed by a space
+/// or tab and anything else; any other entry matches only a command equal to
+/// it. Leading and trailing whitespace of `command` is ignored. A command that
+/// is not [simple](is_simple_command) never matches, so `lark-cli *` does not
+/// cover `lark-cli x && rm -rf y`.
+pub fn excluded_command_matches(entries: &[String], command: &str) -> bool {
+    let command = command.trim();
+    if !is_simple_command(command) {
+        return false;
+    }
+    entries.iter().any(|entry| match entry.strip_suffix(" *") {
+        Some(prefix) => command
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t'])),
+        None => command == entry,
+    })
+}
+
+/// Whether `command` is one simple shell command: every quote is closed, and
+/// it has no unquoted `;`, `&`, `|`, `<`, `>`, `(`, `)`, `#` or line feed, and
+/// no `$` or backtick outside single quotes. Anything that could chain,
+/// redirect, or substitute another command fails. `#` fails because quotes
+/// after a comment start are not quotes to the shell, so `x #'` followed by a
+/// line feed and `y #'` would scan as one quoted word but run `y`.
+pub fn is_simple_command(command: &str) -> bool {
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for c in command.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if single {
+            single = c != '\'';
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '$' | '`' => return false,
+            '"' => double = !double,
+            '\'' if !double => single = true,
+            ';' | '&' | '|' | '<' | '>' | '(' | ')' | '#' | '\n' if !double => return false,
+            _ => {}
+        }
+    }
+    !single && !double && !escaped
+}
+
+/// The entry `/approve <id> always` adds for `command`: its first word
+/// followed by ` *`. `None` when the command is not simple, its first word
+/// has a quote, a backslash or `=` (an environment assignment), or the first
+/// word is one of [`COMMAND_RUNNERS`], because the entry would then not
+/// describe one program.
+pub fn excluded_command_entry(command: &str) -> Option<String> {
+    let command = command.trim();
+    if !is_simple_command(command) {
+        return None;
+    }
+    let program = command.split([' ', '\t']).next()?;
+    if program.is_empty()
+        || program.contains(['\'', '"', '\\', '=', '*'])
+        || COMMAND_RUNNERS.contains(&program.rsplit('/').next().unwrap_or(program))
+    {
+        return None;
+    }
+    Some(format!("{program} *"))
+}
+
+/// Programs that run another command given as an argument. `bash *` or
+/// `env *` would take every command out of the sandbox, so
+/// [`excluded_command_entry`] does not derive an entry from them; a user can
+/// still write one in the configuration file.
+const COMMAND_RUNNERS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "env",
+    "eval",
+    "exec",
+    "command",
+    "builtin",
+    "source",
+    ".",
+    "sudo",
+    "doas",
+    "su",
+    "xargs",
+    "nohup",
+    "nice",
+    "time",
+    "timeout",
+    "watch",
+    "osascript",
+    "python",
+    "python3",
+    "perl",
+    "ruby",
+    "node",
+];
+
+fn valid_excluded_command(entry: &str) -> bool {
+    let body = entry.strip_suffix(" *").unwrap_or(entry);
+    !body.is_empty()
+        && body.trim() == body
+        && !body.contains('*')
+        && !entry.chars().any(char::is_control)
+        && is_simple_command(body)
 }
 
 fn sandbox_driver_mode(value: &str) -> Option<SandboxDriverMode> {
@@ -133,6 +261,7 @@ mod tests {
             network: network.map(String::from),
             read_paths: read_paths.iter().map(|s| s.to_string()).collect(),
             allow_env: allow_env.iter().map(|s| s.to_string()).collect(),
+            excluded_commands: Vec::new(),
         }
     }
 
@@ -146,7 +275,8 @@ mod tests {
                 driver: SandboxDriverMode::Auto,
                 network: SandboxNetworkMode::Allow,
                 read_paths: vec![],
-                allow_env: vec![]
+                allow_env: vec![],
+                excluded_commands: vec![],
             }
         );
     }
@@ -190,6 +320,124 @@ mod tests {
         for value in ["block", "ALLOW", "off", "unknown"] {
             let err = resolve_sandbox(&config(None, Some(value), &[], &[]), None).unwrap_err();
             assert!(err.to_string().contains("network"), "{value}: {err}");
+        }
+    }
+
+    fn entries(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn excluded_commands_match_a_prefix_or_the_exact_command() {
+        let list = entries(&["lark-cli *", "gh auth status"]);
+        for command in [
+            "lark-cli",
+            "lark-cli auth status",
+            "  lark-cli\tim +messages-send --text 'a; b | c > d $(e) `f` # g'\n",
+            "lark-cli --text \"a; b & c\"",
+            "lark-cli --text \"two\nlines\"",
+            "lark-cli --text a\\;b",
+            "gh auth status",
+        ] {
+            assert!(excluded_command_matches(&list, command), "{command:?}");
+        }
+        for command in [
+            "lark-clix",
+            "lark-cli-other auth",
+            "./lark-cli auth",
+            "gh auth status --show-token",
+            "gh auth",
+            "FOO=1 lark-cli auth",
+        ] {
+            assert!(!excluded_command_matches(&list, command), "{command:?}");
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn excluded_commands_never_match_a_command_that_runs_something_else() {
+        let list = entries(&["lark-cli *"]);
+        for command in [
+            "lark-cli auth; rm -rf x",
+            "lark-cli auth && rm -rf x",
+            "lark-cli auth || rm -rf x",
+            "lark-cli auth | sh",
+            "lark-cli auth & rm -rf x",
+            "lark-cli auth > ~/.zshrc",
+            "lark-cli auth < /etc/passwd",
+            "lark-cli auth\nrm -rf x",
+            "lark-cli $(rm -rf x)",
+            "lark-cli ${HOME}",
+            "lark-cli \"$(rm -rf x)\"",
+            "lark-cli `rm -rf x`",
+            "lark-cli \"`rm -rf x`\"",
+            "lark-cli (x)",
+            "lark-cli #'\nrm -rf x #'",
+            "lark-cli 'unterminated",
+            "lark-cli \"unterminated",
+            "lark-cli trailing\\",
+        ] {
+            assert!(!excluded_command_matches(&list, command), "{command:?}");
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn excluded_command_entries_are_validated() {
+        let mut raw = SandboxConfig {
+            excluded_commands: entries(&["lark-cli *", "gh auth status", "/opt/bin/tool *"]),
+            ..SandboxConfig::default()
+        };
+        let got = resolve_sandbox(&raw, None).expect("resolve");
+        assert_eq!(got.excluded_commands, raw.excluded_commands);
+
+        for invalid in [
+            "",
+            " *",
+            "*",
+            "lark-cli*",
+            "lark-* *",
+            " lark-cli *",
+            "lark-cli  *",
+            "a; b *",
+            "a $(b)",
+            "a\tb\n",
+            "lark-cli * x",
+        ] {
+            raw.excluded_commands = entries(&[invalid]);
+            let error = resolve_sandbox(&raw, None).expect_err(invalid);
+            assert!(
+                error.to_string().contains("excluded_commands"),
+                "{invalid:?}"
+            );
+        }
+        raw.excluded_commands = entries(&["lark-cli *", "lark-cli *"]);
+        assert!(resolve_sandbox(&raw, None).is_err());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn approve_always_derives_one_program_entry() {
+        assert_eq!(
+            excluded_command_entry("  lark-cli auth status").as_deref(),
+            Some("lark-cli *")
+        );
+        assert_eq!(
+            excluded_command_entry("/opt/bin/tool --flag").as_deref(),
+            Some("/opt/bin/tool *")
+        );
+        for command in [
+            "lark-cli auth && rm x",
+            "FOO=1 lark-cli auth",
+            "'lark-cli' auth",
+            "bash -c 'lark-cli auth'",
+            "/usr/bin/env lark-cli",
+            "sudo lark-cli",
+            "python3 script.py",
+            "",
+        ] {
+            assert_eq!(excluded_command_entry(command), None, "{command:?}");
         }
     }
 

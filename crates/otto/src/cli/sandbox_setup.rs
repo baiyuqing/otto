@@ -272,13 +272,17 @@ pub async fn run(
 // ---- amending the [sandbox] table from a running session ----
 
 /// One `[sandbox]` change a frontend applies to the configuration file while a
-/// session is running, behind `/sandbox allow` and `/sandbox network`.
+/// session is running, behind `/sandbox allow`, `/sandbox network` and
+/// `/sandbox exclude`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxChange {
     /// One absolute, symlink-free path added to `read_paths`.
     AllowReadPath(String),
     /// The `network` mode, `allow` or `deny`.
     Network(String),
+    /// One `excluded_commands` entry, a command pattern that runs outside the
+    /// sandbox.
+    ExcludeCommand(String),
 }
 
 impl SandboxChange {
@@ -287,6 +291,7 @@ impl SandboxChange {
         match self {
             Self::AllowReadPath(path) => format!("read path {}", quote(path)),
             Self::Network(mode) => format!("network {mode}"),
+            Self::ExcludeCommand(entry) => format!("excluded command {}", quote(entry)),
         }
     }
 }
@@ -330,6 +335,27 @@ pub fn resolve_read_path(input: &str, home: &str) -> Result<String, String> {
     }
 }
 
+/// The entry of `/sandbox exclude <entry>`: the rest of the line, trimmed,
+/// with one pair of matching single or double quotes removed.
+pub fn parse_exclude_entry(rest: &str) -> Result<String, String> {
+    let trimmed = rest.trim();
+    let entry = ['\'', '"']
+        .iter()
+        .find_map(|quote| {
+            trimmed
+                .strip_prefix(*quote)
+                .and_then(|inner| inner.strip_suffix(*quote))
+        })
+        .unwrap_or(trimmed)
+        .trim();
+    if entry.is_empty() {
+        return Err(
+            "usage: /sandbox exclude <entry>, for example /sandbox exclude lark-cli *".to_string(),
+        );
+    }
+    Ok(entry.to_string())
+}
+
 /// Applies `change` to the `[sandbox]` table at `path` and writes the file.
 ///
 /// The write goes through the same [`crate::config::write_bytes`] the
@@ -358,8 +384,23 @@ pub fn amend_sandbox_config(path: &Path, change: &SandboxChange) -> Result<Amend
             }
         }
         SandboxChange::Network(mode) => proposed.network = Some(mode.clone()),
+        SandboxChange::ExcludeCommand(entry) => {
+            if !proposed.excluded_commands.contains(entry) {
+                proposed.excluded_commands.push(entry.clone());
+            }
+        }
     }
-    let updated = update_sandbox(&original, &proposed).map_err(|error| error.to_string())?;
+    let updated = update_sandbox(&original, &proposed).map_err(|error| match change {
+        SandboxChange::ExcludeCommand(entry)
+            if error.to_string() == "invalid sandbox excluded_commands" =>
+        {
+            format!(
+            "invalid excluded command {}: use one simple command, or a program name followed by ' *'",
+                quote(entry)
+            )
+        }
+        _ => error.to_string(),
+    })?;
     crate::config::write_bytes(path, &original, &updated).map_err(str::to_string)?;
     Ok(Amendment { original, updated })
 }
@@ -872,5 +913,63 @@ mod tests {
 
         assert!(error.contains("invalid sandbox network"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).expect("read"), PRESERVED);
+    }
+
+    #[test]
+    fn excluding_a_command_appends_it_once() {
+        let home = TempDir::new().expect("home");
+        let path = home.path().join("config.toml");
+        std::fs::write(&path, PRESERVED).expect("write config");
+        let change = SandboxChange::ExcludeCommand("lark-cli *".to_string());
+
+        amend_sandbox_config(&path, &change).expect("amend");
+        let first = std::fs::read(&path).expect("read");
+        amend_sandbox_config(&path, &change).expect("amend again");
+
+        assert_eq!(std::fs::read(&path).expect("read"), first);
+        let text = String::from_utf8(first).expect("utf8");
+        assert!(
+            text.contains("excluded_commands = ['lark-cli *']"),
+            "{text}"
+        );
+        assert_eq!(change.summary(), "excluded command \"lark-cli *\"");
+    }
+
+    #[test]
+    fn excluding_an_invalid_entry_is_refused_without_touching_the_file() {
+        let home = TempDir::new().expect("home");
+        let path = home.path().join("config.toml");
+        std::fs::write(&path, PRESERVED).expect("write config");
+
+        let error = amend_sandbox_config(&path, &SandboxChange::ExcludeCommand("a; b".to_string()))
+            .expect_err("invalid entry");
+
+        assert!(
+            error.contains("invalid excluded command \"a; b\""),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), PRESERVED);
+    }
+
+    #[test]
+    fn the_exclude_entry_drops_one_pair_of_matching_quotes() {
+        assert_eq!(
+            parse_exclude_entry("  lark-cli *  "),
+            Ok("lark-cli *".to_string())
+        );
+        assert_eq!(
+            parse_exclude_entry("'lark-cli *'"),
+            Ok("lark-cli *".to_string())
+        );
+        assert_eq!(
+            parse_exclude_entry("\"lark-cli *\""),
+            Ok("lark-cli *".to_string())
+        );
+        assert_eq!(
+            parse_exclude_entry("'lark-cli *\""),
+            Ok("'lark-cli *\"".to_string())
+        );
+        assert!(parse_exclude_entry("").is_err());
+        assert!(parse_exclude_entry("''").is_err());
     }
 }

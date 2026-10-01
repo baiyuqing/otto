@@ -156,6 +156,7 @@ pub struct SandboxReloader {
     pub(super) api_key_env: String,
     pub(super) reopen: OpenOptions,
     pub(super) cancel: CancellationToken,
+    pub(super) excluded: Option<Arc<crate::tool::bash::ExcludedCommands>>,
 }
 
 #[async_trait::async_trait]
@@ -186,7 +187,11 @@ impl SandboxControl for SandboxReloader {
             )
             .await,
         );
-        self.control.reload(next).await
+        let info = self.control.reload(next).await?;
+        if let Some(excluded) = &self.excluded {
+            excluded.set_entries(settings.excluded_commands.clone());
+        }
+        Ok(info)
     }
 }
 
@@ -376,6 +381,7 @@ mod tests {
             api_key_env: "OTTO_API_KEY".to_string(),
             reopen: options(home, &[]),
             cancel: CancellationToken::new(),
+            excluded: None,
         }
     }
 
@@ -438,6 +444,44 @@ mod tests {
         let (result, output) = printf_ok(&control, &home).await;
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(output, "ok", "the runtime from before the reload serves");
+        control.close().await.expect("close");
+    }
+
+    fn excluded(
+        executor: Arc<SandboxSwitch>,
+        entries: &[&str],
+    ) -> Arc<crate::tool::bash::ExcludedCommands> {
+        Arc::new(crate::tool::bash::ExcludedCommands::new(
+            executor,
+            Vec::new(),
+            entries.iter().map(|entry| entry.to_string()).collect(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_reload_replaces_the_excluded_commands_and_a_failed_one_keeps_them() {
+        let home = TempDir::new().expect("home");
+        let control = SandboxSwitch::new(usable_runtime(&home, &[]).await);
+        let list = excluded(Arc::clone(&control), &["old *"]);
+
+        let mut ok = reloader(
+            &home,
+            "[sandbox]\nnetwork = 'allow'\nexcluded_commands = ['lark-cli *']\n",
+            Arc::clone(&control),
+        );
+        ok.excluded = Some(list.clone());
+        SandboxControl::reload(&ok).await.expect("reload");
+        assert!(list.matches("lark-cli x"));
+        assert!(!list.matches("old x"));
+
+        let mut bad = reloader(
+            &home,
+            "[sandbox]\nnetwork = 'sometimes'\n",
+            Arc::clone(&control),
+        );
+        bad.excluded = Some(list.clone());
+        SandboxControl::reload(&bad).await.expect_err("invalid");
+        assert!(list.matches("lark-cli x"));
         control.close().await.expect("close");
     }
 }

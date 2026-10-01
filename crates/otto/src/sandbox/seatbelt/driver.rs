@@ -1228,6 +1228,13 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     async fn reconfigure_fixture() -> Option<Reconfigure> {
+        fixture_with(false).await
+    }
+
+    /// `git` makes the workspace a repository with one commit before the
+    /// driver opens, using the host's git outside any sandbox.
+    #[cfg(target_os = "macos")]
+    async fn fixture_with(git: bool) -> Option<Reconfigure> {
         use std::os::unix::fs::PermissionsExt as _;
 
         if let Some(reason) = super::unavailable_reason() {
@@ -1244,6 +1251,29 @@ mod tests {
             path
         };
         let workspace = directory("workspace");
+        if git {
+            for args in [
+                &["init", "-q"][..],
+                &[
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "init",
+                ],
+            ] {
+                let status = std::process::Command::new("/usr/bin/git")
+                    .args(args)
+                    .current_dir(&workspace)
+                    .status()
+                    .expect("run host git");
+                assert!(status.success(), "host git {args:?} failed");
+            }
+        }
         let outside = directory("outside");
         std::fs::write(outside.join("note"), "outside-contents").expect("outside file");
         let driver = SeatbeltDriver::open(
@@ -1413,5 +1443,50 @@ mod tests {
             .await
             .expect_err("closed");
         assert_eq!(error, Error::Closed);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn workspace_git_metadata_is_read_only_but_git_workflows_work() {
+        let Some(fixture) = fixture_with(true).await else {
+            return;
+        };
+        let config = fixture.workspace.join(".git/config");
+        let before = std::fs::read(&config).expect("read .git/config");
+        for script in [
+            "echo x > .git/hooks/pre-commit",
+            "echo '[x]' >> .git/config",
+            "git config user.email a@b",
+            "touch .git/commondir",
+            "mv .git g2",
+            "ln .git/config hl",
+        ] {
+            let (ok, _) = run_script(&fixture, script).await;
+            assert!(!ok, "the sandbox allowed: {script}");
+        }
+        assert_eq!(std::fs::read(&config).expect("re-read"), before);
+        assert!(fixture.workspace.join(".git").is_dir(), ".git was moved");
+        for script in [
+            "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m t",
+            "git checkout -q -b topic",
+            "echo ok > regular-file",
+        ] {
+            let (ok, _) = run_script(&fixture, script).await;
+            assert!(ok, "the sandbox refused: {script}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_system_volumes_alias_does_not_reopen_a_denied_path() {
+        let Some(fixture) = reconfigure_fixture().await else {
+            return;
+        };
+        let path = fixture.outside.join("note");
+        let (readable, _) = run_script(&fixture, &format!("cat '{}'", path.display())).await;
+        assert!(!readable, "control: the denied path must be unreadable");
+        let alias = format!("cat '/System/Volumes/Data{}'", path.display());
+        let (readable, output) = run_script(&fixture, &alias).await;
+        assert!(!readable, "the alias read the file: {output:?}");
     }
 }

@@ -63,12 +63,12 @@ pub fn system_prompt_for(
         info.reason,
     ) {
         (SandboxMode::Seatbelt, SandboxNetwork::Allowed, true, SandboxReason::None) => (
-            "Bash is confined to workspace-write with network allowed. When a Bash command fails because the sandbox denied a path, tell the user to run /sandbox allow &lt;absolute path&gt; for that path. Commands the user listed in `[sandbox] excluded_commands` run outside the sandbox only when written as one simple command (no pipes, redirections, `;`, `&&`, comments, `$` or backticks); when a program fails because it needs its real home directory or keychain, tell the user to run /sandbox exclude '&lt;program&gt; *'.",
+            "Bash is confined to workspace-write with network allowed. When a Bash command fails because the sandbox denied a path, tell the user to run /sandbox allow &lt;absolute path&gt; for that path. Commands the user listed in `[sandbox] excluded_commands` run outside the sandbox only when written as one simple command (no pipes, redirections, `;`, `&&`, comments, `$` or backticks); when a program fails because it needs its real home directory or keychain, tell the user to run /sandbox exclude '&lt;program&gt; *'. The workspace's `.git` entry, `.git/config`, `.git/config.worktree`, `.git/commondir` and `.git/hooks` are read-only in the sandbox; a git command that writes them (such as `git init`, `git config` without `--global`, `git remote add`, `git push -u`, or a hook installer) must be run with `sandbox_permissions` set to `require_escalated`.",
             "mode=\"seatbelt\" network=\"allowed\"",
             true,
         ),
         (SandboxMode::Seatbelt, SandboxNetwork::Denied, true, SandboxReason::None) => (
-            "Bash is confined to workspace-write with network denied. When a Bash command fails because the sandbox denied a path or a network connection, tell the user to run /sandbox allow &lt;absolute path&gt; for that path, or /sandbox network allow to permit network access. Commands the user listed in `[sandbox] excluded_commands` run outside the sandbox only when written as one simple command (no pipes, redirections, `;`, `&&`, comments, `$` or backticks); when a program fails because it needs its real home directory or keychain, tell the user to run /sandbox exclude '&lt;program&gt; *'.",
+            "Bash is confined to workspace-write with network denied. When a Bash command fails because the sandbox denied a path or a network connection, tell the user to run /sandbox allow &lt;absolute path&gt; for that path, or /sandbox network allow to permit network access. Commands the user listed in `[sandbox] excluded_commands` run outside the sandbox only when written as one simple command (no pipes, redirections, `;`, `&&`, comments, `$` or backticks); when a program fails because it needs its real home directory or keychain, tell the user to run /sandbox exclude '&lt;program&gt; *'. The workspace's `.git` entry, `.git/config`, `.git/config.worktree`, `.git/commondir` and `.git/hooks` are read-only in the sandbox; a git command that writes them (such as `git init`, `git config` without `--global`, `git remote add`, `git push -u`, or a hook installer) must be run with `sandbox_permissions` set to `require_escalated`.",
             "mode=\"seatbelt\" network=\"denied\"",
             true,
         ),
@@ -245,6 +245,21 @@ mod tests {
         }
         let prompt = system_prompt_for(&definitions(&["bash"]), off(), "", "", "");
         assert!(!prompt.contains("excluded_commands"), "{prompt}");
+    }
+
+    #[test]
+    fn seatbelt_policies_state_the_read_only_git_metadata() {
+        for network in [SandboxNetwork::Allowed, SandboxNetwork::Denied] {
+            let prompt = system_prompt_for(&definitions(&["bash"]), seatbelt(network), "", "", "");
+            assert!(
+                prompt.contains("`.git/hooks` are read-only in the sandbox")
+                    && prompt.contains("`git config` without `--global`")
+                    && prompt.contains("`require_escalated`"),
+                "{prompt}"
+            );
+        }
+        let prompt = system_prompt_for(&definitions(&["bash"]), off(), "", "", "");
+        assert!(!prompt.contains(".git/hooks"), "{prompt}");
     }
 
     #[test]

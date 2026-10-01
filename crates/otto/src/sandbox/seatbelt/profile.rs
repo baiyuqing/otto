@@ -194,7 +194,7 @@ pub(crate) fn generate_with(
     let metadata = metadata_ancestors(&writable, &roots, &resolved.shell);
 
     let read_rules = render_read_rules(&metadata, &writable, &roots)?;
-    let write_rules = render_write_rules(&writable)?;
+    let write_rules = render_write_rules(&writable, &resolved.workspace)?;
     let network_rules = render_network_rules(resolved.network);
     let shell_rule = render_shell_rule(&resolved.shell)?;
 
@@ -618,7 +618,7 @@ fn render_read_rules(
             path: path.clone(),
         })
         .collect();
-    write_rule(&mut builder, "file-read-metadata", &literals)?;
+    write_rule(&mut builder, "allow", "file-read-metadata", &literals)?;
     builder.push_str("; OTTO-DYNAMIC-METADATA-END\n");
     builder.push_str("; OTTO-DYNAMIC-READ-DATA-BEGIN\n");
     let mut filters: Vec<Filter> = Vec::with_capacity(writable.len() + roots.len());
@@ -638,13 +638,13 @@ fn render_read_rules(
             path: root.path.clone(),
         });
     }
-    write_rule(&mut builder, "file-read*", &filters)?;
+    write_rule(&mut builder, "allow", "file-read*", &filters)?;
     builder.push_str("; OTTO-DYNAMIC-READ-DATA-END\n");
     builder.push_str("; OTTO-DYNAMIC-READ-END");
     Ok(builder)
 }
 
-fn render_write_rules(writable: &[String]) -> Result<String, Rejected> {
+fn render_write_rules(writable: &[String], workspace: &str) -> Result<String, Rejected> {
     let mut builder = String::new();
     builder.push_str("; OTTO-DYNAMIC-WRITE-BEGIN\n");
     let filters: Vec<Filter> = writable
@@ -654,7 +654,25 @@ fn render_write_rules(writable: &[String]) -> Result<String, Rejected> {
             path: path.clone(),
         })
         .collect();
-    write_rule(&mut builder, "file-write*", &filters)?;
+    write_rule(&mut builder, "allow", "file-write*", &filters)?;
+    // Git runs hooks and the configuration's program settings outside the
+    // sandbox, so these workspace paths are read-only. Seatbelt applies the
+    // last matching rule: the deny must follow the workspace allow above (a
+    // probe on macOS 27.2 showed the same denies placed before it had no
+    // effect). The rules are emitted whether or not the paths exist, and no
+    // setting turns them off.
+    let git = |name: &str, kind| Filter {
+        kind,
+        path: join(workspace, &format!(".git{name}")),
+    };
+    let protected = [
+        git("", FilterKind::Literal),
+        git("/config", FilterKind::Literal),
+        git("/config.worktree", FilterKind::Literal),
+        git("/commondir", FilterKind::Literal),
+        git("/hooks", FilterKind::Subpath),
+    ];
+    write_rule(&mut builder, "deny", "file-write*", &protected)?;
     builder.push_str("; OTTO-DYNAMIC-WRITE-END");
     Ok(builder)
 }
@@ -695,6 +713,7 @@ fn render_shell_rule(shell: &str) -> Result<String, Rejected> {
     builder.push_str("; OTTO-DYNAMIC-SHELL-BEGIN\n");
     write_rule(
         &mut builder,
+        "allow",
         "file-read*",
         &[Filter {
             kind: FilterKind::Literal,
@@ -726,13 +745,20 @@ struct Filter {
     path: String,
 }
 
-/// Writes one `(allow …)` form. An empty filter list is a rejection: an
-/// operation with no filter would allow it unconditionally.
-fn write_rule(builder: &mut String, operation: &str, filters: &[Filter]) -> Result<(), Rejected> {
+/// Writes one `(allow …)` or `(deny …)` form. An empty filter list is a
+/// rejection: an operation with no filter would apply to everything.
+fn write_rule(
+    builder: &mut String,
+    action: &str,
+    operation: &str,
+    filters: &[Filter],
+) -> Result<(), Rejected> {
     if filters.is_empty() {
         return Err(Rejected);
     }
-    builder.push_str("(allow ");
+    builder.push('(');
+    builder.push_str(action);
+    builder.push(' ');
     builder.push_str(operation);
     builder.push('\n');
     for filter in filters {
@@ -1223,6 +1249,29 @@ mod tests {
             !profile.contains(&fixture.state().profiles)
                 && !profile.contains(&fixture.state().profile_path),
             "profiles directory or generated profile leaked into child policy"
+        );
+    }
+
+    #[test]
+    fn workspace_git_metadata_is_denied_after_every_write_allow() {
+        let fixture = new_fixture();
+        let workspace = fixture.options.workspace.clone();
+        let profile = fixture.render();
+        let deny = format!(
+            "(deny file-write*\n  (literal {})\n  (literal {})\n  (literal {})\n  (literal {})\n  (subpath {})\n)\n",
+            quote(&format!("{workspace}/.git")),
+            quote(&format!("{workspace}/.git/config")),
+            quote(&format!("{workspace}/.git/config.worktree")),
+            quote(&format!("{workspace}/.git/commondir")),
+            quote(&format!("{workspace}/.git/hooks")),
+        );
+        assert_eq!(count(&profile, &deny), 1, "git deny missing:\n{profile}");
+        // Seatbelt applies the last matching rule.
+        let deny_at = profile.find(&deny).unwrap();
+        let last_allow = profile.rfind("(allow file-write*").unwrap();
+        assert!(
+            last_allow < deny_at,
+            "git deny precedes an allow file-write* rule"
         );
     }
 

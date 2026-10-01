@@ -31,6 +31,13 @@ pub fn update_sandbox(content: &[u8], settings: &SandboxConfig) -> Result<Vec<u8
         ("network", settings.network.as_deref().map(encode_string)),
         ("read_paths", Some(encode_array(&settings.read_paths))),
         ("allow_env", Some(encode_array(&settings.allow_env))),
+        // Written only when used, so files without exclusions keep their
+        // existing four keys.
+        (
+            "excluded_commands",
+            (!settings.excluded_commands.is_empty())
+                .then(|| encode_array(&settings.excluded_commands)),
+        ),
     ];
     for (key, value) in values {
         text = edit::set_value(&text, &["sandbox"], key, value.as_deref())?;
@@ -93,6 +100,7 @@ mod tests {
             read_paths: vec!["/tmp/gh".to_string()],
             allow_env: vec!["GH_CONFIG_DIR".to_string()],
             driver: None,
+            excluded_commands: Vec::new(),
         }
     }
 
@@ -143,12 +151,38 @@ mod tests {
             network: Some("allow".to_string()),
             read_paths: vec!["/tmp/it's".to_string()],
             allow_env: Vec::new(),
+            excluded_commands: Vec::new(),
         };
         let updated = update_sandbox(b"", &settings).expect("update");
         assert_eq!(
             String::from_utf8(updated).expect("utf-8"),
             "\n[sandbox]\ndriver = 'auto'\nnetwork = 'allow'\nread_paths = [\"/tmp/it's\"]\nallow_env = []\n"
         );
+    }
+
+    #[test]
+    fn update_sandbox_writes_excluded_commands_only_when_present() {
+        let settings = SandboxConfig {
+            excluded_commands: vec!["lark-cli *".to_string(), "tool 'a b' *".to_string()],
+            ..raw()
+        };
+        let updated = update_sandbox(b"[sandbox]\nnetwork = 'allow'\n", &settings).expect("update");
+        let got = String::from_utf8(updated).expect("utf-8");
+        assert!(
+            got.ends_with("excluded_commands = ['lark-cli *', \"tool 'a b' *\"]\n"),
+            "{got}"
+        );
+        let parsed: SandboxConfig = toml::from_str::<toml::Table>(&got).expect("toml")["sandbox"]
+            .clone()
+            .try_into()
+            .expect("sandbox");
+        assert_eq!(parsed.excluded_commands, settings.excluded_commands);
+
+        let invalid = SandboxConfig {
+            excluded_commands: vec!["a; b".to_string()],
+            ..raw()
+        };
+        assert!(update_sandbox(b"", &invalid).is_err());
     }
 
     #[test]

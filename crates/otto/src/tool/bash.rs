@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use otto_core::model::ToolDefinition;
@@ -84,6 +84,41 @@ pub struct BashApprovals {
     state: Mutex<ApprovalState>,
 }
 
+/// Commands the user listed in `[sandbox].excluded_commands`, with the
+/// unconfined executor and real-home environment they run in.
+///
+/// One value per workspace sandbox, shared by the parent and child bash tools
+/// and by the reloader. Entries are replaced as a whole under a lock;
+/// `matches` reads a consistent list.
+pub struct ExcludedCommands {
+    executor: Arc<dyn CommandExecutor>,
+    environment: Vec<String>,
+    entries: RwLock<Vec<String>>,
+}
+
+impl ExcludedCommands {
+    pub fn new(
+        executor: Arc<dyn CommandExecutor>,
+        environment: Vec<String>,
+        entries: Vec<String>,
+    ) -> Self {
+        Self {
+            executor,
+            environment,
+            entries: RwLock::new(entries),
+        }
+    }
+
+    pub fn set_entries(&self, entries: Vec<String>) {
+        *self.entries.write().expect("excluded commands lock") = entries;
+    }
+
+    pub(crate) fn matches(&self, command: &str) -> bool {
+        let entries = self.entries.read().expect("excluded commands lock");
+        otto_core::config::sandbox::excluded_command_matches(&entries, command)
+    }
+}
+
 impl BashApprovals {
     pub fn new(executor: Arc<dyn CommandExecutor>, environment: Vec<String>) -> Self {
         Self {
@@ -93,7 +128,7 @@ impl BashApprovals {
         }
     }
 
-    fn request(&self, session_id: &str, command: &str) -> String {
+    pub(crate) fn request(&self, session_id: &str, command: &str) -> String {
         let mut state = self.state.lock().expect("bash approval mutex");
         if let Some(request) = state
             .requests
@@ -125,6 +160,16 @@ impl BashApprovals {
             .ok_or("approval request not found")?;
         request.granted = true;
         Ok(())
+    }
+
+    /// The command of `session_id`'s pending request `id`, granted or not.
+    pub fn pending_command(&self, session_id: &str, id: &str) -> Option<String> {
+        let state = self.state.lock().expect("bash approval mutex");
+        state
+            .requests
+            .get(session_id)
+            .filter(|request| request.id == id)
+            .map(|request| request.command.clone())
     }
 
     /// Pending approvals for `session_id`: 0 or 1, since a session keeps only
@@ -169,6 +214,7 @@ pub struct BashTool {
     redaction_marker: String,
     dynamic_content: bool,
     approvals: Option<(String, Arc<BashApprovals>)>,
+    excluded: Option<Arc<ExcludedCommands>>,
 }
 
 /// How the shell is invoked.
@@ -267,6 +313,7 @@ impl BashTool {
             redaction_marker,
             dynamic_content,
             approvals: None,
+            excluded: None,
         })
     }
 
@@ -277,6 +324,12 @@ impl BashTool {
         approvals: Arc<BashApprovals>,
     ) -> Self {
         self.approvals = Some((session_id.into(), approvals));
+        self
+    }
+
+    /// Runs commands matching the excluded list outside the sandbox.
+    pub fn with_excluded_commands(mut self, excluded: Arc<ExcludedCommands>) -> Self {
+        self.excluded = Some(excluded);
         self
     }
 
@@ -484,9 +537,15 @@ impl Tool for BashTool {
         if !self.dynamic_content {
             return self.execute_suppressed(&args.command, cancel).await;
         }
-        let (executor, environment) = match args.sandbox_permissions {
-            SandboxPermissions::UseDefault => (&self.executor, self.environment.as_slice()),
-            SandboxPermissions::RequireEscalated => {
+        // An excluded command never asks for approval and never consumes one.
+        let excluded = self
+            .excluded
+            .as_ref()
+            .filter(|excluded| excluded.matches(&args.command));
+        let (executor, environment) = match (excluded, args.sandbox_permissions) {
+            (Some(excluded), _) => (&excluded.executor, excluded.environment.as_slice()),
+            (None, SandboxPermissions::UseDefault) => (&self.executor, self.environment.as_slice()),
+            (None, SandboxPermissions::RequireEscalated) => {
                 if args.justification.trim().is_empty() {
                     return self.argument_error("justification is required for elevated execution");
                 }
@@ -874,6 +933,67 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
         let consumed = run_escalated(&tool, "git push", "push the reviewed branch").await;
         assert!(consumed.is_error);
         assert_eq!(elevated.calls(), 1);
+    }
+
+    fn excluded(executor: &Arc<FakeExecutor>, entries: &[&str]) -> Arc<ExcludedCommands> {
+        Arc::new(ExcludedCommands::new(
+            executor.clone(),
+            strings(&["HOME=/real-home"]),
+            strings(entries),
+        ))
+    }
+
+    #[tokio::test]
+    async fn excluded_command_runs_unconfined_and_compound_does_not() {
+        let (_dir, workspace) = temp_workspace();
+        let confined = Arc::new(FakeExecutor::default());
+        let unconfined = Arc::new(FakeExecutor::default());
+        let tool = bash(&workspace, confined.clone(), &["HOME=/sandbox"], 1024, &[])
+            .with_excluded_commands(excluded(&unconfined, &["lark-cli *"]));
+
+        run(&tool, "lark-cli doc get").await;
+        assert_eq!((confined.calls(), unconfined.calls()), (0, 1));
+        assert_eq!(unconfined.requests()[0].env, strings(&["HOME=/real-home"]));
+
+        run(&tool, "git status").await;
+        run(&tool, "lark-cli x && rm -rf y").await;
+        assert_eq!((confined.calls(), unconfined.calls()), (2, 1));
+        assert_eq!(confined.requests()[0].env, strings(&["HOME=/sandbox"]));
+    }
+
+    #[tokio::test]
+    async fn excluded_command_with_require_escalated_needs_no_approval() {
+        let (_dir, workspace) = temp_workspace();
+        let confined = Arc::new(FakeExecutor::default());
+        let unconfined = Arc::new(FakeExecutor::default());
+        let approvals = Arc::new(BashApprovals::new(
+            Arc::new(FakeExecutor::default()),
+            Vec::new(),
+        ));
+        let tool = bash(&workspace, confined.clone(), &[], 1024, &[])
+            .with_approvals("session-1", approvals)
+            .with_excluded_commands(excluded(&unconfined, &["lark-cli *"]));
+
+        let result = run_escalated(&tool, "lark-cli doc get", "needs keychain").await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!((confined.calls(), unconfined.calls()), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn set_entries_changes_which_commands_are_excluded() {
+        let (_dir, workspace) = temp_workspace();
+        let confined = Arc::new(FakeExecutor::default());
+        let unconfined = Arc::new(FakeExecutor::default());
+        let list = excluded(&unconfined, &[]);
+        let tool =
+            bash(&workspace, confined.clone(), &[], 1024, &[]).with_excluded_commands(list.clone());
+
+        run(&tool, "lark-cli doc get").await;
+        assert_eq!((confined.calls(), unconfined.calls()), (1, 0));
+
+        list.set_entries(strings(&["lark-cli *"]));
+        run(&tool, "lark-cli doc get").await;
+        assert_eq!((confined.calls(), unconfined.calls()), (1, 1));
     }
 
     #[tokio::test]

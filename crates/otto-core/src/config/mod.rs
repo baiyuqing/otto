@@ -134,6 +134,10 @@ pub struct SandboxConfig {
     pub read_paths: Vec<String>,
     #[serde(default)]
     pub allow_env: Vec<String>,
+    /// Commands that run outside the sandbox; see
+    /// [`sandbox::excluded_command_matches`].
+    #[serde(default)]
+    pub excluded_commands: Vec<String>,
 }
 
 /// The `[agent]` table.

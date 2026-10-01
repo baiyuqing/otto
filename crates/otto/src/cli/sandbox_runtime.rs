@@ -613,6 +613,7 @@ mod tests {
             network: Some("deny".to_string()),
             read_paths: vec!["/b".to_string(), "/a".to_string()],
             allow_env: vec!["ZED".to_string(), "ABLE".to_string()],
+            excluded_commands: Vec::new(),
         };
         let resolved = resolve_sandbox(&config, None).expect("resolve");
         let settings = settings_from_config(&resolved);

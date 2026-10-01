@@ -63,12 +63,12 @@ pub fn system_prompt_for(
         info.reason,
     ) {
         (SandboxMode::Seatbelt, SandboxNetwork::Allowed, true, SandboxReason::None) => (
-            "Bash is confined to workspace-write with network allowed. When a Bash command fails because the sandbox denied a path, tell the user to run /sandbox allow &lt;absolute path&gt; for that path.",
+            "Bash is confined to workspace-write with network allowed. When a Bash command fails because the sandbox denied a path, tell the user to run /sandbox allow &lt;absolute path&gt; for that path. Commands the user listed in `[sandbox] excluded_commands` run outside the sandbox only when written as one simple command (no pipes, redirections, `;`, `&&`, comments, `$` or backticks); when a program fails because it needs its real home directory or keychain, tell the user to run /sandbox exclude '&lt;program&gt; *'.",
             "mode=\"seatbelt\" network=\"allowed\"",
             true,
         ),
         (SandboxMode::Seatbelt, SandboxNetwork::Denied, true, SandboxReason::None) => (
-            "Bash is confined to workspace-write with network denied. When a Bash command fails because the sandbox denied a path or a network connection, tell the user to run /sandbox allow &lt;absolute path&gt; for that path, or /sandbox network allow to permit network access.",
+            "Bash is confined to workspace-write with network denied. When a Bash command fails because the sandbox denied a path or a network connection, tell the user to run /sandbox allow &lt;absolute path&gt; for that path, or /sandbox network allow to permit network access. Commands the user listed in `[sandbox] excluded_commands` run outside the sandbox only when written as one simple command (no pipes, redirections, `;`, `&&`, comments, `$` or backticks); when a program fails because it needs its real home directory or keychain, tell the user to run /sandbox exclude '&lt;program&gt; *'.",
             "mode=\"seatbelt\" network=\"denied\"",
             true,
         ),
@@ -231,6 +231,20 @@ mod tests {
             }
             assert!(!prompt.contains(CONTROL_CHARACTERS), "{prompt:?}");
         }
+    }
+
+    #[test]
+    fn seatbelt_policies_explain_excluded_commands() {
+        for network in [SandboxNetwork::Allowed, SandboxNetwork::Denied] {
+            let prompt = system_prompt_for(&definitions(&["bash"]), seatbelt(network), "", "", "");
+            assert!(prompt.contains("excluded_commands"), "{prompt}");
+            assert!(
+                prompt.contains("/sandbox exclude '&lt;program&gt; *'"),
+                "{prompt}"
+            );
+        }
+        let prompt = system_prompt_for(&definitions(&["bash"]), off(), "", "", "");
+        assert!(!prompt.contains("excluded_commands"), "{prompt}");
     }
 
     #[test]

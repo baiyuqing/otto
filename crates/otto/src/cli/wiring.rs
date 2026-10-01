@@ -605,7 +605,7 @@ impl Builder {
                 .command_executor
                 .clone()
                 .expect("bash_configured implies an executor");
-            let tool = crate::tool::bash::BashTool::new_with_grace(
+            let mut tool = crate::tool::bash::BashTool::new_with_grace(
                 self.workspace,
                 executor,
                 &self.shell,
@@ -616,6 +616,9 @@ impl Builder {
                 redaction_values,
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
+            if let Some(excluded) = &self.excluded_commands {
+                tool = tool.with_excluded_commands(Arc::clone(excluded));
+            }
             tools.push(Box::new(tool));
         }
         if !skills.is_empty() {

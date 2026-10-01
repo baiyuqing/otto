@@ -273,6 +273,9 @@ Configure shell permissions interactively with `otto sandbox setup`; see the
 [setup guide](docs/user-manual.md#interactive-sandbox-setup). In a running
 session, `/sandbox allow <path>` and `/sandbox network allow|deny` write the
 same `[sandbox]` settings and apply them to the current process.
+`[sandbox].excluded_commands` lists simple commands, such as `lark-cli *`, that
+run outside the sandbox with the real `HOME`; see the
+[user manual](docs/user-manual.md#configuration).
 
 Read [tools and safety](docs/user-manual.md#tools-and-safety) before granting
 access to a workspace.

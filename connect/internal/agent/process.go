@@ -43,11 +43,15 @@ func sleep(ctx context.Context, d time.Duration) error {
 
 // process is one running (or exited) child.
 type process struct {
-	cmd    *exec.Cmd
-	conn   *acp.ClientSideConnection
-	stdin  io.WriteCloser
-	tail   *tail
-	exited chan struct{} // closed after Wait returns and endedAt is set
+	cmd   *exec.Cmd
+	conn  *acp.ClientSideConnection
+	stdin io.WriteCloser
+	// writeFailed is closed when a write to stdin fails. The SDK reports
+	// that as an ordinary internal error, possibly before the exit or the
+	// end of stdout is observed.
+	writeFailed chan struct{}
+	tail        *tail
+	exited      chan struct{} // closed after Wait returns and endedAt is set
 
 	startedAt time.Time
 	// endedAt and waitErr are valid after exited is closed.
@@ -116,6 +120,7 @@ func (p *process) wrap(err error) error {
 	select {
 	case <-p.conn.Done():
 	case <-p.exited:
+	case <-p.writeFailed:
 	default:
 		return err
 	}
@@ -145,7 +150,7 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 	cmd := exec.Command(a.opts.Command[0], a.opts.Command[1:]...)
 	cmd.Dir = a.opts.Dir
 	cmd.Env = a.opts.Env
-	p := &process{cmd: cmd, exited: make(chan struct{}), open: map[string]bool{}, loading: map[string]bool{}}
+	p := &process{cmd: cmd, exited: make(chan struct{}), writeFailed: make(chan struct{}), open: map[string]bool{}, loading: map[string]bool{}}
 	p.tail = &tail{level: a.opts.StderrLevel}
 	cmd.Stderr = p.tail
 	var err error
@@ -173,8 +178,9 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 		close(p.exited)
 		slog.Info("agent exited", "status", p.exitError().Status)
 	}()
-	p.conn = acp.NewClientSideConnection(&client{a: a, p: p, handler: a.handler}, p.stdin, stdoutR)
-	p.conn.SetLogger(slog.Default())
+	// No SetLogger: the receive goroutine reads the logger as soon as the
+	// connection exists, and the SDK's default is slog.Default().
+	p.conn = acp.NewClientSideConnection(&client{a: a, p: p, handler: a.handler}, &stdinWriter{p: p}, stdoutR)
 	go func() {
 		<-p.conn.Done()
 		stdoutR.Close()
@@ -200,6 +206,21 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 		return nil, err
 	}
 	return p, nil
+}
+
+// stdinWriter writes to the process's stdin and closes writeFailed on the
+// first failed write.
+type stdinWriter struct {
+	p    *process
+	once sync.Once
+}
+
+func (w *stdinWriter) Write(b []byte) (int, error) {
+	n, err := w.p.stdin.Write(b)
+	if err != nil {
+		w.once.Do(func() { close(w.p.writeFailed) })
+	}
+	return n, err
 }
 
 // client implements acp.Client for one process.

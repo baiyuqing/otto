@@ -212,3 +212,20 @@ func TestCloseKillsProcessThatIgnoresStdinEOF(t *testing.T) {
 		t.Fatalf("after Close: %v", err)
 	}
 }
+
+// A process that answers initialize, then closes its stdin and exits 300 ms
+// later: the next call's failed write is reported as the exit, not as the
+// SDK's internal error.
+func TestWriteAfterStdinClosedIsExitError(t *testing.T) {
+	init := `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}`
+	a := New(Options{
+		Command: []string{"sh", "-c", "read line; exec 0<&-; echo '" + init + "'; sleep 0.3; echo gone >&2; exit 5"},
+		Dir:     t.TempDir(),
+	})
+	defer a.Close()
+	_, err := a.New(context.Background())
+	var ee *ExitError
+	if !errors.As(err, &ee) || ee.Status != "exit status 5" || strings.Join(ee.Stderr, "|") != "gone" {
+		t.Fatalf("err = %v, want *ExitError with exit status 5 and stderr gone", err)
+	}
+}

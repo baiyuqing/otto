@@ -237,7 +237,7 @@ A new `~/.otto/reflection.db` (SQLite, same open/migrate helpers as
 `usage`). It holds, per session: the last reflected entry id (the watermark),
 and one row per run: id, session id, trigger, entry range, status
 (`ok|noop|failed|canceled|truncated`), counts of memory candidates and skill
-skill writes, token usage, and times. Rows are appended, never rewritten, except
+writes, token usage, and times. Rows are appended, never rewritten, except
 the watermark, which advances only after a run completes. Failed and
 canceled runs do not advance it, so the next run covers the same slice.
 `--no-session` runs have nothing to reflect on and are skipped. The database

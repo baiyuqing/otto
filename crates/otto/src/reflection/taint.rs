@@ -18,7 +18,8 @@ fn external_tool(name: &str) -> bool {
 }
 
 /// The context message types that carry text from someone other than the
-/// user. `parent_message` is how inbound chat and notification text arrives.
+/// user. `parent_message` is how the removed `[inbound.feishu]` recorded chat
+/// messages; older sessions still contain it.
 pub fn external_context(context_type: &str) -> bool {
     context_type == "parent_message"
 }

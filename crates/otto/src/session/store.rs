@@ -85,6 +85,11 @@ pub(crate) fn unanswered_calls_from(pending: &[Block]) -> Vec<UnansweredCall> {
         .collect()
 }
 
+/// What [`Store::repair_dangling_tool_calls`] did: its warnings, the calls it
+/// answered with synthetic results, and the calls it left for the agent to run
+/// again. At most one of the last two is non-empty.
+type RepairOutcome = (Vec<Warning>, Vec<UnansweredCall>, Vec<UnansweredCall>);
+
 /// Recorded when [`Prepared::activate`](super::prepared::Prepared::activate)
 /// builds a store from a taken-over lease epoch: the holder the epoch was
 /// taken from, and the calls the store's dangling-tool-call repair gave
@@ -93,6 +98,11 @@ pub(crate) fn unanswered_calls_from(pending: &[Block]) -> Vec<UnansweredCall> {
 pub struct Takeover {
     pub holder: lease::Holder,
     pub repaired: Vec<UnansweredCall>,
+    /// Calls left without a result on purpose: every pending call of the
+    /// trailing assistant message is replayable, so the store neither
+    /// settled nor answered them and the agent runs them again before the
+    /// next provider request. Empty whenever `repaired` is not.
+    pub replayable: Vec<UnansweredCall>,
 }
 
 /// Everything the store mutates, behind one lock.
@@ -277,6 +287,7 @@ impl Store {
         mut file: File,
         path: &str,
         lease: Option<(Arc<lease::Lease>, lease::Acquired)>,
+        replayable: fn(&str) -> bool,
     ) -> Result<(Self, Vec<Warning>), PiError> {
         fsops::lock_session_exclusive(&file)?;
         reject_oversized_session_file(&file)?;
@@ -322,10 +333,16 @@ impl Store {
                 fail_writes: false,
             }),
         };
-        let (repair_warnings, repaired) = store.repair_dangling_tool_calls()?;
+        let taken_over = matches!(acquired, Some(lease::Acquired::TakenOver(_)));
+        let replayable: fn(&str) -> bool = if taken_over { replayable } else { |_| false };
+        let (repair_warnings, repaired, deferred) = store.repair_dangling_tool_calls(replayable)?;
         warnings.extend(repair_warnings);
         if let Some(lease::Acquired::TakenOver(holder)) = acquired {
-            store.lock()?.takeover = Some(Takeover { holder, repaired });
+            store.lock()?.takeover = Some(Takeover {
+                holder,
+                repaired,
+                replayable: deferred,
+            });
         }
         let mut guard = store.lock()?;
         if let Some(file) = guard.file.as_mut() {
@@ -693,9 +710,19 @@ impl Store {
 
     /// Repairs trailing tool calls according to their durable operation facts.
     /// A terminal fact is always persisted before its synthetic result.
-    fn repair_dangling_tool_calls(&self) -> Result<(Vec<Warning>, Vec<UnansweredCall>), PiError> {
+    ///
+    /// When every pending call is replayable (see
+    /// [`Self::all_replayable`]), nothing is settled or answered and the calls
+    /// are returned as the third element instead of the second.
+    fn repair_dangling_tool_calls(
+        &self,
+        replayable: fn(&str) -> bool,
+    ) -> Result<RepairOutcome, PiError> {
         let pending = pending_tool_calls(&self.messages())?;
         let repaired = unanswered_calls_from(&pending);
+        if self.all_replayable(&pending, replayable)? {
+            return Ok((Vec::new(), Vec::new(), repaired));
+        }
         let legacy_stand_ins = missing_tool_results(&pending);
         let mut warnings = Vec::new();
         for (index, call) in pending.into_iter().enumerate() {
@@ -778,7 +805,34 @@ impl Store {
                 call.tool_call_id
             )));
         }
-        Ok((warnings, repaired))
+        Ok((warnings, repaired, Vec::new()))
+    }
+
+    /// Whether the agent may run every call in `pending` again: there is at
+    /// least one, each names a replayable tool, and each has at most one
+    /// recorded attempt with no terminal fact and no corrupt history. All or
+    /// nothing, so tool results keep call order and the calls with results
+    /// stay a prefix of the message's calls. The attempt bound makes a call
+    /// that killed its process once fall back to the interrupted repair the
+    /// next time instead of looping.
+    fn all_replayable(
+        &self,
+        pending: &[Block],
+        replayable: fn(&str) -> bool,
+    ) -> Result<bool, PiError> {
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        let state = self.lock()?;
+        Ok(pending.iter().all(|call| {
+            replayable(&call.tool_name)
+                && state
+                    .operation_ledger
+                    .operation_for_tool_call(&call.tool_call_id)
+                    .is_none_or(|record| {
+                        !record.corrupt && record.terminal.is_none() && record.attempts <= 1
+                    })
+        }))
     }
 }
 

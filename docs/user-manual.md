@@ -930,7 +930,11 @@ lease in `<session-id>.lease/` beside the session file.
   `<session-id>.lease/fenced-<n>.jsonl` and continues from a copy that holds
   only its complete records, so a write from the stopped host after that point
   does not reach the session. Tool calls without results get the error results
-  described above. Otto then queues one notification to the model that names
+  described above, except when every such call names `read`, `ls`, `grep`,
+  `find`, or `memory_search`: Otto then runs them again itself, before the
+  next model request, as the next attempt of the same operation, and lists
+  them in the notification as run again. A call that was already run again
+  once and was interrupted again gets the error result instead. Otto then queues one notification to the model that names
   the stopped host and pid, the calls without results (marked "may have run"
   or "not executed"), and each sub-agent task that had not finished, and starts
   a wake turn in the REPL, the TUI, and `otto serve`. With `--prompt`, the

@@ -42,6 +42,7 @@ pub enum SlashCommandKind {
     Archive,
     Rename,
     Compact,
+    Reflect,
     Image,
     Memory,
     Remember,
@@ -116,6 +117,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/compact",
         description: "compact context",
         kind: SlashCommandKind::Compact,
+    },
+    SlashCommand {
+        name: "/reflect",
+        description: "queue memory candidates from this session for review",
+        kind: SlashCommandKind::Reflect,
     },
     SlashCommand {
         name: "/image",

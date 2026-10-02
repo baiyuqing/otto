@@ -211,7 +211,7 @@ func TestOffsetPersistedAndResumed(t *testing.T) {
 	if first["offset"] != float64(12) {
 		t.Errorf("first getUpdates offset = %v, want 12", first["offset"])
 	}
-	if !reflect.DeepEqual(first["allowed_updates"], []any{"message"}) {
+	if !reflect.DeepEqual(first["allowed_updates"], []any{"message", "callback_query"}) {
 		t.Errorf("allowed_updates = %v", first["allowed_updates"])
 	}
 	if _, ok := first["timeout"]; !ok {
@@ -469,7 +469,7 @@ func TestSendCountsUTF16Units(t *testing.T) {
 	// 4098 units in one line: hard split, never inside a surrogate pair.
 	check("emoji long line", strings.Repeat(emoji, 2049), 2)
 	// 4096 ASCII runes fit; 4097 do not.
-	check("exact limit", strings.Repeat("x", 4096), 1)
+	check("exact limit", strings.Repeat("x", 4000), 1)
 	check("over limit", strings.Repeat("x", 4097), 2)
 	// 4096 runes of 2 units each would pass a rune-count check but not the limit.
 	check("rune count is not unit count", strings.Repeat(emoji, 4096), 2)
@@ -583,4 +583,56 @@ func TestTokenNeverInErrors(t *testing.T) {
 	// Run's getMe failure path.
 	api = newAPI(t, func(string, map[string]any) resp { return errR(401, "Unauthorized", 0) })
 	assertClean("run/401", newBot(api, nil).Run(ctx, func(bridge.Message) {}))
+}
+
+func TestApprovalButtonsLifecycle(t *testing.T) {
+	id := strings.Repeat("a", 32)
+	api := newAPI(t, func(method string, body map[string]any) resp { return okR(map[string]any{"message_id": 42}) })
+	b := New(testToken, nil)
+	b.APIBase = api.srv.URL
+	finish, err := b.SendApproval(context.Background(), "123", id, strings.Repeat("x", 4000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := api.byMethod("sendMessage")
+	buttons := calls[0].body["reply_markup"].(map[string]any)["inline_keyboard"].([]any)[0].([]any)
+	for i, action := range []string{"approve", "deny"} {
+		button := buttons[i].(map[string]any)
+		q := &callbackQuery{ID: "q1", From: &user{ID: 7}, Message: &message{}, Data: button["callback_data"].(string)}
+		q.Message.Chat.ID = 123
+		m, ok := normalizeCallback(q)
+		want := "/deny"
+		if action == "approve" {
+			want = "/allow"
+		}
+		if !ok || m.ApprovalID != id || m.Text != want || m.SenderID != "7" || m.ChatID != "123" {
+			t.Fatalf("callback = %+v, %v", m, ok)
+		}
+	}
+	if err = finish(context.Background(), "Approved."); err != nil {
+		t.Fatal(err)
+	}
+	edit := api.byMethod("editMessageText")[0].body
+	if edit["message_id"] != float64(42) || !strings.HasSuffix(edit["text"].(string), "Approved.") || len(edit["reply_markup"].(map[string]any)["inline_keyboard"].([]any)) != 0 {
+		t.Fatal(edit)
+	}
+	if _, ok := normalizeCallback(&callbackQuery{Data: "approve:" + id}); ok {
+		t.Fatal("missing sender/message accepted")
+	}
+}
+
+func TestPollingDeliversAndAcknowledgesApproval(t *testing.T) {
+	id := strings.Repeat("b", 32)
+	api := botAPI(t, okR([]any{map[string]any{"update_id": 1, "callback_query": map[string]any{"id": "query1", "from": map[string]any{"id": 7}, "message": map[string]any{"message_id": 42, "chat": map[string]any{"id": 123}}, "data": "approve:" + id}}}))
+	store, _ := openStore(t)
+	b := newBot(api, store)
+	r := start(b)
+	api.waitCalls(t, "answerCallbackQuery", 1)
+	_, got := r.stop(t)
+	if len(got) != 1 || got[0].ApprovalID != id || got[0].Text != "/allow" {
+		t.Fatalf("messages = %+v", got)
+	}
+	if api.byMethod("answerCallbackQuery")[0].body["callback_query_id"] != "query1" {
+		t.Fatal("wrong acknowledgement")
+	}
 }

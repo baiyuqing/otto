@@ -202,8 +202,9 @@ func (m *message) hasAttachment() bool {
 }
 
 type update struct {
-	UpdateID int64    `json:"update_id"`
-	Message  *message `json:"message"`
+	UpdateID int64          `json:"update_id"`
+	Message  *message       `json:"message"`
+	Callback *callbackQuery `json:"callback_query"`
 }
 
 // Run identifies the bot with getMe, then polls getUpdates until ctx ends.
@@ -243,7 +244,7 @@ func (b *Bot) Run(ctx context.Context, deliver func(bridge.Message)) error {
 		err := b.call(ctx, "getUpdates", map[string]any{
 			"offset":          next,
 			"timeout":         int(b.PollTimeout / time.Second),
-			"allowed_updates": []string{"message"},
+			"allowed_updates": []string{"message", "callback_query"},
 		}, &updates)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -262,6 +263,14 @@ func (b *Bot) Run(ctx context.Context, deliver func(bridge.Message)) error {
 		}
 		delay = b.backoffMin
 		for _, u := range updates {
+			if u.Callback != nil {
+				if m, ok := normalizeCallback(u.Callback); ok {
+					deliver(m)
+				}
+				if err := b.call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": u.Callback.ID}, nil); err != nil {
+					slog.Warn("telegram callback acknowledgement failed", "err", err)
+				}
+			}
 			if m, ok := b.normalize(u.Message); ok {
 				deliver(m)
 			}
@@ -404,4 +413,40 @@ func splitText(text string, limit int) []string {
 	}
 	flush()
 	return parts
+}
+
+type callbackQuery struct {
+	ID      string   `json:"id"`
+	From    *user    `json:"from"`
+	Message *message `json:"message"`
+	Data    string   `json:"data"`
+}
+
+func normalizeCallback(q *callbackQuery) (bridge.Message, bool) {
+	action, id, ok := strings.Cut(q.Data, ":")
+	if !ok || len(id) != 32 || (action != "approve" && action != "deny") || q.From == nil || q.Message == nil {
+		return bridge.Message{}, false
+	}
+	text := "/deny"
+	if action == "approve" {
+		text = "/allow"
+	}
+	return bridge.Message{Platform: "telegram", ChatID: strconv.FormatInt(q.Message.Chat.ID, 10), SenderID: strconv.FormatInt(q.From.ID, 10), ApprovalID: id, Text: text, Time: time.Now()}, true
+}
+
+func (b *Bot) SendApproval(ctx context.Context, chatID, requestID, text string) (func(context.Context, string) error, error) {
+	parts := splitText(text, maxUnits-64)
+	if len(parts) > 1 {
+		if err := b.Send(ctx, chatID, "", strings.Join(parts[:len(parts)-1], "\n")); err != nil {
+			return nil, err
+		}
+	}
+	var sent message
+	err := b.call(ctx, "sendMessage", map[string]any{"chat_id": chatParam(chatID), "text": parts[len(parts)-1], "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "Approve", "callback_data": "approve:" + requestID}, map[string]any{"text": "Deny", "callback_data": "deny:" + requestID}}}}}, &sent)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, status string) error {
+		return b.call(ctx, "editMessageText", map[string]any{"chat_id": chatParam(chatID), "message_id": sent.MessageID, "text": parts[len(parts)-1] + "\n\n" + status, "reply_markup": map[string]any{"inline_keyboard": [][]any{}}}, nil)
+	}, nil
 }

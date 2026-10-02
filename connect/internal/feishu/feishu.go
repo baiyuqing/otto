@@ -4,6 +4,7 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -33,6 +34,8 @@ type Options struct {
 
 // sdk is the part of channel.Channel the adapter calls.
 type sdk interface {
+	Stream(context.Context, *types.SendInput) (types.StreamController, error)
+	OnCardAction(func(context.Context, *types.CardActionEvent) error)
 	OnMessage(handler func(ctx context.Context, msg *types.NormalizedMessage) error)
 	OnError(handler func(err error))
 	OnReject(handler func(ctx context.Context, event *types.RejectEvent) error)
@@ -111,6 +114,12 @@ func safety() types.SafetyConfig {
 // event when its dispatcher returns, which is before the handler runs, so a
 // message is acknowledged once the SDK has queued it.
 func (p *Platform) Run(ctx context.Context, deliver func(bridge.Message)) error {
+	p.ch.OnCardAction(func(_ context.Context, e *types.CardActionEvent) error {
+		if m, ok := cardMessage(e); ok {
+			deliver(m)
+		}
+		return nil
+	})
 	p.ch.OnMessage(func(_ context.Context, m *types.NormalizedMessage) error {
 		deliver(toMessage(m))
 		return nil
@@ -247,4 +256,43 @@ func format(args []interface{}) string {
 		return fmt.Sprintf(f, args[1:]...)
 	}
 	return strings.TrimSpace(fmt.Sprintln(args...))
+}
+
+func cardMessage(e *types.CardActionEvent) (bridge.Message, bool) {
+	id, _ := e.Action.Value["request_id"].(string)
+	action, _ := e.Action.Value["action"].(string)
+	if len(id) != 32 || (action != "approve" && action != "deny") || e.ChatID == "" || e.Operator.OpenID == "" {
+		return bridge.Message{}, false
+	}
+	text := "/deny"
+	if action == "approve" {
+		text = "/allow"
+	}
+	return bridge.Message{Platform: "feishu", ChatID: e.ChatID, SenderID: e.Operator.OpenID, ApprovalID: id, Text: text, Time: time.Now()}, true
+}
+
+func approvalCard(requestID, text, status string) string {
+	elements := []any{map[string]any{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": text}}}
+	if status == "" {
+		buttons := []any{}
+		for _, b := range []struct{ label, action, style string }{{"Approve", "approve", "primary"}, {"Deny", "deny", "danger"}} {
+			buttons = append(buttons, map[string]any{"tag": "button", "text": map[string]any{"tag": "plain_text", "content": b.label}, "type": b.style, "value": map[string]any{"request_id": requestID, "action": b.action}})
+		}
+		elements = append(elements, map[string]any{"tag": "action", "actions": buttons})
+	} else {
+		elements = append(elements, map[string]any{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": status}})
+	}
+	raw, _ := json.Marshal(map[string]any{"config": map[string]any{"wide_screen_mode": true, "update_multi": true}, "elements": elements})
+	return string(raw)
+}
+
+func (p *Platform) SendApproval(ctx context.Context, chatID, requestID, text string) (func(context.Context, string) error, error) {
+	stream, err := p.ch.Stream(ctx, &types.SendInput{ChatID: chatID, Card: approvalCard(requestID, text, "")})
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, status string) error {
+		defer stream.Close(ctx)
+		return stream.UpdateCard(ctx, approvalCard(requestID, text, status))
+	}, nil
 }

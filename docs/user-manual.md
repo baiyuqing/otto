@@ -2207,7 +2207,7 @@ In the Feishu (or Lark) developer console:
 2. Grant the message permissions, at least `im:message` and
    `im:message:send_as_bot`.
 3. Under events and callbacks, select long connection mode and subscribe to
-   `im.message.receive_v1`.
+   `im.message.receive_v1`, and enable the `card.action.trigger` card callback.
 4. Publish the app version; publish again after changing permissions or
    events.
 5. Add the bot to a group, or open a private chat with it.
@@ -2356,8 +2356,12 @@ not available from the chat; use `/memory review` in the REPL or TUI.
 
 When Otto asks to run an unsandboxed `bash` command (see
 [Elevated `bash` uses `session/request_permission`](#elevated-bash-uses-sessionrequest_permission)),
-the chat gets the command followed by "Reply /allow or /deny". The first
-`/allow` or `/deny` from an admitted sender in that chat answers it. `/stop`
+the chat gets the command with **Approve** and **Deny** buttons (Telegram inline
+keyboard or Feishu interactive card). The first button click or `/allow` or
+`/deny` from an admitted sender in that chat answers it once. Buttons are bound
+to that request; old cards cannot answer a newer request. After a decision,
+cancellation, or expiry, the connector replaces the buttons with the final status.
+If sending the card fails, it falls back to text commands. `/stop`
 cancels it. With no answer after 10 minutes the request is denied and the
 chat gets "Permission request timed out; denied." `/allow` or `/deny` with
 no pending request gets "No pending request."

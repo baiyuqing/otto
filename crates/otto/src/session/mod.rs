@@ -22,3 +22,10 @@ pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
 pub use prepared::{ArchiveResult, Prepared, archive};
 pub(crate) use store::unanswered_calls_from;
 pub use store::{Store, Takeover, UnansweredCall};
+
+/// A session id is 32 lowercase hexadecimal characters. Checked before an id
+/// from a client becomes `<session directory>/<id>.jsonl`, so it cannot name
+/// another path.
+pub fn is_session_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}

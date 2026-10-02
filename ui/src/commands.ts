@@ -12,6 +12,7 @@ export type WebCommand =
   | { kind: 'sandbox' }
   | { kind: 'sandboxReload' }
   | { kind: 'approve'; id: string }
+  | { kind: 'deny'; id: string }
   | { kind: 'tasks' }
   | { kind: 'task'; id: string }
   | { kind: 'taskCancel'; id: string }
@@ -35,7 +36,8 @@ export const supportedCommands: WebCommandSuggestion[] = [
   { name: '/rename', description: 'rename the current session' },
   { name: '/compact', description: 'compact context with optional focus' },
   { name: '/sandbox', description: 'show sandbox state, or reload configuration' },
-  { name: '/approve', description: 'allow one exact elevated Bash command' },
+  { name: '/approve', description: 'allow the elevated Bash command a running turn is waiting on' },
+  { name: '/deny', description: 'deny the elevated Bash command a running turn is waiting on' },
   { name: '/tasks', description: 'list sub-agent tasks' },
   { name: '/task', description: 'show or cancel a sub-agent task' },
   { name: '/mcp', description: 'list MCP servers and their state' },
@@ -82,6 +84,10 @@ export function parseWebCommand(text: string): WebCommand {
       return argument && !/\s/.test(argument)
         ? { kind: 'approve', id: argument }
         : { kind: 'error', message: 'usage: /approve <id>' }
+    case '/deny':
+      return argument && !/\s/.test(argument)
+        ? { kind: 'deny', id: argument }
+        : { kind: 'error', message: 'usage: /deny <id>' }
     case '/tasks':
       return argument ? { kind: 'prompt', text: trimmed } : { kind: 'tasks' }
     case '/task': {

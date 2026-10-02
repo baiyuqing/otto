@@ -521,6 +521,52 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
             next.push(Item::Error { text });
             next
         }
+        // The image of a user_message is added by the client that holds it.
+        "user_message" => {
+            if event.text.is_empty() {
+                return items.to_vec();
+            }
+            let mut next = items.to_vec();
+            next.push(Item::User {
+                text: event.text.clone(),
+                created_at: String::new(),
+            });
+            next
+        }
+        // An agent failure already added its agent_error item just before;
+        // turn_end adds one only for failures outside the agent loop.
+        "turn_end" => {
+            if event.status != "error" || matches!(items.last(), Some(Item::Error { .. })) {
+                return items.to_vec();
+            }
+            let mut next = items.to_vec();
+            let text = first_non_empty(&[&event.error, "turn failed"]);
+            next.push(Item::Error { text });
+            next
+        }
+        "approval_requested" => {
+            let mut text = format!(
+                "Approval {} requested for: {}",
+                event.approval_id, event.command
+            );
+            if !event.justification.is_empty() {
+                text.push_str(&format!("\nReason: {}", event.justification));
+            }
+            text.push_str(&format!(
+                "\n/approve {id} or /deny {id}",
+                id = event.approval_id
+            ));
+            let mut next = items.to_vec();
+            next.push(Item::Notice { text });
+            next
+        }
+        "approval_decided" => {
+            let mut next = items.to_vec();
+            next.push(Item::Notice {
+                text: format!("Approval {}: {}", event.approval_id, event.decision),
+            });
+            next
+        }
         // agent_started, agent_finished, provider_usage, compaction_planned
         // and compaction_started carry nothing the transcript shows.
         _ => items.to_vec(),
@@ -737,6 +783,66 @@ mod tests {
         );
         let noop = r#"{"type":"compaction_completed","compaction":{"reason":"threshold","tokens_before":900,"estimated_tokens_after":300,"automatic":true,"noop":true}}"#;
         assert_eq!(apply(&[noop]), vec![]);
+    }
+
+    #[test]
+    fn user_message_adds_a_user_item_unless_empty() {
+        assert_eq!(
+            apply(&[
+                r#"{"type":"user_message","text":"hi","image":true}"#,
+                r#"{"type":"user_message","text":""}"#,
+            ]),
+            vec![user("hi")]
+        );
+    }
+
+    #[test]
+    fn turn_end_adds_an_error_item_only_for_status_error() {
+        assert_eq!(
+            apply(&[
+                r#"{"type":"turn_end","status":"ok"}"#,
+                r#"{"type":"turn_end","status":"canceled"}"#,
+            ]),
+            vec![]
+        );
+        assert_eq!(
+            apply(&[r#"{"type":"turn_end","error":"boom","status":"error"}"#]),
+            vec![Item::Error {
+                text: "boom".into()
+            }]
+        );
+        assert_eq!(
+            apply(&[
+                r#"{"type":"agent_error","error":"provider: 500"}"#,
+                r#"{"type":"turn_end","error":"provider: 500","status":"error"}"#,
+            ]),
+            vec![Item::Error {
+                text: "provider: 500".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn approval_frames_become_notices() {
+        let items = apply(&[
+            r#"{"type":"approval_requested","tool_call_id":"c1","approval_id":"a1","command":"ls","justification":"why"}"#,
+            r#"{"type":"approval_decided","approval_id":"a1","decision":"timeout"}"#,
+        ]);
+        assert_eq!(items.len(), 2);
+        let Item::Notice { text } = &items[0] else {
+            panic!("expected notice, got {:?}", items[0]);
+        };
+        assert!(text.contains("ls") && text.contains("why"), "{text}");
+        assert!(
+            text.contains("/approve a1") && text.contains("/deny a1"),
+            "{text}"
+        );
+        assert_eq!(
+            items[1],
+            Item::Notice {
+                text: "Approval a1: timeout".into()
+            }
+        );
     }
 
     #[test]

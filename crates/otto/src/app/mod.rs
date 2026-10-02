@@ -19,6 +19,7 @@
 //! against the constants below, the way `cli::run` already compares
 //! [`SESSION_OPERATION_UNAVAILABLE`].
 
+pub mod approval;
 pub mod sandbox;
 pub mod tasks;
 pub mod wake;
@@ -40,6 +41,7 @@ use crate::cli::sandbox_setup::{self, SandboxChange};
 use crate::session::{self as sessionfs, ArchiveResult, MAX_LIST_SESSIONS};
 use crate::tool::remind::Reminders;
 
+pub use approval::{ApprovalDecision, ApprovalRequest, Step, Stop};
 pub use sandbox::SandboxControl;
 pub use tasks::{Task, TaskStatus, TaskView};
 pub use wake::WakeOperation;

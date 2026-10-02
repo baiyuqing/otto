@@ -48,6 +48,11 @@ crossterm = "=0.29.0"
 # `tui::render::composer_lines`). Already in the tree as ratatui's own
 # width source; depending on it directly keeps the two in agreement.
 unicode-width = "=0.2.2"
+# ACP v1 message types for `otto acp` (`otto::acp`). The default feature only
+# adds JSON Schema generation. The crate enables serde_json's
+# `preserve_order`, so every serde_json map in a native workspace build keeps
+# insertion order (see docs/development.md).
+agent-client-protocol-schema = { version = "=1.10.2", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true

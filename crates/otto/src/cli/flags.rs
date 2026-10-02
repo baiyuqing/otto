@@ -55,6 +55,7 @@ pub struct CliOptions {
     pub socket_set: bool,
     pub listen_set: bool,
     pub serve: bool,
+    pub acp: bool,
 }
 
 /// Why a command line was refused. Both cases exit with status 2.
@@ -85,6 +86,9 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     let mut rest = args;
     if rest.first().is_some_and(|first| first == "serve") {
         options.serve = true;
+        rest = &rest[1..];
+    } else if rest.first().is_some_and(|first| first == "acp") {
+        options.acp = true;
         rest = &rest[1..];
     }
 
@@ -175,7 +179,7 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
             )));
         }
     }
-    if options.serve {
+    if options.serve || options.acp {
         let conflict = if ui_visited {
             "--ui"
         } else if options.prompt_set {
@@ -193,7 +197,8 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
         };
         if !conflict.is_empty() {
             return Err(reject(&format!(
-                "otto: serve cannot be combined with {conflict}"
+                "otto: {} cannot be combined with {conflict}",
+                if options.acp { "acp" } else { "serve" }
             )));
         }
     }
@@ -254,6 +259,7 @@ pub fn print_usage(output: &mut dyn Write) {
 
 const USAGE: &str = r"Usage: otto [options]
        otto serve [options] [--socket PATH | --listen HOST:PORT [--open] [--exit-on-stdin-close]]
+       otto acp [options]      Agent Client Protocol server on stdin/stdout
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
        otto memory status|forget <id>
@@ -566,6 +572,39 @@ mod tests {
     }
 
     #[test]
+    fn the_acp_subcommand_accepts_runtime_flags() {
+        let got = options(&[
+            "acp",
+            "--config",
+            "/tmp/config.toml",
+            "--cwd",
+            "/work",
+            "--profile",
+            "p",
+            "--provider",
+            "openai-compatible",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--model",
+            "m",
+            "--thinking",
+            "low",
+            "--sandbox",
+            "off",
+            "--shell-timeout",
+            "30s",
+            "--max-output-bytes",
+            "4096",
+        ]);
+        assert!(got.acp && !got.serve);
+        assert_eq!(got.cwd, "/work");
+        assert_eq!(got.profile, "p");
+        assert_eq!(got.sandbox, "off");
+        assert!(got.explicit_config);
+        assert!(!options(&["--cwd", "/work"]).acp);
+    }
+
+    #[test]
     fn open_is_serve_only_and_needs_a_tcp_listener() {
         let got = options(&["serve", "--listen", "127.0.0.1:0", "--open"]);
         assert!(got.serve);
@@ -591,6 +630,7 @@ mod tests {
             assert_eq!(outcome, Parsed::Help);
             let text = String::from_utf8(stdout).expect("utf-8 usage");
             assert!(text.starts_with("Usage: otto [options]\n"), "{text}");
+            assert!(text.contains("       otto acp [options]"), "{text}");
             assert!(text.contains(
                 "  --sandbox MODE         sandbox mode: auto, seatbelt, or off (off is unsafe)\n"
             ));
@@ -727,6 +767,38 @@ mod tests {
             (
                 &["serve", "--open", "--socket", "/tmp/otto.sock"],
                 "otto: --open cannot be used with --socket\n",
+            ),
+            (
+                &["acp", "--ui", "repl"],
+                "otto: acp cannot be combined with --ui\n",
+            ),
+            (
+                &["acp", "--prompt", "x"],
+                "otto: acp cannot be combined with --prompt\n",
+            ),
+            (
+                &["acp", "--resume", "anything"],
+                "otto: acp cannot be combined with --resume\n",
+            ),
+            (
+                &["acp", "--continue"],
+                "otto: acp cannot be combined with --continue\n",
+            ),
+            (
+                &["acp", "--archive", "anything"],
+                "otto: acp cannot be combined with --archive\n",
+            ),
+            (
+                &["acp", "--no-session"],
+                "otto: acp cannot be combined with --no-session\n",
+            ),
+            (
+                &["acp", "--socket", "/tmp/otto.sock"],
+                "otto: --socket requires the serve subcommand\n",
+            ),
+            (
+                &["acp", "--open"],
+                "otto: --open requires the serve subcommand\n",
             ),
             (
                 &["--exit-on-stdin-close"],

@@ -274,8 +274,10 @@ mod tests {
 
     #[test]
     fn estimate_request_falls_back_to_stable_system_messages_and_tools() {
-        // The two schemas differ only in key order. Both serialize through a
-        // sorted map, so the estimate cannot depend on the author's ordering.
+        // The two schemas differ only in key order. serde_json keeps
+        // insertion order in native workspace builds and sorts keys in a
+        // wasm32 otto-core build, so the serialized strings may differ; the
+        // estimate counts characters and must not depend on the ordering.
         let schema_a = serde_json::json!({
             "type": "object",
             "properties": {"path": {"type": "string"}, "mode": {"enum": ["r", "w"]}},
@@ -286,11 +288,8 @@ mod tests {
             "properties": {"mode": {"enum": ["r", "w"]}, "path": {"type": "string"}},
             "type": "object",
         });
+        assert_eq!(schema_a, schema_b);
         let serialized = serde_json::to_string(&schema_a).expect("encodes");
-        assert_eq!(
-            serialized,
-            serde_json::to_string(&schema_b).expect("encodes")
-        );
 
         let messages = vec![
             text_message("", Role::User, "inspect src"),

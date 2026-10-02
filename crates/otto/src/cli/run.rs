@@ -718,14 +718,25 @@ pub async fn run(
     }
 
     if options.serve {
-        let listen =
-            match resolve_server(&config_file, &environment, &options.socket, &options.listen) {
-                Ok(listen) => listen,
-                Err(error) => {
-                    let _ = control.close().await;
-                    return fail(stderr, &builder.redact_error(&error.to_string(), None));
-                }
-            };
+        let resolved_listen =
+            resolve_server(&config_file, &environment, &options.socket, &options.listen).and_then(
+                |mut listen| {
+                    // Both flags bind both listeners; `resolve_server` keeps
+                    // only the TCP one when both overrides are given.
+                    if options.socket_set && options.listen_set {
+                        listen.socket =
+                            resolve_server(&config_file, &environment, &options.socket, "")?.socket;
+                    }
+                    Ok(listen)
+                },
+            );
+        let listen = match resolved_listen {
+            Ok(listen) => listen,
+            Err(error) => {
+                let _ = control.close().await;
+                return fail(stderr, &builder.redact_error(&error.to_string(), None));
+            }
+        };
         let exit_on_stdin_close = options.exit_on_stdin_close.then_some(stdin);
         let exit = serve::run(
             serve::ServeOptions {

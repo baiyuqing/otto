@@ -27,7 +27,7 @@ pub mod ui;
 pub mod workflows;
 pub mod workspaces;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -38,6 +38,7 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::{get, post};
+use otto_core::agent::Event;
 use otto_core::agent::inbox::Notification;
 use otto_core::model::{Block, MAX_IMAGE_BYTES, Message, Usage};
 use otto_core::session::ListResult;
@@ -46,11 +47,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{self, Controller};
+use crate::app::{self, ApprovalDecision, ApprovalRequest, Controller, Step, Stop};
 use crate::cli::info::SandboxInfo;
 #[cfg(test)]
 use crate::cli::info::{SandboxMode, SandboxNetwork, SandboxReason};
 use metrics::{Metrics, SessionContext};
+use otto_core::wire::events::WireEvent;
 use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
 
 /// A [`Factory::open`] that answers with exactly this text produces 404
@@ -336,13 +338,72 @@ pub struct OpenSession {
     closed: CancellationToken,
 }
 
+/// A session queues at most this many turns behind the running one.
+const MAX_QUEUED_TURNS: usize = 16;
+/// A waiting approval with no decision after this long is decided `timeout`.
+const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// How many decided approval ids a session remembers, so a late decision is
+/// answered `approval_decided` rather than `approval_failed`.
+const REMEMBERED_DECISIONS: usize = 32;
+
+/// A user turn accepted with `"queue": true` behind another turn.
+struct QueuedTurn {
+    turn: Arc<Turn>,
+    text: String,
+    image: Option<Block>,
+}
+
+/// The elevated command the running turn waits on. At most one per session,
+/// because the turn waits.
+struct WaitingApproval {
+    id: String,
+    decide: tokio::sync::oneshot::Sender<ApprovalDecision>,
+}
+
 #[derive(Default)]
 struct SessionState {
+    /// The running turn, or the last one that finished. Never a queued turn.
     turn: Option<Arc<Turn>>,
     /// Non-`None` while `POST .../compact` runs. `start_turn` and
     /// `handle_compact` both check it under the same lock, so a turn and a
     /// compaction are never admitted together.
     compacting: Option<CancellationToken>,
+    /// Turns waiting for the running turn or compaction, oldest first. Every
+    /// reader of this field holds the session lock, so the queue, `turn` and
+    /// `compacting` change together.
+    queue: VecDeque<QueuedTurn>,
+    waiting: Option<WaitingApproval>,
+    decided: VecDeque<String>,
+}
+
+impl SessionState {
+    fn turn_running(&self) -> bool {
+        self.turn.as_ref().is_some_and(|turn| !turn.is_done())
+    }
+
+    /// Whether a new turn or compaction must wait. A non-empty queue counts:
+    /// the next queued turn starts when the current one ends, and nothing may
+    /// start in between.
+    pub(crate) fn busy(&self) -> bool {
+        self.turn_running() || !self.queue.is_empty() || self.compacting.is_some()
+    }
+
+    fn remember_decided(&mut self, id: &str) {
+        if self.decided.iter().any(|known| known == id) {
+            return;
+        }
+        if self.decided.len() == REMEMBERED_DECISIONS {
+            self.decided.pop_front();
+        }
+        self.decided.push_back(id.to_string());
+    }
+
+    /// Ends every queued turn `canceled`; none of them ran.
+    fn cancel_queue(&mut self) {
+        for queued in self.queue.drain(..) {
+            queued.turn.finish(Some(String::new()), true);
+        }
+    }
 }
 
 impl OpenSession {
@@ -365,11 +426,24 @@ impl OpenSession {
         self.lock().turn.clone()
     }
 
+    /// The running, last finished or queued turn named `id`.
+    fn find_turn(&self, id: &str) -> Option<Arc<Turn>> {
+        let state = self.lock();
+        state
+            .turn
+            .iter()
+            .chain(state.queue.iter().map(|queued| &queued.turn))
+            .find(|turn| turn.id == id)
+            .cloned()
+    }
+
     /// Cancels the running turn or compaction so a following close does not
-    /// wait on a provider call, and stops the wake loop.
+    /// wait on a provider call, ends the queued turns, and stops the wake
+    /// loop.
     fn cancel_work(&self) {
         self.closed.cancel();
-        let state = self.lock();
+        let mut state = self.lock();
+        state.cancel_queue();
         if let Some(turn) = state.turn.as_ref() {
             turn.cancel();
         }
@@ -523,6 +597,18 @@ impl Server {
     // ---- routing ----
 
     /// Every route in `openapi.yaml`, plus the two token-free UI routes.
+    /// The router for a Unix socket listener. Reaching the socket needs
+    /// file-system permission on its path, so requests on it skip the bearer
+    /// token that [`Server::router`] requires on TCP.
+    pub fn socket_router(self: &Arc<Self>) -> Router {
+        self.router().layer(axum::middleware::from_fn(
+            |mut request: axum::extract::Request, next: Next| async move {
+                request.extensions_mut().insert(SocketRequest);
+                next.run(request).await
+            },
+        ))
+    }
+
     pub fn router(self: &Arc<Self>) -> Router {
         let state = Arc::clone(self);
         Router::new()
@@ -537,7 +623,7 @@ impl Server {
             .route("/v1/sessions/{id}/context", get(context))
             .route(
                 "/v1/sessions/{id}/approvals/{approval_id}",
-                post(approvals::approve),
+                post(approvals::decide),
             )
             .route(
                 "/v1/sessions/{id}/turns",
@@ -748,13 +834,28 @@ impl Server {
             .iter()
             .map(|session| {
                 let info = session.ctrl.info();
-                let turn = session.current_turn().map(|turn| turn.summary().status);
-                let approvals = session
-                    .ctrl
-                    .builder()
-                    .bash_approvals
-                    .as_ref()
-                    .map_or(0, |approvals| approvals.pending_count(&info.session_id));
+                let (turn, turn_id, queued, approvals) = {
+                    let state = session.lock();
+                    let summary = state.turn.as_ref().map(|turn| turn.summary());
+                    // The running turn; else the newest, which is a queued
+                    // one while a compaction holds the session.
+                    let turn_id = match &summary {
+                        Some(summary) if summary.status == turn::TURN_RUNNING => {
+                            Some(summary.id.clone())
+                        }
+                        _ => state
+                            .queue
+                            .back()
+                            .map(|queued| queued.turn.id.clone())
+                            .or_else(|| summary.as_ref().map(|summary| summary.id.clone())),
+                    };
+                    (
+                        summary.map(|summary| summary.status),
+                        turn_id,
+                        state.queue.len(),
+                        usize::from(state.waiting.is_some()),
+                    )
+                };
                 let tasks = session
                     .ctrl
                     .tasks()
@@ -770,6 +871,8 @@ impl Server {
                     id: info.session_id,
                     workspace: info.workspace,
                     turn,
+                    turn_id,
+                    queued,
                     approvals,
                     tasks,
                 }
@@ -832,17 +935,21 @@ impl Server {
         loops.push(handle);
     }
 
+    fn bump_status(&self) {
+        self.status_changed.send_modify(|version| *version += 1);
+    }
+
     /// Runs one task-triggered turn on `session` when a notification is pending
     /// and nothing else holds the session.
     ///
     /// The wake is prepared before the turn is published, so a no-op or busy
     /// admission cannot leave a phantom turn visible on `GET /v1/sessions`. A
-    /// busy session is left to the turn that holds it.
+    /// busy session, including one with queued turns, is left to the turn that
+    /// holds it.
     async fn wake_turn(self: &Arc<Self>, session: &Arc<OpenSession>) {
         let prepared = {
             let mut state = session.lock();
-            let busy = state.turn.as_ref().is_some_and(|turn| !turn.is_done());
-            if busy || state.compacting.is_some() {
+            if state.busy() {
                 None
             } else {
                 match session.ctrl.prepare_wake() {
@@ -851,6 +958,7 @@ impl Server {
                         Ok(id) => {
                             let turn =
                                 Arc::new(Turn::new(id, TRIGGER_TASK, self.cancel.child_token()));
+                            turn.start_running(session.ctrl.history().len());
                             state.turn = Some(Arc::clone(&turn));
                             Some(Ok((turn, wake)))
                         }
@@ -871,7 +979,7 @@ impl Server {
             }
             Some(Ok(prepared)) => prepared,
         };
-        self.status_changed.send_modify(|version| *version += 1);
+        self.bump_status();
 
         self.metrics.turn_started();
         let mut fields = vec![
@@ -888,17 +996,49 @@ impl Server {
             fields.push(("inbox_kind", kind.as_str().to_string()));
         }
         self.log.info("turn_started", &fields);
+        self.run_turn(session, &turn, Step::Wake(wake), TRIGGER_TASK)
+            .await;
+        // Queued turns that arrived during the wake turn start now.
+        self.start_next(session);
+    }
+
+    /// Runs `first` and its approval retries as `turn`, then finishes it. The
+    /// error text is redacted before it reaches the turn frame, the summary
+    /// or the log.
+    async fn run_turn(
+        self: &Arc<Self>,
+        session: &Arc<OpenSession>,
+        turn: &Arc<Turn>,
+        first: Step<'_>,
+        trigger: &'static str,
+    ) {
         let cancel = turn.cancel_token();
         let result = {
-            let mut emit = turn.emitter(&self.metrics);
-            wake.run(&mut emit, &cancel).await
+            let mut buffer = turn.emitter(&self.metrics);
+            // The agent_error frame carries the same provider error that
+            // turn_end carries redacted.
+            let mut emit = |event: Event| match event {
+                Event::AgentError { message } => buffer(Event::AgentError {
+                    message: session.ctrl.redact_error(&message),
+                }),
+                event => buffer(event),
+            };
+            let (server, open, running, token) = (&**self, &**session, &**turn, &cancel);
+            session
+                .ctrl
+                .run_with_approvals(first, &mut emit, &cancel, |request| {
+                    server.wait_for_approval(open, running, token, request)
+                })
+                .await
         };
-        let (error, canceled) = match &result {
-            Ok(()) => (None, false),
-            Err(error) => (Some(error.to_string()), error.is_cancelled()),
+        let (error, canceled) = match result {
+            Ok(Stop::EndTurn) => (None, false),
+            Ok(Stop::Cancelled) => (Some(String::new()), true),
+            Err(error) if error.is_cancelled() => (Some(String::new()), true),
+            Err(error) => (Some(session.ctrl.redact_error(&error.to_string())), false),
         };
         turn.finish(error.clone(), canceled);
-        self.status_changed.send_modify(|version| *version += 1);
+        self.bump_status();
         let summary = turn.summary();
         self.metrics.turn_finished(&summary.status, turn.elapsed());
         if let Some(message) = error.filter(|_| !canceled) {
@@ -906,7 +1046,7 @@ impl Server {
                 "turn_error",
                 &[
                     ("turn_id", turn.id.clone()),
-                    ("trigger", TRIGGER_TASK.to_string()),
+                    ("trigger", trigger.to_string()),
                     ("error", message),
                 ],
             );
@@ -915,88 +1055,144 @@ impl Server {
             "turn_finished",
             &[
                 ("turn_id", turn.id.clone()),
-                ("trigger", TRIGGER_TASK.to_string()),
+                ("trigger", trigger.to_string()),
                 ("status", summary.status.clone()),
                 ("duration_ms", turn.elapsed().as_millis().to_string()),
             ],
         );
     }
 
-    /// Starts a user turn on `session`. The `trigger == triggerTask` branch
-    /// lives in [`Server::wake_turn`], because a wake turn needs no HTTP reply
-    /// and is awaited by the wake loop that admitted it.
+    /// Publishes the waiting approval, then waits for the decision route, the
+    /// turn's cancellation, or [`APPROVAL_TIMEOUT`]. The turn stays `running`.
+    /// Every outcome but cancellation is recorded as an `approval_decided`
+    /// frame; a timeout is a deny.
+    async fn wait_for_approval(
+        &self,
+        session: &OpenSession,
+        turn: &Turn,
+        cancel: &CancellationToken,
+        request: ApprovalRequest,
+    ) -> ApprovalDecision {
+        let (decide, decided) = tokio::sync::oneshot::channel();
+        session.lock().waiting = Some(WaitingApproval {
+            id: request.approval_id.clone(),
+            decide,
+        });
+        turn.push_event(WireEvent::approval_requested(
+            &request.approval_id,
+            &request.tool_call_id,
+            &request.command,
+            &request.justification,
+        ));
+        self.bump_status();
+
+        let (decision, label) = tokio::select! {
+            biased;
+            received = decided => match received {
+                Ok(ApprovalDecision::Allow) => (ApprovalDecision::Allow, "allow"),
+                _ => (ApprovalDecision::Deny, "deny"),
+            },
+            () = cancel.cancelled() => (ApprovalDecision::Cancelled, ""),
+            () = tokio::time::sleep(APPROVAL_TIMEOUT) => (ApprovalDecision::Deny, "timeout"),
+        };
+        {
+            let mut state = session.lock();
+            if state
+                .waiting
+                .as_ref()
+                .is_some_and(|waiting| waiting.id == request.approval_id)
+            {
+                state.waiting = None;
+            }
+            state.remember_decided(&request.approval_id);
+        }
+        if decision != ApprovalDecision::Cancelled {
+            turn.push_event(WireEvent::approval_decided(&request.approval_id, label));
+        }
+        self.bump_status();
+        decision
+    }
+
+    /// Starts a user turn on `session`, or queues it when `queue` is set and
+    /// the session is busy. The `trigger == triggerTask` branch lives in
+    /// [`Server::wake_turn`], because a wake turn needs no HTTP reply and is
+    /// awaited by the wake loop that admitted it.
     fn start_turn(
         self: &Arc<Self>,
         session: &Arc<OpenSession>,
         text: String,
         image: Option<Block>,
+        queue: bool,
     ) -> Result<Arc<Turn>, String> {
-        let turn = {
+        let (turn, running) = {
             let mut state = session.lock();
-            let busy = state.turn.as_ref().is_some_and(|turn| !turn.is_done());
-            if busy || state.compacting.is_some() {
+            let busy = state.busy();
+            if busy && !queue {
                 return Err(TURN_ACTIVE.to_string());
+            }
+            if busy && state.queue.len() >= MAX_QUEUED_TURNS {
+                return Err(QUEUE_FULL.to_string());
             }
             let id = new_id()?;
             let cancel = self.cancel.child_token();
-            let turn = Arc::new(Turn::new(id, TRIGGER_USER, cancel));
-            state.turn = Some(Arc::clone(&turn));
-            turn
-        };
-        self.status_changed.send_modify(|version| *version += 1);
-
-        self.metrics.turn_started();
-        let server = Arc::clone(self);
-        let session = Arc::clone(session);
-        let spawned = Arc::clone(&turn);
-        tokio::spawn(async move {
-            let cancel = spawned.cancel_token();
-            let result = {
-                let mut emit = spawned.emitter(&server.metrics);
-                match image {
-                    Some(image) => {
-                        session
-                            .ctrl
-                            .prompt_with_image(&text, image, &mut emit, &cancel)
-                            .await
-                    }
-                    None => session.ctrl.prompt(&text, &mut emit, &cancel).await,
-                }
-            };
-            let (error, canceled) = match &result {
-                Ok(()) => (None, false),
-                Err(error) => (Some(error.to_string()), error.is_cancelled()),
-            };
-            spawned.finish(error.clone(), canceled);
-            server.status_changed.send_modify(|version| *version += 1);
-            let summary = spawned.summary();
-            server
-                .metrics
-                .turn_finished(&summary.status, spawned.elapsed());
-            if let Some(message) = error.filter(|_| !canceled) {
-                server.log.error(
-                    "turn_error",
-                    &[
-                        ("turn_id", spawned.id.clone()),
-                        ("trigger", TRIGGER_USER.to_string()),
-                        ("error", message),
-                    ],
-                );
+            if busy {
+                let turn = Arc::new(Turn::queued(id, TRIGGER_USER, cancel));
+                state.queue.push_back(QueuedTurn {
+                    turn: Arc::clone(&turn),
+                    text,
+                    image,
+                });
+                (turn, None)
+            } else {
+                let turn = Arc::new(Turn::new(id, TRIGGER_USER, cancel));
+                turn.start_running(session.ctrl.history().len());
+                state.turn = Some(Arc::clone(&turn));
+                (turn, Some((text, image)))
             }
-            server.log.info(
-                "turn_finished",
-                &[
-                    ("turn_id", spawned.id.clone()),
-                    ("trigger", TRIGGER_USER.to_string()),
-                    ("status", summary.status.clone()),
-                    ("duration_ms", spawned.elapsed().as_millis().to_string()),
-                ],
-            );
-            // A notification that landed too late for this turn's own drain is
-            // caught by the wake loop's end-of-turn check.
-            session.turn_finished.notify_one();
-        });
+        };
+        self.bump_status();
+        if let Some((text, image)) = running {
+            self.spawn_user_turn(session, Arc::clone(&turn), text, image);
+        }
+        Ok(turn)
+    }
 
+    /// Starts the oldest queued turn when nothing holds the session. While the
+    /// server or the session is closing, ends every queued turn `canceled`
+    /// instead. Called whenever a turn or a compaction ends.
+    fn start_next(self: &Arc<Self>, session: &Arc<OpenSession>) {
+        let next = {
+            let mut state = session.lock();
+            if state.turn_running() || state.compacting.is_some() {
+                return;
+            }
+            if self.cancel.is_cancelled() || session.closed.is_cancelled() {
+                state.cancel_queue();
+                None
+            } else if let Some(next) = state.queue.pop_front() {
+                next.turn.start_running(session.ctrl.history().len());
+                state.turn = Some(Arc::clone(&next.turn));
+                Some(next)
+            } else {
+                None
+            }
+        };
+        self.bump_status();
+        if let Some(next) = next {
+            self.spawn_user_turn(session, next.turn, next.text, next.image);
+        }
+    }
+
+    /// Spawns the task that runs `turn`, which is already `state.turn`.
+    fn spawn_user_turn(
+        self: &Arc<Self>,
+        session: &Arc<OpenSession>,
+        turn: Arc<Turn>,
+        text: String,
+        image: Option<Block>,
+    ) {
+        turn.push_event(WireEvent::user_message(&text, image.is_some()));
+        self.metrics.turn_started();
         self.log.info(
             "turn_started",
             &[
@@ -1004,11 +1200,24 @@ impl Server {
                 ("trigger", TRIGGER_USER.to_string()),
             ],
         );
-        Ok(turn)
+        let server = Arc::clone(self);
+        let session = Arc::clone(session);
+        tokio::spawn(async move {
+            let first = match image {
+                Some(image) => Step::Image(&text, image),
+                None => Step::Text(&text),
+            };
+            server.run_turn(&session, &turn, first, TRIGGER_USER).await;
+            server.start_next(&session);
+            // A notification that landed too late for this turn's own drain is
+            // caught by the wake loop's end-of-turn check.
+            session.turn_finished.notify_one();
+        });
     }
 }
 
 const TURN_ACTIVE: &str = "turn already active";
+const QUEUE_FULL: &str = "turn queue full";
 
 /// 16 random bytes, hex encoded. The same generator as `cmd`'s, duplicated
 /// because the package boundary forbids the import.
@@ -1022,6 +1231,10 @@ fn new_id() -> Result<String, String> {
 }
 
 // ---- middleware ----
+
+/// Request extension set by [`Server::socket_router`].
+#[derive(Clone, Copy)]
+struct SocketRequest;
 
 /// Request-ID handling, token gating, structured logging and HTTP metrics.
 /// Token gating is folded in so a 401 is still logged and measured under its
@@ -1051,6 +1264,7 @@ async fn instrument(
 
     let start = Instant::now();
     let mut response = if !server.token.is_empty()
+        && request.extensions().get::<SocketRequest>().is_none()
         && route.contains(" /v1/")
         && !auth::authorized(&server.token, request.headers())
     {
@@ -1287,7 +1501,15 @@ struct SessionListRow {
     #[serde(skip_serializing_if = "String::is_empty")]
     model: String,
     open: bool,
+    /// The last user message, cut to [`LAST_USER_TEXT_CHARS`] characters.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_user_text: String,
+    /// RFC 3339 time of the last write to the session file.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    modified: String,
 }
+
+const LAST_USER_TEXT_CHARS: usize = 80;
 
 #[derive(Debug, Clone, Serialize)]
 struct SessionListResponse {
@@ -1307,6 +1529,10 @@ struct StatusSessionWire {
     id: String,
     workspace: String,
     turn: Option<String>,
+    /// The running turn, else the newest one; `null` until a turn exists.
+    turn_id: Option<String>,
+    /// Turns waiting behind the running one.
+    queued: usize,
     approvals: usize,
     tasks: usize,
 }
@@ -1413,6 +1639,12 @@ async fn list_sessions(
             provider: info.provider.clone(),
             model: info.model.clone(),
             open: open.contains_key(&info.id),
+            last_user_text: info
+                .last_user_text
+                .chars()
+                .take(LAST_USER_TEXT_CHARS)
+                .collect(),
+            modified: info.modified.to_rfc3339(),
         });
     }
     for (id, session) in &open {
@@ -1428,6 +1660,8 @@ async fn list_sessions(
             provider: info.provider,
             model: info.model,
             open: true,
+            last_user_text: String::new(),
+            modified: String::new(),
         });
     }
 
@@ -1501,12 +1735,34 @@ async fn delete_session(State(server): State<Arc<Server>>, Path(id): Path<String
         .expect("static response")
 }
 
-async fn history(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
-    match server.lookup(&id) {
-        // An empty Vec serializes as "[]".
-        Some(session) => json_response::<Vec<Message>>(StatusCode::OK, &session.ctrl.history()),
-        None => not_found("session not found"),
+#[derive(Debug, Default, Deserialize)]
+struct HistoryQuery {
+    before_turn: Option<String>,
+}
+
+/// The session's messages; with `before_turn`, only those that existed when
+/// that turn started, so a reader replaying the turn's events from 0 does not
+/// see its prompt and finished steps twice.
+async fn history(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    Query(query): Query<HistoryQuery>,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let mut messages = session.ctrl.history();
+    if let Some(turn_id) = query.before_turn.as_deref() {
+        let Some(start) = session
+            .find_turn(turn_id)
+            .and_then(|turn| turn.history_start())
+        else {
+            return not_found("turn not found");
+        };
+        messages.truncate(start);
     }
+    // An empty Vec serializes as "[]".
+    json_response::<Vec<Message>>(StatusCode::OK, &messages)
 }
 
 async fn context(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
@@ -1531,6 +1787,9 @@ struct StartTurnBody {
     stream: Option<bool>,
     #[serde(default)]
     image: Option<StartTurnImage>,
+    /// Queue behind a running turn instead of answering 409 `turn_active`.
+    #[serde(default)]
+    queue: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1569,20 +1828,35 @@ async fn start_turn(
     }
     let stream = parsed.stream.unwrap_or(true);
 
-    let turn = match server.start_turn(&session, parsed.text, image) {
+    let turn = match server.start_turn(&session, parsed.text, image, parsed.queue) {
         Ok(turn) => turn,
         Err(error) if error == TURN_ACTIVE => {
             return turn_active("a turn is already active for this session");
         }
+        Err(error) if error == QUEUE_FULL => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "queue_full",
+                "the turn queue for this session is full",
+            );
+        }
         Err(error) => return internal_error(&server.log, &error),
     };
 
-    if stream {
-        return stream_sse(&server.metrics, turn, 0);
+    let mut response = if stream {
+        stream_sse(&server.metrics, Arc::clone(&turn), 0)
+    } else {
+        wait_done(&turn).await;
+        json_response(StatusCode::OK, &turn.summary())
+    };
+    if let Ok(value) = axum::http::HeaderValue::from_str(&turn.id) {
+        response.headers_mut().insert(TURN_ID_HEADER, value);
     }
-    wait_done(&turn).await;
-    json_response(StatusCode::OK, &turn.summary())
+    response
 }
+
+/// Names the turn a `POST .../turns` response belongs to.
+const TURN_ID_HEADER: &str = "otto-turn-id";
 
 /// Blocks until the turn is done, riding the same version broadcast the SSE
 /// reader uses.
@@ -1600,10 +1874,7 @@ fn resolve_turn(server: &Server, id: &str, turn_id: &str) -> Result<Arc<Turn>, &
     let Some(session) = server.lookup(id) else {
         return Err("session not found");
     };
-    match session.current_turn() {
-        Some(turn) if turn.id == turn_id => Ok(turn),
-        _ => Err("turn not found"),
-    }
+    session.find_turn(turn_id).ok_or("turn not found")
 }
 
 async fn get_turn(
@@ -1655,7 +1926,24 @@ async fn cancel_turn(
 ) -> Response {
     match resolve_turn(&server, &id, &turn_id) {
         Ok(turn) => {
-            turn.cancel();
+            // A queued turn never ran: remove it and end it `canceled`. The
+            // queue and the end happen under one lock so `start_next` cannot
+            // pick it up in between.
+            let removed = server.lookup(&id).is_some_and(|session| {
+                let mut state = session.lock();
+                let before = state.queue.len();
+                state.queue.retain(|queued| queued.turn.id != turn.id);
+                let removed = state.queue.len() != before;
+                if removed {
+                    turn.finish(Some(String::new()), true);
+                }
+                removed
+            });
+            if removed {
+                server.bump_status();
+            } else {
+                turn.cancel();
+            }
             Response::builder()
                 .status(StatusCode::ACCEPTED)
                 .body(Body::empty())
@@ -1914,6 +2202,11 @@ mod tests {
         /// Runs at the top of every call with the 1-based call index. The wake
         /// tests push a notification from it.
         on_call: Option<Box<dyn Fn(usize) + Send + Sync>>,
+        /// Answers every call whose last request message is not a tool
+        /// result with a `bash` tool call for this command; the call after a
+        /// tool result answers with `deltas`. Needs [`HarnessOptions::elevate`]
+        /// to register the `bash` tool.
+        tool_command: Option<String>,
     }
 
     struct ScriptedProvider {
@@ -1923,6 +2216,8 @@ mod tests {
         /// prompt turn ends in [`Role::User`]; a wake turn ends in the
         /// delivered notification's [`Role::Context`].
         roles: Mutex<Vec<Role>>,
+        /// The last user message of each call, in call order.
+        texts: Mutex<Vec<String>>,
     }
 
     impl ScriptedProvider {
@@ -1931,7 +2226,15 @@ mod tests {
                 script,
                 started: watch::channel(0).0,
                 roles: Mutex::new(Vec::new()),
+                texts: Mutex::new(Vec::new()),
             })
+        }
+
+        fn texts(&self) -> Vec<String> {
+            self.texts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone()
         }
 
         fn roles(&self) -> Vec<Role> {
@@ -1970,6 +2273,22 @@ mod tests {
                 );
                 roles.len()
             };
+            self.texts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(
+                    request
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == Role::User)
+                        .map(Message::text)
+                        .unwrap_or_default(),
+                );
+            let after_tool_result = request
+                .messages
+                .last()
+                .is_some_and(|last| last.role == Role::Tool);
             if let Some(hook) = &self.script.on_call {
                 hook(call);
             }
@@ -2020,21 +2339,80 @@ mod tests {
                     otto_core::model::EffectCertainty::Completed,
                 );
             }
+            let (blocks, finish_reason) = match &self.script.tool_command {
+                Some(command) if !after_tool_result => (
+                    vec![Block {
+                        block_type: BlockType::ToolCall,
+                        tool_call_id: format!("call-{call}"),
+                        tool_name: "bash".to_string(),
+                        arguments: Some(
+                            serde_json::value::RawValue::from_string(
+                                serde_json::json!({ "command": command }).to_string(),
+                            )
+                            .expect("arguments"),
+                        ),
+                        ..Block::default()
+                    }],
+                    Some(otto_core::model::FinishReason::ToolCalls),
+                ),
+                _ => (
+                    vec![Block {
+                        block_type: BlockType::Text,
+                        text: deltas.concat(),
+                        ..Block::default()
+                    }],
+                    None,
+                ),
+            };
             otto_core::provider::ProviderSettlement::succeeded(
                 ProviderResponse {
                     message: Message {
                         role: Role::Assistant,
-                        blocks: vec![Block {
-                            block_type: BlockType::Text,
-                            text: deltas.concat(),
-                            ..Block::default()
-                        }],
+                        blocks,
                         usage: self.script.usage,
+                        finish_reason,
                         ..Message::default()
                     },
                 },
                 0,
             )
+        }
+    }
+
+    /// A `bash` tool that asks for approval until the command is granted,
+    /// then answers `elevated ok`. The request text matches the real tool's,
+    /// so `parse_approval_request` reads it.
+    struct ElevatedBash {
+        approvals: Arc<crate::tool::bash::BashApprovals>,
+        session_id: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for ElevatedBash {
+        fn definition(&self) -> otto_core::model::ToolDefinition {
+            crate::tool::definition("bash", "test double", serde_json::json!({"type": "object"}))
+        }
+
+        async fn execute(
+            &self,
+            arguments: &serde_json::value::RawValue,
+            _cancel: &CancellationToken,
+        ) -> otto_core::tool::ToolResult {
+            let command = serde_json::from_str::<Value>(arguments.get())
+                .ok()
+                .and_then(|value| value["command"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            if self.approvals.take(&self.session_id, &command) {
+                return otto_core::tool::ToolResult {
+                    content: "elevated ok".to_string(),
+                    ..Default::default()
+                };
+            }
+            let id = self.approvals.request(&self.session_id, &command);
+            otto_core::tool::ToolResult::error(format!(
+                "approval required\nApprove in Otto: /approve {id}\nCommand: {}\nJustification: \"needed\"",
+                serde_json::to_string(&command).expect("command")
+            ))
         }
     }
 
@@ -2138,12 +2516,21 @@ mod tests {
                 model: "test-model".to_string(),
                 created_at: chrono::Utc::now(),
             });
-            let runner = Runner::scripted(
+            let tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>> =
+                match &self.builder.bash_approvals {
+                    Some(approvals) => vec![Box::new(ElevatedBash {
+                        approvals: Arc::clone(approvals),
+                        session_id: id.to_string(),
+                    })],
+                    None => Vec::new(),
+                };
+            let runner = Runner::scripted_with_tools(
                 session.clone(),
                 Arc::clone(&self.provider) as Arc<dyn Provider + Send + Sync>,
                 self.tasks
                     .clone()
                     .unwrap_or_else(|| Arc::new(crate::subagent::tasks::Tasks::new())),
+                tools,
             );
             Controller::with_builder(
                 Arc::clone(&self.builder),
@@ -2428,6 +2815,9 @@ mod tests {
         workspace: Option<TempDir>,
         token: String,
         info: Info,
+        /// Registers the approval store and the `bash` double that
+        /// [`Script::tool_command`] calls.
+        elevate: bool,
     }
 
     struct Harness {
@@ -2456,7 +2846,23 @@ mod tests {
             // an already-canonical path, and macOS's `$TMPDIR` is a symlink.
             let canonical_workspace = std::fs::canonicalize(workspace.path())
                 .unwrap_or_else(|_| workspace.path().to_path_buf());
-            let builder = Arc::new(testutil::builder(&canonical_workspace, sessions.path()));
+            let mut builder = testutil::builder(&canonical_workspace, sessions.path());
+            if options.elevate {
+                let executor = crate::sandbox::Executor::new(
+                    Arc::new(crate::sandbox::direct::DirectDriver::new()),
+                    crate::sandbox::Policy {
+                        filesystem: crate::sandbox::FilesystemMode::Unconfined,
+                        network: crate::sandbox::NetworkMode::Allow,
+                    },
+                    &canonical_workspace,
+                )
+                .expect("executor");
+                builder.bash_approvals = Some(Arc::new(crate::tool::bash::BashApprovals::new(
+                    Arc::new(executor),
+                    Vec::new(),
+                )));
+            }
+            let builder = Arc::new(builder);
             let provider = ScriptedProvider::new(options.script);
             // Production always sets `Options.info.workspace` from the same
             // path as the startup workspace (`cli/serve.rs`); match that here
@@ -2586,7 +2992,7 @@ mod tests {
                     )
                     .await
                     .json();
-                if body["status"] != turn::TURN_RUNNING {
+                if body["status"] != turn::TURN_RUNNING && body["status"] != turn::TURN_QUEUED {
                     return body;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -2676,7 +3082,7 @@ mod tests {
     }
 
     /// Starts a streaming turn and returns its reader plus the turn id, read
-    /// out of the `agent_started` frame that always leads the stream.
+    /// out of the `agent_started` frame that follows the leading `user_message` frame.
     async fn start_stream(harness: &Harness, session: &str) -> (SseReader, String) {
         let response = harness
             .raw(
@@ -2694,13 +3100,22 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("text/event-stream")
         );
+        let header_id = response
+            .headers()
+            .get("otto-turn-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("Otto-Turn-Id header")
+            .to_string();
         let mut reader = SseReader::new(response);
+        let user = reader.next().await.expect("user_message frame");
+        assert_eq!(user.event, "user_message");
+        assert_eq!(user.id, Some(0));
         let first = reader.next().await.expect("agent_started frame");
         assert_eq!(first.event, "agent_started");
-        assert_eq!(first.id, Some(0));
+        assert_eq!(first.id, Some(1));
         let data: Value = serde_json::from_str(&first.data).expect("frame data");
         let turn_id = data["turn_id"].as_str().expect("turn_id").to_string();
-        assert!(!turn_id.is_empty());
+        assert_eq!(turn_id, header_id);
         (reader, turn_id)
     }
 
@@ -3154,11 +3569,10 @@ mod tests {
         let frames = reader.all().await;
         let events: Vec<&str> = frames.iter().map(|frame| frame.event.as_str()).collect();
         assert!(events.contains(&"text_delta"), "frames = {events:?}");
-        assert_eq!(
-            events.last(),
-            Some(&"agent_finished"),
-            "frames = {events:?}"
-        );
+        assert_eq!(events.last(), Some(&"turn_end"), "frames = {events:?}");
+        assert_eq!(events[events.len() - 2], "agent_finished");
+        let last: Value = serde_json::from_str(&frames.last().expect("frame").data).expect("json");
+        assert_eq!(last["status"], turn::TURN_OK);
 
         let summary = harness.wait_turn_done(&id, &turn_id).await;
         assert_eq!(summary["text"], "hello");
@@ -3337,7 +3751,7 @@ mod tests {
         let (_primary, turn_id) = start_stream(&harness, &id).await;
         harness.provider.wait_started(1).await;
 
-        // after=0 replays from sequence 1, skipping agent_started.
+        // after=0 replays from sequence 1, skipping the user_message frame.
         let response = harness
             .raw(
                 "GET",
@@ -3366,7 +3780,7 @@ mod tests {
         let tail = resumed.all().await;
         assert_eq!(
             tail.last().map(|frame| frame.event.as_str()),
-            Some("agent_finished")
+            Some("turn_end")
         );
 
         let reply = harness
@@ -4292,14 +4706,28 @@ mod tests {
             .send(
                 "POST",
                 &format!("/v1/sessions/{id}/approvals/approval-1"),
-                None,
+                Some(r#"{"decision":"allow"}"#),
             )
             .await;
         assert_eq!(reply.status, StatusCode::CONFLICT);
         assert_eq!(reply.json()["error"]["code"], "approval_failed");
+        for body in [None, Some(r#"{"decision":"maybe"}"#), Some("{}")] {
+            let bad = harness
+                .send(
+                    "POST",
+                    &format!("/v1/sessions/{id}/approvals/approval-1"),
+                    body,
+                )
+                .await;
+            assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{body:?}");
+        }
         assert_eq!(
             harness
-                .send("POST", "/v1/sessions/missing/approvals/approval-1", None,)
+                .send(
+                    "POST",
+                    "/v1/sessions/missing/approvals/approval-1",
+                    Some(r#"{"decision":"allow"}"#),
+                )
                 .await
                 .status,
             StatusCode::NOT_FOUND
@@ -5981,5 +6409,600 @@ mod tests {
             StatusCode::NOT_FOUND,
             "an unknown path must not fall through to index.html"
         );
+    }
+
+    // ---- turn queue, stream frames, approvals ----
+
+    async fn post_turn(harness: &Harness, session: &str, text: &str, queue: bool) -> Response {
+        let body = serde_json::json!({"text": text, "queue": queue}).to_string();
+        harness
+            .raw(
+                "POST",
+                &format!("/v1/sessions/{session}/turns"),
+                Some(&body),
+                &[],
+            )
+            .await
+    }
+
+    fn turn_header(response: &Response) -> String {
+        response
+            .headers()
+            .get("otto-turn-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("Otto-Turn-Id header")
+            .to_string()
+    }
+
+    /// Reads frames until one named `name`, and returns its data.
+    async fn frame_named_untimed(reader: &mut SseReader, name: &str) -> Value {
+        loop {
+            let frame = reader
+                .next()
+                .await
+                .unwrap_or_else(|| panic!("stream ended before {name}"));
+            if frame.event == name {
+                return serde_json::from_str(&frame.data).expect("frame data");
+            }
+        }
+    }
+
+    async fn frame_named(reader: &mut SseReader, name: &str) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), frame_named_untimed(reader, name))
+            .await
+            .unwrap_or_else(|_| panic!("no {name} frame in time"))
+    }
+
+    /// The events of a finished stream: first and last frame names, and the
+    /// `turn_end` status.
+    async fn ends_of(reader: SseReader) -> (String, String, String) {
+        let frames = tokio::time::timeout(Duration::from_secs(10), reader.all())
+            .await
+            .expect("stream did not end");
+        let last = frames.last().expect("frames");
+        let status = serde_json::from_str::<Value>(&last.data).expect("data")["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        (frames[0].event.clone(), last.event.clone(), status)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn queued_turns_run_in_arrival_order() {
+        let (gate, mut options) = gated();
+        options.script.echo = true;
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+
+        let first = post_turn(&harness, &id, "one", false).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        harness.provider.wait_started(1).await;
+        let mut readers = vec![SseReader::new(first)];
+        let mut ids = Vec::new();
+        for text in ["two", "three"] {
+            let queued = post_turn(&harness, &id, text, true).await;
+            assert_eq!(queued.status(), StatusCode::OK);
+            ids.push(turn_header(&queued));
+            readers.push(SseReader::new(queued));
+        }
+        let waiting = harness
+            .send("GET", &format!("/v1/sessions/{id}/turns/{}", ids[0]), None)
+            .await
+            .json();
+        assert_eq!(waiting["status"], turn::TURN_QUEUED);
+
+        gate.cancel();
+        for reader in readers {
+            let (first, last, status) = ends_of(reader).await;
+            assert_eq!(first, "user_message");
+            assert_eq!(last, "turn_end");
+            assert_eq!(status, "ok");
+        }
+        assert_eq!(harness.provider.texts(), ["one", "two", "three"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_busy_session_refuses_a_turn_without_queue_and_the_seventeenth_with_it() {
+        let (_gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let first = post_turn(&harness, &id, "one", false).await;
+        harness.provider.wait_started(1).await;
+
+        let refused = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(r#"{"text":"x"}"#),
+            )
+            .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert_eq!(refused.json()["error"]["code"], "turn_active");
+
+        let mut held = vec![first];
+        for index in 0..MAX_QUEUED_TURNS {
+            let queued = post_turn(&harness, &id, &format!("q{index}"), true).await;
+            assert_eq!(queued.status(), StatusCode::OK, "queued turn {index}");
+            held.push(queued);
+        }
+        let full = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(r#"{"text":"late","queue":true}"#),
+            )
+            .await;
+        assert_eq!(full.status, StatusCode::CONFLICT, "{}", full.body);
+        assert_eq!(full.json()["error"]["code"], "queue_full");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelling_a_queued_turn_removes_it_and_ends_its_events() {
+        let (gate, mut options) = gated();
+        options.script.echo = true;
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let first = post_turn(&harness, &id, "one", false).await;
+        harness.provider.wait_started(1).await;
+        let second = post_turn(&harness, &id, "two", true).await;
+        let second_id = turn_header(&second);
+        let third = post_turn(&harness, &id, "three", true).await;
+
+        let cancel = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns/{second_id}/cancel"),
+                None,
+            )
+            .await;
+        assert_eq!(cancel.status, StatusCode::ACCEPTED);
+        let (_, last, status) = ends_of(SseReader::new(second)).await;
+        assert_eq!((last.as_str(), status.as_str()), ("turn_end", "canceled"));
+
+        gate.cancel();
+        for reader in [SseReader::new(first), SseReader::new(third)] {
+            assert_eq!(ends_of(reader).await.2, "ok");
+        }
+        assert_eq!(harness.provider.texts(), ["one", "three"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_task_turn_does_not_start_while_a_turn_is_queued() {
+        let (harness, tasks) = wake_harness(Script {
+            deltas: vec!["ok".to_string()],
+            ..Script::default()
+        });
+        let id = harness.create().await;
+        let session = harness.server.lookup(&id).expect("session");
+        session.lock().queue.push_back(QueuedTurn {
+            turn: Arc::new(Turn::queued(
+                "q1".to_string(),
+                turn::TRIGGER_USER,
+                CancellationToken::new(),
+            )),
+            text: "x".to_string(),
+            image: None,
+        });
+
+        tasks.notifications().push(notification());
+        harness.server.wake_turn(&session).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(harness.provider.roles().is_empty());
+        assert!(session.current_turn().is_none());
+
+        // With the queue empty the same notification starts a wake turn.
+        session.lock().queue.clear();
+        harness.server.wake_turn(&session).await;
+        assert_eq!(harness.provider.roles(), vec![Role::Context]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn closing_the_server_cancels_queued_turns() {
+        let (_gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let first = post_turn(&harness, &id, "one", false).await;
+        harness.provider.wait_started(1).await;
+        let second = post_turn(&harness, &id, "two", true).await;
+
+        harness.server.close().await.expect("close");
+
+        assert_eq!(ends_of(SseReader::new(first)).await.2, "canceled");
+        let (_, last, status) = ends_of(SseReader::new(second)).await;
+        assert_eq!((last.as_str(), status.as_str()), ("turn_end", "canceled"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn compact_answers_409_while_a_turn_is_running_with_a_queue() {
+        let (_gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let _first = post_turn(&harness, &id, "one", false).await;
+        harness.provider.wait_started(1).await;
+        let _second = post_turn(&harness, &id, "two", true).await;
+
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/compact"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "turn_active");
+    }
+
+    #[test]
+    fn a_session_with_only_a_queued_turn_is_busy() {
+        let mut state = SessionState::default();
+        assert!(!state.busy());
+        let turn = Arc::new(Turn::queued(
+            "t1".to_string(),
+            turn::TRIGGER_USER,
+            CancellationToken::new(),
+        ));
+        state.queue.push_back(QueuedTurn {
+            turn,
+            text: "x".to_string(),
+            image: None,
+        });
+        assert!(state.busy());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_turn_stream_starts_with_user_message_and_ends_with_turn_end() {
+        let (gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let (mut reader, turn_id) = start_stream(&harness, &id).await;
+        harness.provider.wait_started(1).await;
+        gate.cancel();
+        let user = harness
+            .send("GET", &format!("/v1/sessions/{id}/turns/{turn_id}"), None)
+            .await;
+        assert_eq!(user.status, StatusCode::OK);
+
+        let mut last = None;
+        while let Some(frame) = reader.next().await {
+            last = Some(frame);
+        }
+        let last = last.expect("frames");
+        assert_eq!(last.event, "turn_end");
+        let last_id = last.id.expect("id");
+
+        // A reconnect after the last delta frame still receives turn_end.
+        let response = harness
+            .raw(
+                "GET",
+                &format!(
+                    "/v1/sessions/{id}/turns/{turn_id}/events?after={}",
+                    last_id - 1
+                ),
+                None,
+                &[],
+            )
+            .await;
+        let frames = SseReader::new(response).all().await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].event, "turn_end");
+        assert_eq!(
+            serde_json::from_str::<Value>(&frames[0].data).expect("data")["status"],
+            "ok"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn history_before_turn_omits_the_running_turns_messages() {
+        let (gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let (_reader, turn_id) = start_stream(&harness, &id).await;
+        // The provider is called after the prompt is appended.
+        harness.provider.wait_started(1).await;
+        let count = |path: String| {
+            let harness = &harness;
+            async move {
+                let response = harness.send("GET", &path, None).await;
+                assert_eq!(response.status, StatusCode::OK, "{path}");
+                response.json().as_array().expect("array").len()
+            }
+        };
+        assert_eq!(count(format!("/v1/sessions/{id}/history")).await, 1);
+        assert_eq!(
+            count(format!("/v1/sessions/{id}/history?before_turn={turn_id}")).await,
+            0
+        );
+        let unknown = harness
+            .send(
+                "GET",
+                &format!("/v1/sessions/{id}/history?before_turn=missing"),
+                None,
+            )
+            .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        gate.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_user_message_frame_carries_text_and_image_flag() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let response = harness
+            .raw(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(r#"{"text":"look","image":{"data":"iVBORw0KGgo=","mime_type":"image/png"}}"#),
+                &[],
+            )
+            .await;
+        let mut reader = SseReader::new(response);
+        let user = frame_named(&mut reader, "user_message").await;
+        assert_eq!(user["text"], "look");
+        assert_eq!(user["image"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_provider_error_is_redacted_in_the_frame_the_summary_and_the_log() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                error: Some("upstream rejected key sk-alpha-secret".to_string()),
+                ..Script::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let response = post_turn(&harness, &id, "hi", false).await;
+        let turn_id = turn_header(&response);
+        let frames = SseReader::new(response).all().await;
+        let end = frames.last().expect("frames");
+        assert_eq!(end.event, "turn_end");
+        assert!(frames.iter().any(|frame| frame.event == "agent_error"));
+        for frame in &frames {
+            assert!(!frame.data.contains("sk-alpha-secret"), "{}", frame.data);
+        }
+        assert!(end.data.contains("upstream rejected key"), "{}", end.data);
+
+        let reply = harness
+            .send("GET", &format!("/v1/sessions/{id}/turns/{turn_id}"), None)
+            .await;
+        assert!(!reply.body.contains("sk-alpha-secret"), "{}", reply.body);
+        assert_eq!(reply.json()["status"], "error");
+        assert!(!harness.logged().contains("sk-alpha-secret"));
+    }
+
+    #[tokio::test]
+    async fn list_rows_carry_the_last_user_text_and_modified_time() {
+        let long = "x".repeat(200);
+        let harness = Harness::with(HarnessOptions {
+            list: Some(ListResult {
+                sessions: vec![SessionInfo {
+                    id: "a1".to_string(),
+                    last_user_text: long,
+                    ..SessionInfo::default()
+                }],
+                skipped: 0,
+            }),
+            ..HarnessOptions::default()
+        });
+        let body = harness.send("GET", "/v1/sessions", None).await.json();
+        let row = &body["sessions"][0];
+        assert_eq!(row["last_user_text"].as_str().expect("text").len(), 80);
+        let modified = row["modified"].as_str().expect("modified");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(modified).is_ok(),
+            "{modified}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn status_rows_carry_the_turn_id_and_the_queued_count() {
+        let (gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let response = harness.raw("GET", "/v1/status", None, &[]).await;
+        let mut reader = SseReader::new(response);
+        let idle = status_snapshot(&mut reader).await;
+        assert_eq!(idle["sessions"][0]["queued"], 0);
+
+        let first = post_turn(&harness, &id, "one", false).await;
+        let turn_id = turn_header(&first);
+        harness.provider.wait_started(1).await;
+        let _second = post_turn(&harness, &id, "two", true).await;
+        let _third = post_turn(&harness, &id, "three", true).await;
+
+        let row = loop {
+            let snapshot = status_snapshot(&mut reader).await;
+            let row = snapshot["sessions"][0].clone();
+            if row["queued"] == 2 {
+                break row;
+            }
+        };
+        assert_eq!(row["turn_id"], turn_id.as_str());
+        gate.cancel();
+    }
+
+    // ---- approvals decided inside the waiting turn ----
+
+    fn approval_harness() -> Harness {
+        Harness::with(HarnessOptions {
+            script: Script {
+                tool_command: Some("echo hi".to_string()),
+                deltas: vec!["done".to_string()],
+                ..Script::default()
+            },
+            elevate: true,
+            ..HarnessOptions::default()
+        })
+    }
+
+    async fn decide(harness: &Harness, session: &str, approval: &str, decision: &str) -> Reply {
+        harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{session}/approvals/{approval}"),
+                Some(&serde_json::json!({ "decision": decision }).to_string()),
+            )
+            .await
+    }
+
+    /// Starts a turn that requests an approval; returns the reader, turn id
+    /// and approval id once the `approval_requested` frame arrived.
+    async fn waiting_turn(harness: &Harness, session: &str) -> (SseReader, String, String) {
+        let response = post_turn(harness, session, "run it", false).await;
+        let turn_id = turn_header(&response);
+        let mut reader = SseReader::new(response);
+        let requested = frame_named(&mut reader, "approval_requested").await;
+        let approval = requested["approval_id"].as_str().expect("id").to_string();
+        assert_eq!(requested["command"], "echo hi");
+        (reader, turn_id, approval)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_turn_waits_for_an_approval_then_retries_in_the_same_turn() {
+        let harness = approval_harness();
+        let id = harness.create().await;
+        let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+
+        let waiting = harness
+            .send("GET", &format!("/v1/sessions/{id}/turns/{turn_id}"), None)
+            .await
+            .json();
+        assert_eq!(waiting["status"], turn::TURN_RUNNING);
+        let status = harness.raw("GET", "/v1/status", None, &[]).await;
+        let snapshot = status_snapshot(&mut SseReader::new(status)).await;
+        assert_eq!(snapshot["sessions"][0]["approvals"], 1);
+
+        let allowed = decide(&harness, &id, &approval, "allow").await;
+        assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.body);
+        assert_eq!(allowed.json()["decision"], "allow");
+        let decided = frame_named(&mut reader, "approval_decided").await;
+        assert_eq!(decided["decision"], "allow");
+        assert_eq!(decided["approval_id"], approval.as_str());
+
+        let (_, last, end) = ends_of(reader).await;
+        assert_eq!((last.as_str(), end.as_str()), ("turn_end", "ok"));
+        let summary = harness.wait_turn_done(&id, &turn_id).await;
+        assert_eq!(summary["status"], "ok");
+        // The retry ran in the same turn: no second turn exists.
+        let session = harness
+            .send("GET", &format!("/v1/sessions/{id}"), None)
+            .await
+            .json();
+        assert_eq!(session["turn"]["id"], turn_id.as_str());
+
+        let again = decide(&harness, &id, &approval, "allow").await;
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        assert_eq!(again.json()["error"]["code"], "approval_decided");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn denying_an_approval_ends_the_turn_ok() {
+        let harness = approval_harness();
+        let id = harness.create().await;
+        let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+
+        let denied = decide(&harness, &id, &approval, "deny").await;
+        assert_eq!(denied.status, StatusCode::OK, "{}", denied.body);
+        assert_eq!(denied.json()["decision"], "deny");
+        let decided = frame_named(&mut reader, "approval_decided").await;
+        assert_eq!(decided["decision"], "deny");
+        let summary = harness.wait_turn_done(&id, &turn_id).await;
+        assert_eq!(summary["status"], "ok");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unknown_approval_id_answers_409_approval_failed() {
+        let harness = approval_harness();
+        let id = harness.create().await;
+        let (_reader, _turn_id, _approval) = waiting_turn(&harness, &id).await;
+        let reply = decide(&harness, &id, "nope", "allow").await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "approval_failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelling_a_turn_during_an_approval_wait_ends_it_canceled() {
+        let harness = approval_harness();
+        let id = harness.create().await;
+        let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+
+        let cancel = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns/{turn_id}/cancel"),
+                None,
+            )
+            .await;
+        assert_eq!(cancel.status, StatusCode::ACCEPTED);
+        let summary = harness.wait_turn_done(&id, &turn_id).await;
+        assert_eq!(summary["status"], "canceled");
+        let mut names = Vec::new();
+        while let Some(frame) = reader.next().await {
+            names.push(frame.event);
+        }
+        assert!(!names.iter().any(|name| name == "approval_decided"));
+        assert_eq!(names.last().map(String::as_str), Some("turn_end"));
+        let late = decide(&harness, &id, &approval, "allow").await;
+        assert_eq!(late.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn an_approval_not_decided_in_ten_minutes_times_out_as_a_denial() {
+        let harness = approval_harness();
+        let id = harness.create().await;
+        let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+
+        tokio::time::pause();
+        tokio::time::advance(APPROVAL_TIMEOUT + Duration::from_secs(1)).await;
+        let decided = frame_named_untimed(&mut reader, "approval_decided").await;
+        assert_eq!(decided["decision"], "timeout");
+        assert_eq!(decided["approval_id"], approval.as_str());
+        tokio::time::resume();
+        let summary = harness.wait_turn_done(&id, &turn_id).await;
+        assert_eq!(summary["status"], "ok");
+        let late = decide(&harness, &id, &approval, "allow").await;
+        assert_eq!(late.status, StatusCode::CONFLICT);
+        assert_eq!(late.json()["error"]["code"], "approval_decided");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_task_turn_waits_for_an_approval_too() {
+        let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                tool_command: Some("echo hi".to_string()),
+                deltas: vec!["done".to_string()],
+                ..Script::default()
+            },
+            elevate: true,
+            tasks: Some(Arc::clone(&tasks)),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        tasks.notifications().push(notification());
+
+        let turn_id = loop {
+            let session = harness
+                .send("GET", &format!("/v1/sessions/{id}"), None)
+                .await
+                .json();
+            if let Some(turn_id) = session["turn"]["id"].as_str() {
+                break turn_id.to_string();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        let response = harness
+            .raw(
+                "GET",
+                &format!("/v1/sessions/{id}/turns/{turn_id}/events"),
+                None,
+                &[],
+            )
+            .await;
+        let mut reader = SseReader::new(response);
+        let requested = frame_named(&mut reader, "approval_requested").await;
+        let approval = requested["approval_id"].as_str().expect("id").to_string();
+        let allowed = decide(&harness, &id, &approval, "allow").await;
+        assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.body);
+        let summary = harness.wait_turn_done(&id, &turn_id).await;
+        assert_eq!(summary["trigger"], turn::TRIGGER_TASK);
+        assert_eq!(summary["status"], "ok");
     }
 }

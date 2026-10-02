@@ -147,7 +147,7 @@ The selected model and OpenAI-compatible endpoint must support image input.
   forwards it to a running `otto serve`.
 - [Chat connector](docs/user-manual.md#chat-connector): `otto-connect`, a
   separate Go program in `connect/`, runs `otto acp` and connects it to
-  Telegram chats, one session per chat, with `/allow` and `/deny` for
+  Telegram and Feishu chats, one session per chat, with `/allow` and `/deny` for
   elevated `bash` commands and `/sessions` and `/use` to pick a session.
   With `otto acp --attach`, chats share sessions with the `otto serve` web UI
   and `otto --attach` terminals.

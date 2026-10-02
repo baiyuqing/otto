@@ -1,7 +1,30 @@
 # Chat connector (`otto-connect`)
 
-Status: approved 2026-10-02 with D1-D6 as written. Change 1 of "Delivery in
-three changes" (core and Telegram) is implemented with this document.
+Status: approved 2026-10-02 with D1-D6 as written. Changes 1 (core and
+Telegram) and 2 (Feishu) of "Delivery in three changes" are implemented; the
+user manual's "Chat connector" section describes current behavior.
+
+Implementation notes for change 2 (`channel-sdk-go` v0.1.0), where the SDK
+differs from the "Facts" below:
+
+- Batching is off (`Safety.Batch.DelayMs = 0`). A merged message carries
+  the last message's sender and message id with the text of the whole
+  batch, so in a group an unlisted sender's text would be attributed to a
+  listed sender.
+- The SDK acknowledges an event when its dispatcher has queued it, before
+  the `OnMessage` handler runs. Delivery stays at most once.
+- The SDK drops messages older than its stale window without a callback.
+  The adapter sets that window to 24 h so the bridge's 30-minute rule
+  applies and the chat gets the notice.
+- Messages the SDK policy rejects never reach the bridge; the adapter logs
+  them from `OnReject` with the bridge's rejection log message, so the
+  chat and sender ids can still be read from the log. Rejections with
+  reason `no_mention` are not logged: the SDK checks the group before the
+  mention, so the chat is already allowed, and the Telegram adapter drops
+  unmentioned group messages without a log line too.
+- With an empty `chats` list the adapter sets a group allowlist that no
+  chat id matches, and with an empty `senders` list `DMMode = "disabled"`,
+  because an empty SDK group allowlist admits every group.
 
 Supersedes the "IM access goes through cc-connect" section of the
 [ACP agent server design](2026-10-02-acp-agent-server.md). `otto acp` itself

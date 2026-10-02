@@ -52,6 +52,7 @@ type Bridge struct {
 	chats     map[string]*chat
 	bySession map[string]*chat // chats with a running prompt, by session id
 	closing   bool
+	sessLocks map[string]*sync.Mutex // one per session id; guarded by mu
 }
 
 // New returns a Bridge and registers it as the agent's handler.
@@ -76,6 +77,7 @@ func New(opts Options) *Bridge {
 		platforms: map[string]Platform{},
 		chats:     map[string]*chat{},
 		bySession: map[string]*chat{},
+		sessLocks: map[string]*sync.Mutex{},
 	}
 	b.workCtx, b.stopWork = context.WithCancel(context.Background())
 	for _, p := range opts.Platforms {
@@ -182,6 +184,13 @@ func (b *Bridge) deliver(m Message) {
 	case "/allow", "/deny":
 		c.cmdDecide(m, text == "/allow")
 		return
+	case "/sessions":
+		c.cmdSessions(m)
+		return
+	}
+	if arg, ok := strings.CutPrefix(text, "/use"); ok && (arg == "" || arg[0] == ' ' || arg[0] == '\t') {
+		c.cmdUse(m, strings.TrimSpace(arg))
+		return
 	}
 	if m.Attachment {
 		c.notify(m.MessageID, "Attachments are not supported and were ignored.")
@@ -203,6 +212,21 @@ func (b *Bridge) chat(p Platform, id string) *chat {
 		b.chats[key] = c
 	}
 	return c
+}
+
+// sessionLock returns the mutex that serializes prompts on session id. Two
+// chats bound to one session would otherwise overwrite each other in
+// bySession and receive each other's updates. Go mutexes are not FIFO; the
+// order of chats that wait together is not guaranteed.
+func (b *Bridge) sessionLock(id string) *sync.Mutex {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	l := b.sessLocks[id]
+	if l == nil {
+		l = &sync.Mutex{}
+		b.sessLocks[id] = l
+	}
+	return l
 }
 
 // Update implements agent.Handler. It only takes a mutex.
@@ -237,6 +261,7 @@ type chat struct {
 	mu      sync.Mutex
 	queue   []Message
 	running bool // a worker goroutine owns the queue
+	using   bool // a /use is loading a session
 	sid     string
 	stopped bool // /stop arrived during the current turn
 	perm    *permission
@@ -272,6 +297,10 @@ func (c *chat) notify(replyTo, text string) {
 func (c *chat) enqueue(m Message) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.using {
+		c.notify(m.MessageID, "A session switch is in progress; the message was not queued.")
+		return
+	}
 	if len(c.queue) >= c.b.opts.QueueLimit {
 		c.notify(m.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not queued.", c.b.opts.QueueLimit))
 		return
@@ -328,9 +357,12 @@ func (c *chat) turn(m Message) {
 		if sid, err = c.session(ctx, m.MessageID); err != nil {
 			break
 		}
+		lock := c.b.sessionLock(sid)
+		lock.Lock()
 		c.mu.Lock()
 		if c.stopped {
 			c.mu.Unlock()
+			lock.Unlock()
 			c.send(ctx, m.MessageID, "Stopped.")
 			return
 		}
@@ -347,6 +379,7 @@ func (c *chat) turn(m Message) {
 		c.b.mu.Lock()
 		delete(c.b.bySession, sid)
 		c.b.mu.Unlock()
+		lock.Unlock()
 		if !errors.Is(err, agent.ErrNotOpen) {
 			break
 		}
@@ -559,8 +592,137 @@ func (c *chat) askPermission(ctx context.Context, req acp.RequestPermissionReque
 		}
 		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(denyID)}
 	}
-	if ctx.Err() == nil {
+	switch {
+	case ctx.Err() == nil:
 		c.send(ctx, "", "Permission request timed out; denied.")
+	case context.Cause(ctx) == context.Canceled && c.b.workCtx.Err() == nil:
+		// The SDK cancels a request context with the cause context.Canceled
+		// only for $/cancel_request; a closed connection ends it with the
+		// connection's error. /stop, /allow and /deny took the request above
+		// (taken), and shutdown cancels workCtx, so neither reaches here.
+		c.send(c.b.workCtx, "", "permission request answered elsewhere")
 	}
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(denyID)}
+}
+
+// cmdSessions lists up to 10 sessions of the agent's workspace.
+func (c *chat) cmdSessions(m Message) {
+	go func() {
+		ctx, stop := context.WithTimeout(c.b.workCtx, 30*time.Second)
+		defer stop()
+		list, err := c.b.opts.Agent.List(ctx)
+		if err != nil {
+			c.send(c.b.workCtx, m.MessageID, "Error: session/list failed: "+err.Error())
+			return
+		}
+		if len(list) == 0 {
+			c.send(c.b.workCtx, m.MessageID, "No sessions.")
+			return
+		}
+		cur := c.b.opts.Store.Session(c.key)
+		var sb strings.Builder
+		for i, s := range list[:min(len(list), maxListed)] {
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			id := string(s.SessionId)
+			mark := " "
+			if id == cur {
+				mark = "*"
+			}
+			fmt.Fprintf(&sb, "%s %s  %s  %s", mark, id[:min(len(id), 8)], updated(s), title(s))
+		}
+		c.send(c.b.workCtx, m.MessageID, sb.String())
+	}()
+}
+
+const (
+	maxListed    = 10
+	minPrefix    = 4
+	fullIDLength = 32
+)
+
+func title(s acp.SessionInfo) string {
+	if s.Title == nil || *s.Title == "" {
+		return "(untitled)"
+	}
+	return *s.Title
+}
+
+// updated formats UpdatedAt (RFC 3339) in the zone it carries.
+func updated(s acp.SessionInfo) string {
+	if s.UpdatedAt == nil {
+		return "-"
+	}
+	t, err := time.Parse(time.RFC3339, *s.UpdatedAt)
+	if err != nil {
+		return *s.UpdatedAt
+	}
+	return t.Format("2006-01-02 15:04")
+}
+
+// cmdUse binds the chat to a session: it resolves id (full or a unique prefix
+// of a listed session), sends session/load and stores the binding.
+func (c *chat) cmdUse(m Message, arg string) {
+	c.mu.Lock()
+	if c.running || c.using {
+		c.mu.Unlock()
+		c.notify(m.MessageID, "A message is running or queued; /use is refused. Send /stop first.")
+		return
+	}
+	c.using = true
+	c.mu.Unlock()
+	go func() {
+		defer func() {
+			c.mu.Lock()
+			c.using = false
+			c.mu.Unlock()
+		}()
+		reply := func(text string) { c.send(c.b.workCtx, m.MessageID, text) }
+		if arg == "" {
+			reply("Usage: /use <session id>")
+			return
+		}
+		if len(arg) < minPrefix {
+			reply(fmt.Sprintf("A session id prefix needs at least %d characters.", minPrefix))
+			return
+		}
+		ctx, stop := context.WithTimeout(c.b.workCtx, 2*time.Minute)
+		defer stop()
+		list, err := c.b.opts.Agent.List(ctx)
+		if err != nil {
+			reply("Error: session/list failed: " + err.Error())
+			return
+		}
+		var found []acp.SessionInfo
+		for _, s := range list {
+			id := string(s.SessionId)
+			if id == arg || len(arg) < fullIDLength && strings.HasPrefix(id, arg) {
+				found = append(found, s)
+			}
+		}
+		id := arg
+		switch {
+		case len(found) > 1:
+			reply(fmt.Sprintf("%q matches %d sessions; use more characters.", arg, len(found)))
+			return
+		case len(found) == 1:
+			id = string(found[0].SessionId)
+		case len(arg) < fullIDLength:
+			reply(fmt.Sprintf("No listed session starts with %q.", arg))
+			return
+		}
+		if err := c.b.opts.Agent.Load(ctx, id); err != nil {
+			reply("Error: could not load session " + id + ": " + err.Error())
+			return
+		}
+		if err := c.b.opts.Store.SetSession(c.key, id); err != nil {
+			slog.Warn("saving session id failed", "chat", c.key, "error", err)
+		}
+		t := "(untitled)"
+		if len(found) == 1 {
+			t = title(found[0])
+		}
+		reply("Using session " + id + ": " + t)
+	}()
 }

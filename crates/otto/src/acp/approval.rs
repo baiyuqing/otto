@@ -18,14 +18,8 @@ use crate::app::ApprovalDecision as Decision;
 const ALLOW_ONCE: &str = "allow_once";
 const REJECT_ONCE: &str = "reject_once";
 
-/// Asks the client to allow `command` once and waits for the answer.
-pub(super) async fn request_permission(
-    connection: &Connection,
-    session_id: &str,
-    tool_call_id: &str,
-    command: &str,
-    cancel: &CancellationToken,
-) -> Decision {
+/// The `session/request_permission` parameters for one elevated command.
+pub(super) fn permission_params(session_id: &str, tool_call_id: &str, command: &str) -> Value {
     let tool_call = ToolCallUpdate::new(
         tool_call_id.to_string(),
         ToolCallUpdateFields::new()
@@ -41,7 +35,18 @@ pub(super) async fn request_permission(
             PermissionOption::new(REJECT_ONCE, "Deny", PermissionOptionKind::RejectOnce),
         ],
     );
-    let params = serde_json::to_value(request).expect("permission request serializes");
+    serde_json::to_value(request).expect("permission request serializes")
+}
+
+/// Asks the client to allow `command` once and waits for the answer.
+pub(super) async fn request_permission(
+    connection: &Connection,
+    session_id: &str,
+    tool_call_id: &str,
+    command: &str,
+    cancel: &CancellationToken,
+) -> Decision {
+    let params = permission_params(session_id, tool_call_id, command);
     let (id, reply) = connection.send_request("session/request_permission", params);
     tokio::select! {
         () = cancel.cancelled() => {
@@ -53,7 +58,7 @@ pub(super) async fn request_permission(
 }
 
 /// Reads the client's response frame.
-fn decide(frame: &Value) -> Decision {
+pub(super) fn decide(frame: &Value) -> Decision {
     let Some(result) = frame.get("result") else {
         return Decision::Deny;
     };

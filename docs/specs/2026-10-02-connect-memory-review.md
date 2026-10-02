@@ -102,3 +102,12 @@ JSON-RPC wrapper. A unique candidate prefix needs at least 4 characters and
 is resolved by the connector against the pending list. A source guard
 (`crates/otto/tests/memory_review_boundary.rs`) fails if anything under
 `src/tool/` can decide a candidate.
+
+## Card support update
+
+Telegram and Feishu now use the existing approval buttons for memory review as
+well as Bash permissions. Successful turns refresh the first pending page;
+`/memory` explicitly replaces its cards. Random button tokens bind the original
+session and candidate, and admitted human clicks call the existing review API.
+Text commands remain available and card delivery failures fall back to them.
+The user manual is the canonical behavior reference.

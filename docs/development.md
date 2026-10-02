@@ -38,7 +38,8 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `subagent`: child agent construction (`Runner`), task lifecycle, the parent-facing `agent`/`agent_wait`/`agent_status`/`agent_send` tools, the child-only `agent_report` tool, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
   - `workflow`: workspace-scoped TOML DAG discovery, SQLite run/step/attempt/approval/event state, committed-boundary recovery, and the shared CLI/server workflow controller
   - `inbound`: host adapters that turn external event streams into session inbox notifications. Feishu inbound spawns `lark-cli event consume im.message.receive_v1 --as bot`, parses NDJSON, expands `merge_forward` via `lark-cli im +messages-mget --as bot`, and fans messages out through `Controller::notify`
-  - `acp`: the Agent Client Protocol v1 agent server behind `otto acp`: newline-delimited JSON-RPC on stdin/stdout with a single stdout writer, per-session `Controller`s on one `Builder`, the mapping from agent events and stored history to `session/update`, and the after-turn `session/request_permission` round trip for elevated `bash`. Message types come from the `agent-client-protocol-schema` crate; the design is `docs/specs/2026-10-02-acp-agent-server.md`
+  - `acp`: the Agent Client Protocol v1 agent server behind `otto acp`: newline-delimited JSON-RPC on stdin/stdout with a single stdout writer, per-session `Controller`s on one `Builder`, the mapping from agent events and stored history to `session/update`, and the after-turn `session/request_permission` round trip for elevated `bash`. `acp::attach` is the `otto acp --attach` relay: the same transport and dispatcher with every session operation sent to `otto serve` through `client`. Message types come from the `agent-client-protocol-schema` crate; the designs are `docs/specs/2026-10-02-acp-agent-server.md` and `docs/specs/2026-10-02-shared-session.md`
+  - `client`: the HTTP client of `otto serve` over its Unix socket (sessions, history, queued turns with their SSE stream, turn cancel, approval decisions); it maps a failed connection to `Error::Unreachable` and a non-2xx answer to `Error::Http`
   - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI (`ui/dist`, written by `make ui`)
   - `tui`: the terminal frontend on the alternate screen, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
 - `crates/otto-web`: the wasm cdylib the browser UI loads; exports `otto-core`'s wire codecs to JavaScript through `wasm-bindgen`
@@ -253,9 +254,9 @@ Go connector checks, the wasm32 build check, the wasm tests under Node, the PTY
 smoke test, and `make ui-test`.
 
 `connect-check` needs the Go version named in `connect/go.mod`; CI installs it
-with `actions/setup-go` from that file. Its end-to-end test drives the real
-`otto acp` from `target/debug/otto` against a loopback fake provider, so it is
-offline like the Rust tests.
+with `actions/setup-go` from that file. Its end-to-end tests drive the real
+`otto acp`, and `otto serve` with `otto acp --attach`, from `target/debug/otto`
+against a loopback fake provider, so they are offline like the Rust tests.
 
 `rust-wasm-test` and `make ui`/`make ui-test` need `wasm-pack` (pinned to
 0.15.0 in CI via `cargo install wasm-pack --version 0.15.0 --locked`).

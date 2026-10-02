@@ -225,7 +225,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
 | `otto trust <dir> [--config PATH]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
 | `otto serve [--socket PATH] [--listen HOST:PORT [--open] [--exit-on-stdin-close]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket, a loopback TCP port, or both, instead of an interactive frontend. See [Agent server](#agent-server). |
-| `otto acp` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as `otto-connect`. See [ACP agent server](#acp-agent-server). |
+| `otto acp [--attach [--socket PATH]]` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as `otto-connect`. With `--attach`, forward each request to a running `otto serve` instead of opening sessions in this process. See [ACP agent server](#acp-agent-server). |
 
 | Flag | Description |
 | --- | --- |
@@ -246,7 +246,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume`, `--archive`, or `--no-session`. |
 | `--resume PATH` | Resume a specific session file. Cannot be combined with `--continue`, `--archive`, or `--no-session`. |
 | `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--prompt`. |
-| `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. With `--listen`, both listeners are opened. |
+| `--socket PATH` | `serve`, or `acp --attach`. Unix domain socket path of `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. For `serve` with `--listen`, both listeners are opened. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. With `--socket`, both listeners are opened. |
 | `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). A failed launch is not fatal: the URL is still printed. |
 | `--exit-on-stdin-close` | `serve` only. Read stdin and shut down, as on `SIGTERM`, when it reaches end of file or a read fails. Without the flag stdin is not read. Requires a TCP listener. |
@@ -1964,7 +1964,8 @@ otto acp [--config PATH] [--cwd PATH] [--profile NAME] ...
 `acp` accepts `--config`, `--cwd`, `--profile`, `--provider`, `--base-url`,
 `--model`, `--thinking`, `--sandbox`, `--shell-timeout`, and
 `--max-output-bytes`. It rejects `--ui`, `--prompt`, `--resume`,
-`--continue`, `--no-session`, `--archive`, and the `serve`-only flags.
+`--continue`, `--no-session`, `--archive`, and the `serve`-only flags;
+`--socket` is accepted only with `--attach`.
 
 One process serves one workspace: `--cwd`, else the process working
 directory. A request whose `cwd` resolves to another directory is rejected.
@@ -2020,6 +2021,47 @@ answers each with `cancelled`, closes every session, and exits `0`. A
 A client that kills the process with `SIGKILL` loses the assistant message
 being streamed; everything Otto had already written to the session file
 remains.
+
+### `--attach` forwards requests to `otto serve`
+
+```bash
+otto acp --attach [--socket PATH]
+```
+
+`otto acp --attach` holds no session: it forwards each ACP method to a
+running `otto serve` over its Unix socket, so the session it uses can be open
+in the web UI, in another `otto acp --attach` process, and in `otto serve`'s
+other clients at the same time. It runs no model or tool and reads no
+provider credentials. The socket defaults to `[server].socket`, then
+`~/.otto/otto.sock`; TCP is not supported. The `initialize` response, the
+workspace rule and the `cwd` checks are those of `otto acp`, and `otto serve`
+must admit the workspace (see [Workspaces](#workspaces)).
+
+At startup it requests `GET /healthz`. If `otto serve` does not answer, it
+prints `otto serve is not reachable at <path>: <error>` to stderr and exits
+with status `1`.
+
+| Method | Request to `otto serve` |
+| --- | --- |
+| `session/new` | `POST /v1/sessions` with the workspace. |
+| `session/load` | `POST /v1/sessions` with `resume`, then `GET .../history`, sent as `session/update` notifications before the response. Any session id of the workspace can be loaded, including one older than the newest 20. |
+| `session/list` | `GET /v1/sessions?workspace=...`. |
+| `session/prompt` | `POST .../turns` with `"queue": true`. A prompt sent while the session runs another client's turn waits in `otto serve`'s queue (see [Turn queue](#turn-queue)). |
+| `session/cancel` | Cancels the prompt's turn, queued or running. |
+
+- Only turns started by this process are forwarded; turns from other
+  clients of the same session are not sent as `session/update`.
+- A turn that ends with an error answers the prompt with a JSON-RPC error
+  carrying the redacted message.
+- An elevated `bash` command sends `session/request_permission` while the
+  turn waits (see [Approvals inside a turn](#approvals-inside-a-turn)).
+  **Allow once** allows it; any other answer denies it. If another client
+  decides first, the request is withdrawn with `$/cancel_request` and the
+  turn continues with that decision.
+- If the connection to `otto serve` fails, or a turn's event stream ends
+  without its `turn_end` frame, every running prompt is answered with the
+  JSON-RPC error `connection to otto serve lost` and the process exits with
+  status `1`.
 
 ### Chat access goes through otto-connect
 
@@ -2087,6 +2129,27 @@ senders = ["123456789"]
 - Log lines contain chat ids, sender ids, and errors. Message text is not
   logged.
 
+### Sharing sessions with `otto serve`
+
+With `command = ["otto", "acp", "--attach"]`, the agent process is the
+relay described in [`--attach` forwards requests to `otto serve`](#--attach-forwards-requests-to-otto-serve):
+sessions, models, and tools run in the `otto serve` on the socket, and the
+web UI of that serve shows the same sessions.
+
+```toml
+[agent]
+command = ["otto", "acp", "--attach"]   # add "--socket", "/path" for a non-default socket
+workspace = "/Users/me/work"            # the same workspace the serve clients use
+```
+
+- Start `otto serve` before `otto-connect`. The relay reads no provider
+  credentials; the serve process needs them.
+- A chat's message and a web UI message on the same session wait in serve's
+  turn queue and run one after the other. The chat gets the reply of its own
+  turns only; turns started in the web UI are not sent to the chat.
+- Use `/sessions` and `/use` (see [Commands](#commands)) to bind a chat to a
+  session that was started in another client.
+
 ### Admission
 
 A message is handled only when its chat id is in `chats` and its sender id
@@ -2106,12 +2169,16 @@ messages to the bot.
 - Each chat has one Otto session. The first message creates it; after a
   restart of `otto-connect` or of the agent, the next message loads it.
   The replayed history of a loaded session is not sent to the chat.
-- If the session cannot be loaded (for example it is open in the TUI or in
-  `otto serve`), the chat gets "The previous session could not be loaded;
-  started a new one." and the message runs in a new session.
+- If the session cannot be loaded (for example, without `--attach`, it is
+  open in the TUI or in `otto serve`), the chat gets "The previous session
+  could not be loaded; started a new one." and the message runs in a new
+  session.
 - One prompt runs per chat at a time; further messages wait in a queue of at
   most 10. A message beyond that gets "Queue is full (10 messages); the
-  message was not queued." Different chats run concurrently.
+  message was not queued." Chats on different sessions run concurrently.
+  Chats bound to the same session (with `/use`) take turns: one prompt runs
+  on a session at a time, and when three or more chats wait for the same
+  session, the order in which they run is not guaranteed.
 - The reply is sent when the turn ends, as a reply to the message that
   started it. It contains the assistant text only: reasoning and tool calls
   are not sent, and text before and after a tool call is separated by a
@@ -2128,9 +2195,9 @@ messages to the bot.
 
 ### Commands
 
-A message whose whole text is one of these commands is handled by
-`otto-connect` and not sent to Otto. Any other text, including other words
-starting with `/`, is a prompt.
+A message whose whole text is one of these commands (for `/use`, the
+command and its argument) is handled by `otto-connect` and not sent to Otto.
+Any other text, including other words starting with `/`, is a prompt.
 
 | Command | Effect |
 | --- | --- |
@@ -2138,6 +2205,23 @@ starting with `/`, is a prompt.
 | `/stop` | Cancels the running turn (reply "Stopped.") and clears the chat's queue. With nothing running: "Nothing is running." |
 | `/allow` | Answers the pending permission request with Allow once. |
 | `/deny` | Answers the pending permission request with Deny. |
+| `/sessions` | Lists the 10 newest sessions of the workspace, one per line: `*` for the chat's session or a space, the first 8 characters of the id, the last change as `YYYY-MM-DD HH:MM` (`-` when unknown), and the title (`(untitled)` when empty). With none: "No sessions." |
+| `/use <id>` | Binds the chat to a session and loads it. `<id>` is a full session id, or a prefix of at least 4 characters of a session that `session/list` returns (the newest 20). Reply: "Using session `<id>`: `<title>`". |
+
+`/use` replies with one of these when it does not switch:
+
+| Case | Reply |
+| --- | --- |
+| No argument | "Usage: /use <session id>" |
+| Prefix shorter than 4 characters | "A session id prefix needs at least 4 characters." |
+| Prefix matches several listed sessions | "\"`<prefix>`\" matches `<n>` sessions; use more characters." |
+| Prefix matches no listed session | "No listed session starts with \"`<prefix>`\"." |
+| A message of the chat is running or queued | "A message is running or queued; /use is refused. Send /stop first." |
+| The agent refuses the load | "Error: could not load session `<id>`: `<error>`" |
+
+A message that arrives while `/use` is loading gets "A session switch is in
+progress; the message was not queued." A failed `session/list` call in
+`/sessions` or `/use` gets "Error: session/list failed: `<error>`".
 
 ### Permission requests
 
@@ -2149,12 +2233,25 @@ cancels it. With no answer after 10 minutes the request is denied and the
 chat gets "Permission request timed out; denied." `/allow` or `/deny` with
 no pending request gets "No pending request."
 
+With `--attach`, the same request is also shown in the web UI of
+`otto serve`. When another client decides it first, serve's own
+10-minute timeout denies it, or the turn ends before an answer, the relay
+withdraws the request (`$/cancel_request`) and the chat gets "permission
+request answered elsewhere". A later `/allow` or `/deny` gets "No pending
+request."
+
 ### Agent process exits
 
 If `otto acp` exits, each running turn ends and its chat gets one message
 with the exit status and the last 20 lines of the agent's stderr. The next
 message starts the agent again. After consecutive exits within 60 s of a
 start, the restart waits 1 s, then 2 s, 4 s, and so on up to 60 s.
+
+With `--attach`, the relay exits with status 1 when `otto serve` stops or
+the socket connection breaks, and a relay started while serve is not
+running exits with status 1 and the stderr line "otto serve is not reachable
+at `<path>`: `<error>`". Both reach the chat as an agent exit. Restart
+`otto serve`; the next message starts the relay again.
 
 ### Not supported by otto-connect
 

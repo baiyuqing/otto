@@ -242,3 +242,27 @@ func TestRunReturnsStartError(t *testing.T) {
 		t.Errorf("Run = %v", err)
 	}
 }
+
+func TestSDKReadReceiptLogLevel(t *testing.T) {
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(old)
+	for _, tc := range []struct{ event, detail, level string }{
+		{"im.message.message_read_v1", "not found handler", "DEBUG"},
+		{"im.message.receive_v1", "not found handler", "ERROR"},
+		{"im.message.message_read_v1", "invalid payload", "ERROR"},
+	} {
+		logs.Reset()
+		slogLogger{}.Error(context.Background(), "handle message failed, message_type: event, message_id: test, err: event type: %s, %s [conn_id=123]", tc.event, tc.detail)
+		if !strings.Contains(logs.String(), "level="+tc.level) {
+			t.Errorf("event %s (%s): got %s, want %s", tc.event, tc.detail, logs.String(), tc.level)
+		}
+	}
+	logs.Reset()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	slogLogger{}.Error(context.Background(), "handle message failed, err: event type: im.message.message_read_v1, not found handler [conn_id=123]")
+	if logs.Len() != 0 {
+		t.Fatalf("benign read receipt logged at default level: %s", logs.String())
+	}
+}

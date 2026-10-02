@@ -227,7 +227,15 @@ func (slogLogger) Warn(_ context.Context, args ...interface{}) {
 	slog.Warn("feishu sdk", "msg", format(args))
 }
 func (slogLogger) Error(_ context.Context, args ...interface{}) {
-	slog.Error("feishu sdk", "msg", format(args))
+	msg := format(args)
+	// The channel SDK has no read-receipt hook. This unused event is benign;
+	// keep it visible at debug without hiding other dispatcher failures.
+	if strings.HasPrefix(msg, "handle message failed,") &&
+		strings.Contains(msg, "err: event type: im.message.message_read_v1, not found handler") {
+		slog.Debug("feishu sdk", "msg", msg)
+		return
+	}
+	slog.Error("feishu sdk", "msg", msg)
 }
 
 // format handles both Sprint-style and Printf-style SDK calls.

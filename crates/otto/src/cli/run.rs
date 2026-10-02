@@ -429,6 +429,31 @@ pub async fn run(
         Ok(path) => path.to_string_lossy().into_owned(),
         Err(error) => return fail(stderr, &startup.redact(&format!("resolve cwd: {error}"))),
     };
+    if options.attach {
+        // The relay builds no provider runtime and opens no sandbox or
+        // session: it forwards to the `otto serve` on the socket, which is
+        // `--socket`, `[server].socket` or the default, never a TCP address.
+        let mut file = config_file.clone();
+        file.server.listen.clear();
+        let socket = resolve_server(&file, &environment, &options.socket, "")
+            .map_err(|error| error.to_string())
+            .and_then(|server| {
+                std::path::absolute(&server.socket).map_err(|error| error.to_string())
+            });
+        let socket = match socket {
+            Ok(socket) => socket,
+            Err(message) => return fail(stderr, &startup.redact(&message)),
+        };
+        return crate::acp::attach::run(
+            &socket,
+            PathBuf::from(&workspace_path),
+            stdin,
+            stdout,
+            stderr,
+            cancel,
+        )
+        .await;
+    }
     let workspace = match leaked_workspace(Path::new(&workspace_path)) {
         Ok(workspace) => workspace,
         Err(error) => {

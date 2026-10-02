@@ -26,11 +26,14 @@ type sent struct{ chat, replyTo, text string }
 // fakePlatform records what the bridge sends and lets the test deliver
 // messages.
 type fakePlatform struct {
-	mu      sync.Mutex
-	deliver func(Message)
-	started chan struct{}
-	sent    []sent
-	typing  int
+	mu        sync.Mutex
+	deliver   func(Message)
+	started   chan struct{}
+	sent      []sent
+	typing    int
+	approvals []string
+	statuses  []string
+	cardErr   error
 }
 
 func newFakePlatform() *fakePlatform { return &fakePlatform{started: make(chan struct{})} }
@@ -214,4 +217,26 @@ func newStore(t *testing.T) *state.Store {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func (p *fakePlatform) SendApproval(ctx context.Context, chat, id, text string) (func(context.Context, string) error, error) {
+	p.mu.Lock()
+	p.approvals = append(p.approvals, id)
+	err := p.cardErr
+	p.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	p.Send(ctx, chat, "", text)
+	return func(_ context.Context, status string) error {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.statuses = append(p.statuses, status)
+		return nil
+	}, nil
+}
+func (p *fakePlatform) approvalID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.approvals[len(p.approvals)-1]
 }

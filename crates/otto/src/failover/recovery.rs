@@ -57,6 +57,7 @@ pub fn notify(
         .collect();
 
     if takeover.repaired.is_empty()
+        && takeover.replayable.is_empty()
         && interrupted_children.is_empty()
         && ends_with_a_finished_assistant_turn(parent_messages)
     {
@@ -125,7 +126,7 @@ pub fn notify_moved(
         lease::local_hostname(),
         std::process::id(),
     );
-    let text = render_body(&header, &[], &moved, max_output_bytes);
+    let text = render_body(&header, &[], &[], &moved, max_output_bytes);
     inbox.push(Notification {
         task_id: String::new(),
         kind: Some(NotificationKind::Message),
@@ -147,7 +148,13 @@ fn render(takeover: &Takeover, interrupted: &[ChildRecord], max_output_bytes: us
         "This session was taken over from another host: the previous holder was fenced at epoch {}, host {}, pid {}.\n",
         takeover.holder.epoch, takeover.holder.host, takeover.holder.pid
     );
-    render_body(&header, &takeover.repaired, interrupted, max_output_bytes)
+    render_body(
+        &header,
+        &takeover.repaired,
+        &takeover.replayable,
+        interrupted,
+        max_output_bytes,
+    )
 }
 
 /// The body shared by [`render`] and [`notify_moved`]: a header line
@@ -156,10 +163,25 @@ fn render(takeover: &Takeover, interrupted: &[ChildRecord], max_output_bytes: us
 fn render_body(
     header: &str,
     repaired: &[UnansweredCall],
+    replayed: &[UnansweredCall],
     interrupted: &[ChildRecord],
     max_output_bytes: usize,
 ) -> String {
     let mut text = header.to_string();
+
+    if !replayed.is_empty() {
+        text.push_str(
+            "\nRead-only calls left unanswered when the session was taken over were run \
+             again; their results are in the transcript above and reflect the workspace now:\n",
+        );
+        for call in replayed {
+            text.push_str(&format!(
+                "- {} {}\n",
+                call.name,
+                truncate_bytes(&call.arguments, CALL_ARGUMENTS_PREVIEW_BYTES)
+            ));
+        }
+    }
 
     if !repaired.is_empty() {
         text.push_str("\nCalls left unanswered in this session when it was taken over:\n");
@@ -244,6 +266,7 @@ mod tests {
                 pid: 4242,
             },
             repaired,
+            replayable: Vec::new(),
         }
     }
 
@@ -370,6 +393,31 @@ mod tests {
             &[assistant("", true)],
         );
         assert_eq!(inbox.len(), 1);
+    }
+
+    #[test]
+    fn notify_lists_replayed_calls_apart_from_unanswered_ones() {
+        let inbox = Inbox::new(None);
+        let dir = tempfile::tempdir().expect("dir");
+        let mut record = takeover(Vec::new());
+        record.replayable = vec![call("read", "{\"path\":\"a.txt\"}", true)];
+        notify(
+            &inbox,
+            Some(record),
+            &dir.path().join("children"),
+            1000,
+            &[assistant("", true)],
+        );
+        let queued = inbox.queued();
+        assert_eq!(queued.len(), 1);
+        let text = &queued[0].notification.text;
+        assert!(text.contains("were run again"), "{text}");
+        assert!(text.contains("- read {\"path\":\"a.txt\"}"), "{text}");
+        assert!(
+            !text.contains("Calls left unanswered"),
+            "a replayed call is not reported as unanswered: {text}"
+        );
+        assert!(!text.contains("do not retry automatically"), "{text}");
     }
 
     /// Writes a child transcript at `<parent without .jsonl>/<task_id>-child.jsonl`

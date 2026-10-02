@@ -952,6 +952,7 @@ fn activate_initial_session(
 ) -> Result<(SharedSession, Vec<String>), String> {
     if let Some(prepared) = prepared {
         let (store, warnings) = prepared
+            .with_replayable(crate::tool::safety::is_replayable)
             .activate()
             .map_err(|error| builder.redact_error(&error.to_string(), Some(runtime)))?;
         let messages = warnings

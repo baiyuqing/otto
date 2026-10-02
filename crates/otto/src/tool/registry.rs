@@ -125,6 +125,10 @@ impl ToolExecutor for Registry {
         self.ordered.iter().map(|tool| tool.definition()).collect()
     }
 
+    fn replayable(&self, name: &str) -> bool {
+        self.lookup(name).is_some() && super::safety::is_replayable(name)
+    }
+
     async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution {
         if let Some(reason) = control.admission_stop_reason() {
             return stopped_not_started(reason);

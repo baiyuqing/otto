@@ -1,6 +1,9 @@
 # Shared sessions through `otto serve`
 
-Status: approved 2026-10-02. Change 1 (serve and web UI) merged in #273.
+Status: approved 2026-10-02. Change 1 (serve and web UI) merged in #273;
+change 2 (`otto acp --attach`, otto-connect `/sessions` and `/use`) merged
+in #276. Change 3 (`otto --attach`) is described in the
+[user manual](../user-manual.md#the-tui-attached-to-otto-serve).
 
 Extends the [chat connector design](2026-10-02-otto-connect.md): its "Not in
 this change" list names session listing and switching from the chat; this
@@ -314,6 +317,11 @@ Turns from other clients: the TUI reads `GET /v1/status`. When its session's
 `turn_id` changes to a turn this TUI did not start, it reloads the history
 with `before_turn` set to that turn and follows that turn's events from 0.
 The prompt appears through `user_message`.
+
+Implementation note (change 3): `GET /v1/status` coalesces changes, so a
+turn can start and finish between two snapshots. When the row names a new
+`turn_id` that is already finished, the TUI reloads the whole history instead
+of following the turn.
 
 When the connection is lost, the TUI shows `disconnected from otto serve` and
 retries every 1 s. On reconnect it resumes the same session and reloads the

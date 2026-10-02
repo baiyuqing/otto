@@ -56,7 +56,9 @@ pub struct CliOptions {
     pub listen_set: bool,
     pub serve: bool,
     pub acp: bool,
-    /// `otto acp --attach`: relay to an `otto serve` instead of running the agent.
+    /// Use the `otto serve` on the socket instead of running the agent:
+    /// `otto acp --attach` relays ACP to it, plain `otto --attach` runs the
+    /// TUI against it.
     pub attach: bool,
 }
 
@@ -206,7 +208,24 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
         }
     }
     if options.attach && !options.acp {
-        return Err(reject("otto: --attach requires the acp subcommand"));
+        let conflict = if options.serve {
+            "serve"
+        } else if options.prompt_set {
+            "--prompt"
+        } else if options.no_session {
+            "--no-session"
+        } else if !options.archive_path.is_empty() {
+            "--archive"
+        } else if ui_visited && !matches!(options.ui.as_str(), "auto" | "tui") {
+            "--ui repl"
+        } else {
+            ""
+        };
+        if !conflict.is_empty() {
+            return Err(reject(&format!(
+                "otto: --attach cannot be combined with {conflict}"
+            )));
+        }
     }
     if options.socket_set && !options.serve && !options.attach {
         return Err(reject("otto: --socket requires the serve subcommand"));
@@ -262,6 +281,7 @@ const USAGE: &str = r"Usage: otto [options]
        otto serve [options] [--socket PATH] [--listen HOST:PORT [--open] [--exit-on-stdin-close]]
        otto acp [options]      Agent Client Protocol server on stdin/stdout
        otto acp --attach [--socket PATH]   relay Agent Client Protocol to a running otto serve
+       otto --attach [--socket PATH] [--resume ID | --continue]   terminal UI on a running otto serve
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
        otto memory status|forget <id>
@@ -291,10 +311,10 @@ Options:
   --max-output-bytes N   maximum tool output bytes
   --no-session           use an in-memory session
   --continue             continue newest workspace session
-  --resume PATH          resume a session file
+  --resume PATH          resume a session file (with --attach: a session id)
   --archive PATH         archive an active session file
-  --socket PATH          unix socket path for the serve subcommand and acp --attach
-  --attach               acp: forward to the otto serve on the socket instead of running the agent
+  --socket PATH          unix socket path for the serve subcommand and --attach
+  --attach               use the otto serve on the socket instead of running the agent (terminal UI, or acp: relay)
   --listen HOST:PORT     loopback TCP address for the serve subcommand (prints a URL with the access token)
   --open                 open the serve URL in the default browser (TCP listener only)
   --exit-on-stdin-close  exit when stdin closes (TCP listener only)
@@ -618,6 +638,15 @@ mod tests {
     }
 
     #[test]
+    fn attach_without_acp_selects_the_tui_client() {
+        let got = options(&["--attach", "--socket", "/tmp/otto.sock", "--resume", "abc"]);
+        assert!(got.attach && !got.acp && got.socket_set);
+        assert_eq!(got.resume_path, "abc");
+        assert!(options(&["--attach", "--continue"]).continue_last);
+        assert!(options(&["--attach", "--ui", "tui"]).attach);
+    }
+
+    #[test]
     fn open_is_serve_only_and_needs_a_tcp_listener() {
         let got = options(&["serve", "--listen", "127.0.0.1:0", "--open"]);
         assert!(got.serve);
@@ -646,6 +675,10 @@ mod tests {
             assert!(text.contains("       otto acp [options]"), "{text}");
             assert!(
                 text.contains("       otto acp --attach [--socket PATH]"),
+                "{text}"
+            );
+            assert!(
+                text.contains("       otto --attach [--socket PATH] [--resume ID | --continue]"),
                 "{text}"
             );
             assert!(text.contains(
@@ -804,12 +837,28 @@ mod tests {
                 "otto: --socket requires the serve subcommand\n",
             ),
             (
-                &["--attach"],
-                "otto: --attach requires the acp subcommand\n",
+                &["serve", "--attach"],
+                "otto: --attach cannot be combined with serve\n",
             ),
             (
-                &["serve", "--attach"],
-                "otto: --attach requires the acp subcommand\n",
+                &["--attach", "--prompt", "x"],
+                "otto: --attach cannot be combined with --prompt\n",
+            ),
+            (
+                &["--attach", "--no-session"],
+                "otto: --attach cannot be combined with --no-session\n",
+            ),
+            (
+                &["--attach", "--archive", "/tmp/x.jsonl"],
+                "otto: --attach cannot be combined with --archive\n",
+            ),
+            (
+                &["--attach", "--ui", "repl"],
+                "otto: --attach cannot be combined with --ui repl\n",
+            ),
+            (
+                &["--attach", "--resume", "abc", "--continue"],
+                "otto: --continue and --resume cannot be used together\n",
             ),
             (
                 &["acp", "--attach", "--listen", "127.0.0.1:0"],

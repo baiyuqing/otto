@@ -2,7 +2,7 @@
 //! across every session and process (see
 //! `docs/specs/2026-09-25-agents-view.md`, "TUI"). Unlike
 //! [`super::context_view::ContextView`], which is built once from a
-//! snapshot, this overlay re-queries [`Controller::builder`]'s
+//! snapshot, this overlay re-queries the backend's
 //! [`crate::subagent::record::Store`] on every filter change and on the
 //! caller's periodic tick, since the underlying rows change while the
 //! overlay is open.
@@ -10,9 +10,9 @@
 use chrono::{DateTime, Utc};
 use crossterm::event::KeyCode;
 
+use super::app::Backend;
 use super::entries::{self, Entry};
 use super::layout::{footer_workspace, format_token_count};
-use crate::app::Controller;
 use crate::subagent::format::{first_runes, one_line};
 use crate::subagent::record::{ListQuery, TaskRow};
 
@@ -99,19 +99,19 @@ pub(crate) struct AgentsView {
 }
 
 impl AgentsView {
-    /// Opens the overlay, scoped to `controller`'s workspace by default, and
+    /// Opens the overlay, scoped to the backend's workspace by default, and
     /// runs the first query.
-    pub fn open(controller: &Controller) -> Self {
+    pub fn open(backend: &Backend) -> Self {
         let mut view = Self {
             rows: Vec::new(),
             status: StatusFilter::All,
             this_workspace_only: true,
-            workspace: controller.workspace().to_string(),
+            workspace: backend.workspace(),
             selected: 0,
             detail: None,
             error: None,
         };
-        view.refresh(controller);
+        view.refresh(backend);
         view
     }
 
@@ -126,9 +126,9 @@ impl AgentsView {
 
     /// Re-lists rows for the current filters, keeping the same row selected
     /// (by parent session and task id) when it is still in the result.
-    fn refresh(&mut self, controller: &Controller) {
+    fn refresh(&mut self, backend: &Backend) {
         let selected_key = self.rows.get(self.selected).map(row_key);
-        match controller.builder().tasks_list(&self.query()) {
+        match backend.tasks_list(&self.query()) {
             Ok(result) => {
                 self.rows = result.tasks;
                 self.error = None;
@@ -142,30 +142,27 @@ impl AgentsView {
 
     /// The periodic refresh: re-lists while the list is showing, or
     /// re-fetches the open task while the detail pane is showing.
-    pub fn tick(&mut self, controller: &Controller) {
+    pub fn tick(&mut self, backend: &Backend) {
         match self.detail.as_ref().map(|detail| row_key(&detail.row)) {
             Some((parent_session, task_id)) => {
-                self.refresh_detail(controller, &parent_session, &task_id);
+                self.refresh_detail(backend, &parent_session, &task_id);
             }
-            None => self.refresh(controller),
+            None => self.refresh(backend),
         }
     }
 
-    fn refresh_detail(&mut self, controller: &Controller, parent_session: &str, task_id: &str) {
-        if let Ok(Some(row)) = controller.builder().tasks_get(parent_session, task_id) {
+    fn refresh_detail(&mut self, backend: &Backend, parent_session: &str, task_id: &str) {
+        if let Ok(Some(row)) = backend.tasks_get(parent_session, task_id) {
             let scroll = self.detail.as_ref().map_or(0, |detail| detail.scroll);
             self.detail = Some(load_detail(row, scroll));
         }
     }
 
-    fn open_detail(&mut self, controller: &Controller) {
+    fn open_detail(&mut self, backend: &Backend) {
         let Some(selected) = self.rows.get(self.selected).cloned() else {
             return;
         };
-        let row = match controller
-            .builder()
-            .tasks_get(&selected.parent_session, &selected.task_id)
-        {
+        let row = match backend.tasks_get(&selected.parent_session, &selected.task_id) {
             Ok(Some(fresh)) => fresh,
             _ => selected,
         };
@@ -181,7 +178,7 @@ impl AgentsView {
 
     /// Applies one key. Returns `false` when Esc closes the overlay
     /// (from the list; Esc from the detail pane goes back to the list).
-    pub fn handle_key(&mut self, code: KeyCode, controller: &Controller) -> bool {
+    pub fn handle_key(&mut self, code: KeyCode, backend: &Backend) -> bool {
         if let Some(detail) = &mut self.detail {
             match code {
                 KeyCode::Esc => self.detail = None,
@@ -201,13 +198,13 @@ impl AgentsView {
             KeyCode::PageDown => self.move_selection(10),
             KeyCode::Char('s') => {
                 self.status = self.status.next();
-                self.refresh(controller);
+                self.refresh(backend);
             }
             KeyCode::Char('w') => {
                 self.this_workspace_only = !self.this_workspace_only;
-                self.refresh(controller);
+                self.refresh(backend);
             }
-            KeyCode::Enter => self.open_detail(controller),
+            KeyCode::Enter => self.open_detail(backend),
             _ => {}
         }
         true
@@ -320,6 +317,7 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+    use crate::app::Controller;
     use crate::cli::testutil;
     use crate::subagent::record::{self, TaskContext};
     use crate::subagent::tasks::{Task, TaskStatus};
@@ -451,7 +449,7 @@ mod tests {
             controller_with_task_recorder(workspace.path(), sessions.path(), Arc::clone(&store))
                 .await;
 
-        let view = AgentsView::open(&controller);
+        let view = AgentsView::open(&Backend::Local(&controller));
         assert_eq!(view.rows.len(), 1, "only the current workspace's row");
         assert_eq!(view.rows[0].task_id, "t1");
     }
@@ -468,10 +466,10 @@ mod tests {
             controller_with_task_recorder(workspace.path(), sessions.path(), Arc::clone(&store))
                 .await;
 
-        let mut view = AgentsView::open(&controller);
-        assert!(view.handle_key(KeyCode::Char('w'), &controller));
+        let mut view = AgentsView::open(&Backend::Local(&controller));
+        assert!(view.handle_key(KeyCode::Char('w'), &Backend::Local(&controller)));
         assert_eq!(view.rows.len(), 2, "both workspaces now listed");
-        assert!(view.handle_key(KeyCode::Char('w'), &controller));
+        assert!(view.handle_key(KeyCode::Char('w'), &Backend::Local(&controller)));
         assert_eq!(view.rows.len(), 1, "back to this workspace only");
     }
 
@@ -487,14 +485,14 @@ mod tests {
             controller_with_task_recorder(workspace.path(), sessions.path(), Arc::clone(&store))
                 .await;
 
-        let mut view = AgentsView::open(&controller);
+        let mut view = AgentsView::open(&Backend::Local(&controller));
         assert_eq!(view.rows.len(), 2);
-        assert!(view.handle_key(KeyCode::Char('s'), &controller));
+        assert!(view.handle_key(KeyCode::Char('s'), &Backend::Local(&controller)));
         assert_eq!(view.status, StatusFilter::Queued);
         assert!(view.rows.is_empty(), "no queued rows");
 
         for _ in 0..3 {
-            view.handle_key(KeyCode::Char('s'), &controller);
+            view.handle_key(KeyCode::Char('s'), &Backend::Local(&controller));
         }
         assert_eq!(view.status, StatusFilter::Failed);
         assert_eq!(view.rows.len(), 1);
@@ -512,19 +510,19 @@ mod tests {
             controller_with_task_recorder(workspace.path(), sessions.path(), Arc::clone(&store))
                 .await;
 
-        let mut view = AgentsView::open(&controller);
-        assert!(view.handle_key(KeyCode::Enter, &controller));
+        let mut view = AgentsView::open(&Backend::Local(&controller));
+        assert!(view.handle_key(KeyCode::Enter, &Backend::Local(&controller)));
         let detail = view.detail.as_ref().expect("detail pane open");
         assert_eq!(detail.row.task_id, "t1");
         assert!(detail.transcript_missing, "no session_path was recorded");
 
         assert!(
-            view.handle_key(KeyCode::Esc, &controller),
+            view.handle_key(KeyCode::Esc, &Backend::Local(&controller)),
             "back to the list"
         );
         assert!(view.detail.is_none());
         assert!(
-            !view.handle_key(KeyCode::Esc, &controller),
+            !view.handle_key(KeyCode::Esc, &Backend::Local(&controller)),
             "Esc on the list closes the overlay"
         );
     }
@@ -541,11 +539,11 @@ mod tests {
             controller_with_task_recorder(workspace.path(), sessions.path(), Arc::clone(&store))
                 .await;
 
-        let mut view = AgentsView::open(&controller);
+        let mut view = AgentsView::open(&Backend::Local(&controller));
         assert_eq!(view.selected, 0);
-        view.handle_key(KeyCode::Up, &controller);
+        view.handle_key(KeyCode::Up, &Backend::Local(&controller));
         assert_eq!(view.selected, 1, "up from the first row wraps to the last");
-        view.handle_key(KeyCode::Down, &controller);
+        view.handle_key(KeyCode::Down, &Backend::Local(&controller));
         assert_eq!(view.selected, 0);
     }
 
@@ -555,7 +553,7 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
 
-        let view = AgentsView::open(&controller);
+        let view = AgentsView::open(&Backend::Local(&controller));
         assert!(view.rows.is_empty());
         assert!(
             view.header().contains("no recorded tasks"),

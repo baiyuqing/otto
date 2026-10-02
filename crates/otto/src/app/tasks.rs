@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use otto_core::model::{Message, Usage};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cli::runtime_builder::Runner;
 use crate::subagent::tasks::{TaskError, TaskStatus as SubagentStatus, Tasks as Registry};
@@ -21,7 +21,7 @@ use crate::subagent::tasks::{TaskError, TaskStatus as SubagentStatus, Tasks as R
 pub const TASK_FINISHED: &str = "task already finished";
 pub const TASK_NOT_FOUND: &str = "task not found";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Queued,
@@ -49,35 +49,35 @@ impl TaskStatus {
 }
 
 /// One sub-agent task.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     pub agent: String,
     pub description: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
     pub steps: i64,
     pub tool_calls: i64,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_tool: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_text: String,
     pub usage: Usage,
     pub usage_present: bool,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub result: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
     /// The child session transcript file; empty when the task runs in memory.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub session_path: String,
 }
 
@@ -134,6 +134,38 @@ fn wire(task: &crate::subagent::tasks::Task) -> Task {
         result: task.result.clone(),
         error: task.error.clone(),
         session_path: task.session_path.clone(),
+    }
+}
+
+/// The registry record for one wire task, as a client of serve reads it.
+/// `prompt` and `context` are empty because the wire omits them.
+pub fn from_wire(task: Task) -> crate::subagent::tasks::Task {
+    crate::subagent::tasks::Task {
+        id: task.id,
+        name: task.name,
+        agent: task.agent,
+        description: task.description,
+        model: task.model,
+        status: match task.status {
+            TaskStatus::Queued => SubagentStatus::Queued,
+            TaskStatus::Running => SubagentStatus::Running,
+            TaskStatus::Succeeded => SubagentStatus::Succeeded,
+            TaskStatus::Failed => SubagentStatus::Failed,
+            TaskStatus::Canceled => SubagentStatus::Canceled,
+        },
+        created_at: Some(task.created_at),
+        started_at: task.started_at,
+        finished_at: task.finished_at,
+        steps: task.steps,
+        tool_calls: task.tool_calls,
+        last_tool: task.last_tool,
+        last_text: task.last_text,
+        usage: task.usage,
+        usage_present: task.usage_present,
+        result: task.result,
+        error: task.error,
+        session_path: task.session_path,
+        ..Default::default()
     }
 }
 

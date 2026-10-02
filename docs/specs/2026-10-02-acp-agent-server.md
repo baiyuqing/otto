@@ -108,11 +108,12 @@ cc-connect at `dfad194` (`agent/acp/`):
   `cwd` canonicalizes to a different path is rejected with `-32602`.
   cc-connect starts the process in `work_dir` and passes the same path as
   `cwd`.
-- The workspace is composed (sandbox, MCP servers, memory, approvals with
-  elevation enabled, as for `otto serve`) on the first `session/new` or
-  `session/load`, not at startup. `initialize` and `session/list` do not
-  start MCP servers; cc-connect runs `session/list` in a separate short-lived
-  process with a 15 s timeout.
+- The workspace is composed at startup by the same path as `otto serve`
+  (sandbox, memory, approvals with elevation enabled). MCP servers start
+  when a session's runner is built (`Controller::create` and
+  `Controller::open` through `attach_runner`, `app/mod.rs:1309-1360`), so
+  `initialize` and `session/list` do not start them; cc-connect runs
+  `session/list` in a separate short-lived process with a 15 s timeout.
 - A connection may hold several sessions. Each has its own `Controller` on
   the shared `Builder`. One prompt per session at a time; prompts on
   different sessions run concurrently.

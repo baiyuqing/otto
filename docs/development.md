@@ -43,6 +43,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `tui`: the terminal frontend on the alternate screen, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
 - `crates/otto-web`: the wasm cdylib the browser UI loads; exports `otto-core`'s wire codecs to JavaScript through `wasm-bindgen`
 - `ui/`: the TypeScript browser frontend; a client of `crates/otto`'s HTTP API and `crates/otto-web`'s wasm exports only, with no Rust code of its own and no part in `make check-fast`
+- `connect/`: `otto-connect`, the Go chat connector (module `github.com/baiyuqing/otto/connect`). It is an ACP client that starts an ACP agent (by default `otto acp`) as a child process and links no otto code; its only contract with otto is ACP v1 on stdio. `internal/agent` owns the child process and the ACP connection, `internal/bridge` the chat-to-session map, queues, commands, replies, permission requests and admission, `internal/telegram` the Bot API adapter, `internal/config` `connect.toml`, and `internal/state` the state file. Design: [chat connector](specs/2026-10-02-otto-connect.md)
 
 Keep provider-specific wire structs inside the two provider implementation
 modules. Keep file-tool workspace enforcement inside `crates/otto`'s `tool`
@@ -241,13 +242,20 @@ make rust-test      # cargo test --workspace (offline)
 make rust-wasm-check # cargo check -p otto-core and -p otto-web for wasm32-unknown-unknown
 make rust-wasm-test  # wasm-pack test --node for otto-core and otto-web
 make test-tui       # cargo test -p otto --test tui_pty (needs a real PTY)
-make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, rust-wasm-check, test-tui
+make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, connect-check, rust-wasm-check, test-tui
+make connect-check  # Go connector: gofmt -l, go vet, go test -race (builds target/debug/otto for its end-to-end test)
+make connect-build  # build the Go connector to target/otto-connect
 ```
 
 `check-fast` runs `rustfmt`, `clippy`, and the focused `otto-core` test suite;
 `check` adds the Web UI and release build, the full workspace test suite, the
-wasm32 build check, the wasm tests under Node, the PTY smoke test, and `make
-ui-test`.
+Go connector checks, the wasm32 build check, the wasm tests under Node, the PTY
+smoke test, and `make ui-test`.
+
+`connect-check` needs the Go version named in `connect/go.mod`; CI installs it
+with `actions/setup-go` from that file. Its end-to-end test drives the real
+`otto acp` from `target/debug/otto` against a loopback fake provider, so it is
+offline like the Rust tests.
 
 `rust-wasm-test` and `make ui`/`make ui-test` need `wasm-pack` (pinned to
 0.15.0 in CI via `cargo install wasm-pack --version 0.15.0 --locked`).
@@ -336,6 +344,7 @@ fixtures.
 - Never put raw API keys, OAuth tokens, or auth headers in TOML, JSONL session fixtures, logs, docs, or tests. Redact sample values in errors and examples.
 - `read`, `grep`, `find`, `ls`, `write`, `edit`, and `skill` must reject workspace/skill-directory escapes after canonical path and symlink validation.
 - Do not describe `bash` as always unsandboxed. Otto defaults to macOS Seatbelt; only explicit sandbox `off` is unsandboxed.
+- The chat connector reads its bot token from the environment variable that `connect.toml` names; a secret key in that file fails the config load. Its errors and logs never contain the token, and it does not log message text.
 - Never put secrets in skill files; skill content is user- or repository-provided instruction text of the same class as `AGENTS.md` and `CLAUDE.md`.
 
 Keep README limited to implemented, tested behavior; list unsupported behavior

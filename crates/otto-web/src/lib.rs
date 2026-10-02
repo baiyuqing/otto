@@ -88,6 +88,8 @@ export interface SessionListRow {
   provider?: string
   model?: string
   open: boolean
+  last_user_text?: string
+  modified?: string
 }
 
 export interface TurnSummary {

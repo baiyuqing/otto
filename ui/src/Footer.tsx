@@ -12,10 +12,13 @@ export function Footer(props: {
   turnUsage: Usage | null
   recordedUsage: UsageSummary | null
   status?: string | null
+  /** True from send until the turn's first frame arrives. */
+  queued?: boolean
 }) {
-  const { info, session, turnUsage, recordedUsage, status } = props
+  const { info, session, turnUsage, recordedUsage, status, queued } = props
   return (
     <div className="footer">
+      {queued && <span>queued</span>}
       {status && <span>{status}</span>}
       {info && (
         <span>

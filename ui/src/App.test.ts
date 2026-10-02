@@ -18,6 +18,7 @@ const api = vi.hoisted(() => ({
   listMcp: vi.fn(),
   cancelTurn: vi.fn(),
   startTurn: vi.fn(),
+  decideApproval: vi.fn(),
   compact: vi.fn(),
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
@@ -148,6 +149,8 @@ describe('idle wake follow', () => {
     })
 
     expect(api.attach).toHaveBeenCalledWith('sess1', 'wake1')
+    // History stops before the turn, whose events replay from sequence 0.
+    expect(api.history).toHaveBeenLastCalledWith('sess1', 'wake1')
   })
 
   it('cancels a running turn when Escape is pressed', async () => {
@@ -155,6 +158,7 @@ describe('idle wake follow', () => {
     api.createSession.mockResolvedValue(running)
     api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
     await openIdleSession()
+    expect(api.history).toHaveBeenCalledWith('sess1', 'turn1')
 
     await act(async () => {
       await Promise.resolve()
@@ -187,7 +191,9 @@ describe('idle wake follow', () => {
     expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
     expect(api.startTurn).not.toHaveBeenCalled()
     api.getSession.mockResolvedValueOnce(done).mockResolvedValue(nextRunning)
-    api.startTurn.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    api.startTurn.mockResolvedValue(
+      new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream', 'Otto-Turn-Id': 'turn2' } }),
+    )
     closeStream()
 
     await act(async () => {
@@ -214,6 +220,64 @@ describe('idle wake follow', () => {
 
     expect(within(document.querySelector('.transcript') as HTMLElement).queryByText('follow up')).toBeNull()
     expect(api.startTurn).not.toHaveBeenCalled()
+  })
+
+  it('sends with queue, reads Otto-Turn-Id, shows queued until the first frame and takes the prompt from user_message', async () => {
+    let push = (_frame: string) => {}
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (frame) => controller.enqueue(new TextEncoder().encode(frame))
+      },
+    })
+    api.startTurn.mockResolvedValue(
+      new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Otto-Turn-Id': 'turn9' } }),
+    )
+    await openIdleSession()
+    const transcript = () => document.querySelector('.transcript') as HTMLElement
+
+    const input = screen.getByPlaceholderText('Message Otto…') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'hello' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(api.startTurn).toHaveBeenCalledWith('sess1', 'hello', undefined)
+    expect(document.querySelector('.footer')?.textContent).toContain('queued')
+    expect(within(transcript()).queryByText('hello')).toBeNull()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(api.cancelTurn).toHaveBeenCalledWith('sess1', 'turn9')
+
+    await act(async () => {
+      push('id: 0\nevent: user_message\ndata: {"type":"user_message","text":"hello"}\n\n')
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    })
+
+    expect(document.querySelector('.footer')?.textContent).not.toContain('queued')
+    expect(within(transcript()).getAllByText('hello')).toHaveLength(1)
+  })
+
+  it('posts /approve and /deny to the running turn without starting a turn', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    api.decideApproval.mockResolvedValue({ decision: 'allow' })
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+    for (const text of ['/approve a1', '/deny a2']) {
+      fireEvent.change(input, { target: { value: text } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      await act(async () => {
+        await Promise.resolve()
+      })
+    }
+
+    expect(api.decideApproval).toHaveBeenNthCalledWith(1, 'sess1', 'a1', 'allow')
+    expect(api.decideApproval).toHaveBeenNthCalledWith(2, 'sess1', 'a2', 'deny')
+    expect(api.startTurn).not.toHaveBeenCalled()
+    expect(screen.queryByText(/Queued next input/)).toBeNull()
   })
 
   it('reloads history when a wake finished between polls', async () => {

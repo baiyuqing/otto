@@ -158,6 +158,12 @@ ACP and the connector:
   `canceled`) and `error` (redacted, empty unless `status` is `error`). Then
   the stream closes. Both frames are stored in the turn's event buffer, so a
   reader that reconnects with `?after=N` receives them too.
+- `GET .../history?before_turn=<turn_id>` returns only the messages that
+  existed when that turn started. The session history is append-only and the
+  running turn appends its prompt and each finished step, so a client that
+  loads the full history and then reads the turn's events from 0 shows those
+  messages twice. A client attaching to a running turn loads the history with
+  `before_turn` instead. An unknown or not yet started turn gets 404.
 - The otto-core transcript reducer, which the web UI (through otto-web) and
   the TUI use, renders `user_message` as a user item and `turn_end` with
   status `error` as an error item. Other `turn_end` frames add nothing.
@@ -198,7 +204,7 @@ ACP and the connector:
 - `GET /v1/sessions` rows add `last_user_text` (at most 80 characters) and
   `modified` (RFC 3339).
 - Turn errors pass through `redact_error` before they are stored, returned in
-  `turn_end` and `GET .../turns/{id}`, or logged.
+  `agent_error`, `turn_end` and `GET .../turns/{id}`, or logged.
 
 ## `otto acp --attach` forwards one ACP connection to `otto serve`
 
@@ -305,8 +311,9 @@ implementations: `Controller` (local mode) and a serve client (attach mode).
 `not available with --attach`.
 
 Turns from other clients: the TUI reads `GET /v1/status`. When its session's
-`turn_id` changes to a turn this TUI did not start, it reloads the history and
-follows that turn's events from 0. The prompt appears through `user_message`.
+`turn_id` changes to a turn this TUI did not start, it reloads the history
+with `before_turn` set to that turn and follows that turn's events from 0.
+The prompt appears through `user_message`.
 
 When the connection is lost, the TUI shows `disconnected from otto serve` and
 retries every 1 s. On reconnect it resumes the same session and reloads the
@@ -366,8 +373,10 @@ harness with a fake provider.
     file access outside the session directory;
   - list rows carry `last_user_text` and `modified`; status rows carry
     `turn_id` and `queued`;
+  - `history?before_turn=` during a running turn omits the turn's prompt and
+    finished steps;
   - a provider error containing the API key and the home path is redacted in
-    `turn_end`, `GET .../turns/{id}` and the log;
+    `agent_error`, `turn_end`, `GET .../turns/{id}` and the log;
   - both listeners: the socket needs no token, TCP without the token gets
     401.
 - `otto acp` local: the existing approval tests pass unchanged on the shared

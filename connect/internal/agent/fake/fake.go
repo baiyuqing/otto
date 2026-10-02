@@ -10,13 +10,18 @@
 //	perm:<title> requests permission for a tool call titled <title>; ends
 //	             with stop reason cancelled when the outcome is cancelled,
 //	             otherwise replies "outcome=<option id>"
+//	permcancel:<title>
+//	             like perm:, but the agent cancels its permission request
+//	             after 200 ms, which sends $/cancel_request
 //	exit         writes "fatal: boom" to stderr and exits with status 3
 //	other        replies "echo: <text>"
 //
 // Every call is appended to <dir>/calls as one line: init:<pid>, new:<id>,
 // load:<id>, start:<text>, end:<text>, cancel:<id>, perm:<outcome>.
 // Sessions persist in <dir>/sessions so a restarted agent can load them;
-// loading an unknown id fails. FAKE_REPLAY=<n> makes session/load replay n
+// loading an unknown id fails. A line is "<id>" or
+// "<id>\t<updatedAt>\t<title>"; session/list returns the lines newest
+// (last) first. FAKE_REPLAY=<n> makes session/load replay n
 // updates, FAKE_NO_EXIT=1 makes the process ignore end of stdin.
 package fake
 
@@ -98,7 +103,7 @@ func (a *agent) known(id string) bool {
 	defer f.Close()
 	s := bufio.NewScanner(f)
 	for s.Scan() {
-		if s.Text() == id {
+		if strings.SplitN(s.Text(), "\t", 2)[0] == id {
 			return true
 		}
 	}
@@ -109,7 +114,7 @@ func (a *agent) Initialize(context.Context, acp.InitializeRequest) (acp.Initiali
 	a.log("init:%d", os.Getpid())
 	return acp.InitializeResponse{
 		ProtocolVersion:   acp.ProtocolVersionNumber,
-		AgentCapabilities: acp.AgentCapabilities{LoadSession: true},
+		AgentCapabilities: acp.AgentCapabilities{LoadSession: true, SessionCapabilities: acp.SessionCapabilities{List: &acp.SessionListCapabilities{}}},
 		AuthMethods:       []acp.AuthMethod{},
 	}, nil
 }
@@ -152,6 +157,24 @@ func (a *agent) LoadSession(ctx context.Context, p acp.LoadSessionRequest) (acp.
 		}
 	}
 	return acp.LoadSessionResponse{}, nil
+}
+
+func (a *agent) ListSessions(_ context.Context, p acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	if p.Cwd == nil || *p.Cwd == "" {
+		return acp.ListSessionsResponse{}, errors.New("cwd is required")
+	}
+	raw, _ := os.ReadFile(a.dir + "/sessions")
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	out := []acp.SessionInfo{}
+	for i := len(lines) - 1; i >= 0 && lines[i] != ""; i-- {
+		f := strings.SplitN(lines[i], "\t", 3)
+		info := acp.SessionInfo{SessionId: acp.SessionId(f[0]), Cwd: *p.Cwd}
+		if len(f) == 3 {
+			info.UpdatedAt, info.Title = &f[1], &f[2]
+		}
+		out = append(out, info)
+	}
+	return acp.ListSessionsResponse{Sessions: out}, nil
 }
 
 func (a *agent) Cancel(_ context.Context, p acp.CancelNotification) error {
@@ -197,9 +220,16 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
 		}
 		a.chunk(ctx, p.SessionId, "echo: "+text)
-	case strings.HasPrefix(text, "perm:"):
-		title := strings.TrimPrefix(text, "perm:")
-		resp, err := a.conn.Load().RequestPermission(ctx, acp.RequestPermissionRequest{
+	case strings.HasPrefix(text, "perm:"), strings.HasPrefix(text, "permcancel:"):
+		title := text[strings.Index(text, ":")+1:]
+		reqCtx := ctx
+		if strings.HasPrefix(text, "permcancel:") {
+			var stop context.CancelFunc
+			reqCtx, stop = context.WithCancel(ctx)
+			defer stop()
+			time.AfterFunc(200*time.Millisecond, stop)
+		}
+		resp, err := a.conn.Load().RequestPermission(reqCtx, acp.RequestPermissionRequest{
 			SessionId: p.SessionId,
 			ToolCall:  acp.ToolCallUpdate{ToolCallId: "t1", Title: &title},
 			Options: []acp.PermissionOption{
@@ -209,7 +239,7 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 		})
 		// The SDK ends the agent's request context when session/cancel
 		// arrives; that is an outcome of cancelled.
-		if err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil {
+		if err != nil && reqCtx.Err() == nil {
 			return end, err
 		}
 		outcome := "cancelled"

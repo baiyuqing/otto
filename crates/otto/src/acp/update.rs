@@ -1,4 +1,4 @@
-//! Maps otto events and stored history to ACP `session/update` payloads.
+//! Maps otto wire events and stored history to ACP `session/update` payloads.
 //!
 //! Stateless and synchronous: every function takes its input by reference and
 //! returns owned schema values. The live mapping (`event_update`) and the
@@ -11,6 +11,7 @@ use agent_client_protocol_schema::v1::{
 };
 use otto_core::agent::Event;
 use otto_core::model::{BlockType, Message, Role};
+use otto_core::wire::events::{WireEvent, to_wire};
 use serde_json::Value;
 
 /// The ACP tool kind of an otto tool name.
@@ -74,38 +75,43 @@ fn tool_result(id: &str, text: &str, is_error: bool) -> SessionUpdate {
     ))
 }
 
+/// The wire form of a local agent event, with the finished tool result's
+/// content replaced by `persisted_text`, the text stored in the session, so
+/// the live update equals what `session/load` replays later. Frames from
+/// `otto serve` carry the live content and are mapped unchanged.
+pub fn local_wire(event: &Event) -> WireEvent {
+    let mut wire = to_wire(event);
+    if let (Event::ToolCallFinished { result, .. }, Some(wire_result)) = (event, &mut wire.result) {
+        wire_result.content = result.persisted_text().to_string();
+    }
+    wire
+}
+
 /// The update for one live event; `None` for events ACP has no counterpart for.
-///
-/// The finished result uses `persisted_text`, the text stored in the session,
-/// so the live update equals what `session/load` replays later.
-pub fn event_update(event: &Event) -> Option<SessionUpdate> {
-    match event {
-        Event::TextDelta { text } => Some(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-            text_block(text),
+pub fn event_update(event: &WireEvent) -> Option<SessionUpdate> {
+    match event.event_type.as_str() {
+        "text_delta" => Some(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            text_block(&event.text),
         ))),
-        Event::ReasoningDelta { text } => Some(SessionUpdate::AgentThoughtChunk(
-            ContentChunk::new(text_block(text)),
-        )),
-        Event::ToolCallStarted {
-            tool_name,
-            tool_call_id,
-            arguments,
-            ..
-        } => Some(tool_call(
-            tool_name,
-            tool_call_id,
-            raw_input(arguments),
-            ToolCallStatus::InProgress,
-        )),
-        Event::ToolCallFinished {
-            tool_call_id,
-            result,
-            ..
-        } => Some(tool_result(
-            tool_call_id,
-            result.persisted_text(),
-            result.is_error,
-        )),
+        "reasoning_delta" => Some(SessionUpdate::AgentThoughtChunk(ContentChunk::new(
+            text_block(&event.text),
+        ))),
+        "tool_call_started" => {
+            let input = event
+                .tool_args
+                .as_ref()
+                .map_or_else(|| Value::String(String::new()), |raw| raw_input(raw.get()));
+            Some(tool_call(
+                &event.tool_name,
+                &event.tool_call_id,
+                input,
+                ToolCallStatus::InProgress,
+            ))
+        }
+        "tool_call_finished" => event
+            .result
+            .as_ref()
+            .map(|result| tool_result(&event.tool_call_id, &result.content, result.is_error)),
         _ => None,
     }
 }
@@ -175,17 +181,18 @@ mod tests {
 
     #[test]
     fn text_and_reasoning_deltas_map_to_message_and_thought_chunks() {
-        let text = event_update(&Event::TextDelta { text: "hi".into() }).unwrap();
+        let text = event_update(&local_wire(&Event::TextDelta { text: "hi".into() })).unwrap();
         assert_eq!(
             to_json(&text),
             json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}})
         );
-        let thought = event_update(&Event::ReasoningDelta { text: "hm".into() }).unwrap();
+        let thought =
+            event_update(&local_wire(&Event::ReasoningDelta { text: "hm".into() })).unwrap();
         assert_eq!(
             to_json(&thought)["sessionUpdate"],
             json!("agent_thought_chunk")
         );
-        assert!(event_update(&Event::AgentStarted).is_none());
+        assert!(event_update(&local_wire(&Event::AgentStarted)).is_none());
     }
 
     #[test]
@@ -207,7 +214,7 @@ mod tests {
             ("web_fetch", r#"{"url":"u"}"#, "other", "web_fetch"),
         ];
         for (name, arguments, kind, title) in cases {
-            let update = to_json(&event_update(&started(name, arguments)).unwrap());
+            let update = to_json(&event_update(&local_wire(&started(name, arguments))).unwrap());
             assert_eq!(update["sessionUpdate"], "tool_call", "{name}");
             assert_eq!(update["toolCallId"], "call-1", "{name}");
             // The schema omits a default `kind` ("other") from the wire.
@@ -224,7 +231,7 @@ mod tests {
 
     #[test]
     fn unparsable_arguments_are_sent_as_a_json_string() {
-        let update = to_json(&event_update(&started("bash", "{not json")).unwrap());
+        let update = to_json(&event_update(&local_wire(&started("bash", "{not json"))).unwrap());
         assert_eq!(update["rawInput"], json!("{not json"));
         assert_eq!(update["title"], "bash");
     }
@@ -249,7 +256,7 @@ mod tests {
             is_error: false,
             outcome_override: None,
         };
-        let update = to_json(&event_update(&finished(ok)).unwrap());
+        let update = to_json(&event_update(&local_wire(&finished(ok))).unwrap());
         assert_eq!(update["sessionUpdate"], "tool_call_update");
         assert_eq!(update["status"], "completed");
         assert_eq!(update["content"][0]["content"]["text"], "stored");
@@ -259,7 +266,7 @@ mod tests {
             is_error: true,
             outcome_override: None,
         };
-        let update = to_json(&event_update(&finished(failed)).unwrap());
+        let update = to_json(&event_update(&local_wire(&finished(failed))).unwrap());
         assert_eq!(update["status"], "failed");
         assert_eq!(update["content"][0]["content"]["text"], "boom");
     }

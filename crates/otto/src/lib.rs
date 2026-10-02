@@ -5,6 +5,7 @@ pub mod acp;
 pub mod app;
 pub mod auth;
 pub mod cli;
+pub mod client;
 pub mod config;
 pub mod deadline;
 pub mod failover;

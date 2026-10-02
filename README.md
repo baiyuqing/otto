@@ -141,11 +141,13 @@ The selected model and OpenAI-compatible endpoint must support image input.
   [Feishu inbound](docs/user-manual.md#feishu-inbound) delivers group and chat
   text into open session inboxes.
 - [ACP agent](docs/user-manual.md#acp-agent-server): `otto acp` speaks the
-  Agent Client Protocol on stdio for ACP clients.
+  Agent Client Protocol on stdio for ACP clients; `otto acp --attach`
+  forwards it to a running `otto serve`.
 - [Chat connector](docs/user-manual.md#chat-connector): `otto-connect`, a
   separate Go program in `connect/`, runs `otto acp` and connects it to
   Telegram chats, one session per chat, with `/allow` and `/deny` for
-  elevated `bash` commands.
+  elevated `bash` commands and `/sessions` and `/use` to pick a session.
+  With `otto acp --attach`, chats share sessions with the `otto serve` web UI.
 - [Usage history](docs/user-manual.md#observability): a Web UI analysis page
   for local provider token trends and cache hit rate, without prompt or tool
   content.

@@ -3,6 +3,12 @@
 Status: approved 2026-10-02 with D1 = the official schema crate and D2 =
 after-turn approval. D3 (upstream cc-connect PRs) is not part of this change.
 
+Superseded in part: chat access no longer goes through cc-connect. The
+sections "IM access goes through cc-connect", "cc-connect changes this
+depends on" and "cc-connect configuration" are historical; the
+[chat connector design](2026-10-02-otto-connect.md) replaces them. The
+`otto acp` protocol behavior described here is current.
+
 ## IM access goes through cc-connect, which drives `otto acp` over ACP v1
 
 The user wants to talk to otto from Telegram and Feishu, does not want to

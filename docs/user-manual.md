@@ -2165,10 +2165,10 @@ its ACP agent. See [Chat connector](#chat-connector).
 
 ## Chat connector
 
-`otto-connect` connects Telegram chats to `otto acp`. It is a separate Go
-program in `connect/`: it starts one `otto acp` process as a child, acts as
-its ACP client, and maps each chat to one Otto session. Telegram is the only
-supported chat platform.
+`otto-connect` connects Telegram and Feishu (Lark) chats to `otto acp`. It is
+a separate Go program in `connect/`: it starts one `otto acp` process as a
+child, acts as its ACP client, and maps each chat to one Otto session.
+Telegram and Feishu can be enabled in the same process.
 
 ### Building and running
 
@@ -2176,15 +2176,19 @@ Building requires Go at the version in `connect/go.mod`.
 
 ```bash
 make connect-build                 # writes target/otto-connect
-export OTTO_CONNECT_TELEGRAM_TOKEN=<bot token from @BotFather>
+export OTTO_CONNECT_TELEGRAM_TOKEN=<bot token from @BotFather>   # for [telegram]
+export OTTO_CONNECT_FEISHU_APP_SECRET=<app secret>               # for [feishu]
 target/otto-connect [--config PATH]
 ```
 
 `otto-connect` runs in the foreground and logs to stderr. `SIGINT` or
 `SIGTERM` sends `session/cancel` for every running prompt, stops polling
-Telegram, closes the agent's stdin, and kills the agent if it has not exited
-10 s later. A config error or a token that Telegram rejects (HTTP 401 or 404
-from `getMe`) exits with status 1 and `otto-connect: <message>`.
+Telegram and closes the Feishu connection, closes the agent's stdin, and
+kills the agent if it has not exited 10 s later. A config error, a token that
+Telegram rejects (HTTP 401 or 404 from `getMe`), or an app id or secret that
+Feishu rejects exits with status 1 and `otto-connect: <message>`. A Feishu
+connection that fails for another reason, such as no network, is retried by
+the SDK and each failure is logged as `feishu connection error`.
 
 ### Configuration
 
@@ -2199,15 +2203,26 @@ workspace = "/Users/me/work"       # required, absolute
 token_env = "OTTO_CONNECT_TELEGRAM_TOKEN"
 chats = ["123456789"]
 senders = ["123456789"]
+
+[feishu]
+app_id = "cli_xxx"
+app_secret_env = "OTTO_CONNECT_FEISHU_APP_SECRET"
+domain = "feishu"                  # the default; "lark" for Lark (larksuite.com)
+chats = ["oc_xxx"]
+senders = ["ou_xxx"]
 ```
 
+- A platform is enabled when its section is present. At least one of
+  `[telegram]` and `[feishu]` is required.
 - The agent process starts with `workspace` as its working directory, and
   every session uses it as `cwd`. Otto flags go into `command`, for example
   `["otto", "acp", "--profile", "work"]`.
-- The bot token is read from the environment variable that `token_env`
-  names; an empty or unset variable fails startup. A `token` key in the file,
-  like any unknown key, fails the config load. The agent process is started
-  without that variable, so tools run by Otto cannot read the token.
+- The Telegram bot token is read from the environment variable that
+  `token_env` names, and the Feishu app secret from the one that
+  `app_secret_env` names; an empty or unset variable fails startup. A `token`
+  or `app_secret` key in the file, like any unknown key, fails the config
+  load. `app_id` is not a secret and is required. The agent process is
+  started without these variables, so tools run by Otto cannot read them.
 - `otto acp` inherits the rest of the environment and reads its provider key
   as usual (the profile's `api_key_env` variable or `OTTO_API_KEY`), or uses
   the `chatgpt` provider after `otto login`.
@@ -2215,6 +2230,23 @@ senders = ["123456789"]
   of each chat and the Telegram update offset.
 - Log lines contain chat ids, sender ids, and errors. Message text is not
   logged.
+
+### Feishu app
+
+In the Feishu (or Lark) developer console:
+
+1. Create a self-built app and enable the bot capability.
+2. Grant the message permissions, at least `im:message` and
+   `im:message:send_as_bot`.
+3. Under events and callbacks, select long connection mode and subscribe to
+   `im.message.receive_v1`.
+4. Publish the app version; publish again after changing permissions or
+   events.
+5. Add the bot to a group, or open a private chat with it.
+
+`otto-connect` opens the long connection itself, so no public address or
+`lark-cli` is needed. [Feishu inbound](#feishu-inbound) also opens a long
+connection for the app's message events; do not use the same app for both.
 
 ### Sharing sessions with `otto serve`
 
@@ -2243,13 +2275,22 @@ A message is handled only when its chat id is in `chats` and its sender id
 is in `senders`. An empty list admits nothing, and startup logs a warning
 that the platform will ignore all messages. A rejected message gets no reply
 and is logged with its chat and sender ids; send the bot a message and read
-that log line to find the ids to add. In a private chat the chat id equals
-the user id; group ids are negative numbers.
+that log line to find the ids to add. In a Telegram private chat the chat
+id equals the user id; Telegram group ids are negative numbers.
 
-In a group, a message must also mention the bot (`@BotName`), reply to one
-of the bot's messages, or be a command addressed to it (`/stop@BotName`).
-With BotFather's privacy mode on (the default), Telegram delivers only such
-messages to the bot.
+In a Telegram group, a message must also mention the bot (`@BotName`), reply
+to one of the bot's messages, or be a command addressed to it
+(`/stop@BotName`). With BotFather's privacy mode on (the default), Telegram
+delivers only such messages to the bot.
+
+Feishu chat ids start with `oc_` and sender ids (open ids) with `ou_`. A
+private chat with the bot has its own `oc_` chat id, which must be in
+`chats` as well. In a Feishu group, a message must mention the bot; the
+mention is removed from the prompt, so `@Bot /stop` is the `/stop` command.
+The Feishu SDK applies the same lists before `otto-connect` sees a message;
+the messages it rejects are logged with the same `message rejected` line and
+a `reason`. A group message that does not mention the bot is ignored without
+a log line.
 
 ### Messages and replies
 
@@ -2269,16 +2310,26 @@ messages to the bot.
 - The reply is sent when the turn ends, as a reply to the message that
   started it. It contains the assistant text only: reasoning and tool calls
   are not sent, and text before and after a tool call is separated by a
-  blank line. Replies are plain text, split at line boundaries into parts of
-  at most 4096 characters. The chat shows "typing" while the turn runs.
+  blank line. Telegram replies are plain text, split at line boundaries into
+  parts of at most 4096 characters, and the chat shows "typing" while the
+  turn runs. Feishu replies are Markdown, split by the Feishu SDK into parts
+  of at most 3500 characters with code blocks kept closed; Feishu shows no
+  typing indicator.
 - Only text is sent to Otto. A photo, file, or other attachment gets
-  "Attachments are not supported and were ignored."; its caption, if any, is
-  sent as the prompt.
-- A message received by Telegram more than 30 minutes before `otto-connect`
-  reads it is not run; the chat gets a notice with the message's time.
-- Each message is acknowledged to Telegram once it is queued or rejected, so
-  a crash does not run a message twice; a message queued but not yet run
-  when `otto-connect` stops is not run.
+  "Attachments are not supported and were ignored."; a Telegram caption is
+  sent as the prompt. In Feishu, images, files, audio, video and stickers get
+  the same notice; the text of a rich-text message is sent and its images are
+  not.
+- A message received by the platform more than 30 minutes before
+  `otto-connect` reads it is not run; the chat gets a notice with the
+  message's time.
+- Each Telegram message is acknowledged once it is queued or rejected; each
+  Feishu message is acknowledged when the SDK receives it, before it is
+  queued. A crash therefore does not run a message twice; a message
+  acknowledged but not yet run when `otto-connect` stops is not run.
+- Feishu messages that arrive close together are delivered one by one, each
+  with its own sender and reply target; the SDK's merging of messages is
+  turned off.
 
 ### Commands
 

@@ -5,6 +5,8 @@ BINARY := otto
 INSTALL_DIR ?= $(HOME)/.local/bin
 SKILLS_INSTALL_DIR ?= $(HOME)/.otto/skills
 
+CONNECT_DIR := connect
+
 DESKTOP_DIR := desktop/src-tauri
 DESKTOP_TARGET := aarch64-apple-darwin
 DESKTOP_SIDECAR := $(DESKTOP_DIR)/binaries/otto-$(DESKTOP_TARGET)
@@ -12,7 +14,7 @@ DESKTOP_APP := $(DESKTOP_DIR)/target/$(DESKTOP_TARGET)/release/bundle/macos/Otto
 # `cargo tauri build` runs `xattr -crs` on the bundle; /usr/bin comes first so
 # a pip-installed `xattr` earlier on PATH, which has no -r, is not used.
 
-.PHONY: all build install check-fast check check-linux ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test test-tui desktop-sidecar desktop-check desktop-app desktop-release clean help
+.PHONY: all build install check-fast check check-linux ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
 
 all: build
 
@@ -49,14 +51,23 @@ scripts-test: ## run the Node tests beside scripts/ (offline, no build needed)
 test-tui: ## run the TUI PTY lifecycle smoke test (needs a real PTY)
 	cargo test -p otto --test tui_pty
 
+connect-check: ## Go chat connector: gofmt, vet, race tests; builds target/debug/otto for its end-to-end test
+	cargo build -p otto
+	@unformatted="$$(cd $(CONNECT_DIR) && gofmt -l .)"; test -z "$$unformatted" || { echo "gofmt needed: $$unformatted"; exit 1; }
+	cd $(CONNECT_DIR) && go vet ./...
+	cd $(CONNECT_DIR) && OTTO_BIN="$(CURDIR)/target/debug/otto" go test -race ./...
+
+connect-build: ## build the chat connector to target/otto-connect
+	cd $(CONNECT_DIR) && go build -o ../target/otto-connect ./cmd/otto-connect
+
 check-fast: rust-fmt rust-lint ## quick feedback: formatting, lint, focused core tests
 	cargo test -p otto-core
 	@git diff --check
 
-check: check-fast build rust-test rust-wasm-check rust-wasm-test scripts-test test-tui ui-test ## full macOS acceptance, including host integration, PTY and web UI tests
+check: check-fast build rust-test connect-check rust-wasm-check rust-wasm-test scripts-test test-tui ui-test ## full macOS acceptance, including host integration, PTY and web UI tests
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
-check-linux: rust-fmt rust-lint rust-test rust-wasm-check scripts-test test-tui ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
+check-linux: rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test test-tui ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 ui: ## build the web UI into ui/dist (needs Node 24+ and wasm-pack)

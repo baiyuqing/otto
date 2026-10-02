@@ -25,11 +25,12 @@ what the CLI actually does today.
 12. [Headless mode](#headless-mode)
 13. [Agent server](#agent-server)
 14. [ACP agent server](#acp-agent-server)
-15. [Durable workflows](#durable-workflows)
-16. [Memory](#memory)
-17. [Skills](#skills)
-18. [MCP servers](#mcp-servers)
-19. [Troubleshooting](#troubleshooting)
+15. [Chat connector](#chat-connector)
+16. [Durable workflows](#durable-workflows)
+17. [Memory](#memory)
+18. [Skills](#skills)
+19. [MCP servers](#mcp-servers)
+20. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -224,7 +225,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
 | `otto trust <dir> [--config PATH]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
 | `otto serve [--socket PATH \| --listen HOST:PORT [--open] [--exit-on-stdin-close]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
-| `otto acp` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as cc-connect. See [ACP agent server](#acp-agent-server). |
+| `otto acp` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as `otto-connect`. See [ACP agent server](#acp-agent-server). |
 
 | Flag | Description |
 | --- | --- |
@@ -1957,56 +1958,10 @@ A client that kills the process with `SIGKILL` loses the assistant message
 being streamed; everything Otto had already written to the session file
 remains.
 
-### Telegram and Feishu through cc-connect
+### Chat access goes through otto-connect
 
-[cc-connect](https://github.com/chenhg5/cc-connect) connects chat platforms,
-including Telegram and Feishu, to ACP agents. Its `acp` agent type starts one
-`otto acp` process per chat. Example cc-connect configuration (placeholders
-in angle brackets):
-
-```toml
-[[projects]]
-name = "otto"
-
-[projects.agent]
-type = "acp"
-
-[projects.agent.options]
-work_dir = "/path/to/workspace"
-cmd = "otto"
-args = ["acp"]
-display_name = "Otto"
-
-[[projects.platforms]]
-type = "telegram"
-
-[projects.platforms.options]
-token = "<bot token>"
-allow_from = "<your Telegram user id>"
-```
-
-- cc-connect's `allow_from` defaults to `*`. Anyone who can message the bot
-  can then run Otto in the workspace and approve elevated `bash` commands.
-  Set it to your own user id.
-- Bot tokens and app secrets belong in cc-connect's configuration, not
-  Otto's. Otto reads its provider key from the environment cc-connect starts
-  it with (the profile's `api_key_env` variable or `OTTO_API_KEY`), or uses
-  the `chatgpt` provider after `otto login`.
-- Each chat runs a separate `otto acp` process with its own sandbox and MCP
-  servers.
-- Do not configure the same Feishu app in both cc-connect and Otto's
-  `[inbound.feishu]`.
-- A session open in the TUI or `otto serve` cannot be loaded by `otto acp`
-  at the same time; the load fails and cc-connect starts a new session.
-
-cc-connect at commit `dfad194` (2026-09-29) has two limitations that affect
-Otto:
-
-- It shows `agent_thought_chunk` text as reply text, so reasoning appears in
-  chat replies when thinking is enabled (cc-connect issue #1940).
-- During `session/load` it reads at most 128 updates before it reads the
-  load response, so resuming a long session does not finish (cc-connect
-  issue #1941).
+To use Otto from Telegram, run `otto-connect`, which starts `otto acp` as
+its ACP agent. See [Chat connector](#chat-connector).
 
 ### Not supported over ACP
 
@@ -2015,6 +1970,134 @@ Otto:
 - Image, audio, and embedded-resource prompt content.
 - Slash commands such as `/approve` or `/sandbox`: text from the client
   reaches the model as a user message.
+
+## Chat connector
+
+`otto-connect` connects Telegram chats to `otto acp`. It is a separate Go
+program in `connect/`: it starts one `otto acp` process as a child, acts as
+its ACP client, and maps each chat to one Otto session. Telegram is the only
+supported chat platform.
+
+### Building and running
+
+Building requires Go at the version in `connect/go.mod`.
+
+```bash
+make connect-build                 # writes target/otto-connect
+export OTTO_CONNECT_TELEGRAM_TOKEN=<bot token from @BotFather>
+target/otto-connect [--config PATH]
+```
+
+`otto-connect` runs in the foreground and logs to stderr. `SIGINT` or
+`SIGTERM` sends `session/cancel` for every running prompt, stops polling
+Telegram, closes the agent's stdin, and kills the agent if it has not exited
+10 s later. A config error or a token that Telegram rejects (HTTP 401 or 404
+from `getMe`) exits with status 1 and `otto-connect: <message>`.
+
+### Configuration
+
+`~/.config/otto/connect.toml`, or the file given with `--config`:
+
+```toml
+[agent]
+command = ["otto", "acp"]          # the default; resolved through PATH
+workspace = "/Users/me/work"       # required, absolute
+
+[telegram]
+token_env = "OTTO_CONNECT_TELEGRAM_TOKEN"
+chats = ["123456789"]
+senders = ["123456789"]
+```
+
+- The agent process starts with `workspace` as its working directory, and
+  every session uses it as `cwd`. Otto flags go into `command`, for example
+  `["otto", "acp", "--profile", "work"]`.
+- The bot token is read from the environment variable that `token_env`
+  names; an empty or unset variable fails startup. A `token` key in the file,
+  like any unknown key, fails the config load. The agent process is started
+  without that variable, so tools run by Otto cannot read the token.
+- `otto acp` inherits the rest of the environment and reads its provider key
+  as usual (the profile's `api_key_env` variable or `OTTO_API_KEY`), or uses
+  the `chatgpt` provider after `otto login`.
+- State is kept in `~/.otto/connect/state.json` (mode `0600`): the session id
+  of each chat and the Telegram update offset.
+- Log lines contain chat ids, sender ids, and errors. Message text is not
+  logged.
+
+### Admission
+
+A message is handled only when its chat id is in `chats` and its sender id
+is in `senders`. An empty list admits nothing, and startup logs a warning
+that the platform will ignore all messages. A rejected message gets no reply
+and is logged with its chat and sender ids; send the bot a message and read
+that log line to find the ids to add. In a private chat the chat id equals
+the user id; group ids are negative numbers.
+
+In a group, a message must also mention the bot (`@BotName`), reply to one
+of the bot's messages, or be a command addressed to it (`/stop@BotName`).
+With BotFather's privacy mode on (the default), Telegram delivers only such
+messages to the bot.
+
+### Messages and replies
+
+- Each chat has one Otto session. The first message creates it; after a
+  restart of `otto-connect` or of the agent, the next message loads it.
+  The replayed history of a loaded session is not sent to the chat.
+- If the session cannot be loaded (for example it is open in the TUI or in
+  `otto serve`), the chat gets "The previous session could not be loaded;
+  started a new one." and the message runs in a new session.
+- One prompt runs per chat at a time; further messages wait in a queue of at
+  most 10. A message beyond that gets "Queue is full (10 messages); the
+  message was not queued." Different chats run concurrently.
+- The reply is sent when the turn ends, as a reply to the message that
+  started it. It contains the assistant text only: reasoning and tool calls
+  are not sent, and text before and after a tool call is separated by a
+  blank line. Replies are plain text, split at line boundaries into parts of
+  at most 4096 characters. The chat shows "typing" while the turn runs.
+- Only text is sent to Otto. A photo, file, or other attachment gets
+  "Attachments are not supported and were ignored."; its caption, if any, is
+  sent as the prompt.
+- A message received by Telegram more than 30 minutes before `otto-connect`
+  reads it is not run; the chat gets a notice with the message's time.
+- Each message is acknowledged to Telegram once it is queued or rejected, so
+  a crash does not run a message twice; a message queued but not yet run
+  when `otto-connect` stops is not run.
+
+### Commands
+
+A message whose whole text is one of these commands is handled by
+`otto-connect` and not sent to Otto. Any other text, including other words
+starting with `/`, is a prompt.
+
+| Command | Effect |
+| --- | --- |
+| `/new` | The chat's next message starts a new session. The old session stays in Otto's session store. |
+| `/stop` | Cancels the running turn (reply "Stopped.") and clears the chat's queue. With nothing running: "Nothing is running." |
+| `/allow` | Answers the pending permission request with Allow once. |
+| `/deny` | Answers the pending permission request with Deny. |
+
+### Permission requests
+
+When Otto asks to run an unsandboxed `bash` command (see
+[Elevated `bash` uses `session/request_permission`](#elevated-bash-uses-sessionrequest_permission)),
+the chat gets the command followed by "Reply /allow or /deny". The first
+`/allow` or `/deny` from an admitted sender in that chat answers it. `/stop`
+cancels it. With no answer after 10 minutes the request is denied and the
+chat gets "Permission request timed out; denied." `/allow` or `/deny` with
+no pending request gets "No pending request."
+
+### Agent process exits
+
+If `otto acp` exits, each running turn ends and its chat gets one message
+with the exit status and the last 20 lines of the agent's stderr. The next
+message starts the agent again. After consecutive exits within 60 s of a
+start, the restart waits 1 s, then 2 s, 4 s, and so on up to 60 s.
+
+### Not supported by otto-connect
+
+- Streaming partial replies; the reply is sent when the turn ends.
+- Images, files, and other attachments.
+- Running as a login service (launchd or systemd).
 
 ## Durable workflows
 

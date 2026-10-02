@@ -17,7 +17,6 @@ pub mod agents;
 pub mod duration;
 pub mod edit;
 pub mod failover;
-pub mod inbound;
 pub mod mcp;
 pub mod memory;
 pub mod model_limits;
@@ -37,7 +36,6 @@ use serde::{Deserialize, Serialize};
 
 pub use agents::{Agents, AgentsRuntime, resolve_agents};
 pub use failover::{Failover, FailoverRuntime, resolve_failover};
-pub use inbound::{FeishuRuntime, Inbound, resolve_feishu};
 pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
 pub use memory::{Memory, MemoryRuntime, MemorySQLite, resolve_memory};
 pub use model_limits::ModelLimits;
@@ -88,8 +86,6 @@ pub struct File {
     pub skills: Skills,
     #[serde(default)]
     pub agents: Agents,
-    #[serde(default, skip_serializing_if = "Inbound::is_default")]
-    pub inbound: Inbound,
     #[serde(default, skip_serializing_if = "Experimental::is_default")]
     pub experimental: Experimental,
     #[serde(default)]
@@ -198,7 +194,13 @@ pub fn parse(text: &str) -> Result<File, ConfigError> {
         Ok(file) => Ok(file),
         Err(err) => {
             let message = err.message();
-            if message.contains("unknown field") {
+            if message.starts_with("unknown field `inbound`")
+                && toml::from_str::<toml::Table>(text).is_ok_and(|t| t.contains_key("inbound"))
+            {
+                Err(ConfigError::new(
+                    "[inbound] was removed: Feishu messages now reach otto through otto-connect (see \"Chat connector\" in the user manual); delete the [inbound] table from config.toml",
+                ))
+            } else if message.contains("unknown field") {
                 Err(ConfigError::new(format!("unknown field: {err}")))
             } else {
                 Err(ConfigError::new(err.to_string()))
@@ -251,6 +253,26 @@ fn go_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn removed_inbound_table_gets_a_specific_error() {
+        let err = parse("[inbound.feishu]\nenabled = true\nchat_ids = [\"oc_x\"]\n")
+            .expect_err("inbound is removed");
+        let text = err.to_string();
+        assert!(text.contains("[inbound] was removed"), "{text}");
+        assert!(text.contains("otto-connect"), "{text}");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn other_unknown_inbound_keys_keep_the_generic_error() {
+        for text in ["bogus = 1\n", "[server]\ninbound = 1\n"] {
+            let message = parse(text).expect_err("unknown key").to_string();
+            assert!(message.starts_with("unknown field:"), "{message}");
+            assert!(!message.contains("was removed"), "{message}");
+        }
+    }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]

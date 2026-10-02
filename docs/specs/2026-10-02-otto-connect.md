@@ -1,8 +1,9 @@
 # Chat connector (`otto-connect`)
 
-Status: approved 2026-10-02 with D1-D6 as written. Changes 1 (core and
-Telegram) and 2 (Feishu) of "Delivery in three changes" are implemented; the
-user manual's "Chat connector" section describes current behavior.
+Status: approved 2026-10-02 with D1-D6 as written. All three changes of
+"Delivery in three changes" are implemented: 1 (core and Telegram), 2
+(Feishu) and 3 (removal of `[inbound.feishu]`). The user manual's "Chat
+connector" section describes current behavior.
 
 Implementation notes for change 2 (`channel-sdk-go` v0.1.0), where the SDK
 differs from the "Facts" below:

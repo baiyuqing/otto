@@ -663,6 +663,56 @@ impl Controller {
         runner.compact(focus, emit, cancel).await
     }
 
+    /// Reflects on the part of the current session no earlier run covered and
+    /// queues what it finds as memory candidates for human review.
+    ///
+    /// Takes the same admission as a turn or a compaction, so it never runs
+    /// beside either. Appends nothing to the session.
+    pub async fn reflect(
+        &self,
+        focus: &str,
+        cancel: &CancellationToken,
+    ) -> Result<crate::reflection::Report, crate::reflection::Error> {
+        use crate::reflection::Error;
+        let _admission = self.begin_operation().map_err(Error::Read)?;
+        let runner = self.runner().map_err(Error::Read)?;
+        let session = self
+            .current_session_opt()
+            .ok_or_else(|| Error::Read(CLOSED.to_owned()))?;
+        let (service, user_scope, workspace_scope) =
+            self.memory_manager().ok_or(Error::MemoryUnavailable)?;
+        let session_id = session.header().id;
+        let session_path = session.path();
+        let skill_roots = self.reflection_skill_roots();
+        let context = crate::reflection::Context {
+            runner: &runner,
+            session_id: &session_id,
+            session_path: &session_path,
+            service: &service,
+            user_scope: &user_scope,
+            workspace_scope: &workspace_scope,
+            skill_roots: skill_roots.as_ref(),
+        };
+        self.builder
+            .reflector
+            .run(&context, "manual", focus, cancel)
+            .await
+    }
+
+    /// Where reflection writes and looks up skills, or `None` when skills are
+    /// disabled in `[skills]` or there is no home directory.
+    pub fn reflection_skill_roots(&self) -> Option<crate::reflection::skillwrite::Roots> {
+        let skills = otto_core::config::resolve_skills(
+            &self.builder.config,
+            &self.builder.environment,
+            &self.builder.workspace_path,
+        );
+        skills
+            .enabled
+            .then(|| crate::reflection::skill_roots(&self.builder.home, &skills.roots))
+            .flatten()
+    }
+
     // ---- profiles ----
 
     /// The configured profile names, sorted.

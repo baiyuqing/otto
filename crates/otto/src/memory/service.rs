@@ -11,9 +11,10 @@
 //!
 //! Deliberate absences:
 //!
-//! - `Observe`, the extractor and the per-binding content guard are absent,
-//!   because automatic memory extraction is out of scope. The store still
-//!   guards written content.
+//! - `Observe` and the per-binding content guard are absent, because
+//!   automatic extraction through a binding is out of scope. The `reflection`
+//!   module queues extractor candidates on demand through [`Service::propose`];
+//!   the store still guards written content.
 //! - The store is the concrete SQLite store and the policy a function, so
 //!   there is no missing-dependency case to reject.
 //! - `close` waits on the store's connection mutex, which an in-flight

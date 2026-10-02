@@ -58,6 +58,7 @@ use crate::provider::{
     Provider, ProviderError, ProviderSettlement, Request, RequestSizer, Response, StreamEvent,
 };
 use crate::session::Session;
+use crate::session::context::pending_tool_calls;
 use crate::session::operation::OperationFact;
 use crate::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
 
@@ -350,11 +351,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         // are delivered before the user's own message is appended, so the
         // provider sees them first: the user's prompt reads as a response
         // to what is already in the transcript, not the other way around.
+        // Calls a session takeover left without a result come first: nothing
+        // may be appended between an assistant message and its tool results.
+        let mut state = RunDispatchState::default();
+        self.replay_pending_calls(emit, &mut state, control).await?;
+
         if let Err(error) = self.deliver_notifications(emit).await {
             return Err(self.fail(emit, error));
         }
 
-        let mut state = RunDispatchState::default();
         if !text.is_empty() || image.is_some() {
             let redacted = self.redactor.redact_string(user_text);
             let mut blocks = Vec::new();
@@ -451,130 +456,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             // Tool calls run one at a time, so a frontend can reserve bounded
             // delivery for the terminal event of the single active call.
             for block in tool_calls {
-                let arguments = block.arguments.clone().unwrap_or_else(empty_object);
-                let operation_id = match (self.options.new_operation_id)() {
-                    Ok(id) => id,
-                    Err(message) => {
-                        return Err(self.fail(emit, AgentError::OperationIdentity { message }));
-                    }
-                };
-                let attempt = 1;
-                let attempt_fact = OperationFact::attempt(
-                    operation_id.clone(),
-                    attempt,
-                    block.tool_call_id.clone(),
-                    block.tool_name.clone(),
-                );
-                if let Err(source) = self.session.append_operation_fact(attempt_fact) {
-                    return Err(self.fail(
-                        emit,
-                        AgentError::Persist {
-                            kind: format!(
-                                "operation attempt for {}",
-                                quote_go(&block.tool_call_id)
-                            ),
-                            source,
-                        },
-                    ));
-                }
-                emit(Event::ToolCallStarted {
-                    operation_id: operation_id.clone(),
-                    attempt,
-                    tool_name: block.tool_name.clone(),
-                    tool_call_id: block.tool_call_id.clone(),
-                    arguments: arguments.get().to_owned(),
-                });
-                let mut execution = if let Some(reason) = control.admission_stop_reason() {
-                    stopped_tool_execution(reason)
-                } else {
-                    self.tools
-                        .execute(
-                            ToolCall {
-                                operation_id: &operation_id,
-                                name: &block.tool_name,
-                                arguments: &arguments,
-                                attempt,
-                            },
-                            control,
-                        )
-                        .await
-                };
-                execution.result.content = self.redactor.redact_string(&execution.result.content);
-                execution.result.persisted_content = execution
-                    .result
-                    .persisted_content
-                    .as_deref()
-                    .map(|text| self.redactor.redact_string(text));
-                let persisted_text = match &execution.result.persisted_content {
-                    Some(persisted) => {
-                        // The stored text is a placeholder, so the live text
-                        // is kept for this turn's provider requests only.
-                        state
-                            .tool_result_overlay
-                            .insert(block.tool_call_id.clone(), execution.result.content.clone());
-                        persisted.clone()
-                    }
-                    None => execution.result.content.clone(),
-                };
-                let is_error = execution.result.is_error;
-                let terminal = OperationFact::terminal(
-                    operation_id.clone(),
-                    attempt,
-                    block.tool_call_id.clone(),
-                    block.tool_name.clone(),
-                    execution.outcome.clone(),
-                );
-                if let Err(source) = self.session.append_operation_fact(terminal) {
-                    return Err(self.fail(
-                        emit,
-                        AgentError::Persist {
-                            kind: format!(
-                                "operation terminal for {}",
-                                quote_go(&block.tool_call_id)
-                            ),
-                            source,
-                        },
-                    ));
-                }
-                let operation_metadata = ToolResultMetadata {
-                    operation_id: Some(operation_id.clone()),
-                    disposition: execution.outcome.disposition,
-                    effect_certainty: execution.outcome.effect_certainty,
-                    stop_reason: execution.outcome.stop_reason,
-                };
-                emit(Event::ToolCallFinished {
-                    operation_id: operation_id.clone(),
-                    attempt,
-                    tool_name: block.tool_name.clone(),
-                    tool_call_id: block.tool_call_id.clone(),
-                    result: execution.result,
-                    outcome: execution.outcome,
-                });
-                let stored = Message {
-                    id: (self.options.new_id)(),
-                    role: Role::Tool,
-                    created_at: (self.options.now)(),
-                    blocks: vec![Block {
-                        block_type: BlockType::ToolResult,
-                        text: persisted_text,
-                        tool_call_id: block.tool_call_id.clone(),
-                        tool_name: block.tool_name.clone(),
-                        is_error,
-                        operation_metadata: Some(operation_metadata),
-                        ..Block::default()
-                    }],
-                    ..Message::default()
-                };
-                // `Session::append` is likewise not cancellable.
-                if let Err(source) = self.session.append(stored).await {
-                    return Err(self.fail(
-                        emit,
-                        AgentError::Persist {
-                            kind: format!("tool result for {}", quote_go(&block.tool_call_id)),
-                            source,
-                        },
-                    ));
-                }
+                self.run_tool_call(emit, &mut state, control, &block, None)
+                    .await?;
             }
 
             if !had_tool_call {
@@ -596,6 +479,185 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 return Err(self.fail(emit, error));
             }
         }
+    }
+
+    /// Runs one tool call to its durable result: attempt fact, execution,
+    /// terminal fact, result message. `prior` is the operation id and the
+    /// attempts already recorded when this is a replay of a call a takeover
+    /// left without a result; `None` starts a new operation at attempt 1.
+    /// Failures are reported through `emit` before they are returned.
+    async fn run_tool_call(
+        &self,
+        emit: EventSink<'_>,
+        state: &mut RunDispatchState,
+        control: &dyn OperationControl,
+        block: &Block,
+        prior: Option<(OperationId, u32)>,
+    ) -> Result<(), AgentError> {
+        let arguments = block.arguments.clone().unwrap_or_else(empty_object);
+        let (operation_id, attempt) = match prior {
+            Some((operation_id, attempts)) => (operation_id, attempts + 1),
+            None => match (self.options.new_operation_id)() {
+                Ok(id) => (id, 1),
+                Err(message) => {
+                    return Err(self.fail(emit, AgentError::OperationIdentity { message }));
+                }
+            },
+        };
+        let attempt_fact = OperationFact::attempt(
+            operation_id.clone(),
+            attempt,
+            block.tool_call_id.clone(),
+            block.tool_name.clone(),
+        );
+        if let Err(source) = self.session.append_operation_fact(attempt_fact) {
+            return Err(self.fail(
+                emit,
+                AgentError::Persist {
+                    kind: format!("operation attempt for {}", quote_go(&block.tool_call_id)),
+                    source,
+                },
+            ));
+        }
+        emit(Event::ToolCallStarted {
+            operation_id: operation_id.clone(),
+            attempt,
+            tool_name: block.tool_name.clone(),
+            tool_call_id: block.tool_call_id.clone(),
+            arguments: arguments.get().to_owned(),
+        });
+        let mut execution = if let Some(reason) = control.admission_stop_reason() {
+            stopped_tool_execution(reason)
+        } else {
+            self.tools
+                .execute(
+                    ToolCall {
+                        operation_id: &operation_id,
+                        name: &block.tool_name,
+                        arguments: &arguments,
+                        attempt,
+                    },
+                    control,
+                )
+                .await
+        };
+        execution.result.content = self.redactor.redact_string(&execution.result.content);
+        execution.result.persisted_content = execution
+            .result
+            .persisted_content
+            .as_deref()
+            .map(|text| self.redactor.redact_string(text));
+        let persisted_text = match &execution.result.persisted_content {
+            Some(persisted) => {
+                // The stored text is a placeholder, so the live text
+                // is kept for this turn's provider requests only.
+                state
+                    .tool_result_overlay
+                    .insert(block.tool_call_id.clone(), execution.result.content.clone());
+                persisted.clone()
+            }
+            None => execution.result.content.clone(),
+        };
+        let is_error = execution.result.is_error;
+        let terminal = OperationFact::terminal(
+            operation_id.clone(),
+            attempt,
+            block.tool_call_id.clone(),
+            block.tool_name.clone(),
+            execution.outcome.clone(),
+        );
+        if let Err(source) = self.session.append_operation_fact(terminal) {
+            return Err(self.fail(
+                emit,
+                AgentError::Persist {
+                    kind: format!("operation terminal for {}", quote_go(&block.tool_call_id)),
+                    source,
+                },
+            ));
+        }
+        let operation_metadata = ToolResultMetadata {
+            operation_id: Some(operation_id.clone()),
+            disposition: execution.outcome.disposition,
+            effect_certainty: execution.outcome.effect_certainty,
+            stop_reason: execution.outcome.stop_reason,
+        };
+        emit(Event::ToolCallFinished {
+            operation_id: operation_id.clone(),
+            attempt,
+            tool_name: block.tool_name.clone(),
+            tool_call_id: block.tool_call_id.clone(),
+            result: execution.result,
+            outcome: execution.outcome,
+        });
+        let stored = Message {
+            id: (self.options.new_id)(),
+            role: Role::Tool,
+            created_at: (self.options.now)(),
+            blocks: vec![Block {
+                block_type: BlockType::ToolResult,
+                text: persisted_text,
+                tool_call_id: block.tool_call_id.clone(),
+                tool_name: block.tool_name.clone(),
+                is_error,
+                operation_metadata: Some(operation_metadata),
+                ..Block::default()
+            }],
+            ..Message::default()
+        };
+        // `Session::append` is likewise not cancellable.
+        if let Err(source) = self.session.append(stored).await {
+            return Err(self.fail(
+                emit,
+                AgentError::Persist {
+                    kind: format!("tool result for {}", quote_go(&block.tool_call_id)),
+                    source,
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    /// Runs again the calls a takeover left without a result, when every one
+    /// of them names a replayable tool and has at most one recorded attempt
+    /// with no terminal fact (the same all-or-nothing rule the store applies
+    /// when it leaves them pending). Each runs as the next attempt of its
+    /// recorded operation, or as attempt 1 of a new one when none was
+    /// recorded. Does nothing for any other pending set, which the store has
+    /// already answered.
+    async fn replay_pending_calls(
+        &self,
+        emit: EventSink<'_>,
+        state: &mut RunDispatchState,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
+        let Ok(pending) = pending_tool_calls(&self.session.messages()) else {
+            return Ok(());
+        };
+        if pending.is_empty()
+            || !pending
+                .iter()
+                .all(|call| self.tools.replayable(&call.tool_name))
+        {
+            return Ok(());
+        }
+        let ledger = self.session.operation_ledger();
+        let mut priors = Vec::with_capacity(pending.len());
+        for call in &pending {
+            match ledger.operation_for_tool_call(&call.tool_call_id) {
+                None => priors.push(None),
+                Some(record)
+                    if !record.corrupt && record.terminal.is_none() && record.attempts <= 1 =>
+                {
+                    priors.push(Some((record.operation_id.clone(), record.attempts)));
+                }
+                Some(_) => return Ok(()),
+            }
+        }
+        for (call, prior) in pending.iter().zip(priors) {
+            self.run_tool_call(emit, state, control, call, prior)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Appends each queued notification as a display context message and
@@ -1290,6 +1352,129 @@ mod tests {
                 ..Message::default()
             },
         }
+    }
+
+    /// An executor that serves `echo` and declares the names in `replayable`
+    /// replayable, counting how many calls reached it.
+    struct ReplayExecutor {
+        replayable: &'static [&'static str],
+        calls: AtomicUsize,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl ToolExecutor for ReplayExecutor {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            EchoExecutor.definitions()
+        }
+
+        fn replayable(&self, name: &str) -> bool {
+            self.replayable.contains(&name)
+        }
+
+        async fn execute(
+            &self,
+            call: crate::tool::ToolCall<'_>,
+            control: &dyn OperationControl,
+        ) -> crate::tool::ToolExecution {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            EchoExecutor.execute(call, control).await
+        }
+    }
+
+    /// A session that ends on an assistant message with an unanswered `echo`
+    /// call, the shape a takeover leaves for a replayable tool, and whose
+    /// recorded first attempt (when `attempted`) was never settled.
+    async fn session_with_pending_echo(attempted: bool) -> MemorySession {
+        let session = MemorySession::new();
+        let call = assistant_tool_call().message;
+        session.append(call).await.expect("append call");
+        if attempted {
+            session
+                .append_operation_fact(OperationFact::attempt(
+                    OperationId::new("op-prior").expect("operation id"),
+                    1,
+                    "call-1",
+                    "echo",
+                ))
+                .expect("attempt fact");
+        }
+        session
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn run_replays_a_replayable_call_a_takeover_left_unanswered() {
+        let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);
+        let executor = ReplayExecutor {
+            replayable: &["echo"],
+            calls: AtomicUsize::new(0),
+        };
+        let agent = Agent::new(
+            provider,
+            executor,
+            session_with_pending_echo(true).await,
+            test_options(),
+        );
+        let mut events = Vec::new();
+        agent
+            .run(
+                "continue",
+                &mut |event| events.push(event),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("run");
+
+        let started: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ToolCallStarted {
+                    operation_id,
+                    attempt,
+                    ..
+                } => Some((operation_id.as_str().to_owned(), *attempt)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            started,
+            vec![("op-prior".to_owned(), 2)],
+            "the call reruns as the next attempt of its recorded operation"
+        );
+        let roles: Vec<Role> = agent
+            .session()
+            .messages()
+            .iter()
+            .map(|message| message.role.clone())
+            .collect();
+        assert_eq!(
+            roles,
+            vec![Role::Assistant, Role::Tool, Role::User, Role::Assistant],
+            "the result follows its call before the user message"
+        );
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn run_does_not_replay_a_call_whose_tool_is_not_replayable() {
+        let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);
+        let executor = ReplayExecutor {
+            replayable: &[],
+            calls: AtomicUsize::new(0),
+        };
+        let agent = Agent::new(
+            provider,
+            executor,
+            session_with_pending_echo(true).await,
+            test_options(),
+        );
+        let result = agent
+            .run("continue", &mut |_| {}, &CancellationToken::new())
+            .await;
+        assert!(
+            result.is_err(),
+            "a pending call the store should have answered is a loud error, not a silent run"
+        );
+        assert_eq!(agent.tools.calls.load(Ordering::SeqCst), 0);
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

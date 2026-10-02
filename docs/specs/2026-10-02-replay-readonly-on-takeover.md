@@ -1,7 +1,8 @@
 # Replay read-only tool calls after a takeover
 
-Status: draft 2026-10-02, awaiting approval. No production code or tests are
-written until this design is approved. It is a slice of the approved
+Status: approved 2026-10-02; open questions resolved as recommended
+(all-or-nothing per message, `memory_search` in the first set and `skill` not,
+SIGTERM path out of scope). It is a slice of the approved
 [resilience, retry, and idempotency](2026-09-28-resilience-retry-idempotency.md)
 design (Phase 4's `ReadOnly` declaration plus a new consumer of it) and of
 [session failover](2026-09-28-session-failover.md); where they disagree, this

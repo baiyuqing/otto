@@ -5538,6 +5538,7 @@ mod tests {
                 pid: 4242,
             },
             repaired: Vec::new(),
+            replayable: Vec::new(),
         };
         crate::failover::recovery::notify(
             tasks.notifications(),

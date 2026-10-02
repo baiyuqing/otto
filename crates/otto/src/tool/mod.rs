@@ -27,6 +27,7 @@ pub mod registry;
 pub mod remind;
 pub mod result;
 pub(crate) mod root;
+pub mod safety;
 mod search;
 pub mod skill;
 pub mod workspace;

@@ -3179,6 +3179,120 @@ fn takeover_through_prepare_records_the_holder_and_repairs_the_dangling_calls() 
     activated.close().expect("close");
 }
 
+// Replay: a takeover leaves calls of replayable tools unanswered, for the
+// agent to run again, only when every pending call qualifies.
+
+fn read_only_tools(name: &str) -> bool {
+    matches!(name, "read" | "grep")
+}
+
+/// Takes over a session whose log ends in `calls`, after `prepare` is given
+/// `setup` to add operation facts first, and returns the activated store.
+fn take_over_with(
+    calls: &[(&str, &str)],
+    attempts: &[(&str, &str, u32)],
+    replayable: fn(&str) -> bool,
+) -> (TempDir, Store, String) {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_message(&tool_calls(calls))
+        .expect("append dangling calls");
+    for (index, (call_id, name, count)) in attempts.iter().enumerate() {
+        let operation_id =
+            otto_core::model::OperationId::new(format!("op-{index}")).expect("operation id");
+        for attempt in 1..=*count {
+            store
+                .append_operation_fact(otto_core::session::operation::OperationFact::attempt(
+                    operation_id.clone(),
+                    attempt,
+                    (*call_id).to_string(),
+                    (*name).to_string(),
+                ))
+                .expect("append attempt");
+        }
+    }
+    let path = store.path();
+    store
+        .close()
+        .expect("close before simulating a stopped holder");
+    write_lease_dir_by_hand(Path::new(&path), 6, 1, "stopped-host", 9001, false);
+    let prepared = Prepared::prepare(Path::new(&path), None)
+        .expect("prepare takes over")
+        .with_replayable(replayable);
+    let (activated, _warnings) = prepared.activate().expect("activate");
+    (temp, activated, path)
+}
+
+fn tool_result_count(path: &str) -> usize {
+    let (_entries, messages) = Store::read_entries(path).expect("read log");
+    messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .count()
+}
+
+#[test]
+fn takeover_leaves_all_replayable_dangling_calls_unanswered() {
+    let (_temp, store, path) = take_over_with(
+        &[("call-1", "read"), ("call-2", "grep")],
+        &[("call-1", "read", 1)],
+        read_only_tools,
+    );
+    let takeover = store.take_takeover().expect("takeover recorded");
+    assert!(takeover.repaired.is_empty());
+    assert_eq!(takeover.replayable.len(), 2);
+    assert_eq!(takeover.replayable[0].name, "read");
+    assert!(takeover.replayable[0].may_have_run);
+    assert_eq!(
+        tool_result_count(&path),
+        0,
+        "no synthetic result may be appended for a call the agent will run again"
+    );
+    let record = store
+        .operation_ledger()
+        .operation_for_tool_call("call-1")
+        .cloned()
+        .expect("recorded operation");
+    assert!(
+        record.terminal.is_none(),
+        "the interrupted attempt must stay unsettled so the next attempt can follow it"
+    );
+    store.close().expect("close");
+}
+
+#[test]
+fn takeover_repairs_every_call_when_one_is_not_replayable() {
+    let (_temp, store, path) = take_over_with(
+        &[("call-1", "read"), ("call-2", "bash")],
+        &[],
+        read_only_tools,
+    );
+    let takeover = store.take_takeover().expect("takeover recorded");
+    assert_eq!(takeover.repaired.len(), 2);
+    assert!(takeover.replayable.is_empty());
+    assert_eq!(tool_result_count(&path), 2);
+    store.close().expect("close");
+}
+
+#[test]
+fn takeover_repairs_a_call_that_was_already_replayed_once() {
+    let (_temp, store, path) = take_over_with(
+        &[("call-1", "read")],
+        &[("call-1", "read", 2)],
+        read_only_tools,
+    );
+    let takeover = store.take_takeover().expect("takeover recorded");
+    assert_eq!(takeover.repaired.len(), 1);
+    assert!(takeover.replayable.is_empty());
+    assert_eq!(
+        tool_result_count(&path),
+        1,
+        "a second interruption falls back to the interrupted result"
+    );
+    store.close().expect("close");
+}
+
 // R6: new sessions.
 
 #[test]

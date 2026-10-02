@@ -161,6 +161,14 @@ pub trait ToolExecutor {
     /// The schemas advertised to the provider, in a stable order.
     fn definitions(&self) -> Vec<ToolDefinition>;
 
+    /// Whether a call to `name` that a session takeover left without a result
+    /// may be run again by the agent instead of being settled as interrupted.
+    /// True only for a tool declared `RetrySafety::ReadOnly`; the default is
+    /// false, so an executor opts in per tool.
+    fn replayable(&self, _name: &str) -> bool {
+        false
+    }
+
     /// Runs one attempt. A name this executor does not serve must settle as
     /// `Error + NotStarted` with [`ToolResult::unknown_tool`].
     async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution;

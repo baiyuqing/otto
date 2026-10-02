@@ -294,6 +294,8 @@ enum IdleEvent {
     Registry(bool),
     AgentsTick,
     TasksTick,
+    /// Background reflection queued a notice.
+    Notices,
 }
 
 /// Refreshes the sub-agent panel snapshot and redraws. The sole place
@@ -334,7 +336,16 @@ async fn run_app<B: Backend>(
     // while the snapshot holds a queued or running task, matching
     // `agents_refresh`'s open/closed lifecycle above.
     let mut tasks_refresh: Option<tokio::time::Interval> = None;
+    let mut notices = controller.notices_changed();
     loop {
+        // Anything queued while a turn or command ran shows before the next wait.
+        let queued = controller.take_notices();
+        if !queued.is_empty() {
+            for line in queued {
+                app.push_system(line);
+            }
+            redraw(terminal, &mut app, controller)?;
+        }
         match controller.subagent_tasks() {
             Some(tasks) => {
                 if updates
@@ -390,6 +401,11 @@ async fn run_app<B: Backend>(
                 open = signal => IdleEvent::Registry(open),
                 () = tick => IdleEvent::AgentsTick,
                 () = tasks_tick => IdleEvent::TasksTick,
+                changed = notices.changed() => {
+                    // The sender lives as long as the controller.
+                    let _ = changed;
+                    IdleEvent::Notices
+                }
             }
         };
         let event = match event {
@@ -404,6 +420,8 @@ async fn run_app<B: Backend>(
                 redraw(terminal, &mut app, controller)?;
                 continue;
             }
+            // The top of the loop drains and redraws.
+            IdleEvent::Notices => continue,
             IdleEvent::Input(event) => event,
             IdleEvent::Registry(false) => {
                 updates = None;

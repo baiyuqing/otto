@@ -6,6 +6,8 @@ export function Composer(props: {
   disabled: boolean
   running: boolean
   compacting: boolean
+  // A reflection is running; like a compaction, it holds the session.
+  reflecting?: boolean
   queuedText?: string
   onSend: (text: string, image?: { data: string; mime_type: string }) => void
   onQueue: (text: string) => void
@@ -18,7 +20,8 @@ export function Composer(props: {
   const [image, setImage] = useState<{ name: string; data: string; mime_type: string } | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const hint = sendHint()
-  const busy = props.running || props.compacting
+  const held = props.compacting || Boolean(props.reflecting)
+  const busy = props.running || held
   const queueing = props.running
   const queued = queueing && (props.queuedText?.trim().length ?? 0) > 0
   const suggestions = props.disabled || busy ? [] : webCommandSuggestions(text)
@@ -56,7 +59,7 @@ export function Composer(props: {
       props.onQueue(t)
       return
     }
-    if ((!t && !image) || props.disabled || props.compacting) return
+    if ((!t && !image) || props.disabled || held) return
     setText('')
     const selected = image ? { data: image.data, mime_type: image.mime_type } : undefined
     setImage(null)
@@ -107,7 +110,9 @@ export function Composer(props: {
       : 'Otto is working · type, then Enter to queue next input · Esc cancels turn'
     : props.compacting
       ? 'Compacting context…'
-      : suggestions.length > 0
+      : props.reflecting
+        ? 'Reflecting on this session…'
+        : suggestions.length > 0
         ? 'Tab or click to complete a command'
         : hint
 
@@ -134,7 +139,7 @@ export function Composer(props: {
           ref={textareaRef}
           value={text}
           placeholder={placeholder}
-          disabled={props.disabled || props.compacting}
+          disabled={props.disabled || held}
           onChange={(e) => changeText(e.target.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
@@ -181,7 +186,7 @@ export function Composer(props: {
               </button>
             </>
           ) : (
-            <button className="primary" onClick={submit} disabled={props.disabled || props.compacting || (!text.trim() && !image)}>
+            <button className="primary" onClick={submit} disabled={props.disabled || held || (!text.trim() && !image)}>
               Send
             </button>
           )}

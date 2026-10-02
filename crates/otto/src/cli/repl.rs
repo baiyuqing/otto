@@ -97,7 +97,12 @@ impl<'a> Repl<'a> {
 
         let mut lines = spawn_reader(input);
         let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
+        let mut notices = self.controller.notices_changed();
         loop {
+            // Lines background reflection queued while a turn or command ran.
+            for line in self.controller.take_notices() {
+                let _ = writeln!(self.stdout, "{line}");
+            }
             let _ = write!(self.stdout, "{}", crate::tui::gutter::USER_MARK);
             let _ = self.stdout.flush();
             // The receiver is kept across iterations rather than re-subscribed:
@@ -127,17 +132,23 @@ impl<'a> Repl<'a> {
                 };
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(Error::Cancelled),
-                    open = signal => Err(open),
+                    open = signal => Err(Some(open)),
+                    // The top of the loop prints it and shows the prompt again.
+                    _ = notices.changed() => Err(None),
                     line = lines.recv() => Ok(line),
                 }
             };
             let line = match read {
                 Ok(line) => line,
-                Err(false) => {
+                Err(None) => {
+                    let _ = writeln!(self.stdout);
+                    continue;
+                }
+                Err(Some(false)) => {
                     updates = None;
                     continue;
                 }
-                Err(true) => match self.wake(cancel).await {
+                Err(Some(true)) => match self.wake(cancel).await {
                     Ok(_) | Err(Error::Turn { fatal: false, .. }) => continue,
                     Err(error) => return Err(error),
                 },
@@ -1083,6 +1094,32 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn notices_from_background_reflection_print_before_the_prompt() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        controller.push_notice(
+            "reflection: 1 candidate(s) queued for review (/memory review), 0 dropped",
+        );
+
+        let (stdout, stderr, result) = session("/exit\n", &controller).await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(stderr, "");
+        let notice = stdout
+            .find("reflection: 1 candidate(s) queued")
+            .expect("the notice is printed");
+        let prompt = stdout
+            .find(crate::tui::gutter::USER_MARK)
+            .expect("a prompt is printed");
+        assert!(
+            notice < prompt,
+            "the notice comes before the prompt: {stdout}"
+        );
+        assert!(controller.take_notices().is_empty(), "it was drained");
     }
 
     async fn session(input: &str, controller: &Controller) -> (String, String, Result<(), Error>) {

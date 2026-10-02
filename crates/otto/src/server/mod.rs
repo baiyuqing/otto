@@ -18,6 +18,7 @@ pub mod fs;
 pub mod listen;
 pub mod mcp;
 pub mod metrics;
+pub mod reflection;
 pub mod sandbox;
 pub mod skills;
 pub mod tasks;
@@ -636,6 +637,16 @@ impl Server {
                 post(cancel_turn),
             )
             .route("/v1/sessions/{id}/compact", post(compact::handle))
+            .route("/v1/sessions/{id}/reflect", post(reflection::reflect))
+            .route("/v1/sessions/{id}/notices", get(reflection::notices))
+            .route(
+                "/v1/sessions/{id}/reflection/skills",
+                get(reflection::list_skills),
+            )
+            .route(
+                "/v1/sessions/{id}/reflection/skills/{name}/revert",
+                post(reflection::revert_skill),
+            )
             .route("/v1/sessions/{id}/tasks", get(tasks::list))
             .route("/v1/sessions/{id}/tasks/{task_id}", get(tasks::get))
             .route(
@@ -2818,6 +2829,9 @@ mod tests {
         /// Registers the approval store and the `bash` double that
         /// [`Script::tool_command`] calls.
         elevate: bool,
+        /// Gives the builder a reflector backed by this store, with the
+        /// directory as its home, so `~/.otto/skills` is `<home>/.otto/skills`.
+        reflection: Option<(Arc<crate::reflection::Store>, std::path::PathBuf)>,
     }
 
     struct Harness {
@@ -2847,6 +2861,16 @@ mod tests {
             let canonical_workspace = std::fs::canonicalize(workspace.path())
                 .unwrap_or_else(|_| workspace.path().to_path_buf());
             let mut builder = testutil::builder(&canonical_workspace, sessions.path());
+            if let Some((store, home)) = &options.reflection {
+                let skills_root = home.join(".otto/skills");
+                builder.shared_mut().home = home.to_string_lossy().into_owned();
+                builder.shared_mut().config.skills.paths =
+                    Some(vec![skills_root.to_string_lossy().into_owned()]);
+                builder.shared_mut().reflector = Arc::new(crate::reflection::Reflector::new(
+                    otto_core::config::ReflectionRuntime::default(),
+                    Some(Arc::clone(store)),
+                ));
+            }
             if options.elevate {
                 let executor = crate::sandbox::Executor::new(
                     Arc::new(crate::sandbox::direct::DirectDriver::new()),
@@ -4459,6 +4483,10 @@ mod tests {
         "/v1/sessions/{id}/turns/{turn_id}/events",
         "/v1/sessions/{id}/turns/{turn_id}/cancel",
         "/v1/sessions/{id}/compact",
+        "/v1/sessions/{id}/reflect",
+        "/v1/sessions/{id}/notices",
+        "/v1/sessions/{id}/reflection/skills",
+        "/v1/sessions/{id}/reflection/skills/{name}/revert",
         "/v1/sessions/{id}/tasks",
         "/v1/sessions/{id}/tasks/{task_id}",
         "/v1/sessions/{id}/tasks/{task_id}/cancel",
@@ -4579,6 +4607,272 @@ mod tests {
         assert_eq!(reply.status, StatusCode::CONFLICT);
         assert_eq!(reply.json()["error"]["code"], "turn_active");
         gate.cancel();
+    }
+
+    // ---- reflection ----
+
+    #[tokio::test]
+    async fn reflecting_an_unknown_session_is_404_and_a_bad_body_is_400() {
+        let harness = Harness::new();
+        let reply = harness
+            .send("POST", "/v1/sessions/missing/reflect", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+        let id = harness.create().await;
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/reflect"), Some("{nope"))
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reflecting_while_a_turn_runs_is_409_turn_active() {
+        let (gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let (_stream, _turn_id) = start_stream(&harness, &id).await;
+        harness.provider.wait_started(1).await;
+
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/reflect"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT);
+        assert_eq!(reply.json()["error"]["code"], "turn_active");
+        gate.cancel();
+    }
+
+    #[tokio::test]
+    async fn reflecting_a_session_that_cannot_reflect_is_409_unavailable_and_frees_the_slot() {
+        // The test controllers keep their history in memory, so there is no
+        // session file to read.
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/reflect"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "reflection_unavailable");
+        // The compaction slot is released, so a compaction is not refused.
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/compact"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    }
+
+    /// A reflection store, a home directory, and the skill roots under it.
+    struct ReflectionHome {
+        _home: TempDir,
+        path: std::path::PathBuf,
+        store: Arc<crate::reflection::Store>,
+        roots: crate::reflection::skillwrite::Roots,
+    }
+
+    fn reflection_home() -> ReflectionHome {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().to_path_buf();
+        let roots = crate::reflection::skill_roots(
+            &path.to_string_lossy(),
+            &[path.join(".otto/skills").to_string_lossy().into_owned()],
+        )
+        .expect("roots");
+        ReflectionHome {
+            _home: home,
+            path,
+            store: Arc::new(crate::reflection::Store::open_in_memory().expect("store")),
+            roots,
+        }
+    }
+
+    fn write_generated_skill(home: &ReflectionHome, name: &str, body: &str, action_revise: bool) {
+        use crate::reflection::guard::{self, Candidate, Verdict};
+        use crate::reflection::output::SkillAction;
+        let candidate = Candidate {
+            action: if action_revise {
+                SkillAction::Revise
+            } else {
+                SkillAction::Create
+            },
+            name: name.into(),
+            description: "Run the lint gate before committing".into(),
+            body: body.into(),
+            reason: "the user asked for it and it ran cleanly".into(),
+            cited: Vec::new(),
+        };
+        let entries = HashMap::new();
+        let checked =
+            guard::check(candidate, &entries, &|text: &str| text.to_owned()).expect("check");
+        let vetted = guard::approve(checked, Verdict::NotRequested);
+        crate::reflection::skillwrite::apply(
+            &home.store,
+            &home.roots,
+            &vetted,
+            "run-7",
+            "session-9",
+            "2026-10-02T00:00:00Z",
+            30,
+        )
+        .expect("write");
+    }
+
+    const GENERATED_BODY: &str = "1. Run `cargo fmt --all`.\n2. Run `cargo clippy --workspace -- -D warnings`.\n3. Fix every warning before committing.";
+
+    #[tokio::test]
+    async fn the_generated_skills_list_says_when_reflection_is_off() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reply = harness
+            .send("GET", &format!("/v1/sessions/{id}/reflection/skills"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json()["enabled"], false);
+        assert_eq!(reply.json()["skills"], serde_json::json!([]));
+        let reply = harness
+            .send("GET", "/v1/sessions/missing/reflection/skills", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn generated_skills_list_and_revert_over_http() {
+        let home = reflection_home();
+        write_generated_skill(&home, "lint-gate", GENERATED_BODY, false);
+        write_generated_skill(&home, "fmt-check", GENERATED_BODY, false);
+        let harness = Harness::with(HarnessOptions {
+            reflection: Some((Arc::clone(&home.store), home.path.clone())),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let list = format!("/v1/sessions/{id}/reflection/skills");
+
+        let reply = harness.send("GET", &list, None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let body = reply.json();
+        assert_eq!(body["enabled"], true);
+        let names: Vec<_> = body["skills"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|skill| skill["name"].as_str().expect("name").to_owned())
+            .collect();
+        assert_eq!(names, ["fmt-check", "lint-gate"]);
+        assert_eq!(body["skills"][1]["owned"], true);
+        assert_eq!(body["skills"][1]["run_id"], "run-7");
+        assert_eq!(body["skills"][1]["session_id"], "session-9");
+
+        // Reverting a skill reflection created removes it.
+        let reply = harness
+            .send("POST", &format!("{list}/lint-gate/revert"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert_eq!(reply.json()["result"], "removed");
+        assert!(!home.path.join(".otto/skills/lint-gate/SKILL.md").exists());
+        // It is gone from the list and a second revert is 404.
+        let reply = harness.send("GET", &list, None).await;
+        assert_eq!(reply.json()["skills"].as_array().expect("array").len(), 1);
+        let reply = harness
+            .send("POST", &format!("{list}/lint-gate/revert"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+
+        // A skill edited by hand is listed as not owned, and revert refuses it.
+        let edited = home.path.join(".otto/skills/fmt-check/SKILL.md");
+        std::fs::write(&edited, "my own version").expect("edit");
+        let reply = harness.send("GET", &list, None).await;
+        assert_eq!(reply.json()["skills"][0]["owned"], false);
+        let reply = harness
+            .send("POST", &format!("{list}/fmt-check/revert"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT);
+        assert_eq!(reply.json()["error"]["code"], "skill_not_owned");
+        assert_eq!(
+            std::fs::read_to_string(&edited).expect("read"),
+            "my own version"
+        );
+    }
+
+    #[tokio::test]
+    async fn reverting_restores_the_previous_version_and_rejects_bad_names() {
+        let home = reflection_home();
+        write_generated_skill(&home, "lint-gate", GENERATED_BODY, false);
+        let first = std::fs::read_to_string(home.path.join(".otto/skills/lint-gate/SKILL.md"))
+            .expect("first");
+        write_generated_skill(
+            &home,
+            "lint-gate",
+            &format!("{GENERATED_BODY}\n4. Re-run the tests."),
+            true,
+        );
+        let harness = Harness::with(HarnessOptions {
+            reflection: Some((Arc::clone(&home.store), home.path.clone())),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let base = format!("/v1/sessions/{id}/reflection/skills");
+
+        let reply = harness
+            .send("POST", &format!("{base}/lint-gate/revert"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert_eq!(reply.json()["result"], "restored");
+        assert_eq!(
+            std::fs::read_to_string(home.path.join(".otto/skills/lint-gate/SKILL.md"))
+                .expect("read"),
+            first
+        );
+        let reply = harness
+            .send("POST", &format!("{base}/Not%20A%20Name/revert"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+        let reply = harness
+            .send(
+                "POST",
+                "/v1/sessions/missing/reflection/skills/x/revert",
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn notices_are_listed_by_id_without_being_removed() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let path = format!("/v1/sessions/{id}/notices");
+        let reply = harness.send("GET", &path, None).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json(), serde_json::json!({"notices": [], "last": 0}));
+
+        let session = harness.server.lookup(&id).expect("session");
+        session.ctrl.push_notice("reflection: first");
+        session.ctrl.push_notice("reflection: second");
+
+        let reply = harness.send("GET", &path, None).await;
+        assert_eq!(
+            reply.json(),
+            serde_json::json!({
+                "notices": [{"id": 1, "text": "reflection: first"}, {"id": 2, "text": "reflection: second"}],
+                "last": 2,
+            })
+        );
+        // A second client, or a repeated read, sees them again.
+        assert_eq!(
+            harness.send("GET", &path, None).await.json()["notices"]
+                .as_array()
+                .expect("array")
+                .len(),
+            2
+        );
+        let reply = harness.send("GET", &format!("{path}?after=1"), None).await;
+        assert_eq!(
+            reply.json()["notices"],
+            serde_json::json!([{"id": 2, "text": "reflection: second"}])
+        );
+        let reply = harness.send("GET", &format!("{path}?after=2"), None).await;
+        assert_eq!(reply.json(), serde_json::json!({"notices": [], "last": 2}));
+        let reply = harness
+            .send("GET", "/v1/sessions/missing/notices", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

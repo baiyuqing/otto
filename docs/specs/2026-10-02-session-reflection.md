@@ -1,11 +1,11 @@
 # Session reflection: learning memories and skills from past work
 
-Status: approved 2026-10-02. Phase 1 (memory reflection on demand) and
-phase 2 (generated skills with the vetting pipeline) are implemented; phases 3
-and 4 (automatic triggers, HTTP and the Web UI) are not. The five open
-decisions were answered on 2026-10-02 and are recorded under "Decisions"
-below. Current user behavior of the shipped parts is in the user manual; this
-document remains the rationale and the plan for the rest.
+Status: approved 2026-10-02. Phases 1 to 4 are implemented: memory
+reflection on demand, generated skills with the vetting pipeline, automatic
+triggers (`on_compaction`, the default, and `on_exit`), and the HTTP API and
+Web UI. The five open decisions were answered on 2026-10-02 and are recorded
+under "Decisions" below. Current user behavior is in the user manual; this
+document remains the rationale.
 
 ## Motivation
 
@@ -539,3 +539,61 @@ Questions the design left open, and what the code showed:
 - **Seatbelt.** `~/.otto/skills` is added to the sandbox read paths at process
   start only if it exists; a skills directory created by the first generated
   skill is readable by sandboxed commands after a restart.
+
+## Notes from implementing phase 3
+
+- **A background run does not take the controller's admission.** The design
+  said an automatic run should wait for the turn to finish. A compaction
+  usually happens *inside* a turn, so waiting would defer the run to the end of
+  that turn for no benefit: the run only reads the session file, which the
+  read-only decoder tolerates mid-append (an incomplete final record is
+  ignored), and calls the provider. One run at a time is enforced with a flag.
+  `Controller::request_close` cancels it.
+- **The slice is everything no earlier run covered**, not only the entries the
+  compaction summarized. It is a superset, simpler, and keeps one watermark.
+- **The hook is the controller, not the agent loop.** `Controller::prompt`,
+  `prompt_with_image`, `compact` and the wake turn wrap their event sink and
+  note a completed, non-noop compaction, then start the run after the
+  operation ends. This covers automatic and manual compactions on every
+  frontend, including the server.
+- **`on_exit` delays exit.** The design said automatic runs never delay the
+  event that triggers them. A process that is exiting cannot finish a
+  background run, so `on_exit` is awaited for at most 60 seconds, with a line
+  saying so, and Ctrl+C skips it. It runs for the REPL, the TUI and `--prompt`,
+  not for `otto serve` or `otto acp`.
+- **Notices.** The result of a background run is one line queued on the
+  controller (at most 20 kept). The REPL prints it before the next prompt and
+  the TUI adds it to the transcript; `otto serve` and `otto acp` queue it with
+  nobody to read it.
+- **The interval is a constant** (ten minutes between automatic runs of one
+  session, from the earlier run's start, failures included), not a config key.
+- **A request sizer for scripted runners.** `Runner::scripted` now carries a
+  byte-counting request sizer so tests can run a real compaction.
+
+## Notes from implementing phase 4
+
+- **Routes.** `POST /v1/sessions/{id}/reflect` takes the session's
+  `compacting` slot exactly as `compact` does, so turns are refused while it
+  runs and it is refused while a turn runs. `GET .../reflection/skills` and
+  `POST .../reflection/skills/{name}/revert` are under `reflection/` rather
+  than `skills/` so a skill named `generated` is not shadowed. They act on the
+  user's skills directory and are tied to no session state; the `{id}` only
+  selects the controller. They carry no extra authorization beyond the server
+  token or socket, like `POST .../skills/{name}/enable`.
+- **Notices are read by id, not drained.** The terminal frontends are the only
+  reader of their controller and drain it. A server session can have several
+  clients, so `GET .../notices?after=N` leaves the queue alone and returns ids;
+  the Web UI polls it every two seconds and, on its first poll, only records
+  where the queue stands so old lines are not replayed. This needed no new
+  stream; a push channel (for example a field on the status stream) remains an
+  option if polling proves too slow.
+- **Typed revert errors.** `skillwrite::revert` returns `RevertError` instead of
+  text so the route can answer 400, 404 or 409 without parsing messages; its
+  `Display` keeps the REPL wording.
+- **No memory review over HTTP or in the Web UI.** The Web UI's `/reflect`
+  line points at `/memory review`, which exists only in the terminal. A review
+  route and view are the next gap if browser-only use matters.
+- **Not tested through HTTP:** a successful `POST .../reflect` (the server test
+  harness uses memory-only sessions, so it reaches the 409 paths); the success
+  path is covered at the controller level and the response mapping by a unit
+  test.

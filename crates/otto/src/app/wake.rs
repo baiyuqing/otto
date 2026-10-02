@@ -45,8 +45,16 @@ impl<'a> WakeOperation<'a> {
                 return Err(AgentError::Other(message));
             }
         };
-        let result = runner.run("", emit, cancel).await;
+        let compacted = std::sync::atomic::AtomicBool::new(false);
+        let result = runner
+            .run(
+                "",
+                &mut super::auto_reflection::observing(emit, &compacted),
+                cancel,
+            )
+            .await;
         drop(admission);
+        self.controller.after_operation(&compacted);
         result
     }
 

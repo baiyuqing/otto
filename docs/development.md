@@ -59,9 +59,9 @@ loop, tools, and frontends must never reach a store directly: use the
 and explicit management (`memory_search`/`remember`/`forget` tools,
 `/memory`/`/remember` in the REPL, and `otto memory status|forget`) are wired
 end to end via `[memory]` TOML config. Model- and human-originated writes
-always land as pending candidates requiring review. `/reflect` proposes candidates
-through `reflection` on demand; automatic extraction (`Binding.Observe`, or a
-trigger on compaction or exit) and durability (backup/restore/verify) remain unwired. `/memory review` lists pending
+always land as pending candidates requiring review. `reflection` proposes candidates
+on `/reflect` and, by default, in the background after a compaction
+(`app::auto_reflection`); `Binding.Observe` and durability (backup/restore/verify) remain unwired. `/memory review` lists pending
 candidates and `/memory review <id> accept|reject` decides one through
 `Service::review` (human authority, like `/memory forget`). The TUI dispatches `/memory` and `/remember` to the same
 functions the REPL uses (`crates/otto/src/cli/repl_commands.rs`).

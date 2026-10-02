@@ -4,6 +4,7 @@
 //
 // Behavior is chosen by the prompt text:
 //
+//	remember     a tool call titled "remember", then "Queued."
 //	chunks       "Hello", a thought, " world", a tool call, "After tool"
 //	block        waits for session/cancel, then ends with stop reason cancelled
 //	sleep        waits 300 ms, then echoes
@@ -18,7 +19,9 @@
 //
 // The agent advertises _meta.otto.memoryReview unless FAKE_NO_MEMORY=1 and
 // serves _otto/memory/pending and _otto/memory/review over the candidates in
-// <dir>/memory, one "<id>\t<kind>\t<text>" per line. A review removes the
+// <dir>/memory (FAKE_PAGE=<n> pages pending n at a time, FAKE_MEMORY_UNAVAILABLE=1
+// answers it with -32010; a candidate id starting with "dddd" conflicts on
+// review), one "<id>\t<kind>\t<text>" per line. A review removes the
 // line and is logged as review:<id>:<decision>.
 //
 // Every call is appended to <dir>/calls as one line: init:<pid>, new:<id>,
@@ -220,6 +223,9 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 		a.chunk(ctx, p.SessionId, " world")
 		_ = a.conn.Load().SessionUpdate(ctx, acp.SessionNotification{SessionId: p.SessionId, Update: acp.StartToolCall("t1", "ls")})
 		a.chunk(ctx, p.SessionId, "After tool")
+	case text == "remember":
+		_ = a.conn.Load().SessionUpdate(ctx, acp.SessionNotification{SessionId: p.SessionId, Update: acp.StartToolCall("t2", "remember")})
+		a.chunk(ctx, p.SessionId, "Queued.")
 	case text == "block":
 		<-cancelled
 		return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
@@ -280,12 +286,26 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 	}
 	switch method {
 	case "_otto/memory/pending":
+		if os.Getenv("FAKE_MEMORY_UNAVAILABLE") != "" {
+			return nil, &acp.RequestError{Code: -32010, Message: "memory is not available in this session"}
+		}
+		var req struct{ Cursor string }
+		_ = json.Unmarshal(params, &req)
+		start, _ := strconv.Atoi(req.Cursor)
+		next := ""
+		if n, _ := strconv.Atoi(os.Getenv("FAKE_PAGE")); n > 0 {
+			end := min(start+n, len(lines))
+			if end < len(lines) {
+				next = strconv.Itoa(end)
+			}
+			lines = lines[min(start, len(lines)):end]
+		}
 		out := []map[string]string{}
 		for _, l := range lines {
 			f := strings.SplitN(l, "\t", 3)
 			out = append(out, map[string]string{"id": f[0], "action": "create", "kind": f[1], "key": "k", "text": f[2], "reason": "because", "origin": "model"})
 		}
-		return map[string]any{"candidates": out}, nil
+		return map[string]any{"candidates": out, "nextCursor": next}, nil
 	case "_otto/memory/review":
 		var req struct{ CandidateID, Decision string }
 		if err := json.Unmarshal(params, &req); err != nil {
@@ -301,7 +321,10 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 			keep = append(keep, l)
 		}
 		if !found {
-			return nil, acp.NewInvalidParams(map[string]any{"error": "candidate " + req.CandidateID + " not found"})
+			return nil, &acp.RequestError{Code: -32002, Message: "candidate " + req.CandidateID + " not found"}
+		}
+		if strings.HasPrefix(req.CandidateID, "dddd") {
+			return nil, &acp.RequestError{Code: -32011, Message: "memory revision conflict"}
 		}
 		if err := os.WriteFile(path, []byte(strings.Join(keep, "\n")+"\n"), 0o600); err != nil {
 			return nil, err

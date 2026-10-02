@@ -4,11 +4,43 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+
+	"github.com/coder/acp-go-sdk"
 )
 
 // ErrMemoryUnsupported is returned by the Memory methods when the agent does
 // not advertise _meta.otto.memoryReview in its initialize response.
 var ErrMemoryUnsupported = errors.New("agent does not support memory review")
+
+// Errors the agent answers for _otto/memory/* with its own codes.
+var (
+	ErrMemoryUnavailable = errors.New("memory is not available in this session")
+	ErrMemoryConflict    = errors.New("the candidate was already decided or changed")
+	ErrCandidateNotFound = errors.New("candidate not found")
+)
+
+const (
+	codeNotFound          = -32002
+	codeMemoryUnavailable = -32010
+	codeMemoryConflict    = -32011
+)
+
+// memoryErr turns the agent's _otto/memory/* error codes into the errors above.
+func memoryErr(err error) error {
+	var re *acp.RequestError
+	if !errors.As(err, &re) {
+		return err
+	}
+	switch re.Code {
+	case codeMemoryUnavailable:
+		return ErrMemoryUnavailable
+	case codeMemoryConflict:
+		return ErrMemoryConflict
+	case codeNotFound:
+		return ErrCandidateNotFound
+	}
+	return err
+}
 
 const (
 	methodMemoryPending = "_otto/memory/pending"
@@ -55,23 +87,26 @@ func (a *Agent) memoryProcess(ctx context.Context, id string) (*process, error) 
 	return p, nil
 }
 
-// MemoryPending lists the pending memory candidates visible to session id.
-func (a *Agent) MemoryPending(ctx context.Context, id string) ([]MemoryCandidate, error) {
+// MemoryPage is one page of pending candidates; NextCursor is empty on the
+// last page.
+type MemoryPage struct {
+	Candidates []MemoryCandidate `json:"candidates"`
+	NextCursor string            `json:"nextCursor"`
+}
+
+// MemoryPending returns one page of the pending memory candidates visible to
+// session id. An empty cursor starts at the first page.
+func (a *Agent) MemoryPending(ctx context.Context, id, cursor string) (MemoryPage, error) {
+	var page MemoryPage
 	p, err := a.memoryProcess(ctx, id)
 	if err != nil {
-		return nil, err
+		return page, err
 	}
-	raw, err := p.conn.CallExtension(ctx, methodMemoryPending, map[string]string{"sessionId": id})
+	raw, err := p.conn.CallExtension(ctx, methodMemoryPending, map[string]string{"sessionId": id, "cursor": cursor})
 	if err != nil {
-		return nil, p.wrap(err)
+		return page, memoryErr(p.wrap(err))
 	}
-	var out struct {
-		Candidates []MemoryCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	return out.Candidates, nil
+	return page, json.Unmarshal(raw, &page)
 }
 
 // MemoryReview accepts or rejects one candidate; decision is "accept" or
@@ -86,7 +121,7 @@ func (a *Agent) MemoryReview(ctx context.Context, id, candidateID, decision stri
 		"sessionId": id, "candidateId": candidateID, "decision": decision,
 	})
 	if err != nil {
-		return out, p.wrap(err)
+		return out, memoryErr(p.wrap(err))
 	}
 	return out, json.Unmarshal(raw, &out)
 }

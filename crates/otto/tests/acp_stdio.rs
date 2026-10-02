@@ -20,16 +20,20 @@ use serde_json::{Value, json};
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn configure(home: &Path, base_url: &str) {
+    configure_with(home, base_url, false);
+}
+
+fn configure_with(home: &Path, base_url: &str, failover: bool) {
     std::fs::create_dir_all(home.join("Library/Caches")).expect("cache base");
     let config_dir = home.join(".config/otto");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    std::fs::write(
-        config_dir.join("config.toml"),
-        format!(
-            "default_profile = \"test\"\n\n[profiles.test]\nprovider = \"openai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"gpt-test\"\napi_key_env = \"OTTO_API_KEY\"\n"
-        ),
-    )
-    .expect("write config");
+    let mut text = format!(
+        "default_profile = \"test\"\n\n[profiles.test]\nprovider = \"openai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"gpt-test\"\napi_key_env = \"OTTO_API_KEY\"\n"
+    );
+    if failover {
+        text.push_str("\n[failover]\nenabled = true\nlease_seconds = 12\n");
+    }
+    std::fs::write(config_dir.join("config.toml"), text).expect("write config");
 }
 
 /// A provider that accepts connections and never answers them, so a turn
@@ -434,6 +438,69 @@ fn stdin_eof_during_a_prompt_answers_cancelled_and_exits_zero() {
     let (_, response) = client.finish(id, &mut |frame| panic!("unexpected request: {frame}"));
     assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
     assert_eq!(client.close(), Some(0));
+}
+
+/// The first `.jsonl` at `root/<workspace key>/`; child transcripts live one
+/// level deeper and are not matched.
+fn find_session_file(root: &Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|workspace| std::fs::read_dir(workspace.path()).ok())
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        })
+}
+
+fn sigterm(client: &Client) {
+    let pid = nix::unistd::Pid::from_raw(client.child.id() as i32);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("send SIGTERM");
+}
+
+#[test]
+fn sigterm_without_a_lease_cancels_the_prompt_and_exits_zero() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, accepted) = serve_stalled();
+    configure(home.path(), &base_url);
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+
+    let id = client.start("session/prompt", prompt(&session_id, "wait"));
+    wait_for_count(&accepted, 1);
+    sigterm(&client);
+    let (_, response) = client.finish(id, &mut |frame| panic!("unexpected request: {frame}"));
+    assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn sigterm_with_a_lease_migrates_the_session() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, accepted) = serve_stalled();
+    configure_with(home.path(), &base_url, true);
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+
+    let id = client.start("session/prompt", prompt(&session_id, "wait"));
+    wait_for_count(&accepted, 1);
+    let session_path = find_session_file(&home.path().join(".otto/sessions"))
+        .expect("the first prompt wrote the session file");
+    sigterm(&client);
+    let (_, response) = client.finish(id, &mut |frame| panic!("unexpected request: {frame}"));
+    assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+    assert_eq!(client.close(), Some(0));
+
+    let inbox = std::fs::read_to_string(session_path.with_extension("inbox.json")).expect("inbox");
+    assert!(inbox.contains("This session was moved"), "{inbox}");
+    let heartbeat = std::fs::read_to_string(session_path.with_extension("lease").join("heartbeat"))
+        .expect("heartbeat");
+    assert!(heartbeat.contains("\"released\":true"), "{heartbeat}");
 }
 
 /// The elevated bash approval round trip needs Seatbelt, so it runs on macOS.

@@ -138,6 +138,7 @@ cc-connect at `dfad194` (`agent/acp/`):
 | `session/list` | Returns the newest 20 sessions of the workspace as `{sessionId, cwd, title, updatedAt}`, `title` = session name, else the last user text truncated to 80 characters. `cursor` is ignored and `nextCursor` is never set. |
 | `session/prompt` | Concatenates `text` blocks with `\n`; a `resource_link` block becomes a line `<name>: <uri>`. Other block types get `-32602`. Runs `Controller::prompt`, streams updates, returns `{stopReason}`: `end_turn` on success, `cancelled` after `session/cancel` or a cancelled turn. |
 | `session/cancel` | Cancels the running prompt and any pending permission wait of that session. |
+| `_otto/memory/pending`, `_otto/memory/review` | Extension methods for human memory review, specified in [memory review from the chat connector](2026-10-02-connect-memory-review.md). Local backend only; `--attach` answers `-32601`. |
 | `session/request_permission` (otto → client) | Elevated bash approval, below. |
 
 Not implemented, so not advertised: `authenticate` (no auth methods;

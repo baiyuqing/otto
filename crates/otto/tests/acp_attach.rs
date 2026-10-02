@@ -482,7 +482,13 @@ fn a_relayed_prompt_sends_the_same_updates_as_local_acp() {
     let init = relay.initialize();
     assert_eq!(init["result"]["agentInfo"]["name"], "otto");
     assert_eq!(init["result"]["agentCapabilities"]["loadSession"], true);
+    assert!(
+        init["result"]["agentCapabilities"]["_meta"].is_null(),
+        "the relay must not advertise memory review: {init}"
+    );
     let session_id = relay.new_session(workspace.path());
+    let (_, memory) = relay.call("_otto/memory/pending", json!({"sessionId": session_id}));
+    assert_eq!(memory["error"]["code"], -32601, "{memory}");
     let (relay_frames, response) = relay.call("session/prompt", prompt(&session_id, "read hello"));
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
 

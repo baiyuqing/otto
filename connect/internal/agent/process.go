@@ -54,6 +54,8 @@ type process struct {
 	exited      chan struct{} // closed after Wait returns and endedAt is set
 
 	startedAt time.Time
+	// memoryReview is set from the initialize response.
+	memoryReview bool
 	// endedAt and waitErr are valid after exited is closed.
 	endedAt time.Time
 	waitErr error
@@ -205,7 +207,15 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 		}
 		return nil, err
 	}
+	p.memoryReview = advertisesMemoryReview(resp.AgentCapabilities.Meta)
 	return p, nil
+}
+
+// advertisesMemoryReview reads _meta.otto.memoryReview.
+func advertisesMemoryReview(meta map[string]any) bool {
+	otto, _ := meta["otto"].(map[string]any)
+	on, _ := otto["memoryReview"].(bool)
+	return on
 }
 
 // stdinWriter writes to the process's stdin and closes writeFailed on the

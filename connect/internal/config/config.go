@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Agent    Agent
 	Telegram *Telegram // nil when the [telegram] section is absent
+	Feishu   *Feishu   // nil when the [feishu] section is absent
 }
 
 // Agent is the ACP agent the connector starts.
@@ -33,6 +34,18 @@ type Telegram struct {
 	Senders []string
 }
 
+// Feishu is the [feishu] section.
+type Feishu struct {
+	AppID        string
+	AppSecretEnv string
+	// AppSecret is read from the AppSecretEnv environment variable by Load.
+	// It is never read from the file.
+	AppSecret string
+	Domain    string // "feishu" or "lark"
+	Chats     []string
+	Senders   []string
+}
+
 // file is the decoding target. Fields not declared here are reported by
 // MetaData.Undecoded, which is how secret keys placed in the file are
 // rejected.
@@ -46,6 +59,13 @@ type file struct {
 		Chats    []string `toml:"chats"`
 		Senders  []string `toml:"senders"`
 	} `toml:"telegram"`
+	Feishu *struct {
+		AppID        string   `toml:"app_id"`
+		AppSecretEnv string   `toml:"app_secret_env"`
+		Domain       string   `toml:"domain"`
+		Chats        []string `toml:"chats"`
+		Senders      []string `toml:"senders"`
+	} `toml:"feishu"`
 }
 
 // Load reads and validates path. Unknown keys, a relative workspace, an
@@ -91,8 +111,28 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.Telegram = &Telegram{TokenEnv: t.TokenEnv, Token: token, Chats: t.Chats, Senders: t.Senders}
 	}
-	if cfg.Telegram == nil {
-		return nil, errors.New("config: no platform configured (add a [telegram] section)")
+	if fs := f.Feishu; fs != nil {
+		if fs.AppID == "" {
+			return nil, errors.New("config: [feishu].app_id is required")
+		}
+		if fs.AppSecretEnv == "" {
+			return nil, errors.New("config: [feishu].app_secret_env is required")
+		}
+		domain := fs.Domain
+		if domain == "" {
+			domain = "feishu"
+		}
+		if domain != "feishu" && domain != "lark" {
+			return nil, fmt.Errorf(`config: [feishu].domain must be "feishu" or "lark", got %q`, fs.Domain)
+		}
+		secret := os.Getenv(fs.AppSecretEnv)
+		if secret == "" {
+			return nil, fmt.Errorf("config: environment variable %s (feishu app_secret_env) is empty or unset", fs.AppSecretEnv)
+		}
+		cfg.Feishu = &Feishu{AppID: fs.AppID, AppSecretEnv: fs.AppSecretEnv, AppSecret: secret, Domain: domain, Chats: fs.Chats, Senders: fs.Senders}
+	}
+	if cfg.Telegram == nil && cfg.Feishu == nil {
+		return nil, errors.New("config: no platform configured (add a [telegram] or [feishu] section)")
 	}
 	return cfg, nil
 }

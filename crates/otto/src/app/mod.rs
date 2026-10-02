@@ -1416,6 +1416,7 @@ async fn open_current(
         runtime.thinking = session_thinking;
     }
     let (store, warnings) = prepared
+        .with_replayable(crate::tool::safety::is_replayable)
         .activate()
         .map_err(|error| builder.redact_error(&error.to_string(), Some(&runtime)))?;
     let warnings = warnings

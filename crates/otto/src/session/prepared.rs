@@ -92,6 +92,10 @@ pub struct Prepared {
     /// into the [`Store`] on [`Prepared::activate`]; released by
     /// [`Prepared::close`] or, if neither ran, by `drop`.
     lease: Mutex<Option<AcquiredLease>>,
+    /// Which tool names may be run again, instead of settled as interrupted,
+    /// when this open takes over a lease epoch. Set by the composition root
+    /// through [`Prepared::with_replayable`]; never replays by default.
+    replayable: fn(&str) -> bool,
 }
 
 /// A completed archive move.
@@ -190,12 +194,21 @@ impl Prepared {
                 info,
                 identity,
                 lease: Mutex::new(lease),
+                replayable: |_| false,
             }),
             Err(error) => {
                 release_on_prepare_failure(&lease);
                 Err(error)
             }
         }
+    }
+
+    /// Lets a takeover leave calls of the tools `replayable` accepts without a
+    /// result, for the agent to run again, instead of settling them as
+    /// interrupted. See [`Takeover::replayable`](super::Takeover).
+    pub fn with_replayable(mut self, replayable: fn(&str) -> bool) -> Self {
+        self.replayable = replayable;
+        self
     }
 
     /// The listing row read while preparing.
@@ -238,7 +251,7 @@ impl Prepared {
             .lock()
             .map_err(|_| PiError::other("prepared session mutex is poisoned"))?
             .take();
-        Store::from_file(file, &self.path, lease)
+        Store::from_file(file, &self.path, lease, self.replayable)
     }
 
     fn verify_identity(&self, prepared: &Metadata) -> Result<(), PiError> {

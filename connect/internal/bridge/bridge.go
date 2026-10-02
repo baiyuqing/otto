@@ -279,6 +279,8 @@ type chat struct {
 	perm    *permission
 	reply   strings.Builder
 	brk     bool // a tool call followed text; the next text starts a paragraph
+	// proposed is set when the turn called remember or forget.
+	proposed bool
 }
 
 type permission struct {
@@ -382,6 +384,7 @@ func (c *chat) turn(m Message) {
 		c.sid = sid
 		c.reply.Reset()
 		c.brk = false
+		c.proposed = false
 		c.mu.Unlock()
 		c.b.mu.Lock()
 		c.b.bySession[sid] = c
@@ -401,6 +404,8 @@ func (c *chat) turn(m Message) {
 	c.sid = ""
 	text := strings.TrimSpace(c.reply.String())
 	c.reply.Reset()
+	proposed := c.proposed
+	c.proposed = false
 	c.mu.Unlock()
 	if ctx.Err() != nil {
 		return
@@ -421,10 +426,22 @@ func (c *chat) turn(m Message) {
 			text += "\n\n"
 		}
 		c.send(ctx, m.MessageID, text+"Stop reason: "+string(stop))
-	case text != "":
-		c.send(ctx, m.MessageID, text)
+	default:
+		if proposed {
+			if text != "" {
+				text += "\n\n"
+			}
+			text += memoryHint
+		}
+		if text != "" {
+			c.send(ctx, m.MessageID, text)
+		}
 	}
 }
+
+// memoryHint follows a turn that proposed a memory change. Only a person can
+// decide it, through the connector's commands, not by writing to the model.
+const memoryHint = "Memory changes are proposals. Send /memory to review them."
 
 // session returns the chat's session id, loading the stored one or creating
 // a new one. A load that the agent refuses is replaced by a new session and a
@@ -486,6 +503,9 @@ func (c *chat) collect(u acp.SessionUpdate) {
 		c.reply.WriteString(t.Text)
 	case u.ToolCall != nil:
 		c.brk = strings.TrimSpace(c.reply.String()) != ""
+		if t := u.ToolCall.Title; t == "remember" || t == "forget" {
+			c.proposed = true
+		}
 	}
 }
 
@@ -800,17 +820,21 @@ func (c *chat) cmdMemory(m Message, args []string) {
 			reply("Error: could not load session " + sid + ": " + err.Error())
 			return
 		}
-		pending, err := c.b.opts.Agent.MemoryPending(ctx, sid)
+		if len(args) == 0 {
+			page, err := c.b.opts.Agent.MemoryPending(ctx, sid, "")
+			if err != nil {
+				reply(memoryError(err))
+				return
+			}
+			reply(renderPending(page))
+			return
+		}
+		id, err := c.findCandidate(ctx, sid, args[1])
 		if err != nil {
 			reply(memoryError(err))
 			return
 		}
-		if len(args) == 0 {
-			reply(renderPending(pending))
-			return
-		}
-		id, ok := resolveCandidate(pending, args[1])
-		if !ok {
+		if id == "" {
 			reply(fmt.Sprintf("No single pending candidate starts with %q.", args[1]))
 			return
 		}
@@ -839,8 +863,15 @@ const (
 )
 
 func memoryError(err error) string {
-	if errors.Is(err, agent.ErrMemoryUnsupported) {
+	switch {
+	case errors.Is(err, agent.ErrMemoryUnsupported):
 		return "This agent does not support memory review."
+	case errors.Is(err, agent.ErrMemoryUnavailable):
+		return "Memory is not available in this session."
+	case errors.Is(err, agent.ErrMemoryConflict):
+		return "That candidate was already decided or changed; send /memory to refresh."
+	case errors.Is(err, agent.ErrCandidateNotFound):
+		return "That candidate no longer exists; send /memory to refresh."
 	}
 	var ee *agent.ExitError
 	if errors.As(err, &ee) {
@@ -849,7 +880,8 @@ func memoryError(err error) string {
 	return "Error: " + err.Error()
 }
 
-func renderPending(list []agent.MemoryCandidate) string {
+func renderPending(page agent.MemoryPage) string {
+	list := page.Candidates
 	if len(list) == 0 {
 		return "No pending memory candidates."
 	}
@@ -862,20 +894,39 @@ func renderPending(list []agent.MemoryCandidate) string {
 		}
 		fmt.Fprintf(&sb, "\n%s  %s %s/%s  %s  (%s)", cand.ID[:min(len(cand.ID), shortID)], cand.Action, cand.Kind, cand.Key, text, cand.Origin)
 	}
+	if page.NextCursor != "" {
+		sb.WriteString("\nMore are pending; decide some, then send /memory again.")
+	}
 	return sb.String()
 }
 
-// resolveCandidate returns the id of the one pending candidate that arg
-// names, either in full or as a prefix of at least minPrefix characters.
-func resolveCandidate(list []agent.MemoryCandidate, arg string) (string, bool) {
-	var found []string
-	for _, cand := range list {
-		if cand.ID == arg || len(arg) >= minPrefix && strings.HasPrefix(cand.ID, arg) {
-			found = append(found, cand.ID)
+// maxPendingPages bounds the search for a candidate id across pages.
+const maxPendingPages = 10
+
+// findCandidate returns the id of the one pending candidate that arg names,
+// either in full or as a prefix of at least minPrefix characters, reading
+// pages until it is found or the pages end. It returns "" when no single
+// candidate matches.
+func (c *chat) findCandidate(ctx context.Context, sid, arg string) (string, error) {
+	var matches []string
+	cursor := ""
+	for range maxPendingPages {
+		page, err := c.b.opts.Agent.MemoryPending(ctx, sid, cursor)
+		if err != nil {
+			return "", err
 		}
+		for _, cand := range page.Candidates {
+			if cand.ID == arg || len(arg) >= minPrefix && strings.HasPrefix(cand.ID, arg) {
+				matches = append(matches, cand.ID)
+			}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
 	}
-	if len(found) != 1 {
-		return "", false
+	if len(matches) != 1 {
+		return "", nil
 	}
-	return found[0], true
+	return matches[0], nil
 }

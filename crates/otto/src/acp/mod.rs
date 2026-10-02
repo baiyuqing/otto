@@ -59,6 +59,10 @@ const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
 const RESOURCE_NOT_FOUND: i32 = -32002;
+/// `_otto/memory/*`: memory is disabled or not usable in the session.
+const MEMORY_UNAVAILABLE: i32 = -32010;
+/// `_otto/memory/review`: the candidate was already decided or changed.
+const MEMORY_CONFLICT: i32 = -32011;
 const TITLE_CHARS: usize = 80;
 
 /// What [`serve`] needs from the composition root.
@@ -253,7 +257,7 @@ impl Connection {
         if method == memory::PENDING_METHOD {
             let params: memory::PendingParams = serde_json::from_value(params)
                 .map_err(|failure| invalid_params(failure.to_string()))?;
-            memory::pending(&session_of(&params.session_id)?.controller)
+            memory::pending(&session_of(&params.session_id)?.controller, &params)
         } else {
             let params: memory::ReviewParams = serde_json::from_value(params)
                 .map_err(|failure| invalid_params(failure.to_string()))?;

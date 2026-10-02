@@ -161,3 +161,49 @@ func TestMemoryIgnoresUnadmittedSenders(t *testing.T) {
 		t.Fatalf("unadmitted sender reached the review: calls=%q sent=%q", h.calls("review:"), h.plat.texts())
 	}
 }
+
+func TestMemoryHintFollowsATurnThatProposed(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("remember")
+	if got, want := h.waitSent(1)[0], "Queued.\n\n"+memoryHint; got != want {
+		t.Fatalf("reply = %q, want %q", got, want)
+	}
+	h.say("hi")
+	if got := h.waitSent(2)[1]; got != "echo: hi" {
+		t.Fatalf("a turn without a proposal got %q", got)
+	}
+}
+
+func TestMemoryPagesAreFollowedToFindACandidateAndListingSaysMoreRemain(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	h := withSession(t, setup{dir: dir, env: []string{"FAKE_PAGE=1"}})
+	seedMemory(t, dir, candA+"\tfact\tone", candC+"\tfact\ttwo")
+	h.say("/memory")
+	got := h.waitSent(2)[1]
+	if !strings.Contains(got, "aaaa1111") || strings.Contains(got, "cccc3333") || !strings.Contains(got, "More are pending") {
+		t.Fatalf("first page = %q", got)
+	}
+	h.say("/memory accept cccc")
+	if got := h.waitSent(3)[2]; !strings.HasPrefix(got, "Accepted cccc3333") {
+		t.Fatalf("a candidate on page two was not found: %q", got)
+	}
+}
+
+func TestMemoryErrorCodesBecomeReadableReplies(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	h := withSession(t, setup{dir: dir})
+	seedMemory(t, dir, "dddd1111000000000000000000000000\tfact\tone")
+	h.say("/memory accept dddd")
+	if got, want := h.waitSent(2)[1], "That candidate was already decided or changed; send /memory to refresh."; got != want {
+		t.Fatalf("conflict reply = %q, want %q", got, want)
+	}
+
+	off := withSession(t, setup{env: []string{"FAKE_MEMORY_UNAVAILABLE=1"}})
+	off.say("/memory")
+	if got, want := off.waitSent(2)[1], "Memory is not available in this session."; got != want {
+		t.Fatalf("unavailable reply = %q, want %q", got, want)
+	}
+}

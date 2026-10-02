@@ -321,6 +321,112 @@ fn memory_review_reject_writes_no_record() {
 }
 
 #[test]
+fn memory_pending_pages_with_a_cursor_and_rejects_bad_paging() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, _requests) = serve(Script {
+        replies: vec![
+            tool_call_reply(
+                "c1",
+                "remember",
+                r#"{"kind":"fact","key":"a","text":"first"}"#,
+            ),
+            tool_call_reply(
+                "c2",
+                "remember",
+                r#"{"kind":"fact","key":"b","text":"second"}"#,
+            ),
+            text_reply("queued"),
+        ],
+        served: Arc::new(AtomicUsize::new(0)),
+    });
+    configure(home.path(), &base_url);
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    let (_, done) = client.call("session/prompt", prompt(&session_id, "remember two"));
+    assert_eq!(done["result"]["stopReason"], "end_turn", "{done}");
+
+    let page = |client: &mut Client, extra: Value| -> Value {
+        let mut params = json!({"sessionId": session_id});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        client.call("_otto/memory/pending", params).1
+    };
+    let first = page(&mut client, json!({"limit": 1}));
+    assert_eq!(
+        first["result"]["candidates"].as_array().unwrap().len(),
+        1,
+        "{first}"
+    );
+    let cursor = first["result"]["nextCursor"].as_str().unwrap().to_string();
+    assert!(!cursor.is_empty(), "{first}");
+    let second = page(&mut client, json!({"limit": 1, "cursor": cursor}));
+    assert_eq!(
+        second["result"]["candidates"].as_array().unwrap().len(),
+        1,
+        "{second}"
+    );
+    assert_eq!(second["result"]["nextCursor"], "", "{second}");
+    assert_ne!(
+        first["result"]["candidates"][0]["id"],
+        second["result"]["candidates"][0]["id"]
+    );
+    let everything = page(&mut client, json!({}));
+    assert_eq!(
+        everything["result"]["candidates"].as_array().unwrap().len(),
+        2
+    );
+
+    for bad in [
+        json!({"limit": 0}),
+        json!({"limit": 51}),
+        json!({"cursor": "not-a-cursor"}),
+    ] {
+        let response = page(&mut client, bad.clone());
+        assert_eq!(response["error"]["code"], -32602, "{bad}: {response}");
+    }
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn memory_review_of_a_decided_candidate_is_a_conflict() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (mut client, session_id, id) =
+        client_with_pending_candidate(home.path(), workspace.path(), "preference");
+    let params = json!({"sessionId": session_id, "candidateId": id, "decision": "accept"});
+    let (_, first) = client.call("_otto/memory/review", params.clone());
+    assert!(first["result"].is_object(), "{first}");
+    let (_, again) = client.call("_otto/memory/review", params);
+    assert_eq!(again["error"]["code"], -32011, "{again}");
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn memory_methods_report_unavailable_memory_with_its_own_code() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    configure(home.path(), "http://127.0.0.1:1");
+    let config = home.path().join(".config/otto/config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{text}\n[memory]\nenabled = false\n")).unwrap();
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    let (_, pending) = client.call("_otto/memory/pending", json!({"sessionId": session_id}));
+    assert_eq!(pending["error"]["code"], -32010, "{pending}");
+    let (_, review) = client.call(
+        "_otto/memory/review",
+        json!({"sessionId": session_id, "candidateId": "x", "decision": "accept"}),
+    );
+    assert_eq!(review["error"]["code"], -32010, "{review}");
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
 fn memory_methods_reject_an_unknown_session() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

@@ -156,6 +156,12 @@ impl Service {
         self.ready()?.get_candidate(reference)
     }
 
+    /// One page of candidates in the given states, newest first, with the
+    /// cursor of the next page ("" at the end).
+    pub fn list_candidates(&self, request: &CandidateListRequest) -> Result<super::CandidatePage> {
+        self.ready()?.list_candidates(request)
+    }
+
     /// An empty query lists, a non-empty one retrieves. Candidates are read
     /// only when the caller asked for them, and they page on the same cursor.
     pub fn search(&self, request: &SearchRequest) -> Result<SearchResult> {

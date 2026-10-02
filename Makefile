@@ -22,9 +22,10 @@ build: ui ## build the Web UI and compile the Rust binary (release) to ./$(BINAR
 	cargo build --release
 	cp target/release/$(BINARY) ./$(BINARY)
 
-install: build ## install Otto and bundled skills
+install: build connect-build ## install Otto, otto-connect and bundled skills
 	install -d "$(INSTALL_DIR)"
 	install -m 0755 ./$(BINARY) "$(INSTALL_DIR)/$(BINARY)"
+	install -m 0755 target/otto-connect "$(INSTALL_DIR)/otto-connect"
 	install -d "$(SKILLS_INSTALL_DIR)/sandbox-setup"
 	install -m 0644 .otto/skills/sandbox-setup/SKILL.md "$(SKILLS_INSTALL_DIR)/sandbox-setup/SKILL.md"
 

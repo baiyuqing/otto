@@ -37,7 +37,7 @@ make install
 otto --help
 ```
 
-`make install` refreshes and embeds the Web UI, builds the release binary, installs it to `~/.local/bin/otto`, and installs bundled skills under `~/.otto/skills/`. Make sure `~/.local/bin` is on your `PATH`. A direct `cargo build` without a prior `make ui` embeds a one-line placeholder instead.
+`make install` refreshes and embeds the Web UI, builds Otto and otto-connect, installs both to `~/.local/bin/`, and installs bundled skills under `~/.otto/skills/`. Make sure `~/.local/bin` is on your `PATH`. A direct `cargo build` without a prior `make ui` embeds a one-line placeholder instead.
 
 If you only want a local copy in the checkout, run `make build` and then
 `./otto --help`.

@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::tasks::Task;
 
@@ -124,7 +124,8 @@ pub trait Recorder: Send + Sync {
 /// the displayed status (it can be `interrupted`); `cancelable` is not here
 /// because only the server, which knows which sessions it owns, can compute
 /// it.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TaskRow {
     pub parent_session: String,
     pub task_id: String,

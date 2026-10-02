@@ -230,7 +230,7 @@ export function App() {
   const compactingRef = useRef(holding)
   compactingRef.current = holding
 
-  // Server-started wakes (Feishu inbound, remind) never go through startTurn,
+  // Server-started wakes (remind) never go through startTurn,
   // so an idle page has to poll the open session and attach or reload history.
   useEffect(() => {
     if (!session || turnId !== null || holding) return

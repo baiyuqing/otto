@@ -40,7 +40,6 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::{get, post};
 use otto_core::agent::Event;
-use otto_core::agent::inbox::Notification;
 use otto_core::model::{Block, MAX_IMAGE_BYTES, Message, Usage};
 use otto_core::session::ListResult;
 use otto_core::wire::sse::format_frame;
@@ -508,23 +507,6 @@ impl Server {
 
     pub fn logger(&self) -> &Arc<Logger> {
         &self.log
-    }
-
-    /// Fans `notification` out to every currently open session in the startup
-    /// workspace. Sessions in another workspace (opened via `?workspace=` or
-    /// `{"workspace": ...}`) are not this host's concern: Feishu inbound is
-    /// wired to one workspace only. Sessions that have no task registry
-    /// (sub-agents off) drop it. Returns how many sessions received it.
-    pub(crate) fn notify_open_sessions(&self, notification: Notification) -> usize {
-        let sessions: Vec<Arc<OpenSession>> = self
-            .all_sessions()
-            .into_iter()
-            .filter(|session| session.ctrl.workspace() == self.info.workspace)
-            .collect();
-        for session in &sessions {
-            session.ctrl.notify(notification.clone());
-        }
-        sessions.len()
     }
 
     /// Cancels every in-flight turn, then closes every open controller.
@@ -5433,8 +5415,7 @@ mod tests {
     async fn deleting_a_workspace_with_an_open_session_answers_409() {
         // A session registered directly against a second workspace's own
         // builder, bypassing `TestFactory` (which always builds against the
-        // harness's one builder), matching
-        // `notify_open_sessions_skips_sessions_outside_the_startup_workspace`.
+        // harness's one builder).
         let other_workspace = tempfile::tempdir().expect("other workspace");
         let other_sessions = tempfile::tempdir().expect("other sessions");
         // Canonical, as a real session's workspace is (`/var` → `/private/var`).
@@ -6274,109 +6255,6 @@ mod tests {
             .await
             .expect("the recovery notification did not start a wake turn");
         assert_eq!(harness.provider.roles(), vec![Role::Context]);
-    }
-
-    #[tokio::test]
-    async fn notify_open_sessions_fans_out_to_every_open_controller() {
-        let harness = Harness::new();
-        let first = harness.create().await;
-        let second = harness.create().await;
-        let notification = otto_core::agent::inbox::Notification {
-            kind: Some(otto_core::agent::inbox::NotificationKind::Message),
-            text: "[feishu] hello".to_string(),
-            ..otto_core::agent::inbox::Notification::default()
-        };
-        assert_eq!(harness.server.notify_open_sessions(notification), 2);
-        for id in [first, second] {
-            let pending = harness
-                .server
-                .lookup(&id)
-                .expect("session")
-                .ctrl
-                .subagent_tasks()
-                .expect("registry")
-                .notifications()
-                .snapshot();
-            assert_eq!(pending.len(), 1, "{id}");
-            assert_eq!(pending[0].text, "[feishu] hello");
-        }
-    }
-
-    #[tokio::test]
-    async fn notify_open_sessions_skips_sessions_outside_the_startup_workspace() {
-        let harness = Harness::new();
-        let startup_id = harness.create().await;
-
-        // A session opened directly against a second workspace, bypassing
-        // `TestFactory` (which always builds against the harness's one
-        // builder): `Server::register` takes a `Controller` regardless of
-        // which workspace built it.
-        let other_workspace = tempfile::tempdir().expect("other workspace");
-        let other_sessions = tempfile::tempdir().expect("other sessions");
-        let other_builder = Arc::new(testutil::builder(
-            other_workspace.path(),
-            other_sessions.path(),
-        ));
-        let session = SharedSession::memory(Header {
-            version: CURRENT_VERSION,
-            id: new_id().expect("id"),
-            workspace: other_builder.workspace_path.clone(),
-            provider: "openai-compatible".to_string(),
-            profile: "alpha".to_string(),
-            model: "test-model".to_string(),
-            created_at: chrono::Utc::now(),
-        });
-        let runner = Runner::scripted(
-            session.clone(),
-            Arc::clone(&harness.provider) as Arc<dyn Provider + Send + Sync>,
-            Arc::new(crate::subagent::tasks::Tasks::new()),
-        );
-        let other_ctrl = Controller::with_builder(
-            other_builder,
-            true,
-            session,
-            runner,
-            RuntimeInfo {
-                provider: "openai-compatible".to_string(),
-                profile: "alpha".to_string(),
-                model: "test-model".to_string(),
-                thinking: "high".to_string(),
-                context_window: 128_000,
-                sandbox: SandboxInfo::default(),
-            },
-        );
-        let other_id = other_ctrl.info().session_id.clone();
-        harness.server.register(other_ctrl);
-
-        let notification = otto_core::agent::inbox::Notification {
-            kind: Some(otto_core::agent::inbox::NotificationKind::Message),
-            text: "[feishu] hello".to_string(),
-            ..otto_core::agent::inbox::Notification::default()
-        };
-        assert_eq!(harness.server.notify_open_sessions(notification), 1);
-
-        let startup_pending = harness
-            .server
-            .lookup(&startup_id)
-            .expect("startup session")
-            .ctrl
-            .subagent_tasks()
-            .expect("registry")
-            .notifications()
-            .snapshot();
-        assert_eq!(startup_pending.len(), 1);
-        assert_eq!(startup_pending[0].text, "[feishu] hello");
-
-        let other_pending = harness
-            .server
-            .lookup(&other_id)
-            .expect("other session")
-            .ctrl
-            .subagent_tasks()
-            .expect("registry")
-            .notifications()
-            .snapshot();
-        assert!(other_pending.is_empty(), "{other_pending:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

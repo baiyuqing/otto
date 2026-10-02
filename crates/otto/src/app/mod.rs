@@ -1130,28 +1130,6 @@ impl Controller {
         Ok(Some(WakeOperation::new(self, admission)))
     }
 
-    /// Pushes `notification` into the current runner's inbox. Returns true
-    /// when a registry received it. A closed controller or a runner without
-    /// tasks drops it.
-    pub fn notify(&self, notification: Notification) -> bool {
-        let tasks = {
-            let state = self.lock();
-            if state.closed {
-                return false;
-            }
-            let Some(tasks) = state
-                .current
-                .as_ref()
-                .and_then(|current| current.runner.tasks.clone())
-            else {
-                return false;
-            };
-            tasks
-        };
-        tasks.notifications().push(notification);
-        true
-    }
-
     /// Queues user input for the active turn's next safe checkpoint.
     pub fn queue_user_message(&self, text: &str) -> bool {
         let text = text.trim();
@@ -1601,7 +1579,6 @@ mod tests {
     use crate::cli::testutil::{
         FakeSandbox, builder, controller, initial_runtime, seatbelt_info, user,
     };
-    use otto_core::agent::inbox::NotificationKind;
 
     #[tokio::test]
     async fn info_reports_the_current_session_and_the_resolved_profile() {
@@ -2672,27 +2649,5 @@ mod tests {
         );
         wake.cancel();
         controller.begin_operation().expect("admit");
-    }
-
-    #[tokio::test]
-    async fn notify_queues_a_message_that_claims_a_wake_turn() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let sessions = tempfile::tempdir().expect("sessions");
-        let controller = controller(workspace.path(), sessions.path()).await;
-        assert!(controller.notify(Notification {
-            kind: Some(NotificationKind::Message),
-            text: "[feishu] hello".to_string(),
-            ..Notification::default()
-        }));
-        let wake = controller
-            .prepare_wake()
-            .expect("prepare")
-            .expect("claimed");
-        wake.cancel();
-        controller.close().expect("close");
-        assert!(!controller.notify(Notification {
-            text: "late".to_string(),
-            ..Notification::default()
-        }));
     }
 }

@@ -316,11 +316,6 @@ socket = "~/.otto/otto.sock"
 # [projects."/Users/me/src/app"]
 # trust_level = "trusted"
 
-[inbound.feishu]
-enabled = false
-# binary = "lark-cli"
-# chat_ids = ["oc_xxx"]         # required for inbound to start
-
 [failover]
 enabled = false
 lease_seconds = 30
@@ -441,19 +436,10 @@ external side effect did not occur.
   other value fails config loading. `otto trust <dir>` appends the table as
   text, so the rest of the file is kept byte for byte; there is no environment variable
   and no HTTP route that adds one.
-- `[inbound.feishu]` is off by default. When `enabled = true`, `otto serve`
-  spawns `lark-cli event consume im.message.receive_v1 --as bot` and delivers
-  each text message to every open session inbox, which starts a wake turn
-  when the session is idle. `binary` defaults to `lark-cli`. `chat_ids` is
-  the allowlist of chats that may deliver, and it is the only authorization
-  an inbound message passes before it drives a turn that runs tools in the
-  workspace, so an empty list disables inbound: `enabled = true` with no
-  `chat_ids` logs an error and starts nothing. Anyone in a listed chat can
-  drive that session, so list chats whose membership you control.
-  Credentials stay
-  in `lark-cli`'s own store, not in Otto config: unknown keys such as `token`
-  fail config load. A missing binary logs an error and disables inbound;
-  serve keeps running. The TUI and REPL do not spawn this consumer.
+- There is no `[inbound]` table. A config that still has `[inbound.feishu]`
+  fails to load with an error that says to delete the table. Feishu and
+  Telegram messages reach otto through the
+  [chat connector](#chat-connector).
 - `[failover]` decides whether a session gets a lease directory so it can be
   continued on another host (see
   [Continuing a session on another host](#continuing-a-session-on-another-host)).
@@ -1422,25 +1408,6 @@ otto serve [--socket PATH] [--listen HOST:PORT [--open]]
 default browser. It rejects `--ui`, `--prompt`, `--resume`, `--continue`,
 `--archive`, and `--no-session`. `--open` requires a TCP listener.
 
-### Feishu inbound
-
-When `[inbound.feishu].enabled` is true and `chat_ids` lists at least one
-chat, the serve process consumes Feishu
-`im.message.receive_v1` events through `lark-cli` and pushes them as
-`[feishu]` inbox messages. Open sessions receive a copy; an idle session
-starts a wake turn with HTTP `trigger` still `task`. An open Web UI follows
-that wake without a reload: it attaches while the turn is running, or
-reloads history if the turn finished between polls. A `merge_forward`
-message is expanded one level with `lark-cli im +messages-mget --as bot`
-(8s timeout, 30000 character cap). Nested forwards inside that body stay as
-`[Merged forward]`. If mget fails, the original placeholder is kept.
-Interactive cards and empty bodies are ignored. Shutting down the server
-sends SIGTERM to the child. Replying in Feishu is not wired: a model that
-should respond uses a user-installed `lark-cli` skill through `bash`.
-Delivery and idle-session wake are limited to open sessions in the startup
-workspace; sessions in another loaded workspace do not receive Feishu
-messages.
-
 ### Listener
 
 With both `--socket` and `--listen` on the command line, Otto opens both
@@ -1713,8 +1680,8 @@ composer:
   stream and continues rendering it; if the stream drops, the page re-reads
   it from the last sequence number it saw.
 - While a session is open and idle, the page polls `GET /v1/sessions/{id}`
-  about once a second. A server-started wake (`trigger` `task`, including
-  Feishu inbound and `remind`) is attached if it is still running; if it
+  about once a second. A server-started wake (`trigger` `task`, such as a
+  `remind` timer) is attached if it is still running; if it
   already finished, the page reloads history.
 
 - **Compact** calls `POST /v1/sessions/{id}/compact`; any text in the
@@ -2096,8 +2063,7 @@ option over ACP.
 ### Background results arrive with the next prompt
 
 `otto acp` does not start turns on its own. A finished sub-agent, a timer,
-or another inbox item reaches the model before the next prompt's text. Feishu
-inbound (`[inbound.feishu]`) is not started by `otto acp`.
+or another inbox item reaches the model before the next prompt's text.
 
 ### Shutdown
 
@@ -2245,8 +2211,7 @@ In the Feishu (or Lark) developer console:
 5. Add the bot to a group, or open a private chat with it.
 
 `otto-connect` opens the long connection itself, so no public address or
-`lark-cli` is needed. [Feishu inbound](#feishu-inbound) also opens a long
-connection for the app's message events; do not use the same app for both.
+`lark-cli` is needed.
 
 ### Sharing sessions with `otto serve`
 
@@ -2594,10 +2559,12 @@ model:
   A `preference` must cite one of your own messages. Proposals whose quotes do not match
   are dropped.
 - Content from outside you and the workspace is withheld from the model and cannot be
-  cited: MCP tool results, inbound chat or notification messages, and `bash` results whose
+  cited: MCP tool results, chat messages that the removed `[inbound.feishu]` recorded in
+  older sessions, and `bash` results whose
   command invokes a network tool (`curl`, `wget`, `ssh`, `git clone|fetch|pull|push`, `gh`,
   a URL, and similar). The check reads the command text, so it narrows the exposure but does
-  not see network access hidden inside a script.
+  not see network access hidden inside a script. A prompt that `otto-connect` forwards
+  from a chat is a user message, including one from another listed sender in a group.
 - Text goes through the same secret redaction as a normal request, and a closed redaction
   boundary stops the run.
 - A proposal that repeats a candidate already pending is skipped. The store clears a

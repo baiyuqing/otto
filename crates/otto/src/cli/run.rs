@@ -28,8 +28,8 @@ use std::time::Instant;
 
 use otto_core::config::resolve::{Overrides, Runtime};
 use otto_core::config::{
-    File, SandboxSettings, UiMode, resolve_agents, resolve_mcp, resolve_memory, resolve_sandbox,
-    resolve_server, resolve_skills, resolve_ui_mode,
+    File, SandboxSettings, UiMode, resolve_agents, resolve_mcp, resolve_memory, resolve_reflection,
+    resolve_sandbox, resolve_server, resolve_skills, resolve_ui_mode,
 };
 use otto_core::session::{CURRENT_VERSION, Header, RuntimeMetadata};
 use tokio::task::JoinHandle;
@@ -516,6 +516,28 @@ pub async fn run(
             }
         };
     let skill_checker = skill_checker(&config_file, &environment, &home, &mut *stderr);
+    let reflection_config = match resolve_reflection(&config_file) {
+        Ok(config) => config,
+        Err(error) => return fail(stderr, &error.to_string()),
+    };
+    let reflection_store = if reflection_config.enabled {
+        match crate::reflection::Store::open(&Path::new(&home).join(".otto/reflection.db")) {
+            Ok(store) => Some(Arc::new(store)),
+            Err(_) => {
+                let _ = writeln!(
+                    stderr,
+                    "warning: reflection store unavailable, continuing without reflection history"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let reflector = Arc::new(crate::reflection::Reflector::new(
+        reflection_config,
+        reflection_store,
+    ));
 
     let shared = Arc::new(Shared {
         config_path: PathBuf::from(&config_path),
@@ -538,6 +560,7 @@ pub async fn run(
         task_recorder,
         skill_checker,
         memory: Default::default(),
+        reflector,
     });
     let mut builder = Builder::for_workspace(shared, workspace, workspace_path.clone(), mcp_config);
 

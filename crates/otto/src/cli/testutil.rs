@@ -79,6 +79,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         task_recorder: None,
         skill_checker: None,
         memory: Default::default(),
+        reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
     });
     let mut builder = Builder::for_workspace(
         shared,
@@ -130,6 +131,7 @@ pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {
         task_recorder: None,
         skill_checker: None,
         memory: Default::default(),
+        reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
     })
 }
 
@@ -161,6 +163,7 @@ pub fn shared_with_sandbox_driver_override(root: &Path, driver: &str) -> Arc<Sha
         task_recorder: None,
         skill_checker: None,
         memory: Default::default(),
+        reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
     })
 }
 

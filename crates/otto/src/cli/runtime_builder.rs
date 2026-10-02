@@ -642,6 +642,45 @@ impl Runner {
         drive_with_control(compact, cancel, &control).await
     }
 
+    /// Asks the model once with no tools, outside the turn loop, under the
+    /// turn timeout and `cancel`. The provider usage is recorded against
+    /// `task_id` so reflection cost is separable from turn cost.
+    pub async fn complete_text(
+        &self,
+        request: &otto_core::agent::oneshot::TextRequest<'_>,
+        task_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<otto_core::agent::oneshot::TextResponse, AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
+        let collector = self.usage.as_ref().map(|usage| usage.for_task(task_id));
+        let mut emit = |_event: otto_core::agent::Event| {};
+        let call = self.agent.complete_text(request, &mut emit, &control);
+        let response = drive_with_control(call, cancel, &control).await?;
+        if let Some(collector) = collector {
+            let _ = collector.record(&otto_core::agent::Event::ProviderUsage {
+                usage: response.usage,
+                present: response.usage_present,
+            });
+        }
+        Ok(response)
+    }
+
+    /// Redacts transcript text exactly as a provider request would be.
+    pub fn redact_text(&self, text: &str) -> String {
+        self.agent.redact_text(text)
+    }
+
+    /// Whether transcript-derived text may be sent to the provider at all.
+    pub fn allows_dynamic_content(&self) -> bool {
+        self.agent.allows_dynamic_content()
+    }
+
     fn collecting<'a>(
         &'a self,
         emit: EventSink<'a>,
@@ -877,6 +916,9 @@ pub struct Shared {
     /// loaded workspace. Each workspace's `Builder` keeps only its own
     /// `workspace_scope`.
     pub memory: super::wiring::MemoryWiring,
+    /// The reflection use case: resolved `[reflection]` settings and, when
+    /// enabled, the `~/.otto/reflection.db` store.
+    pub reflector: Arc<crate::reflection::Reflector>,
 }
 
 /// The composition root for one workspace.
@@ -1891,6 +1933,7 @@ mod tests {
             task_recorder: None,
             skill_checker: None,
             memory: Default::default(),
+            reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
         })
     }
 

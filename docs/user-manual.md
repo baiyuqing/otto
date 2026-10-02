@@ -2259,7 +2259,8 @@ What's wired:
   never written to Pi session JSONL, compaction summaries, or logs.
 - Agent tools: `memory_search`, `remember`, `forget`.
 - Human commands in both frontends: `/memory list`, `/memory show`, `/memory search`, `/memory forget`,
-  `/memory review`, and `/remember`.
+  `/memory review`, `/memory review <id> accept|reject`, and `/remember`.
+- `/reflect [focus]` in the TUI and the REPL: reflection, described below.
 - Standalone CLI: `otto memory status`, `otto memory list`, `otto memory show <id>`, and
   `otto memory forget <id>`.
 
@@ -2270,11 +2271,59 @@ to narrow that set, or explicit `--scope all` to inventory every stored workspac
 record from the current scopes (or the selected user/workspace scope).
 
 Model-originated writes always land as pending candidates for human review.
+`/memory review` lists the pending candidates for the current user and workspace scopes (id,
+scope, action, kind, key, text, reason, confidence, origin), and `/memory review <id> accept`
+or `/memory review <id> reject` decides one. Accepting creates the active record (or applies the
+update or forget); rejecting leaves memory unchanged.
 Human `/remember` and `/memory forget` apply immediately.
+
+### Reflection
+
+`/reflect [focus]` looks back at the part of the current session that no earlier
+reflection covered and asks the session's own model, once and with no tools, which
+durable facts and preferences are worth remembering. Each survivor is queued as a
+pending candidate (origin `extractor`) that you review with `/memory review`; reflection
+never writes a memory record itself, and it appends nothing to the session file.
+`focus` is free text that steers what to look for.
+
+What reflection checks before queueing a candidate, all in code rather than by asking the
+model:
+
+- Every proposal must cite transcript entries with quotes that appear verbatim in them.
+  A `preference` must cite one of your own messages. Proposals whose quotes do not match
+  are dropped.
+- Content from outside you and the workspace is withheld from the model and cannot be
+  cited: MCP tool results, inbound chat or notification messages, and `bash` results whose
+  command invokes a network tool (`curl`, `wget`, `ssh`, `git clone|fetch|pull|push`, `gh`,
+  a URL, and similar). The check reads the command text, so it narrows the exposure but does
+  not see network access hidden inside a script.
+- Text goes through the same secret redaction as a normal request, and a closed redaction
+  boundary stops the run.
+- A proposal that repeats a candidate already pending is skipped. The store clears a
+  rejected candidate's content, so a rejected proposal can be proposed again by a later run.
+
+Each run is recorded in `~/.otto/reflection.db` (ids, entry ranges, counts, and status; no
+transcript text). A completed run advances a per-session watermark, so the next run covers
+only newer entries; a failed or canceled run leaves it in place and the next run covers the
+same entries again. Provider usage is recorded in the usage history under the task id
+`reflection:<run id>`. A session started with `--no-session` has no file to read and cannot
+be reflected on.
+
+```toml
+[reflection]
+enabled = true          # default true; false disables /reflect and does not open reflection.db
+memories = true         # default true; false makes /reflect a no-op
+max_input_bytes = 204800  # 1024..4194304; the oldest entries are cut to fit
+max_memories = 8        # 1..8 proposals per run
+```
+
+Reflection runs only when you run `/reflect`.
 
 Not yet implemented:
 
-- No automatic extraction (`Binding.Observe` is not wired).
+- No automatic extraction: reflection is never triggered by compaction or by exiting, and
+  `Binding.Observe` is not wired.
+- Reflection does not create or change skills.
 - No backup/restore/verify commands.
 - No `otto memory backup|backups|verify|restore` subcommands.
 

@@ -1,10 +1,10 @@
 # Session reflection: learning memories and skills from past work
 
-Status: proposed 2026-10-02. The five open decisions were answered on
-2026-10-02 and are recorded under "Decisions" below; the document awaits a
-final go-ahead before any production code or tests are written. Once
-implemented, current behavior moves to the README and user manual and this
-document becomes historical rationale.
+Status: approved 2026-10-02. Phase 1 (memory reflection on demand) is
+implemented; phases 2 to 4 are not. The five open decisions were answered on
+2026-10-02 and are recorded under "Decisions" below. Current user behavior of
+the shipped part is in the user manual; this document remains the rationale
+and the plan for the rest.
 
 ## Motivation
 
@@ -469,10 +469,35 @@ Answered 2026-10-02:
    and a fail-closed model review. The reflection prompt is kept but documented
    as not a security boundary.
 
-## Open questions to settle during implementation
+## Notes from implementing phase 1
 
-- Exact session entry identifiers for the watermark and how the active branch
-  is walked; the design assumes the Pi v3 reader already exposes both.
-- How rejected memory candidates are queried so the run can skip repeats.
-- Whether the one-shot call should reuse the compaction summary request path
-  or the plain provider turn path; the choice does not change this contract.
+Questions the design left open, and what the code showed:
+
+- **Reading the slice.** The live session no longer holds entries a
+  compaction summarized, so a run reads the session file read-only
+  (`Store::read_entries`) and follows the active branch. Entry ids are the
+  watermark and the evidence ids.
+- **Rejected candidates.** The memory store clears a rejected candidate's
+  content, so a run cannot recognize and skip a rejected proposal. Only
+  proposals already *pending* are suppressed. A rejected proposal can be made
+  again by a later run.
+- **Provenance.** The store refuses a non-empty `observation_id` on a
+  candidate. The run id travels as candidate metadata (`reflection_run`) and
+  the cited entry ids as provenance `message_ids`.
+- **The request path.** A new `Agent::complete_text` in `otto-core` makes one
+  tool-less request with the agent's own provider, model, thinking setting and
+  redactor, redacts the input, and appends nothing to the session. It does not
+  reuse the compaction summary path.
+- **Usage.** The usage table's `kind` column only allows `provider` and
+  `compaction`, so reflection calls are recorded as `provider` with the task id
+  `reflection:<run id>` rather than adding a `reflection` kind and a schema
+  migration.
+- **The redactor is exact-value only.** It has no secret *patterns*, so the
+  "secret pattern" part of the phase 2 rule scan needs new code; it cannot
+  reuse the redactor.
+- **`/memory review` did not exist.** The REPL and TUI listed it in their help
+  but did not implement it. Phase 1 implemented it (list pending candidates,
+  `accept|reject <id>`) because reflection's output is otherwise unreviewable.
+- **Evidence for memories** is implemented in phase 1 (verbatim quotes,
+  non-external entries, a user citation for `preference`, `update` and
+  `forget`), as the phase list says.

@@ -1,9 +1,8 @@
 //! The REPL's memory and sub-agent commands.
 //!
-//! `/memory review` would review extraction candidates, but automatic memory
-//! extraction is not implemented, so the subcommand falls through to the usage
-//! line instead of reaching a reviewer. The usage text still names it, because
-//! the frontend output is pinned byte for byte.
+//! `/memory review` lists pending candidates (queued by the model's `remember`
+//! tool or any other non-human writer) and `/memory review <id> accept|reject`
+//! decides one. Like `/memory forget`, it is a human command.
 //!
 //! [`repl_memory_command`] and [`repl_remember_command`] are free functions,
 //! not [`Repl`] methods, so `tui::app`'s `/memory`/`/remember` dispatch can
@@ -22,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::mcp::{Era, ServerState};
 use crate::memory::{
-    ForgetRequest, RecordRef, RememberRequest, Scope, SearchRequest, SearchResult, Service,
+    CandidateRef, CandidateState, ForgetRequest, RecordRef, RememberRequest, ReviewDecision,
+    ReviewRequest, Scope, SearchRequest, SearchResult, Service,
 };
 use crate::skill;
 use crate::subagent::format::{first_runes, one_line, task_line, task_steps};
@@ -574,11 +574,90 @@ pub(crate) fn repl_memory_command(
                 format!("record {id} not found: {reason}"),
             ));
         }
+        "review" if rest.is_empty() => {
+            let result = service
+                .search(&SearchRequest {
+                    scopes,
+                    include_candidates: true,
+                    candidate_states: vec![CandidateState::Pending],
+                    limit: SEARCH_LIMIT,
+                    token_budget: SEARCH_TOKEN_BUDGET,
+                    now: Utc::now(),
+                    ..SearchRequest::default()
+                })
+                .map_err(|error| command_error("/memory review", error))?;
+            let _ = writeln!(stdout, "{}", render_pending_candidates(&result.candidates));
+        }
+        "review" if rest.len() == 2 => {
+            let Some(decision) = ReviewDecision::parse(rest[1]) else {
+                let _ = writeln!(stderr, "{MEMORY_USAGE}");
+                return Ok(());
+            };
+            let id = rest[0];
+            let Some(reference) = scopes.iter().find_map(|scope| {
+                let reference = CandidateRef {
+                    scope: scope.clone(),
+                    id: id.to_string(),
+                };
+                service.get_candidate(&reference).ok().map(|_| reference)
+            }) else {
+                return Err(command_error(
+                    "/memory review",
+                    format!("candidate {id} not found"),
+                ));
+            };
+            let result = service
+                .review(&ReviewRequest {
+                    reference,
+                    decision,
+                    edited: None,
+                    target_revision: None,
+                })
+                .map_err(|error| command_error("/memory review", error))?;
+            let line = match (decision, &result.record, &result.tombstone) {
+                (ReviewDecision::Reject, _, _) => format!("rejected {id}"),
+                (_, Some(record), _) => format!(
+                    "accepted {id} as record {} (revision {})",
+                    record.id, record.revision
+                ),
+                (_, None, Some(tombstone)) => {
+                    format!("accepted {id}: forgot {}", tombstone.id)
+                }
+                _ => format!("accepted {id}"),
+            };
+            let _ = writeln!(stdout, "{line}");
+        }
         _ => {
             let _ = writeln!(stderr, "{MEMORY_USAGE}");
         }
     }
     Ok(())
+}
+
+fn render_pending_candidates(candidates: &[crate::memory::Candidate]) -> String {
+    if candidates.is_empty() {
+        return "no pending candidates".to_string();
+    }
+    let mut out = format!("{} pending candidates:", candidates.len());
+    for candidate in candidates {
+        let proposed = &candidate.proposed;
+        let origin = proposed.source.origin.map_or("unknown", |o| o.as_str());
+        let _ = write!(
+            out,
+            "\nid={} scope={}/{} action={} kind={} key={} confidence={} origin={} text={} reason={}",
+            candidate.id,
+            proposed.scope.namespace,
+            proposed.scope.id,
+            candidate.action.as_str(),
+            proposed.kind,
+            proposed.key,
+            proposed.confidence,
+            origin,
+            first_runes(&one_line(&proposed.text), 120),
+            first_runes(&one_line(&candidate.reason), 120),
+        );
+    }
+    out
 }
 
 /// See [`repl_memory_command`] for why this is a free function.
@@ -1193,6 +1272,113 @@ mod tests {
             .expect_err("command error");
         assert!(
             super::super::repl::is_command_error(&error, "/memory forget"),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("not found"), "{error}");
+    }
+
+    fn propose_pending(controller: &Controller, text: &str) -> String {
+        let (service, _, workspace_scope) = controller.memory_manager().expect("memory");
+        service
+            .propose(&crate::memory::ProposeRequest {
+                scope: workspace_scope,
+                kind: "preference".into(),
+                key: "editor".into(),
+                text: text.into(),
+                reason: "said so".into(),
+                confidence: 0.5,
+                source: crate::memory::Provenance {
+                    origin: Some(crate::memory::Origin::Model),
+                    ..crate::memory::Provenance::default()
+                },
+                ..crate::memory::ProposeRequest::default()
+            })
+            .expect("propose")
+            .remove(0)
+            .id
+    }
+
+    #[tokio::test]
+    async fn review_lists_accepts_and_rejects_pending_candidates() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+
+        let (stdout, _) = session("/memory review\n/exit\n", &controller).await;
+        assert!(stdout.contains("no pending candidates"), "{stdout}");
+
+        let accepted = propose_pending(&controller, "uses vim");
+        let (stdout, _) = session("/memory review\n/exit\n", &controller).await;
+        assert!(stdout.contains("1 pending candidates:"), "{stdout}");
+        assert!(stdout.contains(&format!("id={accepted}")), "{stdout}");
+        assert!(stdout.contains("origin=model"), "{stdout}");
+        assert!(stdout.contains("text=uses vim"), "{stdout}");
+        assert!(stdout.contains("reason=said so"), "{stdout}");
+
+        let (stdout, _) = session(
+            &format!("/memory review {accepted} accept\n/memory list\n/exit\n"),
+            &controller,
+        )
+        .await;
+        assert!(
+            stdout.contains(&format!("accepted {accepted} as record ")),
+            "{stdout}"
+        );
+        assert!(stdout.contains("uses vim"), "{stdout}");
+
+        let rejected = propose_pending(&controller, "uses emacs");
+        let (stdout, _) = session(
+            &format!("/memory review {rejected} reject\n/memory list\n/memory review\n/exit\n"),
+            &controller,
+        )
+        .await;
+        assert!(stdout.contains(&format!("rejected {rejected}")), "{stdout}");
+        assert!(!stdout.contains("uses emacs"), "{stdout}");
+        assert!(stdout.contains("no pending candidates"), "{stdout}");
+    }
+
+    #[tokio::test]
+    async fn review_reports_unknown_ids_and_usage_mistakes() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let id = propose_pending(&controller, "uses vim");
+
+        let (_, stderr) = session(
+            &format!(
+                "/memory review {id} maybe\n/memory review {id}\n/memory review a b c\n/exit\n"
+            ),
+            &controller,
+        )
+        .await;
+        assert_eq!(stderr.matches(MEMORY_USAGE).count(), 3, "{stderr}");
+
+        let mut repl = Repl::new(
+            &controller,
+            Box::new(Buffer::default()),
+            Box::new(Buffer::default()),
+        );
+        let error = repl
+            .run(
+                std::io::Cursor::new(b"/memory review missing accept\n".to_vec()),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("command error");
+        assert!(
+            super::super::repl::is_command_error(&error, "/memory review"),
             "{error:?}"
         );
         assert!(error.to_string().contains("not found"), "{error}");

@@ -17,6 +17,7 @@ import (
 	"github.com/baiyuqing/otto/connect/internal/agent"
 	"github.com/baiyuqing/otto/connect/internal/bridge"
 	"github.com/baiyuqing/otto/connect/internal/config"
+	"github.com/baiyuqing/otto/connect/internal/feishu"
 	"github.com/baiyuqing/otto/connect/internal/state"
 	"github.com/baiyuqing/otto/connect/internal/telegram"
 )
@@ -46,18 +47,17 @@ func run() error {
 		return err
 	}
 
-	// config.Load fails when no platform is configured.
-	t := cfg.Telegram
-	bot := telegram.New(t.Token, store)
-	platforms := []bridge.Platform{bot}
-	access := map[string]bridge.Access{bot.Name(): {Chats: t.Chats, Senders: t.Senders}}
+	platforms, access, secretVars, err := platformsFor(cfg, store)
+	if err != nil {
+		return err
+	}
 
 	b := bridge.New(bridge.Options{
 		Agent: agent.New(agent.Options{
 			Command: cfg.Agent.Command,
 			Dir:     cfg.Agent.Workspace,
-			// The agent and its tools do not need the bot token.
-			Env: withoutVars(os.Environ(), t.TokenEnv),
+			// The agent and its tools do not need the bot token or app secret.
+			Env: withoutVars(os.Environ(), secretVars...),
 		}),
 		Platforms: platforms,
 		Access:    access,
@@ -66,6 +66,32 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return b.Run(ctx)
+}
+
+// platformsFor builds the platform for every section present in cfg, the
+// admission lists by platform name, and the names of the environment
+// variables that hold their secrets. config.Load fails when no platform is
+// configured.
+func platformsFor(cfg *config.Config, store *state.Store) ([]bridge.Platform, map[string]bridge.Access, []string, error) {
+	var platforms []bridge.Platform
+	access := map[string]bridge.Access{}
+	var secretVars []string
+	if t := cfg.Telegram; t != nil {
+		bot := telegram.New(t.Token, store)
+		platforms = append(platforms, bot)
+		access[bot.Name()] = bridge.Access{Chats: t.Chats, Senders: t.Senders}
+		secretVars = append(secretVars, t.TokenEnv)
+	}
+	if f := cfg.Feishu; f != nil {
+		p, err := feishu.New(feishu.Options{AppID: f.AppID, AppSecret: f.AppSecret, Domain: f.Domain, Chats: f.Chats, Senders: f.Senders})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		platforms = append(platforms, p)
+		access[p.Name()] = bridge.Access{Chats: f.Chats, Senders: f.Senders}
+		secretVars = append(secretVars, f.AppSecretEnv)
+	}
+	return platforms, access, secretVars, nil
 }
 
 // withoutVars returns env without the entries named in names.

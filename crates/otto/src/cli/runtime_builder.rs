@@ -558,6 +558,23 @@ where
 }
 
 /// One composed agent, plus the two fixed strings a frontend may show.
+/// The request sizer a [`Runner::scripted`] runner uses: the bytes of text, so
+/// compaction can size its summary request without a real provider client.
+#[cfg(test)]
+struct ScriptedSizer;
+
+#[cfg(test)]
+impl RequestSizer for ScriptedSizer {
+    fn serialized_request_size(&self, request: &Request) -> Result<usize, ProviderError> {
+        Ok(request.system_prompt.len()
+            + request
+                .messages
+                .iter()
+                .map(|message| message.text().len())
+                .sum::<usize>())
+    }
+}
+
 pub struct Runner {
     agent: Agent<ProviderClient, Registry, SharedSession>,
     turn_timeout: Option<Duration>,
@@ -831,6 +848,7 @@ impl Runner {
                 Options {
                     model: "test-model".to_string(),
                     provider_name: "openai-compatible".to_string(),
+                    request_sizer: Some(Arc::new(ScriptedSizer)),
                     now: Box::new(Utc::now),
                     inbox: Arc::clone(tasks.notifications()),
                     tasks: Some(Arc::clone(&tasks)

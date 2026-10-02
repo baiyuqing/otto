@@ -22,6 +22,22 @@ pub const MAXIMUM_MEMORIES: usize = 8;
 pub const MAXIMUM_SKILLS_PER_RUN: usize = 8;
 pub const MAXIMUM_GENERATED_SKILLS: usize = 200;
 
+/// The largest accepted `min_turns`.
+pub const MAXIMUM_MIN_TURNS: usize = 1000;
+
+/// When reflection runs by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Auto {
+    /// Only on `/reflect`.
+    Off,
+    /// Once when a terminal session closes normally, over what no earlier run
+    /// covered, if it has at least `min_turns` user messages.
+    OnExit,
+    /// In the background after each successful compaction (the default).
+    OnCompaction,
+}
+
 /// When reflection may write skills, given where the slice's content came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -42,6 +58,10 @@ pub struct Reflection {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub memories: bool,
+    #[serde(default = "default_auto")]
+    pub auto: Auto,
+    #[serde(default = "default_min_turns")]
+    pub min_turns: usize,
     #[serde(default = "default_true")]
     pub skills: bool,
     #[serde(default = "default_skill_source")]
@@ -63,6 +83,8 @@ impl Default for Reflection {
         Reflection {
             enabled: true,
             memories: true,
+            auto: default_auto(),
+            min_turns: default_min_turns(),
             skills: true,
             skill_source: default_skill_source(),
             skill_review: true,
@@ -93,6 +115,14 @@ fn default_max_memories() -> usize {
     MAXIMUM_MEMORIES
 }
 
+fn default_auto() -> Auto {
+    Auto::OnCompaction
+}
+
+fn default_min_turns() -> usize {
+    4
+}
+
 fn default_skill_source() -> SkillSource {
     SkillSource::Untainted
 }
@@ -110,6 +140,8 @@ fn default_max_generated_skills() -> usize {
 pub struct ReflectionRuntime {
     pub enabled: bool,
     pub memories: bool,
+    pub auto: Auto,
+    pub min_turns: usize,
     pub skills: bool,
     pub skill_source: SkillSource,
     pub skill_review: bool,
@@ -125,6 +157,8 @@ impl Default for ReflectionRuntime {
         ReflectionRuntime {
             enabled: table.enabled,
             memories: table.memories,
+            auto: table.auto,
+            min_turns: table.min_turns,
             skills: table.skills,
             skill_source: table.skill_source,
             skill_review: table.skill_review,
@@ -160,9 +194,16 @@ pub fn resolve_reflection(file: &super::File) -> Result<ReflectionRuntime, Confi
             "invalid reflection.max_generated_skills: must be between 1 and {MAXIMUM_GENERATED_SKILLS}"
         )));
     }
+    if table.min_turns == 0 || table.min_turns > MAXIMUM_MIN_TURNS {
+        return Err(ConfigError::new(format!(
+            "invalid reflection.min_turns: must be between 1 and {MAXIMUM_MIN_TURNS}"
+        )));
+    }
     Ok(ReflectionRuntime {
         enabled: table.enabled,
         memories: table.memories,
+        auto: table.auto,
+        min_turns: table.min_turns,
         skills: table.skills,
         skill_source: table.skill_source,
         skill_review: table.skill_review,
@@ -187,6 +228,8 @@ mod tests {
             ReflectionRuntime {
                 enabled: true,
                 memories: true,
+                auto: Auto::OnCompaction,
+                min_turns: 4,
                 skills: true,
                 skill_source: SkillSource::Untainted,
                 skill_review: true,
@@ -203,7 +246,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn explicit_table_is_used() {
         let file = parse(
-            "[reflection]\nenabled = false\nmemories = false\nskills = false\nskill_source = \"any\"\nskill_review = false\nmax_input_bytes = 4096\nmax_memories = 3\nmax_skills = 1\nmax_generated_skills = 5\n",
+            "[reflection]\nenabled = false\nmemories = false\nauto = \"on_exit\"\nmin_turns = 6\nskills = false\nskill_source = \"any\"\nskill_review = false\nmax_input_bytes = 4096\nmax_memories = 3\nmax_skills = 1\nmax_generated_skills = 5\n",
         )
         .expect("parse");
         let runtime = resolve_reflection(&file).expect("resolve");
@@ -211,6 +254,7 @@ mod tests {
         assert!(!runtime.memories);
         assert_eq!(runtime.max_input_bytes, 4096);
         assert_eq!(runtime.max_memories, 3);
+        assert_eq!((runtime.auto, runtime.min_turns), (Auto::OnExit, 6));
         assert!(!runtime.skills);
         assert_eq!(runtime.skill_source, SkillSource::Any);
         assert!(!runtime.skill_review);
@@ -229,6 +273,8 @@ mod tests {
             ),
             ("[reflection]\nmax_memories = 0\n", "max_memories"),
             ("[reflection]\nmax_memories = 9\n", "max_memories"),
+            ("[reflection]\nmin_turns = 0\n", "min_turns"),
+            ("[reflection]\nmin_turns = 1001\n", "min_turns"),
             ("[reflection]\nmax_skills = 0\n", "max_skills"),
             ("[reflection]\nmax_skills = 9\n", "max_skills"),
             (
@@ -251,7 +297,20 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn unknown_keys_are_rejected() {
-        assert!(parse("[reflection]\nauto = \"off\"\n").is_err());
+        assert!(parse("[reflection]\nauto = \"sometimes\"\n").is_err());
         assert!(parse("[reflection]\nskill_source = \"anywhere\"\n").is_err());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn every_auto_mode_parses() {
+        for (text, mode) in [
+            ("off", Auto::Off),
+            ("on_exit", Auto::OnExit),
+            ("on_compaction", Auto::OnCompaction),
+        ] {
+            let file = parse(&format!("[reflection]\nauto = \"{text}\"\n")).expect("parse");
+            assert_eq!(resolve_reflection(&file).expect("resolve").auto, mode);
+        }
     }
 }

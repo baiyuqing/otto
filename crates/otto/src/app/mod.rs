@@ -20,6 +20,7 @@
 //! [`SESSION_OPERATION_UNAVAILABLE`].
 
 pub mod approval;
+pub mod auto_reflection;
 pub mod sandbox;
 pub mod tasks;
 pub mod wake;
@@ -175,6 +176,12 @@ pub struct Controller {
     sandbox: Option<Arc<dyn SandboxControl>>,
     state: Mutex<State>,
     close_signal: Condvar,
+    /// Lines from background reflection for a frontend to show.
+    notices: Arc<auto_reflection::Notices>,
+    /// Whether a background reflection run is in flight; one at a time.
+    auto_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancelled by `request_close`, which stops a background run.
+    auto_cancel: CancellationToken,
 }
 
 /// One admitted operation. Dropping it releases admission and performs a
@@ -229,6 +236,9 @@ impl Controller {
                 ..State::default()
             }),
             close_signal: Condvar::new(),
+            notices: Arc::new(auto_reflection::Notices::new()),
+            auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            auto_cancel: CancellationToken::new(),
         }
     }
 
@@ -301,6 +311,7 @@ impl Controller {
     /// flight. Never waits and never closes, so a callback running inside an
     /// operation may call it.
     pub fn request_close(&self) {
+        self.auto_cancel.cancel();
         let mut state = self.lock();
         state.closed = true;
         if state.busy {
@@ -637,7 +648,16 @@ impl Controller {
     ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        runner.run(text, emit, cancel).await
+        let compacted = std::sync::atomic::AtomicBool::new(false);
+        let result = runner
+            .run(
+                text,
+                &mut auto_reflection::observing(emit, &compacted),
+                cancel,
+            )
+            .await;
+        self.after_operation(&compacted);
+        result
     }
 
     pub async fn prompt_with_image(
@@ -649,7 +669,17 @@ impl Controller {
     ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        runner.run_with_image(text, image, emit, cancel).await
+        let compacted = std::sync::atomic::AtomicBool::new(false);
+        let result = runner
+            .run_with_image(
+                text,
+                image,
+                &mut auto_reflection::observing(emit, &compacted),
+                cancel,
+            )
+            .await;
+        self.after_operation(&compacted);
+        result
     }
 
     pub async fn compact(
@@ -660,7 +690,24 @@ impl Controller {
     ) -> Result<CompactionResult, AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        runner.compact(focus, emit, cancel).await
+        let compacted = std::sync::atomic::AtomicBool::new(false);
+        let result = runner
+            .compact(
+                focus,
+                &mut auto_reflection::observing(emit, &compacted),
+                cancel,
+            )
+            .await;
+        self.after_operation(&compacted);
+        result
+    }
+
+    /// Starts background reflection when the operation just ended compacted
+    /// the transcript.
+    pub(crate) fn after_operation(&self, compacted: &std::sync::atomic::AtomicBool) {
+        if compacted.load(std::sync::atomic::Ordering::SeqCst) {
+            self.start_auto_reflection();
+        }
     }
 
     /// Reflects on the part of the current session no earlier run covered and
@@ -673,29 +720,7 @@ impl Controller {
         focus: &str,
         cancel: &CancellationToken,
     ) -> Result<crate::reflection::Report, crate::reflection::Error> {
-        use crate::reflection::Error;
-        let _admission = self.begin_operation().map_err(Error::Read)?;
-        let runner = self.runner().map_err(Error::Read)?;
-        let session = self
-            .current_session_opt()
-            .ok_or_else(|| Error::Read(CLOSED.to_owned()))?;
-        let (service, user_scope, workspace_scope) =
-            self.memory_manager().ok_or(Error::MemoryUnavailable)?;
-        let session_id = session.header().id;
-        let session_path = session.path();
-        let skill_roots = self.reflection_skill_roots();
-        let context = crate::reflection::Context {
-            runner: &runner,
-            session_id: &session_id,
-            session_path: &session_path,
-            service: &service,
-            user_scope: &user_scope,
-            workspace_scope: &workspace_scope,
-            skill_roots: skill_roots.as_ref(),
-        };
-        self.builder
-            .reflector
-            .run(&context, "manual", focus, cancel)
+        self.reflect_as(crate::reflection::Trigger::Manual, focus, cancel)
             .await
     }
 
@@ -1381,6 +1406,9 @@ impl Controller {
                 ..State::default()
             }),
             close_signal: Condvar::new(),
+            notices: Arc::new(auto_reflection::Notices::new()),
+            auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            auto_cancel: CancellationToken::new(),
         }
     }
 }

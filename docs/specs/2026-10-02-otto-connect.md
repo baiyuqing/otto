@@ -361,5 +361,6 @@ connector was stopped.
 - Delivering otto's background results (for example `remind`) to the chat
   outside a prompt: `otto acp` sends no updates outside a prompt.
 - Streaming replies, buttons, attachments, session listing and switching
-  from the chat, more than one workspace per connector process, platforms
-  other than Telegram and Feishu.
+  from the chat (later added as `/sessions` and `/use`; see
+  [shared session](2026-10-02-shared-session.md)), more than one workspace
+  per connector process, platforms other than Telegram and Feishu.

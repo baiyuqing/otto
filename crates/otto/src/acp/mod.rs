@@ -22,6 +22,7 @@
 //! Errors: see the table in `docs/specs/2026-10-02-acp-agent-server.md`.
 
 mod approval;
+pub mod attach;
 pub mod update;
 
 use std::collections::HashMap;
@@ -34,9 +35,11 @@ use agent_client_protocol_schema::ProtocolVersion;
 use agent_client_protocol_schema::v1::{
     AgentCapabilities, ContentBlock, Error, Implementation, InitializeResponse,
     ListSessionsResponse, McpCapabilities, NewSessionResponse, PromptCapabilities, PromptResponse,
-    SessionCapabilities, SessionListCapabilities, SessionNotification, SessionUpdate, StopReason,
+    SessionCapabilities, SessionInfo, SessionListCapabilities, SessionNotification, SessionUpdate,
+    StopReason,
 };
 use otto_core::config::resolve::Runtime;
+use otto_core::model::Message;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
@@ -86,16 +89,14 @@ fn result<T: serde::Serialize>(value: T) -> Reply {
     Ok(serde_json::to_value(value).expect("ACP result serializes"))
 }
 
-/// One loaded session: its controller and the token of the running prompt.
-struct Session {
-    controller: Arc<Controller>,
-    prompt: Mutex<Option<CancellationToken>>,
-}
+/// The token of a session's running prompt.
+#[derive(Default)]
+struct PromptSlot(Mutex<Option<CancellationToken>>);
 
-impl Session {
+impl PromptSlot {
     /// Installs the token of a new prompt; `None` while one is running.
-    fn begin_prompt(&self, parent: &CancellationToken) -> Option<CancellationToken> {
-        let mut slot = self.prompt.lock().expect("prompt slot");
+    fn begin(&self, parent: &CancellationToken) -> Option<CancellationToken> {
+        let mut slot = self.0.lock().expect("prompt slot");
         if slot.is_some() {
             return None;
         }
@@ -104,22 +105,42 @@ impl Session {
         Some(token)
     }
 
-    fn end_prompt(&self) {
-        *self.prompt.lock().expect("prompt slot") = None;
+    fn end(&self) {
+        *self.0.lock().expect("prompt slot") = None;
     }
 
     fn cancel(&self) {
-        if let Some(token) = self.prompt.lock().expect("prompt slot").as_ref() {
+        if let Some(token) = self.0.lock().expect("prompt slot").as_ref() {
             token.cancel();
         }
     }
 }
 
+/// One loaded session: its controller and the token of the running prompt.
+struct Session {
+    controller: Arc<Controller>,
+    prompt: Arc<PromptSlot>,
+}
+
+/// The sessions this process runs itself.
+struct Local {
+    config: Config,
+    sessions: Mutex<HashMap<String, Arc<Session>>>,
+}
+
+/// Where a connection's session operations go: this process (`otto acp`) or
+/// an `otto serve` (`otto acp --attach`).
+enum Backend {
+    Local(Box<Local>),
+    Attach(attach::Relay),
+}
+
 /// State shared by the read loop and its request tasks.
 struct Connection {
-    config: Config,
+    /// The canonical workspace every request's `cwd` must match.
+    workspace: PathBuf,
+    backend: Backend,
     out: mpsc::UnboundedSender<Value>,
-    sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// Requests sent to the client, by id, waiting for their response frame.
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     next_request_id: AtomicU64,
@@ -168,14 +189,12 @@ impl Connection {
         }
     }
 
-    fn session(&self, id: &str) -> Option<Arc<Session>> {
-        self.sessions.lock().expect("session map").get(id).cloned()
-    }
-
-    fn redact(&self, message: &str) -> String {
-        self.config
-            .builder
-            .redact_error(message, Some(&self.config.runtime))
+    /// The prompt slot of a session this connection has opened.
+    fn slot(&self, id: &str) -> Option<Arc<PromptSlot>> {
+        match &self.backend {
+            Backend::Local(local) => local.session(id).map(|session| Arc::clone(&session.prompt)),
+            Backend::Attach(relay) => relay.slot(id),
+        }
     }
 
     /// Accepts `cwd` only when it canonicalizes to the process workspace.
@@ -185,44 +204,22 @@ impl Connection {
             return Err(invalid_params("cwd must be an absolute path"));
         }
         match crate::cli::sandbox_runtime::canonical_directory(Path::new(cwd)) {
-            Ok(canonical) if canonical == self.config.workspace => Ok(()),
+            Ok(canonical) if canonical == self.workspace => Ok(()),
             _ => Err(invalid_params(format!(
                 "cwd must be the workspace {}",
-                self.config.workspace.display()
+                self.workspace.display()
             ))),
         }
-    }
-
-    fn wire(&self, controller: Controller) -> Controller {
-        match &self.config.sandbox {
-            Some(control) => controller.with_sandbox_control(Arc::clone(control)),
-            None => controller,
-        }
-    }
-
-    fn register(&self, controller: Controller) -> (String, Arc<Session>) {
-        let controller = Arc::new(self.wire(controller));
-        let id = controller.info().session_id;
-        let session = Arc::new(Session {
-            controller,
-            prompt: Mutex::new(None),
-        });
-        self.sessions
-            .lock()
-            .expect("session map")
-            .insert(id.clone(), Arc::clone(&session));
-        (id, session)
     }
 
     async fn new_session(&self, params: Value) -> Reply {
         let params = SessionParams::parse(params)?;
         self.check_cwd(params.cwd.as_deref())?;
         params.check_mcp_servers()?;
-        let controller = Controller::create(Arc::clone(&self.config.builder), &self.config.runtime)
-            .await
-            .map_err(|message| error(INTERNAL_ERROR, self.redact(&message)))?;
-        let (id, _) = self.register(controller);
-        result(NewSessionResponse::new(id))
+        match &self.backend {
+            Backend::Local(local) => local.new_session().await,
+            Backend::Attach(relay) => relay.new_session(&self.workspace).await,
+        }
     }
 
     async fn load_session(&self, params: Value) -> Reply {
@@ -235,29 +232,11 @@ impl Connection {
                 "sessionId must be 32 lowercase hexadecimal characters",
             ));
         }
-        let session = match self.session(&id) {
-            Some(session) => session,
-            None => {
-                let path = session_directory(
-                    &self.config.builder.session_root,
-                    &self.config.workspace.to_string_lossy(),
-                )
-                .map_err(|error_| error(INTERNAL_ERROR, self.redact(&error_.to_string())))?
-                .join(format!("{id}.jsonl"));
-                if !path.is_file() {
-                    return Err(unknown_session());
-                }
-                let (controller, warnings) =
-                    Controller::open(Arc::clone(&self.config.builder), &path)
-                        .await
-                        .map_err(|message| error(INTERNAL_ERROR, self.redact(&message)))?;
-                for warning in warnings {
-                    eprintln!("warning: {}", self.redact(&warning));
-                }
-                self.register(controller).1
-            }
+        let history = match &self.backend {
+            Backend::Local(local) => local.load_session(&id, &self.workspace).await?,
+            Backend::Attach(relay) => relay.load_session(&id, &self.workspace).await?,
         };
-        for update in update::history_updates(&session.controller.history()) {
+        for update in update::history_updates(&history) {
             self.update(&id, update);
         }
         Ok(json!({ "sessionId": id }))
@@ -265,41 +244,29 @@ impl Connection {
 
     async fn list_sessions(&self, params: Value) -> Reply {
         self.check_cwd(params.get("cwd").and_then(Value::as_str))?;
-        let root = self.config.builder.session_root.clone();
-        let workspace = self.config.workspace.to_string_lossy().into_owned();
-        let listed = if root.exists() {
-            tokio::task::spawn_blocking(move || {
-                crate::session::list(&root, &workspace, "", MAX_LIST_SESSIONS)
-            })
-            .await
-            .map_err(|join| error(INTERNAL_ERROR, join.to_string()))?
-            .map_err(|failure| error(INTERNAL_ERROR, self.redact(&failure.to_string())))?
-            .sessions
-        } else {
-            Vec::new()
+        let sessions = match &self.backend {
+            Backend::Local(local) => local.list_sessions().await?,
+            Backend::Attach(relay) => relay.list_sessions(&self.workspace).await?,
         };
-        let sessions = listed
-            .into_iter()
-            .map(|info| {
-                let title = if info.name.is_empty() {
-                    &info.last_user_text
-                } else {
-                    &info.name
-                };
-                agent_client_protocol_schema::v1::SessionInfo::new(
-                    info.id.clone(),
-                    PathBuf::from(&info.cwd),
-                )
-                .title(title.chars().take(TITLE_CHARS).collect::<String>())
-                .updated_at(info.modified.to_rfc3339())
-            })
-            .collect();
         result(ListSessionsResponse::new(sessions))
     }
 
-    /// Runs one prompt, including the approval retries, to its stop reason.
-    async fn prompt(
+    /// Runs one prompt to its stop reason.
+    async fn prompt(&self, session_id: &str, text: String, cancel: &CancellationToken) -> Reply {
+        match &self.backend {
+            Backend::Local(local) => {
+                let session = local.session(session_id).ok_or_else(unknown_session)?;
+                self.local_prompt(local, &session, session_id, text, cancel)
+                    .await
+            }
+            Backend::Attach(relay) => relay.prompt(self, session_id, &text, cancel).await,
+        }
+    }
+
+    /// Runs one local prompt, including the approval retries.
+    async fn local_prompt(
         &self,
+        local: &Local,
         session: &Session,
         session_id: &str,
         text: String,
@@ -310,7 +277,7 @@ impl Connection {
             .run_with_approvals(
                 Step::Text(&text),
                 &mut |event| {
-                    if let Some(update) = update::event_update(&event) {
+                    if let Some(update) = update::event_update(&update::local_wire(&event)) {
                         self.update(session_id, update);
                     }
                 },
@@ -330,8 +297,105 @@ impl Connection {
         match outcome {
             Ok(Stop::EndTurn) => result(PromptResponse::new(StopReason::EndTurn)),
             Ok(Stop::Cancelled) => result(PromptResponse::new(StopReason::Cancelled)),
-            Err(failure) => Err(error(INTERNAL_ERROR, self.redact(&failure.to_string()))),
+            Err(failure) => Err(error(INTERNAL_ERROR, local.redact(&failure.to_string()))),
         }
+    }
+}
+
+impl Local {
+    fn session(&self, id: &str) -> Option<Arc<Session>> {
+        self.sessions.lock().expect("session map").get(id).cloned()
+    }
+
+    fn redact(&self, message: &str) -> String {
+        self.config
+            .builder
+            .redact_error(message, Some(&self.config.runtime))
+    }
+
+    fn wire(&self, controller: Controller) -> Controller {
+        match &self.config.sandbox {
+            Some(control) => controller.with_sandbox_control(Arc::clone(control)),
+            None => controller,
+        }
+    }
+
+    fn register(&self, controller: Controller) -> (String, Arc<Session>) {
+        let controller = Arc::new(self.wire(controller));
+        let id = controller.info().session_id;
+        let session = Arc::new(Session {
+            controller,
+            prompt: Arc::default(),
+        });
+        self.sessions
+            .lock()
+            .expect("session map")
+            .insert(id.clone(), Arc::clone(&session));
+        (id, session)
+    }
+
+    async fn new_session(&self) -> Reply {
+        let controller = Controller::create(Arc::clone(&self.config.builder), &self.config.runtime)
+            .await
+            .map_err(|message| error(INTERNAL_ERROR, self.redact(&message)))?;
+        let (id, _) = self.register(controller);
+        result(NewSessionResponse::new(id))
+    }
+
+    /// Loads the session if this process has not, and returns its history.
+    async fn load_session(&self, id: &str, workspace: &Path) -> Result<Vec<Message>, Error> {
+        let session = match self.session(id) {
+            Some(session) => session,
+            None => {
+                let path = session_directory(
+                    &self.config.builder.session_root,
+                    &workspace.to_string_lossy(),
+                )
+                .map_err(|error_| error(INTERNAL_ERROR, self.redact(&error_.to_string())))?
+                .join(format!("{id}.jsonl"));
+                if !path.is_file() {
+                    return Err(unknown_session());
+                }
+                let (controller, warnings) =
+                    Controller::open(Arc::clone(&self.config.builder), &path)
+                        .await
+                        .map_err(|message| error(INTERNAL_ERROR, self.redact(&message)))?;
+                for warning in warnings {
+                    eprintln!("warning: {}", self.redact(&warning));
+                }
+                self.register(controller).1
+            }
+        };
+        Ok(session.controller.history())
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionInfo>, Error> {
+        let root = self.config.builder.session_root.clone();
+        let workspace = self.config.workspace.to_string_lossy().into_owned();
+        let listed = if root.exists() {
+            tokio::task::spawn_blocking(move || {
+                crate::session::list(&root, &workspace, "", MAX_LIST_SESSIONS)
+            })
+            .await
+            .map_err(|join| error(INTERNAL_ERROR, join.to_string()))?
+            .map_err(|failure| error(INTERNAL_ERROR, self.redact(&failure.to_string())))?
+            .sessions
+        } else {
+            Vec::new()
+        };
+        Ok(listed
+            .into_iter()
+            .map(|info| {
+                let title = if info.name.is_empty() {
+                    &info.last_user_text
+                } else {
+                    &info.name
+                };
+                SessionInfo::new(info.id.clone(), PathBuf::from(&info.cwd))
+                    .title(title.chars().take(TITLE_CHARS).collect::<String>())
+                    .updated_at(info.modified.to_rfc3339())
+            })
+            .collect())
     }
 }
 
@@ -446,8 +510,8 @@ impl Dispatcher {
                     .get("params")
                     .and_then(|params| params.get("sessionId"))
                     .and_then(Value::as_str);
-                if let Some(session) = session_id.and_then(|id| self.connection.session(id)) {
-                    session.cancel();
+                if let Some(slot) = session_id.and_then(|id| self.connection.slot(id)) {
+                    slot.cancel();
                 }
             }
             (Some(_), None) => {}
@@ -502,18 +566,18 @@ impl Dispatcher {
             Ok(parsed) => parsed,
             Err(failure) => return connection.reply(id, Err(failure)),
         };
-        let Some(session) = connection.session(&session_id) else {
+        let Some(slot) = connection.slot(&session_id) else {
             return connection.reply(id, Err(unknown_session()));
         };
-        let Some(token) = session.begin_prompt(&self.stop) else {
+        let Some(token) = slot.begin(&self.stop) else {
             return connection.reply(
                 id,
                 Err(error(INTERNAL_ERROR, "a prompt is already running")),
             );
         };
         self.tasks.spawn(async move {
-            let reply = connection.prompt(&session, &session_id, text, &token).await;
-            session.end_prompt();
+            let reply = connection.prompt(&session_id, text, &token).await;
+            slot.end();
             connection.reply(id, reply);
         });
     }
@@ -567,11 +631,51 @@ pub async fn serve(
     stdout: &mut (dyn Write + Send),
     cancel: &CancellationToken,
 ) -> Vec<Arc<Controller>> {
+    let workspace = config.workspace.clone();
+    let local = Local {
+        config,
+        sessions: Mutex::new(HashMap::new()),
+    };
+    drive(
+        workspace,
+        Backend::Local(Box::new(local)),
+        stdin,
+        stdout,
+        &CancellationToken::new(),
+        cancel,
+        |connection| match &connection.backend {
+            Backend::Local(local) => local
+                .sessions
+                .lock()
+                .expect("session map")
+                .values()
+                .map(|session| Arc::clone(&session.controller))
+                .collect(),
+            Backend::Attach(_) => Vec::new(),
+        },
+    )
+    .await
+}
+
+/// Runs one connection until stdin ends, `cancel` fires or `lost` fires, and
+/// returns what `collect` takes from the connection after every request task
+/// has finished. `lost` is the attach relay's signal that serve is gone; the
+/// request tasks answer their requests with an error before the writer is
+/// released.
+async fn drive<T>(
+    workspace: PathBuf,
+    backend: Backend,
+    stdin: Box<dyn BufRead + Send>,
+    stdout: &mut (dyn Write + Send),
+    lost: &CancellationToken,
+    cancel: &CancellationToken,
+    collect: impl FnOnce(&Connection) -> T,
+) -> T {
     let (out, frames) = mpsc::unbounded_channel();
     let connection = Arc::new(Connection {
-        config,
+        workspace,
+        backend,
         out,
-        sessions: Mutex::new(HashMap::new()),
         pending: Mutex::new(HashMap::new()),
         next_request_id: AtomicU64::new(1),
     });
@@ -589,6 +693,7 @@ pub async fn serve(
                     None => break,
                 },
                 () = cancel.cancelled() => break,
+                () = lost.cancelled() => break,
                 Some(finished) = dispatcher.tasks.join_next() => {
                     if let Err(failure) = finished {
                         eprintln!("acp: request task failed: {failure}");
@@ -598,19 +703,13 @@ pub async fn serve(
         }
         dispatcher.stop.cancel();
         while dispatcher.tasks.join_next().await.is_some() {}
-        let controllers = connection
-            .sessions
-            .lock()
-            .expect("session map")
-            .values()
-            .map(|session| Arc::clone(&session.controller))
-            .collect();
+        let collected = collect(&connection);
         // Dropping the dispatcher and the connection drops the last sender,
         // which ends the writer.
         drop(dispatcher);
         drop(connection);
-        controllers
+        collected
     };
-    let (controllers, ()) = tokio::join!(read_loop, write_frames(stdout, frames));
-    controllers
+    let (collected, ()) = tokio::join!(read_loop, write_frames(stdout, frames));
+    collected
 }

@@ -128,6 +128,19 @@ func (b *Bridge) Run(ctx context.Context) error {
 		}
 	}
 	b.wg.Wait()
+	b.mu.Lock()
+	var chats []*chat
+	for _, c := range b.chats {
+		chats = append(chats, c)
+	}
+	b.mu.Unlock()
+	for _, c := range chats {
+		c.memoryMu.Lock()
+		for token := range c.memoryCards {
+			c.closeMemory(context.Background(), token, "Closed; connector stopped. Send /memory after restart.")
+		}
+		c.memoryMu.Unlock()
+	}
 	if err := b.opts.Agent.Close(); err != nil {
 		slog.Warn("closing agent", "error", err)
 	}
@@ -177,7 +190,7 @@ func (b *Bridge) deliver(m Message) {
 	}
 	if m.ApprovalID != "" {
 		if m.Text == "/allow" || m.Text == "/deny" {
-			c.cmdDecide(m, m.Text == "/allow")
+			c.cmdApprovalButton(m)
 		}
 		return
 	}
@@ -280,7 +293,9 @@ type chat struct {
 	reply   strings.Builder
 	brk     bool // a tool call followed text; the next text starts a paragraph
 	// proposed is set when the turn called remember or forget.
-	proposed bool
+	proposed    bool
+	memoryMu    sync.Mutex             // serializes card refreshes and memory reviews
+	memoryCards map[string]*memoryCard // request token -> original session/candidate
 }
 
 type permission struct {
@@ -436,6 +451,11 @@ func (c *chat) turn(m Message) {
 		if text != "" {
 			c.send(ctx, m.MessageID, text)
 		}
+	}
+	if err == nil && stop == acp.StopReasonEndTurn {
+		c.memoryMu.Lock()
+		c.showMemory(ctx, sid, "", false)
+		c.memoryMu.Unlock()
 	}
 }
 
@@ -748,6 +768,8 @@ func (c *chat) cmdUse(m Message, arg string) {
 			c.using = false
 			c.mu.Unlock()
 		}()
+		c.memoryMu.Lock()
+		defer c.memoryMu.Unlock()
 		reply := func(text string) { c.send(c.b.workCtx, m.MessageID, text) }
 		if arg == "" {
 			reply("Usage: /use <session id>")
@@ -804,6 +826,8 @@ const memoryUsage = "Usage: /memory | /memory accept <id> | /memory reject <id>"
 // model, and it does not wait for a running turn.
 func (c *chat) cmdMemory(m Message, args []string) {
 	go func() {
+		c.memoryMu.Lock()
+		defer c.memoryMu.Unlock()
 		reply := func(text string) { c.send(c.b.workCtx, m.MessageID, text) }
 		if len(args) != 0 && (len(args) != 2 || args[0] != "accept" && args[0] != "reject") {
 			reply(memoryUsage)
@@ -821,12 +845,7 @@ func (c *chat) cmdMemory(m Message, args []string) {
 			return
 		}
 		if len(args) == 0 {
-			page, err := c.b.opts.Agent.MemoryPending(ctx, sid, "")
-			if err != nil {
-				reply(memoryError(err))
-				return
-			}
-			reply(renderPending(page))
+			c.showMemory(ctx, sid, m.MessageID, true)
 			return
 		}
 		id, err := c.findCandidate(ctx, sid, args[1])
@@ -839,6 +858,9 @@ func (c *chat) cmdMemory(m Message, args []string) {
 			return
 		}
 		res, err := c.b.opts.Agent.MemoryReview(ctx, sid, id, args[0])
+		if err == nil || errors.Is(err, agent.ErrMemoryConflict) || errors.Is(err, agent.ErrCandidateNotFound) {
+			c.finishMemory(ctx, sid, id, memoryStatus(args[0], err))
+		}
 		if err != nil {
 			reply(memoryError(err))
 			return

@@ -83,14 +83,17 @@ type harness struct {
 	n     int
 }
 
+type textPlatform struct{ Platform }
+
 type setup struct {
-	dir     string // fake agent state; default a new temp dir
-	store   *state.Store
-	env     []string // extra agent environment
-	chats   []string
-	senders []string
-	mod     func(*Options)
-	agent   *agent.Options // replaces the fake agent's options
+	textOnly bool
+	dir      string // fake agent state; default a new temp dir
+	store    *state.Store
+	env      []string // extra agent environment
+	chats    []string
+	senders  []string
+	mod      func(*Options)
+	agent    *agent.Options // replaces the fake agent's options
 }
 
 func newHarness(t *testing.T, s setup) *harness {
@@ -127,6 +130,9 @@ func newHarness(t *testing.T, s setup) *harness {
 		Access:         map[string]Access{"fake": {Chats: s.chats, Senders: s.senders}},
 		Store:          s.store,
 		TypingInterval: time.Hour,
+	}
+	if s.textOnly {
+		opts.Platforms = []Platform{textPlatform{h.plat}}
 	}
 	if s.mod != nil {
 		s.mod(&opts)

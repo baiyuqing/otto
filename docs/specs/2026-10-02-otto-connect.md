@@ -371,7 +371,8 @@ connector was stopped.
 - D3. Replies are sent once per turn. Streaming edits are a later change.
 - D4. Permission requests are answered with `/allow` and `/deny` text, with
   a 10-minute timeout that denies. Buttons (Telegram inline keyboard, Feishu
-  card) are a later change.
+  card) were deferred here; now implemented with request-bound callbacks,
+  the same admission checks, and final-status updates. See the user manual.
 - D5. `[inbound.feishu]` and its `lark-cli` dependency are removed after the
   Feishu adapter ships. This removes a documented `otto serve` option.
 - D6. cc-connect is no longer documented. Issue #264 is closed as not

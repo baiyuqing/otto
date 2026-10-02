@@ -151,6 +151,14 @@ func TestPermissionOutcomes(t *testing.T) {
 			if got := h.calls("perm:"); len(got) != 1 || got[0] != "perm:"+tc.want {
 				t.Fatalf("agent got %q, want perm:%s", got, tc.want)
 			}
+			h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.statuses) == 1 }, "approval card resolved")
+			h.plat.mu.Lock()
+			status := h.plat.statuses[0]
+			h.plat.mu.Unlock()
+			wantStatus := map[string]string{"allow": "Approved.", "deny": "Denied.", "timeout": "Denied / expired.", "stop": "Cancelled."}[tc.name]
+			if status != wantStatus {
+				t.Fatalf("status = %q, want %q", status, wantStatus)
+			}
 			// The chat is told the outcome.
 			n := 3
 			if tc.name == "stop" {
@@ -394,5 +402,67 @@ func TestShutdownCancelsRunningPrompt(t *testing.T) {
 	}
 	if got := h.plat.texts(); len(got) != 0 {
 		t.Fatalf("shutdown sent to the chat: %q", got)
+	}
+}
+
+func TestApprovalButtonsBoundToRequest(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("perm:first")
+	h.waitSent(1)
+	first := h.plat.approvalID()
+	click := func(chat, sender, id, text string) {
+		m := h.msg(chat, sender, text)
+		m.ApprovalID = id
+		h.plat.deliver(m)
+	}
+	click("c1", "intruder", first, "/allow")
+	click("c2", "u1", first, "/allow")
+	click("c1", "u1", "wrong", "/allow")
+	settle()
+	if len(h.calls("perm:")) != 0 {
+		t.Fatal("invalid callback answered request")
+	}
+	click("c1", "u1", first, "/allow")
+	h.waitCall("perm:")
+	h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.statuses) == 1 }, "card completion")
+	h.say("perm:second")
+	h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.approvals) == 2 }, "second card")
+	second := h.plat.approvalID()
+	if first == second {
+		t.Fatal("request ID reused")
+	}
+	click("c1", "u1", first, "/allow")
+	settle()
+	if len(h.calls("perm:")) != 1 {
+		t.Fatal("old card answered new request")
+	}
+	click("c1", "u1", second, "/deny")
+	h.waitFor(func() bool { return len(h.calls("perm:")) == 2 }, "deny")
+	if got := h.calls("perm:"); got[0] != "perm:allow_once" || got[1] != "perm:reject_once" {
+		t.Fatal(got)
+	}
+	click("c1", "u1", second, "/allow")
+	settle()
+	if len(h.calls("perm:")) != 2 {
+		t.Fatal("duplicate callback reached agent")
+	}
+}
+
+func TestApprovalCardFailureFallsBackToCommands(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.plat.mu.Lock()
+	h.plat.cardErr = fmt.Errorf("card unavailable")
+	h.plat.mu.Unlock()
+	h.say("perm:ls")
+	got := h.waitSent(1)
+	if !strings.Contains(got[0], "Reply /allow or /deny") {
+		t.Fatal(got)
+	}
+	h.say("/allow")
+	h.waitCall("perm:")
+	if h.calls("perm:")[0] != "perm:allow_once" {
+		t.Fatal(h.calls("perm:"))
 	}
 }

@@ -3,6 +3,7 @@ package feishu
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"reflect"
@@ -121,6 +122,8 @@ func TestToMessage(t *testing.T) {
 }
 
 type fakeSDK struct {
+	onCard   func(context.Context, *types.CardActionEvent) error
+	stream   *fakeStream
 	handler  func(context.Context, *types.NormalizedMessage) error
 	onError  func(error)
 	onReject func(context.Context, *types.RejectEvent) error
@@ -188,6 +191,9 @@ func TestRunDeliversAndStopsOnCancel(t *testing.T) {
 	go func() { done <- p.Run(ctx, func(m bridge.Message) { got <- m }) }()
 	<-f.started
 	// Handlers are registered before Start, so they are set here.
+	if f.onCard == nil {
+		t.Fatal("no card handler")
+	}
 	if f.onReject == nil {
 		t.Fatal("Run registered no OnReject handler")
 	}
@@ -222,6 +228,13 @@ func TestRunDeliversAndStopsOnCancel(t *testing.T) {
 	}
 	if m := <-got; m.Text != "hi" || m.SenderID != "ou_test" || m.Platform != "feishu" {
 		t.Errorf("delivered %+v", m)
+	}
+	id := strings.Repeat("a", 32)
+	if err := f.onCard(context.Background(), &types.CardActionEvent{ChatID: "oc_test", Operator: types.CardActionOperator{OpenID: "ou_test"}, Action: types.CardActionPayload{Value: map[string]any{"request_id": id, "action": "approve"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if m := <-got; m.ApprovalID != id || m.Text != "/allow" || m.SenderID != "ou_test" {
+		t.Fatalf("card delivered %+v", m)
 	}
 	cancel()
 	if err := <-done; err != nil {
@@ -264,5 +277,57 @@ func TestSDKReadReceiptLogLevel(t *testing.T) {
 	slogLogger{}.Error(context.Background(), "handle message failed, err: event type: im.message.message_read_v1, not found handler [conn_id=123]")
 	if logs.Len() != 0 {
 		t.Fatalf("benign read receipt logged at default level: %s", logs.String())
+	}
+}
+
+type fakeStream struct {
+	card   string
+	closed bool
+}
+
+func (s *fakeStream) Append(context.Context, string) error                            { return nil }
+func (s *fakeStream) Flush(context.Context) error                                     { return nil }
+func (s *fakeStream) Close(context.Context) error                                     { s.closed = true; return nil }
+func (s *fakeStream) UpdateCard(_ context.Context, card string) error                 { s.card = card; return nil }
+func (f *fakeSDK) OnCardAction(h func(context.Context, *types.CardActionEvent) error) { f.onCard = h }
+func (f *fakeSDK) Stream(ctx context.Context, in *types.SendInput) (types.StreamController, error) {
+	if _, err := f.Send(ctx, in); err != nil {
+		return nil, err
+	}
+	f.stream = &fakeStream{}
+	return f.stream, nil
+}
+func TestApprovalCardLifecycle(t *testing.T) {
+	f := newFake()
+	p := &Platform{ch: f}
+	id := strings.Repeat("a", 32)
+	finish, err := p.SendApproval(context.Background(), "oc_test", id, "rm <build>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var card map[string]any
+	if err = json.Unmarshal([]byte(f.sent[0].Card), &card); err != nil {
+		t.Fatal(err)
+	}
+	actions := card["elements"].([]any)[1].(map[string]any)["actions"].([]any)
+	for i, action := range []string{"approve", "deny"} {
+		button := actions[i].(map[string]any)
+		m, ok := cardMessage(&types.CardActionEvent{ChatID: "oc_test", Operator: types.CardActionOperator{OpenID: "ou_test"}, Action: types.CardActionPayload{Value: button["value"].(map[string]any)}})
+		want := "/deny"
+		if action == "approve" {
+			want = "/allow"
+		}
+		if !ok || m.ApprovalID != id || m.Text != want || m.SenderID != "ou_test" {
+			t.Fatalf("callback = %+v, %v", m, ok)
+		}
+	}
+	if err = finish(context.Background(), "Approved."); err != nil {
+		t.Fatal(err)
+	}
+	if !f.stream.closed || strings.Contains(f.stream.card, `"button"`) || !strings.Contains(f.stream.card, "Approved.") {
+		t.Fatal(f.stream)
+	}
+	if _, ok := cardMessage(&types.CardActionEvent{}); ok {
+		t.Fatal("invalid callback admitted")
 	}
 }

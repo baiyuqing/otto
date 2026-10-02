@@ -14,9 +14,10 @@ type Message struct {
 	MessageID string
 	// Text is the message text with any mention of the bot removed and a
 	// command addressed to the bot ("/stop@name") reduced to "/stop".
-	Text  string
-	Time  time.Time // when the platform received the message
-	Group bool
+	ApprovalID string // non-empty only for a button callback; never parsed from chat text
+	Text       string
+	Time       time.Time // when the platform received the message
+	Group      bool
 	// Attachment is true when the message carried a photo, file or other
 	// non-text content; the adapter drops that content.
 	Attachment bool
@@ -37,4 +38,10 @@ type Platform interface {
 	Send(ctx context.Context, chatID, replyTo, text string) error
 	// Typing shows a typing indicator where the platform supports one.
 	Typing(ctx context.Context, chatID string) error
+}
+
+// ApprovalPlatform sends buttons bound to one permission request. finish replaces
+// them with the final status; it is called once, including on cancellation.
+type ApprovalPlatform interface {
+	SendApproval(ctx context.Context, chatID, requestID, text string) (finish func(context.Context, string) error, err error)
 }

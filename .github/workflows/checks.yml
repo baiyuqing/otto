@@ -107,6 +107,11 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         with:
           node-version: '24'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: needs.changes.outputs.docs_only != 'true'
+        with:
+          go-version-file: connect/go.mod
+          cache-dependency-path: connect/go.sum
       - if: needs.changes.outputs.docs_only != 'true'
         run: make check
 
@@ -136,6 +141,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: needs.changes.outputs.docs_only != 'true'
+        with:
+          go-version-file: connect/go.mod
+          cache-dependency-path: connect/go.sum
       # Linux has no Seatbelt, so this is the Rust gate without the sandbox
       # conformance suite; the web UI is platform independent and stays on
       # the macOS job, which is the one that ships a binary.

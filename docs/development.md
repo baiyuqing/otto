@@ -33,6 +33,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `provider`: native HTTP transports for the two provider implementations
   - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
   - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the SQLite/FTS5 store and retriever
+  - `reflection`: the `/reflect` use case: it reads the part of a session no earlier run covered (from the session file, so compacted entries stay reachable), classifies entries as local or external (`taint`), builds one tool-less request (`prompt`), parses and validates the answer (`output`), verifies quoted evidence in code (`evidence`), and queues survivors as memory candidates through `Service::propose` with `Origin::Extractor`. `store` keeps run rows, per-session watermarks, and skill ownership in `~/.otto/reflection.db`. Skills pass `guard` (structure and the rule table), `review` (a fail-closed second-model call), and only then `skillwrite`, the only file that mutates skill files; it accepts only a `guard::Vetted`, which only `guard::approve` builds. `crates/otto/tests/reflection_boundary.rs` fails if this module ever writes, forgets, or reviews a memory record directly, if a file other than `skillwrite.rs` mutates the filesystem, or if `Vetted` is built outside `guard.rs`. A new scan rule goes in the `RULES` table in `guard.rs` with a positive and a negative test case
   - `usage`: native collection of parent, sub-agent, and compaction token events; append-only SQLite storage; and total/daily aggregate queries consumed by the server
   - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
   - `subagent`: child agent construction (`Runner`), task lifecycle, the parent-facing `agent`/`agent_wait`/`agent_status`/`agent_send` tools, the child-only `agent_report` tool, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
@@ -58,10 +59,11 @@ loop, tools, and frontends must never reach a store directly: use the
 and explicit management (`memory_search`/`remember`/`forget` tools,
 `/memory`/`/remember` in the REPL, and `otto memory status|forget`) are wired
 end to end via `[memory]` TOML config. Model- and human-originated writes
-always land as pending candidates requiring review. Automatic extraction and
-durability (backup/restore/verify) remain unwired. `/memory review` names a
-candidate reviewer that automatic extraction would feed and falls through to
-the usage line. The TUI dispatches `/memory` and `/remember` to the same
+always land as pending candidates requiring review. `/reflect` proposes candidates
+through `reflection` on demand; automatic extraction (`Binding.Observe`, or a
+trigger on compaction or exit) and durability (backup/restore/verify) remain unwired. `/memory review` lists pending
+candidates and `/memory review <id> accept|reject` decides one through
+`Service::review` (human authority, like `/memory forget`). The TUI dispatches `/memory` and `/remember` to the same
 functions the REPL uses (`crates/otto/src/cli/repl_commands.rs`).
 
 Keep `crates/otto`'s `skill` module free of imports from other Otto modules

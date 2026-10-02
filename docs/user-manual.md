@@ -2419,7 +2419,8 @@ What's wired:
   never written to Pi session JSONL, compaction summaries, or logs.
 - Agent tools: `memory_search`, `remember`, `forget`.
 - Human commands in both frontends: `/memory list`, `/memory show`, `/memory search`, `/memory forget`,
-  `/memory review`, and `/remember`.
+  `/memory review`, `/memory review <id> accept|reject`, and `/remember`.
+- `/reflect [focus]` in the TUI and the REPL: reflection, described below.
 - Standalone CLI: `otto memory status`, `otto memory list`, `otto memory show <id>`, and
   `otto memory forget <id>`.
 
@@ -2430,11 +2431,116 @@ to narrow that set, or explicit `--scope all` to inventory every stored workspac
 record from the current scopes (or the selected user/workspace scope).
 
 Model-originated writes always land as pending candidates for human review.
+`/memory review` lists the pending candidates for the current user and workspace scopes (id,
+scope, action, kind, key, text, reason, confidence, origin), and `/memory review <id> accept`
+or `/memory review <id> reject` decides one. Accepting creates the active record (or applies the
+update or forget); rejecting leaves memory unchanged.
 Human `/remember` and `/memory forget` apply immediately.
+
+### Reflection
+
+`/reflect [focus]` looks back at the part of the current session that no earlier
+reflection covered and asks the session's own model, once and with no tools, which
+durable facts and preferences are worth remembering, and which procedures are worth
+reusing as skills. Each memory survivor is queued as a pending candidate (origin
+`extractor`) that you review with `/memory review`; reflection never writes a memory
+record itself, and it appends nothing to the session file. Skills are different: a skill
+that passes every check below is **written and active without a review step**, as
+described under [Generated skills](#generated-skills). `focus` is free text that steers
+what to look for.
+
+What reflection checks before queueing a candidate, all in code rather than by asking the
+model:
+
+- Every proposal must cite transcript entries with quotes that appear verbatim in them.
+  A `preference` must cite one of your own messages. Proposals whose quotes do not match
+  are dropped.
+- Content from outside you and the workspace is withheld from the model and cannot be
+  cited: MCP tool results, inbound chat or notification messages, and `bash` results whose
+  command invokes a network tool (`curl`, `wget`, `ssh`, `git clone|fetch|pull|push`, `gh`,
+  a URL, and similar). The check reads the command text, so it narrows the exposure but does
+  not see network access hidden inside a script.
+- Text goes through the same secret redaction as a normal request, and a closed redaction
+  boundary stops the run.
+- A proposal that repeats a candidate already pending is skipped. The store clears a
+  rejected candidate's content, so a rejected proposal can be proposed again by a later run.
+
+Each run is recorded in `~/.otto/reflection.db` (ids, entry ranges, counts, and status; no
+transcript text). A completed run advances a per-session watermark, so the next run covers
+only newer entries; a failed or canceled run leaves it in place and the next run covers the
+same entries again. Provider usage is recorded in the usage history under the task id
+`reflection:<run id>`. A session started with `--no-session` has no file to read and cannot
+be reflected on.
+
+#### Generated skills
+
+When a run's slice is clean, the model may also propose skills: short task-scoped
+procedures that you asked for or approved and that ran successfully in the slice. A
+proposal becomes `~/.otto/skills/<name>/SKILL.md` only after all of these pass, in order.
+Any failure drops the skill and is counted; nothing is partly written.
+
+1. **Source isolation.** If the slice contains any external entry (see above), skills are not
+   requested at all and the run says so. `skill_source = "any"` lifts this; external entries
+   are then still withheld and cannot be cited.
+2. **Evidence.** A skill must cite one of your messages and one entry showing the procedure
+   ran (a successful tool result, or an assistant tool call), with verbatim quotes.
+3. **Structure and rule scan.** A valid name and description, a body of 40 characters to
+   16 KiB, and no match in a fixed rule table: secret patterns and any value Otto knows to
+   be secret, instruction-override and conceal-from-the-user phrasing (English and
+   Chinese), tampering with the sandbox, approvals, or `~/.otto` state, pipe-to-shell,
+   destructive and data-egress commands, URLs that no cited entry contains, invisible
+   Unicode, and large encoded blobs. This is a tripwire for known-bad shapes, not a proof of
+   safety.
+4. **Name and ownership.** A new skill never reuses a name that exists in any configured skill
+   root. Reflection revises only a skill it wrote whose file is unchanged since; a skill you
+   wrote, or a generated one you have since edited, is never revised or removed by it.
+5. **Model review** (`skill_review`, default on). A second tool-less call sees only the
+   candidate, never the transcript, and must answer `ALLOW`; an error, a timeout, or any other
+   answer rejects the skill.
+
+A generated skill carries only `name` and `description`: it never declares an `input`/`output`
+contract, so it is never run as a sub-agent, and it has no `allowed-tools`. At most
+`max_skills` are written per run and `max_generated_skills` in total. Each write is announced
+on the `/reflect` result line with the undo command, and the skill becomes visible to the model
+at the next catalog discovery (`/new`, `/resume`, `/model`, or a restart), like any new skill.
+Skills are written only to `~/.otto/skills`; if you changed `[skills].paths` so that root is
+not listed, they are written but not discovered.
+
+- `/skill generated` lists the skills reflection wrote, with the run, the session, the time,
+  and the reason it gave; one you have edited is marked as no longer owned.
+- `/skill <name>` on a generated skill shows where it came from.
+- `/skill revert <name>` restores the previous version, or removes the skill if reflection
+  created it. It refuses a skill you have edited. Every version reflection wrote is kept under
+  `~/.otto/skill-history/`, outside the skill roots, so it is never loaded.
+- `/skill set <name> disabled` also works on a generated skill.
+
+The residual risk is stated plainly: a skill is instructions the model follows in later
+sessions, and the checks above reduce but cannot remove the chance that a plausible-looking
+bad procedure is written. Set `skills = false` to remove it. Under the default settings a
+slice that held external content never produces skills.
+
+```toml
+[reflection]
+enabled = true            # default true; false disables /reflect and does not open reflection.db
+memories = true           # default true; false stops memory proposals
+skills = true             # default true; false never asks for or writes skills
+skill_source = "untainted"  # "untainted" (default) | "any"
+skill_review = true       # default true; the second-model review of each skill
+max_input_bytes = 204800  # 1024..4194304; the oldest entries are cut to fit
+max_memories = 8          # 1..8 memory proposals per run
+max_skills = 2            # 1..8 skills per run
+max_generated_skills = 30 # 1..200 skills reflection may own in total
+```
+
+Reflection runs only when you run `/reflect`. With `memories = false` and `skills = false`,
+`/reflect` makes no model call.
 
 Not yet implemented:
 
-- No automatic extraction (`Binding.Observe` is not wired).
+- No automatic extraction: reflection is never triggered by compaction or by exiting, and
+  `Binding.Observe` is not wired.
+- Reflection never changes a skill you wrote, and it cannot create skills with scripts or
+  supporting files.
 - No backup/restore/verify commands.
 - No `otto memory backup|backups|verify|restore` subcommands.
 
@@ -2497,6 +2603,8 @@ What's wired:
   `AGENT.md` definition of the same name wins, and the clash is reported.
   Registration is skipped entirely when `[agents]` is disabled, and a skill
   is never marked `exec="agent"` unless it really was registered.
+- `/skill generated` and `/skill revert <name>` list and undo the skills that
+  [reflection](#reflection) wrote.
 - `/skill` lists every available skill; `/skill <name>` displays its description,
   location, contract-check status, and instructions; `/skill set <name>
   enabled|disabled` persists its state change. `/skills` is not a command.

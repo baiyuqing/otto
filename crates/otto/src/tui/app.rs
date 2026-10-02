@@ -136,6 +136,7 @@ pub(crate) enum Action {
     Prompt(String),
     Image(String),
     Compact(String),
+    Reflect(String),
     NewSession,
     SwitchProfile(String),
     SwitchProfileThinking {
@@ -1167,6 +1168,7 @@ impl App {
                 None
             }
             SlashCommandKind::Compact => Some(Action::Compact(args)),
+            SlashCommandKind::Reflect => Some(Action::Reflect(args)),
             SlashCommandKind::Image => {
                 if args.is_empty() {
                     self.push_system("usage: /image <path>");
@@ -2948,14 +2950,10 @@ mod tests {
         );
     }
 
-    /// Documents the pre-existing divergence recorded in `repl_commands.rs`'s
-    /// module doc: `/memory review` reaches candidate review and automatic
-    /// extraction, neither of which is ported, so the subcommand always falls
-    /// through to the same usage line as an unknown one, regardless of whether
-    /// the decision word is valid. A valid and an invalid decision word are
-    /// therefore indistinguishable here, so one test covers both.
+    /// `/memory review` reaches the shared memory command: a bad decision word
+    /// prints the usage line and an unknown candidate id is a command error.
     #[tokio::test]
-    async fn memory_review_falls_through_to_the_usage_line_pending_the_reviewer_port() {
+    async fn memory_review_reaches_the_shared_reviewer() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let store = tempfile::tempdir().expect("store");
@@ -2968,10 +2966,16 @@ mod tests {
         let mut app = App::new(&controller);
         let cancel = CancellationToken::new();
 
+        app.dispatch_line("/memory review", &controller, &cancel);
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            "no pending candidates"
+        );
+
         app.dispatch_line("/memory review cand-1 accept", &controller, &cancel);
         assert_eq!(
             app.entries.last().expect("entry").raw,
-            repl_commands::MEMORY_USAGE
+            "/memory: candidate cand-1 not found"
         );
 
         app.dispatch_line("/memory review cand-1 maybe", &controller, &cancel);

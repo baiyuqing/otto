@@ -24,11 +24,12 @@ what the CLI actually does today.
 11. [Tools and safety](#tools-and-safety)
 12. [Headless mode](#headless-mode)
 13. [Agent server](#agent-server)
-14. [Durable workflows](#durable-workflows)
-15. [Memory](#memory)
-16. [Skills](#skills)
-17. [MCP servers](#mcp-servers)
-18. [Troubleshooting](#troubleshooting)
+14. [ACP agent server](#acp-agent-server)
+15. [Durable workflows](#durable-workflows)
+16. [Memory](#memory)
+17. [Skills](#skills)
+18. [MCP servers](#mcp-servers)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -223,6 +224,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
 | `otto trust <dir> [--config PATH]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
 | `otto serve [--socket PATH \| --listen HOST:PORT [--open] [--exit-on-stdin-close]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
+| `otto acp` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as cc-connect. See [ACP agent server](#acp-agent-server). |
 
 | Flag | Description |
 | --- | --- |
@@ -1879,6 +1881,136 @@ shows the exit status and the last 50 lines of that log.
 
 Building, checking, and releasing the app are covered in
 [`desktop/README.md`](../desktop/README.md).
+
+## ACP agent server
+
+`otto acp` runs Otto as an [Agent Client Protocol](https://agentclientprotocol.com)
+(ACP) v1 agent: newline-delimited JSON-RPC 2.0 on stdin and stdout, started by
+an ACP client as a child process. stdout carries only JSON-RPC frames;
+warnings and diagnostics go to stderr.
+
+```bash
+otto acp [--config PATH] [--cwd PATH] [--profile NAME] ...
+```
+
+`acp` accepts `--config`, `--cwd`, `--profile`, `--provider`, `--base-url`,
+`--model`, `--thinking`, `--sandbox`, `--shell-timeout`, and
+`--max-output-bytes`. It rejects `--ui`, `--prompt`, `--resume`,
+`--continue`, `--no-session`, `--archive`, and the `serve`-only flags.
+
+One process serves one workspace: `--cwd`, else the process working
+directory. A request whose `cwd` resolves to another directory is rejected.
+The workspace's sandbox and memory are set up at startup as for `otto serve`;
+MCP servers start when a session is created or loaded. A process may hold
+several sessions. A second prompt in a session that is already running one
+is rejected.
+
+### Methods
+
+| Method | Behavior |
+| --- | --- |
+| `initialize` | Reports protocol version 1, `loadSession`, and `session/list`. Prompts accept text only; images, audio, and embedded context are not accepted. No authentication methods: credentials come from environment variables and `otto login`. |
+| `session/new` | Creates a session. No session file is written until the first prompt. |
+| `session/load` | Opens a session of this workspace by its 32-character id, sends the stored conversation as `session/update` notifications, then responds. The response also carries `sessionId`. |
+| `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
+| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Returns `end_turn`, or `cancelled` after `session/cancel`. |
+| `session/cancel` | Cancels the session's running prompt and any pending permission request. |
+
+`mcpServers` in `session/new` and `session/load` must be empty: MCP servers
+come from Otto's own configuration (see [MCP servers](#mcp-servers)). Otto
+does not call the client's `fs/*` or `terminal/*` methods; tools run inside
+Otto as in the other frontends.
+
+During a prompt Otto sends assistant text as `agent_message_chunk`,
+reasoning as `agent_thought_chunk`, and each tool call as a `tool_call`
+followed by a `tool_call_update` with status `completed` or `failed`.
+`bash` calls have kind `execute` and the command as title.
+
+### Elevated `bash` uses `session/request_permission`
+
+When the model asks for an unsandboxed `bash` command (see
+[`bash` sandbox policy](#bash-sandbox-policy)), the turn finishes as in the
+other frontends. Otto then sends `session/request_permission` with the
+command and two options, **Allow once** and **Deny**. Allow once grants that
+command and runs the retry turn inside the same `session/prompt`. Deny, a
+cancelled request, or `session/cancel` ends the prompt; the approval stays
+pending as when a TUI user does not enter `/approve`. There is no "always"
+option over ACP.
+
+### Background results arrive with the next prompt
+
+`otto acp` does not start turns on its own. A finished sub-agent, a timer,
+or another inbox item reaches the model before the next prompt's text. Feishu
+inbound (`[inbound.feishu]`) is not started by `otto acp`.
+
+### Shutdown
+
+End of file on stdin, `SIGINT`, or `SIGTERM` cancels every running prompt,
+answers each with `cancelled`, closes every session, and exits `0`. A
+`SIGTERM` while a session holds a lease first moves it, as for `otto serve`
+(see [Continuing a session on another host](#continuing-a-session-on-another-host)).
+A client that kills the process with `SIGKILL` loses the assistant message
+being streamed; everything Otto had already written to the session file
+remains.
+
+### Telegram and Feishu through cc-connect
+
+[cc-connect](https://github.com/chenhg5/cc-connect) connects chat platforms,
+including Telegram and Feishu, to ACP agents. Its `acp` agent type starts one
+`otto acp` process per chat. Example cc-connect configuration (placeholders
+in angle brackets):
+
+```toml
+[[projects]]
+name = "otto"
+
+[projects.agent]
+type = "acp"
+
+[projects.agent.options]
+work_dir = "/path/to/workspace"
+cmd = "otto"
+args = ["acp"]
+display_name = "Otto"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "<bot token>"
+allow_from = "<your Telegram user id>"
+```
+
+- cc-connect's `allow_from` defaults to `*`. Anyone who can message the bot
+  can then run Otto in the workspace and approve elevated `bash` commands.
+  Set it to your own user id.
+- Bot tokens and app secrets belong in cc-connect's configuration, not
+  Otto's. Otto reads its provider key from the environment cc-connect starts
+  it with (the profile's `api_key_env` variable or `OTTO_API_KEY`), or uses
+  the `chatgpt` provider after `otto login`.
+- Each chat runs a separate `otto acp` process with its own sandbox and MCP
+  servers.
+- Do not configure the same Feishu app in both cc-connect and Otto's
+  `[inbound.feishu]`.
+- A session open in the TUI or `otto serve` cannot be loaded by `otto acp`
+  at the same time; the load fails and cc-connect starts a new session.
+
+cc-connect at commit `dfad194` (2026-09-29) has two limitations that affect
+Otto:
+
+- It shows `agent_thought_chunk` text as reply text, so reasoning appears in
+  chat replies when thinking is enabled (cc-connect issue #1940).
+- During `session/load` it reads at most 128 updates before it reads the
+  load response, so resuming a long session does not finish (cc-connect
+  issue #1941).
+
+### Not supported over ACP
+
+- `session/resume`, `session/close`, `session/delete`, session modes and
+  config options, and client-supplied MCP servers.
+- Image, audio, and embedded-resource prompt content.
+- Slash commands such as `/approve` or `/sandbox`: text from the client
+  reaches the model as a user message.
 
 ## Durable workflows
 

@@ -1,6 +1,8 @@
 import type { Session } from './wire'
 
 export const IDLE_POLL_MS = 1000
+// How often the open session is asked for lines background reflection queued.
+export const NOTICE_POLL_MS = 2000
 
 export type FollowAction = { kind: 'none' } | { kind: 'attach'; turnId: string } | { kind: 'reload' }
 

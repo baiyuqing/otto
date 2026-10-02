@@ -1601,7 +1601,8 @@ composer:
 - Typing `/` in the composer shows local suggestions for supported Web slash
   commands; Tab or click completes the highlighted command. Supported commands
   are `/help`, `/init`, `/session`, `/new`, `/clear`, `/resume`, `/model`,
-  `/rename <name>`, `/compact [focus]`, `/sandbox`, `/sandbox reload`,
+  `/rename <name>`, `/compact [focus]`, `/reflect [focus]`,
+  `/skill generated`, `/skill revert <name>`, `/sandbox`, `/sandbox reload`,
   `/approve <id>`, `/deny <id>`, `/tasks`, `/task <id|name>`,
   `/task cancel <id|name>`,
   `/mcp`, and `/exit`. Commands backed by existing server APIs run locally
@@ -1646,6 +1647,15 @@ composer:
 - **Compact** calls `POST /v1/sessions/{id}/compact`; any text in the
   composer is sent as the `focus`. The result appears as a notice in the
   transcript (`Nothing to compact` when the server reports a no-op).
+- `/reflect [focus]` calls `POST /v1/sessions/{id}/reflect` and shows the one-line
+  report as a notice; the composer is held while it runs, as for a compaction.
+  `/skill generated` lists the skills reflection wrote
+  (`GET /v1/sessions/{id}/reflection/skills`) and `/skill revert <name>` undoes
+  one. Lines that background reflection queues after a compaction appear in the
+  transcript within a couple of seconds (the page polls
+  `GET /v1/sessions/{id}/notices`); lines queued before the page opened are not
+  replayed. The Web UI has no memory review: candidates queued from the browser
+  are reviewed in a terminal with `/memory review`.
 - A **Tasks** panel appears above the composer when the session has sub-agent
   tasks (`GET /v1/sessions/{id}/tasks`). It re-reads on `notification` events
   and at turn end, polls every 3 seconds while a task is queued or running,
@@ -1709,6 +1719,10 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
+| `POST /v1/sessions/{id}/reflect` | Run one reflection now, optionally with `{"focus":"..."}`, and return what it did (`status`, `candidates`, `skills`, `dropped`, and the one-line summary). Memory proposals are queued as pending candidates; skills that pass every check are written to `~/.otto/skills`. `409 turn_active` while a turn runs or is queued, or a compaction or reflection runs; `409 reflection_unavailable` when reflection is disabled, the session has no file, memory is unavailable, or the redaction boundary is closed; `409 reflection_failed` when the model call or its answer failed (nothing is marked covered). |
+| `GET /v1/sessions/{id}/reflection/skills` | List the skills reflection wrote and not reverted, with the run, session, time, reason, and `owned` (false once the file was edited by hand). `enabled:false` when reflection is turned off. |
+| `POST /v1/sessions/{id}/reflection/skills/{name}/revert` | Restore the previous version of a skill reflection wrote, or remove it if reflection created it (`result` is `restored` or `removed`). `404` when reflection did not write it; `409 skill_not_owned` when it was edited by hand; `409 skills_unavailable` when `[skills]` is disabled. These act on the user's `~/.otto/skills`, not on the session, and are as exposed as the skill enable and disable routes: any holder of the token or socket may call them. |
+| `GET /v1/sessions/{id}/notices` | The lines background reflection queued for this session, `{"notices":[{"id":1,"text":"..."}],"last":1}`; pass `?after=<last>` to read only newer ones. They are not removed by reading, so every client sees each one, and only the 20 newest are kept. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn runs or is queued, or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
 | `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
@@ -1814,7 +1828,7 @@ Status codes:
 | `400` | Empty or missing turn text, or an invalid JSON body. |
 | `401` | Missing or invalid bearer token (TCP listener only). |
 | `404` | Session, turn, or task not found. |
-| `409` | `turn_active`: a turn is running or queued, or a compaction is active, on this session. `queue_full`: 16 turns are already queued. `approval_decided` and `approval_failed` name the approval conflicts. `compaction_failed`, `sandbox_reload_failed`, and `task_done` name the other conflicts. |
+| `409` | `turn_active`: a turn is running or queued, or a compaction is active, on this session. `queue_full`: 16 turns are already queued. `approval_decided` and `approval_failed` name the approval conflicts. `compaction_failed`, `reflection_unavailable`, `reflection_failed`, `skill_not_owned`, `skills_unavailable`, `revert_failed`, `sandbox_reload_failed`, and `task_done` name the other conflicts. |
 | `500` | Internal error. The response body is a fixed `internal error` message; details go to the server log only. |
 
 ### Observability
@@ -2420,7 +2434,7 @@ What's wired:
 - Agent tools: `memory_search`, `remember`, `forget`.
 - Human commands in both frontends: `/memory list`, `/memory show`, `/memory search`, `/memory forget`,
   `/memory review`, `/memory review <id> accept|reject`, and `/remember`.
-- `/reflect [focus]` in the TUI and the REPL: reflection, described below.
+- `/reflect [focus]` in the TUI, the REPL, and the Web UI: reflection, described below.
 - Standalone CLI: `otto memory status`, `otto memory list`, `otto memory show <id>`, and
   `otto memory forget <id>`.
 
@@ -2547,9 +2561,9 @@ stop skill writing, or `enabled = false` to turn reflection off entirely.
   with `/compact`, a run starts in the background over everything no earlier run covered.
   It does not wait for or interrupt the turn, and at most one runs at a time. A session that
   never compacts never reflects on its own. When the run queued a candidate or wrote a skill,
-  one line says so, printed before the next prompt (REPL) or added to the transcript (TUI).
-  A run that found nothing says nothing; a failed one shows its error once. `otto serve`
-  and `otto acp` run it but have nowhere to show the line, so use `/memory review` and
+  one line says so, printed before the next prompt (REPL) or added to the transcript (TUI
+  and Web UI). A run that found nothing says nothing; a failed one shows its error once.
+  `otto acp` runs it but has nowhere to show the line, so use `/memory review` and
   `/skill generated` to see the result.
 - `on_exit`: when a terminal frontend (the TUI, the REPL, or `--prompt`) ends normally,
   reflection runs once over what no earlier run covered, if the session has at least
@@ -2567,7 +2581,8 @@ these limits.
 Not yet implemented:
 
 - `Binding.Observe` is not wired; reflection reads the session file instead.
-- Reflection is not exposed over `otto serve`'s HTTP API or the Web UI.
+- The Web UI and the HTTP API cannot review memory candidates; use `/memory review` in a terminal.
+- `otto acp` does not show reflection notices.
 - Reflection never changes a skill you wrote, and it cannot create skills with scripts or
   supporting files.
 - No backup/restore/verify commands.

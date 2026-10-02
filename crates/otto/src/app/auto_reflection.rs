@@ -40,14 +40,23 @@ pub const EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60)
 /// Lines a background run wants a frontend to show, with a signal that fires
 /// when one is added.
 pub(super) struct Notices {
-    queue: Mutex<VecDeque<String>>,
+    queue: Mutex<Queue>,
     signal: watch::Sender<u64>,
+}
+
+/// The queued lines, each with the id it was given when queued. Ids start at 1
+/// and only grow, so a reader that remembers the last id it saw can ask for
+/// what came after without draining the queue for other readers.
+#[derive(Default)]
+struct Queue {
+    lines: VecDeque<(u64, String)>,
+    last_id: u64,
 }
 
 impl Notices {
     pub(super) fn new() -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(Queue::default()),
             signal: watch::channel(0).0,
         }
     }
@@ -55,20 +64,40 @@ impl Notices {
     fn push(&self, line: String) {
         {
             let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
-            if queue.len() >= MAXIMUM_NOTICES {
-                queue.pop_front();
+            if queue.lines.len() >= MAXIMUM_NOTICES {
+                queue.lines.pop_front();
             }
-            queue.push_back(line);
+            queue.last_id += 1;
+            let id = queue.last_id;
+            queue.lines.push_back((id, line));
         }
         self.signal.send_modify(|count| *count += 1);
     }
 
+    /// Removes and returns every queued line. For a frontend that is the only
+    /// reader (the REPL and the TUI).
     fn take(&self) -> Vec<String> {
         self.queue
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .lines
             .drain(..)
+            .map(|(_, line)| line)
             .collect()
+    }
+
+    /// The queued lines with an id above `after`, oldest first, and the id of
+    /// the newest line ever queued. Leaves the queue as it is, so several
+    /// readers each see every line.
+    fn since(&self, after: u64) -> (Vec<(u64, String)>, u64) {
+        let queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        let lines = queue
+            .lines
+            .iter()
+            .filter(|(id, _)| *id > after)
+            .cloned()
+            .collect();
+        (lines, queue.last_id)
     }
 }
 
@@ -102,6 +131,14 @@ impl Controller {
     /// Takes the lines background reflection has queued since the last call.
     pub fn take_notices(&self) -> Vec<String> {
         self.notices.take()
+    }
+
+    /// The notices queued after `after` (0 for all still kept) with their ids,
+    /// and the newest id so far. Does not remove them: for readers that share
+    /// a controller, such as the HTTP server's clients. The REPL and the TUI
+    /// use [`Controller::take_notices`] instead, which drains.
+    pub fn notices_since(&self, after: u64) -> (Vec<(u64, String)>, u64) {
+        self.notices.since(after)
     }
 
     /// Queues a notice as background reflection would, for frontend tests.
@@ -249,6 +286,32 @@ mod tests {
         let kept = notices.take();
         assert_eq!(kept.len(), MAXIMUM_NOTICES);
         assert_eq!(kept[0], "n5", "the oldest are dropped first");
+        let (_, last) = notices.since(0);
+        assert_eq!(
+            last as usize,
+            MAXIMUM_NOTICES + 5 + 2,
+            "ids keep counting past the cap"
+        );
+    }
+
+    #[test]
+    fn notices_can_be_read_by_id_without_draining() {
+        let notices = Notices::new();
+        assert_eq!(notices.since(0), (Vec::new(), 0));
+        notices.push("first".into());
+        notices.push("second".into());
+        let (all, last) = notices.since(0);
+        assert_eq!(all, [(1, "first".to_owned()), (2, "second".to_owned())]);
+        assert_eq!(last, 2);
+        // A second reader sees the same lines; a reader that is caught up sees none.
+        assert_eq!(notices.since(0).0.len(), 2);
+        assert_eq!(notices.since(2), (Vec::new(), 2));
+        assert_eq!(notices.since(1).0, [(2, "second".to_owned())]);
+        // Draining is for the single-reader frontends and does not reuse ids.
+        assert_eq!(notices.take(), ["first", "second"]);
+        assert_eq!(notices.since(0), (Vec::new(), 2));
+        notices.push("third".into());
+        assert_eq!(notices.since(2).0, [(3, "third".to_owned())]);
     }
 
     #[test]

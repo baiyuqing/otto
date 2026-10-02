@@ -133,6 +133,20 @@ func (a *Agent) Load(ctx context.Context, id string) error {
 	return p.wrap(err)
 }
 
+// List returns the first page of session/list for the agent's workspace. The
+// agent decides the order and the page size (otto: newest first, 20).
+func (a *Agent) List(ctx context.Context) ([]acp.SessionInfo, error) {
+	p, err := a.process(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := p.conn.ListSessions(ctx, acp.ListSessionsRequest{Cwd: &a.opts.Dir})
+	if err != nil {
+		return nil, p.wrap(err)
+	}
+	return resp.Sessions, nil
+}
+
 // Prompt sends text to session id and waits for the turn to end. ctx must
 // not be cancelled to stop a turn: the agent ignores the SDK's request
 // cancellation, so use Cancel and keep waiting.

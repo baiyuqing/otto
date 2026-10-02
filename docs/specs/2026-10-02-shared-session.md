@@ -1,6 +1,6 @@
 # Shared sessions through `otto serve`
 
-Status: proposed 2026-10-02, not approved. No code has been written for it.
+Status: approved 2026-10-02. Change 1 (serve and web UI) merged in #273.
 
 Extends the [chat connector design](2026-10-02-otto-connect.md): its "Not in
 this change" list names session listing and switching from the chat; this

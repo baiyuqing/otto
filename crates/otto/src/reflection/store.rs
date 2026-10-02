@@ -313,6 +313,18 @@ impl Store {
         transaction.commit().map_err(|_| Error::Io)
     }
 
+    /// When the most recent automatic (not `manual`) run for `session_id`
+    /// started, as the RFC 3339 text it was recorded with.
+    pub fn last_auto_started(&self, session_id: &str) -> Result<Option<String>> {
+        self.lock()?
+            .query_row(
+                "SELECT MAX(started_at) FROM runs WHERE session_id = ?1 AND trigger != 'manual'",
+                params![session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|_| Error::Io)
+    }
+
     /// The skill reflection owns under `name`, if any.
     pub fn generated(&self, name: &str) -> Result<Option<GeneratedSkill>> {
         self.lock()?
@@ -660,5 +672,33 @@ mod tests {
         store
             .record(&row("a", Status::Ok, "bbbbbbbb"))
             .expect("runs column");
+    }
+
+    #[test]
+    fn the_last_automatic_run_ignores_manual_ones() {
+        let store = Store::open_in_memory().expect("open");
+        assert_eq!(store.last_auto_started("session-1").expect("read"), None);
+        let mut manual = row("a", Status::Ok, "aaaaaaaa");
+        manual.trigger = "manual".into();
+        manual.started_at = "2026-10-02T05:00:00Z".into();
+        store.record(&manual).expect("manual");
+        assert_eq!(store.last_auto_started("session-1").expect("read"), None);
+        for (id, trigger, started) in [
+            ("bb", "on_compaction", "2026-10-02T01:00:00Z"),
+            ("ccc", "on_exit", "2026-10-02T03:00:00Z"),
+        ] {
+            let mut automatic = row(id, Status::Failed, "");
+            automatic.trigger = trigger.into();
+            automatic.started_at = started.into();
+            store.record(&automatic).expect("automatic");
+        }
+        assert_eq!(
+            store
+                .last_auto_started("session-1")
+                .expect("read")
+                .as_deref(),
+            Some("2026-10-02T03:00:00Z")
+        );
+        assert_eq!(store.last_auto_started("session-2").expect("read"), None);
     }
 }

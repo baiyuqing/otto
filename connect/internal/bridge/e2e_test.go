@@ -1,7 +1,9 @@
 package bridge
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -290,5 +292,51 @@ func TestEndToEndSharedSession(t *testing.T) {
 	h.plat.mu.Unlock()
 	if !slices.Equal(order, []string{"echo: from one", "echo: from two"}) {
 		t.Fatalf("reply order = %q", order)
+	}
+}
+
+// The real ACP agent must turn remember's pending candidate into an actionable
+// connector card; a tool-call notification alone is not a permission request.
+func TestEndToEndMemoryApprovalCard(t *testing.T) {
+	bin := ottoBin(t)
+	var calls int
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls == 1 {
+			args, _ := json.Marshal(`{"kind":"preference","key":"tabs","text":"prefers tabs"}`)
+			fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-memory\",\"type\":\"function\",\"function\":{\"name\":\"remember\",\"arguments\":%s}}]},\"finish_reason\":null}]}\n\n", args)
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+		} else {
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Queued.\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		}
+	}))
+	defer provider.Close()
+	home := ottoHome(t, provider.URL)
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, setup{agent: &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}})
+	h.say("Remember my preference for tabs.")
+	waitCards(h, 1)
+	if got := h.waitSent(2); !strings.Contains(got[1], "prefers tabs") {
+		t.Fatal(got)
+	}
+	token := h.plat.approvalID()
+	memoryClick(h, "c1", "u1", token, "/allow")
+	h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.statuses) == 1 }, "real memory review")
+	sid := h.store.Session("fake:c1")
+	page, err := h.agent.MemoryPending(context.Background(), sid, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Candidates) != 0 {
+		t.Fatalf("accepted candidate is still pending: %+v", page)
+	}
+	h.plat.mu.Lock()
+	defer h.plat.mu.Unlock()
+	if h.plat.statuses[0] != "Approved." {
+		t.Fatal(h.plat.statuses)
 	}
 }

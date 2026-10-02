@@ -2334,7 +2334,8 @@ progress; the message was not queued." A failed `session/list` call in
 ### Memory review
 
 `remember` and `forget` only queue candidates; a person decides them. In a
-chat, `/memory accept` and `/memory reject` are that decision: the connector
+chat, **Approve / Deny** buttons and `/memory accept` / `/memory reject` make
+that decision: the connector
 sends them to `otto acp` as the ACP extension requests `_otto/memory/pending`
 and `_otto/memory/review`, which Otto records as a human review. The model has
 no tool for this, and text in the chat such as "approve" is just a prompt.
@@ -2344,6 +2345,14 @@ reply "This agent does not support memory review." when the agent does not
 advertise it, as `otto acp --attach` does not. An id that is not a unique
 pending prefix gets "No single pending candidate starts with \"`<id>`\"."; other
 arguments get "Usage: /memory | /memory accept <id> | /memory reject <id>".
+After each successful turn, Telegram and Feishu show pending memory candidates
+as cards with **Approve / Deny** buttons, including create, update, and forget
+proposals. `/memory` refreshes the cards; old buttons become inactive. Buttons
+are bound to the original chat session and candidate, and use the same chat and
+sender allowlists as text commands. A successful decision or a conflict removes
+the buttons. Failed card delivery falls back to text commands. After restarting
+the connector, use `/memory` to get fresh cards.
+
 `/memory` shows the first page (20) and says when more are pending; an id
 is looked up across pages. When a turn called `remember` or `forget`, the
 reply ends with "Memory changes are proposals. Send /memory to review them."

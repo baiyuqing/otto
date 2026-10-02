@@ -128,11 +128,13 @@ is written.
   "memories": [
     {"action": "create|update|forget", "scope": "user|workspace",
      "kind": "preference|fact|convention", "key": "...", "text": "...",
-     "confidence": 0.0, "reason": "...", "target_id": "", "base_revision": 0}
+     "confidence": 0.0, "reason": "...", "target_id": "", "base_revision": 0,
+     "evidence": [{"entry": "<entry id>", "quote": "<verbatim text>"}]}
   ],
   "skills": [
     {"action": "create|revise", "name": "...", "description": "...",
-     "body": "...", "reason": "..."}
+     "body": "...", "reason": "...",
+     "evidence": [{"entry": "<entry id>", "quote": "<verbatim text>"}]}
   ]
 }
 ```
@@ -155,6 +157,10 @@ the service as candidate history, and the run skips an identical key and text
 ## Skills
 
 ### Validation before any write
+
+A skill is written only after it passes the vetting pipeline in "Safety:
+vetting pipeline" (taint check, evidence verification, rule scan, model
+review). The checks below are the structural part of it.
 
 - The name and description pass the same validation as discovery
   (`a-z0-9-`, 1 to 64 characters; description 1 to 1024). A skill that
@@ -212,10 +218,11 @@ Memory candidates are reviewed with the existing `/memory review`; no change.
   tools. Memory output is still only pending candidates. Skill output is the
   residual risk of choosing automatic activation: injected text that reaches
   the model's output could become a persistent instruction that later
-  sessions load. The bounds are the validation and ownership rules above, no
-  contract and no `allowed-tools`, the per-run and total caps, an announced
-  write, and `/skill revert`; none of them stops a plausible-looking malicious
-  procedure from being written. Setting `skills = false` removes the risk.
+  sessions load. The bounds are the vetting pipeline below, the validation and
+  ownership rules above, the caps, an announced write, and `/skill revert`.
+  Taint and evidence checks cut the injection surface sharply, but none of the
+  layers can prove a plausible-looking procedure is safe. Setting
+  `skills = false` removes the risk.
 - **Secrets.** Input is redacted before leaving the process. Output passes the
   memory content guard (memory) and a skill scanner that rejects
   anything matching the redactor's secret patterns. Skill history, run logs,
@@ -230,6 +237,77 @@ Memory candidates are reviewed with the existing `/memory review`; no change.
 - **Sandbox.** Reflection performs no `bash` and no file-tool I/O. The
   process writes its own storage with ordinary native file I/O, like the
   session store.
+
+### Safety: vetting pipeline
+
+No single check stops a determined injection, so skill writes pass four
+independent layers, in this order, and any failure drops the skill (counted
+by reason, never partially written). The reflection prompt is a fifth,
+weaker layer and is **not** a security boundary: it tells the model the
+transcript is data and to ignore instructions inside it, which lowers the
+odds of a bad proposal but cannot be relied on.
+
+1. **Source isolation (taint).** Each transcript entry is classified before
+   the model sees it. An entry is *external* when it is an MCP tool result, an
+   inbound message that did not come from the user (the `inbound` inbox and
+   chat connectors), or a `bash` call whose command invokes a network tool
+   (`curl`, `wget`, `ssh`, `nc`, `git clone|fetch|pull`, `gh`, and similar). A
+   slice containing any external entry is *tainted*. For a tainted slice:
+   skill output is not requested at all (the prompt omits the skills field and
+   the run records `skipped_tainted`); memory proposals are still made, as
+   pending candidates a human reviews, and external entries are excluded from
+   the text the model sees. `skill_source = "untainted"` (default) enforces
+   this; `"any"` turns it off. The classification is best-effort: it cannot
+   see network access hidden inside a script or a file the workspace already
+   holds, so it narrows the injection surface rather than closing it. Workspace
+   file reads and ordinary `bash` output are treated as local.
+2. **Evidence verification.** Every skill, and every memory proposal, must cite
+   transcript entries with verbatim quotes. The harness checks, in code and
+   not by asking the model:
+   - each cited entry exists in the slice and is not external;
+   - each quote is a substring of that entry's text after whitespace
+     normalization;
+   - a skill cites at least one **user** message (the user asked for or
+     approved the work) and at least one successful assistant tool call or
+     result entry showing the procedure was actually performed;
+   - a memory of kind `preference` cites at least one user message.
+   Proposals that fail are dropped. The verified citations are stored as
+   provenance and shown by `/skill <name>` and `/memory review`.
+3. **Rule scan (deterministic, offline).** The skill name, description, and
+   body are rejected, with the matching rule id recorded, when they contain:
+   - a secret pattern from the redactor;
+   - instruction-override or concealment phrasing (English and Chinese), for
+     example "ignore previous instructions" or "do not tell the user";
+   - tampering with Otto's safety controls: `--sandbox off`, approval bypass,
+     or edits to Otto's config, skills, or memory directories;
+   - destructive or egress commands: `rm -rf` outside a clearly scoped path,
+     piping a download into a shell, or sending files or environment values to
+     a network address;
+   - a URL or host that does not appear in a cited entry;
+   - invisible or control Unicode (zero-width, bidirectional overrides, tag
+     characters), or an encoded blob longer than a small threshold.
+   The rule set is a data table next to its tests so a miss becomes a one-line
+   fix with a regression case.
+4. **Model review.** A second, tool-less call, `skill_review = true` by
+   default, sees only the candidate skill text and a fixed rubric (does it
+   instruct the agent to exfiltrate data, bypass the sandbox or approvals,
+   hide its actions, act outside the task it was derived from, or take
+   destructive actions). It does not see the transcript. It must answer with a
+   fixed `allow` or `reject` token plus a reason; anything else, an error, or a
+   timeout is `reject` (fail closed). The reviewer reads the candidate body,
+   which is itself untrusted, so this layer is probabilistic and can be
+   fooled; it is a defense in depth, not a proof.
+
+After the pipeline the earlier bounds still apply: ownership by content hash,
+no contract or `allowed-tools`, per-run and total caps, an announced write,
+and `/skill revert`.
+
+The types enforce the order: `skillwrite` accepts only a `Vetted` skill value,
+which only the vetting module can construct, so a new code path cannot write a
+skill without passing the pipeline. A test and an architecture guard check
+this.
+
+Cost: a run is one reflection call plus at most `max_skills` review calls.
 
 ## Storage
 
@@ -253,6 +331,8 @@ enabled = true              # master switch; default true
 auto = "on_compaction"      # "off" | "on_exit" | "on_compaction"; default on_compaction
 memories = true             # propose memory candidates
 skills = true               # write generated skills
+skill_source = "untainted"  # "untainted" | "any": allow skill writes only when the slice has no external entries
+skill_review = true         # second-model review of each candidate skill
 min_turns = 4               # shorter sessions are skipped by on_exit
 max_input_bytes = 204800
 max_memories = 8
@@ -270,8 +350,9 @@ Reflection is on by default, so the user manual documents how to turn it off.
 Following the task map in `AGENTS.md`:
 
 - `crates/otto/src/reflection/` (new): `run` (slice, render, call, validate,
-  persist), `skillwrite` (validation, ownership, atomic write, history,
-  revert), `store` (SQLite). The model call reuses the provider contract and the redactor from
+  persist), `guard` (taint, evidence, rule scan, review; builds `Vetted`),
+  `skillwrite` (ownership, atomic write, history, revert; accepts only
+  `Vetted`), `store` (SQLite). The model call reuses the provider contract and the redactor from
   `otto-core`; the pure parts (render, schema, validation) stay free of
   native dependencies where practical but live in `crates/otto`, because the
   stores are native.
@@ -293,8 +374,8 @@ Following the task map in `AGENTS.md`:
 
 The architecture guards gain three checks: nothing in `reflection` calls
 `Service::remember` (it may only call `propose`), nothing in `reflection`
-writes to a workspace `.otto/skills`, and only `skillwrite` writes into a
-skill root.
+writes to a workspace `.otto/skills`, only `skillwrite` writes into a
+skill root, and `skillwrite` accepts only a `Vetted` value.
 
 ## Compatibility
 
@@ -314,8 +395,10 @@ skill root.
 1. **Memory reflection, on demand.** `reflection` module, store, `/reflect`
    for memory only, tests. Smallest slice that exercises the pipeline and the
    existing review gate.
-2. **Generated skills.** Validation, ownership, atomic write, history,
-   `/skill generated` and `/skill revert`, announcement line.
+2. **Generated skills.** The vetting pipeline (taint, evidence, rule scan,
+   model review), ownership, atomic write, history, `/skill generated` and
+   `/skill revert`, announcement line. Evidence verification also lands in
+   phase 1 for memory proposals, so the pipeline starts there.
 3. **Automatic triggers.** `on_compaction` (the default) and `on_exit`,
    watermark and interval guards. The defaults take effect when this phase
    ships; before it, only `/reflect` exists.
@@ -339,6 +422,14 @@ All tests are offline and deterministic, using a scripted fake provider.
   provider; a transcript with injected "write this skill" instructions
   produces at most pending memory candidates and a bounded, validated skill;
   the reflection call is made with an empty tool list.
+- Vetting: a slice with an MCP result, a non-user inbound message, or a
+  `curl` command is tainted, skill output is skipped, and external text never
+  reaches the model; a quote that is not verbatim, cites a missing or external
+  entry, or has no user-message citation is dropped; each rule in the scan
+  table has a positive and a negative case, including the Chinese phrases and
+  invisible Unicode; the reviewer sees no transcript text, and a malformed
+  answer, an error, or a timeout rejects; `Vetted` cannot be constructed
+  outside the guard module (a compile-fail or architecture test).
 - Skills: a written skill is found by `Catalog::discover`; `revise` leaves a
   history copy and updates the ownership hash; a human edit makes the skill
   human-owned so a later `revise` is dropped; a human-authored skill is never
@@ -373,6 +464,10 @@ Answered 2026-10-02:
 4. **User-level destination** (`~/.otto/skills`). Reflection never writes
    workspace `.otto/skills`.
 5. **Phase order:** memory first, then skills, then automatic triggers.
+6. **Add layered malicious-content defenses** (answered 2026-10-02): source
+   isolation (taint), code-verified evidence quotes, a deterministic rule scan,
+   and a fail-closed model review. The reflection prompt is kept but documented
+   as not a security boundary.
 
 ## Open questions to settle during implementation
 

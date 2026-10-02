@@ -31,6 +31,7 @@ pub mod context_report;
 pub mod events;
 pub mod inbox;
 pub mod memory;
+pub mod oneshot;
 pub mod overflow;
 pub mod redactor;
 pub mod summary;

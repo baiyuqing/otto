@@ -492,6 +492,13 @@ async fn run_app<B: Backend>(
                         propagate_turn_error(error)?;
                     }
                 }
+                Action::Reflect(focus) => {
+                    if let Err(error) =
+                        run_reflect(&mut app, terminal, keys, controller, cancel, focus).await
+                    {
+                        propagate_turn_error(error)?;
+                    }
+                }
                 Action::NewSession => {
                     pending_image = None;
                     match controller.new_session().await {
@@ -979,6 +986,44 @@ async fn run_compact<B: Backend>(
             })
         }
     }
+}
+
+/// Runs one `/reflect`: one model call with no tool events, then a one-line
+/// report as system text.
+async fn run_reflect<B: Backend>(
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    keys: &mut mpsc::Receiver<TuiEvent>,
+    controller: &Controller,
+    cancel: &CancellationToken,
+    focus: String,
+) -> Result<(), ReplError> {
+    app.start_turn();
+    let turn = cancel.child_token();
+    let result = {
+        let (_events, mut received) = mpsc::unbounded_channel::<Event>();
+        drive_turn(
+            app,
+            terminal,
+            keys,
+            &mut received,
+            &turn,
+            controller,
+            controller.reflect(&focus, &turn),
+            |_app, _event| {},
+        )
+        .await
+    };
+    app.end_turn();
+    if cancel.is_cancelled() {
+        return Err(ReplError::Cancelled);
+    }
+    match result {
+        Ok(report) => app.push_system(report.line()),
+        Err(crate::reflection::Error::Cancelled) => {}
+        Err(error) => app.push_system(format!("/reflect: {error}")),
+    }
+    Ok(())
 }
 
 fn push_session_id(app: &mut App, controller: &Controller) {

@@ -2750,3 +2750,181 @@ fn a_compaction_summary_and_mcp_tools_get_their_own_sections() {
     assert_eq!(sections[3].items[0].text, "[Compaction summary]\nearlier");
     assert_eq!(sections[4].items[0].label, "#2 user");
 }
+
+// -- one-shot text completion ------------------------------------------------
+
+fn text_request<'a>(user_text: &'a str, maximum_bytes: usize) -> super::oneshot::TextRequest<'a> {
+    super::oneshot::TextRequest {
+        system_prompt: "answer briefly",
+        user_text,
+        maximum_bytes,
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn complete_text_sends_one_tool_less_redacted_message_and_touches_no_history() {
+    const SECRET: &str = "sk-live-abcdef";
+    let agent = Agent::with_redactor(
+        FakeProvider::new(vec![Turn::summary("the answer")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+        Redactor::new(&[SECRET.to_owned()]),
+    );
+
+    let response = agent
+        .complete_text(
+            &text_request(&format!("the key is {SECRET}"), 1024),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("complete");
+
+    assert_eq!(response.text, "the answer");
+    assert!(response.usage_present);
+    assert_eq!(response.usage.output_tokens, 7);
+    let requests = agent.provider().requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].tools.is_empty());
+    assert_eq!(requests[0].system_prompt, "answer briefly");
+    assert_eq!(requests[0].messages.len(), 1);
+    assert!(!requests[0].messages[0].text().contains(SECRET));
+    assert!(agent.session.messages().is_empty(), "no history appended");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn complete_text_redacts_the_response() {
+    const SECRET: &str = "sk-live-abcdef";
+    let provider = FakeProvider::new(vec![Turn::summary(&format!("leaked {SECRET}"))]);
+    let agent = Agent::with_redactor(
+        provider,
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+        Redactor::new(&[SECRET.to_owned()]),
+    );
+    let response = agent
+        .complete_text(
+            &text_request("hi", 1024),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("complete");
+    assert!(!response.text.contains(SECRET), "{}", response.text);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn complete_text_rejects_a_tool_call_a_wrong_role_and_an_oversized_answer() {
+    let cases = [
+        (Turn::tool_call("c1", "{}"), "non-text block"),
+        (Turn::summary("0123456789"), "byte bound"),
+    ];
+    for (turn, expected) in cases {
+        let agent = Agent::new(
+            FakeProvider::new(vec![turn]),
+            EchoExecutor::default(),
+            MemorySession::new(),
+            options(),
+        );
+        let error = agent
+            .complete_text(
+                &text_request("hi", 5),
+                &mut |_| {},
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("rejected");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+
+    let mut wrong_role = Turn::summary("fine");
+    if let Ok(response) = &mut wrong_role.outcome {
+        response.message.role = Role::User;
+    }
+    let agent = Agent::new(
+        FakeProvider::new(vec![wrong_role]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    let error = agent
+        .complete_text(
+            &text_request("hi", 1024),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("rejected");
+    assert!(error.to_string().contains("assistant"), "{error}");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn complete_text_stops_a_stream_that_runs_past_its_bound() {
+    let turn = Turn::summary("x").with_events(vec![
+        StreamEvent::TextDelta {
+            text: "0123".into(),
+        },
+        StreamEvent::TextDelta {
+            text: "4567".into(),
+        },
+    ]);
+    let agent = Agent::new(
+        FakeProvider::new(vec![turn]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    let error = agent
+        .complete_text(
+            &text_request("hi", 5),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("stopped");
+    assert!(error.to_string().contains("exceeded"), "{error}");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn complete_text_does_not_call_the_provider_when_already_cancelled_or_boundary_closed() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::summary("never")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let error = agent
+        .complete_text(&text_request("hi", 1024), &mut |_| {}, &cancel)
+        .await
+        .expect_err("cancelled");
+    assert!(error.is_cancelled(), "{error}");
+
+    let closed = Agent::with_redactor(
+        FakeProvider::new(vec![Turn::summary("never")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+        Redactor::with_completeness(&[], false),
+    );
+    assert!(!closed.allows_dynamic_content());
+    let error = closed
+        .complete_text(
+            &text_request("hi", 1024),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("closed");
+    assert!(error.to_string().contains("redaction boundary"), "{error}");
+    assert!(agent.provider().requests().is_empty());
+    assert!(closed.provider().requests().is_empty());
+}

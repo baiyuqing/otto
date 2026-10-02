@@ -13,6 +13,7 @@ pub mod inbound;
 pub mod mcp;
 pub mod memory;
 pub mod provider;
+pub mod reflection;
 pub mod retry;
 pub mod sandbox;
 pub mod server;

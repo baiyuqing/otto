@@ -11,6 +11,19 @@ fn is_empty(value: &str) -> bool {
     value.is_empty()
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The first frame of a turn a client started.
+pub const USER_MESSAGE: &str = "user_message";
+/// The last frame of every turn.
+pub const TURN_END: &str = "turn_end";
+/// A serve turn waits for a decision on one elevated Bash command.
+pub const APPROVAL_REQUESTED: &str = "approval_requested";
+/// The decision on an `approval_requested` frame: `allow`, `deny` or `timeout`.
+pub const APPROVAL_DECIDED: &str = "approval_decided";
+
 /// `tool_call_finished`'s payload.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireToolResult {
@@ -118,6 +131,71 @@ pub struct WireEvent {
     pub retry: Option<WireRetry>,
     #[serde(default, skip_serializing_if = "is_empty")]
     pub error: String,
+    /// `user_message`: an image was attached. The image data is not repeated.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub image: bool,
+    /// `turn_end`: `ok`, `error` or `canceled`.
+    #[serde(default, skip_serializing_if = "is_empty")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "is_empty")]
+    pub approval_id: String,
+    #[serde(default, skip_serializing_if = "is_empty")]
+    pub command: String,
+    #[serde(default, skip_serializing_if = "is_empty")]
+    pub justification: String,
+    /// `approval_decided`: `allow`, `deny` or `timeout`.
+    #[serde(default, skip_serializing_if = "is_empty")]
+    pub decision: String,
+}
+
+impl WireEvent {
+    /// `user_message`: the prompt text of a turn a client started.
+    pub fn user_message(text: &str, image: bool) -> Self {
+        Self {
+            event_type: USER_MESSAGE.to_string(),
+            text: text.to_string(),
+            image,
+            ..Self::default()
+        }
+    }
+
+    /// `turn_end`: the terminal status; `error` is empty unless `status` is
+    /// `error`.
+    pub fn turn_end(status: &str, error: &str) -> Self {
+        Self {
+            event_type: TURN_END.to_string(),
+            status: status.to_string(),
+            error: error.to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// `approval_requested`: the turn waits for a decision on `command`.
+    pub fn approval_requested(
+        approval_id: &str,
+        tool_call_id: &str,
+        command: &str,
+        justification: &str,
+    ) -> Self {
+        Self {
+            event_type: APPROVAL_REQUESTED.to_string(),
+            approval_id: approval_id.to_string(),
+            tool_call_id: tool_call_id.to_string(),
+            command: command.to_string(),
+            justification: justification.to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// `approval_decided`: `decision` is `allow`, `deny` or `timeout`.
+    pub fn approval_decided(approval_id: &str, decision: &str) -> Self {
+        Self {
+            event_type: APPROVAL_DECIDED.to_string(),
+            approval_id: approval_id.to_string(),
+            decision: decision.to_string(),
+            ..Self::default()
+        }
+    }
 }
 
 impl PartialEq for WireEvent {
@@ -141,6 +219,12 @@ impl PartialEq for WireEvent {
             && self.plan == other.plan
             && self.retry == other.retry
             && self.error == other.error
+            && self.image == other.image
+            && self.status == other.status
+            && self.approval_id == other.approval_id
+            && self.command == other.command
+            && self.justification == other.justification
+            && self.decision == other.decision
     }
 }
 
@@ -435,6 +519,34 @@ mod tests {
             let name = event.name();
             assert_eq!(json(&event), format!(r#"{{"type":"{name}","error":"w"}}"#));
         }
+    }
+
+    #[test]
+    fn session_frames_carry_their_fields() {
+        let encode = |event: &WireEvent| serde_json::to_string(event).expect("serializes");
+        assert_eq!(
+            encode(&WireEvent::user_message("hi", true)),
+            r#"{"type":"user_message","text":"hi","image":true}"#
+        );
+        assert_eq!(
+            encode(&WireEvent::user_message("hi", false)),
+            r#"{"type":"user_message","text":"hi"}"#
+        );
+        assert_eq!(
+            encode(&WireEvent::turn_end("error", "boom")),
+            r#"{"type":"turn_end","error":"boom","status":"error"}"#
+        );
+        assert_eq!(
+            encode(&WireEvent::approval_requested("a1", "c1", "ls", "why")),
+            r#"{"type":"approval_requested","tool_call_id":"c1","approval_id":"a1","command":"ls","justification":"why"}"#
+        );
+        let decided = WireEvent::approval_decided("a1", "timeout");
+        assert_eq!(
+            encode(&decided),
+            r#"{"type":"approval_decided","approval_id":"a1","decision":"timeout"}"#
+        );
+        let parsed: WireEvent = serde_json::from_str(&encode(&decided)).expect("parses");
+        assert_eq!(parsed, decided);
     }
 
     #[test]

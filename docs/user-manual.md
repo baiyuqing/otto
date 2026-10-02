@@ -82,7 +82,7 @@ Install the binary:
 make install
 ```
 
-`make install` builds Otto, installs it to `~/.local/bin/otto`, and installs
+`make install` builds Otto and otto-connect, installs both to `~/.local/bin/`, and installs
 bundled skills under `~/.otto/skills/`; make sure `~/.local/bin` is on your
 `PATH`.
 

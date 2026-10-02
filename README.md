@@ -140,6 +140,9 @@ The selected model and OpenAI-compatible endpoint must support image input.
   socket or a loopback TCP port, with an embedded browser UI. Optional
   [Feishu inbound](docs/user-manual.md#feishu-inbound) delivers group and chat
   text into open session inboxes.
+- [ACP agent](docs/user-manual.md#acp-agent-server): `otto acp` speaks the
+  Agent Client Protocol on stdio, so ACP clients such as cc-connect can
+  connect Otto to Telegram or Feishu chats.
 - [Usage history](docs/user-manual.md#observability): a Web UI analysis page
   for local provider token trends and cache hit rate, without prompt or tool
   content.

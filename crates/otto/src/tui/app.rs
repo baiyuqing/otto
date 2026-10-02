@@ -1545,43 +1545,13 @@ impl App {
 }
 
 fn bash_approval_request(tool_name: &str, result: &ToolResult) -> Option<ApprovalDialog> {
-    if tool_name != "bash" || !result.is_error {
-        return None;
-    }
-    let approve = result
-        .content
-        .lines()
-        .find_map(|line| line.strip_prefix("Approve in Otto: "))?;
-    let mut parts = approve.split_whitespace();
-    if parts.next()? != "/approve" {
-        return None;
-    }
-    let id = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    let command = result
-        .content
-        .lines()
-        .find_map(|line| line.strip_prefix("Command: "))
-        .map(decode_approval_field)
-        .unwrap_or_default();
-    let justification = result
-        .content
-        .lines()
-        .find_map(|line| line.strip_prefix("Justification: "))
-        .map(decode_approval_field)
-        .unwrap_or_default();
+    let request = crate::tool::bash::parse_approval_request(tool_name, result)?;
     Some(ApprovalDialog {
-        id: id.to_string(),
-        command,
-        justification,
+        id: request.id,
+        command: request.command,
+        justification: request.justification,
         ..Default::default()
     })
-}
-
-fn decode_approval_field(value: &str) -> String {
-    serde_json::from_str::<String>(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn approval_hint(approval: &ApprovalDialog) -> String {

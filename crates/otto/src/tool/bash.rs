@@ -39,6 +39,52 @@ use super::result::{
 use super::workspace::Workspace;
 use super::{Tool, definition};
 
+/// An elevated-command approval request decoded from a `bash` error result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRequest {
+    pub id: String,
+    pub command: String,
+    pub justification: String,
+}
+
+/// Decodes the approval-required result `BashTool::execute` returns for an
+/// elevated call that has no grant (the `Approve in Otto: /approve {id}`,
+/// `Command:` and `Justification:` lines). `None` for any other result.
+pub fn parse_approval_request(tool_name: &str, result: &ToolResult) -> Option<ApprovalRequest> {
+    if tool_name != "bash" || !result.is_error {
+        return None;
+    }
+    let approve = result
+        .content
+        .lines()
+        .find_map(|line| line.strip_prefix("Approve in Otto: "))?;
+    let mut parts = approve.split_whitespace();
+    if parts.next()? != "/approve" {
+        return None;
+    }
+    let id = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let field = |prefix: &str| {
+        result
+            .content
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .map(decode_approval_field)
+            .unwrap_or_default()
+    };
+    Some(ApprovalRequest {
+        id: id.to_string(),
+        command: field("Command: "),
+        justification: field("Justification: "),
+    })
+}
+
+fn decode_approval_field(value: &str) -> String {
+    serde_json::from_str::<String>(value).unwrap_or_else(|_| value.to_string())
+}
+
 /// The text every infrastructure failure collapses to.
 const SANDBOX_EXECUTION_UNAVAILABLE: &str = "sandbox execution unavailable";
 
@@ -761,6 +807,37 @@ mod tests {
     use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy, UnavailableReason};
     use crate::tool::testutil::raw;
     use std::sync::Mutex;
+
+    #[test]
+    fn parse_approval_request_decodes_the_formatted_result() {
+        let content = "approval required for unsandboxed bash execution.\n\
+Approve in Otto: /approve approval-7\n\
+Command: \"git push \\\"x\\\"\"\n\
+Justification: \"push branch\"\n\
+The command did not run.";
+        let request = parse_approval_request("bash", &ToolResult::error(content)).expect("request");
+        assert_eq!(
+            request,
+            ApprovalRequest {
+                id: "approval-7".to_string(),
+                command: "git push \"x\"".to_string(),
+                justification: "push branch".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_approval_request("read", &ToolResult::error(content)),
+            None
+        );
+        let ok = ToolResult {
+            content: content.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(parse_approval_request("bash", &ok), None);
+        assert_eq!(
+            parse_approval_request("bash", &ToolResult::error("Approve in Otto: /approve a b")),
+            None
+        );
+    }
 
     type BehaviorFuture<'a> = std::pin::Pin<
         Box<dyn std::future::Future<Output = (ExitStatus, Result<(), Error>)> + Send + 'a>,

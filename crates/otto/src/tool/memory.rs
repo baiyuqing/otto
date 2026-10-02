@@ -313,6 +313,11 @@ impl Tool for ForgetTool {
 }
 
 /// The shared reply of `remember` and `forget`.
+/// Tells the model how the person decides a queued candidate, so it can point
+/// them there instead of claiming nobody can. It grants the model nothing:
+/// every path named here is a human command.
+const REVIEW_HINT: &str = "You cannot approve it yourself. The user decides it: in a chat client they send /memory to list pending candidates, then /memory accept <id> or /memory reject <id>; in the terminal they use /memory review. If the user says approve, tell them this.";
+
 fn proposal_result(outcome: crate::memory::Result<Vec<crate::memory::Candidate>>) -> ToolResult {
     let candidates = match outcome {
         Ok(candidates) => candidates,
@@ -321,7 +326,7 @@ fn proposal_result(outcome: crate::memory::Result<Vec<crate::memory::Candidate>>
     match candidates.first() {
         None => text_result("proposal was not queued for review"),
         Some(candidate) => text_result(format!(
-            "candidate {} queued for human review (state={})",
+            "candidate {} queued for human review (state={}). {REVIEW_HINT}",
             candidate.id,
             candidate.state.as_str()
         )),
@@ -436,9 +441,9 @@ mod tests {
         let result = run(&tool, r#"{"kind":"preference","text":"likes dark mode"}"#).await;
         assert!(!result.is_error, "{result:?}");
         assert!(
-            result
-                .content
-                .ends_with(" queued for human review (state=pending)"),
+            result.content.contains(
+                " queued for human review (state=pending). You cannot approve it yourself."
+            ),
             "{result:?}"
         );
 

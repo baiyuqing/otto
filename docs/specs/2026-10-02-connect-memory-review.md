@@ -80,6 +80,20 @@ User manual ("Chat connector" and "ACP agent server"), the
 [chat connector](2026-10-02-otto-connect.md) command table, and the
 [ACP agent server](2026-10-02-acp-agent-server.md) method list.
 
+## Follow-up: paging, error codes and discoverability
+
+- `_otto/memory/pending` takes `cursor` and `limit` (1 to 50, default 20) and
+  returns `nextCursor` (`""` at the end).
+- Error codes: `-32010` memory unavailable in the session, `-32011` the
+  candidate was already decided or changed, `-32002` unknown session or
+  candidate, `-32602` bad `limit`, `cursor` or `decision`.
+- The model did not know `/memory` existed and told the user nobody could
+  approve. The `remember` and `forget` tool results now say that only the user
+  decides, and how (chat `/memory`, terminal `/memory review`), without giving
+  the model any authority. The connector also appends "Memory changes are
+  proposals. Send /memory to review them." to a turn that called either tool.
+- The connector reads pages until it finds a candidate id (10 pages at most).
+
 ## Implementation notes
 
 `coder/acp-go-sdk` v0.13.5 supports extension calls

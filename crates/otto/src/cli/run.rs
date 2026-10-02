@@ -461,7 +461,7 @@ pub async fn run(
         Err(error) => return fail(stderr, &startup.redact(&error.to_string())),
     };
     let mut frontend = Frontend::Once;
-    if !options.prompt_set {
+    if !options.prompt_set && !options.acp {
         frontend = match select_frontend(ui_mode, terminal) {
             Ok(frontend) => frontend,
             Err(message) => return fail(stderr, &startup.redact(&message)),
@@ -594,7 +594,7 @@ pub async fn run(
     // server both need `/approve`); `load_workspace` always passes `true`,
     // because every workspace `otto serve` loads at runtime needs the same
     // support the startup workspace gets.
-    let elevate = options.serve || frontend != Frontend::Once;
+    let elevate = options.serve || options.acp || frontend != Frontend::Once;
     let composed = compose_workspace_sandbox(
         &mut builder,
         &sandbox_settings,
@@ -620,7 +620,7 @@ pub async fn run(
     let reloader = composed.reloader;
 
     let dynamic_content = builder.boundary_allows_dynamic(Some(&resolved));
-    if (prepared_initial.is_some() || options.serve || workflow_command.is_some())
+    if (prepared_initial.is_some() || options.serve || options.acp || workflow_command.is_some())
         && !dynamic_content
     {
         let _ = control.close().await;
@@ -689,6 +689,32 @@ pub async fn run(
             Ok(()) => 0,
             Err(error) => fail(stderr, &builder.redact_error(&error, Some(&resolved))),
         };
+    }
+
+    if options.acp {
+        let builder = Arc::new(builder);
+        let exit = super::acp::run(
+            super::acp::AcpOptions {
+                builder,
+                runtime: resolved,
+                workspace: PathBuf::from(&workspace_path),
+                control,
+                reloader,
+                terminate,
+            },
+            stdin,
+            stdout,
+            stderr,
+            cancel,
+        )
+        .await;
+        if approval_executor
+            .as_ref()
+            .is_some_and(|executor| executor.close().is_err())
+        {
+            return fail(stderr, "close sandbox: sandbox runtime close failed");
+        }
+        return exit;
     }
 
     if options.serve {

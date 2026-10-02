@@ -76,11 +76,13 @@ fn sources(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// The source before its `#[cfg(test)]` module, so test fixtures may use the
-/// store directly.
+/// The source before its test module, so test fixtures may use the store
+/// directly. The cut is the `#[cfg(test)]` that opens `mod tests`, not the
+/// first `#[cfg(test)]` in the file: a test-only helper earlier in a file must
+/// not hide the production code after it from these scans.
 fn non_test(source: &str) -> &str {
     source
-        .find("#[cfg(test)]")
+        .find("#[cfg(test)]\nmod tests")
         .map_or(source, |index| &source[..index])
 }
 

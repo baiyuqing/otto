@@ -20,6 +20,10 @@ const api = vi.hoisted(() => ({
   startTurn: vi.fn(),
   decideApproval: vi.fn(),
   compact: vi.fn(),
+  reflect: vi.fn(),
+  generatedSkills: vi.fn(),
+  revertSkill: vi.fn(),
+  notices: vi.fn(),
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
   getWorkspaceDiff: vi.fn(),
@@ -35,7 +39,7 @@ vi.mock('./api', async (importOriginal) => {
 })
 
 import { App } from './App'
-import { IDLE_POLL_MS } from './follow'
+import { IDLE_POLL_MS, NOTICE_POLL_MS } from './follow'
 
 const sandbox = { mode: 'seatbelt', network: 'off', bash_available: true, summary: 'seatbelt' }
 
@@ -110,6 +114,7 @@ describe('idle wake follow', () => {
     api.cancelTurn.mockResolvedValue(new Response(null, { status: 204 }))
     api.startTurn.mockResolvedValue(new Response('', { headers: { 'Content-Type': 'text/event-stream' } }))
     api.compact.mockResolvedValue({ noop: true })
+    api.notices.mockResolvedValue({ notices: [], last: 0 })
     api.listWorkspaces.mockResolvedValue({ startup: '/tmp/otto-work', roots: [], workspaces: [{ path: '/tmp/otto-work', open_sessions: 1, workflows: true }] })
   })
 
@@ -342,6 +347,126 @@ describe('idle wake follow', () => {
     expect(api.renameSession).toHaveBeenCalledWith('sess1', 'polished ui')
     expect(screen.queryByRole('dialog', { name: 'Rename session' })).toBeNull()
     promptSpy.mockRestore()
+  })
+
+  async function runCommand(text: string) {
+    const input = screen.getByPlaceholderText('Message Otto…')
+    fireEvent.change(input, { target: { value: text } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => {
+      await Promise.resolve()
+    })
+  }
+
+  it('runs /reflect with its focus and shows the one-line report', async () => {
+    await openIdleSession()
+    api.reflect.mockResolvedValue({
+      status: 'ok',
+      run_id: 'run-1',
+      line: 'reflection: 1 candidate(s) queued for review (/memory review), 0 dropped',
+      candidates: ['cand-1'],
+      skills: [],
+      dropped: {},
+      entries: 4,
+      tainted: false,
+      skills_withheld: false,
+      truncated: false,
+      note: '',
+    })
+
+    await runCommand('/reflect the editor setup')
+
+    expect(api.reflect).toHaveBeenCalledWith('sess1', 'the editor setup', expect.any(AbortSignal))
+    expect(screen.getByText('reflection: 1 candidate(s) queued for review (/memory review), 0 dropped')).toBeTruthy()
+  })
+
+  it('holds the composer while a reflection runs and releases it afterwards', async () => {
+    await openIdleSession()
+    let finish: (value: unknown) => void = () => {}
+    api.reflect.mockReturnValue(new Promise((resolve) => (finish = resolve)))
+
+    await runCommand('/reflect')
+    expect(screen.getByPlaceholderText('Message Otto…').hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText('Reflecting on this session…')).toBeTruthy()
+
+    await act(async () => {
+      finish({ status: 'noop', run_id: '', line: 'reflection: nothing new to reflect on', candidates: [], skills: [], dropped: {}, entries: 0, tainted: false, skills_withheld: false, truncated: false, note: '' })
+      await Promise.resolve()
+    })
+    expect(screen.getByPlaceholderText('Message Otto…').hasAttribute('disabled')).toBe(false)
+    expect(screen.getByText('reflection: nothing new to reflect on')).toBeTruthy()
+  })
+
+  it('shows the error when a reflection cannot run', async () => {
+    await openIdleSession()
+    api.reflect.mockRejectedValue(new Error('reflection needs a persisted session (not --no-session)'))
+    await runCommand('/reflect')
+    expect(screen.getByText('reflection needs a persisted session (not --no-session)')).toBeTruthy()
+  })
+
+  it('lists and reverts generated skills', async () => {
+    await openIdleSession()
+    api.generatedSkills.mockResolvedValue({
+      enabled: true,
+      skills: [{ name: 'lint-gate', run_id: 'run-7', session_id: 's', reason: 'it ran cleanly', created_at: 't', updated_at: 't', owned: true }],
+    })
+    await runCommand('/skill generated')
+    expect(api.generatedSkills).toHaveBeenCalledWith('sess1')
+    expect(screen.getByText(/lint-gate: it ran cleanly \(run run-7\)/)).toBeTruthy()
+
+    api.revertSkill.mockResolvedValue({ name: 'lint-gate', result: 'removed' })
+    await runCommand('/skill revert lint-gate')
+    expect(api.revertSkill).toHaveBeenCalledWith('sess1', 'lint-gate')
+    expect(screen.getByText('Removed skill lint-gate, which reflection created; the change applies to new sessions')).toBeTruthy()
+  })
+
+  it('shows a refused revert instead of hiding it', async () => {
+    await openIdleSession()
+    api.revertSkill.mockRejectedValue(new Error('lint-gate has been edited since reflection wrote it'))
+    await runCommand('/skill revert lint-gate')
+    expect(screen.getByText('lint-gate has been edited since reflection wrote it')).toBeTruthy()
+  })
+
+  it('shows lines background reflection queued, once each, and not the ones from before the page opened', async () => {
+    api.notices.mockResolvedValue({ notices: [{ id: 1, text: 'reflection: old line' }], last: 1 })
+    await openIdleSession()
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(api.notices).toHaveBeenCalledWith('sess1', 0)
+    expect(screen.queryByText('reflection: old line')).toBeNull()
+
+    api.notices.mockResolvedValue({
+      notices: [{ id: 2, text: 'reflection: 1 candidate(s) queued for review (/memory review), 0 dropped' }],
+      last: 2,
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOTICE_POLL_MS)
+    })
+    expect(api.notices).toHaveBeenLastCalledWith('sess1', 1)
+    expect(screen.getAllByText('reflection: 1 candidate(s) queued for review (/memory review), 0 dropped')).toHaveLength(1)
+
+    // Nothing new: the page asks from the newest id and adds nothing.
+    api.notices.mockResolvedValue({ notices: [], last: 2 })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOTICE_POLL_MS)
+    })
+    expect(api.notices).toHaveBeenLastCalledWith('sess1', 2)
+    expect(screen.getAllByText('reflection: 1 candidate(s) queued for review (/memory review), 0 dropped')).toHaveLength(1)
+  })
+
+  it('keeps polling for notices after a failed poll', async () => {
+    api.notices.mockResolvedValue({ notices: [], last: 0 })
+    await openIdleSession()
+    api.notices.mockRejectedValueOnce(new Error('network'))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOTICE_POLL_MS)
+    })
+    api.notices.mockResolvedValue({ notices: [{ id: 1, text: 'reflection: after the failure' }], last: 1 })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOTICE_POLL_MS)
+    })
+    expect(screen.getByText('reflection: after the failure')).toBeTruthy()
   })
 
   it('lists MCP servers for the /mcp command', async () => {

@@ -9,6 +9,9 @@ export type WebCommand =
   | { kind: 'model' }
   | { kind: 'rename'; name: string }
   | { kind: 'compact'; focus: string }
+  | { kind: 'reflect'; focus: string }
+  | { kind: 'generatedSkills' }
+  | { kind: 'revertSkill'; name: string }
   | { kind: 'sandbox' }
   | { kind: 'sandboxReload' }
   | { kind: 'approve'; id: string }
@@ -35,6 +38,8 @@ export const supportedCommands: WebCommandSuggestion[] = [
   { name: '/model', description: 'show current model and configured profiles' },
   { name: '/rename', description: 'rename the current session' },
   { name: '/compact', description: 'compact context with optional focus' },
+  { name: '/reflect', description: 'queue memory candidates and skills from this session, with optional focus' },
+  { name: '/skill', description: 'list skills reflection wrote, or undo one: generated | revert <name>' },
   { name: '/sandbox', description: 'show sandbox state, or reload configuration' },
   { name: '/approve', description: 'allow the elevated Bash command a running turn is waiting on' },
   { name: '/deny', description: 'deny the elevated Bash command a running turn is waiting on' },
@@ -76,6 +81,14 @@ export function parseWebCommand(text: string): WebCommand {
       return argument ? { kind: 'rename', name: argument } : { kind: 'error', message: 'usage: /rename <name>' }
     case '/compact':
       return { kind: 'compact', focus: argument }
+    case '/reflect':
+      return { kind: 'reflect', focus: argument }
+    case '/skill': {
+      const parts = argument.split(/\s+/).filter(Boolean)
+      if (parts.length === 1 && parts[0] === 'generated') return { kind: 'generatedSkills' }
+      if (parts.length === 2 && parts[0] === 'revert') return { kind: 'revertSkill', name: parts[1] }
+      return { kind: 'error', message: 'usage: /skill generated | /skill revert <name>' }
+    }
     case '/sandbox':
       if (!argument) return { kind: 'sandbox' }
       if (argument === 'reload') return { kind: 'sandboxReload' }

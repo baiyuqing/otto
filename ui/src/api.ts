@@ -23,6 +23,49 @@ export interface UsageAnalysis {
   daily: DailyUsage[]
 }
 
+/** What one reflection run did (`POST /v1/sessions/{id}/reflect`). */
+export interface Reflection {
+  status: 'ok' | 'noop'
+  run_id: string
+  line: string
+  candidates: string[]
+  skills: { name: string; action: 'created' | 'revised' }[]
+  dropped: Record<string, number>
+  entries: number
+  tainted: boolean
+  skills_withheld: boolean
+  truncated: boolean
+  note: string
+}
+
+export interface GeneratedSkill {
+  name: string
+  run_id: string
+  session_id: string
+  reason: string
+  created_at: string
+  updated_at: string
+  /** False once the file was edited or removed by hand; revert then refuses it. */
+  owned: boolean
+}
+
+export interface GeneratedSkillList {
+  /** False when reflection is turned off. */
+  enabled: boolean
+  skills: GeneratedSkill[]
+}
+
+export interface SkillRevert {
+  name: string
+  result: 'restored' | 'removed'
+}
+
+export interface NoticeList {
+  notices: { id: number; text: string }[]
+  /** The newest notice id ever queued; pass it as `after` next time. */
+  last: number
+}
+
 export interface McpServer {
   name: string
   transport: string
@@ -283,6 +326,12 @@ export const api = {
     }),
   compact: (id: string, focus: string, signal?: AbortSignal) =>
     json<Compaction>(`/v1/sessions/${id}/compact`, { method: 'POST', body: JSON.stringify({ focus }), signal }),
+  reflect: (id: string, focus: string, signal?: AbortSignal) =>
+    json<Reflection>(`/v1/sessions/${id}/reflect`, { method: 'POST', body: JSON.stringify({ focus }), signal }),
+  generatedSkills: (id: string) => json<GeneratedSkillList>(`/v1/sessions/${id}/reflection/skills`),
+  revertSkill: (id: string, name: string) =>
+    json<SkillRevert>(`/v1/sessions/${id}/reflection/skills/${encodeURIComponent(name)}/revert`, { method: 'POST' }),
+  notices: (id: string, after: number) => json<NoticeList>(`/v1/sessions/${id}/notices?after=${after}`),
   listWorkflows: () => json<{ runs: WorkflowRun[] }>('/v1/workflows'),
   startWorkflow: (name: string, input: string) =>
     json<WorkflowView>('/v1/workflows', { method: 'POST', body: JSON.stringify({ name, input }) }),

@@ -292,11 +292,10 @@ impl Reflector {
         &self,
         roots: &skillwrite::Roots,
         name: &str,
-    ) -> Result<skillwrite::Reverted, String> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| "reflection is disabled ([reflection].enabled)".to_owned())?;
+    ) -> Result<skillwrite::Reverted, skillwrite::RevertError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            skillwrite::RevertError::Failed("reflection is disabled ([reflection].enabled)".into())
+        })?;
         skillwrite::revert(store, roots, name, &now())
     }
 

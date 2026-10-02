@@ -1,12 +1,11 @@
 # Session reflection: learning memories and skills from past work
 
-Status: approved 2026-10-02. Phases 1 to 3 are implemented: memory
-reflection on demand, generated skills with the vetting pipeline, and
-automatic triggers (`on_compaction`, the default, and `on_exit`). Phase 4
-(HTTP and the Web UI) is not. The five open decisions were answered on
-2026-10-02 and are recorded under "Decisions" below. Current user behavior of
-the shipped parts is in the user manual; this document remains the rationale
-and the plan for the rest.
+Status: approved 2026-10-02. Phases 1 to 4 are implemented: memory
+reflection on demand, generated skills with the vetting pipeline, automatic
+triggers (`on_compaction`, the default, and `on_exit`), and the HTTP API and
+Web UI. The five open decisions were answered on 2026-10-02 and are recorded
+under "Decisions" below. Current user behavior is in the user manual; this
+document remains the rationale.
 
 ## Motivation
 
@@ -570,3 +569,31 @@ Questions the design left open, and what the code showed:
   session, from the earlier run's start, failures included), not a config key.
 - **A request sizer for scripted runners.** `Runner::scripted` now carries a
   byte-counting request sizer so tests can run a real compaction.
+
+## Notes from implementing phase 4
+
+- **Routes.** `POST /v1/sessions/{id}/reflect` takes the session's
+  `compacting` slot exactly as `compact` does, so turns are refused while it
+  runs and it is refused while a turn runs. `GET .../reflection/skills` and
+  `POST .../reflection/skills/{name}/revert` are under `reflection/` rather
+  than `skills/` so a skill named `generated` is not shadowed. They act on the
+  user's skills directory and are tied to no session state; the `{id}` only
+  selects the controller. They carry no extra authorization beyond the server
+  token or socket, like `POST .../skills/{name}/enable`.
+- **Notices are read by id, not drained.** The terminal frontends are the only
+  reader of their controller and drain it. A server session can have several
+  clients, so `GET .../notices?after=N` leaves the queue alone and returns ids;
+  the Web UI polls it every two seconds and, on its first poll, only records
+  where the queue stands so old lines are not replayed. This needed no new
+  stream; a push channel (for example a field on the status stream) remains an
+  option if polling proves too slow.
+- **Typed revert errors.** `skillwrite::revert` returns `RevertError` instead of
+  text so the route can answer 400, 404 or 409 without parsing messages; its
+  `Display` keeps the REPL wording.
+- **No memory review over HTTP or in the Web UI.** The Web UI's `/reflect`
+  line points at `/memory review`, which exists only in the terminal. A review
+  route and view are the next gap if browser-only use matters.
+- **Not tested through HTTP:** a successful `POST .../reflect` (the server test
+  harness uses memory-only sessions, so it reaches the 409 paths); the success
+  path is covered at the controller level and the response mapping by a unit
+  test.

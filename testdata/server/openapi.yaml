@@ -461,6 +461,107 @@ components:
         restart_required:
           type: boolean
       required: [name, enabled, restart_required]
+    Reflection:
+      type: object
+      description: What one reflection run did; also the `line` the terminal frontends print.
+      properties:
+        status:
+          type: string
+          enum: [ok, noop]
+          description: noop when there was nothing to reflect on or the run was skipped (see note)
+        run_id:
+          type: string
+        line:
+          type: string
+        candidates:
+          type: array
+          description: Memory candidate ids queued for review
+          items:
+            type: string
+        skills:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              action:
+                type: string
+                enum: [created, revised]
+            required: [name, action]
+        dropped:
+          type: object
+          description: Proposals dropped, by reason
+          additionalProperties:
+            type: integer
+        entries:
+          type: integer
+        tainted:
+          type: boolean
+          description: The slice held external content, which was withheld from the model
+        skills_withheld:
+          type: boolean
+        truncated:
+          type: boolean
+        note:
+          type: string
+      required: [status, run_id, line, candidates, skills, dropped, entries, tainted, skills_withheld, truncated, note]
+    GeneratedSkill:
+      type: object
+      properties:
+        name:
+          type: string
+        run_id:
+          type: string
+        session_id:
+          type: string
+        reason:
+          type: string
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        owned:
+          type: boolean
+          description: False once the file was edited or removed by hand; revert then refuses it
+      required: [name, run_id, session_id, reason, created_at, updated_at, owned]
+    GeneratedSkillList:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          description: False when reflection is turned off; skills is then empty
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/GeneratedSkill"
+      required: [enabled, skills]
+    SkillRevert:
+      type: object
+      properties:
+        name:
+          type: string
+        result:
+          type: string
+          enum: [restored, removed]
+      required: [name, result]
+    NoticeList:
+      type: object
+      properties:
+        notices:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              text:
+                type: string
+            required: [id, text]
+        last:
+          type: integer
+          description: The newest notice id ever queued for this session; pass it as `after` next time
+      required: [notices, last]
     TaskWithHistory:
       allOf:
         - $ref: "#/components/schemas/Task"
@@ -1521,6 +1622,143 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: turn_active (a turn is running or queued, or a compaction is running) or compaction_failed (the previous context is still in effect)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/reflect:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Reflect on the session now
+      description: >
+        Runs one reflection over what no earlier run covered and returns its
+        result once it finishes; no events are streamed. Memory proposals are
+        queued as pending candidates for review; skills that pass every check
+        are written to the user-level skills directory and can be reverted.
+        Refused while a turn is running, and turns are refused while it runs.
+        Automatic reflection after a compaction is separate and reports through
+        `GET /v1/sessions/{id}/notices`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                focus:
+                  type: string
+                  description: Optional guidance for what to look for
+      responses:
+        "200":
+          description: >
+            The run finished. The body is empty when it was cancelled by
+            process shutdown or by closing the session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reflection"
+        "400":
+          description: Invalid JSON body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >
+            turn_active (a turn is running or queued, or a compaction or
+            reflection is running), reflection_unavailable (reflection is
+            disabled, the session has no file, memory is unavailable, or the
+            redaction boundary is closed), or reflection_failed (the model call
+            or its answer failed; nothing was recorded as covered)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/notices:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: after
+        in: query
+        required: false
+        schema: { type: integer, minimum: 0 }
+        description: Return only notices with a larger id
+    get:
+      summary: Lines background reflection queued for this session
+      description: >
+        Notices are read by id and not removed, so every client sees each one.
+        At most the 20 newest are kept.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoticeList"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/reflection/skills:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: List the skills reflection wrote
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeneratedSkillList"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/reflection/skills/{name}/revert:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Undo a skill reflection wrote
+      description: >
+        Restores the previous version, or removes the skill if reflection
+        created it. Refuses a skill that was edited by hand since. Takes effect
+        in new sessions.
+      responses:
+        "200":
+          description: Reverted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillRevert"
+        "400":
+          description: Not a valid skill name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open, or reflection did not write a skill by this name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: skill_not_owned (edited since), skills_unavailable ([skills] is disabled), or revert_failed
           content:
             application/json:
               schema:

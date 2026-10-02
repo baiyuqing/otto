@@ -12,8 +12,8 @@ import { UsageView } from './UsageView'
 import { WorkflowsView } from './WorkflowsView'
 import { ChangesView } from './ChangesView'
 import { AgentsView } from './AgentsView'
-import { mcpServerLine, sessionLabel, workspaceName } from './uiText'
-import { IDLE_POLL_MS, idleFollow } from './follow'
+import { generatedSkillsText, mcpServerLine, sessionLabel, workspaceName } from './uiText'
+import { IDLE_POLL_MS, NOTICE_POLL_MS, idleFollow } from './follow'
 import { useStatus } from './status'
 import logo from '../logo.svg'
 
@@ -81,6 +81,7 @@ export function App() {
   const [turnUsage, setTurnUsage] = useState<Usage | null>(null)
   const [recordedUsage, setRecordedUsage] = useState<UsageSummary | null>(null)
   const [compacting, setCompacting] = useState(false)
+  const [reflecting, setReflecting] = useState(false)
   const [queuedInput, setQueuedInput] = useState('')
   const [queuedTurn, setQueuedTurn] = useState(false)
   const [tasksKey, setTasksKey] = useState(0)
@@ -90,6 +91,7 @@ export function App() {
   const [error, setError] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const compactAbort = useRef<AbortController | null>(null)
+  const reflectAbort = useRef<AbortController | null>(null)
   // The running turn's phase and when it and the turn started (ms). A turn
   // re-attached after a reload counts from the attach, not the server start.
   const [phaseState, setPhaseState] = useState<{ name: string; since: number; turnStart: number } | null>(null)
@@ -173,6 +175,7 @@ export function App() {
     async (id?: string, workspace?: string) => {
       setError('')
       compactAbort.current?.abort()
+      reflectAbort.current?.abort()
       try {
         const s = await api.createSession(id, workspace)
         location.hash = s.id
@@ -221,13 +224,16 @@ export function App() {
   const queuedInputRef = useRef(queuedInput)
   queuedInputRef.current = queuedInput
   const sendRef = useRef<((text: string, image?: { data: string; mime_type: string }) => Promise<void>) | null>(null)
-  const compactingRef = useRef(compacting)
-  compactingRef.current = compacting
+  // A compaction and a reflection both hold the session: the server refuses
+  // turns while either runs, so neither is polled over or sent into.
+  const holding = compacting || reflecting
+  const compactingRef = useRef(holding)
+  compactingRef.current = holding
 
   // Server-started wakes (Feishu inbound, remind) never go through startTurn,
   // so an idle page has to poll the open session and attach or reload history.
   useEffect(() => {
-    if (!session || turnId !== null || compacting) return
+    if (!session || turnId !== null || holding) return
     const sessionId = session.id
     let inFlight = false
     const tick = async () => {
@@ -258,7 +264,40 @@ export function App() {
     }
     const id = setInterval(() => void tick(), IDLE_POLL_MS)
     return () => clearInterval(id)
-  }, [session?.id, turnId, compacting, consume, fail])
+  }, [session?.id, turnId, holding, consume, fail])
+
+  // Lines background reflection queued (after a compaction) reach this page by
+  // polling. The first poll only records where the queue stands, so notices
+  // from before the page opened are not replayed.
+  useEffect(() => {
+    if (!session) return
+    const sessionId = session.id
+    let after: number | null = null
+    let inFlight = false
+    let stopped = false
+    const poll = async () => {
+      if (inFlight || stopped) return
+      inFlight = true
+      try {
+        const list = await api.notices(sessionId, after ?? 0)
+        if (stopped) return
+        if (after !== null && list.notices.length > 0) {
+          setItems((prev) => [...prev, ...list.notices.map((n) => ({ kind: 'notice' as const, text: n.text }))])
+        }
+        after = list.last
+      } catch {
+        // A missed poll is retried; the notices stay queued on the server.
+      } finally {
+        inFlight = false
+      }
+    }
+    void poll()
+    const id = setInterval(() => void poll(), NOTICE_POLL_MS)
+    return () => {
+      stopped = true
+      clearInterval(id)
+    }
+  }, [session?.id])
 
   const send = async (text: string, image?: { data: string; mime_type: string }): Promise<void> => {
     if (!session) return
@@ -339,6 +378,32 @@ export function App() {
     }
     if (command.kind === 'compact') {
       await compact(command.focus)
+      return
+    }
+    if (command.kind === 'reflect') {
+      await reflect(command.focus)
+      return
+    }
+    if (command.kind === 'generatedSkills') {
+      try {
+        const list = await api.generatedSkills(session.id)
+        setItems((prev) => [...prev, { kind: 'notice', text: generatedSkillsText(list) }])
+      } catch (e) {
+        fail(e)
+      }
+      return
+    }
+    if (command.kind === 'revertSkill') {
+      try {
+        const r = await api.revertSkill(session.id, command.name)
+        const text =
+          r.result === 'restored'
+            ? `Reverted skill ${r.name} to its previous version; the change applies to new sessions`
+            : `Removed skill ${r.name}, which reflection created; the change applies to new sessions`
+        setItems((prev) => [...prev, { kind: 'notice', text }])
+      } catch (e) {
+        fail(e)
+      }
       return
     }
     if (command.kind === 'sandbox') {
@@ -463,6 +528,24 @@ export function App() {
     }
   }
 
+  const reflect = async (focus: string) => {
+    if (!session) return
+    setError('')
+    setReflecting(true)
+    const ac = new AbortController()
+    reflectAbort.current = ac
+    try {
+      const r = await api.reflect(session.id, focus, ac.signal)
+      setItems((prev) => [...prev, { kind: 'notice', text: r.line }])
+    } catch (e) {
+      if (!ac.signal.aborted) fail(e)
+    } finally {
+      if (reflectAbort.current === ac) reflectAbort.current = null
+      setReflecting(false)
+      void refreshUsage()
+    }
+  }
+
   const renameSession = async (name: string) => {
     if (!session) return
     setError('')
@@ -486,7 +569,7 @@ export function App() {
 
   const renameName = renameDraft?.trim() ?? ''
   const canSaveRename = Boolean(renameName) && !renaming
-  const busy = turnId !== null || compacting
+  const busy = turnId !== null || holding
 
   return (
     <div className="app">
@@ -601,6 +684,7 @@ export function App() {
           disabled={!session}
           running={turnId !== null}
           compacting={compacting}
+          reflecting={reflecting}
           queuedText={queuedInput}
           onSend={send}
           onQueue={(t) => void send(t)}

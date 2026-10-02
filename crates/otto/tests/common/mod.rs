@@ -6,6 +6,9 @@
 // Each test binary compiles its own copy, so some helpers are unused in some.
 #![allow(dead_code)]
 
+#[cfg(unix)]
+pub mod pty;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};

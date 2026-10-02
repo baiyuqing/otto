@@ -12,6 +12,7 @@
 
 mod agents_view;
 mod app;
+pub(crate) mod attach;
 mod commands;
 mod context_view;
 mod entries;
@@ -33,7 +34,9 @@ use crossterm::event::{
     MouseButton, MouseEventKind,
 };
 use otto_core::agent::Event;
+use otto_core::agent::inbox::NotificationKind;
 use otto_core::model::{Block, MAX_IMAGE_BYTES};
+use otto_core::wire::events::{WireEvent, to_wire, to_wire_compaction};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::sync::{mpsc, watch};
@@ -303,7 +306,7 @@ fn redraw<B: Backend>(
     app: &mut App,
     controller: &Controller,
 ) -> Result<(), ReplError> {
-    app.refresh_tasks(controller);
+    app.refresh_tasks(&app::Backend::Local(controller));
     terminal
         .draw(|frame| render::draw(frame, app))
         .map(|_| ())
@@ -316,7 +319,8 @@ async fn run_app<B: Backend>(
     cancel: &CancellationToken,
     keys: &mut mpsc::Receiver<TuiEvent>,
 ) -> Result<(), ReplError> {
-    let mut app = App::new(controller);
+    let backend = app::Backend::Local(controller);
+    let mut app = App::new(&backend);
     let mut pending_image = None;
     redraw(terminal, &mut app, controller)?;
 
@@ -407,7 +411,7 @@ async fn run_app<B: Backend>(
         let event = match event {
             IdleEvent::AgentsTick => {
                 if let Some(view) = &mut app.agents {
-                    view.tick(controller);
+                    view.tick(&backend);
                 }
                 redraw(terminal, &mut app, controller)?;
                 continue;
@@ -427,7 +431,7 @@ async fn run_app<B: Backend>(
                 if let Err(error) = run_wake(&mut app, terminal, keys, controller, cancel).await {
                     propagate_turn_error(error)?;
                 }
-                app.refresh_info(controller);
+                app.refresh_info(&backend);
                 redraw(terminal, &mut app, controller)?;
                 continue;
             }
@@ -462,7 +466,7 @@ async fn run_app<B: Backend>(
 
         // Any key moves the composer or the transcript under the highlight.
         app.selection = None;
-        let mut action = app.handle_key(key, controller, cancel);
+        let mut action = app.handle_key(key, &backend, cancel);
         while let Some(current_action) = action.take() {
             match current_action {
                 Action::Exit => return Ok(()),
@@ -478,7 +482,7 @@ async fn run_app<B: Backend>(
                     )
                     .await;
                     if let Err(error) = result {
-                        app.defer_queued_input(controller);
+                        app.defer_queued_input(&backend);
                         propagate_turn_error(error)?;
                         continue;
                     }
@@ -489,11 +493,11 @@ async fn run_app<B: Backend>(
                             propagate_turn_error(error)?;
                         }
                         if app.queued_input_sent {
-                            app.defer_queued_input(controller);
+                            app.defer_queued_input(&backend);
                         }
                     }
                     if app.queued_input.is_some() {
-                        action = app.submit_queued_input(controller, cancel);
+                        action = app.submit_queued_input(&backend, cancel);
                     }
                 }
                 Action::Image(path) => match image_block_from_path(&path) {
@@ -521,7 +525,7 @@ async fn run_app<B: Backend>(
                     pending_image = None;
                     match controller.new_session().await {
                         Ok(()) => {
-                            app.refresh(controller);
+                            app.refresh(&backend);
                             push_session_id(&mut app, controller);
                         }
                         Err(message) => app.push_system(format!("/new: {message}")),
@@ -547,7 +551,7 @@ async fn run_app<B: Backend>(
                     pending_image = None;
                     match controller.resume_session(&path).await {
                         Ok(result) => {
-                            app.refresh(controller);
+                            app.refresh(&backend);
                             app.push_system(format!("Resumed: {}", result.session_path));
                             for warning in &result.warnings {
                                 app.push_system(warning.clone());
@@ -561,7 +565,7 @@ async fn run_app<B: Backend>(
                     pending_image = None;
                     match controller.archive_session(&path).await {
                         Ok(result) => {
-                            app.refresh(controller);
+                            app.refresh(&backend);
                             app.push_system(format!("Archived: {}", result.path));
                             push_session_id(&mut app, controller);
                         }
@@ -638,6 +642,8 @@ async fn run_app<B: Backend>(
                     }
                     Err(message) => app.push_system(format!("/approve: {message}")),
                 },
+                // Raised only by attach mode.
+                Action::Deny(_) => {}
                 Action::Login(args) => {
                     login_dispatch(&mut app, controller, &args, cancel).await;
                 }
@@ -647,7 +653,7 @@ async fn run_app<B: Backend>(
             }
         }
 
-        app.refresh_info(controller);
+        app.refresh_info(&backend);
         redraw(terminal, &mut app, controller)?;
     }
 }
@@ -680,11 +686,11 @@ async fn drive_turn<B: Backend, T, E>(
     app: &mut App,
     terminal: &mut Terminal<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
-    events: &mut mpsc::UnboundedReceiver<Event>,
+    events: &mut mpsc::UnboundedReceiver<WireEvent>,
     turn: &CancellationToken,
-    controller: &Controller,
+    backend: &app::Backend<'_>,
     future: impl Future<Output = Result<T, E>>,
-    mut apply: impl FnMut(&mut App, Event),
+    mut apply: impl FnMut(&mut App, &WireEvent),
 ) -> Result<T, E> {
     tokio::pin!(future);
     let mut frames = tokio::time::interval(render::SPINNER_FRAME);
@@ -715,22 +721,22 @@ async fn drive_turn<B: Backend, T, E>(
                 // sink's last events can still be queued behind the call's
                 // own completion.
                 while let Ok(event) = events.try_recv() {
-                    apply(app, event);
+                    apply(app, &event);
                 }
                 return result;
             }
-            Some(event) = events.recv() => apply(app, event),
+            Some(event) = events.recv() => apply(app, &event),
             Some(event) = keys.recv() => {
-                apply_turn_key(app, terminal, event, turn, controller);
+                apply_turn_key(app, terminal, event, turn, backend);
             }
             () = tick => {
                 if let Some(view) = &mut app.agents {
-                    view.tick(controller);
+                    view.tick(backend);
                 }
             }
             _ = frames.tick() => {}
         }
-        app.refresh_tasks(controller);
+        app.refresh_tasks(backend);
         let _ = terminal.draw(|frame| render::draw(frame, app));
     }
 }
@@ -751,12 +757,12 @@ fn apply_turn_key<B: Backend>(
     terminal: &mut Terminal<B>,
     event: TuiEvent,
     turn: &CancellationToken,
-    controller: &Controller,
+    backend: &app::Backend<'_>,
 ) {
     match event {
         TuiEvent::Key(key) => {
             app.selection = None;
-            if app.handle_turn_key(key, controller) {
+            if app.handle_turn_key(key, backend) {
                 turn.cancel();
             }
         }
@@ -793,7 +799,7 @@ async fn run_turn<B: Backend>(
     let result = {
         let (events, mut received) = mpsc::unbounded_channel();
         let mut sink = |event: Event| {
-            let _ = events.send(event);
+            let _ = events.send(wire_frame(&event));
         };
         drive_turn(
             app,
@@ -801,7 +807,7 @@ async fn run_turn<B: Backend>(
             keys,
             &mut received,
             &turn,
-            controller,
+            &app::Backend::Local(controller),
             async {
                 match image {
                     Some(image) => {
@@ -833,6 +839,20 @@ async fn run_turn<B: Backend>(
             fatal: is_fatal_persistence(&error),
             message: error.to_string(),
         }),
+    }
+}
+
+/// The wire form of one local event, so a local turn and an attached turn
+/// reach [`App::apply_event`] as the same frames. `to_wire` drops a
+/// notification's kind, so the queued-prompt notification is mapped here.
+fn wire_frame(event: &Event) -> WireEvent {
+    match event {
+        Event::Notification {
+            kind: Some(NotificationKind::UserMessage),
+            text,
+            ..
+        } => WireEvent::user_message(text, false),
+        _ => to_wire(event),
     }
 }
 
@@ -888,7 +908,7 @@ async fn run_wake<B: Backend>(
     let result = {
         let (events, mut received) = mpsc::unbounded_channel();
         let mut sink = |event: Event| {
-            let _ = events.send(event);
+            let _ = events.send(wire_frame(&event));
         };
         drive_turn(
             app,
@@ -896,7 +916,7 @@ async fn run_wake<B: Backend>(
             keys,
             &mut received,
             &turn,
-            controller,
+            &app::Backend::Local(controller),
             wake.run(&mut sink, &turn),
             |app, event| {
                 if app.apply_event(event) {
@@ -942,7 +962,7 @@ async fn run_compact<B: Backend>(
     let result = {
         let (events, mut received) = mpsc::unbounded_channel();
         let mut sink = |event: Event| {
-            let _ = events.send(event);
+            let _ = events.send(wire_frame(&event));
         };
         drive_turn(
             app,
@@ -950,10 +970,14 @@ async fn run_compact<B: Backend>(
             keys,
             &mut received,
             &turn,
-            controller,
+            &app::Backend::Local(controller),
             controller.compact(&focus, &mut sink, &turn),
             |app, event| {
-                if let Event::CompactionCompleted { compaction } = &event {
+                if let Some(compaction) = event
+                    .compaction
+                    .as_ref()
+                    .filter(|_| event.event_type == "compaction_completed")
+                {
                     let already = if !compaction.checkpoint_id.is_empty() {
                         rendered_ids.contains(&compaction.checkpoint_id)
                     } else {
@@ -987,7 +1011,7 @@ async fn run_compact<B: Backend>(
                 result.noop && rendered_noop_empty
             };
             if !already {
-                app.push_system(app::compaction_line(&result));
+                app.push_system(app::compaction_line(&to_wire_compaction(&result)));
             }
             Ok(())
         }
@@ -1019,14 +1043,14 @@ async fn run_reflect<B: Backend>(
     app.start_turn();
     let turn = cancel.child_token();
     let result = {
-        let (_events, mut received) = mpsc::unbounded_channel::<Event>();
+        let (_events, mut received) = mpsc::unbounded_channel::<WireEvent>();
         drive_turn(
             app,
             terminal,
             keys,
             &mut received,
             &turn,
-            controller,
+            &app::Backend::Local(controller),
             controller.reflect(&focus, &turn),
             |_app, _event| {},
         )
@@ -1097,7 +1121,7 @@ async fn switch_profile(app: &mut App, controller: &Controller, profile: &str) {
         app.push_system(format!("/model: {message}"));
         return;
     }
-    app.refresh(controller);
+    app.refresh(&app::Backend::Local(controller));
     let saved = controller.set_default_profile(profile);
     let info = controller.info();
     match saved {
@@ -1160,7 +1184,7 @@ async fn apply_thinking(app: &mut App, controller: &Controller, thinking: &str, 
     }
     match controller.set_thinking(thinking).await {
         Ok(()) => {
-            app.refresh_info(controller);
+            app.refresh_info(&app::Backend::Local(controller));
             let info = controller.info();
             let display = if info.thinking.is_empty() {
                 "default"
@@ -1292,7 +1316,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&app::Backend::Local(&controller));
         app.push_system(NEEDLE.to_string());
 
         let mut terminal =
@@ -1352,7 +1376,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&app::Backend::Local(&controller));
         app.selection = Some(Selection::new(1, 1));
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(40, 10)).expect("terminal");
@@ -1463,7 +1487,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&app::Backend::Local(&controller));
         app.max_scroll.set(10);
         app.start_turn();
         let turn = CancellationToken::new();
@@ -1477,7 +1501,13 @@ mod tests {
         .expect("wheel event");
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(40, 10)).expect("terminal");
-        apply_turn_key(&mut app, &mut terminal, wheel_up, &turn, &controller);
+        apply_turn_key(
+            &mut app,
+            &mut terminal,
+            wheel_up,
+            &turn,
+            &app::Backend::Local(&controller),
+        );
 
         assert_eq!(app.scroll, Some(9));
         assert!(!turn.is_cancelled());
@@ -1487,7 +1517,7 @@ mod tests {
             &mut terminal,
             TuiEvent::Key(KeyCode::Esc.into()),
             &turn,
-            &controller,
+            &app::Backend::Local(&controller),
         );
         assert!(turn.is_cancelled());
     }

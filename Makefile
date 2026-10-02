@@ -48,8 +48,8 @@ rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
 scripts-test: ## run the Node tests beside scripts/ (offline, no build needed)
 	node --test scripts/*.test.mjs
 
-test-tui: ## run the TUI PTY lifecycle smoke test (needs a real PTY)
-	cargo test -p otto --test tui_pty
+test-tui: ## run the TUI PTY tests, local and --attach (need a real PTY)
+	cargo test -p otto --test tui_pty --test tui_attach_pty
 
 connect-check: ## Go chat connector: gofmt, vet, race tests; builds target/debug/otto for its end-to-end test
 	cargo build -p otto

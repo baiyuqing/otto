@@ -91,7 +91,7 @@ impl Relay {
     pub(super) async fn new_session(&self, workspace: &Path) -> Reply {
         let id = self
             .client
-            .open_session(&workspace.to_string_lossy(), None)
+            .open_session(Some(&workspace.to_string_lossy()), None)
             .await
             .map_err(|failure| self.fail(failure))?;
         self.register(&id);
@@ -109,7 +109,7 @@ impl Relay {
     ) -> Result<Vec<Message>, agent_client_protocol_schema::v1::Error> {
         let resumed = self
             .client
-            .open_session(&workspace.to_string_lossy(), Some(id))
+            .open_session(Some(&workspace.to_string_lossy()), Some(id))
             .await;
         match resumed {
             Ok(_) => {}
@@ -118,7 +118,7 @@ impl Relay {
         }
         let history = self
             .client
-            .history(id)
+            .history(id, None)
             .await
             .map_err(|failure| self.fail(failure))?;
         self.register(id);
@@ -169,7 +169,7 @@ impl Relay {
         let mut stream = tokio::select! {
             biased;
             () = self.lost.cancelled() => return Err(error(INTERNAL_ERROR, LOST)),
-            started = self.client.start_turn(session_id, text) => {
+            started = self.client.start_turn(session_id, text, None) => {
                 started.map_err(|failure| self.fail(failure))?
             }
         };

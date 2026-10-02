@@ -148,6 +148,25 @@ pub(crate) fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
 /// non-empty. A database open failure prints one warning here, before any UI
 /// starts, and leaves the checker off for the process; `TYPESAFE_API_KEY`
 /// never appears in that warning.
+/// Runs `on_exit` reflection before the controller closes, for at most
+/// [`crate::app::auto_reflection::EXIT_TIMEOUT`]. Ctrl+C skips it. The wait is the cost of
+/// the feature: a process that is exiting cannot finish it in the background.
+/// Returns the line to show, or `Err` when it timed out. It takes no writers, so the
+/// future stays `Send`.
+async fn reflect_on_exit(
+    controller: &Controller,
+    cancel: &CancellationToken,
+) -> Result<Option<String>, ()> {
+    let token = cancel.child_token();
+    let outcome = tokio::time::timeout(
+        crate::app::auto_reflection::EXIT_TIMEOUT,
+        controller.reflect_on_exit(&token),
+    )
+    .await;
+    token.cancel();
+    outcome.map_err(|_| ())
+}
+
 fn skill_checker(
     config: &File,
     environment: &HashMap<String, String>,
@@ -888,6 +907,29 @@ pub async fn run(
 
     let cancelled_before_exit = cancel.is_cancelled();
     let frontend_cancelled = matches!(run_error, Err(repl::Error::Cancelled));
+    if !cancelled_before_exit
+        && run_error.is_ok()
+        && !terminate.migrating()
+        && controller.reflects_on_exit()
+    {
+        let _ = writeln!(
+            stderr,
+            "reflecting on this session before exit (up to {}s, Ctrl+C skips)...",
+            crate::app::auto_reflection::EXIT_TIMEOUT.as_secs()
+        );
+        match reflect_on_exit(&controller, cancel).await {
+            Ok(Some(line)) => {
+                let _ = writeln!(stdout, "{line}");
+            }
+            Ok(None) => {}
+            Err(()) => {
+                let _ = writeln!(
+                    stderr,
+                    "reflection: timed out; /reflect can cover it next time"
+                );
+            }
+        }
+    }
     cancel.cancel();
     if let Some(task) = mcp_swap {
         task.abort();

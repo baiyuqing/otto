@@ -129,7 +129,7 @@ The selected model and OpenAI-compatible endpoint must support image input.
 
 ## More workflows
 
-- [Local memory](docs/user-manual.md#memory): search, remember, review, and forget, plus on-demand [reflection](docs/user-manual.md#reflection) that proposes memories from a session for your review and can write vetted skills you can undo with `/skill revert`.
+- [Local memory](docs/user-manual.md#memory): search, remember, review, and forget, plus [reflection](docs/user-manual.md#reflection), which proposes memories from a session for your review and can write vetted skills you can undo with `/skill revert`. It runs on `/reflect` and, by default, in the background after a compaction; `auto = "off"` turns that off.
 - [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files.
 - [MCP servers](docs/user-manual.md#mcp-servers): connect stdio or HTTP Model
   Context Protocol servers and use their tools from the same turn loop.
@@ -258,7 +258,7 @@ never retried automatically.
   them as sensitive.
 - No plugins, automatic project-local config discovery, session trees/forks,
   deletion, or search.
-- No automatic memory extraction (`/reflect` is on demand) or memory backup/restore/verify commands.
+- No memory backup/restore/verify commands.
 - No per-skill `allowed-tools` enforcement.
 - No nested sub-agent delegation; `agent_report` sends the parent an answer to
   its question or a blocker needing its decision, limited to 10 calls on the

@@ -46,7 +46,7 @@ use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
 use otto_core::agent::oneshot::TextRequest;
-use otto_core::config::{ReflectionRuntime, SkillSource};
+use otto_core::config::{Auto, ReflectionRuntime, SkillSource};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::runtime_builder::Runner;
@@ -120,13 +120,43 @@ pub struct Report {
     pub tainted: bool,
     /// Whether the oldest entries were dropped to fit `max_input_bytes`.
     pub truncated: bool,
+    /// Why the run was skipped, for a skipped run; empty otherwise.
+    pub note: String,
 }
 
 impl Report {
+    /// A report for a run that did not start, with the reason in `note`.
+    fn skipped(note: &str) -> Self {
+        Self {
+            run_id: String::new(),
+            status: Status::Noop,
+            candidates: Vec::new(),
+            dropped: BTreeMap::new(),
+            skills: Vec::new(),
+            skills_withheld: false,
+            entries: 0,
+            tainted: false,
+            truncated: false,
+            note: note.to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn skipped_for_test() -> Self {
+        Self::skipped("test")
+    }
+
+    /// Whether the run did anything a user needs to hear about: it queued a
+    /// candidate or wrote a skill.
+    pub fn changed_something(&self) -> bool {
+        !self.candidates.is_empty() || !self.skills.is_empty()
+    }
+
     /// One line for a frontend.
     pub fn line(&self) -> String {
         let dropped: usize = self.dropped.values().sum();
         match self.status {
+            Status::Noop if !self.note.is_empty() => format!("reflection: skipped ({})", self.note),
             Status::Noop => "reflection: nothing new to reflect on".to_owned(),
             _ => {
                 let mut line = format!(
@@ -158,6 +188,30 @@ impl Report {
     }
 }
 
+/// What started a run. Only `Manual` ignores `[reflection].auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    Manual,
+    OnCompaction,
+    OnExit,
+}
+
+impl Trigger {
+    /// The name recorded in `reflection.db`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::OnCompaction => "on_compaction",
+            Self::OnExit => "on_exit",
+        }
+    }
+}
+
+/// The fewest seconds between two automatic runs for one session, counted
+/// from when the earlier one started. A failed run counts: automatic runs
+/// never retry.
+pub const AUTO_MINIMUM_INTERVAL_SECONDS: i64 = 600;
+
 /// What a run reads and writes besides the model call.
 pub struct Context<'a> {
     pub runner: &'a Runner,
@@ -176,11 +230,48 @@ pub struct Context<'a> {
 pub struct Reflector {
     config: ReflectionRuntime,
     store: Option<Arc<Store>>,
+    minimum_interval: chrono::Duration,
 }
 
 impl Reflector {
     pub fn new(config: ReflectionRuntime, store: Option<Arc<Store>>) -> Self {
-        Self { config, store }
+        Self {
+            config,
+            store,
+            minimum_interval: chrono::Duration::seconds(AUTO_MINIMUM_INTERVAL_SECONDS),
+        }
+    }
+
+    /// Replaces the minimum interval between automatic runs.
+    #[cfg(test)]
+    fn with_minimum_interval(mut self, interval: chrono::Duration) -> Self {
+        self.minimum_interval = interval;
+        self
+    }
+
+    /// When reflection runs by itself, or `Auto::Off` when it is disabled.
+    pub fn auto(&self) -> Auto {
+        if self.config.enabled {
+            self.config.auto
+        } else {
+            Auto::Off
+        }
+    }
+
+    /// Whether an automatic run for `session_id` started too recently to
+    /// start another. A store that cannot be read blocks the run: an
+    /// automatic run that cannot rely on its own limits does not start.
+    pub fn too_soon(&self, session_id: &str) -> bool {
+        let Some(store) = &self.store else {
+            return true;
+        };
+        match store.last_auto_started(session_id) {
+            Ok(None) => false,
+            Ok(Some(started)) => chrono::DateTime::parse_from_rfc3339(&started)
+                .map(|started| Utc::now() - started.with_timezone(&Utc) < self.minimum_interval)
+                .unwrap_or(true),
+            Err(_) => true,
+        }
     }
 
     pub fn enabled(&self) -> bool {
@@ -218,12 +309,18 @@ impl Reflector {
     pub async fn run(
         &self,
         context: &Context<'_>,
-        trigger: &str,
+        trigger: Trigger,
         focus: &str,
         cancel: &CancellationToken,
     ) -> Result<Report, Error> {
         if !self.config.enabled {
             return Err(Error::Disabled);
+        }
+        if trigger != Trigger::Manual && self.auto() != Auto::from(trigger) {
+            return Err(Error::Disabled);
+        }
+        if trigger == Trigger::OnCompaction && self.too_soon(context.session_id) {
+            return Ok(Report::skipped("an automatic run started recently"));
         }
         if context.session_path.is_empty() {
             return Err(Error::NoSession);
@@ -251,7 +348,7 @@ impl Reflector {
         let mut row = RunRow {
             id: run_id.clone(),
             session_id: session_id.to_owned(),
-            trigger: trigger.to_owned(),
+            trigger: trigger.as_str().to_owned(),
             started_at,
             finished_at: String::new(),
             status: Status::Noop,
@@ -274,12 +371,20 @@ impl Reflector {
             entries: slice.entries.len(),
             tainted: slice.tainted(),
             truncated: false,
+            note: String::new(),
         };
 
-        let has_user = slice
+        let user_turns = slice
             .entries
             .iter()
-            .any(|entry| entry.role == EntryRole::User && !entry.external);
+            .filter(|entry| entry.role == EntryRole::User && !entry.external)
+            .count();
+        let has_user = user_turns > 0;
+        if trigger == Trigger::OnExit && user_turns < self.config.min_turns {
+            // Too short to be worth a call. No row and no watermark: the
+            // session is ending, and `/reflect` can still cover it later.
+            return Ok(Report::skipped("the session is shorter than min_turns"));
+        }
         let skills_allowed = self.skills_allowed(context, &slice, &mut report);
         if !has_user || (!self.config.memories && !skills_allowed) {
             return self.finish(row, report);
@@ -533,6 +638,16 @@ impl Reflector {
                 .map_err(|error| Error::Store(error.to_string()))?;
         }
         Ok(report)
+    }
+}
+
+impl From<Trigger> for Auto {
+    fn from(trigger: Trigger) -> Self {
+        match trigger {
+            Trigger::Manual => Auto::Off,
+            Trigger::OnCompaction => Auto::OnCompaction,
+            Trigger::OnExit => Auto::OnExit,
+        }
     }
 }
 
@@ -903,7 +1018,7 @@ mod tests {
                         workspace_scope: &self.workspace_scope,
                         skill_roots: Some(&self.roots),
                     },
-                    "manual",
+                    Trigger::Manual,
                     "",
                     cancel,
                 )
@@ -1259,7 +1374,7 @@ mod tests {
                     workspace_scope: &fixture.workspace_scope,
                     skill_roots: None,
                 },
-                "manual",
+                Trigger::Manual,
                 "",
                 &CancellationToken::new(),
             )
@@ -1819,5 +1934,176 @@ mod tests {
             Path::new("/home/me/.otto/skill-history")
         );
         assert_eq!(roots.lookup_roots, vec![Path::new("/work/.otto/skills")]);
+    }
+
+    // -- automatic triggers ---------------------------------------------------
+
+    async fn run_as(
+        fixture: &Fixture,
+        reflector: &Reflector,
+        trigger: Trigger,
+    ) -> Result<Report, Error> {
+        let path = fixture.session.path();
+        let header = fixture.session.header();
+        reflector
+            .run(
+                &Context {
+                    runner: &fixture.runner,
+                    session_id: &header.id,
+                    session_path: &path,
+                    service: &fixture.service,
+                    user_scope: &fixture.user_scope,
+                    workspace_scope: &fixture.workspace_scope,
+                    skill_roots: Some(&fixture.roots),
+                },
+                trigger,
+                "",
+                &CancellationToken::new(),
+            )
+            .await
+    }
+
+    fn auto_config(auto: Auto) -> ReflectionRuntime {
+        ReflectionRuntime {
+            auto,
+            ..ReflectionRuntime::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_automatic_run_needs_its_own_mode_to_be_selected() {
+        let fixture = Fixture::new(Vec::new()).await;
+        fixture.say(Role::User, "a topic worth reflecting on").await;
+        for (auto, trigger) in [
+            (Auto::Off, Trigger::OnCompaction),
+            (Auto::OnExit, Trigger::OnCompaction),
+            (Auto::OnCompaction, Trigger::OnExit),
+            (Auto::Off, Trigger::OnExit),
+        ] {
+            let reflector = fixture.reflector(auto_config(auto));
+            let error = run_as(&fixture, &reflector, trigger)
+                .await
+                .expect_err("refused");
+            assert!(
+                matches!(error, Error::Disabled),
+                "{auto:?} {trigger:?}: {error}"
+            );
+        }
+        assert!(fixture.provider.calls().is_empty());
+        let disabled = Reflector::new(
+            ReflectionRuntime {
+                enabled: false,
+                ..ReflectionRuntime::default()
+            },
+            None,
+        );
+        assert_eq!(disabled.auto(), Auto::Off);
+        // A manual run ignores `auto`.
+        let off = fixture.reflector(auto_config(Auto::Off));
+        push(&fixture, Reply::Text(r#"{"memories":[]}"#.into()));
+        assert!(run_as(&fixture, &off, Trigger::Manual).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn on_exit_skips_a_session_shorter_than_min_turns_without_recording_a_run() {
+        let fixture = Fixture::new(vec![Reply::Text(r#"{"memories":[]}"#.into())]).await;
+        fixture.say(Role::User, "first").await;
+        fixture.say(Role::User, "second").await;
+        let reflector = fixture.reflector(ReflectionRuntime {
+            min_turns: 3,
+            ..auto_config(Auto::OnExit)
+        });
+
+        let report = run_as(&fixture, &reflector, Trigger::OnExit)
+            .await
+            .expect("skipped");
+        assert_eq!(report.status, Status::Noop);
+        assert!(
+            report.line().contains("shorter than min_turns"),
+            "{}",
+            report.line()
+        );
+        assert!(fixture.provider.calls().is_empty());
+        let session_id = fixture.session_id();
+        assert!(
+            fixture.store.runs(&session_id).expect("runs").is_empty(),
+            "no row"
+        );
+        assert_eq!(
+            fixture.store.watermark(&session_id).expect("watermark"),
+            None
+        );
+
+        fixture.say(Role::User, "third").await;
+        let report = run_as(&fixture, &reflector, Trigger::OnExit)
+            .await
+            .expect("runs");
+        assert_eq!(report.status, Status::Ok);
+        assert_eq!(fixture.provider.calls().len(), 1);
+        assert_eq!(fixture.store.runs(&session_id).expect("runs").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn automatic_compaction_runs_respect_the_minimum_interval_and_never_retry() {
+        let fixture = Fixture::new(vec![
+            Reply::Fail("boom".into()),
+            Reply::Text(r#"{"memories":[]}"#.into()),
+        ])
+        .await;
+        fixture.say(Role::User, "a topic worth reflecting on").await;
+        let reflector = fixture.reflector(auto_config(Auto::OnCompaction));
+
+        let error = run_as(&fixture, &reflector, Trigger::OnCompaction)
+            .await
+            .expect_err("the first run fails");
+        assert!(matches!(error, Error::Model(_)), "{error}");
+        assert!(
+            reflector.too_soon(&fixture.session_id()),
+            "a failed run still counts"
+        );
+
+        let report = run_as(&fixture, &reflector, Trigger::OnCompaction)
+            .await
+            .expect("skipped");
+        assert!(
+            report.line().contains("started recently"),
+            "{}",
+            report.line()
+        );
+        assert_eq!(
+            fixture.provider.calls().len(),
+            1,
+            "no retry inside the interval"
+        );
+
+        let eager = fixture
+            .reflector(auto_config(Auto::OnCompaction))
+            .with_minimum_interval(chrono::Duration::zero());
+        assert!(!eager.too_soon(&fixture.session_id()));
+        let report = run_as(&fixture, &eager, Trigger::OnCompaction)
+            .await
+            .expect("runs");
+        assert_eq!(report.status, Status::Ok);
+        assert_eq!(fixture.provider.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_manual_run_is_never_held_back_by_the_interval() {
+        let fixture = Fixture::new(vec![
+            Reply::Text(r#"{"memories":[]}"#.into()),
+            Reply::Text(r#"{"memories":[]}"#.into()),
+        ])
+        .await;
+        fixture.say(Role::User, "first topic").await;
+        let reflector = fixture.reflector(auto_config(Auto::OnCompaction));
+        run_as(&fixture, &reflector, Trigger::OnCompaction)
+            .await
+            .expect("auto");
+        fixture.say(Role::User, "second topic").await;
+        let report = run_as(&fixture, &reflector, Trigger::Manual)
+            .await
+            .expect("manual");
+        assert_eq!(report.status, Status::Ok);
+        assert_eq!(fixture.provider.calls().len(), 2);
     }
 }

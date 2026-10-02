@@ -2424,7 +2424,9 @@ slice that held external content never produces skills.
 
 ```toml
 [reflection]
-enabled = true            # default true; false disables /reflect and does not open reflection.db
+enabled = true            # default true; false disables all reflection and does not open reflection.db
+auto = "on_compaction"    # "on_compaction" (default) | "on_exit" | "off"
+min_turns = 4             # 1..1000; on_exit skips a session with fewer user messages
 memories = true           # default true; false stops memory proposals
 skills = true             # default true; false never asks for or writes skills
 skill_source = "untainted"  # "untainted" (default) | "any"
@@ -2435,13 +2437,40 @@ max_skills = 2            # 1..8 skills per run
 max_generated_skills = 30 # 1..200 skills reflection may own in total
 ```
 
-Reflection runs only when you run `/reflect`. With `memories = false` and `skills = false`,
-`/reflect` makes no model call.
+With `memories = false` and `skills = false`, reflection makes no model call.
+
+#### Automatic reflection
+
+Reflection also starts by itself, as `[reflection].auto` selects. **It is on by default**
+(`on_compaction`): upgrading adds one model call per automatic run in long sessions, and a run
+may write skills (see above). Set `auto = "off"` to keep only `/reflect`, `skills = false` to
+stop skill writing, or `enabled = false` to turn reflection off entirely.
+
+- `on_compaction` (default): after a compaction completes, whether it started automatically or
+  with `/compact`, a run starts in the background over everything no earlier run covered.
+  It does not wait for or interrupt the turn, and at most one runs at a time. A session that
+  never compacts never reflects on its own. When the run queued a candidate or wrote a skill,
+  one line says so, printed before the next prompt (REPL) or added to the transcript (TUI).
+  A run that found nothing says nothing; a failed one shows its error once. `otto serve`
+  and `otto acp` run it but have nowhere to show the line, so use `/memory review` and
+  `/skill generated` to see the result.
+- `on_exit`: when a terminal frontend (the TUI, the REPL, or `--prompt`) ends normally,
+  reflection runs once over what no earlier run covered, if the session has at least
+  `min_turns` user messages. **This delays exit** by as long as the run takes, up to 60
+  seconds, while a line says so; Ctrl+C skips it. A killed process, a Ctrl+C exit, `otto serve`
+  and `otto acp` do not run it. A session shorter than `min_turns` is skipped with no record, so
+  `/reflect` can still cover it.
+- `off`: only `/reflect`.
+
+Limits that apply to automatic runs only: at least ten minutes between two automatic runs of
+the same session (counted from when the earlier one started, and a failed run counts, so
+nothing retries); and every other check above still applies. `/reflect` is never held back by
+these limits.
 
 Not yet implemented:
 
-- No automatic extraction: reflection is never triggered by compaction or by exiting, and
-  `Binding.Observe` is not wired.
+- `Binding.Observe` is not wired; reflection reads the session file instead.
+- Reflection is not exposed over `otto serve`'s HTTP API or the Web UI.
 - Reflection never changes a skill you wrote, and it cannot create skills with scripts or
   supporting files.
 - No backup/restore/verify commands.

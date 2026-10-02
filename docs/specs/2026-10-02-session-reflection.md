@@ -1,11 +1,12 @@
 # Session reflection: learning memories and skills from past work
 
-Status: approved 2026-10-02. Phase 1 (memory reflection on demand) and
-phase 2 (generated skills with the vetting pipeline) are implemented; phases 3
-and 4 (automatic triggers, HTTP and the Web UI) are not. The five open
-decisions were answered on 2026-10-02 and are recorded under "Decisions"
-below. Current user behavior of the shipped parts is in the user manual; this
-document remains the rationale and the plan for the rest.
+Status: approved 2026-10-02. Phases 1 to 3 are implemented: memory
+reflection on demand, generated skills with the vetting pipeline, and
+automatic triggers (`on_compaction`, the default, and `on_exit`). Phase 4
+(HTTP and the Web UI) is not. The five open decisions were answered on
+2026-10-02 and are recorded under "Decisions" below. Current user behavior of
+the shipped parts is in the user manual; this document remains the rationale
+and the plan for the rest.
 
 ## Motivation
 
@@ -539,3 +540,33 @@ Questions the design left open, and what the code showed:
 - **Seatbelt.** `~/.otto/skills` is added to the sandbox read paths at process
   start only if it exists; a skills directory created by the first generated
   skill is readable by sandboxed commands after a restart.
+
+## Notes from implementing phase 3
+
+- **A background run does not take the controller's admission.** The design
+  said an automatic run should wait for the turn to finish. A compaction
+  usually happens *inside* a turn, so waiting would defer the run to the end of
+  that turn for no benefit: the run only reads the session file, which the
+  read-only decoder tolerates mid-append (an incomplete final record is
+  ignored), and calls the provider. One run at a time is enforced with a flag.
+  `Controller::request_close` cancels it.
+- **The slice is everything no earlier run covered**, not only the entries the
+  compaction summarized. It is a superset, simpler, and keeps one watermark.
+- **The hook is the controller, not the agent loop.** `Controller::prompt`,
+  `prompt_with_image`, `compact` and the wake turn wrap their event sink and
+  note a completed, non-noop compaction, then start the run after the
+  operation ends. This covers automatic and manual compactions on every
+  frontend, including the server.
+- **`on_exit` delays exit.** The design said automatic runs never delay the
+  event that triggers them. A process that is exiting cannot finish a
+  background run, so `on_exit` is awaited for at most 60 seconds, with a line
+  saying so, and Ctrl+C skips it. It runs for the REPL, the TUI and `--prompt`,
+  not for `otto serve` or `otto acp`.
+- **Notices.** The result of a background run is one line queued on the
+  controller (at most 20 kept). The REPL prints it before the next prompt and
+  the TUI adds it to the transcript; `otto serve` and `otto acp` queue it with
+  nobody to read it.
+- **The interval is a constant** (ten minutes between automatic runs of one
+  session, from the earlier run's start, failures included), not a config key.
+- **A request sizer for scripted runners.** `Runner::scripted` now carries a
+  byte-counting request sizer so tests can run a real compaction.

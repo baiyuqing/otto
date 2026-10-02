@@ -192,6 +192,10 @@ func (b *Bridge) deliver(m Message) {
 		c.cmdUse(m, strings.TrimSpace(arg))
 		return
 	}
+	if arg, ok := strings.CutPrefix(text, "/memory"); ok && (arg == "" || arg[0] == ' ' || arg[0] == '\t') {
+		c.cmdMemory(m, strings.Fields(arg))
+		return
+	}
 	if m.Attachment {
 		c.notify(m.MessageID, "Attachments are not supported and were ignored.")
 	}
@@ -725,4 +729,107 @@ func (c *chat) cmdUse(m Message, arg string) {
 		}
 		reply("Using session " + id + ": " + t)
 	}()
+}
+
+const memoryUsage = "Usage: /memory | /memory accept <id> | /memory reject <id>"
+
+// cmdMemory is the human side of memory review: it lists the chat session's
+// pending candidates, or accepts or rejects one. It never goes through the
+// model, and it does not wait for a running turn.
+func (c *chat) cmdMemory(m Message, args []string) {
+	go func() {
+		reply := func(text string) { c.send(c.b.workCtx, m.MessageID, text) }
+		if len(args) != 0 && (len(args) != 2 || args[0] != "accept" && args[0] != "reject") {
+			reply(memoryUsage)
+			return
+		}
+		sid := c.b.opts.Store.Session(c.key)
+		if sid == "" {
+			reply("This chat has no session yet; send a message first.")
+			return
+		}
+		ctx, stop := context.WithTimeout(c.b.workCtx, 2*time.Minute)
+		defer stop()
+		if err := c.b.opts.Agent.Load(ctx, sid); err != nil {
+			reply("Error: could not load session " + sid + ": " + err.Error())
+			return
+		}
+		pending, err := c.b.opts.Agent.MemoryPending(ctx, sid)
+		if err != nil {
+			reply(memoryError(err))
+			return
+		}
+		if len(args) == 0 {
+			reply(renderPending(pending))
+			return
+		}
+		id, ok := resolveCandidate(pending, args[1])
+		if !ok {
+			reply(fmt.Sprintf("No single pending candidate starts with %q.", args[1]))
+			return
+		}
+		res, err := c.b.opts.Agent.MemoryReview(ctx, sid, id, args[0])
+		if err != nil {
+			reply(memoryError(err))
+			return
+		}
+		short := id[:min(len(id), shortID)]
+		switch {
+		case res.Decision == "reject":
+			reply("Rejected " + short + ".")
+		case res.Record != nil:
+			reply(fmt.Sprintf("Accepted %s as record %s (revision %d).", short, res.Record.ID, res.Record.Revision))
+		case res.Forgotten != "":
+			reply(fmt.Sprintf("Accepted %s: forgot %s.", short, res.Forgotten))
+		default:
+			reply("Accepted " + short + ".")
+		}
+	}()
+}
+
+const (
+	shortID       = 8
+	candidateText = 200
+)
+
+func memoryError(err error) string {
+	if errors.Is(err, agent.ErrMemoryUnsupported) {
+		return "This agent does not support memory review."
+	}
+	var ee *agent.ExitError
+	if errors.As(err, &ee) {
+		return ee.Error()
+	}
+	return "Error: " + err.Error()
+}
+
+func renderPending(list []agent.MemoryCandidate) string {
+	if len(list) == 0 {
+		return "No pending memory candidates."
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d pending memory candidates (reply /memory accept <id> or /memory reject <id>):", len(list))
+	for _, cand := range list {
+		text := strings.Join(strings.Fields(cand.Text), " ")
+		if r := []rune(text); len(r) > candidateText {
+			text = string(r[:candidateText]) + "…"
+		}
+		fmt.Fprintf(&sb, "\n%s  %s %s/%s  %s  (%s)", cand.ID[:min(len(cand.ID), shortID)], cand.Action, cand.Kind, cand.Key, text, cand.Origin)
+	}
+	return sb.String()
+}
+
+// resolveCandidate returns the id of the one pending candidate that arg
+// names, either in full or as a prefix of at least minPrefix characters.
+func resolveCandidate(list []agent.MemoryCandidate, arg string) (string, bool) {
+	var found []string
+	for _, cand := range list {
+		if cand.ID == arg || len(arg) >= minPrefix && strings.HasPrefix(cand.ID, arg) {
+			found = append(found, cand.ID)
+		}
+	}
+	if len(found) != 1 {
+		return "", false
+	}
+	return found[0], true
 }

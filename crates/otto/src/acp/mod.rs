@@ -23,6 +23,7 @@
 
 mod approval;
 pub mod attach;
+mod memory;
 pub mod update;
 
 use std::collections::HashMap;
@@ -242,6 +243,24 @@ impl Connection {
         Ok(json!({ "sessionId": id }))
     }
 
+    /// A `_otto/memory/*` request. Only the local backend serves them: the
+    /// controller that owns the memory service lives in this process.
+    fn memory_request(&self, method: &str, params: Value) -> Reply {
+        let Backend::Local(local) = &self.backend else {
+            return Err(error(METHOD_NOT_FOUND, format!("unknown method {method}")));
+        };
+        let session_of = |id: &str| local.session(id).ok_or_else(unknown_session);
+        if method == memory::PENDING_METHOD {
+            let params: memory::PendingParams = serde_json::from_value(params)
+                .map_err(|failure| invalid_params(failure.to_string()))?;
+            memory::pending(&session_of(&params.session_id)?.controller)
+        } else {
+            let params: memory::ReviewParams = serde_json::from_value(params)
+                .map_err(|failure| invalid_params(failure.to_string()))?;
+            memory::review(&session_of(&params.session_id)?.controller, &params)
+        }
+    }
+
     async fn list_sessions(&self, params: Value) -> Reply {
         self.check_cwd(params.get("cwd").and_then(Value::as_str))?;
         let sessions = match &self.backend {
@@ -456,12 +475,21 @@ fn parse_prompt(params: &Value) -> Result<(String, String), Error> {
     Ok((session_id, text))
 }
 
-fn initialize_result() -> Reply {
+/// `local` advertises the `_otto/memory/*` methods, which only the local
+/// backend serves.
+fn initialize_result(local: bool) -> Reply {
     let capabilities = AgentCapabilities::new()
         .load_session(true)
         .prompt_capabilities(PromptCapabilities::new())
         .mcp_capabilities(McpCapabilities::new())
         .session_capabilities(SessionCapabilities::new().list(SessionListCapabilities::new()));
+    let capabilities = match local {
+        true => capabilities.meta(serde_json::Map::from_iter([(
+            "otto".to_string(),
+            json!({"memoryReview": true}),
+        )])),
+        false => capabilities,
+    };
     result(
         InitializeResponse::new(ProtocolVersion::V1)
             .agent_capabilities(capabilities)
@@ -531,7 +559,10 @@ impl Dispatcher {
     fn request(&mut self, method: String, id: Value, params: Value) {
         let connection = Arc::clone(&self.connection);
         match method.as_str() {
-            "initialize" => connection.reply(id, initialize_result()),
+            "initialize" => {
+                let local = matches!(connection.backend, Backend::Local(_));
+                connection.reply(id, initialize_result(local));
+            }
             "session/new" => {
                 self.tasks.spawn(async move {
                     let reply = connection.new_session(params).await;
@@ -551,6 +582,12 @@ impl Dispatcher {
                 });
             }
             "session/prompt" => self.start_prompt(id, &params),
+            memory::PENDING_METHOD | memory::REVIEW_METHOD => {
+                self.tasks.spawn(async move {
+                    let reply = connection.memory_request(&method, params);
+                    connection.reply(id, reply);
+                });
+            }
             _ => connection.reply(
                 id,
                 Err(error(METHOD_NOT_FOUND, format!("unknown method {method}"))),

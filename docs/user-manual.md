@@ -2038,6 +2038,8 @@ is rejected.
 | `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
 | `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Returns `end_turn`, or `cancelled` after `session/cancel`. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
+| `_otto/memory/pending` | Extension. Params `{sessionId}`; lists the session's pending memory candidates as `{id, action, kind, key, text, reason, origin, scope}`. |
+| `_otto/memory/review` | Extension. Params `{sessionId, candidateId, decision}` with `decision` `accept` or `reject`; decides one candidate as a human review and returns `{decision, candidateId, record, forgotten}`. `otto acp` advertises both with `agentCapabilities._meta.otto.memoryReview`; `otto acp --attach` does not serve them. |
 
 `mcpServers` in `session/new` and `session/load` must be empty: MCP servers
 come from Otto's own configuration (see [MCP servers](#mcp-servers)). Otto
@@ -2310,6 +2312,9 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/deny` | Answers the pending permission request with Deny. |
 | `/sessions` | Lists the 10 newest sessions of the workspace, one per line: `*` for the chat's session or a space, the first 8 characters of the id, the last change as `YYYY-MM-DD HH:MM` (`-` when unknown), and the title (`(untitled)` when empty). With none: "No sessions." |
 | `/use <id>` | Binds the chat to a session and loads it. `<id>` is a full session id, or a prefix of at least 4 characters of a session that `session/list` returns (the newest 20). Reply: "Using session `<id>`: `<title>`". |
+| `/memory` | Lists the chat session's pending memory candidates, one per line: the first 8 characters of the id, the action, `kind/key`, the text (200 characters at most), and the origin. With none: "No pending memory candidates." |
+| `/memory accept <id>` | Accepts one pending candidate, which writes the record. `<id>` is a full candidate id or a unique prefix of at least 4 characters. |
+| `/memory reject <id>` | Rejects one pending candidate; no record is written. |
 
 `/use` replies with one of these when it does not switch:
 
@@ -2325,6 +2330,22 @@ Any other text, including other words starting with `/`, is a prompt.
 A message that arrives while `/use` is loading gets "A session switch is in
 progress; the message was not queued." A failed `session/list` call in
 `/sessions` or `/use` gets "Error: session/list failed: `<error>`".
+
+### Memory review
+
+`remember` and `forget` only queue candidates; a person decides them. In a
+chat, `/memory accept` and `/memory reject` are that decision: the connector
+sends them to `otto acp` as the ACP extension requests `_otto/memory/pending`
+and `_otto/memory/review`, which Otto records as a human review. The model has
+no tool for this, and text in the chat such as "approve" is just a prompt.
+The commands need the chat to have a session (otherwise "This chat has no
+session yet; send a message first."), work while a turn is running, and
+reply "This agent does not support memory review." when the agent does not
+advertise it, as `otto acp --attach` does not. An id that is not a unique
+pending prefix gets "No single pending candidate starts with \"`<id>`\"."; other
+arguments get "Usage: /memory | /memory accept <id> | /memory reject <id>".
+Editing a candidate during review is not available from the chat; use
+`/memory review` in the REPL or TUI.
 
 ### Permission requests
 

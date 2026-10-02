@@ -173,6 +173,7 @@ A message whose text is exactly one of these commands (Telegram also accepts
 | `/new` | The chat's next message starts a new session. The old session stays in otto's session store. |
 | `/stop` | `session/cancel` for the running prompt; the queue is cleared. |
 | `/allow` | Answers the chat's pending permission request with `allow_once`. |
+| `/memory`, `/memory accept <id>`, `/memory reject <id>` | Memory review, see [memory review from the chat connector](2026-10-02-connect-memory-review.md). |
 | `/deny` | Answers the chat's pending permission request with `reject_once`. |
 
 Any other text, including other words starting with `/`, goes to the queue.

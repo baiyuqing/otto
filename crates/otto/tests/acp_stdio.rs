@@ -242,6 +242,99 @@ fn initialize_advertises_the_implemented_capabilities() {
     assert_eq!(client.close(), Some(0));
 }
 
+/// Spawns a client whose model proposes one memory, and returns the id of the
+/// pending candidate.
+fn client_with_pending_candidate(
+    home: &Path,
+    workspace: &Path,
+    kind: &str,
+) -> (Client, String, String) {
+    let served = Arc::new(AtomicUsize::new(0));
+    let arguments = format!(r#"{{"kind":"{kind}","key":"tabs","text":"prefers tabs"}}"#);
+    let (base_url, _requests) = serve(Script {
+        replies: vec![
+            tool_call_reply("call-1", "remember", &arguments),
+            text_reply("queued"),
+        ],
+        served,
+    });
+    configure(home, &base_url);
+    let mut client = Client::spawn(home, workspace, "off");
+    let (_, initialized) = client.call("initialize", json!({"protocolVersion": 1}));
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["_meta"]["otto"]["memoryReview"],
+        true
+    );
+    let session_id = client.new_session(workspace);
+    let (_, response) = client.call("session/prompt", prompt(&session_id, "remember tabs"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let (_, pending) = client.call("_otto/memory/pending", json!({"sessionId": session_id}));
+    let candidates = pending["result"]["candidates"].as_array().expect("list");
+    assert_eq!(candidates.len(), 1, "{pending}");
+    assert_eq!(candidates[0]["text"], "prefers tabs");
+    assert_eq!(candidates[0]["origin"], "model");
+    let id = candidates[0]["id"].as_str().expect("id").to_string();
+    (client, session_id, id)
+}
+
+#[test]
+fn memory_review_accepts_a_pending_candidate_only_on_the_clients_request() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (mut client, session_id, id) =
+        client_with_pending_candidate(home.path(), workspace.path(), "preference");
+
+    let review = |client: &mut Client, id: &str, decision: &str| {
+        client
+            .call(
+                "_otto/memory/review",
+                json!({"sessionId": session_id, "candidateId": id, "decision": decision}),
+            )
+            .1
+    };
+    let bad = review(&mut client, &id, "maybe");
+    assert_eq!(bad["error"]["code"], -32602, "{bad}");
+    let missing = review(&mut client, "nope", "accept");
+    assert_eq!(missing["error"]["code"], -32002, "{missing}");
+
+    let accepted = review(&mut client, &id, "accept");
+    assert_eq!(accepted["result"]["decision"], "accept", "{accepted}");
+    assert!(accepted["result"]["record"]["id"].is_string(), "{accepted}");
+    let (_, after) = client.call("_otto/memory/pending", json!({"sessionId": session_id}));
+    assert_eq!(after["result"]["candidates"], json!([]), "{after}");
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn memory_review_reject_writes_no_record() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (mut client, session_id, id) =
+        client_with_pending_candidate(home.path(), workspace.path(), "preference");
+    let (_, rejected) = client.call(
+        "_otto/memory/review",
+        json!({"sessionId": session_id, "candidateId": id, "decision": "reject"}),
+    );
+    assert_eq!(rejected["result"]["decision"], "reject", "{rejected}");
+    assert!(rejected["result"]["record"].is_null(), "{rejected}");
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn memory_methods_reject_an_unknown_session() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    configure(home.path(), "http://127.0.0.1:1");
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let (_, response) = client.call(
+        "_otto/memory/pending",
+        json!({"sessionId": "0123456789abcdef0123456789abcdef"}),
+    );
+    assert_eq!(response["error"]["code"], -32002, "{response}");
+    assert_eq!(client.close(), Some(0));
+}
+
 #[test]
 fn invalid_requests_get_the_specified_error_codes() {
     let home = tempfile::tempdir().unwrap();

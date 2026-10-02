@@ -181,13 +181,16 @@ func TestCancelledPermissionRequestSendsNotice(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
 	h.say("permcancel:rm -rf build")
-	got := h.waitSent(2)
-	if !strings.Contains(got[0], "rm -rf build") || got[1] != "permission request answered elsewhere" {
+	// The notice comes from the permission handler and "Stopped." from the
+	// turn's end, so only the prompt is guaranteed to come first.
+	got := h.waitSent(3)
+	if !strings.Contains(got[0], "rm -rf build") {
 		t.Fatalf("sent = %q", got)
 	}
-	// The agent's request was cancelled, so the turn ends cancelled.
-	if got = h.waitSent(3); got[2] != "Stopped." {
-		t.Fatalf("sent = %q", got)
+	for _, want := range []string{"permission request answered elsewhere", "Stopped."} {
+		if !slices.Contains(got[1:], want) {
+			t.Fatalf("sent = %q, missing %q", got, want)
+		}
 	}
 }
 

@@ -208,15 +208,10 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
     if options.listen_set && !options.serve {
         return Err(reject("otto: --listen requires the serve subcommand"));
     }
-    if options.socket_set && options.listen_set {
-        return Err(reject(
-            "otto: --socket and --listen cannot be used together",
-        ));
-    }
     if options.open && !options.serve {
         return Err(reject("otto: --open requires the serve subcommand"));
     }
-    if options.open && options.socket_set {
+    if options.open && options.socket_set && !options.listen_set {
         return Err(reject("otto: --open cannot be used with --socket"));
     }
     if options.exit_on_stdin_close && !options.serve {
@@ -224,7 +219,7 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
             "otto: --exit-on-stdin-close requires the serve subcommand",
         ));
     }
-    if options.exit_on_stdin_close && options.socket_set {
+    if options.exit_on_stdin_close && options.socket_set && !options.listen_set {
         return Err(reject(
             "otto: --exit-on-stdin-close cannot be used with --socket",
         ));
@@ -258,7 +253,7 @@ pub fn print_usage(output: &mut dyn Write) {
 }
 
 const USAGE: &str = r"Usage: otto [options]
-       otto serve [options] [--socket PATH | --listen HOST:PORT [--open] [--exit-on-stdin-close]]
+       otto serve [options] [--socket PATH] [--listen HOST:PORT [--open] [--exit-on-stdin-close]]
        otto acp [options]      Agent Client Protocol server on stdin/stdout
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
@@ -752,16 +747,6 @@ mod tests {
             (
                 &["--listen", "127.0.0.1:0"],
                 "otto: --listen requires the serve subcommand\n",
-            ),
-            (
-                &[
-                    "serve",
-                    "--socket",
-                    "/tmp/otto.sock",
-                    "--listen",
-                    "127.0.0.1:0",
-                ],
-                "otto: --socket and --listen cannot be used together\n",
             ),
             (&["--open"], "otto: --open requires the serve subcommand\n"),
             (

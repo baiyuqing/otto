@@ -121,12 +121,20 @@ components:
               items:
                 $ref: "#/components/schemas/WorkspaceReload"
           required: [workspaces]
+    ApprovalDecision:
+      type: object
+      properties:
+        decision:
+          type: string
+          enum: [allow, deny]
+      required: [decision]
     ApprovalResponse:
       type: object
       properties:
-        prompt:
+        decision:
           type: string
-      required: [prompt]
+          enum: [allow, deny]
+      required: [decision]
     Compaction:
       type: object
       description: The compaction_completed event payload, also returned by POST /v1/sessions/{id}/compact.
@@ -203,6 +211,14 @@ components:
           type: string
         open:
           type: boolean
+        last_user_text:
+          type: string
+          maxLength: 80
+          description: The last user message, cut to 80 characters. Omitted when empty.
+        modified:
+          type: string
+          format: date-time
+          description: Time of the last write to the session file. Omitted for a session with no file yet.
       required: [id, open]
     SessionList:
       type: object
@@ -221,12 +237,19 @@ components:
           type: string
         turn:
           type: [string, "null"]
-          enum: [running, ok, error, canceled, null]
+          enum: [queued, running, ok, error, canceled, null]
+        turn_id:
+          type: string
+          description: Id of the running or last turn. Omitted when the session has had no turn.
+        queued:
+          type: integer
+          description: Number of turns waiting in the session's queue.
         approvals:
           type: integer
+          description: 1 while a turn waits for an approval decision, otherwise 0.
         tasks:
           type: integer
-      required: [id, workspace, turn, approvals, tasks]
+      required: [id, workspace, turn, queued, approvals, tasks]
     StatusSnapshot:
       type: object
       properties:
@@ -251,7 +274,7 @@ components:
           enum: [user, task]
         status:
           type: string
-          enum: [running, ok, error, canceled]
+          enum: [queued, running, ok, error, canceled]
         error:
           type: string
         text:
@@ -574,6 +597,10 @@ components:
             - memory_warning
             - agent_error
             - notification
+            - user_message
+            - approval_requested
+            - approval_decided
+            - turn_end
         turn_id:
           type: string
         task_id:
@@ -616,8 +643,29 @@ components:
           $ref: "#/components/schemas/Compaction"
         plan:
           type: object
+        image:
+          type: boolean
+          description: user_message only; true when the prompt carried an image.
+        status:
+          type: string
+          enum: [ok, error, canceled]
+          description: turn_end only; the turn's terminal status.
+        approval_id:
+          type: string
+          description: approval_requested and approval_decided.
+        command:
+          type: string
+          description: approval_requested only; the command awaiting a decision.
+        justification:
+          type: string
+          description: approval_requested only.
+        decision:
+          type: string
+          enum: [allow, deny, timeout]
+          description: approval_decided only. A timeout is a denial.
         error:
           type: string
+          description: Also set on turn_end when status is error.
       required: [type]
     Healthz:
       type: object
@@ -862,7 +910,11 @@ paths:
               properties:
                 resume:
                   type: string
-                  description: An existing session id. Omit to create a new session.
+                  description: >
+                    An existing session id, 32 lowercase hex characters. The
+                    session file is looked up in every loaded workspace, not
+                    only among the most recent sessions. Any other value is 404.
+                    Omit to create a new session.
                 workspace:
                   type: string
                   description: An admitted workspace path to create or resume in. Defaults to the startup workspace; loaded if not already.
@@ -1002,6 +1054,13 @@ paths:
       - $ref: "#/components/parameters/sessionID"
     get:
       summary: Session message history
+      parameters:
+        - name: before_turn
+          in: query
+          required: false
+          description: Return only the messages that existed when this turn started.
+          schema:
+            type: string
       responses:
         "200":
           description: OK
@@ -1012,7 +1071,7 @@ paths:
                 items:
                   $ref: "#/components/schemas/Message"
         "404":
-          description: Session not open
+          description: Session not open, or before_turn names a turn that is not retained or has not started
           content:
             application/json:
               schema:
@@ -1046,14 +1105,31 @@ paths:
       - $ref: "#/components/parameters/sessionID"
       - $ref: "#/components/parameters/approvalID"
     post:
-      summary: Approve one exact elevated Bash command
+      summary: Decide the approval a running turn waits for
+      description: >
+        The turn that requested the approval (approval_requested frame) is
+        waiting for this decision. allow runs the command and continues the
+        same turn; deny ends the turn without running it. A turn that gets no
+        decision in 10 minutes records decision timeout and continues as a deny.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecision"
       responses:
         "200":
-          description: Approved; submit the returned prompt as the next turn
+          description: The first decision for this approval id
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApprovalResponse"
+        "400":
+          description: Missing or invalid body, or decision is neither allow nor deny
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           description: Session not open
           content:
@@ -1061,7 +1137,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: Approval unavailable, unknown, expired, or a turn is active
+          description: approval_decided (a decision for this id was already accepted or it timed out) or approval_failed (unknown id, or no turn waits for it)
           content:
             application/json:
               schema:
@@ -1094,13 +1170,27 @@ paths:
                 stream:
                   type: boolean
                   default: true
+                queue:
+                  type: boolean
+                  default: false
+                  description: >
+                    When the session is busy, append the turn to a FIFO queue
+                    of at most 16 turns instead of answering 409 turn_active.
+                    A queued turn has status queued and no events until it
+                    starts.
               required: [text]
       responses:
         "200":
           description: >
             stream:true (default) returns a text/event-stream of WireEvent
             frames starting at seq 0; stream:false waits for the turn to
-            finish and returns its TurnSummary.
+            finish and returns its TurnSummary. A user turn's first frame is
+            user_message and its last frame is turn_end.
+          headers:
+            Otto-Turn-Id:
+              description: Id of the started or queued turn.
+              schema:
+                type: string
           content:
             text/event-stream:
               schema:
@@ -1121,7 +1211,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A turn is already active for this session
+          description: >
+            turn_active (a turn is running or queued and queue was not set) or
+            queue_full (16 turns are already queued)
           content:
             application/json:
               schema:
@@ -1183,7 +1275,10 @@ paths:
       - $ref: "#/components/parameters/sessionID"
       - $ref: "#/components/parameters/turnID"
     post:
-      summary: Cancel a running turn
+      summary: Cancel a running or queued turn
+      description: >
+        A queued turn is removed from the queue and ends canceled with a
+        turn_end frame.
       responses:
         "202":
           description: Cancellation requested
@@ -1425,7 +1520,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: turn_active (a turn or compaction is running) or compaction_failed (the previous context is still in effect)
+          description: turn_active (a turn is running or queued, or a compaction is running) or compaction_failed (the previous context is still in effect)
           content:
             application/json:
               schema:

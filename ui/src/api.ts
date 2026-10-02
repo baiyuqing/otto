@@ -170,6 +170,10 @@ export interface SessionStatus {
   turn: 'running' | 'ok' | 'error' | 'canceled' | null
   approvals: number
   tasks: number
+  /** The running turn's id; absent when no turn is running. */
+  turn_id?: string
+  /** Turns waiting behind the running one. */
+  queued?: number
 }
 
 export interface StatusSnapshot {
@@ -257,8 +261,11 @@ export const api = {
     json<Session>(`/v1/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   getSession: (id: string) => json<Session>(`/v1/sessions/${id}`),
   // history returns the raw JSON body: fromHistory parses it in wasm so tool
-  // argument objects keep the key order the provider sent.
-  history: (id: string) => text(`/v1/sessions/${id}/history`),
+  // argument objects keep the key order the provider sent. beforeTurn stops
+  // at the messages that existed when that turn started, so replaying the
+  // turn's events from sequence 0 does not show its messages twice.
+  history: (id: string, beforeTurn?: string) =>
+    text(`/v1/sessions/${id}/history${beforeTurn ? `?before_turn=${encodeURIComponent(beforeTurn)}` : ''}`),
   getTurn: (id: string, turnId: string) => json<TurnSummary>(`/v1/sessions/${id}/turns/${turnId}`),
   cancelTurn: (id: string, turnId: string) => request(`/v1/sessions/${id}/turns/${turnId}/cancel`, { method: 'POST' }),
   listTasks: (id: string) => json<{ tasks: Task[] }>(`/v1/sessions/${id}/tasks`),
@@ -267,8 +274,13 @@ export const api = {
   getTask: (id: string, taskId: string) => json<TaskDetail>(`/v1/sessions/${id}/tasks/${taskId}`),
   cancelTask: (id: string, taskId: string) => request(`/v1/sessions/${id}/tasks/${taskId}/cancel`, { method: 'POST' }),
   reloadSandbox: () => json<Session['sandbox']>('/v1/sandbox/reload', { method: 'POST' }),
-  approveBash: (id: string, approvalId: string) =>
-    json<{ prompt: string }>(`/v1/sessions/${id}/approvals/${approvalId}`, { method: 'POST' }),
+  // decideApproval answers an approval the running turn is waiting on. The
+  // retry of the approved command runs inside that turn on the server.
+  decideApproval: (id: string, approvalId: string, decision: 'allow' | 'deny') =>
+    json<{ decision: string }>(`/v1/sessions/${id}/approvals/${approvalId}`, {
+      method: 'POST',
+      body: JSON.stringify({ decision }),
+    }),
   compact: (id: string, focus: string, signal?: AbortSignal) =>
     json<Compaction>(`/v1/sessions/${id}/compact`, { method: 'POST', body: JSON.stringify({ focus }), signal }),
   listWorkflows: () => json<{ runs: WorkflowRun[] }>('/v1/workflows'),
@@ -298,9 +310,11 @@ export const api = {
   getAgentTask: (parentSession: string, taskId: string) =>
     json<AgentTaskDetail>(`/v1/tasks/${encodeURIComponent(parentSession)}/${encodeURIComponent(taskId)}`),
 
-  // startTurn opens the turn's event stream from sequence 0.
+  // startTurn opens the turn's event stream from sequence 0. With queue the
+  // server starts the turn at once or holds it behind the running one; the
+  // response's Otto-Turn-Id header names it either way.
   startTurn: (id: string, text: string, image?: { data: string; mime_type: string }) =>
-    request(`/v1/sessions/${id}/turns`, { method: 'POST', body: JSON.stringify({ text, image, stream: true }) }),
+    request(`/v1/sessions/${id}/turns`, { method: 'POST', body: JSON.stringify({ text, image, stream: true, queue: true }) }),
   // attach re-reads a turn's events after sequence `after` (all of them when
   // omitted); used after a page reload or a dropped stream.
   attach: (id: string, turnId: string, after?: number) =>

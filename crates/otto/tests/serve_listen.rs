@@ -253,3 +253,64 @@ async fn the_listen_address_can_come_from_the_config_file() {
         .expect("serve task");
     assert_eq!(code, 0, "stderr {:?}", stderr.text());
 }
+
+/// One HTTP/1.1 request over the unix socket; returns the status code.
+async fn socket_status(socket: &std::path::Path, path: &str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .expect("connect to the socket");
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: otto\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await
+        .expect("write");
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).await.expect("read");
+    reply
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("status line in {reply:?}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn socket_and_tcp_listeners_serve_one_server_with_the_token_on_tcp_only() {
+    let fixture = fixture("http://127.0.0.1:1", "");
+    let sockets = tempfile::tempdir().expect("socket dir");
+    let socket = sockets.path().join("run").join("otto.sock");
+    let socket_arg = socket.to_string_lossy().into_owned();
+    let cancel = CancellationToken::new();
+    let (stdout, stderr, handle) = run_serve(
+        &fixture,
+        &["--socket", &socket_arg, "--listen", "127.0.0.1:0"],
+        cancel.clone(),
+    )
+    .await;
+    let (base, token) = await_startup(&stdout, &stderr).await;
+    let client = reqwest::Client::new();
+
+    assert_eq!(socket_status(&socket, "/v1/sessions").await, 200);
+
+    let refused = client
+        .get(format!("{base}/v1/sessions"))
+        .send()
+        .await
+        .expect("tcp without token");
+    assert_eq!(refused.status().as_u16(), 401);
+    let allowed = client
+        .get(format!("{base}/v1/sessions"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("tcp with token");
+    assert_eq!(allowed.status().as_u16(), 200);
+
+    cancel.cancel();
+    let code = tokio::time::timeout(Duration::from_secs(7), handle)
+        .await
+        .expect("serve stops")
+        .expect("serve task");
+    assert_eq!(code, 0, "stderr {:?}", stderr.text());
+}

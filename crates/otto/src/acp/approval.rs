@@ -13,21 +13,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::Connection;
+use crate::app::ApprovalDecision as Decision;
 
 const ALLOW_ONCE: &str = "allow_once";
 const REJECT_ONCE: &str = "reject_once";
-
-/// What the client decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Decision {
-    /// `allow_once` was selected.
-    Allow,
-    /// `reject_once`, outcome `cancelled`, an error response or a response
-    /// that does not parse. The prompt ends with `end_turn`.
-    Deny,
-    /// The prompt token was cancelled during the wait.
-    Cancelled,
-}
 
 /// Asks the client to allow `command` once and waits for the answer.
 pub(super) async fn request_permission(

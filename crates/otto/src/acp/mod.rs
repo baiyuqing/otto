@@ -36,7 +36,6 @@ use agent_client_protocol_schema::v1::{
     ListSessionsResponse, McpCapabilities, NewSessionResponse, PromptCapabilities, PromptResponse,
     SessionCapabilities, SessionListCapabilities, SessionNotification, SessionUpdate, StopReason,
 };
-use otto_core::agent::Event;
 use otto_core::config::resolve::Runtime;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -44,11 +43,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{Controller, SandboxControl};
+use crate::app::{Controller, SandboxControl, Step, Stop};
 use crate::cli::runtime_builder::Builder;
-use crate::session::{MAX_LIST_SESSIONS, session_directory};
+use crate::session::{MAX_LIST_SESSIONS, is_session_id, session_directory};
 
-use approval::{Decision, request_permission};
+use approval::request_permission;
 
 const PARSE_ERROR: i32 = -32700;
 const INVALID_REQUEST: i32 = -32600;
@@ -231,7 +230,7 @@ impl Connection {
         self.check_cwd(params.cwd.as_deref())?;
         params.check_mcp_servers()?;
         let id = params.session_id.unwrap_or_default();
-        if id.len() != 32 || !id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        if !is_session_id(&id) {
             return Err(invalid_params(
                 "sessionId must be 32 lowercase hexadecimal characters",
             ));
@@ -303,63 +302,35 @@ impl Connection {
         &self,
         session: &Session,
         session_id: &str,
-        mut text: String,
+        text: String,
         cancel: &CancellationToken,
     ) -> Reply {
-        let stopped = |reason| result(PromptResponse::new(reason));
-        loop {
-            let mut request = None;
-            let outcome = session
-                .controller
-                .prompt(
-                    &text,
-                    &mut |event| {
-                        if let Event::ToolCallFinished {
-                            tool_name,
-                            tool_call_id,
-                            result,
-                            ..
-                        } = &event
-                            && let Some(found) =
-                                crate::tool::bash::parse_approval_request(tool_name, result)
-                        {
-                            request = Some((tool_call_id.clone(), found));
-                        }
-                        if let Some(update) = update::event_update(&event) {
-                            self.update(session_id, update);
-                        }
-                    },
-                    cancel,
-                )
-                .await;
-            if cancel.is_cancelled() {
-                return stopped(StopReason::Cancelled);
-            }
-            if let Err(failure) = outcome {
-                return Err(error(INTERNAL_ERROR, self.redact(&failure.to_string())));
-            }
-            let Some((tool_call_id, request)) = request else {
-                return stopped(StopReason::EndTurn);
-            };
-            let pending = self
-                .config
-                .builder
-                .bash_approvals
-                .as_ref()
-                .and_then(|approvals| approvals.pending_command(session_id, &request.id));
-            let Some(command) = pending else {
-                return stopped(StopReason::EndTurn);
-            };
-            match request_permission(self, session_id, &tool_call_id, &command, cancel).await {
-                Decision::Cancelled => return stopped(StopReason::Cancelled),
-                Decision::Deny => return stopped(StopReason::EndTurn),
-                Decision::Allow => {
-                    text = session
-                        .controller
-                        .approve_bash(&request.id)
-                        .map_err(|message| error(INTERNAL_ERROR, self.redact(&message)))?;
-                }
-            }
+        let outcome = session
+            .controller
+            .run_with_approvals(
+                Step::Text(&text),
+                &mut |event| {
+                    if let Some(update) = update::event_update(&event) {
+                        self.update(session_id, update);
+                    }
+                },
+                cancel,
+                |request| async move {
+                    request_permission(
+                        self,
+                        session_id,
+                        &request.tool_call_id,
+                        &request.command,
+                        cancel,
+                    )
+                    .await
+                },
+            )
+            .await;
+        match outcome {
+            Ok(Stop::EndTurn) => result(PromptResponse::new(StopReason::EndTurn)),
+            Ok(Stop::Cancelled) => result(PromptResponse::new(StopReason::Cancelled)),
+            Err(failure) => Err(error(INTERNAL_ERROR, self.redact(&failure.to_string()))),
         }
     }
 }

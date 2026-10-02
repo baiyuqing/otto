@@ -224,7 +224,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto mcp login <server>` | Run the OAuth sign-in flow for one configured MCP server. See [MCP servers](#mcp-servers). |
 | `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
 | `otto trust <dir> [--config PATH]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
-| `otto serve [--socket PATH \| --listen HOST:PORT [--open] [--exit-on-stdin-close]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
+| `otto serve [--socket PATH] [--listen HOST:PORT [--open] [--exit-on-stdin-close]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket, a loopback TCP port, or both, instead of an interactive frontend. See [Agent server](#agent-server). |
 | `otto acp` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as `otto-connect`. See [ACP agent server](#acp-agent-server). |
 
 | Flag | Description |
@@ -246,10 +246,10 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume`, `--archive`, or `--no-session`. |
 | `--resume PATH` | Resume a specific session file. Cannot be combined with `--continue`, `--archive`, or `--no-session`. |
 | `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--prompt`. |
-| `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. Cannot be combined with `--listen`. |
-| `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. Cannot be combined with `--socket`. |
-| `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). Cannot be combined with `--socket`. A failed launch is not fatal: the URL is still printed. |
-| `--exit-on-stdin-close` | `serve` only. Read stdin and shut down, as on `SIGTERM`, when it reaches end of file or a read fails. Without the flag stdin is not read. Requires a TCP listener. Cannot be combined with `--socket`. |
+| `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. With `--listen`, both listeners are opened. |
+| `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. With `--socket`, both listeners are opened. |
+| `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). A failed launch is not fatal: the URL is still printed. |
+| `--exit-on-stdin-close` | `serve` only. Read stdin and shut down, as on `SIGTERM`, when it reaches end of file or a read fails. Without the flag stdin is not read. Requires a TCP listener. |
 
 ## Environment variables
 
@@ -1332,21 +1332,22 @@ read the prompt from a file (bounded to 1 MiB).
 TUI or REPL. One process holds the startup workspace (`--cwd`, default `.`)
 and, when `[server].workspace_roots` or a trusted directory admits others, any number of additional
 workspaces loaded on first use; it manages any number of sessions across all
-loaded workspaces. Turns in different sessions run concurrently, and starting
-a second turn on a session that already has one active returns `409`. It
-listens on either a Unix domain socket (the default) or a loopback TCP port.
+loaded workspaces. Turns in different sessions run concurrently. A session
+runs one turn at a time; a turn requested while another runs is queued when
+the request asks for it, and otherwise returns `409` (see
+[Turn queue](#turn-queue)). It listens on a Unix domain socket (the default),
+a loopback TCP port, or both.
 
 ```bash
-otto serve [--socket PATH | --listen HOST:PORT [--open]]
+otto serve [--socket PATH] [--listen HOST:PORT [--open]]
 ```
 
 `serve` accepts the same startup flags as the interactive frontends
 (`--config`, `--cwd`, `--profile`, `--provider`, `--base-url`, `--model`,
 `--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus
-`--socket` or `--listen`, and `--open` to launch the printed TCP URL in the
+`--socket` and `--listen`, and `--open` to launch the printed TCP URL in the
 default browser. It rejects `--ui`, `--prompt`, `--resume`, `--continue`,
-`--archive`, and `--no-session`. `--open` also rejects `--socket` and a Unix
-socket from config or the default path.
+`--archive`, and `--no-session`. `--open` requires a TCP listener.
 
 ### Feishu inbound
 
@@ -1369,9 +1370,13 @@ messages.
 
 ### Listener
 
-The listener resolves in this order: `--listen` > `--socket` >
+With both `--socket` and `--listen` on the command line, Otto opens both
+listeners and serves the same sessions on each: requests on the socket carry
+no token, requests on the TCP port need the token. A browser uses the TCP
+URL; local clients can use the socket at the same time. Otherwise one
+listener is opened, resolved in this order: `--listen` > `--socket` >
 `[server].listen` > `[server].socket` > the built-in default
-`~/.otto/otto.sock`. Exactly one listener is opened.
+`~/.otto/otto.sock`. The config file cannot select both.
 
 **Unix socket.** Otto creates a missing parent directory with mode `0700`,
 creates the socket file with mode `0600`, and refuses to start if a live
@@ -1391,9 +1396,8 @@ otto serve: http://127.0.0.1:PORT/?token=<token>
 ```
 
 `--open` then launches that URL with `/usr/bin/open` on macOS and `xdg-open`
-on Linux. A failed launch is not fatal. `--open` with a Unix socket (the
-default, `--socket`, or `[server].socket`) exits with
-`otto: --open requires a TCP listener`.
+on Linux. A failed launch is not fatal. `--open` without a TCP listener exits
+with `otto: --open requires a TCP listener`.
 
 Every `/v1/` request must then carry `Authorization: Bearer <token>`; a
 missing or wrong token returns `401` with `WWW-Authenticate: Bearer`. The
@@ -1491,6 +1495,56 @@ for every workspace.
   `warning: cannot save workspace list: <error>`. `DELETE /v1/workspaces`
   removes an entry.
 
+### Turn queue
+
+`POST /v1/sessions/{id}/turns` with `"queue": true` starts the turn at once
+when the session has no running or queued turn and no compaction, and
+otherwise appends it to the session's queue with status `queued`. Queued
+turns start one at a time in arrival order, each after the previous turn
+ends. A session queues at most 16 turns; the 17th request returns
+`409 queue_full`. Without `"queue": true` the request returns
+`409 turn_active` while a turn runs or is queued.
+
+A queued turn has an id and can be read, followed and cancelled through the
+turn routes. Its event stream sends nothing until it starts. Cancelling it
+removes it from the queue and ends it `canceled`. A server-started wake turn
+(`trigger` `task`) starts only when no turn is running or queued.
+`POST .../compact` returns `409 turn_active` while a turn runs or is queued.
+On shutdown, queued turns end `canceled` without starting.
+
+Each `POST .../turns` response carries the header `Otto-Turn-Id` with the
+turn's id. In the event stream of a turn started by a client, the first frame
+is `user_message` with the prompt `text`, and `image: true` when an image was
+attached (the image data is not repeated). Wake turns have no `user_message`.
+The last frame of every turn is `turn_end` with `status` (`ok`, `error`, or
+`canceled`) and, for `error`, the error text. Both frames are kept in the
+turn's event buffer, so a reader that resumes with `?after=N` receives them
+as well. Turn errors are redacted of configured secrets before they are
+stored, returned, sent in `agent_error` or `turn_end`, or logged.
+
+### Approvals inside a turn
+
+When a step of a serve turn ends with an elevated Bash command waiting for
+approval, the turn does not end. Its stream emits `approval_requested` with
+`approval_id`, `tool_call_id`, `command`, and `justification`, and the turn
+stays `running` while it waits; other turns queue behind it.
+`POST /v1/sessions/{id}/approvals/{approval_id}` with `{"decision":"allow"}`
+or `{"decision":"deny"}` decides it, from any client:
+
+- The first decision returns `200 {"decision": ...}`. A later decision for
+  the same request returns `409 approval_decided`; an id that is not waiting
+  returns `409 approval_failed`.
+- `allow` grants the command once and the server retries it inside the same
+  turn, with the same turn id and stream. The client sends no prompt.
+- `deny` ends the turn with status `ok`.
+- A request with no decision after 10 minutes is denied.
+- Each outcome emits `approval_decided` with `approval_id` and `decision`
+  (`allow`, `deny`, or `timeout`). Cancelling the turn during the wait ends
+  it `canceled`.
+
+Excluding the command's program from the sandbox (the TUI's
+`/approve always`) is not available through the API.
+
 ### Web UI
 
 `GET /` serves the browser UI built by `make ui` and embedded into the
@@ -1548,15 +1602,19 @@ composer:
   commands; Tab or click completes the highlighted command. Supported commands
   are `/help`, `/init`, `/session`, `/new`, `/clear`, `/resume`, `/model`,
   `/rename <name>`, `/compact [focus]`, `/sandbox`, `/sandbox reload`,
-  `/approve <id>`, `/tasks`, `/task <id|name>`, `/task cancel <id|name>`,
+  `/approve <id>`, `/deny <id>`, `/tasks`, `/task <id|name>`,
+  `/task cancel <id|name>`,
   `/mcp`, and `/exit`. Commands backed by existing server APIs run locally
   instead of starting a provider turn. `/init` submits the same built-in
   `AGENTS.md` contributor-guide task as the terminal frontends. `/resume` asks
   you to choose a session from the sidebar; `/exit` asks you to close the
   browser tab because a page cannot reliably close a tab it did not open.
-  `/approve <id>` grants one pending elevated Bash command through
-  `POST /v1/sessions/{id}/approvals/{approval_id}` and then submits the retry
-  prompt the server returns as the next turn.
+  `/approve <id>` and `/deny <id>` decide an elevated Bash command the
+  running turn waits for, through
+  `POST /v1/sessions/{id}/approvals/{approval_id}`; the turn continues with
+  the decision. Both run immediately while a turn runs. The transcript shows
+  each request with its id and each decision, including decisions made by
+  another client.
   `/mcp` shows each configured server's connection state only; signing in
   runs on the host with `otto mcp login <server>`, since the OAuth flow opens
   a browser there, not in the page.
@@ -1570,8 +1628,13 @@ composer:
   Sending stores the original image with the prompt in session history and
   shows it in the transcript, including after resume. The provider receives it
   with `detail: high`.
-- While a turn runs the composer is disabled and a **Cancel** button calls
+- While a turn runs, Enter holds the composer text as the next input and
+  sends it when the turn ends; Enter again replaces it, and Ctrl+U or
+  **Withdraw** removes it. **Cancel turn** calls
   `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
+- The page starts turns with `"queue": true`. When another client's turn
+  starts first, the footer shows `queued` until this turn starts, and the
+  transcript shows the prompt when it starts.
 - Reloading the page during a turn re-attaches to the running turn's event
   stream and continues rendering it; if the stream drops, the page re-reads
   it from the last sequence number it saw.
@@ -1634,19 +1697,19 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/fs/dirs?path=...` | List subdirectories for the folder picker: `{"path", "parent", "roots", "dirs": [{"name", "path"}...]}`. Limited to the home directory and `workspace_roots`; `400 INVALID_PATH`, `403 PATH_NOT_ALLOWED`. |
 | `DELETE /v1/workspaces?path=...` | Unload a workspace and remove it from `~/.otto/serve-workspaces.json`. `204` on success; `404 WORKSPACE_NOT_FOUND`, `409 WORKSPACE_IS_STARTUP`, or `409 WORKSPACE_IN_USE` otherwise. |
 | `GET /v1/workspaces/diff?workspace=<path>` | Read-only changes of a working directory (default the startup workspace) against `HEAD`, or the empty tree before the first commit: staged, unstaged, and untracked files under that directory, ignored files excluded. `{"workspace", "repository", "branch", "files": [{"path", "old_path", "status", "binary", "patch", "truncated"}...], "truncated"}`. `status` is `modified`, `added`, `deleted`, `renamed`, or `untracked`; paths are relative to the directory. `repository:false` when the directory is not in a git work tree. git runs through the workspace's sandbox with external diff and textconv drivers disabled. Limits: 256 KiB of patch per file, about 1 MiB in total, patches for the first 200 untracked files, 10 s for all git commands. `400`/`403` as `POST /v1/workspaces`; `501 diff_unavailable` without a usable sandbox; `500 git_failed`; `504 git_timeout`. |
-| `POST /v1/sessions` | Create a session (`{}`, optionally `"workspace":"<path>"`, default the startup workspace) or attach to one already open in this process (`{"resume":"<id>"}`, searched in `workspace` if given, else every loaded workspace). `201` for a new session, `200` for an already-open one. Returns the session object. |
-| `GET /v1/status` | `text/event-stream` of `event: status` snapshots of every session open in this process, in every loaded workspace: `{"sessions":[{"id","workspace","turn","approvals","tasks"}...]}`, sorted by workspace, then id. `turn` is `running`, the last finished turn's `ok`, `error`, or `canceled`, or `null` before the first turn; `approvals` counts pending Bash approvals; `tasks` counts queued or running sub-agent tasks. The current snapshot is sent on connect and again whenever it changes; there is no replay. The stream ends when the server shuts down. |
-| `GET /v1/sessions?workspace=<path>` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`. Without `workspace`, every loaded workspace; with it, that workspace only. |
+| `POST /v1/sessions` | Create a session (`{}`, optionally `"workspace":"<path>"`, default the startup workspace) or open one by id (`{"resume":"<id>"}`, 32 lowercase hexadecimal characters, looked up in `workspace` if given, else every loaded workspace, including sessions older than the newest 20 listed). `201` for a new session, `200` for an existing one, including one already open in this process. Returns the session object. |
+| `GET /v1/status` | `text/event-stream` of `event: status` snapshots of every session open in this process, in every loaded workspace: `{"sessions":[{"id","workspace","turn","turn_id","queued","approvals","tasks"}...]}`, sorted by workspace, then id. `turn` is `running`, the last finished turn's `ok`, `error`, or `canceled`, or `null` before the first turn; `turn_id` is the running turn's id, else the newest turn's; `queued` counts queued turns; `approvals` counts Bash approvals waiting for a decision; `tasks` counts queued or running sub-agent tasks. The current snapshot is sent on connect and again whenever it changes; there is no replay. The stream ends when the server shuts down. |
+| `GET /v1/sessions?workspace=<path>` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`, with `last_user_text` (at most 80 characters) and `modified` (RFC 3339). Without `workspace`, every loaded workspace; with it, that workspace only. |
 | `GET /v1/sessions/{id}` | Return one open session's info. `404` if the session is not open. |
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
-| `GET /v1/sessions/{id}/history` | Return the session's message history. |
-| `POST /v1/sessions/{id}/approvals/{approval_id}` | Grant one pending elevated Bash command and return the retry prompt to submit as the next turn. `409` when the approval is unknown or a turn is active. |
-| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. |
-| `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. Only the session's most recent turn is retained. |
-| `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |
-| `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. |
-| `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
+| `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
+| `POST /v1/sessions/{id}/approvals/{approval_id}` | Decide an elevated Bash command a running turn waits for: `{"decision":"allow"}` or `{"decision":"deny"}`. `200 {"decision"}` for the first decision; `409 approval_decided` when it was already decided; `409 approval_failed` when the id is not waiting. See [Approvals inside a turn](#approvals-inside-a-turn). |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
+| `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
+| `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
+| `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
+| `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn runs or is queued, or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
 | `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
@@ -1724,7 +1787,7 @@ every endpoint.
 }
 ```
 
-`status` is one of `running`, `ok`, `error`, or `canceled`. `error` is omitted
+`status` is one of `queued`, `running`, `ok`, `error`, or `canceled`. `error` is omitted
 unless `status` is `error`; `finished_at` is omitted while the turn runs.
 
 ### Events
@@ -1751,7 +1814,7 @@ Status codes:
 | `400` | Empty or missing turn text, or an invalid JSON body. |
 | `401` | Missing or invalid bearer token (TCP listener only). |
 | `404` | Session, turn, or task not found. |
-| `409` | `turn_active`: a turn or compaction is already active on this session. `compaction_failed`, `sandbox_reload_failed`, and `task_done` name the other conflicts. |
+| `409` | `turn_active`: a turn is running or queued, or a compaction is active, on this session. `queue_full`: 16 turns are already queued. `approval_decided` and `approval_failed` name the approval conflicts. `compaction_failed`, `sandbox_reload_failed`, and `task_done` name the other conflicts. |
 | `500` | Internal error. The response body is a fixed `internal error` message; details go to the server log only. |
 
 ### Observability

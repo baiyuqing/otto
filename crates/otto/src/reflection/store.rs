@@ -24,7 +24,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 /// The schema version this build writes and expects. A database with another
 /// version is left untouched and reported as [`Error::UnknownVersion`].
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS runs (
@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS runs (
     truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
     memories_proposed INTEGER NOT NULL CHECK (memories_proposed >= 0),
     memories_dropped INTEGER NOT NULL CHECK (memories_dropped >= 0),
-    detail TEXT NOT NULL
+    detail TEXT NOT NULL,
+    skills_written INTEGER NOT NULL DEFAULT 0 CHECK (skills_written >= 0)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS runs_session ON runs(session_id, started_at);
 CREATE TABLE IF NOT EXISTS watermarks (
@@ -48,6 +49,46 @@ CREATE TABLE IF NOT EXISTS watermarks (
     entry_id TEXT NOT NULL,
     updated_at TEXT NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS generated_skills (
+    name TEXT PRIMARY KEY,
+    hash TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS skill_versions (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    saved_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS skill_versions_name ON skill_versions(name, id);
+"#;
+
+/// What a version 1 database lacks: the skill ownership tables and the
+/// per-run skill count.
+const MIGRATE_1_TO_2: &str = r#"
+ALTER TABLE runs ADD COLUMN skills_written INTEGER NOT NULL DEFAULT 0 CHECK (skills_written >= 0);
+CREATE TABLE IF NOT EXISTS generated_skills (
+    name TEXT PRIMARY KEY,
+    hash TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS skill_versions (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    saved_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS skill_versions_name ON skill_versions(name, id);
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,8 +150,45 @@ pub struct RunRow {
     pub truncated: bool,
     pub memories_proposed: usize,
     pub memories_dropped: usize,
+    pub skills_written: usize,
     /// A short, non-sensitive note such as the failure category.
     pub detail: String,
+}
+
+/// A skill reflection owns: the name, the hash of the content it last wrote,
+/// and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedSkill {
+    pub name: String,
+    pub hash: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub reason: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One skill write to record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillWrite {
+    pub name: String,
+    pub hash: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub reason: String,
+    pub at: String,
+}
+
+fn generated_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GeneratedSkill> {
+    Ok(GeneratedSkill {
+        name: row.get(0)?,
+        hash: row.get(1)?,
+        run_id: row.get(2)?,
+        session_id: row.get(3)?,
+        reason: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
 }
 
 #[derive(Debug)]
@@ -159,6 +237,15 @@ impl Store {
             connection
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(|_| Error::Io)?;
+        } else if version == 1 {
+            let transaction = connection.unchecked_transaction().map_err(|_| Error::Io)?;
+            transaction
+                .execute_batch(MIGRATE_1_TO_2)
+                .map_err(|_| Error::Io)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| Error::Io)?;
+            transaction.commit().map_err(|_| Error::Io)?;
         } else if version != SCHEMA_VERSION {
             return Err(Error::UnknownVersion);
         }
@@ -193,7 +280,8 @@ impl Store {
             .execute(
                 "INSERT INTO runs (id, session_id, trigger, started_at, finished_at, status, \
                  from_entry, to_entry, input_bytes, truncated, memories_proposed, \
-                 memories_dropped, detail) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                 memories_dropped, detail, skills_written) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                 params![
                     row.id,
                     row.session_id,
@@ -208,6 +296,7 @@ impl Store {
                     row.memories_proposed as i64,
                     row.memories_dropped as i64,
                     row.detail,
+                    row.skills_written as i64,
                 ],
             )
             .map_err(|_| Error::Io)?;
@@ -222,6 +311,133 @@ impl Store {
                 .map_err(|_| Error::Io)?;
         }
         transaction.commit().map_err(|_| Error::Io)
+    }
+
+    /// The skill reflection owns under `name`, if any.
+    pub fn generated(&self, name: &str) -> Result<Option<GeneratedSkill>> {
+        self.lock()?
+            .query_row(
+                "SELECT name, hash, run_id, session_id, reason, created_at, updated_at \
+                 FROM generated_skills WHERE name = ?1",
+                params![name],
+                generated_from_row,
+            )
+            .optional()
+            .map_err(|_| Error::Io)
+    }
+
+    /// Every skill reflection has written and not reverted, by name.
+    pub fn list_generated(&self) -> Result<Vec<GeneratedSkill>> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT name, hash, run_id, session_id, reason, created_at, updated_at \
+                 FROM generated_skills ORDER BY name",
+            )
+            .map_err(|_| Error::Io)?;
+        let rows = statement
+            .query_map([], generated_from_row)
+            .map_err(|_| Error::Io)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| Error::Io)
+    }
+
+    /// How many skills reflection currently owns.
+    pub fn generated_count(&self) -> Result<usize> {
+        self.lock()?
+            .query_row("SELECT COUNT(*) FROM generated_skills", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+            .map_err(|_| Error::Io)
+    }
+
+    /// Records that reflection wrote `write` as the current content of its
+    /// skill: it becomes (or stays) owned, and the content joins its versions.
+    pub fn record_skill_write(&self, write: &SkillWrite) -> Result<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(|_| Error::Io)?;
+        transaction
+            .execute(
+                "INSERT INTO generated_skills \
+                 (name, hash, run_id, session_id, reason, created_at, updated_at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?6) \
+                 ON CONFLICT(name) DO UPDATE SET hash = excluded.hash, run_id = excluded.run_id, \
+                 session_id = excluded.session_id, reason = excluded.reason, \
+                 updated_at = excluded.updated_at",
+                params![
+                    write.name,
+                    write.hash,
+                    write.run_id,
+                    write.session_id,
+                    write.reason,
+                    write.at
+                ],
+            )
+            .map_err(|_| Error::Io)?;
+        transaction
+            .execute(
+                "INSERT INTO skill_versions (name, hash, run_id, saved_at) VALUES (?1,?2,?3,?4)",
+                params![write.name, write.hash, write.run_id, write.at],
+            )
+            .map_err(|_| Error::Io)?;
+        transaction.commit().map_err(|_| Error::Io)
+    }
+
+    /// The content hashes reflection wrote for `name`, oldest first.
+    pub fn skill_versions(&self, name: &str) -> Result<Vec<String>> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare("SELECT hash FROM skill_versions WHERE name = ?1 ORDER BY id")
+            .map_err(|_| Error::Io)?;
+        let rows = statement
+            .query_map(params![name], |row| row.get::<_, String>(0))
+            .map_err(|_| Error::Io)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| Error::Io)
+    }
+
+    /// Drops the newest version of `name` and makes the one before it current,
+    /// returning its hash; with no earlier version, forgets the skill and
+    /// returns `None`.
+    pub fn pop_skill_version(&self, name: &str, at: &str) -> Result<Option<String>> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(|_| Error::Io)?;
+        transaction
+            .execute(
+                "DELETE FROM skill_versions WHERE id = \
+                 (SELECT MAX(id) FROM skill_versions WHERE name = ?1)",
+                params![name],
+            )
+            .map_err(|_| Error::Io)?;
+        let previous: Option<String> = transaction
+            .query_row(
+                "SELECT hash FROM skill_versions WHERE name = ?1 ORDER BY id DESC LIMIT 1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| Error::Io)?;
+        match &previous {
+            Some(hash) => {
+                transaction
+                    .execute(
+                        "UPDATE generated_skills SET hash = ?2, updated_at = ?3 WHERE name = ?1",
+                        params![name, hash, at],
+                    )
+                    .map_err(|_| Error::Io)?;
+            }
+            None => {
+                transaction
+                    .execute(
+                        "DELETE FROM generated_skills WHERE name = ?1",
+                        params![name],
+                    )
+                    .map_err(|_| Error::Io)?;
+            }
+        }
+        transaction.commit().map_err(|_| Error::Io)?;
+        Ok(previous)
     }
 
     /// The runs recorded for `session_id`, oldest first.
@@ -268,6 +484,7 @@ mod tests {
             truncated: false,
             memories_proposed: 1,
             memories_dropped: 0,
+            skills_written: 0,
             detail: String::new(),
         }
     }
@@ -343,5 +560,105 @@ mod tests {
             |path: &Path| std::fs::metadata(path).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode(path.parent().expect("parent")), 0o700);
         assert_eq!(mode(&path), 0o600);
+    }
+
+    fn write(name: &str, hash: &str) -> SkillWrite {
+        SkillWrite {
+            name: name.into(),
+            hash: hash.into(),
+            run_id: "run-1".into(),
+            session_id: "session-1".into(),
+            reason: "it worked".into(),
+            at: "2026-10-02T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn skill_ownership_tracks_the_latest_hash_and_every_version() {
+        let store = Store::open_in_memory().expect("open");
+        assert_eq!(store.generated("lint").expect("read"), None);
+        store
+            .record_skill_write(&write("lint", "h1"))
+            .expect("first");
+        store
+            .record_skill_write(&write("lint", "h2"))
+            .expect("second");
+        store
+            .record_skill_write(&write("fmt", "h9"))
+            .expect("other");
+        assert_eq!(
+            store.generated("lint").expect("read").expect("row").hash,
+            "h2"
+        );
+        assert_eq!(
+            store.skill_versions("lint").expect("versions"),
+            ["h1", "h2"]
+        );
+        assert_eq!(store.generated_count().expect("count"), 2);
+        let names: Vec<_> = store
+            .list_generated()
+            .expect("list")
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        assert_eq!(names, ["fmt", "lint"]);
+    }
+
+    #[test]
+    fn popping_a_version_restores_the_previous_hash_or_forgets_the_skill() {
+        let store = Store::open_in_memory().expect("open");
+        store
+            .record_skill_write(&write("lint", "h1"))
+            .expect("first");
+        store
+            .record_skill_write(&write("lint", "h2"))
+            .expect("second");
+        assert_eq!(
+            store.pop_skill_version("lint", "t").expect("pop"),
+            Some("h1".to_owned())
+        );
+        assert_eq!(
+            store.generated("lint").expect("read").expect("row").hash,
+            "h1"
+        );
+        assert_eq!(store.pop_skill_version("lint", "t").expect("pop"), None);
+        assert_eq!(store.generated("lint").expect("read"), None);
+        assert!(store.skill_versions("lint").expect("versions").is_empty());
+    }
+
+    #[test]
+    fn a_version_one_database_is_migrated_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reflection.db");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    "CREATE TABLE runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, \
+                     trigger TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, \
+                     status TEXT NOT NULL, from_entry TEXT NOT NULL, to_entry TEXT NOT NULL, \
+                     input_bytes INTEGER NOT NULL, truncated INTEGER NOT NULL, \
+                     memories_proposed INTEGER NOT NULL, memories_dropped INTEGER NOT NULL, \
+                     detail TEXT NOT NULL) STRICT; \
+                     CREATE TABLE watermarks (session_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, \
+                     updated_at TEXT NOT NULL) STRICT; \
+                     INSERT INTO watermarks VALUES ('session-1', 'aaaaaaaa', 't');",
+                )
+                .expect("v1 schema");
+            connection
+                .pragma_update(None, "user_version", 1)
+                .expect("version");
+        }
+        let store = Store::open(&path).expect("migrate");
+        assert_eq!(
+            store.watermark("session-1").expect("read").as_deref(),
+            Some("aaaaaaaa")
+        );
+        store
+            .record_skill_write(&write("lint", "h1"))
+            .expect("new tables");
+        store
+            .record(&row("a", Status::Ok, "bbbbbbbb"))
+            .expect("runs column");
     }
 }

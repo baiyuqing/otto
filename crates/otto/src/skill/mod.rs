@@ -34,8 +34,8 @@ use crate::tool::root::{self, Root};
 
 /// The largest `SKILL.md`, or sibling skill file, this loader will read.
 pub const MAX_SKILL_FILE_BYTES: u64 = 64 << 20;
-const MAX_SKILL_NAME_LENGTH: usize = 64;
-const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
+pub(crate) const MAX_SKILL_NAME_LENGTH: usize = 64;
+pub(crate) const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
 /// The bound on each half of a declared contract.
 pub const MAX_SKILL_CONTRACT_CHARS: usize = 1024;
 
@@ -254,7 +254,7 @@ fn validate_skill_name(fields: &Fields, directory_name: &str) -> Result<String, 
 }
 
 /// `^[a-z0-9]+(-[a-z0-9]+)*$`, spelled out to avoid a regex for one rule.
-fn is_valid_skill_name(name: &str) -> bool {
+pub(crate) fn is_valid_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.split('-').all(|part| {
             !part.is_empty()

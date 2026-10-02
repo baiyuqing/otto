@@ -44,6 +44,9 @@ pub enum Failure {
     QuoteMismatch,
     /// The proposal needs a user message among its citations and has none.
     NoUserEntry,
+    /// The proposal needs a citation showing the work was actually done (a
+    /// successful tool result or a tool call) and has none.
+    NotPerformed,
 }
 
 impl Failure {
@@ -55,6 +58,7 @@ impl Failure {
             Self::ShortQuote => "evidence_short_quote",
             Self::QuoteMismatch => "evidence_quote_mismatch",
             Self::NoUserEntry => "evidence_no_user_entry",
+            Self::NotPerformed => "evidence_not_performed",
         }
     }
 }
@@ -64,20 +68,38 @@ pub fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// What a proposal's citations must show beyond being verbatim.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Requirement {
+    /// At least one citation is a user message.
+    pub user: bool,
+    /// At least one citation shows the work was performed: a successful tool
+    /// result, or an assistant entry that made a tool call.
+    pub performed: bool,
+}
+
+/// Whether `entry` shows work being done.
+fn performed(entry: &Entry) -> bool {
+    match entry.role {
+        EntryRole::Tool => !entry.is_error,
+        EntryRole::Assistant => entry.text.contains("[tool_call "),
+        _ => false,
+    }
+}
+
 /// Verifies `items` against the entries the model was shown. On success
 /// returns the distinct cited entry ids in citation order.
-///
-/// `require_user` demands at least one citation of a user message.
 pub fn verify(
     items: &[Item],
     entries: &HashMap<&str, &Entry>,
-    require_user: bool,
+    requirement: Requirement,
 ) -> Result<Vec<String>, Failure> {
     if items.is_empty() || items.len() > MAXIMUM_ITEMS {
         return Err(Failure::Count);
     }
     let mut cited: Vec<String> = Vec::new();
     let mut has_user = false;
+    let mut has_performed = false;
     for item in items {
         let entry = entries
             .get(item.entry.as_str())
@@ -93,12 +115,16 @@ pub fn verify(
             return Err(Failure::QuoteMismatch);
         }
         has_user |= entry.role == EntryRole::User;
+        has_performed |= performed(entry);
         if !cited.contains(&item.entry) {
             cited.push(item.entry.clone());
         }
     }
-    if require_user && !has_user {
+    if requirement.user && !has_user {
         return Err(Failure::NoUserEntry);
+    }
+    if requirement.performed && !has_performed {
+        return Err(Failure::NotPerformed);
     }
     cited.truncate(MAXIMUM_CITED_ENTRIES);
     Ok(cited)
@@ -131,8 +157,23 @@ mod tests {
         items: &[Item],
         require_user: bool,
     ) -> Result<Vec<String>, Failure> {
+        verify_requiring(
+            entries,
+            items,
+            Requirement {
+                user: require_user,
+                performed: false,
+            },
+        )
+    }
+
+    fn verify_requiring(
+        entries: &[Entry],
+        items: &[Item],
+        requirement: Requirement,
+    ) -> Result<Vec<String>, Failure> {
         let map: HashMap<&str, &Entry> = entries.iter().map(|e| (e.id.as_str(), e)).collect();
-        verify(items, &map, require_user)
+        verify(items, &map, requirement)
     }
 
     fn fixture() -> Vec<Entry> {
@@ -236,6 +277,46 @@ mod tests {
         assert_eq!(
             verify_with(&fixture(), &items, true).expect("verify"),
             vec!["a0000001".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_skill_must_cite_work_that_was_actually_performed() {
+        let mut entries = fixture();
+        entries.push(entry(
+            "a0000004",
+            EntryRole::Tool,
+            false,
+            "ran cargo test: all passed",
+        ));
+        let mut failed = entry("a0000005", EntryRole::Tool, false, "cargo test: 3 failed");
+        failed.is_error = true;
+        entries.push(failed);
+        entries.push(entry(
+            "a0000006",
+            EntryRole::Assistant,
+            false,
+            "[tool_call bash] {\"command\":\"cargo test\"}",
+        ));
+        let need = Requirement {
+            user: true,
+            performed: true,
+        };
+        let user = item("a0000001", "always answer in Chinese");
+
+        assert_eq!(
+            verify_requiring(&entries, std::slice::from_ref(&user), need),
+            Err(Failure::NotPerformed)
+        );
+        let ran = [user.clone(), item("a0000004", "all passed")];
+        assert!(verify_requiring(&entries, &ran, need).is_ok());
+        let called = [user.clone(), item("a0000006", "cargo test")];
+        assert!(verify_requiring(&entries, &called, need).is_ok());
+        let errored = [user, item("a0000005", "3 failed")];
+        assert_eq!(
+            verify_requiring(&entries, &errored, need),
+            Err(Failure::NotPerformed),
+            "a failed tool result does not show the procedure worked"
         );
     }
 }

@@ -17,6 +17,22 @@ pub const MAXIMUM_INPUT_BYTES: usize = 4 * 1024 * 1024;
 /// The largest accepted `max_memories`; the memory store accepts at most this
 /// many candidates in one batch.
 pub const MAXIMUM_MEMORIES: usize = 8;
+/// The largest accepted `max_skills` (per run) and `max_generated_skills`
+/// (in total).
+pub const MAXIMUM_SKILLS_PER_RUN: usize = 8;
+pub const MAXIMUM_GENERATED_SKILLS: usize = 200;
+
+/// When reflection may write skills, given where the slice's content came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillSource {
+    /// Only when no entry in the slice came from outside the user and the
+    /// workspace (the default).
+    Untainted,
+    /// Also when external entries are present; they are still withheld from
+    /// the model and cannot be cited.
+    Any,
+}
 
 /// The `[reflection]` table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,10 +42,20 @@ pub struct Reflection {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub memories: bool,
+    #[serde(default = "default_true")]
+    pub skills: bool,
+    #[serde(default = "default_skill_source")]
+    pub skill_source: SkillSource,
+    #[serde(default = "default_true")]
+    pub skill_review: bool,
     #[serde(default = "default_max_input_bytes")]
     pub max_input_bytes: usize,
     #[serde(default = "default_max_memories")]
     pub max_memories: usize,
+    #[serde(default = "default_max_skills")]
+    pub max_skills: usize,
+    #[serde(default = "default_max_generated_skills")]
+    pub max_generated_skills: usize,
 }
 
 impl Default for Reflection {
@@ -37,8 +63,13 @@ impl Default for Reflection {
         Reflection {
             enabled: true,
             memories: true,
+            skills: true,
+            skill_source: default_skill_source(),
+            skill_review: true,
             max_input_bytes: default_max_input_bytes(),
             max_memories: default_max_memories(),
+            max_skills: default_max_skills(),
+            max_generated_skills: default_max_generated_skills(),
         }
     }
 }
@@ -62,13 +93,30 @@ fn default_max_memories() -> usize {
     MAXIMUM_MEMORIES
 }
 
+fn default_skill_source() -> SkillSource {
+    SkillSource::Untainted
+}
+
+fn default_max_skills() -> usize {
+    2
+}
+
+fn default_max_generated_skills() -> usize {
+    30
+}
+
 /// The resolved `[reflection]` configuration for one process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReflectionRuntime {
     pub enabled: bool,
     pub memories: bool,
+    pub skills: bool,
+    pub skill_source: SkillSource,
+    pub skill_review: bool,
     pub max_input_bytes: usize,
     pub max_memories: usize,
+    pub max_skills: usize,
+    pub max_generated_skills: usize,
 }
 
 impl Default for ReflectionRuntime {
@@ -77,8 +125,13 @@ impl Default for ReflectionRuntime {
         ReflectionRuntime {
             enabled: table.enabled,
             memories: table.memories,
+            skills: table.skills,
+            skill_source: table.skill_source,
+            skill_review: table.skill_review,
             max_input_bytes: table.max_input_bytes,
             max_memories: table.max_memories,
+            max_skills: table.max_skills,
+            max_generated_skills: table.max_generated_skills,
         }
     }
 }
@@ -97,11 +150,26 @@ pub fn resolve_reflection(file: &super::File) -> Result<ReflectionRuntime, Confi
             "invalid reflection.max_memories: must be between 1 and {MAXIMUM_MEMORIES}"
         )));
     }
+    if table.max_skills == 0 || table.max_skills > MAXIMUM_SKILLS_PER_RUN {
+        return Err(ConfigError::new(format!(
+            "invalid reflection.max_skills: must be between 1 and {MAXIMUM_SKILLS_PER_RUN}"
+        )));
+    }
+    if table.max_generated_skills == 0 || table.max_generated_skills > MAXIMUM_GENERATED_SKILLS {
+        return Err(ConfigError::new(format!(
+            "invalid reflection.max_generated_skills: must be between 1 and {MAXIMUM_GENERATED_SKILLS}"
+        )));
+    }
     Ok(ReflectionRuntime {
         enabled: table.enabled,
         memories: table.memories,
+        skills: table.skills,
+        skill_source: table.skill_source,
+        skill_review: table.skill_review,
         max_input_bytes: table.max_input_bytes,
         max_memories: table.max_memories,
+        max_skills: table.max_skills,
+        max_generated_skills: table.max_generated_skills,
     })
 }
 
@@ -119,8 +187,13 @@ mod tests {
             ReflectionRuntime {
                 enabled: true,
                 memories: true,
+                skills: true,
+                skill_source: SkillSource::Untainted,
+                skill_review: true,
                 max_input_bytes: 204_800,
                 max_memories: 8,
+                max_skills: 2,
+                max_generated_skills: 30,
             }
         );
         assert!(File::default().reflection.is_default());
@@ -130,7 +203,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn explicit_table_is_used() {
         let file = parse(
-            "[reflection]\nenabled = false\nmemories = false\nmax_input_bytes = 4096\nmax_memories = 3\n",
+            "[reflection]\nenabled = false\nmemories = false\nskills = false\nskill_source = \"any\"\nskill_review = false\nmax_input_bytes = 4096\nmax_memories = 3\nmax_skills = 1\nmax_generated_skills = 5\n",
         )
         .expect("parse");
         let runtime = resolve_reflection(&file).expect("resolve");
@@ -138,6 +211,10 @@ mod tests {
         assert!(!runtime.memories);
         assert_eq!(runtime.max_input_bytes, 4096);
         assert_eq!(runtime.max_memories, 3);
+        assert!(!runtime.skills);
+        assert_eq!(runtime.skill_source, SkillSource::Any);
+        assert!(!runtime.skill_review);
+        assert_eq!((runtime.max_skills, runtime.max_generated_skills), (1, 5));
         assert!(!file.reflection.is_default());
     }
 
@@ -152,6 +229,16 @@ mod tests {
             ),
             ("[reflection]\nmax_memories = 0\n", "max_memories"),
             ("[reflection]\nmax_memories = 9\n", "max_memories"),
+            ("[reflection]\nmax_skills = 0\n", "max_skills"),
+            ("[reflection]\nmax_skills = 9\n", "max_skills"),
+            (
+                "[reflection]\nmax_generated_skills = 0\n",
+                "max_generated_skills",
+            ),
+            (
+                "[reflection]\nmax_generated_skills = 201\n",
+                "max_generated_skills",
+            ),
         ] {
             let error = resolve_reflection(&parse(text).expect("parse")).expect_err(text);
             assert!(
@@ -165,5 +252,6 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn unknown_keys_are_rejected() {
         assert!(parse("[reflection]\nauto = \"off\"\n").is_err());
+        assert!(parse("[reflection]\nskill_source = \"anywhere\"\n").is_err());
     }
 }

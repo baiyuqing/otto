@@ -42,7 +42,7 @@ pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTranspor
 pub use memory::{Memory, MemoryRuntime, MemorySQLite, resolve_memory};
 pub use model_limits::ModelLimits;
 pub use projects::{Project, TrustLevel};
-pub use reflection::{Reflection, ReflectionRuntime, resolve_reflection};
+pub use reflection::{Reflection, ReflectionRuntime, SkillSource, resolve_reflection};
 pub use resolve::{
     CompactionRuntime, DeadlineRuntime, Overrides, ResilienceRuntime, Runtime, SessionDefaults,
     resolve,

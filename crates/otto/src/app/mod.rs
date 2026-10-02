@@ -681,6 +681,7 @@ impl Controller {
             self.memory_manager().ok_or(Error::MemoryUnavailable)?;
         let session_id = session.header().id;
         let session_path = session.path();
+        let skill_roots = self.reflection_skill_roots();
         let context = crate::reflection::Context {
             runner: &runner,
             session_id: &session_id,
@@ -688,11 +689,26 @@ impl Controller {
             service: &service,
             user_scope: &user_scope,
             workspace_scope: &workspace_scope,
+            skill_roots: skill_roots.as_ref(),
         };
         self.builder
             .reflector
             .run(&context, "manual", focus, cancel)
             .await
+    }
+
+    /// Where reflection writes and looks up skills, or `None` when skills are
+    /// disabled in `[skills]` or there is no home directory.
+    pub fn reflection_skill_roots(&self) -> Option<crate::reflection::skillwrite::Roots> {
+        let skills = otto_core::config::resolve_skills(
+            &self.builder.config,
+            &self.builder.environment,
+            &self.builder.workspace_path,
+        );
+        skills
+            .enabled
+            .then(|| crate::reflection::skill_roots(&self.builder.home, &skills.roots))
+            .flatten()
     }
 
     // ---- profiles ----

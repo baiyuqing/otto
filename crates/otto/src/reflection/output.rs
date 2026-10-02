@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Deserialize;
 
 use super::evidence::{self, Item};
+use super::guard::Candidate as SkillCandidate;
 use super::transcript::Entry;
 
 pub const KINDS: &[&str] = &["preference", "fact", "convention"];
@@ -26,6 +27,13 @@ pub enum Action {
     Create,
     Update,
     Forget,
+}
+
+/// What a skill proposal asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SkillAction {
+    Create,
+    Revise,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -49,10 +57,20 @@ impl ScopeChoice {
 struct Output {
     #[serde(default)]
     memories: Vec<RawMemory>,
-    /// Skills are not produced by this phase; a model that returns some is
-    /// counted and ignored rather than failing the run.
     #[serde(default)]
-    skills: Vec<serde::de::IgnoredAny>,
+    skills: Vec<RawSkill>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSkill {
+    action: String,
+    name: String,
+    description: String,
+    body: String,
+    reason: String,
+    #[serde(default)]
+    evidence: Vec<Item>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,10 +124,11 @@ pub struct Proposal {
 #[derive(Debug, Default, PartialEq)]
 pub struct Plan {
     pub proposals: Vec<Proposal>,
+    /// Skill proposals that passed the output contract and their evidence
+    /// check; the structure checks, rule scan and review come later.
+    pub skills: Vec<SkillCandidate>,
     /// Dropped proposals by reason.
     pub dropped: BTreeMap<&'static str, usize>,
-    /// Skill proposals the model made anyway.
-    pub ignored_skills: usize,
 }
 
 impl Plan {
@@ -124,11 +143,16 @@ impl Plan {
 
 /// Parses `raw` and validates every proposal against `entries` (the entries
 /// the model was shown) and `existing` (the records it was shown).
+///
+/// `maximum_skills` is the most skill proposals to accept, or `None` when
+/// skills were not requested, in which case any the model returns are dropped
+/// and counted.
 pub fn plan(
     raw: &str,
     entries: &[Entry],
     existing: &[Existing],
     maximum: usize,
+    maximum_skills: Option<usize>,
 ) -> Result<Plan, String> {
     let output: Output = serde_json::from_str(strip_fence(raw))
         .map_err(|error| format!("reflection answer is not the expected JSON: {error}"))?;
@@ -142,10 +166,7 @@ pub fn plan(
         .map(|record| (record.scope, record.kind.clone(), record.key.clone()))
         .collect();
 
-    let mut plan = Plan {
-        ignored_skills: output.skills.len(),
-        ..Plan::default()
-    };
+    let mut plan = Plan::default();
     for raw in output.memories {
         if plan.proposals.len() >= maximum {
             plan.drop("over_limit");
@@ -156,7 +177,47 @@ pub fn plan(
             Err(reason) => plan.drop(reason),
         }
     }
+    for raw in output.skills {
+        let Some(maximum_skills) = maximum_skills else {
+            plan.drop("skill_not_requested");
+            continue;
+        };
+        if plan.skills.len() >= maximum_skills {
+            plan.drop("skill_over_limit");
+            continue;
+        }
+        match validate_skill(raw, &by_id) {
+            Ok(candidate) => plan.skills.push(candidate),
+            Err(reason) => plan.drop(reason),
+        }
+    }
     Ok(plan)
+}
+
+/// A skill must cite a user message (the user asked for or approved the work)
+/// and an entry showing the procedure was actually performed.
+fn validate_skill(
+    raw: RawSkill,
+    entries: &HashMap<&str, &Entry>,
+) -> Result<SkillCandidate, &'static str> {
+    let action = match raw.action.as_str() {
+        "create" => SkillAction::Create,
+        "revise" => SkillAction::Revise,
+        _ => return Err("skill_bad_action"),
+    };
+    let requirement = evidence::Requirement {
+        user: true,
+        performed: true,
+    };
+    let cited = evidence::verify(&raw.evidence, entries, requirement).map_err(|f| f.reason())?;
+    Ok(SkillCandidate {
+        action,
+        name: raw.name.trim().to_owned(),
+        description: raw.description.trim().to_owned(),
+        body: raw.body.trim().to_owned(),
+        reason: raw.reason.trim().to_owned(),
+        cited,
+    })
 }
 
 fn validate(
@@ -235,7 +296,11 @@ fn validate(
     };
 
     let require_user = action != Action::Create || kind == "preference";
-    let cited = evidence::verify(&raw.evidence, entries, require_user).map_err(|f| f.reason())?;
+    let requirement = evidence::Requirement {
+        user: require_user,
+        performed: false,
+    };
+    let cited = evidence::verify(&raw.evidence, entries, requirement).map_err(|f| f.reason())?;
     Ok(Proposal {
         action,
         scope,
@@ -284,6 +349,16 @@ fn strip_fence(raw: &str) -> &str {
 mod tests {
     use super::*;
     use crate::reflection::transcript::EntryRole;
+
+    /// Memory-only planning, the shape most tests exercise.
+    fn plan(
+        raw: &str,
+        entries: &[Entry],
+        existing: &[Existing],
+        maximum: usize,
+    ) -> Result<Plan, String> {
+        super::plan(raw, entries, existing, maximum, None)
+    }
 
     fn entries() -> Vec<Entry> {
         vec![
@@ -460,16 +535,57 @@ mod tests {
         assert_eq!(plan.dropped.get("bad_kind"), Some(&1));
     }
 
-    #[test]
-    fn skill_proposals_are_counted_and_ignored() {
-        let plan = plan(
-            r#"{"memories":[],"skills":[{"name":"x"}]}"#,
-            &entries(),
-            &[],
-            8,
+    fn skill(extra_evidence: &str) -> String {
+        format!(
+            r#"{{"skills":[{{"action":"create","name":"cargo-lint","description":"Lint before committing",
+            "body":"1. Run cargo fmt.\n2. Run cargo clippy.\n3. Fix every warning.","reason":"it worked",
+            "evidence":[{{"entry":"a0000001","quote":"Always answer in Chinese"}}{extra_evidence}]}}]}}"#
         )
-        .expect("plan");
-        assert_eq!(plan.ignored_skills, 1);
-        assert!(plan.proposals.is_empty());
+    }
+
+    fn plan_skills(raw: &str, maximum: Option<usize>) -> Plan {
+        super::plan(raw, &entries(), &[], 8, maximum).expect("plan")
+    }
+
+    #[test]
+    fn a_skill_needs_a_user_citation_and_proof_the_work_was_performed() {
+        let performed = r#",{"entry":"a0000002","quote":"cargo nextest"}"#;
+        let plan = plan_skills(&skill(performed), Some(2));
+        assert_eq!(plan.skills.len(), 1, "{:?}", plan.dropped);
+        assert_eq!(plan.skills[0].name, "cargo-lint");
+        assert_eq!(plan.skills[0].action, SkillAction::Create);
+
+        let plan = plan_skills(&skill(""), Some(2));
+        assert!(plan.skills.is_empty());
+        assert_eq!(plan.dropped.get("evidence_not_performed"), Some(&1));
+    }
+
+    #[test]
+    fn skills_are_dropped_when_not_requested_or_over_the_limit() {
+        let performed = r#",{"entry":"a0000002","quote":"cargo nextest"}"#;
+        let one = skill(performed);
+        let plan = plan_skills(&one, None);
+        assert!(plan.skills.is_empty());
+        assert_eq!(plan.dropped.get("skill_not_requested"), Some(&1));
+
+        let item = one
+            .strip_prefix(r#"{"skills":["#)
+            .and_then(|text| text.strip_suffix("]}"))
+            .expect("one skill")
+            .to_owned();
+        let two = format!(r#"{{"skills":[{item},{item}]}}"#);
+        let plan = plan_skills(&two, Some(1));
+        assert_eq!(plan.skills.len(), 1);
+        assert_eq!(plan.dropped.get("skill_over_limit"), Some(&1));
+    }
+
+    #[test]
+    fn a_skill_with_an_unknown_action_or_field_is_rejected() {
+        let performed = r#",{"entry":"a0000002","quote":"cargo nextest"}"#;
+        let bad = skill(performed).replace("\"create\"", "\"delete\"");
+        let plan = plan_skills(&bad, Some(2));
+        assert_eq!(plan.dropped.get("skill_bad_action"), Some(&1));
+        let extra = skill(performed).replace("\"reason\"", "\"allowed-tools\":\"bash\",\"reason\"");
+        assert!(super::plan(&extra, &entries(), &[], 8, Some(2)).is_err());
     }
 }

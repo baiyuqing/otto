@@ -129,7 +129,7 @@ The selected model and OpenAI-compatible endpoint must support image input.
 
 ## More workflows
 
-- [Local memory](docs/user-manual.md#memory): search, remember, review, and forget, plus on-demand [reflection](docs/user-manual.md#reflection) that proposes memories from a session for your review.
+- [Local memory](docs/user-manual.md#memory): search, remember, review, and forget, plus on-demand [reflection](docs/user-manual.md#reflection) that proposes memories from a session for your review and can write vetted skills you can undo with `/skill revert`.
 - [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files.
 - [MCP servers](docs/user-manual.md#mcp-servers): connect stdio or HTTP Model
   Context Protocol servers and use their tools from the same turn loop.

@@ -1,10 +1,11 @@
 # Session reflection: learning memories and skills from past work
 
-Status: approved 2026-10-02. Phase 1 (memory reflection on demand) is
-implemented; phases 2 to 4 are not. The five open decisions were answered on
-2026-10-02 and are recorded under "Decisions" below. Current user behavior of
-the shipped part is in the user manual; this document remains the rationale
-and the plan for the rest.
+Status: approved 2026-10-02. Phase 1 (memory reflection on demand) and
+phase 2 (generated skills with the vetting pipeline) are implemented; phases 3
+and 4 (automatic triggers, HTTP and the Web UI) are not. The five open
+decisions were answered on 2026-10-02 and are recorded under "Decisions"
+below. Current user behavior of the shipped parts is in the user manual; this
+document remains the rationale and the plan for the rest.
 
 ## Motivation
 
@@ -501,3 +502,40 @@ Questions the design left open, and what the code showed:
 - **Evidence for memories** is implemented in phase 1 (verbatim quotes,
   non-external entries, a user citation for `preference`, `update` and
   `forget`), as the phase list says.
+
+## Notes from implementing phase 2
+
+- **Pipeline order.** Output contract, then evidence (a skill must cite a
+  user entry and an entry showing the work ran), then structure and the rule
+  scan (`guard`), then a *precheck* of the name and ownership, then the model
+  review, then the write. The precheck runs before the review so a proposal
+  that cannot be written (name taken, not owned, cap reached) does not cost a
+  review call.
+- **`Vetted` is enforced by the compiler and by a guard test.** Its fields are
+  private to `guard.rs`, so no other module can build one;
+  `tests/reflection_boundary.rs` also fails if any file other than
+  `skillwrite.rs` mutates the filesystem.
+- **Ownership is the content hash.** `reflection.db` (schema version 2, with a
+  migration from version 1) records the hash of every content reflection wrote
+  per skill. Reflection owns a skill only while the file hashes to the latest
+  one; any human edit makes it human-owned.
+- **History is keyed by hash.** `~/.otto/skill-history/<name>/<hash>.md`
+  holds every version written; `/skill revert` restores the previous hash's
+  file, or removes the skill if reflection created it.
+- **The rule scan** is a regex table in `guard.rs` (secret patterns, override
+  and conceal phrasing in English and Chinese, tampering with sandbox,
+  approvals and `~/.otto` state, pipe-to-shell, destructive and egress
+  commands, uncited URLs, invisible Unicode, encoded blobs) plus an exact-value
+  check through the run's redactor. Phrasings that read as ordinary
+  engineering advice are covered by negative test cases, so the table can be
+  tightened without regressions.
+- **`memories = false`** still runs the reflection call when skills are on;
+  the prompt asks for no memories and any returned are dropped. With both off,
+  `/reflect` makes no model call.
+- **Usage.** The review call is recorded under the task id
+  `reflection:<run id>:review`.
+- **The TUI** runs `/skill generated` and `/skill revert <name>` through the
+  shared `skill_report`, but its argument suggestions do not list them yet.
+- **Seatbelt.** `~/.otto/skills` is added to the sandbox read paths at process
+  start only if it exists; a skills directory created by the first generated
+  skill is readable by sandboxed commands after a restart.

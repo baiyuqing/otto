@@ -2038,8 +2038,8 @@ is rejected.
 | `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
 | `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Returns `end_turn`, or `cancelled` after `session/cancel`. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
-| `_otto/memory/pending` | Extension. Params `{sessionId}`; lists the session's pending memory candidates as `{id, action, kind, key, text, reason, origin, scope}`. |
-| `_otto/memory/review` | Extension. Params `{sessionId, candidateId, decision}` with `decision` `accept` or `reject`; decides one candidate as a human review and returns `{decision, candidateId, record, forgotten}`. `otto acp` advertises both with `agentCapabilities._meta.otto.memoryReview`; `otto acp --attach` does not serve them. |
+| `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}`; `nextCursor` is `""` on the last page. |
+| `_otto/memory/review` | Extension. Params `{sessionId, candidateId, decision}` with `decision` `accept` or `reject`; decides one candidate as a human review and returns `{decision, candidateId, record, forgotten}`. Errors: `-32010` memory is not available in the session, `-32011` the candidate was already decided or changed, `-32002` unknown session or candidate, `-32602` bad parameters or cursor. `otto acp` advertises both with `agentCapabilities._meta.otto.memoryReview`; `otto acp --attach` does not serve them. |
 
 `mcpServers` in `session/new` and `session/load` must be empty: MCP servers
 come from Otto's own configuration (see [MCP servers](#mcp-servers)). Otto
@@ -2344,8 +2344,13 @@ reply "This agent does not support memory review." when the agent does not
 advertise it, as `otto acp --attach` does not. An id that is not a unique
 pending prefix gets "No single pending candidate starts with \"`<id>`\"."; other
 arguments get "Usage: /memory | /memory accept <id> | /memory reject <id>".
-Editing a candidate during review is not available from the chat; use
-`/memory review` in the REPL or TUI.
+`/memory` shows the first page (20) and says when more are pending; an id
+is looked up across pages. When a turn called `remember` or `forget`, the
+reply ends with "Memory changes are proposals. Send /memory to review them."
+The tool results of `remember` and `forget` also tell the model that only the
+user decides a candidate and how, so the model can point the user to
+`/memory`; it still cannot decide one. Editing a candidate during review is
+not available from the chat; use `/memory review` in the REPL or TUI.
 
 ### Permission requests
 

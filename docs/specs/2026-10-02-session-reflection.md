@@ -1,9 +1,10 @@
-# Session reflection: learning memories and skill drafts from past work
+# Session reflection: learning memories and skills from past work
 
-Status: proposed 2026-10-02. Not approved, not implemented. No production code
-or tests are written until this design is approved. Once implemented, current
-behavior moves to the README and user manual and this document becomes
-historical rationale.
+Status: proposed 2026-10-02. The five open decisions were answered on
+2026-10-02 and are recorded under "Decisions" below; the document awaits a
+final go-ahead before any production code or tests are written. Once
+implemented, current behavior moves to the README and user manual and this
+document becomes historical rationale.
 
 ## Motivation
 
@@ -22,60 +23,73 @@ loop:
 
 Agents that improve with use (Hermes is the usual reference) add a step after
 the work: look back, keep what was learned, and turn repeated procedures into
-reusable instructions. Otto has the storage and the review gate for this but
-not the step. This design adds that step without weakening the rule the
-existing design already chose: **nothing a model produces becomes active
-without a human accepting it.**
+reusable instructions. Otto has the storage for this but not the step. This
+design adds that step with two different trust levels, chosen deliberately:
+
+- **Memory** keeps the rule the existing design already chose: a model's
+  write is a pending candidate until a human accepts it.
+- **Skills** are written and activated automatically, because a skill loop
+  that waits on a human rarely closes. The cost is that model-derived
+  instructions persist across sessions without a prior review, so this design
+  bounds that with ownership rules, caps, visible notices, and a one-command
+  revert (see "Skills" and "Safety").
 
 ## Goals and non-goals
 
 Goals:
 
 - Extract durable facts and preferences from a session into memory candidates.
-- Propose new skills, or revisions of existing ones, from procedures the
-  session actually performed.
-- Reuse the existing review surfaces and storage; add the smallest new
-  surface that skills need.
+- Create new skills, and revise skills that reflection itself created, from
+  procedures the session actually performed.
+- Reuse the existing review surface for memory and the existing skill roots
+  for skills; add the smallest new surface that skills need (list and
+  revert).
 
 Non-goals:
 
 - No change to what is recalled or when. Recall stays request-local and
   untrusted.
-- No automatic activation of any memory or skill, in any mode.
+- No automatic activation of memory: model-originated records stay pending
+  candidates.
+- No automatic edit of a skill a human wrote or has since edited.
 - No new provider, and no extractor that runs outside the session's own
   configured provider and profile.
 - No writing to session history. Session files stay append-only and
   unchanged by reflection.
 - No bundled-skill or `allowed-tools` changes; no skill scripts or assets in
-  drafts (a draft is a single `SKILL.md`).
+  a generated skill (it is a single `SKILL.md`).
 
 ## Behaviour summary
 
 - A **reflection run** reads a slice of one session's transcript, makes one
-  tool-less model call, validates the structured result, and writes
-  *candidates* and *drafts*. It never writes records or skills directly.
+  tool-less model call, validates the structured result, and writes memory
+  *candidates* and generated *skills*. It never writes memory records
+  directly.
 - Memory output goes through `memory::Service::propose` with
   `Origin::Extractor` (already modelled in `memory/contracts.rs`; the default
   policy already turns extractor writes into pending candidates). They appear
   in the existing `/memory review`.
-- Skill output goes to a new staging directory, `~/.otto/skill-drafts/`, which
-  is not a skill root. Discovery, the skill listing, the `skill` tool, and the
-  Seatbelt read paths do not see it.
-- A human reviews drafts with `/skill drafts` and accepts or rejects each.
-  Accepting copies the draft into a skill root and is the only way a draft
-  becomes visible to the model.
-- Reflection is off unless asked for. `/reflect` runs it on demand; an
-  optional config key runs it automatically at defined points (below).
+- Skill output is written to `~/.otto/skills/<name>/SKILL.md`, the existing
+  user-level skill root. The skill is picked up by the next catalog discovery
+  (`/new`, `/resume`, `/model`, or restart), as for any new skill. Every
+  write is announced to the user and can be undone with `/skill revert`.
+- Reflection is on by default and runs automatically after a successful
+  compaction. `/reflect` runs it on demand, and `[reflection]` can turn it,
+  or just its skill output, off (below).
 
 ## Triggers
 
 | Trigger | Default | Behavior |
 | --- | --- | --- |
-| `/reflect [focus]` (TUI, REPL, Web UI, HTTP) | always available when enabled | Runs now over the unreflected slice; prints counts of candidates and drafts. |
-| `auto = "on_exit"` | off | Runs once when a session closes normally, over the unreflected slice. Skipped for `--no-session`, sub-agent children, and sessions shorter than `min_turns`. |
-| `auto = "on_compaction"` | off | Runs after a successful compaction, over the entries that compaction just summarized. |
+| `/reflect [focus]` (TUI, REPL, Web UI, HTTP) | always available when enabled | Runs now over the unreflected slice; prints counts of candidates and skills. |
+| `auto = "on_compaction"` | **default** | Runs after a successful compaction, over the entries that compaction just summarized. Skipped for `--no-session` and sub-agent children. |
+| `auto = "on_exit"` | not default | Runs once when a session closes normally, over the unreflected slice. Skipped for `--no-session`, sub-agent children, and sessions shorter than `min_turns`. |
+| `auto = "off"` | not default | No automatic runs; only `/reflect`. |
 
-`auto` is one value, not a list, to keep the matrix small. Automatic runs are
+`auto` is one value, not a list, to keep the matrix small. Because
+`on_compaction` is the default, a session that never reaches compaction never
+reflects on its own, which bounds the default cost to long sessions. Automatic
+runs are
 background tasks: they never delay, change, or fail the turn or the exit that
 triggered them, and they are bounded by the same cancellation as the process
 (`Ctrl+C` or shutdown cancels the in-flight call and records the run as
@@ -98,8 +112,9 @@ triggered them, and they are bounded by the same cancellation as the process
   `forget` actions with the right `target_id` and `base_revision` instead of
   creating near-copies.
 - The existing skill catalog (names, descriptions) is included so the model
-  can propose a revision of a skill instead of a duplicate. A revision's
-  current body is included only for the one skill being revised.
+  can revise a skill instead of creating a duplicate. A revision's current
+  body is included only for the one skill being revised, and only skills
+  reflection is allowed to revise (see "Skills") are offered for revision.
 
 ## Output contract
 
@@ -125,7 +140,7 @@ is written.
 Bounds (all configurable ceilings, defaults shown): at most 8 memory
 proposals and 2 skill proposals per run; memory `text` at most the existing
 record limit in `memory/validate.rs`; skill `body` at most 16 KiB.
-Over-limit items are dropped and counted, not partially accepted.
+Over-limit items are dropped and counted, not partially applied.
 
 ### Memory proposals
 
@@ -137,64 +152,77 @@ rejected are not re-proposed: the reviewer's earlier rejection is visible to
 the service as candidate history, and the run skips an identical key and text
 (to be confirmed against the candidate store during implementation).
 
-### Skill drafts
+## Skills
 
-A draft is `~/.otto/skill-drafts/<name>/SKILL.md` plus a sidecar
-`draft.json` (action, reason, source session and range, run id, the content
-hash of the skill being revised, creation time). Validation before writing:
+### Validation before any write
 
 - The name and description pass the same validation as discovery
-  (`a-z0-9-`, 1 to 64 characters; description 1 to 1024), and `input`/`output`
-  frontmatter, if present, passes `validate_skill_contract`. A draft that
-  would be skipped by discovery is never written.
-- `create` is rejected if the name exists in any skill root or as an existing
-  draft; the model must use `revise`. `revise` is rejected if the name does
-  not exist. This keeps a model from silently shadowing a skill that a
-  higher-precedence root defines.
-- The body is plain Markdown. Frontmatter keys other than `name`,
-  `description`, `input`, `output` are dropped, so a draft cannot carry
-  `allowed-tools` or any key Otto later gives meaning to.
+  (`a-z0-9-`, 1 to 64 characters; description 1 to 1024). A skill that
+  discovery would skip is never written.
+- The body is plain Markdown. Frontmatter is regenerated by Otto from `name`
+  and `description` only: `input`, `output`, `allowed-tools`, and every other
+  key are dropped. In particular a generated skill never declares a contract,
+  so it is never registered as a sub-agent definition; delegation stays an
+  opt-in a human makes by editing the skill.
+- The body passes the secret-pattern scanner and a size cap.
+- `create` is rejected if the name exists in any skill root (user, workspace,
+  or bundled), so reflection can never shadow or replace a skill another root
+  defines. The model must use `revise` for an existing one.
+- `revise` is allowed only for a skill reflection owns (next section).
+- At most `max_skills` writes per run and `max_generated_skills` skills in
+  total (default 30), so a poisoned transcript cannot flood the directory.
 
-## Review and acceptance
+### Ownership
 
-Skills are instructions the model will follow, which makes them a higher-risk
-write than a fact. The review therefore shows everything.
+Reflection records, in `reflection.db`, the name and content hash of every
+skill file it writes. A skill is **reflection-owned** only while its current
+file hash equals the last hash reflection wrote. A skill a human authored, or
+a generated skill a human has since edited, is human-owned: reflection never
+revises or removes it, and a `revise` proposal for it is dropped and counted.
+This is what keeps hand-written skills safe without a review step.
 
-- `/skill drafts` lists drafts with name, action, reason, and source.
-- `/skill draft show <name>` prints the full `SKILL.md`; for a `revise`, a
-  unified diff against the current skill. It also prints the contract-check
-  status when the experimental checker is enabled, as `/skill <name>` does.
-- `/skill draft accept <name> [--scope user|workspace]` installs the draft.
-  `user` (default) writes `~/.otto/skills/<name>/SKILL.md`; `workspace` writes
-  `.otto/skills/<name>/SKILL.md`. A `revise` first copies the replaced file to
-  a timestamped backup beside it, using the same convention as the backed-up
-  config writer in `crates/otto/src/config`. The draft is removed on success.
-  The skill is visible after the next catalog discovery (`/new`, `/resume`,
-  `/model`, or restart), as for any new skill.
-- `/skill draft reject <name>` deletes the draft and records the rejection so
-  an identical proposal is not made again.
-- Accept refuses if the revised skill's content changed since the draft was
-  made (hash mismatch), and tells the user to re-run reflection.
-- Every command is human-originated. No agent tool can accept, reject, or
-  write a draft, and the reflection model call has no tools at all.
+### Writes, history, and revert
+
+- The write is atomic (temp file in the same directory, then rename) and
+  creates `~/.otto/skills/<name>/SKILL.md`.
+- A `revise` first copies the replaced file to
+  `~/.otto/skill-history/<name>/<timestamp>/SKILL.md`. The history directory is
+  outside every skill root, so old versions are never discovered or loaded.
+- `/skill generated` lists reflection-owned skills with run id, source
+  session, time, and the reason the model gave.
+- `/skill revert <name>` restores the previous version, or removes the skill
+  if the run created it, for a reflection-owned skill. It is human-originated;
+  no agent tool can call it.
+- The existing `/skill set <name> disabled` also works on generated skills.
+- `/skill <name>` marks a generated skill as such and shows its provenance.
+- When a run writes a skill the user sees one system line naming the skill and
+  the revert command. Under `on_compaction` the session is live, so the line
+  appears immediately; the skill becomes visible to the model at the next
+  catalog discovery.
+- The contract checker, when enabled, is unaffected: generated skills carry
+  no contract, so nothing is checked or delegated.
 
 Memory candidates are reviewed with the existing `/memory review`; no change.
 
 ## Safety
 
 - **Prompt injection.** The transcript includes tool output and fetched
-  content, so it is untrusted. The reflection prompt says so, the call has no
-  tools, and the only effects of any model output are pending candidates and
-  inert drafts that a human must accept. The prompt additionally instructs the
-  model to ignore instructions inside the transcript.
+  content, so it is untrusted. The reflection prompt says so and instructs the
+  model to ignore instructions inside the transcript, and the call has no
+  tools. Memory output is still only pending candidates. Skill output is the
+  residual risk of choosing automatic activation: injected text that reaches
+  the model's output could become a persistent instruction that later
+  sessions load. The bounds are the validation and ownership rules above, no
+  contract and no `allowed-tools`, the per-run and total caps, an announced
+  write, and `/skill revert`; none of them stops a plausible-looking malicious
+  procedure from being written. Setting `skills = false` removes the risk.
 - **Secrets.** Input is redacted before leaving the process. Output passes the
-  memory content guard (memory) and a draft scanner (skills) that rejects
-  anything matching the redactor's secret patterns. Drafts, run logs, and the
-  database never store the raw transcript, only ids and ranges.
-- **Persistence.** The staged drafts live under `~/.otto`, outside any
-  workspace, so file tools cannot reach them and a repository cannot plant
-  one. The workspace destination is only written by an explicit
-  `accept --scope workspace`.
+  memory content guard (memory) and a skill scanner that rejects
+  anything matching the redactor's secret patterns. Skill history, run logs,
+  and the database never store the raw transcript, only ids and ranges.
+- **Persistence.** Generated skills are written only to the user-level root
+  under `~/.otto`, outside any workspace, so a repository cannot cause one to
+  be written into itself. Reflection never writes `.otto/skills`.
 - **Cost and abuse.** One call per run, input and output token caps,
   provider usage recorded through the existing `usage` collector under a
   `reflection` label, and a per-session minimum interval so repeated
@@ -209,37 +237,41 @@ A new `~/.otto/reflection.db` (SQLite, same open/migrate helpers as
 `usage`). It holds, per session: the last reflected entry id (the watermark),
 and one row per run: id, session id, trigger, entry range, status
 (`ok|noop|failed|canceled|truncated`), counts of memory candidates and skill
-drafts, token usage, and times. Rows are appended, never rewritten, except
+skill writes, token usage, and times. Rows are appended, never rewritten, except
 the watermark, which advances only after a run completes. Failed and
 canceled runs do not advance it, so the next run covers the same slice.
-`--no-session` runs have nothing to reflect on and are skipped.
+`--no-session` runs have nothing to reflect on and are skipped. The database
+also holds the ownership table: skill name, last written content hash, run id.
 
-The database is opened only when reflection is enabled, as the skill-check
-database is.
+The database is opened only when reflection is enabled.
 
 ## Configuration
 
 ```toml
 [reflection]
-enabled = false             # master switch; default false
-auto = "off"                # "off" | "on_exit" | "on_compaction"
-min_turns = 4               # shorter sessions are skipped by auto modes
+enabled = true              # master switch; default true
+auto = "on_compaction"      # "off" | "on_exit" | "on_compaction"; default on_compaction
+memories = true             # propose memory candidates
+skills = true               # write generated skills
+min_turns = 4               # shorter sessions are skipped by on_exit
 max_input_bytes = 204800
 max_memories = 8
-max_skills = 2
+max_skills = 2              # per run
+max_generated_skills = 30   # in total
 ```
 
 Reflection uses the session's current provider and model profile; it does not
 add a separate model setting in the first release. With `enabled = false`,
 `/reflect` reports that reflection is disabled and no database is opened.
+Reflection is on by default, so the user manual documents how to turn it off.
 
 ## Where the code goes
 
 Following the task map in `AGENTS.md`:
 
 - `crates/otto/src/reflection/` (new): `run` (slice, render, call, validate,
-  persist), `draft` (staging store, validation, accept/reject), `store`
-  (SQLite). The model call reuses the provider contract and the redactor from
+  persist), `skillwrite` (validation, ownership, atomic write, history,
+  revert), `store` (SQLite). The model call reuses the provider contract and the redactor from
   `otto-core`; the pure parts (render, schema, validation) stay free of
   native dependencies where practical but live in `crates/otto`, because the
   stores are native.
@@ -247,27 +279,31 @@ Following the task map in `AGENTS.md`:
   REPL, `otto serve`, and ACP call one implementation. No frontend gets its
   own copy.
 - `cli` composition root builds the `Reflector` and injects it; `/reflect`,
-  `/skill drafts`, and `/skill draft ...` are added next to the existing
+  `/skill generated`, and `/skill revert` are added next to the existing
   `/skill` and `/memory` commands.
-- `server`: `POST /v1/sessions/{id}/reflect` and draft list/show/accept/reject
+- `server`: `POST /v1/sessions/{id}/reflect` and generated-skill list/revert
   routes; the Web UI renders them. HTTP and ACP are follow-ups to the
   command-line surfaces, listed under phases.
-- `skill`: a small public function to resolve the install target for a draft;
-  discovery code is unchanged.
+- `skill`: discovery code is unchanged; the user-level root path comes from
+  the existing `roots` function.
 - `memory`: remove the "Observe, extractor absent" claim in `service.rs` and
   the user manual only when the extractor path ships, and keep the "no
   `Binding.Observe`" statement accurate: reflection calls `propose`, it does
   not add `Observe`.
 
-The architecture guards gain two checks: nothing in `reflection` calls
-`Service::remember` (it may only call `propose`), and nothing but the draft
-accept path writes into a skill root.
+The architecture guards gain three checks: nothing in `reflection` calls
+`Service::remember` (it may only call `propose`), nothing in `reflection`
+writes to a workspace `.otto/skills`, and only `skillwrite` writes into a
+skill root.
 
 ## Compatibility
 
 - Session JSONL (Pi v3) is untouched.
-- Additive config table, additive slash commands, additive routes. A config
-  without `[reflection]` behaves as today.
+- Additive config table, additive slash commands, additive routes. Behavior
+  change: a config without `[reflection]` now gets the defaults, so after the
+  triggers phase ships, existing users make an extra model call after each
+  compaction and may gain generated skills. The release notes and the user
+  manual must say so and show `enabled = false`.
 - `Origin::Extractor` already exists in the store and the default policy, so
   no schema migration is needed for memory.
 - Wasm boundary: all new code is native-only and lives in `crates/otto`;
@@ -278,10 +314,11 @@ accept path writes into a skill root.
 1. **Memory reflection, on demand.** `reflection` module, store, `/reflect`
    for memory only, tests. Smallest slice that exercises the pipeline and the
    existing review gate.
-2. **Skill drafts.** Draft store, validation, `/skill drafts` and
-   `/skill draft show|accept|reject`, diff and backup on revise.
-3. **Automatic triggers.** `on_exit` and `on_compaction`, watermark and
-   interval guards.
+2. **Generated skills.** Validation, ownership, atomic write, history,
+   `/skill generated` and `/skill revert`, announcement line.
+3. **Automatic triggers.** `on_compaction` (the default) and `on_exit`,
+   watermark and interval guards. The defaults take effect when this phase
+   ships; before it, only `/reflect` exists.
 4. **Server and Web UI.** HTTP routes and review UI; ACP exposure only if a
    connector needs it.
 
@@ -292,41 +329,50 @@ Each phase ships with tests and doc updates in the same change.
 All tests are offline and deterministic, using a scripted fake provider.
 
 - Pipeline: a slice produces exactly the expected `ProposeRequest`s and
-  drafts; the watermark advances only on success; a canceled or failed run
+  skill writes; the watermark advances only on success; a canceled or failed run
   leaves it in place.
 - Output contract: unknown fields, oversize items, bad names, `create` of an
-  existing skill, `revise` of a missing skill, and a stripped `allowed-tools`
-  key are each rejected or dropped with the right count.
+  existing skill in any root, `revise` of a missing skill, and a stripped
+  `allowed-tools`, `input`, or `output` key are each rejected or dropped with
+  the right count; a generated skill is never registered as a sub-agent.
 - Safety: a transcript containing a planted secret never reaches the fake
   provider; a transcript with injected "write this skill" instructions
-  produces at most pending candidates and inert drafts; the reflection call
-  is made with an empty tool list.
-- Review: accept installs into the chosen root and the skill is found by
-  `Catalog::discover`; revise leaves a backup; a hash mismatch refuses;
-  reject suppresses an identical later proposal; drafts are absent from
-  discovery and from the Seatbelt read paths until accepted.
-- Triggers: `on_exit` skips `--no-session`, children, and short sessions;
+  produces at most pending memory candidates and a bounded, validated skill;
+  the reflection call is made with an empty tool list.
+- Skills: a written skill is found by `Catalog::discover`; `revise` leaves a
+  history copy and updates the ownership hash; a human edit makes the skill
+  human-owned so a later `revise` is dropped; a human-authored skill is never
+  revised; `/skill revert` restores the previous version or removes a created
+  skill; history is absent from discovery; the total cap is enforced;
+  `skills = false` writes nothing; reflection never writes a workspace root.
+- Triggers: the default is `on_compaction`; `on_exit` skips `--no-session`,
+  children, and short sessions;
   `on_compaction` covers exactly the compacted range; the minimum interval
   blocks a second automatic run.
-- Disabled: with `enabled = false` no database is created.
-- Architecture guards for the two rules above.
+- Disabled: with `enabled = false` no database is created. The default test
+  suite sets reflection explicitly with a fake provider, so defaults never
+  cause a network call.
+- Architecture guards for the three rules above.
 
-## Decisions for approval
+## Decisions
 
-1. **Skill drafts need a human accept step** (recommended), versus
-   auto-activating drafts. Recommendation: human accept only; skills steer
-   behavior and this matches the existing safety stance.
-2. **Default `auto = "off"`** (recommended), versus defaulting to
-   `on_exit`. Recommendation: off until phase 3 has real-use evidence on
-   cost and candidate quality.
-3. **Single call, session's own provider and model** (recommended), versus a
-   dedicated cheaper reflection model setting. Recommendation: defer the
-   separate setting until usage data shows it is needed.
-4. **User-level default for accept** (`~/.otto/skills`), with `--scope
-   workspace` opt-in, versus workspace default. Recommendation: user level,
-   since a workspace write puts model-derived instructions into a repository.
-5. **Phase order**: memory first, then skills. Skills could be first if the
-   skill loop is the priority; the pipeline is shared either way.
+Answered 2026-10-02:
+
+1. **Skills activate automatically; no human accept step.** This differs from
+   the recommendation (human accept only). It is recorded here together with
+   the mitigations it required: ownership by content hash, no revision of
+   human-owned skills, no contract or `allowed-tools`, caps, an announcement
+   line, history, and `/skill revert`. Memory still lands as pending
+   candidates.
+2. **Default `auto = "on_compaction"`.** This also means reflection is enabled
+   by default, because a default trigger needs the feature on. The default
+   differs from the recommendation (off); cost is bounded to sessions that
+   reach compaction.
+3. **One call on the session's own provider and model.** A separate cheaper
+   reflection model setting is deferred until usage data shows it is needed.
+4. **User-level destination** (`~/.otto/skills`). Reflection never writes
+   workspace `.otto/skills`.
+5. **Phase order:** memory first, then skills, then automatic triggers.
 
 ## Open questions to settle during implementation
 

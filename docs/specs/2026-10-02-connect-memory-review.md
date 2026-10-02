@@ -1,6 +1,6 @@
 # Memory review from the chat connector
 
-Status: proposed 2026-10-02, awaiting approval before any code.
+Status: approved 2026-10-02 and implemented.
 
 ## Problem
 
@@ -27,8 +27,10 @@ through the model.
     edit and no target revision, and returns what `/memory review` prints:
     the resulting record, tombstone, or rejection.
 - `initialize` advertises `agentCapabilities._meta.otto.memoryReview = true`
-  when the backend is local and memory is configured. `--attach` mode does
-  not advertise it and answers the methods with `-32601`.
+  when the backend is local. Whether memory is usable is known only per
+  session, so the methods answer an internal error ("memory is not available
+  in this session") when it is not. `--attach` mode does not advertise it and
+  answers the methods with `-32601`.
 - `otto-connect` handles three commands before the queue, like `/new`:
 
   | Command | Effect |
@@ -78,9 +80,11 @@ User manual ("Chat connector" and "ACP agent server"), the
 [chat connector](2026-10-02-otto-connect.md) command table, and the
 [ACP agent server](2026-10-02-acp-agent-server.md) method list.
 
-## Open risk
+## Implementation notes
 
-`coder/acp-go-sdk` v0.13.5 was not reachable from the authoring sandbox, so
-its support for calling extension methods was not verified. If it has none,
-the connector sends the two requests as raw JSON-RPC on the agent's stdio
-through a thin wrapper; the contract above does not change.
+`coder/acp-go-sdk` v0.13.5 supports extension calls
+(`ClientSideConnection.CallExtension`), so the connector needs no raw
+JSON-RPC wrapper. A unique candidate prefix needs at least 4 characters and
+is resolved by the connector against the pending list. A source guard
+(`crates/otto/tests/memory_review_boundary.rs`) fails if anything under
+`src/tool/` can decide a candidate.

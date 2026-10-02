@@ -16,6 +16,11 @@
 //	exit         writes "fatal: boom" to stderr and exits with status 3
 //	other        replies "echo: <text>"
 //
+// The agent advertises _meta.otto.memoryReview unless FAKE_NO_MEMORY=1 and
+// serves _otto/memory/pending and _otto/memory/review over the candidates in
+// <dir>/memory, one "<id>\t<kind>\t<text>" per line. A review removes the
+// line and is logged as review:<id>:<decision>.
+//
 // Every call is appended to <dir>/calls as one line: init:<pid>, new:<id>,
 // load:<id>, start:<text>, end:<text>, cancel:<id>, perm:<outcome>.
 // Sessions persist in <dir>/sessions so a restarted agent can load them;
@@ -30,6 +35,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -112,9 +118,13 @@ func (a *agent) known(id string) bool {
 
 func (a *agent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {
 	a.log("init:%d", os.Getpid())
+	caps := acp.AgentCapabilities{LoadSession: true, SessionCapabilities: acp.SessionCapabilities{List: &acp.SessionListCapabilities{}}}
+	if os.Getenv("FAKE_NO_MEMORY") == "" {
+		caps.Meta = map[string]any{"otto": map[string]any{"memoryReview": true}}
+	}
 	return acp.InitializeResponse{
 		ProtocolVersion:   acp.ProtocolVersionNumber,
-		AgentCapabilities: acp.AgentCapabilities{LoadSession: true, SessionCapabilities: acp.SessionCapabilities{List: &acp.SessionListCapabilities{}}},
+		AgentCapabilities: caps,
 		AuthMethods:       []acp.AuthMethod{},
 	}, nil
 }
@@ -258,4 +268,50 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 		a.chunk(ctx, p.SessionId, "echo: "+text)
 	}
 	return end, nil
+}
+
+// HandleExtensionMethod serves the _otto/memory/* methods.
+func (a *agent) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
+	path := a.dir + "/memory"
+	raw, _ := os.ReadFile(path)
+	var lines []string
+	if s := strings.TrimSpace(string(raw)); s != "" {
+		lines = strings.Split(s, "\n")
+	}
+	switch method {
+	case "_otto/memory/pending":
+		out := []map[string]string{}
+		for _, l := range lines {
+			f := strings.SplitN(l, "\t", 3)
+			out = append(out, map[string]string{"id": f[0], "action": "create", "kind": f[1], "key": "k", "text": f[2], "reason": "because", "origin": "model"})
+		}
+		return map[string]any{"candidates": out}, nil
+	case "_otto/memory/review":
+		var req struct{ CandidateID, Decision string }
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		var keep []string
+		found := false
+		for _, l := range lines {
+			if strings.SplitN(l, "\t", 2)[0] == req.CandidateID {
+				found = true
+				continue
+			}
+			keep = append(keep, l)
+		}
+		if !found {
+			return nil, acp.NewInvalidParams(map[string]any{"error": "candidate " + req.CandidateID + " not found"})
+		}
+		if err := os.WriteFile(path, []byte(strings.Join(keep, "\n")+"\n"), 0o600); err != nil {
+			return nil, err
+		}
+		a.log("review:%s:%s", req.CandidateID, req.Decision)
+		out := map[string]any{"decision": req.Decision, "candidateId": req.CandidateID}
+		if req.Decision == "accept" {
+			out["record"] = map[string]any{"id": "rec-" + req.CandidateID, "revision": 1}
+		}
+		return out, nil
+	}
+	return nil, acp.NewMethodNotFound(method)
 }

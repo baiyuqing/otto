@@ -4,6 +4,8 @@ package bridge
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -173,6 +175,12 @@ func (b *Bridge) deliver(m Message) {
 			m.Time.Format("2006-01-02 15:04:05 MST"), b.opts.StaleAfter))
 		return
 	}
+	if m.ApprovalID != "" {
+		if m.Text == "/allow" || m.Text == "/deny" {
+			c.cmdDecide(m, m.Text == "/allow")
+		}
+		return
+	}
 	text := strings.TrimSpace(m.Text)
 	switch text {
 	case "/new":
@@ -274,6 +282,7 @@ type chat struct {
 }
 
 type permission struct {
+	id      string
 	decided chan decision // buffered 1
 }
 
@@ -519,6 +528,11 @@ func (c *chat) cmdStop(m Message) {
 func (c *chat) cmdDecide(m Message, ok bool) {
 	c.mu.Lock()
 	perm := c.perm
+	if m.ApprovalID != "" && (perm == nil || perm.id != m.ApprovalID) {
+		c.mu.Unlock()
+		c.notify("", "This approval request is no longer pending.")
+		return
+	}
 	c.perm = nil
 	c.mu.Unlock()
 	if perm == nil {
@@ -555,7 +569,12 @@ func (c *chat) askPermission(ctx context.Context, req acp.RequestPermissionReque
 		c.mu.Unlock()
 		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(denyID)}
 	}
-	perm := &permission{decided: make(chan decision, 1)}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		c.mu.Unlock()
+		return cancelled
+	}
+	perm := &permission{id: hex.EncodeToString(nonce[:]), decided: make(chan decision, 1)}
 	c.perm = perm
 	c.mu.Unlock()
 
@@ -563,7 +582,25 @@ func (c *chat) askPermission(ctx context.Context, req acp.RequestPermissionReque
 	if req.ToolCall.Title != nil {
 		title = *req.ToolCall.Title
 	}
-	c.send(ctx, "", title+"\n\nReply /allow or /deny")
+	text := title + "\n\nReply /allow or /deny"
+	status := "Denied / expired."
+	if p, ok := c.p.(ApprovalPlatform); ok {
+		finish, err := p.SendApproval(ctx, c.id, perm.id, text)
+		if err != nil {
+			slog.Warn("approval card send failed", "chat", c.key, "error", err)
+			c.send(ctx, "", text)
+		} else {
+			defer func() {
+				cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+				defer stop()
+				if err := finish(cleanup, status); err != nil {
+					slog.Warn("approval card update failed", "chat", c.key, "error", err)
+				}
+			}()
+		}
+	} else {
+		c.send(ctx, "", text)
+	}
 
 	timer := time.NewTimer(c.b.opts.PermissionTimeout)
 	defer timer.Stop()
@@ -571,10 +608,13 @@ func (c *chat) askPermission(ctx context.Context, req acp.RequestPermissionReque
 	case d := <-perm.decided:
 		switch d {
 		case allow:
+			status = "Approved."
 			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(allowID)}
 		case deny:
+			status = "Denied."
 			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(denyID)}
 		}
+		status = "Cancelled."
 		return cancelled
 	case <-timer.C:
 	case <-ctx.Done():
@@ -590,11 +630,17 @@ func (c *chat) askPermission(ctx context.Context, req acp.RequestPermissionReque
 	if taken {
 		switch <-perm.decided {
 		case allow:
+			status = "Approved."
 			return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(allowID)}
 		case cancel:
+			status = "Cancelled."
 			return cancelled
 		}
+		status = "Denied."
 		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(denyID)}
+	}
+	if ctx.Err() != nil {
+		status = "Closed; answered elsewhere or cancelled."
 	}
 	switch {
 	case ctx.Err() == nil:

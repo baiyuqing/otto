@@ -118,7 +118,9 @@ Web UI 可点击 **Image** 或粘贴截图。所选模型和 OpenAI-compatible �
 - [本地记忆](docs/user-manual.md#memory)
 - [Skills](docs/user-manual.md#skills)
 - [子代理](README.md#delegate-work-to-sub-agents)
-- [本地服务：otto serve](docs/user-manual.md#agent-server)，可选[飞书 inbound](docs/user-manual.md#feishu-inbound)
+- [本地服务：otto serve](docs/user-manual.md#agent-server)
+- [ACP agent：otto acp](docs/user-manual.md#acp-agent-server)
+- [聊天连接器 otto-connect](docs/user-manual.md#chat-connector)：`connect/` 中独立的 Go 程序，运行 `otto acp` 并接入 Telegram 和飞书，每个聊天对应一个会话
 - [MCP 服务](docs/user-manual.md#mcp-servers)：连接 stdio 或 HTTP 的 MCP 服务，在同一轮循环中调用它们的工具
 - [持久化 workflow](docs/user-manual.md#durable-workflows)：TOML 描述的 DAG，支持顺序/并发的 agent 与 handoff 步骤、持久化审批、重启恢复、CLI 控制和 Web UI 查看
 - [用量历史](docs/user-manual.md#observability)：Web UI 分析页展示本地 token 趋势和缓存命中率，不保存提示词或工具内容
@@ -144,7 +146,7 @@ Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏�
 代码是一个包含三个 crate 的 Cargo workspace：
 
 - `crates/otto-core`：provider 契约、wire 编解码、会话编解码、agent 循环和配置，可编译到 `wasm32-unknown-unknown`。
-- `crates/otto`：原生二进制，包含 CLI、REPL、TUI、工具、沙箱、记忆、Skills、子代理、inbound 适配器和 `otto serve`。
+- `crates/otto`：原生二进制，包含 CLI、REPL、TUI、工具、沙箱、记忆、Skills、子代理、`otto serve` 和 `otto acp`。
 - `crates/otto-web`：把 `otto-core` 编译为 WebAssembly 供 `ui/` 中的浏览器前端使用，前端与二进制共用同一份实现。
 
 开发约定和检查命令见 [AGENTS.md](AGENTS.md)，包契约见[开发指南（英文）](docs/development.md)。

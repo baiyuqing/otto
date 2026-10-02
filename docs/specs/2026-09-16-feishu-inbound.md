@@ -2,6 +2,11 @@
 
 Status: **approved** 2026-09-16. This change implements the contract below.
 
+Removed on 2026-10-02: `[inbound.feishu]` and the `inbound` module are
+deleted (decision D5 of the [chat connector](2026-10-02-otto-connect.md)
+design). Feishu messages reach otto through `otto-connect`. This document is
+historical.
+
 Superseded on 2026-09-21: `chat_ids` is an allowlist, not an optional
 filter. An empty list admits nothing and `otto serve` starts no consumer.
 The "empty → do not filter by chat" behavior described below is historical.

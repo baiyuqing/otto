@@ -15,12 +15,10 @@ use std::sync::Mutex;
 
 use otto_core::config::ServerRuntime;
 use otto_core::config::resolve::Runtime;
-use otto_core::config::resolve_feishu;
 use otto_core::session::ListResult;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{Controller, SandboxControl};
-use crate::inbound;
 use crate::server::listen::{Listener, listen_tcp, listen_unix};
 use crate::server::{self, Factory, Info, Options, SESSION_NOT_FOUND, Server};
 use crate::session::{self as sessionfs, MAX_LIST_SESSIONS};
@@ -804,7 +802,6 @@ pub async fn run(
             }
         };
     let info = builder.runtime_info(&runtime);
-    let feishu = resolve_feishu(&builder.config);
     let mut profiles: Vec<String> = builder.config.profiles.keys().cloned().collect();
     profiles.sort();
     let workspace_path = builder.workspace_path.clone();
@@ -850,14 +847,10 @@ pub async fn run(
         logger: None,
         workflows: host.workflows.clone(),
     });
-    let inbound = inbound::maybe_start(Arc::clone(&server), feishu, serve_cancel.clone());
 
     let _stdin_watch = spawn_stdin_watch(exit_on_stdin_close, serve_cancel.clone());
     let serve_error = serve_listeners(&server, tcp, socket, &serve_cancel).await;
     serve_cancel.cancel();
-    if let Some(handle) = inbound {
-        let _ = handle.await;
-    }
     server.cancel_token().cancel();
     if terminate.migrating() {
         for warning in server.migrate().await {

@@ -18,8 +18,8 @@ memory storage.
 - **Keep access bounded.** Workspace-confined file tools and macOS Seatbelt
   sandboxing for shell commands by default.
 - **Keep going without you typing.** Persistent sessions, local memory, reusable
-  skills, bounded sub-agents, timers, and — with `otto serve` — optional Feishu
-  inbound into the session inbox.
+  skills, bounded sub-agents, timers, and `otto-connect` for Telegram and
+  Feishu chats.
 
 ## Install from source
 
@@ -139,9 +139,7 @@ The selected model and OpenAI-compatible endpoint must support image input.
 - [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
   socket or a loopback TCP port, with an embedded browser UI.
   [`otto --attach`](docs/user-manual.md#the-tui-attached-to-otto-serve) runs
-  the TUI on the same sessions. Optional
-  [Feishu inbound](docs/user-manual.md#feishu-inbound) delivers group and chat
-  text into open session inboxes.
+  the TUI on the same sessions.
 - [ACP agent](docs/user-manual.md#acp-agent-server): `otto acp` speaks the
   Agent Client Protocol on stdio for ACP clients; `otto acp --attach`
   forwards it to a running `otto serve`.
@@ -301,7 +299,7 @@ The code is a Cargo workspace of three crates:
 - `crates/otto-core` holds the provider contract, wire codecs, session codec,
   agent loop, and config. It builds for `wasm32-unknown-unknown`.
 - `crates/otto` is the native binary: CLI, REPL, TUI, tools, sandbox, memory,
-  skills, sub-agents, inbound adapters, and the `otto serve` server.
+  skills, sub-agents, the `otto serve` server, and `otto acp`.
 - `crates/otto-web` compiles `otto-core` to WebAssembly for the browser UI in
   `ui/`, so the web frontend and the binary share one implementation.
 

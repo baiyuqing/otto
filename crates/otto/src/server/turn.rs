@@ -23,6 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::metrics::{Metrics, ProviderOperationMetric};
 
+/// Accepted with `"queue": true` behind another turn; not started yet.
+pub const TURN_QUEUED: &str = "queued";
 pub const TURN_RUNNING: &str = "running";
 pub const TURN_OK: &str = "ok";
 pub const TURN_ERROR: &str = "error";
@@ -46,6 +48,9 @@ struct TurnState {
     started_instant: Instant,
     finished_at: Option<DateTime<Utc>>,
     elapsed: std::time::Duration,
+    /// The session's history length when the turn started; `None` while
+    /// queued.
+    history_start: Option<usize>,
 }
 
 /// The buffered turn.
@@ -78,9 +83,39 @@ impl Turn {
                 started_instant: Instant::now(),
                 finished_at: None,
                 elapsed: std::time::Duration::ZERO,
+                history_start: None,
             }),
             changed: watch::channel(0).0,
         }
+    }
+
+    /// A turn waiting in its session's queue. [`Turn::start_running`] moves it
+    /// to running; [`Turn::finish`] ends it without ever running.
+    pub fn queued(id: String, trigger: &'static str, cancel: CancellationToken) -> Self {
+        let turn = Self::new(id, trigger, cancel);
+        turn.lock().status = TURN_QUEUED;
+        turn
+    }
+
+    /// Marks the turn running before it appends anything to the session's
+    /// `history_len` messages. The duration and `started_at` count from here.
+    pub fn start_running(&self, history_len: usize) {
+        let mut state = self.lock();
+        state.status = TURN_RUNNING;
+        state.started_at = Utc::now();
+        state.started_instant = Instant::now();
+        state.history_start = Some(history_len);
+    }
+
+    /// How many history messages predate this turn; `None` while queued.
+    pub fn history_start(&self) -> Option<usize> {
+        self.lock().history_start
+    }
+
+    /// Buffers `event` for the readers and wakes them.
+    pub fn push_event(&self, event: WireEvent) {
+        self.lock().events.push(event);
+        self.changed.send_modify(|version| *version += 1);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, TurnState> {
@@ -124,8 +159,9 @@ impl Turn {
         (events, state.done)
     }
 
-    /// Records the terminal status. `error` is what the controller returned:
-    /// `None` is ok, a cancellation is canceled, anything else is an error.
+    /// Records the terminal status and buffers the `turn_end` frame. `error`
+    /// is what the controller returned, already redacted: `None` is ok, a
+    /// cancellation is canceled, anything else is an error.
     pub fn finish(&self, error: Option<String>, canceled: bool) {
         {
             let mut state = self.lock();
@@ -141,6 +177,10 @@ impl Turn {
                     state.error_text = message;
                 }
             }
+            // Same lock as `done`, so a reader that sees the turn done has
+            // already been able to read this frame.
+            let end = WireEvent::turn_end(state.status, &state.error_text);
+            state.events.push(end);
         }
         self.changed.send_modify(|version| *version += 1);
     }
@@ -553,7 +593,7 @@ mod tests {
                     loop {
                         let (events, done) = turn.snapshot(seen.len());
                         seen.extend(events);
-                        if done && seen.len() >= COUNT {
+                        if done && seen.len() > COUNT {
                             return seen.len();
                         }
                         if changed.changed().await.is_err() {
@@ -576,7 +616,8 @@ mod tests {
         turn.finish(None, false);
 
         for reader in readers {
-            assert_eq!(reader.await.expect("reader"), COUNT);
+            // The deltas plus the closing `turn_end` frame.
+            assert_eq!(reader.await.expect("reader"), COUNT + 1);
         }
     }
 }

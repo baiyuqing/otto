@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, ApiError, events, loadToken, setToken, type UsageSummary } from './api'
+import { api, events, loadToken, setToken, type UsageSummary } from './api'
 import { parseWebCommand, supportedCommands } from './commands'
 import { fromHistory, phase, reduce, statusLine, type Info, type Item, type Session, type SessionListRow, type Usage } from './wire'
 import { Sidebar } from './Sidebar'
@@ -82,6 +82,7 @@ export function App() {
   const [recordedUsage, setRecordedUsage] = useState<UsageSummary | null>(null)
   const [compacting, setCompacting] = useState(false)
   const [queuedInput, setQueuedInput] = useState('')
+  const [queuedTurn, setQueuedTurn] = useState(false)
   const [tasksKey, setTasksKey] = useState(0)
   const [showContext, setShowContext] = useState(false)
   const [renameDraft, setRenameDraft] = useState<string | null>(null)
@@ -124,6 +125,7 @@ export function App() {
         for (;;) {
           for await (const { seq, event, raw } of events(res)) {
             last = seq
+            setQueuedTurn(false)
             if (event.type === 'provider_usage' && event.usage) {
               const u = event.usage
               setTurnUsage((prev) => ({
@@ -157,6 +159,7 @@ export function App() {
       } catch (e) {
         fail(e)
       } finally {
+        setQueuedTurn(false)
         setTurnId(null)
         setTurnUsage(null)
         setTasksKey((k) => k + 1)
@@ -174,11 +177,12 @@ export function App() {
         const s = await api.createSession(id, workspace)
         location.hash = s.id
         setSession(s)
-        setItems(fromHistory(await api.history(s.id)))
+        const running = s.turn?.status === 'running' ? s.turn.id : undefined
+        setItems(fromHistory(await api.history(s.id, running)))
         void refreshSessions()
-        if (s.turn?.status === 'running') {
-          setTurnId(s.turn.id)
-          void consume(s.id, await api.attach(s.id, s.turn.id))
+        if (running) {
+          setTurnId(running)
+          void consume(s.id, await api.attach(s.id, running))
         }
       } catch (e) {
         fail(e)
@@ -242,7 +246,7 @@ export function App() {
         }
         sessionRef.current = next
         setSession(next)
-        setItems(fromHistory(await api.history(sessionId)))
+        setItems(fromHistory(await api.history(sessionId, action.kind === 'attach' ? action.turnId : undefined)))
         if (action.kind === 'attach') {
           void consume(sessionId, await api.attach(sessionId, action.turnId))
         }
@@ -258,12 +262,26 @@ export function App() {
 
   const send = async (text: string, image?: { data: string; mime_type: string }): Promise<void> => {
     if (!session) return
+    const command = parseWebCommand(text)
+    // An approval is decided inside the running turn, so it is not held back
+    // with the next input.
+    if (command.kind === 'approve' || command.kind === 'deny') {
+      setError('')
+      try {
+        const decision = command.kind === 'approve' ? 'allow' : 'deny'
+        await api.decideApproval(session.id, command.id, decision)
+        const verb = decision === 'allow' ? 'Approved' : 'Denied'
+        setItems((prev) => [...prev, { kind: 'notice', text: `${verb} ${command.id}.` }])
+      } catch (e) {
+        fail(e)
+      }
+      return
+    }
     if (turnIdRef.current !== null) {
       setQueuedInput(text)
       return
     }
     setError('')
-    const command = parseWebCommand(text)
     if (command.kind === 'error') {
       setError(command.message)
       return
@@ -339,16 +357,6 @@ export function App() {
       }
       return
     }
-    if (command.kind === 'approve') {
-      try {
-        const { prompt } = await api.approveBash(session.id, command.id)
-        setItems((prev) => [...prev, { kind: 'notice', text: `Approved ${command.id} for one command.` }])
-        await send(prompt)
-      } catch (e) {
-        fail(e)
-      }
-      return
-    }
     if (command.kind === 'tasks') {
       try {
         const r = await api.listTasks(session.id)
@@ -396,29 +404,23 @@ export function App() {
     }
     try {
       const res = await api.startTurn(session.id, command.text, image)
-      // The stream carries no turn id; the session does.
-      const s = await api.getSession(session.id)
-      setSession(s)
-      setTurnId(s.turn?.id ?? null)
-      setItems((prev) => {
-        const next: Item[] = [...prev]
-        const created_at = new Date().toISOString()
-        if (text) next.push({ kind: 'user', text, created_at })
-        if (image) next.push({ kind: 'image', data: image.data, mime_type: image.mime_type, created_at })
-        return next
-      })
+      const id = res.headers.get('Otto-Turn-Id')
+      if (!id) throw new Error('server response has no Otto-Turn-Id header')
+      turnIdRef.current = id
+      setTurnId(id)
+      // Cleared by consume() at the turn's first frame. The prompt text comes
+      // from the turn's user_message frame; only the image is added here.
+      setQueuedTurn(true)
+      if (image) {
+        setItems((prev) => [
+          ...prev,
+          { kind: 'image', data: image.data, mime_type: image.mime_type, created_at: new Date().toISOString() },
+        ])
+      }
       await consume(session.id, res)
     } catch (e) {
+      // 409 queue_full: the server holds 16 queued turns already.
       fail(e)
-      if (e instanceof ApiError && e.status === 409) {
-        // Another client started a turn; follow it.
-        const s = await api.getSession(session.id).catch(() => null)
-        if (s?.turn?.status === 'running') {
-          setSession(s)
-          setTurnId(s.turn.id)
-          void consume(s.id, await api.attach(s.id, s.turn.id))
-        }
-      }
     }
   }
 
@@ -601,7 +603,7 @@ export function App() {
           compacting={compacting}
           queuedText={queuedInput}
           onSend={send}
-          onQueue={setQueuedInput}
+          onQueue={(t) => void send(t)}
           onWithdrawQueue={() => setQueuedInput('')}
           onCancel={cancel}
           onCompact={compact}
@@ -656,6 +658,7 @@ export function App() {
         session={session}
         turnUsage={turnUsage}
         recordedUsage={recordedUsage}
+        queued={queuedTurn}
         status={
           phaseState &&
           statusLine(

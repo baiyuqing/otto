@@ -770,7 +770,19 @@ impl Runner {
         provider: Arc<dyn Provider + Send + Sync>,
         tasks: Arc<crate::subagent::tasks::Tasks>,
     ) -> Self {
-        let registry = Registry::new(Vec::new()).expect("empty registry");
+        Self::scripted_with_tools(session, provider, tasks, Vec::new())
+    }
+
+    /// [`Self::scripted`] with `tools` registered, for a test that needs the
+    /// provider's tool call to reach a tool double.
+    #[cfg(test)]
+    pub fn scripted_with_tools(
+        session: SharedSession,
+        provider: Arc<dyn Provider + Send + Sync>,
+        tasks: Arc<crate::subagent::tasks::Tasks>,
+        tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>>,
+    ) -> Self {
+        let registry = Registry::new(tools).expect("test tool registry");
         let definitions = registry.definitions();
         Self {
             agent: Agent::new(

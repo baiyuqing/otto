@@ -225,7 +225,7 @@ impl BashApprovals {
         usize::from(state.requests.contains_key(session_id))
     }
 
-    fn take(&self, session_id: &str, command: &str) -> bool {
+    pub(crate) fn take(&self, session_id: &str, command: &str) -> bool {
         let mut state = self.state.lock().expect("bash approval mutex");
         let granted = state
             .requests

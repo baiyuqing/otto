@@ -486,13 +486,21 @@ impl Factory for ServeFactory {
             .hosts_for(workspace)
             .await
             .ok_or_else(|| SESSION_NOT_FOUND.to_string())?;
+        if !sessionfs::is_session_id(id) {
+            return Err(SESSION_NOT_FOUND.to_string());
+        }
         for host in &hosts {
-            let listed = listed_for(&host.builder)?;
-            if let Some(entry) = listed.sessions.into_iter().find(|entry| entry.id == id) {
+            let path = sessionfs::session_directory(
+                &host.builder.session_root,
+                &host.builder.workspace_path,
+            )
+            .map_err(|error| host.builder.redact_error(&error.to_string(), None))?
+            .join(format!("{id}.jsonl"));
+            if path.is_file() {
                 // The repair warnings the CLI prints have no channel here;
                 // the web UI reads the repaired history like any other.
                 let (controller, _warnings) =
-                    Controller::open(Arc::clone(&host.builder), Path::new(&entry.path)).await?;
+                    Controller::open(Arc::clone(&host.builder), &path).await?;
                 return Ok(self.wire(controller));
             }
         }
@@ -710,7 +718,7 @@ impl Factory for ServeFactory {
 pub struct ServeOptions<'a> {
     pub builder: Builder,
     pub runtime: Runtime,
-    /// Exactly one of its two fields is set.
+    /// At least one of its two fields is set; both set binds both listeners.
     pub listen: ServerRuntime,
     /// The process sandbox the composition root opened, already behind its
     /// switch. [`run`] owns closing it.
@@ -778,9 +786,9 @@ pub async fn run(
             return fail(stderr, &builder.redact_error(&message, Some(&runtime)));
         }
     };
-    let (listener, token) = bound;
-    if !token.is_empty() {
-        announce_listen(stdout, &listener.address(), &token, open);
+    let Bound { tcp, socket, token } = bound;
+    if let Some(tcp) = &tcp {
+        announce_listen(stdout, &tcp.address(), &token, open);
     }
 
     let builder = Arc::new(builder);
@@ -845,9 +853,7 @@ pub async fn run(
     let inbound = inbound::maybe_start(Arc::clone(&server), feishu, serve_cancel.clone());
 
     let _stdin_watch = spawn_stdin_watch(exit_on_stdin_close, serve_cancel.clone());
-    let serve_error = server::serve(listener, server.router(), serve_cancel.clone())
-        .await
-        .err();
+    let serve_error = serve_listeners(&server, tcp, socket, &serve_cancel).await;
     serve_cancel.cancel();
     if let Some(handle) = inbound {
         let _ = handle.await;
@@ -872,6 +878,42 @@ pub async fn run(
         return fail(stderr, "close sandbox: sandbox runtime close failed");
     }
     0
+}
+
+/// Serves the TCP listener (token required) and the socket listener (no
+/// token) from one server. A failure on either stops both; the first error is
+/// returned.
+async fn serve_listeners(
+    server: &Arc<Server>,
+    tcp: Option<Listener>,
+    socket: Option<Listener>,
+    cancel: &CancellationToken,
+) -> Option<String> {
+    let stop = cancel.child_token();
+    let tcp_task = tcp.map(|listener| server::serve(listener, server.router(), stop.clone()));
+    let socket_task =
+        socket.map(|listener| server::serve(listener, server.socket_router(), stop.clone()));
+    let guard = |result: Result<(), String>| {
+        if result.is_err() {
+            stop.cancel();
+        }
+        result
+    };
+    let (tcp_result, socket_result) = tokio::join!(
+        async {
+            match tcp_task {
+                Some(task) => guard(task.await),
+                None => Ok(()),
+            }
+        },
+        async {
+            match socket_task {
+                Some(task) => guard(task.await),
+                None => Ok(()),
+            }
+        },
+    );
+    tcp_result.err().or(socket_result.err())
 }
 
 fn require_tcp_for_open(open: bool, listen: &ServerRuntime) -> Result<(), String> {
@@ -955,25 +997,40 @@ fn launch_browser(url: &str) {
     let _ = std::process::Command::new(OPEN_BINARY).arg(url).spawn();
 }
 
-/// Picks the listener. A TCP port is reachable by every local user and every
-/// page open in a browser, so the API is gated by a per-process token; the
-/// token is printed once by the caller and never logged.
-fn bind(listen: &ServerRuntime) -> Result<(Listener, String), String> {
-    if !listen.listen.is_empty() {
-        let listener = listen_tcp(&listen.listen).map_err(|error| format!("serve: {error}"))?;
-        let token =
-            super::runtime_builder::random_id().map_err(|error| format!("serve: {error}"))?;
-        return Ok((listener, token));
-    }
-    let socket = match Path::new(&listen.socket).is_absolute() {
-        true => listen.socket.clone(),
-        false => std::path::absolute(&listen.socket)
-            .map_err(|error| error.to_string())?
-            .to_string_lossy()
-            .into_owned(),
+/// The bound listeners. `token` is non-empty exactly when `tcp` is set.
+struct Bound {
+    tcp: Option<Listener>,
+    socket: Option<Listener>,
+    token: String,
+}
+
+/// Binds the TCP listener, the Unix socket, or both, from the two fields of
+/// `listen`. A TCP port is reachable by every local user and every page open
+/// in a browser, so the API on it is gated by a per-process token; the token
+/// is printed once by the caller and never logged. The socket is protected by
+/// its file permissions and needs no token.
+fn bind(listen: &ServerRuntime) -> Result<Bound, String> {
+    let mut bound = Bound {
+        tcp: None,
+        socket: None,
+        token: String::new(),
     };
-    let listener = listen_unix(&socket).map_err(|error| format!("serve: {error}"))?;
-    Ok((listener, String::new()))
+    if !listen.listen.is_empty() {
+        bound.tcp = Some(listen_tcp(&listen.listen).map_err(|error| format!("serve: {error}"))?);
+        bound.token =
+            super::runtime_builder::random_id().map_err(|error| format!("serve: {error}"))?;
+    }
+    if !listen.socket.is_empty() {
+        let socket = match Path::new(&listen.socket).is_absolute() {
+            true => listen.socket.clone(),
+            false => std::path::absolute(&listen.socket)
+                .map_err(|error| error.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+        };
+        bound.socket = Some(listen_unix(&socket).map_err(|error| format!("serve: {error}"))?);
+    }
+    Ok(bound)
 }
 
 #[cfg(test)]
@@ -1648,91 +1705,91 @@ mod tests {
         assert_eq!(other_host.builder.workspace.root(), other_path);
     }
 
-    /// A host whose session directory listing fails (here: `session_root` is
-    /// a file, not a directory) must report that failure, not a plain
-    /// "session not found" — a caller reading 404 would otherwise conclude
-    /// there is no such session, when the real problem is a broken session
-    /// directory.
-    #[tokio::test]
-    async fn opening_by_id_in_a_named_workspace_whose_listing_fails_propagates_the_error() {
-        let startup = tempfile::tempdir().expect("startup");
-        let startup_path = canonical_directory(startup.path()).expect("canonical");
-        let startup_sessions = tempfile::tempdir().expect("startup sessions");
-        let startup_host = dummy_host(&startup_path, startup_sessions.path());
-
-        let other = tempfile::tempdir().expect("other workspace");
-        let other_path = canonical_directory(other.path()).expect("canonical");
-        let broken_session_root = other.path().join("sessions-is-a-file");
-        std::fs::write(&broken_session_root, b"not a directory").expect("write file");
-        let other_host = dummy_host(&other_path, &broken_session_root);
-
-        let mut loaded = BTreeMap::new();
-        loaded.insert(other_path.to_string_lossy().into_owned(), other_host);
+    fn factory_over(startup_path: &Path, sessions: &Path) -> (ServeFactory, Arc<WorkspaceHost>) {
+        let startup_host = dummy_host(startup_path, sessions);
         let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
         let factory = ServeFactory {
             workspaces: Workspaces {
                 startup: startup_path.to_string_lossy().into_owned(),
-                startup_host,
+                startup_host: Arc::clone(&startup_host),
                 roots: Vec::new(),
                 config_path: PathBuf::new(),
-                loaded: tokio::sync::Mutex::new(loaded),
+                loaded: tokio::sync::Mutex::new(BTreeMap::from([(
+                    startup_path.to_string_lossy().into_owned(),
+                    Arc::clone(&startup_host),
+                )])),
             },
             runtime,
             cancel: CancellationToken::new(),
         };
-
-        let error = match factory
-            .open("some-id", Some(&other_path.to_string_lossy()))
-            .await
-        {
-            Ok(_) => panic!("a broken session directory must not read as an open session"),
-            Err(error) => error,
-        };
-        assert_ne!(error, SESSION_NOT_FOUND, "{error}");
+        (factory, startup_host)
     }
 
-    /// The same failure, met while searching every loaded workspace for a
-    /// resumed id (no `workspace` given): a broken host earlier in the search
-    /// order must not be silently skipped in favor of a later host that
-    /// happens to hold the id.
+    /// Resume by id reads `<session directory>/<id>.jsonl` directly, so a
+    /// session older than the newest `MAX_LIST_SESSIONS` still opens.
     #[tokio::test]
-    async fn opening_by_id_across_workspaces_propagates_one_hosts_listing_error() {
-        let startup = tempfile::tempdir().expect("startup");
-        let startup_path = canonical_directory(startup.path()).expect("canonical");
-        let broken_session_root = startup.path().join("sessions-is-a-file");
-        std::fs::write(&broken_session_root, b"not a directory").expect("write file");
-        let startup_host = dummy_host(&startup_path, &broken_session_root);
+    async fn opening_by_id_finds_a_session_outside_the_newest_listing_window() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace_path = canonical_directory(workspace.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (factory, host) = factory_over(&workspace_path, sessions.path());
 
-        let other = tempfile::tempdir().expect("other workspace");
-        let other_path = canonical_directory(other.path()).expect("canonical");
-        let other_sessions = tempfile::tempdir().expect("other sessions");
-        let other_host = dummy_host(&other_path, other_sessions.path());
+        use otto_core::session::Session;
+        let runtime = crate::cli::testutil::initial_runtime(&host.builder);
+        let mut oldest = String::new();
+        for index in 0..=MAX_LIST_SESSIONS {
+            let session = host.builder.create_session(&runtime).expect("session");
+            session
+                .append(crate::cli::testutil::user("hello"))
+                .await
+                .expect("persist the first message");
+            let path = PathBuf::from(session.path());
+            if index == 0 {
+                oldest = path
+                    .file_stem()
+                    .expect("file stem")
+                    .to_string_lossy()
+                    .into_owned();
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .expect("session file")
+                    .set_modified(
+                        std::time::SystemTime::now() - std::time::Duration::from_secs(86_400),
+                    )
+                    .expect("age the file");
+            }
+        }
+        let listed = listed_for(&host.builder).expect("listing");
+        assert_eq!(listed.sessions.len(), MAX_LIST_SESSIONS);
+        assert!(listed.sessions.iter().all(|entry| entry.id != oldest));
 
-        let runtime = crate::cli::testutil::initial_runtime(&other_host.builder);
-        let created = Controller::create(Arc::clone(&other_host.builder), &runtime)
-            .await
-            .expect("create a real session in the working workspace");
-        let id = created.info().session_id;
+        let reopened = factory.open(&oldest, None).await.expect("open by id");
+        assert_eq!(reopened.info().session_id, oldest);
+    }
 
-        let mut loaded = BTreeMap::new();
-        loaded.insert(other_path.to_string_lossy().into_owned(), other_host);
-        let factory = ServeFactory {
-            workspaces: Workspaces {
-                startup: startup_path.to_string_lossy().into_owned(),
-                startup_host,
-                roots: Vec::new(),
-                config_path: PathBuf::new(),
-                loaded: tokio::sync::Mutex::new(loaded),
-            },
-            runtime,
-            cancel: CancellationToken::new(),
-        };
-
-        let error = match factory.open(&id, None).await {
-            Ok(_) => panic!("the broken startup workspace must not be skipped over"),
-            Err(error) => error,
-        };
-        assert_ne!(error, SESSION_NOT_FOUND, "{error}");
+    /// An id that is not 32 lowercase hexadecimal characters answers "not
+    /// found" before it is used as a file name.
+    #[tokio::test]
+    async fn opening_a_non_hex_id_is_not_found() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace_path = canonical_directory(workspace.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (factory, _host) = factory_over(&workspace_path, sessions.path());
+        for id in [
+            "../../etc/passwd",
+            "some-id",
+            &"A".repeat(32),
+            &"a".repeat(31),
+            &"a".repeat(33),
+        ] {
+            let error = match factory.open(id, None).await {
+                Ok(_) => panic!("{id} opened"),
+                Err(error) => error,
+            };
+            assert_eq!(error, SESSION_NOT_FOUND, "{id}");
+        }
+        assert!(sessionfs::is_session_id(&"0123456789abcdef".repeat(2)));
     }
 
     #[test]

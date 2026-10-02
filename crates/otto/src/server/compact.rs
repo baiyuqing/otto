@@ -42,8 +42,7 @@ pub async fn handle(
 
     let cancel = {
         let mut state = session.lock();
-        let busy = state.turn.as_ref().is_some_and(|turn| !turn.is_done());
-        if busy || state.compacting.is_some() {
+        if state.busy() {
             return turn_active("a turn is already active for this session");
         }
         let cancel = server.cancel_token().child_token();
@@ -52,7 +51,6 @@ pub async fn handle(
     };
 
     // ponytail: axum gives a handler no client-disconnect signal, so only
-    // shutdown cancels. axum gives a handler no disconnect signal, so only
     // shutdown cancels. Add a disconnect watcher if a hung compaction after a
     // dropped client is ever observed.
     let result = {
@@ -64,6 +62,7 @@ pub async fn handle(
     };
     cancel.cancel();
     session.lock().compacting = None;
+    server.start_next(&session);
 
     match result {
         Ok(compaction) => {

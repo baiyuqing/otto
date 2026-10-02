@@ -226,6 +226,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto trust <dir> [--config PATH]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
 | `otto serve [--socket PATH] [--listen HOST:PORT [--open] [--exit-on-stdin-close]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket, a loopback TCP port, or both, instead of an interactive frontend. See [Agent server](#agent-server). |
 | `otto acp [--attach [--socket PATH]]` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as `otto-connect`. With `--attach`, forward each request to a running `otto serve` instead of opening sessions in this process. See [ACP agent server](#acp-agent-server). |
+| `otto --attach [--socket PATH] [--resume ID \| --continue]` | Run the TUI as a client of a running `otto serve`, on a session that the web UI and other clients can use at the same time. See [The TUI attached to `otto serve`](#the-tui-attached-to-otto-serve). |
 
 | Flag | Description |
 | --- | --- |
@@ -244,9 +245,9 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--max-output-bytes N` | Maximum tool output bytes. Must be greater than zero. |
 | `--no-session` | Keep history in memory only; do not persist a session. Cannot be combined with `--continue`, `--resume`, or `--archive`. |
 | `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume`, `--archive`, or `--no-session`. |
-| `--resume PATH` | Resume a specific session file. Cannot be combined with `--continue`, `--archive`, or `--no-session`. |
+| `--resume PATH` | Resume a specific session file; with `--attach`, the session id instead of a path. Cannot be combined with `--continue`, `--archive`, or `--no-session`. |
 | `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--prompt`. |
-| `--socket PATH` | `serve`, or `acp --attach`. Unix domain socket path of `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. For `serve` with `--listen`, both listeners are opened. |
+| `--socket PATH` | `serve`, `acp --attach`, or `--attach`. Unix domain socket path of `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. For `serve` with `--listen`, both listeners are opened. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. With `--socket`, both listeners are opened. |
 | `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). A failed launch is not fatal: the URL is still printed. |
 | `--exit-on-stdin-close` | `serve` only. Read stdin and shut down, as on `SIGTERM`, when it reaches end of file or a read fails. Without the flag stdin is not read. Requires a TCP listener. |
@@ -684,6 +685,78 @@ OTTO_UI=repl otto
 | `Ctrl+A` / `Ctrl+E` | Move the cursor to the start or end of the current composer line |
 | `Esc` | Cancel the active turn or close the current overlay |
 | `Ctrl+C` | Cancel; a second press within one second clears and quits |
+
+### The TUI attached to `otto serve`
+
+```bash
+otto --attach [--socket PATH] [--resume ID | --continue]
+```
+
+`otto --attach` runs the TUI as a client of a running `otto serve`. Sessions,
+models, and tools run in the serve process, so one session can be open in
+this terminal, in the web UI, in other `otto --attach` terminals, and in
+`otto acp --attach` (the process `otto-connect` starts for chats) at the same
+time. The attached process runs no model or tool and reads no provider
+credentials. The socket defaults to `[server].socket`, then
+`~/.otto/otto.sock`; TCP is not supported. stdin and stdout must be
+terminals.
+
+- Without a session flag, it opens a new session in the `--cwd` workspace,
+  which `otto serve` must admit (see [Workspaces](#workspaces)).
+- `--continue` opens the newest session of that workspace, or a new one when
+  the workspace has none.
+- `--resume ID` opens the session with that id, as `/session` and the web UI
+  show it.
+- `--attach` cannot be combined with `serve`, `--prompt`, `--no-session`,
+  `--archive`, or `--ui repl`.
+
+At startup it requests `GET /healthz` and opens the session. If either
+fails, it prints `otto serve is not reachable at <path>: <error>` to stderr
+and exits with status `1`.
+
+Turns:
+
+- A prompt is sent with `POST .../turns` and `"queue": true`, so it waits in
+  serve's [turn queue](#turn-queue) while another client's turn runs. The
+  prompt appears in the transcript when serve's `user_message` frame for the
+  turn arrives. An image attached with `/image` is sent with the prompt; the
+  transcript shows only the prompt text.
+- Text submitted while a turn runs is sent at once as the next turn, and the
+  transcript shows `Queued as the next turn (Ctrl+U withdraws it).`
+  `Ctrl+U` cancels the newest such turn that has not started. A slash command
+  submitted while a turn runs runs after that turn ends.
+- A turn started by another client of the session (the web UI, a chat, or
+  another terminal) is shown while it runs: the transcript is reloaded up to
+  that turn, then its prompt and events follow. A turn that started and
+  finished between two status updates is shown by reloading the history.
+- `Esc` cancels the turn being shown, including a turn another client
+  started.
+- An elevated `bash` command opens the approval dialog when serve reports it
+  (see [Approvals inside a turn](#approvals-inside-a-turn)). **Yes** allows
+  it and **No** denies it. If another client decides first, the dialog
+  closes and the transcript shows `Approval <id> decided elsewhere:
+  <decision>`.
+- The footer, `/session`, and `/sandbox` show the serve process's session,
+  model, and sandbox. The sub-agent panel shows the session's tasks from
+  serve, and `/agents` reads serve's task records.
+
+Commands available while attached: `/help`, `/init`, `/session`, `/new`,
+`/clear`, `/resume` (the sessions of the workspace), `/rename`, `/compact`,
+`/image`, `/context`, `/agents`, `/sandbox`, `/sandbox reload`,
+`/approve <id>`, and `/exit`. Every other command prints
+`/<command>: not available with --attach` and does nothing: `/model`,
+`/thinking`, `/archive`, `/reflect`, `/memory`, `/remember`, `/skill`,
+`/tasks`, `/task`, `/timers`, `/mcp`, `/login`, `/logout`,
+`/sandbox allow|network|exclude`, and `/approve <id> always`.
+
+If a request to serve fails to connect, or the status stream or a turn's
+event stream ends without that turn's `turn_end` frame, the transcript shows
+`disconnected from otto serve` and the TUI retries every second. Prompts,
+approval answers, `/new`, `/resume`, `/compact`, and `/sandbox reload` sent
+in that state are refused with the same line. When serve
+answers again, the TUI opens the same session, reloads its history, shows
+`reconnected to otto serve`, and follows a running turn again. A turn that
+was running when the connection was lost keeps running in serve.
 
 ### REPL behavior
 

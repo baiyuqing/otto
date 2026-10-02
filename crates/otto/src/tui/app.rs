@@ -16,23 +16,26 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use otto_core::agent::inbox::NotificationKind;
-use otto_core::agent::{CompactionResult, Event};
-use otto_core::model::Usage;
+use otto_core::agent::context_report::ContextReport;
+use otto_core::model::{Message, Usage};
 use otto_core::session::types::SessionInfo;
 use otto_core::tool::ToolResult;
-use otto_core::wire::events::to_wire;
+use otto_core::wire::events::{
+    APPROVAL_DECIDED, APPROVAL_REQUESTED, USER_MESSAGE, WireCompaction, WireEvent,
+};
 use otto_core::wire::transcript;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::tasks::{Task, TaskStatus};
 use crate::app::{Controller, Info, PROFILE_SWITCH_UNAVAILABLE};
-use crate::cli::info::SandboxNetwork;
+use crate::cli::info::{SandboxInfo, SandboxNetwork};
 use crate::cli::login;
 use crate::cli::repl_commands;
 use crate::cli::sandbox_setup::parse_exclude_entry;
+use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 use super::agents_view::AgentsView;
+use super::attach::Remote;
 use super::commands::{self, Completion, SlashCommandKind};
 use super::context_view::ContextView;
 use super::entries::{self, Entry, EntryKind};
@@ -158,10 +161,106 @@ pub(crate) enum Action {
     /// One validated-later `excluded_commands` entry to add.
     SandboxExclude(String),
     Approve(String),
+    /// `--attach` only: deny a waiting approval (the dialog's No).
+    Deny(String),
     /// Approve the pending command and exclude its program from the sandbox.
     ApproveAlways(String),
     Login(String),
     McpLogin(String),
+}
+
+/// What the frontend's calls reach: the controller of this process, or the
+/// `otto serve` the TUI is attached to (`otto --attach`). Only the calls both
+/// modes support are methods here; a command that exists in local mode only
+/// matches `Backend::Local` itself and prints [`ATTACH_UNAVAILABLE`] otherwise.
+#[derive(Clone, Copy)]
+pub(crate) enum Backend<'a> {
+    Local(&'a Controller),
+    Attach(&'a Remote),
+}
+
+/// The line a command that `--attach` does not support prints after `/<command>:`.
+const ATTACH_UNAVAILABLE: &str = "not available with --attach";
+
+impl Backend<'_> {
+    pub(crate) fn info(&self) -> Info {
+        match self {
+            Self::Local(controller) => controller.info(),
+            Self::Attach(remote) => remote.info(),
+        }
+    }
+
+    fn history(&self) -> Vec<Message> {
+        match self {
+            Self::Local(controller) => controller.history(),
+            Self::Attach(remote) => remote.history(),
+        }
+    }
+
+    pub(crate) fn workspace(&self) -> String {
+        match self {
+            Self::Local(controller) => controller.workspace().to_string(),
+            Self::Attach(remote) => remote.workspace().to_string(),
+        }
+    }
+
+    pub(crate) fn tasks_list(&self, query: &ListQuery) -> Result<ListResult, String> {
+        match self {
+            Self::Local(controller) => controller.builder().tasks_list(query),
+            Self::Attach(remote) => remote.tasks_list(query),
+        }
+    }
+
+    pub(crate) fn tasks_get(
+        &self,
+        parent_session: &str,
+        task_id: &str,
+    ) -> Result<Option<TaskRow>, String> {
+        match self {
+            Self::Local(controller) => controller.builder().tasks_get(parent_session, task_id),
+            Self::Attach(remote) => remote.tasks_get(parent_session, task_id),
+        }
+    }
+
+    fn context_report(&self) -> Result<ContextReport, String> {
+        match self {
+            Self::Local(controller) => controller
+                .context_report()
+                .ok_or_else(|| "no session is open".to_string()),
+            Self::Attach(remote) => remote.context_report(),
+        }
+    }
+
+    fn sandbox_info(&self) -> SandboxInfo {
+        match self {
+            Self::Local(controller) => controller.sandbox_info(),
+            Self::Attach(remote) => remote.info().sandbox,
+        }
+    }
+
+    fn rename_session(&self, name: &str) -> Result<(), String> {
+        match self {
+            Self::Local(controller) => controller.rename_session(name),
+            Self::Attach(remote) => remote.rename_session(name),
+        }
+    }
+
+    fn withdraw_user_message(&self) -> bool {
+        match self {
+            Self::Local(controller) => controller.withdraw_user_message(),
+            Self::Attach(remote) => remote.withdraw_queued_turn(),
+        }
+    }
+
+    /// The rows of a `/resume` picker, newest first.
+    fn session_rows(&self) -> Result<Vec<PickerRow>, String> {
+        match self {
+            Self::Local(controller) => controller
+                .list_sessions(PICKER_LIST_LIMIT)
+                .map(|result| result.sessions.iter().map(session_row).collect()),
+            Self::Attach(remote) => remote.session_rows(PICKER_LIST_LIMIT),
+        }
+    }
 }
 
 /// The composer's bash-style prompt history: the prompts the transcript already
@@ -318,6 +417,14 @@ pub(crate) struct App {
     pub tasks: Vec<crate::subagent::tasks::Task>,
     /// Snapshot of discovered names used by skill completions.
     skill_names: Vec<String>,
+    /// Whether the TUI is attached to `otto serve`: the transcript then
+    /// takes every prompt from `user_message` frames, and a dialog opens only
+    /// from `approval_requested`.
+    pub(crate) attached: bool,
+    /// `--attach` only: actions raised outside [`App::handle_key`]'s return
+    /// value (queued text typed while a turn runs). The attach loop drains it
+    /// after every key.
+    pub(crate) outgoing: Vec<Action>,
 }
 
 fn skill_state_completions(name: &str, prefix: &str) -> Vec<Completion> {
@@ -332,13 +439,13 @@ fn skill_state_completions(name: &str, prefix: &str) -> Vec<Completion> {
 }
 
 impl App {
-    pub fn new(controller: &Controller) -> Self {
-        let (entries, usage) = entries::entries_from_history(&controller.history());
+    pub fn new(backend: &Backend) -> Self {
+        let (entries, usage) = entries::entries_from_history(&backend.history());
         let history = History::seeded(prompt_history(&entries));
         let mut app = Self {
             entries,
             usage,
-            info: controller.info(),
+            info: backend.info(),
             input: Vec::new(),
             cursor: 0,
             queued_input: None,
@@ -360,15 +467,24 @@ impl App {
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
             skill_names: Vec::new(),
+            attached: matches!(backend, Backend::Attach(_)),
+            outgoing: Vec::new(),
         };
-        app.refresh_tasks(controller);
+        app.refresh_tasks(backend);
         app
     }
 
     /// Refreshes [`App::tasks`] from the controller's live sub-agent
     /// registry. Called before every draw so [`super::render`] never locks
     /// or queries the registry itself.
-    pub(crate) fn refresh_tasks(&mut self, controller: &Controller) {
+    ///
+    /// In attach mode this does nothing: the attach loop sets
+    /// [`App::tasks`] from `session_tasks` when the status stream reports a
+    /// new task count.
+    pub(crate) fn refresh_tasks(&mut self, backend: &Backend) {
+        let Backend::Local(controller) = backend else {
+            return;
+        };
         self.tasks = controller
             .subagent_tasks()
             .map(|tasks| tasks.list())
@@ -418,17 +534,17 @@ impl App {
     /// append-only during a turn ([`App::apply_event`] is the sole writer), so
     /// an in-progress or just-finished turn's entries are never rebuilt out
     /// from under a still-visible scrollback.
-    pub fn refresh(&mut self, controller: &Controller) {
-        let (entries, usage) = entries::entries_from_history(&controller.history());
+    pub fn refresh(&mut self, backend: &Backend) {
+        let (entries, usage) = entries::entries_from_history(&backend.history());
         self.entries = entries;
         self.usage = usage;
-        self.info = controller.info();
+        self.info = backend.info();
         self.scroll = None;
         self.approval = None;
     }
 
-    pub fn refresh_info(&mut self, controller: &Controller) {
-        self.info = controller.info();
+    pub fn refresh_info(&mut self, backend: &Backend) {
+        self.info = backend.info();
         self.usage = self.info.usage;
     }
 
@@ -533,7 +649,7 @@ impl App {
     pub fn handle_key(
         &mut self,
         key: KeyEvent,
-        controller: &Controller,
+        backend: &Backend,
         cancel: &CancellationToken,
     ) -> Option<Action> {
         if key.code != KeyCode::Char('c') || !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -561,7 +677,11 @@ impl App {
             };
             let id = approval.id.clone();
             self.approval = None;
-            return approve.then_some(Action::Approve(id));
+            return if approve {
+                Some(Action::Approve(id))
+            } else {
+                self.attached.then_some(Action::Deny(id))
+            };
         }
 
         if self.show_help {
@@ -579,7 +699,7 @@ impl App {
         }
 
         if let Some(view) = &mut self.agents {
-            if !view.handle_key(key.code, controller) {
+            if !view.handle_key(key.code, backend) {
                 self.agents = None;
             }
             return None;
@@ -620,7 +740,9 @@ impl App {
                         PickerKind::Resume => Some(Action::Resume(row.value)),
                         PickerKind::Archive => Some(Action::Archive(row.value)),
                         PickerKind::Profile => {
-                            self.picker = Some(effort_picker(&row.value, controller));
+                            if let Backend::Local(controller) = backend {
+                                self.picker = Some(effort_picker(&row.value, controller));
+                            }
                             None
                         }
                         PickerKind::Effort => {
@@ -657,7 +779,7 @@ impl App {
             // committed prompt, or clears the current draft. Esc/Ctrl+C are
             // intercepted by the caller as cancellation before this method is
             // invoked.
-            self.handle_busy_composer_key(key, controller);
+            self.handle_busy_composer_key(key, backend);
             return None;
         }
         if key.code == KeyCode::Char('?') && self.input.is_empty() {
@@ -713,7 +835,7 @@ impl App {
                 if self.input.is_empty() {
                     return None;
                 }
-                self.submit_input(controller, cancel)
+                self.submit_input(backend, cancel)
             }
             KeyCode::Backspace => {
                 if self.cursor > 0 {
@@ -786,7 +908,7 @@ impl App {
     /// directly and clears the draft, without touching `queued_input` — the
     /// overlay only reads `tasks.db`, so opening it starts no provider
     /// request.
-    pub(crate) fn handle_busy_composer_key(&mut self, key: KeyEvent, controller: &Controller) {
+    pub(crate) fn handle_busy_composer_key(&mut self, key: KeyEvent, backend: &Backend) {
         if self.handle_history_key(&key) {
             return;
         }
@@ -805,16 +927,20 @@ impl App {
                 let draft: String = self.input.iter().collect();
                 match commands::parse_slash_command(draft.trim()) {
                     Some((command, _)) if command.kind == SlashCommandKind::Agents => {
-                        self.agents = Some(AgentsView::open(controller));
+                        self.agents = Some(AgentsView::open(backend));
                         self.input.clear();
                         self.cursor = 0;
                         self.suggestion = 0;
                     }
-                    _ => self.commit_queued_input(controller),
+                    _ => self.commit_queued_input(backend),
                 }
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.queued_input_sent && !controller.withdraw_user_message() {
+                if self.attached {
+                    if backend.withdraw_user_message() {
+                        self.push_system("Withdrew the queued turn.");
+                    }
+                } else if self.queued_input_sent && !backend.withdraw_user_message() {
                     return;
                 }
                 self.queued_input = None;
@@ -878,7 +1004,7 @@ impl App {
         }
     }
 
-    fn commit_queued_input(&mut self, controller: &Controller) {
+    fn commit_queued_input(&mut self, backend: &Backend) {
         if self.input.is_empty() || self.queued_input_sent {
             return;
         }
@@ -892,6 +1018,20 @@ impl App {
         if line.is_empty() {
             return;
         }
+        let Backend::Local(controller) = backend else {
+            // The transcript shows the prompt when serve's `user_message`
+            // frame arrives, so nothing is held here. Slash commands wait for
+            // the turn to end, as in local mode.
+            if line.starts_with('/') {
+                self.queued_input = Some(line);
+            } else {
+                self.history.remember(&line);
+                self.push_system("Queued as the next turn (Ctrl+U withdraws it).");
+                self.outgoing.push(Action::Prompt(line));
+            }
+            self.scroll = None;
+            return;
+        };
         self.queued_input_sent = !line.starts_with('/') && controller.queue_user_message(&line);
         self.queued_input = Some(line);
         self.scroll = None;
@@ -899,7 +1039,7 @@ impl App {
 
     pub(crate) fn submit_queued_input(
         &mut self,
-        controller: &Controller,
+        backend: &Backend,
         cancel: &CancellationToken,
     ) -> Option<Action> {
         if self.queued_input_sent {
@@ -907,19 +1047,19 @@ impl App {
         }
         let queued = self.queued_input.take()?;
         self.history.remember(&queued);
-        self.dispatch_line(&queued, controller, cancel)
+        self.dispatch_line(&queued, backend, cancel)
     }
 
-    pub(crate) fn defer_queued_input(&mut self, controller: &Controller) {
+    pub(crate) fn defer_queued_input(&mut self, backend: &Backend) {
         if self.queued_input_sent {
-            controller.withdraw_user_message();
+            backend.withdraw_user_message();
             self.queued_input_sent = false;
         }
     }
 
     pub(crate) fn submit_input(
         &mut self,
-        controller: &Controller,
+        backend: &Backend,
         cancel: &CancellationToken,
     ) -> Option<Action> {
         if self.input.is_empty() {
@@ -936,7 +1076,7 @@ impl App {
             return None;
         }
         self.history.remember(&line);
-        self.dispatch_line(&line, controller, cancel)
+        self.dispatch_line(&line, backend, cancel)
     }
 
     pub fn insert_text(&mut self, value: &str) {
@@ -963,12 +1103,12 @@ impl App {
     /// cancellation and every other key goes to
     /// [`App::handle_busy_composer_key`], whose Enter arm opens the overlay
     /// for an `/agents` draft instead of queuing it.
-    pub(crate) fn handle_turn_key(&mut self, key: KeyEvent, controller: &Controller) -> bool {
+    pub(crate) fn handle_turn_key(&mut self, key: KeyEvent, backend: &Backend) -> bool {
         if let Some(view) = &mut self.agents {
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return true;
             }
-            if !view.handle_key(key.code, controller) {
+            if !view.handle_key(key.code, backend) {
                 self.agents = None;
             }
             return false;
@@ -976,7 +1116,7 @@ impl App {
         if Self::is_interrupt_key(&key) {
             return true;
         }
-        self.handle_busy_composer_key(key, controller);
+        self.handle_busy_composer_key(key, backend);
         false
     }
 
@@ -1089,13 +1229,17 @@ impl App {
     fn dispatch_line(
         &mut self,
         line: &str,
-        controller: &Controller,
+        backend: &Backend,
         cancel: &CancellationToken,
     ) -> Option<Action> {
         if line.is_empty() {
             return None;
         }
         let Some(rest) = line.strip_prefix('/') else {
+            if self.attached {
+                // The `user_message` frame of the new turn is the echo.
+                return Some(Action::Prompt(line.to_string()));
+            }
             // Echo the prompt before the turn starts: [`App::apply_event`]
             // only ever sees the model's side of the turn, so this is the
             // sole writer of the user's own text into the live transcript.
@@ -1153,7 +1297,7 @@ impl App {
                     self.push_system(format!("unknown command: {line}"));
                     return None;
                 }
-                self.push_system(session_report(controller));
+                self.push_system(session_report(backend));
                 None
             }
             SlashCommandKind::Rename => {
@@ -1161,14 +1305,19 @@ impl App {
                     self.push_system(format!("unknown command: {line}"));
                     return None;
                 }
-                match controller.rename_session(&args) {
+                match backend.rename_session(&args) {
                     Ok(()) => self.push_system(format!("Renamed session: {args}")),
                     Err(message) => self.push_system(format!("/rename: {message}")),
                 }
                 None
             }
             SlashCommandKind::Compact => Some(Action::Compact(args)),
-            SlashCommandKind::Reflect => Some(Action::Reflect(args)),
+            SlashCommandKind::Reflect => {
+                if self.attached {
+                    return self.unavailable(command.name);
+                }
+                Some(Action::Reflect(args))
+            }
             SlashCommandKind::Image => {
                 if args.is_empty() {
                     self.push_system("usage: /image <path>");
@@ -1178,6 +1327,9 @@ impl App {
                 }
             }
             SlashCommandKind::Model => {
+                let Backend::Local(controller) = backend else {
+                    return self.unavailable(command.name);
+                };
                 if !controller.dynamic_content() {
                     self.push_system(format!("/model: {PROFILE_SWITCH_UNAVAILABLE}"));
                     return None;
@@ -1208,19 +1360,25 @@ impl App {
                 }
             }
             SlashCommandKind::Thinking => {
+                if self.attached {
+                    return self.unavailable(command.name);
+                }
                 if args.is_empty() {
-                    self.picker = Some(thinking_picker(&controller.info().thinking));
+                    self.picker = Some(thinking_picker(&backend.info().thinking));
                     None
                 } else {
                     Some(parse_thinking_action(args, false))
                 }
             }
             SlashCommandKind::Resume => {
-                self.open_session_picker(PickerKind::Resume, controller);
+                self.open_session_picker(PickerKind::Resume, backend);
                 None
             }
             SlashCommandKind::Archive => {
-                self.open_session_picker(PickerKind::Archive, controller);
+                if self.attached {
+                    return self.unavailable(command.name);
+                }
+                self.open_session_picker(PickerKind::Archive, backend);
                 None
             }
             SlashCommandKind::Sandbox => {
@@ -1228,9 +1386,18 @@ impl App {
                     Some((subcommand, rest)) => (subcommand, rest.trim()),
                     None => (args.as_str(), ""),
                 };
+                if self.attached && matches!(subcommand, "allow" | "network" | "exclude") {
+                    return self.unavailable(command.name);
+                }
+                // Past the check above, `local` is `Some` for every arm that
+                // needs the controller.
+                let local = match backend {
+                    Backend::Local(controller) => Some(*controller),
+                    Backend::Attach(_) => None,
+                };
                 match (subcommand, rest) {
                     ("", _) => {
-                        let info = controller.sandbox_info();
+                        let info = backend.sandbox_info();
                         let reason = info.reason_code();
                         let mut text = format!("Sandbox: {}", info.summary());
                         if !reason.is_empty() {
@@ -1241,6 +1408,7 @@ impl App {
                     }
                     ("reload", "") => Some(Action::SandboxReload),
                     ("allow", path) => {
+                        let controller = local?;
                         match controller.resolve_sandbox_read_path(path) {
                             Ok(resolved) => self.picker = Some(sandbox_allow_picker(&resolved)),
                             Err(message) => {
@@ -1250,7 +1418,7 @@ impl App {
                         None
                     }
                     ("network", "") => {
-                        self.picker = Some(sandbox_network_picker(controller));
+                        self.picker = Some(sandbox_network_picker(local?));
                         None
                     }
                     ("network", mode @ ("allow" | "deny")) => {
@@ -1271,14 +1439,23 @@ impl App {
             }
             SlashCommandKind::Approve => match args.split_whitespace().collect::<Vec<_>>()[..] {
                 [id] => Some(Action::Approve(id.to_string())),
+                [_, "always"] if self.attached => self.unavailable(command.name),
                 [id, "always"] => Some(Action::ApproveAlways(id.to_string())),
                 _ => {
                     self.push_system(format!("unknown command: {line}"));
                     None
                 }
             },
-            SlashCommandKind::Login => Some(Action::Login(args)),
+            SlashCommandKind::Login => {
+                if self.attached {
+                    return self.unavailable(command.name);
+                }
+                Some(Action::Login(args))
+            }
             SlashCommandKind::Mcp => {
+                let Backend::Local(controller) = backend else {
+                    return self.unavailable(command.name);
+                };
                 let fields: Vec<&str> = args.split_whitespace().collect();
                 match fields.as_slice() {
                     [] => {
@@ -1293,6 +1470,9 @@ impl App {
                 }
             }
             SlashCommandKind::Logout => {
+                let Backend::Local(controller) = backend else {
+                    return self.unavailable(command.name);
+                };
                 if !args.is_empty() {
                     self.push_system(format!("unknown command: {line}"));
                     return None;
@@ -1307,6 +1487,9 @@ impl App {
                 None
             }
             SlashCommandKind::Tasks => {
+                let Backend::Local(controller) = backend else {
+                    return self.unavailable(command.name);
+                };
                 if !args.is_empty() {
                     self.push_system(format!("unknown command: {line}"));
                     return None;
@@ -1315,21 +1498,27 @@ impl App {
                 None
             }
             SlashCommandKind::Task => {
+                let Backend::Local(controller) = backend else {
+                    return self.unavailable(command.name);
+                };
                 self.push_system(task_report(controller, &args));
                 None
             }
             SlashCommandKind::Context => {
-                match controller.context_report() {
-                    Some(report) => self.context = Some(ContextView::new(report)),
-                    None => self.push_system("/context: no session is open".to_string()),
+                match backend.context_report() {
+                    Ok(report) => self.context = Some(ContextView::new(report)),
+                    Err(message) => self.push_system(format!("/context: {message}")),
                 }
                 None
             }
             SlashCommandKind::Agents => {
-                self.agents = Some(AgentsView::open(controller));
+                self.agents = Some(AgentsView::open(backend));
                 None
             }
             SlashCommandKind::Timers => {
+                let Backend::Local(controller) = backend else {
+                    return self.unavailable(command.name);
+                };
                 self.push_system(
                     repl_commands::timers_report(controller, &args)
                         .unwrap_or_else(|message| message),
@@ -1337,10 +1526,16 @@ impl App {
                 None
             }
             SlashCommandKind::Skill => {
+                let Backend::Local(controller) = backend else {
+                    return self.unavailable(command.name);
+                };
                 self.push_system(repl_commands::skill_report(controller, &args));
                 None
             }
             SlashCommandKind::Memory => {
+                let Backend::Local(controller) = backend else {
+                    return self.unavailable(command.name);
+                };
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
                 let result =
@@ -1349,6 +1544,9 @@ impl App {
                 None
             }
             SlashCommandKind::Remember => {
+                let Backend::Local(controller) = backend else {
+                    return self.unavailable(command.name);
+                };
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
                 let result = repl_commands::repl_remember_command(
@@ -1389,23 +1587,29 @@ impl App {
         }
     }
 
-    /// `list_sessions` is synchronous, so the picker opens with no intermediate
+    /// The reply to a command that needs the local controller while attached.
+    fn unavailable(&mut self, command: &str) -> Option<Action> {
+        self.push_system(format!("{command}: {ATTACH_UNAVAILABLE}"));
+        None
+    }
+
+    /// `session_rows` is synchronous, so the picker opens with no intermediate
     /// loading state.
-    fn open_session_picker(&mut self, kind: PickerKind, controller: &Controller) {
-        match controller.list_sessions(PICKER_LIST_LIMIT) {
-            Ok(result) => {
-                if result.sessions.is_empty() {
+    fn open_session_picker(&mut self, kind: PickerKind, backend: &Backend) {
+        match backend.session_rows() {
+            Ok(rows) => {
+                if rows.is_empty() {
                     self.push_system("No sessions found.");
                     return;
                 }
-                let rows = result.sessions.iter().map(session_row).collect();
                 self.picker = Some(Picker::new(kind, rows));
             }
             Err(message) => self.push_system(format!("/{}: {message}", picker_command_name(kind))),
         }
     }
 
-    /// Applies one streamed turn event to the transcript.
+    /// Applies one turn frame to the transcript. Local turns pass their
+    /// events through [`super::wire_frame`], so both modes share this writer.
     ///
     /// ponytail: one system line is appended per event rather than patching a
     /// streaming assistant entry in place (this is the sole writer during a
@@ -1416,133 +1620,155 @@ impl App {
     /// text deltas into it if scrollback churn during streaming turns is
     /// reported as noisy.
     ///
-    /// Returns `true` for an [`Event::AgentError`], so [`super::run`] does not
-    /// also print a turn's final `Err` when the same failure already appeared
-    /// as an event.
-    pub fn apply_event(&mut self, event: Event) -> bool {
-        if let Some(phase) = transcript::phase(&to_wire(&event))
+    /// Returns `true` for an `agent_error` frame, so the caller does not also
+    /// print a turn's final error when the same failure already appeared as
+    /// an event.
+    pub fn apply_event(&mut self, event: &WireEvent) -> bool {
+        if let Some(phase) = transcript::phase(event)
             && phase != self.phase.0
         {
             self.phase = (phase, Instant::now());
         }
-        match event {
-            Event::ReasoningDelta { text } => {
+        match event.event_type.as_str() {
+            "reasoning_delta" => {
                 if let Some(last) = self.entries.last_mut()
                     && last.kind == Some(EntryKind::Reasoning)
                     && last.id == "streaming-reasoning"
                 {
-                    last.raw.push_str(&text);
+                    last.raw.push_str(&event.text);
                 } else {
                     self.entries.push(Entry {
                         id: "streaming-reasoning".to_string(),
                         kind: Some(EntryKind::Reasoning),
-                        raw: text,
+                        raw: event.text.clone(),
                         ..Entry::default()
                     });
                 }
-                false
             }
-            Event::TextDelta { text } => {
+            "text_delta" => {
                 if let Some(last) = self.entries.last_mut()
                     && last.kind == Some(EntryKind::Assistant)
                     && last.id == "streaming"
                 {
-                    last.raw.push_str(&text);
+                    last.raw.push_str(&event.text);
                 } else {
                     self.entries.push(Entry {
                         id: "streaming".to_string(),
                         kind: Some(EntryKind::Assistant),
-                        raw: text,
+                        raw: event.text.clone(),
                         ..Entry::default()
                     });
                 }
-                false
             }
-            Event::ToolCallStarted {
-                operation_id,
-                tool_name,
-                tool_call_id,
-                arguments,
-                ..
-            } => {
+            "tool_call_started" => {
                 self.entries.push(Entry {
                     id: format!("streaming-tool-{}", self.entries.len()),
                     kind: Some(EntryKind::Tool),
-                    tool_call_id,
-                    tool_name,
-                    tool_args: arguments,
-                    operation_id: Some(operation_id.to_string()),
+                    tool_call_id: event.tool_call_id.clone(),
+                    tool_name: event.tool_name.clone(),
+                    tool_args: event
+                        .tool_args
+                        .as_deref()
+                        .map(|raw| raw.get().to_string())
+                        .unwrap_or_default(),
+                    operation_id: Some(event.operation_id.clone()),
                     ..Entry::default()
                 });
-                false
             }
-            Event::ToolCallFinished {
-                operation_id,
-                tool_name,
-                tool_call_id,
-                result,
-                outcome,
-                ..
-            } => {
-                let approval = bash_approval_request(&tool_name, &result);
+            "tool_call_finished" => {
+                let result = event.result.clone().unwrap_or_default();
+                // An attached turn asks through `approval_requested`; the
+                // result text only carries the local `/approve` hint.
+                let approval = if self.attached {
+                    None
+                } else {
+                    bash_approval_request(
+                        &event.tool_name,
+                        &ToolResult {
+                            content: result.content.clone(),
+                            is_error: result.is_error,
+                            ..ToolResult::default()
+                        },
+                    )
+                };
                 if let Some(entry) = self.entries.iter_mut().rev().find(|entry| {
-                    entry.kind == Some(EntryKind::Tool) && entry.tool_call_id == tool_call_id
+                    entry.kind == Some(EntryKind::Tool) && entry.tool_call_id == event.tool_call_id
                 }) {
                     entry.tool_output = result.content;
                     entry.tool_error = result.is_error;
                     entry.tool_done = true;
-                    entry.operation_id = Some(operation_id.to_string());
-                    entry.disposition = Some(outcome.disposition);
-                    entry.effect_certainty = Some(outcome.effect_certainty);
-                    entry.stop_reason = outcome.stop_reason;
+                    entry.operation_id = Some(event.operation_id.clone());
+                    entry.disposition = result.disposition;
+                    entry.effect_certainty = result.effect_certainty;
+                    entry.stop_reason = result.stop_reason;
                 }
                 if let Some(approval) = approval {
                     self.push_system(approval_hint(&approval));
                     self.approval = Some(approval);
                 }
-                false
             }
-            Event::CompactionCompleted { compaction } => {
-                self.push_system(compaction_line(&compaction));
-                false
+            "compaction_completed" => {
+                if let Some(compaction) = &event.compaction {
+                    self.push_system(compaction_line(compaction));
+                }
             }
-            Event::CompactionWarning { message } | Event::MemoryWarning { message } => {
-                self.push_system(message);
-                false
+            "compaction_warning" | "memory_warning" => self.push_system(event.error.clone()),
+            "agent_error" => {
+                self.push_system(event.error.clone());
+                return true;
             }
-            Event::AgentError { message } => {
-                self.push_system(message);
-                true
-            }
-            Event::Notification {
-                kind: Some(NotificationKind::UserMessage),
-                text,
-                ..
-            } => {
-                let queued = self.queued_input.take().unwrap_or(text);
-                self.queued_input_sent = false;
-                self.history.remember(&queued);
+            USER_MESSAGE => {
+                // ponytail: an attached image prompt shows its text only; the
+                // frame says an image was attached but carries no data.
+                let text = if self.attached {
+                    event.text.clone()
+                } else {
+                    let queued = self
+                        .queued_input
+                        .take()
+                        .unwrap_or_else(|| event.text.clone());
+                    self.queued_input_sent = false;
+                    self.history.remember(&queued);
+                    queued
+                };
                 self.entries.push(Entry {
                     id: format!("user-{}", self.entries.len()),
                     kind: Some(EntryKind::User),
-                    raw: queued,
+                    raw: text,
                     ..Entry::default()
                 });
                 self.scroll = None;
-                false
             }
-            Event::Notification { task_id, text, .. } => {
-                self.push_system(format!("[task {task_id}] {text}"));
-                false
+            "notification" => {
+                self.push_system(format!("[task {}] {}", event.task_id, event.text));
             }
-            Event::AgentStarted
-            | Event::AgentFinished
-            | Event::ProviderUsage { .. }
-            | Event::ProviderApiCall { .. }
-            | Event::ProviderRetry { .. }
-            | Event::CompactionStarted { .. }
-            | Event::CompactionPlanned { .. } => false,
+            APPROVAL_REQUESTED => {
+                let approval = ApprovalDialog {
+                    id: event.approval_id.clone(),
+                    command: event.command.clone(),
+                    justification: event.justification.clone(),
+                    ..Default::default()
+                };
+                self.push_system(approval_hint(&approval));
+                self.approval = Some(approval);
+            }
+            APPROVAL_DECIDED
+                if self
+                    .approval
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.id == event.approval_id) =>
+            {
+                // The user's own answer already closed the dialog; this
+                // closes it when another client or the timeout decided.
+                self.approval = None;
+                self.push_system(format!(
+                    "Approval {} decided elsewhere: {}",
+                    event.approval_id, event.decision
+                ));
+            }
+            _ => {}
         }
+        false
     }
 }
 
@@ -1726,17 +1952,20 @@ fn parse_thinking_action(args: String, save_default: bool) -> Action {
     }
 }
 
-fn session_report(controller: &Controller) -> String {
-    let info = controller.info();
-    let mut text = format!(
-        "ID: {}\nPath: {}\nProvider: {}\nModel: {}\nThinking: {}\nSandbox: {}",
-        info.session_id,
-        info.session_path,
+fn session_report(backend: &Backend) -> String {
+    let info = backend.info();
+    let mut text = format!("ID: {}", info.session_id);
+    // An attached session has no local path.
+    if !info.session_path.is_empty() {
+        text.push_str(&format!("\nPath: {}", info.session_path));
+    }
+    text.push_str(&format!(
+        "\nProvider: {}\nModel: {}\nThinking: {}\nSandbox: {}",
         info.provider,
         info.model,
         display_thinking(&info.thinking),
         info.sandbox.summary()
-    );
+    ));
     if !info.session_name.is_empty() {
         text.push_str(&format!("\nName: {}", info.session_name));
     }
@@ -1770,9 +1999,9 @@ fn display_thinking(thinking: &str) -> &str {
 }
 
 /// `pub(super)` because [`super::run`] also needs it for a `/compact` call's
-/// final [`otto_core::agent::CompactionResult`] (as opposed to a streamed
-/// [`Event::CompactionCompleted`], which [`App::apply_event`] handles itself).
-pub(super) fn compaction_line(result: &CompactionResult) -> String {
+/// final result (as opposed to a streamed `compaction_completed` frame, which
+/// [`App::apply_event`] handles itself).
+pub(super) fn compaction_line(result: &WireCompaction) -> String {
     if result.noop {
         return "[context] no-op".to_string();
     }
@@ -1860,6 +2089,13 @@ fn task_line(task: &Task) -> String {
 #[cfg(test)]
 mod tests {
     use otto_core::agent::context_report::SectionKind;
+    use otto_core::agent::inbox::NotificationKind;
+    use otto_core::agent::{CompactionResult, Event};
+    use otto_core::model::{Block, Role};
+
+    use otto_core::wire::events::to_wire_compaction;
+
+    use crate::tui::wire_frame;
 
     use super::*;
 
@@ -1948,6 +2184,8 @@ mod tests {
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
             skill_names: Vec::new(),
+            attached: false,
+            outgoing: Vec::new(),
         };
         assert!(app.handle_ctrl_c().is_none());
         assert_eq!(app.status.as_deref(), Some(CTRL_C_EXIT_STATUS));
@@ -1981,6 +2219,8 @@ mod tests {
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
             skill_names: Vec::new(),
+            attached: false,
+            outgoing: Vec::new(),
         };
         assert!(app.handle_ctrl_c().is_none());
         assert!(app.input.is_empty());
@@ -1993,22 +2233,22 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let cancel = CancellationToken::new();
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
 
         app.handle_key(
             key(KeyCode::Char('h'), KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         app.handle_key(
             key(KeyCode::Char('i'), KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         let action = app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -2031,7 +2271,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.history.remember("first prompt");
         app.history.remember("latest prompt");
         app.input = "draft".chars().collect();
@@ -2039,15 +2279,27 @@ mod tests {
         app.max_scroll.set(10);
         app.start_turn();
 
-        assert!(!app.handle_turn_key(key(KeyCode::Up, KeyModifiers::NONE), &controller));
+        assert!(!app.handle_turn_key(
+            key(KeyCode::Up, KeyModifiers::NONE),
+            &Backend::Local(&controller)
+        ));
         assert_eq!(app.input.iter().collect::<String>(), "latest prompt");
         assert_eq!(app.scroll, None, "Up must not scroll during an active turn");
 
-        assert!(!app.handle_turn_key(key(KeyCode::Up, KeyModifiers::NONE), &controller));
+        assert!(!app.handle_turn_key(
+            key(KeyCode::Up, KeyModifiers::NONE),
+            &Backend::Local(&controller)
+        ));
         assert_eq!(app.input.iter().collect::<String>(), "first prompt");
-        assert!(!app.handle_turn_key(key(KeyCode::Down, KeyModifiers::NONE), &controller));
+        assert!(!app.handle_turn_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller)
+        ));
         assert_eq!(app.input.iter().collect::<String>(), "latest prompt");
-        assert!(!app.handle_turn_key(key(KeyCode::Down, KeyModifiers::NONE), &controller));
+        assert!(!app.handle_turn_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller)
+        ));
         assert_eq!(app.input.iter().collect::<String>(), "draft");
     }
 
@@ -2058,13 +2310,13 @@ mod tests {
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let _admission = controller.begin_operation().expect("active turn");
         let cancel = CancellationToken::new();
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
         app.insert_text("change course");
 
         let action = app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -2078,26 +2330,26 @@ mod tests {
             })
         }));
 
-        app.apply_event(Event::Notification {
+        app.apply_event(&wire_frame(&Event::Notification {
             kind: None,
             task_id: String::new(),
             text: "not the queued input".into(),
             usage: Usage::default(),
             present: false,
-        });
+        }));
         assert!(
             app.queued_input_sent,
             "an untyped notification is not user input"
         );
         assert_eq!(app.queued_input.as_deref(), Some("change course"));
 
-        app.apply_event(Event::Notification {
+        app.apply_event(&wire_frame(&Event::Notification {
             kind: Some(NotificationKind::UserMessage),
             task_id: String::new(),
             text: "change course".into(),
             usage: Usage::default(),
             present: false,
-        });
+        }));
         assert!(!app.queued_input_sent);
         assert!(app.queued_input.is_none());
         assert_eq!(
@@ -2114,17 +2366,17 @@ mod tests {
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let admission = controller.begin_operation().expect("active turn");
         let cancel = CancellationToken::new();
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
         app.insert_text("follow up");
         app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         drop(admission);
 
-        app.defer_queued_input(&controller);
+        app.defer_queued_input(&Backend::Local(&controller));
 
         assert!(!app.queued_input_sent);
         assert_eq!(app.queued_input.as_deref(), Some("follow up"));
@@ -2136,15 +2388,15 @@ mod tests {
                 .all(|item| item.kind != Some(NotificationKind::UserMessage))
         }));
 
-        let mut slash = App::new(&controller);
+        let mut slash = App::new(&Backend::Local(&controller));
         slash.start_turn();
         slash.insert_text("/memory search vim");
         slash.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
-        slash.defer_queued_input(&controller);
+        slash.defer_queued_input(&Backend::Local(&controller));
         assert_eq!(slash.queued_input.as_deref(), Some("/memory search vim"));
         assert!(slash.entries.is_empty(), "the slash command did not run");
     }
@@ -2154,7 +2406,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
 
         app.insert_text("draft only");
@@ -2171,19 +2423,19 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let cancel = CancellationToken::new();
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
         app.insert_text("queued draft");
         app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         assert_eq!(app.queued_input.as_deref(), Some("queued draft"));
 
         let action = app.handle_key(
             key(KeyCode::Char('u'), KeyModifiers::CONTROL),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -2200,7 +2452,7 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let cancel = CancellationToken::new();
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         if busy {
             app.start_turn();
         }
@@ -2209,7 +2461,7 @@ mod tests {
             app.cursor = from;
             app.handle_key(
                 key(KeyCode::Char(ch), KeyModifiers::CONTROL),
-                &controller,
+                &Backend::Local(&controller),
                 &cancel,
             );
             app.cursor
@@ -2237,13 +2489,13 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let cancel = CancellationToken::new();
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
 
         app.insert_text("next prompt");
         app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         assert!(app.input.is_empty());
@@ -2252,7 +2504,7 @@ mod tests {
         assert!(app.history.previous("").is_none());
 
         app.end_turn();
-        let action = app.submit_queued_input(&controller, &cancel);
+        let action = app.submit_queued_input(&Backend::Local(&controller), &cancel);
 
         assert!(matches!(action, Some(Action::Prompt(line)) if line == "next prompt"));
         assert_eq!(app.entries.len(), 1);
@@ -2288,6 +2540,8 @@ mod tests {
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
             skill_names: Vec::new(),
+            attached: false,
+            outgoing: Vec::new(),
         };
         let event = key(KeyCode::Char('?'), KeyModifiers::NONE);
         // No controller is available in a unit test; '?' with pending text
@@ -2324,6 +2578,8 @@ mod tests {
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
             skill_names: Vec::new(),
+            attached: false,
+            outgoing: Vec::new(),
         };
 
         app.insert_text("one\ntwo");
@@ -2355,7 +2611,10 @@ mod tests {
             noop: true,
             ..Default::default()
         };
-        assert_eq!(compaction_line(&noop), "[context] no-op");
+        assert_eq!(
+            compaction_line(&to_wire_compaction(&noop)),
+            "[context] no-op"
+        );
         let estimated = CompactionResult {
             noop: false,
             tokens_before: 12_000,
@@ -2363,7 +2622,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            compaction_line(&estimated),
+            compaction_line(&to_wire_compaction(&estimated)),
             "[context] compacted 12k \u{2192} 4k tokens"
         );
     }
@@ -2378,19 +2637,19 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
         app.max_scroll.set(10);
 
         app.handle_key(
             key(KeyCode::PageUp, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         assert_eq!(app.scroll, Some(0));
         app.handle_key(
             key(KeyCode::PageDown, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         assert_eq!(app.scroll, None);
@@ -2410,24 +2669,24 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
 
-        app.apply_event(Event::TextDelta {
+        app.apply_event(&wire_frame(&Event::TextDelta {
             text: "first".to_string(),
-        });
+        }));
         assert_eq!(app.scroll, None, "an unscrolled transcript keeps following");
 
         app.scroll = Some(4);
-        app.apply_event(Event::TextDelta {
+        app.apply_event(&wire_frame(&Event::TextDelta {
             text: "second".to_string(),
-        });
-        app.apply_event(Event::ToolCallStarted {
+        }));
+        app.apply_event(&wire_frame(&Event::ToolCallStarted {
             operation_id: otto_core::model::OperationId::new("op_test").expect("operation id"),
             attempt: 1,
             tool_name: "bash".to_string(),
             tool_call_id: "call-1".to_string(),
             arguments: String::new(),
-        });
+        }));
         assert_eq!(app.scroll, Some(4));
     }
 
@@ -2436,17 +2695,17 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let before = app.entries.len();
 
-        app.apply_event(Event::ToolCallStarted {
+        app.apply_event(&wire_frame(&Event::ToolCallStarted {
             operation_id: otto_core::model::OperationId::new("op_approval").expect("operation id"),
             attempt: 1,
             tool_name: "bash".to_string(),
             tool_call_id: "call-1".to_string(),
             arguments: r#"{"command":"git push"}"#.to_string(),
-        });
-        app.apply_event(Event::ToolCallFinished {
+        }));
+        app.apply_event(&wire_frame(&Event::ToolCallFinished {
             operation_id: otto_core::model::OperationId::new("op_approval").expect("operation id"),
             attempt: 1,
             tool_name: "bash".to_string(),
@@ -2461,7 +2720,7 @@ mod tests {
                 effect_certainty: otto_core::model::EffectCertainty::NotStarted,
                 stop_reason: None,
             },
-        });
+        }));
 
         let added = &app.entries[before..];
         assert_eq!(added.len(), 2, "tool entry plus system hint: {added:?}");
@@ -2490,7 +2749,7 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let cancel = CancellationToken::new();
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let dialog = |id: &str| ApprovalDialog {
             id: id.to_string(),
             command: "git push".to_string(),
@@ -2498,7 +2757,11 @@ mod tests {
             ..Default::default()
         };
         let press = |app: &mut App, code| {
-            app.handle_key(key(code, KeyModifiers::NONE), &controller, &cancel)
+            app.handle_key(
+                key(code, KeyModifiers::NONE),
+                &Backend::Local(&controller),
+                &cancel,
+            )
         };
 
         // Enter on the default option ("No") cancels; nothing is granted.
@@ -2573,13 +2836,13 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let before = app.entries.len();
 
         for text in ["weigh ", "options"] {
-            app.apply_event(Event::ReasoningDelta { text: text.into() });
+            app.apply_event(&wire_frame(&Event::ReasoningDelta { text: text.into() }));
         }
-        app.apply_event(Event::TextDelta { text: "ok".into() });
+        app.apply_event(&wire_frame(&Event::TextDelta { text: "ok".into() }));
 
         let added: Vec<_> = app.entries[before..]
             .iter()
@@ -2601,15 +2864,15 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
 
-        app.apply_event(Event::ReasoningDelta { text: "a".into() });
+        app.apply_event(&wire_frame(&Event::ReasoningDelta { text: "a".into() }));
         let started = app.phase.1;
-        app.apply_event(Event::ReasoningDelta { text: "b".into() });
+        app.apply_event(&wire_frame(&Event::ReasoningDelta { text: "b".into() }));
         assert_eq!(app.phase, ("reasoning".to_string(), started));
 
-        app.apply_event(Event::TextDelta { text: "ok".into() });
+        app.apply_event(&wire_frame(&Event::TextDelta { text: "ok".into() }));
         assert_eq!(app.phase.0, "responding");
         assert!(app.phase.1 >= started);
     }
@@ -2622,7 +2885,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.max_scroll.set(10);
         app.start_turn();
 
@@ -2645,16 +2908,16 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
         assert!(matches!(
-            app.dispatch_line("/clear", &controller, &cancel),
+            app.dispatch_line("/clear", &Backend::Local(&controller), &cancel),
             Some(Action::NewSession)
         ));
 
         assert!(
-            app.dispatch_line("/clear now", &controller, &cancel)
+            app.dispatch_line("/clear now", &Backend::Local(&controller), &cancel)
                 .is_none()
         );
         assert_eq!(
@@ -2668,16 +2931,16 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        let action = app.dispatch_line("/init", &controller, &cancel);
+        let action = app.dispatch_line("/init", &Backend::Local(&controller), &cancel);
         assert!(
             matches!(action, Some(Action::Prompt(prompt)) if prompt == otto_core::agent::INIT_PROMPT)
         );
 
         assert!(
-            app.dispatch_line("/init now", &controller, &cancel)
+            app.dispatch_line("/init now", &Backend::Local(&controller), &cancel)
                 .is_none()
         );
         assert_eq!(
@@ -2710,10 +2973,10 @@ mod tests {
         )
         .expect("contract skill");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        app.dispatch_line("/skill", &controller, &cancel);
+        app.dispatch_line("/skill", &Backend::Local(&controller), &cancel);
         assert_eq!(
             app.entries.last().expect("entry").raw,
             "Available skills:\n- api-review\n- release-notes [contract]\n- rust-helper"
@@ -2737,13 +3000,13 @@ mod tests {
             app.entries.last()
         );
 
-        app.dispatch_line("/skills", &controller, &cancel);
+        app.dispatch_line("/skills", &Backend::Local(&controller), &cancel);
         assert_eq!(
             app.entries.last().expect("entry").raw,
             "unknown command: /skills"
         );
 
-        app.dispatch_line("/skill rust-helper", &controller, &cancel);
+        app.dispatch_line("/skill rust-helper", &Backend::Local(&controller), &cancel);
         let detail = &app.entries.last().expect("entry").raw;
         assert!(detail.contains("Skill: rust-helper"), "{detail}");
         assert!(
@@ -2759,7 +3022,7 @@ mod tests {
         testutil::write_skill(workspace.path(), "release-notes", "Notes", "Write notes.");
         testutil::write_skill(workspace.path(), "set", "A named set", "Detail body.");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
 
         let suggestions = |value: &str, app: &mut App| {
             app.input = value.chars().collect();
@@ -2818,19 +3081,19 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        app.dispatch_line("/mcp", &controller, &cancel);
+        app.dispatch_line("/mcp", &Backend::Local(&controller), &cancel);
         assert_eq!(
             app.entries.last().expect("entry").raw,
             "No MCP servers configured."
         );
 
-        let action = app.dispatch_line("/mcp login docs", &controller, &cancel);
+        let action = app.dispatch_line("/mcp login docs", &Backend::Local(&controller), &cancel);
         assert!(matches!(action, Some(Action::McpLogin(name)) if name == "docs"));
 
-        app.dispatch_line("/mcp bogus", &controller, &cancel);
+        app.dispatch_line("/mcp bogus", &Backend::Local(&controller), &cancel);
         assert_eq!(
             app.entries.last().expect("entry").raw,
             repl_commands::MCP_USAGE
@@ -2842,18 +3105,22 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
         assert!(
-            app.dispatch_line("/context", &controller, &cancel)
+            app.dispatch_line("/context", &Backend::Local(&controller), &cancel)
                 .is_none()
         );
         let view = app.context.as_ref().expect("the context overlay is open");
         assert_eq!(view.report.sections[0].kind, SectionKind::SystemPrompt);
         assert!(app.suggestions().is_empty(), "an overlay hides suggestions");
 
-        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert!(app.context.is_none());
     }
 
@@ -2862,11 +3129,11 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
 
         let action = app.dispatch_line(
             "/image /tmp/screenshot with spaces.png",
-            &controller,
+            &Backend::Local(&controller),
             &CancellationToken::new(),
         );
         assert!(
@@ -2879,10 +3146,10 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        app.dispatch_line("/memory search vim", &controller, &cancel);
+        app.dispatch_line("/memory search vim", &Backend::Local(&controller), &cancel);
 
         assert_eq!(
             app.entries.last().expect("entry").raw,
@@ -2895,10 +3162,14 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        app.dispatch_line("/remember prefers dark mode", &controller, &cancel);
+        app.dispatch_line(
+            "/remember prefers dark mode",
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         assert_eq!(
             app.entries.last().expect("entry").raw,
@@ -2917,10 +3188,10 @@ mod tests {
             &store.path().join("m.db"),
         )
         .await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        app.dispatch_line("/memory", &controller, &cancel);
+        app.dispatch_line("/memory", &Backend::Local(&controller), &cancel);
 
         assert_eq!(
             app.entries.last().expect("entry").raw,
@@ -2939,10 +3210,14 @@ mod tests {
             &store.path().join("m.db"),
         )
         .await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        app.dispatch_line("/remember --scope user", &controller, &cancel);
+        app.dispatch_line(
+            "/remember --scope user",
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         assert_eq!(
             app.entries.last().expect("entry").raw,
@@ -2963,22 +3238,30 @@ mod tests {
             &store.path().join("m.db"),
         )
         .await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        app.dispatch_line("/memory review", &controller, &cancel);
+        app.dispatch_line("/memory review", &Backend::Local(&controller), &cancel);
         assert_eq!(
             app.entries.last().expect("entry").raw,
             "no pending candidates"
         );
 
-        app.dispatch_line("/memory review cand-1 accept", &controller, &cancel);
+        app.dispatch_line(
+            "/memory review cand-1 accept",
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert_eq!(
             app.entries.last().expect("entry").raw,
             "/memory: candidate cand-1 not found"
         );
 
-        app.dispatch_line("/memory review cand-1 maybe", &controller, &cancel);
+        app.dispatch_line(
+            "/memory review cand-1 maybe",
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert_eq!(
             app.entries.last().expect("entry").raw,
             repl_commands::MEMORY_USAGE
@@ -2996,15 +3279,15 @@ mod tests {
             &store.path().join("m.db"),
         )
         .await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
         app.dispatch_line(
             "/remember --kind preference --key editor vim",
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
-        app.dispatch_line("/memory search vim", &controller, &cancel);
+        app.dispatch_line("/memory search vim", &Backend::Local(&controller), &cancel);
 
         let text = app.entries.last().expect("entry").raw.clone();
         assert!(text.contains("1 records:"), "{text}");
@@ -3032,12 +3315,12 @@ mod tests {
                 ..RememberRequest::default()
             })
             .expect("remember");
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
         app.dispatch_line(
             &format!("/memory forget {}", record.id),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         assert_eq!(
@@ -3045,7 +3328,11 @@ mod tests {
             format!("forgot {} (revision 1)", record.id)
         );
 
-        app.dispatch_line("/memory forget missing", &controller, &cancel);
+        app.dispatch_line(
+            "/memory forget missing",
+            &Backend::Local(&controller),
+            &cancel,
+        );
         let missing = app.entries.last().expect("entry").raw.clone();
         assert!(missing.starts_with("/memory: "), "{missing}");
         assert!(missing.contains("not found"), "{missing}");
@@ -3063,10 +3350,14 @@ mod tests {
         )
         .await;
         let (_, _, workspace_scope) = controller.memory_manager().expect("memory");
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        app.dispatch_line("/remember prefers dark mode", &controller, &cancel);
+        app.dispatch_line(
+            "/remember prefers dark mode",
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         let text = app.entries.last().expect("entry").raw.clone();
         assert!(text.starts_with("remembered "), "{text}");
@@ -3092,12 +3383,12 @@ mod tests {
         )
         .await;
         let (_, user_scope, _) = controller.memory_manager().expect("memory");
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
         app.dispatch_line(
             "/remember --scope user --kind preference --key editor vim",
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -3118,7 +3409,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let before = app.entries.len();
         app.start_turn();
         app.input = "/memory search vim".chars().collect();
@@ -3127,7 +3418,7 @@ mod tests {
 
         let action = app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -3146,12 +3437,15 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
         app.input = "/agents".chars().collect();
         app.cursor = app.input.len();
 
-        let cancelled = app.handle_turn_key(key(KeyCode::Enter, KeyModifiers::NONE), &controller);
+        let cancelled = app.handle_turn_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+        );
 
         assert!(!cancelled);
         assert!(app.agents.is_some(), "Enter on /agents opens the overlay");
@@ -3166,13 +3460,16 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
         app.queued_input = Some("earlier queued prompt".to_string());
         app.input = "/agents".chars().collect();
         app.cursor = app.input.len();
 
-        app.handle_turn_key(key(KeyCode::Enter, KeyModifiers::NONE), &controller);
+        app.handle_turn_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+        );
 
         assert!(app.agents.is_some());
         assert_eq!(app.queued_input.as_deref(), Some("earlier queued prompt"));
@@ -3186,15 +3483,21 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
-        app.agents = Some(AgentsView::open(&controller));
+        app.agents = Some(AgentsView::open(&Backend::Local(&controller)));
 
-        let cancelled = app.handle_turn_key(key(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        let cancelled = app.handle_turn_key(
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+        );
         assert!(!cancelled, "the first Esc only closes the overlay");
         assert!(app.agents.is_none());
 
-        let cancelled = app.handle_turn_key(key(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        let cancelled = app.handle_turn_key(
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+        );
         assert!(cancelled, "Esc with no overlay open cancels the turn");
     }
 
@@ -3205,12 +3508,14 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.start_turn();
-        app.agents = Some(AgentsView::open(&controller));
+        app.agents = Some(AgentsView::open(&Backend::Local(&controller)));
 
-        let cancelled =
-            app.handle_turn_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL), &controller);
+        let cancelled = app.handle_turn_key(
+            key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &Backend::Local(&controller),
+        );
 
         assert!(cancelled);
     }
@@ -3222,12 +3527,16 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.input = "/mem".chars().collect();
         app.cursor = app.input.len();
         let cancel = CancellationToken::new();
 
-        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Tab, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         assert_eq!(app.input.iter().collect::<String>(), "/memory");
     }
@@ -3289,29 +3598,45 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let cancel = CancellationToken::new();
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.history.remember("first");
         app.history.remember("/model");
 
-        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Up, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert_eq!(app.input.iter().collect::<String>(), "/model");
         assert_eq!(app.cursor, app.input.len());
         assert_eq!(app.scroll, None, "the transcript must not scroll");
         assert!(!app.suggestions().is_empty(), "the panel is open on /model");
 
-        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Up, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert_eq!(app.input.iter().collect::<String>(), "first");
 
         // An edit ends the recall, so the panel owns the keys again and the
         // next Up starts over from the newest line.
         app.handle_key(
             key(KeyCode::Char('!'), KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
-        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Up, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert_eq!(app.input.iter().collect::<String>(), "/model");
-        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert_eq!(app.input.iter().collect::<String>(), "first!");
     }
 
@@ -3321,16 +3646,20 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let cancel = CancellationToken::new();
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         app.input = "  hello  ".chars().collect();
         app.cursor = app.input.len();
 
         app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
-        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Up, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         assert_eq!(app.input.iter().collect::<String>(), "hello");
     }
@@ -3344,17 +3673,29 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
         app.input = "/sk".chars().collect();
         app.cursor = app.input.len();
 
-        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert_eq!(app.suggestion, 0, "only /skill matches");
         assert_eq!(app.scroll, None, "the transcript must not scroll");
-        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert_eq!(app.suggestion, 0, "selection wraps");
-        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Up, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert_eq!(app.suggestion, 0);
     }
 
@@ -3363,13 +3704,21 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
         app.input = "/s".chars().collect();
         app.cursor = app.input.len();
 
-        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
-        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
+        app.handle_key(
+            key(KeyCode::Tab, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         assert_eq!(app.input.iter().collect::<String>(), "/sandbox");
         assert_eq!(app.cursor, app.input.len());
@@ -3381,15 +3730,19 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
         app.input = "/s".chars().collect();
         app.cursor = app.input.len();
 
-        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -3410,23 +3763,31 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
         app.input = "/".chars().collect();
         app.cursor = app.input.len();
 
-        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         app.handle_key(
             key(KeyCode::Char('s'), KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         assert_eq!(app.suggestion, 0);
 
-        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
         app.handle_key(
             key(KeyCode::Backspace, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
         assert_eq!(app.suggestion, 0);
@@ -3438,10 +3799,10 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         controller.set_thinking("high").await.expect("thinking");
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        let action = app.dispatch_line("/thinking", &controller, &cancel);
+        let action = app.dispatch_line("/thinking", &Backend::Local(&controller), &cancel);
 
         assert!(action.is_none());
         let picker = app.picker.as_ref().expect("thinking picker");
@@ -3458,14 +3819,18 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
         app.picker = Some(thinking_picker(""));
-        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Down, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         let action = app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -3484,10 +3849,14 @@ mod tests {
         let resolved = controller
             .resolve_sandbox_read_path("~/cache")
             .expect("resolve");
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        let action = app.dispatch_line("/sandbox allow ~/cache", &controller, &cancel);
+        let action = app.dispatch_line(
+            "/sandbox allow ~/cache",
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         assert!(action.is_none());
         let picker = app.picker.as_ref().expect("sandbox picker");
@@ -3500,11 +3869,15 @@ mod tests {
         );
         assert_eq!(picker.rows[1].value, "");
         assert_eq!(picker.selected, 1);
-        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Up, KeyModifiers::NONE),
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         let action = app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -3517,13 +3890,17 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         std::fs::create_dir(workspace.path().join("cache")).expect("cache");
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
-        app.dispatch_line("/sandbox allow ~/cache", &controller, &cancel);
+        app.dispatch_line(
+            "/sandbox allow ~/cache",
+            &Backend::Local(&controller),
+            &cancel,
+        );
 
         let action = app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -3536,11 +3913,11 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
         for line in ["/sandbox allow", "/sandbox allow ~/missing"] {
-            let action = app.dispatch_line(line, &controller, &cancel);
+            let action = app.dispatch_line(line, &Backend::Local(&controller), &cancel);
 
             assert!(action.is_none());
             assert!(app.picker.is_none(), "{line}");
@@ -3555,7 +3932,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
         for line in [
@@ -3563,7 +3940,7 @@ mod tests {
             "/sandbox exclude 'lark-cli *'",
             "/sandbox exclude \"lark-cli *\"",
         ] {
-            let action = app.dispatch_line(line, &controller, &cancel);
+            let action = app.dispatch_line(line, &Backend::Local(&controller), &cancel);
             assert!(
                 matches!(&action, Some(Action::SandboxExclude(entry)) if entry == "lark-cli *"),
                 "{line}"
@@ -3571,7 +3948,7 @@ mod tests {
             assert!(app.picker.is_none(), "{line}");
         }
 
-        let action = app.dispatch_line("/sandbox exclude", &controller, &cancel);
+        let action = app.dispatch_line("/sandbox exclude", &Backend::Local(&controller), &cancel);
         assert!(action.is_none());
         let entry = app.entries.last().expect("entry");
         assert!(
@@ -3586,12 +3963,17 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        let action = app.dispatch_line("/approve approval-1", &controller, &cancel);
+        let action =
+            app.dispatch_line("/approve approval-1", &Backend::Local(&controller), &cancel);
         assert!(matches!(&action, Some(Action::Approve(id)) if id == "approval-1"));
-        let action = app.dispatch_line("/approve approval-1 always", &controller, &cancel);
+        let action = app.dispatch_line(
+            "/approve approval-1 always",
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert!(matches!(&action, Some(Action::ApproveAlways(id)) if id == "approval-1"));
 
         for line in [
@@ -3600,7 +3982,8 @@ mod tests {
             "/approve a b always",
         ] {
             assert!(
-                app.dispatch_line(line, &controller, &cancel).is_none(),
+                app.dispatch_line(line, &Backend::Local(&controller), &cancel)
+                    .is_none(),
                 "{line}"
             );
             let entry = app.entries.last().expect("entry");
@@ -3613,14 +3996,18 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
 
-        let action = app.dispatch_line("/sandbox network deny", &controller, &cancel);
+        let action = app.dispatch_line(
+            "/sandbox network deny",
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert!(matches!(&action, Some(Action::SandboxNetwork(mode)) if mode == "deny"));
         assert!(app.picker.is_none());
 
-        let action = app.dispatch_line("/sandbox network", &controller, &cancel);
+        let action = app.dispatch_line("/sandbox network", &Backend::Local(&controller), &cancel);
         assert!(action.is_none());
         let picker = app.picker.as_ref().expect("sandbox picker");
         assert_eq!(picker.kind, PickerKind::Sandbox);
@@ -3628,7 +4015,11 @@ mod tests {
         assert_eq!(picker.rows[0].value, "network\tallow");
         assert_eq!(picker.rows[1].value, "network\tdeny");
 
-        let action = app.dispatch_line("/sandbox network sometimes", &controller, &cancel);
+        let action = app.dispatch_line(
+            "/sandbox network sometimes",
+            &Backend::Local(&controller),
+            &cancel,
+        );
         assert!(action.is_none());
         assert!(
             app.entries
@@ -3644,14 +4035,14 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let mut app = App::new(&controller);
+        let mut app = App::new(&Backend::Local(&controller));
         let cancel = CancellationToken::new();
         app.input = "hello otto".chars().collect();
         app.cursor = app.input.len();
 
         let action = app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
-            &controller,
+            &Backend::Local(&controller),
             &cancel,
         );
 
@@ -3659,5 +4050,216 @@ mod tests {
         let entry = app.entries.last().expect("entry");
         assert_eq!(entry.kind, Some(EntryKind::User));
         assert_eq!(entry.raw, "hello otto");
+    }
+    use crate::tui::attach::Remote;
+
+    fn attached_app(remote: &Remote) -> App {
+        App::new(&Backend::Attach(remote))
+    }
+
+    fn frame(event_type: &str) -> WireEvent {
+        WireEvent {
+            event_type: event_type.to_string(),
+            ..WireEvent::default()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attached_prompt_has_no_local_echo_and_user_message_frame_is_the_echo() {
+        let remote = Remote::offline(Vec::new());
+        let backend = Backend::Attach(&remote);
+        let cancel = CancellationToken::new();
+        let mut app = attached_app(&remote);
+        app.input = "hello otto".chars().collect();
+        app.cursor = app.input.len();
+
+        let action = app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &backend, &cancel);
+
+        assert!(matches!(&action, Some(Action::Prompt(line)) if line == "hello otto"));
+        assert!(app.entries.is_empty(), "the prompt is shown by its frame");
+
+        app.apply_event(&WireEvent::user_message("hello otto", false));
+        let entry = app.entries.last().expect("entry");
+        assert_eq!(entry.kind, Some(EntryKind::User));
+        assert_eq!(entry.raw, "hello otto");
+        assert!(app.queued_input.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attached_text_typed_during_a_turn_is_sent_as_the_next_turn() {
+        let remote = Remote::offline(Vec::new());
+        let backend = Backend::Attach(&remote);
+        let cancel = CancellationToken::new();
+        let mut app = attached_app(&remote);
+        app.start_turn();
+        app.insert_text("next");
+
+        let action = app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &backend, &cancel);
+
+        assert!(action.is_none());
+        assert!(matches!(app.outgoing.as_slice(), [Action::Prompt(line)] if line == "next"));
+        assert!(app.queued_input.is_none());
+        assert!(
+            app.entries
+                .last()
+                .expect("entry")
+                .raw
+                .starts_with("Queued as the next turn")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attached_unsupported_commands_print_not_available_and_do_nothing() {
+        let remote = Remote::offline(Vec::new());
+        let backend = Backend::Attach(&remote);
+        let cancel = CancellationToken::new();
+        for (line, name) in [
+            ("/archive", "/archive"),
+            ("/model", "/model"),
+            ("/model gpt", "/model"),
+            ("/thinking high", "/thinking"),
+            ("/sandbox allow /tmp", "/sandbox"),
+            ("/sandbox network on", "/sandbox"),
+            ("/sandbox exclude git", "/sandbox"),
+            ("/approve abc always", "/approve"),
+            ("/login", "/login"),
+            ("/logout", "/logout"),
+            ("/mcp", "/mcp"),
+            ("/memory", "/memory"),
+            ("/remember x", "/remember"),
+            ("/reflect", "/reflect"),
+            ("/tasks", "/tasks"),
+            ("/task t1", "/task"),
+            ("/timers", "/timers"),
+            ("/skill", "/skill"),
+        ] {
+            let mut app = attached_app(&remote);
+            let action = app.dispatch_line(line, &backend, &cancel);
+            assert!(action.is_none(), "{line} raised an action");
+            assert_eq!(app.entries.len(), 1, "{line}");
+            assert_eq!(
+                app.entries[0].raw,
+                format!("{name}: not available with --attach"),
+                "{line}"
+            );
+            assert!(app.picker.is_none(), "{line} opened a picker");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attached_commands_that_serve_supports_raise_actions() {
+        let remote = Remote::offline(Vec::new());
+        let backend = Backend::Attach(&remote);
+        let cancel = CancellationToken::new();
+        let mut app = attached_app(&remote);
+        assert!(matches!(
+            app.dispatch_line("/approve abc", &backend, &cancel),
+            Some(Action::Approve(id)) if id == "abc"
+        ));
+        assert!(matches!(
+            app.dispatch_line("/compact focus", &backend, &cancel),
+            Some(Action::Compact(focus)) if focus == "focus"
+        ));
+        assert!(matches!(
+            app.dispatch_line("/sandbox reload", &backend, &cancel),
+            Some(Action::SandboxReload)
+        ));
+        assert!(matches!(
+            app.dispatch_line("/new", &backend, &cancel),
+            Some(Action::NewSession)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approval_dialog_opens_on_the_frame_and_closes_on_the_decision() {
+        let remote = Remote::offline(Vec::new());
+        let backend = Backend::Attach(&remote);
+        let cancel = CancellationToken::new();
+        let request = || WireEvent {
+            event_type: APPROVAL_REQUESTED.to_string(),
+            approval_id: "a1".to_string(),
+            command: "ls".to_string(),
+            ..WireEvent::default()
+        };
+
+        let mut app = attached_app(&remote);
+        app.apply_event(&request());
+        assert_eq!(app.approval.as_ref().map(|a| a.id.as_str()), Some("a1"));
+        let action = app.handle_key(
+            key(KeyCode::Char('y'), KeyModifiers::NONE),
+            &backend,
+            &cancel,
+        );
+        assert!(matches!(action, Some(Action::Approve(id)) if id == "a1"));
+        assert!(app.approval.is_none());
+
+        app.apply_event(&request());
+        let action = app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &backend, &cancel);
+        assert!(matches!(action, Some(Action::Deny(id)) if id == "a1"));
+
+        // A decision made by another client closes the dialog.
+        app.apply_event(&request());
+        app.apply_event(&WireEvent {
+            event_type: APPROVAL_DECIDED.to_string(),
+            approval_id: "a1".to_string(),
+            decision: "allow".to_string(),
+            ..frame(APPROVAL_DECIDED)
+        });
+        assert!(app.approval.is_none());
+        assert!(
+            app.entries
+                .last()
+                .expect("entry")
+                .raw
+                .contains("decided elsewhere")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attached_app_starts_from_the_loaded_history() {
+        let history = vec![
+            Message {
+                role: Role::User,
+                blocks: vec![Block::text("earlier prompt")],
+                ..Message::default()
+            },
+            Message {
+                role: Role::Assistant,
+                blocks: vec![Block::text("earlier reply")],
+                ..Message::default()
+            },
+        ];
+        let remote = Remote::offline(history);
+        let app = attached_app(&remote);
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.raw == "earlier prompt")
+        );
+        assert!(app.attached);
+    }
+
+    #[tokio::test]
+    async fn local_notification_for_a_queued_prompt_becomes_the_user_entry() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&Backend::Local(&controller));
+        app.queued_input = Some("change course".to_string());
+        app.queued_input_sent = true;
+
+        app.apply_event(&wire_frame(&Event::Notification {
+            kind: Some(NotificationKind::UserMessage),
+            task_id: String::new(),
+            text: "change course".into(),
+            usage: Usage::default(),
+            present: false,
+        }));
+
+        let entry = app.entries.last().expect("entry");
+        assert_eq!(entry.kind, Some(EntryKind::User));
+        assert_eq!(entry.raw, "change course");
+        assert!(app.queued_input.is_none());
+        assert!(!app.queued_input_sent);
     }
 }

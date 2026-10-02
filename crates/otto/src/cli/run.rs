@@ -411,8 +411,8 @@ pub async fn run(
         Err(error) => return fail(stderr, &startup.redact(&format!("resolve cwd: {error}"))),
     };
     if options.attach {
-        // The relay builds no provider runtime and opens no sandbox or
-        // session: it forwards to the `otto serve` on the socket, which is
+        // Neither client builds a provider runtime or opens a sandbox or
+        // session: both use the `otto serve` on the socket, which is
         // `--socket`, `[server].socket` or the default, never a TCP address.
         let mut file = config_file.clone();
         file.server.listen.clear();
@@ -425,15 +425,28 @@ pub async fn run(
             Ok(socket) => socket,
             Err(message) => return fail(stderr, &startup.redact(&message)),
         };
-        return crate::acp::attach::run(
-            &socket,
-            PathBuf::from(&workspace_path),
-            stdin,
-            stdout,
-            stderr,
-            cancel,
-        )
-        .await;
+        if options.acp {
+            return crate::acp::attach::run(
+                &socket,
+                PathBuf::from(&workspace_path),
+                stdin,
+                stdout,
+                stderr,
+                cancel,
+            )
+            .await;
+        }
+        if !terminal {
+            return fail(stderr, "--attach requires terminal stdin and stdout");
+        }
+        let start = if options.continue_last {
+            crate::tui::attach::Start::Continue
+        } else if !options.resume_path.is_empty() {
+            crate::tui::attach::Start::Resume(options.resume_path.clone())
+        } else {
+            crate::tui::attach::Start::New
+        };
+        return crate::tui::attach::run(&socket, &workspace_path, start, cancel, stderr).await;
     }
     let workspace = match leaked_workspace(Path::new(&workspace_path)) {
         Ok(workspace) => workspace,

@@ -382,10 +382,13 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
         };
         (title, Style::default().fg(Color::Cyan))
     } else if app.busy() {
-        (
-            "Working — Enter queues for this turn · Esc cancels turn",
-            Style::default().fg(Color::Magenta),
-        )
+        // Attached, typed text is posted as the next turn.
+        let title = if app.attached {
+            "Working — Enter queues the next turn · Esc cancels turn"
+        } else {
+            "Working — Enter queues for this turn · Esc cancels turn"
+        };
+        (title, Style::default().fg(Color::Magenta))
     } else {
         ("Otto", Style::default())
     };
@@ -948,12 +951,13 @@ mod tests {
     use crate::cli::testutil;
     use crate::tui::app::{Picker, PickerKind, PickerRow};
     use crate::tui::entries::{Entry, EntryKind};
+    use crate::tui::wire_frame;
 
     async fn app_fixture() -> (tempfile::TempDir, tempfile::TempDir, App) {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
-        let app = App::new(&controller);
+        let app = App::new(&crate::tui::app::Backend::Local(&controller));
         (workspace, sessions, app)
     }
 
@@ -1076,13 +1080,13 @@ mod tests {
         let idle = rendered(&app, 50, 10);
         app.start_turn();
         let busy = rendered(&app, 50, 10);
-        app.apply_event(Event::ToolCallStarted {
+        app.apply_event(&wire_frame(&Event::ToolCallStarted {
             operation_id: otto_core::model::OperationId::new("op_test").expect("operation id"),
             attempt: 1,
             tool_name: "bash".into(),
             tool_call_id: "c1".into(),
             arguments: r#"{"command":"ls"}"#.into(),
-        });
+        }));
         let running = rendered(&app, 50, 10);
         app.end_turn();
 
@@ -1096,6 +1100,16 @@ mod tests {
             "tool transcript:\n{running}"
         );
         assert!(!rendered(&app, 50, 10).contains("turn"));
+    }
+
+    #[tokio::test]
+    async fn the_busy_composer_title_says_which_turn_enter_queues_for() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.start_turn();
+        assert!(rendered(&app, 80, 12).contains("Enter queues for this turn"));
+
+        app.attached = true;
+        assert!(rendered(&app, 80, 12).contains("Enter queues the next turn"));
     }
 
     #[tokio::test]
@@ -1447,8 +1461,10 @@ mod tests {
             std::sync::Arc::clone(&store),
         )
         .await;
-        let mut app = App::new(&controller);
-        app.agents = Some(AgentsView::open(&controller));
+        let mut app = App::new(&crate::tui::app::Backend::Local(&controller));
+        app.agents = Some(AgentsView::open(&crate::tui::app::Backend::Local(
+            &controller,
+        )));
 
         // At 80 columns the description column is narrower than the full
         // text; `Table` truncates it rather than panicking or overflowing.
@@ -1456,10 +1472,10 @@ mod tests {
         assert!(screen.contains("succeed"), "{screen}");
         assert!(screen.contains("review t"), "{screen}");
 
-        app.agents
-            .as_mut()
-            .expect("open")
-            .handle_key(KeyCode::Enter, &controller);
+        app.agents.as_mut().expect("open").handle_key(
+            KeyCode::Enter,
+            &crate::tui::app::Backend::Local(&controller),
+        );
         let screen = screen_rows(&app, 80, 24).join("\n");
         assert!(screen.contains("t1"), "{screen}");
         assert!(screen.contains("no child transcript"), "{screen}");
@@ -1817,9 +1833,9 @@ mod tests {
         assert!(before.contains("line 05"), "{before}");
 
         for index in 0..10 {
-            app.apply_event(Event::TextDelta {
+            app.apply_event(&wire_frame(&Event::TextDelta {
                 text: format!("streamed {index}\n"),
-            });
+            }));
         }
 
         let after = rendered(&app, MIN_TERMINAL_WIDTH, 12);

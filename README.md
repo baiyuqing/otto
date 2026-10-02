@@ -137,7 +137,9 @@ The selected model and OpenAI-compatible endpoint must support image input.
   `remind`; `/timers` lists this session's outstanding timers and
   `/timers cancel <id>` stops one.
 - [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
-  socket or a loopback TCP port, with an embedded browser UI. Optional
+  socket or a loopback TCP port, with an embedded browser UI.
+  [`otto --attach`](docs/user-manual.md#the-tui-attached-to-otto-serve) runs
+  the TUI on the same sessions. Optional
   [Feishu inbound](docs/user-manual.md#feishu-inbound) delivers group and chat
   text into open session inboxes.
 - [ACP agent](docs/user-manual.md#acp-agent-server): `otto acp` speaks the
@@ -147,7 +149,8 @@ The selected model and OpenAI-compatible endpoint must support image input.
   separate Go program in `connect/`, runs `otto acp` and connects it to
   Telegram chats, one session per chat, with `/allow` and `/deny` for
   elevated `bash` commands and `/sessions` and `/use` to pick a session.
-  With `otto acp --attach`, chats share sessions with the `otto serve` web UI.
+  With `otto acp --attach`, chats share sessions with the `otto serve` web UI
+  and `otto --attach` terminals.
 - [Usage history](docs/user-manual.md#observability): a Web UI analysis page
   for local provider token trends and cache hit rate, without prompt or tool
   content.

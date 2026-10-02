@@ -24,6 +24,7 @@ func seedMemory(t *testing.T, dir string, lines ...string) {
 // withSession returns a harness whose chat already has a session.
 func withSession(t *testing.T, s setup) *harness {
 	t.Helper()
+	s.textOnly = true
 	h := newHarness(t, s)
 	h.say("hi")
 	h.waitSent(1)
@@ -117,7 +118,7 @@ func TestMemoryUsageAndLookalikeCommands(t *testing.T) {
 
 func TestMemoryWithoutSession(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{})
+	h := newHarness(t, setup{textOnly: true})
 	h.say("/memory")
 	if got := h.waitSent(1)[0]; !strings.Contains(got, "no session yet") {
 		t.Fatalf("reply = %q", got)
@@ -164,7 +165,7 @@ func TestMemoryIgnoresUnadmittedSenders(t *testing.T) {
 
 func TestMemoryHintFollowsATurnThatProposed(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{})
+	h := newHarness(t, setup{textOnly: true})
 	h.say("remember")
 	if got, want := h.waitSent(1)[0], "Queued.\n\n"+memoryHint; got != want {
 		t.Fatalf("reply = %q, want %q", got, want)

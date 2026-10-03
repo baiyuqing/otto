@@ -1572,6 +1572,24 @@ turn's event buffer, so a reader that resumes with `?after=N` receives them
 as well. Turn errors are redacted of configured secrets before they are
 stored, returned, sent in `agent_error` or `turn_end`, or logged.
 
+### Otto's own help and approval controls
+
+The agent can consult `otto_help` for the user manual embedded in the installed
+executable. An empty topic lists section titles; `capabilities` lists this
+session's actual tool names and descriptions. User commands and HTTP/ACP APIs
+are not automatically model-callable tools.
+
+`approval_pending` queries this session's unapproved Bash or persistent read
+request. `approval_revoke` withdraws it by exact ID. It cannot approve, undo an
+executed command, remove permanent grants, or affect another session.
+
+While approval waits, you can ask why it is needed or ask Otto to withdraw it.
+This conversation has only help, approval query/withdrawal and queue tools;
+normal tasks keep waiting in the frontend's queue. In the TUI, press `c` to
+hide the approval panel without deciding and type your message. Telegram and
+Feishu support this with Otto; other ACP agents keep the ordinary queue.
+Explicit Deny/No, `/deny` in chat and `/stop` continue to work.
+
 ### Approvals inside a turn
 
 When a step of a serve turn ends with an elevated Bash command waiting for
@@ -1764,6 +1782,7 @@ are served at the root. Request and error bodies are JSON.
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
 | `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
+| `POST /v1/sessions/{id}/approvals/message` | Restricted dialogue during an unapproved request: `{"text":"..."}`. Returns `null` when none waits, otherwise `{"text","queued"}`. A true `queued` asks the client to put the original message in its normal task queue. Never approves. |
 | `POST /v1/sessions/{id}/approvals/{approval_id}` | Decide an elevated Bash command a running turn waits for: `{"decision":"allow"}` or `{"decision":"deny"}`. `200 {"decision"}` for the first decision; `409 approval_decided` when it was already decided; `409 approval_failed` when the id is not waiting. See [Approvals inside a turn](#approvals-inside-a-turn). |
 | `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
@@ -2047,6 +2066,7 @@ is rejected.
 | `session/load` | Opens a session of this workspace by its 32-character id, sends the stored conversation as `session/update` notifications, then responds. The response also carries `sessionId`. |
 | `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
 | `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Returns `end_turn`, or `cancelled` after `session/cancel`. |
+| `_otto/approvals/message` | Restricted pending-approval dialogue with `sessionId` and `text`; advertised by `_meta.otto.approvalDialogue`. Returns `null` or `{"text","queued"}`. Available in local and attach mode. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
 | `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}`; `nextCursor` is `""` on the last page. |
 | `_otto/memory/review` | Extension. Params `{sessionId, candidateId, decision}` with `decision` `accept` or `reject`; decides one candidate as a human review and returns `{decision, candidateId, record, forgotten}`. Errors: `-32010` memory is not available in the session, `-32011` the candidate was already decided or changed, `-32002` unknown session or candidate, `-32602` bad parameters or cursor. `otto acp` advertises both with `agentCapabilities._meta.otto.memoryReview`; `otto acp --attach` does not serve them. |

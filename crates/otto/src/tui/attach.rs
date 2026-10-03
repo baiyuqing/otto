@@ -760,6 +760,21 @@ impl<'a> Ui<'a> {
         match action {
             Action::Prompt(line) => {
                 let image = self.pending_image.take();
+                if image.is_none() {
+                    match within(remote.client.approval_message(&session, &line)).await {
+                        Ok(Some(reply)) => {
+                            self.app.push_system(reply.text);
+                            if !reply.queued {
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            self.report("approval", error);
+                            return;
+                        }
+                    }
+                }
                 match within(remote.client.start_turn(&session, &line, image.as_ref())).await {
                     Ok(stream) => {
                         // Dropping the response does not cancel the turn; its

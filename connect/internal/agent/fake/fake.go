@@ -74,7 +74,7 @@ func Main() bool {
 	if dir == "" {
 		return false
 	}
-	a := &agent{dir: dir, cancels: map[string]chan struct{}{}}
+	a := &agent{dir: dir, cancels: map[string]chan struct{}{}, approvals: map[string]bool{}}
 	conn := acp.NewAgentSideConnection(a, os.Stdout, os.Stdin)
 	a.conn.Store(conn)
 	<-conn.Done()
@@ -91,8 +91,9 @@ type agent struct {
 	dir  string
 	conn atomic.Pointer[acp.AgentSideConnection] // set after the SDK starts reading
 
-	mu      sync.Mutex
-	cancels map[string]chan struct{} // current prompt of each session
+	mu        sync.Mutex
+	cancels   map[string]chan struct{} // current prompt of each session
+	approvals map[string]bool
 }
 
 func (a *agent) log(format string, args ...any) {
@@ -122,8 +123,15 @@ func (a *agent) known(id string) bool {
 func (a *agent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {
 	a.log("init:%d", os.Getpid())
 	caps := acp.AgentCapabilities{LoadSession: true, SessionCapabilities: acp.SessionCapabilities{List: &acp.SessionListCapabilities{}}}
+	meta := map[string]any{}
 	if os.Getenv("FAKE_NO_MEMORY") == "" {
-		caps.Meta = map[string]any{"otto": map[string]any{"memoryReview": true}}
+		meta["memoryReview"] = true
+	}
+	if os.Getenv("FAKE_APPROVAL_DIALOGUE") != "" {
+		meta["approvalDialogue"] = true
+	}
+	if len(meta) > 0 {
+		caps.Meta = map[string]any{"otto": meta}
 	}
 	return acp.InitializeResponse{
 		ProtocolVersion:   acp.ProtocolVersionNumber,
@@ -249,6 +257,9 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 		if strings.HasPrefix(text, "permread:") {
 			allowOption = acp.PermissionOption{Kind: acp.PermissionOptionKindAllowAlways, Name: "Save read access", OptionId: "read_grant"}
 		}
+		a.mu.Lock()
+		a.approvals[id] = true
+		a.mu.Unlock()
 		resp, err := a.conn.Load().RequestPermission(reqCtx, acp.RequestPermissionRequest{
 			SessionId: p.SessionId,
 			ToolCall:  acp.ToolCallUpdate{ToolCallId: "t1", Title: &title},
@@ -257,6 +268,9 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 				{Kind: acp.PermissionOptionKindRejectOnce, Name: "Deny", OptionId: "reject_once"},
 			},
 		})
+		a.mu.Lock()
+		delete(a.approvals, id)
+		a.mu.Unlock()
 		// The SDK ends the agent's request context when session/cancel
 		// arrives; that is an outcome of cancelled.
 		if err != nil && reqCtx.Err() == nil {
@@ -339,6 +353,25 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 			out["record"] = map[string]any{"id": "rec-" + req.CandidateID, "revision": 1}
 		}
 		return out, nil
+	case "_otto/approvals/message":
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Text      string `json:"text"`
+		}
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		a.mu.Lock()
+		pending := a.approvals[req.SessionID]
+		a.mu.Unlock()
+		if !pending {
+			return nil, nil
+		}
+		a.log("approval:%s", req.Text)
+		if req.Text == "Why do you need this?" {
+			return map[string]any{"text": "The agent needs approval to run this tool call.", "queued": false}, nil
+		}
+		return map[string]any{"text": "I will handle that after approval.", "queued": true}, nil
 	}
 	return nil, acp.NewMethodNotFound(method)
 }

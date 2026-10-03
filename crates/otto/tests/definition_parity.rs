@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use otto::subagent::tools::tool_definitions as agent_tool_definitions;
+use otto::tool::Tool;
 use otto::tool::bash::bash_definition;
 use otto::tool::edit::edit_definition;
 use otto::tool::find::find_definition;
@@ -48,6 +49,16 @@ fn rust_definition(definition: &ToolDefinition) -> serde_json::Value {
 fn every_tool_schema_matches_the_recorded_schema() {
     let recorded = recorded_definitions();
     let mut rust = vec![
+        otto::tool::otto::Help {
+            definitions: Vec::new(),
+        }
+        .definition(),
+        otto::tool::otto::approval_definition(false),
+        otto::tool::otto::approval_definition(true),
+        otto::tool::otto::Queue(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
+        .definition(),
         read_definition(),
         write_definition(),
         edit_definition(),

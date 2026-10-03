@@ -623,6 +623,10 @@ impl Server {
             .route("/v1/sessions/{id}/history", get(history))
             .route("/v1/sessions/{id}/context", get(context))
             .route(
+                "/v1/sessions/{id}/approvals/message",
+                post(approvals::message),
+            )
+            .route(
                 "/v1/sessions/{id}/approvals/{approval_id}",
                 post(approvals::decide),
             )
@@ -1106,6 +1110,7 @@ impl Server {
                 _ => (ApprovalDecision::Deny, "deny"),
             },
             () = cancel.cancelled() => (ApprovalDecision::Cancelled, ""),
+            () = session.ctrl.approval_withdrawn(&request.approval_id) => (ApprovalDecision::Deny, "deny"),
             () = tokio::time::sleep(APPROVAL_TIMEOUT) => (ApprovalDecision::Deny, "timeout"),
         };
         {
@@ -7155,6 +7160,80 @@ mod tests {
         let again = decide(&harness, &id, &approval, "allow").await;
         assert_eq!(again.status, StatusCode::CONFLICT);
         assert_eq!(again.json()["error"]["code"], "approval_decided");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn model_withdrawal_publishes_denial_and_refuses_the_old_card() {
+        let harness = approval_harness();
+        let id = harness.create().await;
+        let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+        let approvals = harness.factory.builder.bash_approvals.as_ref().unwrap();
+        let tool = crate::tool::otto::Approvals {
+            session: id.clone(),
+            approvals: Arc::clone(approvals),
+            revoke: true,
+            expected_id: Some(approval.clone()),
+        };
+        let result = crate::tool::Tool::execute(
+            &tool,
+            &serde_json::value::RawValue::from_string(
+                serde_json::json!({"id":approval}).to_string(),
+            )
+            .unwrap(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        let decided = frame_named(&mut reader, "approval_decided").await;
+        assert_eq!(decided["decision"], "deny");
+        assert_eq!(harness.wait_turn_done(&id, &turn_id).await["status"], "ok");
+        let late = decide(&harness, &id, &approval, "allow").await;
+        assert_eq!(late.status, StatusCode::CONFLICT);
+        assert_eq!(late.json()["error"]["code"], "approval_decided");
+        assert_eq!(approvals.pending_count(&id), 0);
+        assert_eq!(
+            harness.provider.roles.lock().unwrap().len(),
+            2,
+            "withdrawal must not retry the elevated command"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn approval_dialogue_explains_without_deciding_and_none_means_normal_input() {
+        let harness = approval_harness();
+        let id = harness.create().await;
+        let path = format!("/v1/sessions/{id}/approvals/message");
+        let none = harness
+            .send("POST", &path, Some(r#"{"text":"hello"}"#))
+            .await;
+        assert_eq!(none.status, StatusCode::OK);
+        assert!(none.json().is_null());
+        let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+        let original_turn = harness
+            .server
+            .lookup(&id)
+            .unwrap()
+            .find_turn(&turn_id)
+            .unwrap();
+        let response = harness
+            .send(
+                "POST",
+                &path,
+                Some(r#"{"text":"Why does this need approval?"}"#),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+        assert_eq!(response.json()["text"], "done");
+        assert_eq!(response.json()["queued"], false);
+        assert!(harness.server.lookup(&id).unwrap().lock().waiting.is_some());
+        assert_eq!(
+            decide(&harness, &id, &approval, "deny").await.status,
+            StatusCode::OK
+        );
+        let decided = frame_named(&mut reader, "approval_decided").await;
+        assert_eq!(decided["decision"], "deny");
+        Harness::wait_done(&original_turn).await;
+        assert_eq!(original_turn.summary().status, "ok");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

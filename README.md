@@ -287,7 +287,10 @@ session, `/sandbox allow <path>` and `/sandbox network allow|deny` write the
 same `[sandbox]` settings and apply them to the current process. Models can
 also request a persistent read-path grant through a TUI approval dialog or
 a Telegram/Feishu approval card; the prompt shows the path and that it will
-be saved.
+be saved. While an approval waits, you can ask Otto to explain or withdraw it;
+normal tasks remain queued. In the TUI, press `c` to chat without deciding.
+Otto can also consult its installed-version user manual and current tool list;
+see [self-help and approval controls](docs/user-manual.md#ottos-own-help-and-approval-controls).
 `[sandbox].excluded_commands` lists simple commands, such as `lark-cli *`, that
 run outside the sandbox with the real `HOME`; see the
 [user manual](docs/user-manual.md#configuration).

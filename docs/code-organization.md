@@ -92,8 +92,9 @@ execution goes through `sandbox/`. Keep session persistence append-only.
   through `wasm-bindgen`.
 - `ui/` calls the HTTP API provided by `crates/otto::server` and the WASM
   exports from `otto-web`; it does not contain Rust code.
-- `connect/` does not link Otto code. It starts or connects to `otto acp` and
-  uses ACP v1 on stdio as its contract.
+- `connect/` does not link Otto code. It starts `otto acp` over stdio or
+  connects directly to `otto serve` over authenticated loopback ACP TCP.
+  Both use ACP v1; see [ACP TCP](specs/2026-10-03-acp-tcp.md).
 - `desktop/` wraps `otto serve` in a macOS Tauri application and remains a
   separate Cargo workspace.
 

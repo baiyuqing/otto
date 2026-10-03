@@ -119,6 +119,22 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 if invalid_stream.load(Ordering::SeqCst) {
                     return;
                 }
+                if let StreamEvent::Retry {
+                    attempt,
+                    max_attempts,
+                    delay,
+                    reason,
+                } = event
+                {
+                    emit(super::Event::ProviderRetry {
+                        operation_id: operation_id.clone(),
+                        attempt,
+                        max_attempts,
+                        delay,
+                        reason,
+                    });
+                    return;
+                }
                 let StreamEvent::TextDelta { text } = event else {
                     // Reasoning deltas are tolerated: they are not part of the
                     // answer and carry no text this call returns.

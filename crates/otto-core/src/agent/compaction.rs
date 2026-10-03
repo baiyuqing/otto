@@ -382,6 +382,22 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 if invalid_stream.load(Ordering::SeqCst) {
                     return;
                 }
+                if let crate::provider::StreamEvent::Retry {
+                    attempt,
+                    max_attempts,
+                    delay,
+                    reason,
+                } = event
+                {
+                    emit(super::Event::ProviderRetry {
+                        operation_id: operation_id.clone(),
+                        attempt,
+                        max_attempts,
+                        delay,
+                        reason,
+                    });
+                    return;
+                }
                 let crate::provider::StreamEvent::TextDelta { text } = event else {
                     invalid_stream.store(true, Ordering::SeqCst);
                     child.cancel();

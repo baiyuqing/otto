@@ -1,8 +1,9 @@
 # Repository Guidelines
 
-Read this file first. It is the canonical short rulebook; the [development
-guide](docs/development.md) contains the detailed package contracts and
-workflow.
+Read this file first. It is the canonical short rulebook. Use the [code
+organization map](docs/code-organization.md) to find ownership and entry
+points; the [development guide](docs/development.md) contains the detailed
+package contracts and workflow.
 
 ## Scope and task map
 

@@ -303,9 +303,10 @@ The code is a Cargo workspace of three crates:
 - `crates/otto-web` compiles `otto-core` to WebAssembly for the browser UI in
   `ui/`, so the web frontend and the binary share one implementation.
 
-See [AGENTS.md](AGENTS.md) for the task map and the
-[development guide](docs/development.md) for contracts and validation.
-Design documents live in [docs/specs](docs/specs/); the
+See the [code organization map](docs/code-organization.md) for a quick
+repository and ownership overview, [AGENTS.md](AGENTS.md) for the task map,
+and the [development guide](docs/development.md) for detailed contracts and
+validation. Design documents live in [docs/specs](docs/specs/); the
 [Rust rewrite plan](docs/specs/2026-09-13-rust-rewrite-plan.md) records why the
 Go implementation (tagged `go-final`) was replaced.
 

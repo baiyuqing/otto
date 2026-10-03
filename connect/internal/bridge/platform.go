@@ -35,7 +35,9 @@ type Platform interface {
 	Run(ctx context.Context, deliver func(Message)) error
 	// Send posts text to chatID. replyTo is a platform message id or "".
 	// The adapter splits text that exceeds the platform's length limit.
-	Send(ctx context.Context, chatID, replyTo, text string) error
+	// markdown is true when text is the agent's Markdown reply and false for
+	// connector notices, which are plain text.
+	Send(ctx context.Context, chatID, replyTo, text string, markdown bool) error
 	// Typing shows a typing indicator where the platform supports one.
 	Typing(ctx context.Context, chatID string) error
 }

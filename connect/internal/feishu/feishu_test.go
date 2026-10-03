@@ -157,10 +157,10 @@ func (f *fakeSDK) Send(_ context.Context, in *types.SendInput) (*types.SendResul
 func TestSendArguments(t *testing.T) {
 	f := newFake()
 	p := &Platform{ch: f}
-	if err := p.Send(context.Background(), "oc_test", "om_1", "**hi**"); err != nil {
+	if err := p.Send(context.Background(), "oc_test", "om_1", "**hi**", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Send(context.Background(), "oc_test", "", "plain"); err != nil {
+	if err := p.Send(context.Background(), "oc_test", "", "plain", true); err != nil {
 		t.Fatal(err)
 	}
 	want := []types.SendInput{
@@ -171,7 +171,7 @@ func TestSendArguments(t *testing.T) {
 		t.Errorf("sent = %+v\nwant %+v", f.sent, want)
 	}
 	f.sendErr = errors.New("boom")
-	if err := p.Send(context.Background(), "oc_test", "", "x"); err == nil {
+	if err := p.Send(context.Background(), "oc_test", "", "x", true); err == nil {
 		t.Error("send error not returned")
 	}
 }

@@ -7,6 +7,7 @@ require (
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/larksuite/channel-sdk-go v0.1.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.7
+	github.com/yuin/goldmark v1.8.6
 )
 
 require (

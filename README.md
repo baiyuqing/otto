@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" alt="Otto logo" width="320">
+  <img src="docs/logo.svg?v=2" alt="Otto logo" width="320">
 </p>
 
 # Otto — a local-first agent for your terminal

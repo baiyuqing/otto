@@ -296,6 +296,9 @@ enum IdleEvent {
     TasksTick,
     /// Background reflection queued a notice.
     Notices,
+    /// A pending memory candidate was durably created; the signal itself has
+    /// no candidate content.
+    MemoryReviewAvailable,
 }
 
 /// Refreshes the sub-agent panel snapshot and redraws. The sole place
@@ -337,6 +340,7 @@ async fn run_app<B: Backend>(
     // `agents_refresh`'s open/closed lifecycle above.
     let mut tasks_refresh: Option<tokio::time::Interval> = None;
     let mut notices = controller.notices_changed();
+    let mut memory_review = controller.memory_review_available_changed();
     loop {
         // Anything queued while a turn or command ran shows before the next wait.
         let queued = controller.take_notices();
@@ -406,6 +410,10 @@ async fn run_app<B: Backend>(
                     let _ = changed;
                     IdleEvent::Notices
                 }
+                changed = memory_review.changed() => {
+                    let _ = changed;
+                    IdleEvent::MemoryReviewAvailable
+                }
             }
         };
         let event = match event {
@@ -422,6 +430,12 @@ async fn run_app<B: Backend>(
             }
             // The top of the loop drains and redraws.
             IdleEvent::Notices => continue,
+            IdleEvent::MemoryReviewAvailable => {
+                app.push_system(crate::app::MEMORY_REVIEW_AVAILABLE);
+                app.open_memory_review(controller);
+                redraw(terminal, &mut app, controller)?;
+                continue;
+            }
             IdleEvent::Input(event) => event,
             IdleEvent::Registry(false) => {
                 updates = None;
@@ -630,6 +644,12 @@ async fn run_app<B: Backend>(
                     }
                     Err(message) => app.push_system(format!("/approve: {message}")),
                 },
+                Action::MemoryReview { id, accept } => {
+                    let decision = if accept { "accept" } else { "reject" };
+                    app.memory_review = None;
+                    app.dispatch_line(&format!("/memory review {id} {decision}"), &backend, cancel);
+                    app.open_memory_review(controller);
+                }
                 Action::Approve(id) => match controller.approve_bash(&id) {
                     Ok(prompt) => {
                         app.push_system(format!("Approved {id} for one command."));

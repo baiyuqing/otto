@@ -104,6 +104,7 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 | A CLI command, flag, REPL command, or process lifecycle behavior | `crates/otto/src/cli/` | `app/` and the relevant frontend tests |
 | Shared agent turn behavior, messages, tool schemas, or session encoding | `crates/otto-core/src/agent/`, `model.rs`, `tool.rs`, or `session/` | Native callers and WASM compatibility |
 | Provider HTTP behavior | `crates/otto/src/provider/` | The matching wire module in `otto-core` |
+| Agent self-help and pending approval dialogue | `tool/otto.rs`, `app/approval_control.rs` | `cli/runtime_builder.rs`, ACP, HTTP, chat and TUI input paths |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
 | Web API or browser behavior | `crates/otto/src/server/` or `ui/` | `crates/otto-web/` for shared browser wire codecs |
 | ACP integrations | `crates/otto/src/acp/` | `client/` for attach mode; `connect/` for chat connector behavior |

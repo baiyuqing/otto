@@ -190,6 +190,48 @@ func TestPermissionOutcomes(t *testing.T) {
 	}
 }
 
+func TestApprovalDialogueRepliesAndQueuesMessages(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{env: []string{"FAKE_APPROVAL_DIALOGUE=1"}})
+	h.say("perm:ls")
+	h.waitSent(1)
+	h.say("Why do you need this?")
+	h.say("After approval please run ls")
+	h.waitFor(func() bool { return len(h.calls("approval:")) == 2 }, "approval dialogue messages")
+	h.waitFor(func() bool { return len(h.plat.texts()) >= 3 }, "approval dialogue replies")
+	if got := h.calls("start:"); len(got) != 1 || got[0] != "start:perm:ls" {
+		t.Fatalf("queued message ran before approval: %q", got)
+	}
+	if got := h.plat.texts(); !slices.Contains(got, "The agent needs approval to run this tool call.") || !slices.Contains(got, "I will handle that after approval.") {
+		t.Fatalf("dialogue replies = %q", got)
+	}
+	h.say("/deny")
+	h.waitFor(func() bool { return len(h.calls("start:")) == 2 }, "queued message after permission resolves")
+	if got := h.calls("start:"); !strings.Contains(got[1], "After approval please run ls") {
+		t.Fatalf("queued prompt = %q", got[1])
+	}
+}
+
+func TestApprovalMessageUnsupportedKeepsLegacyQueueBehavior(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{}) // the fake agent does not advertise the extension
+	h.say("perm:ls")
+	h.waitSent(1)
+	h.say("run ls after approval")
+	h.waitFor(func() bool { return len(h.plat.texts()) >= 2 }, "legacy queue notice")
+	if got := h.plat.texts(); !strings.Contains(strings.Join(got, "|"), "queues messages while waiting") {
+		t.Fatalf("sent = %q", got)
+	}
+	if got := h.calls("start:"); len(got) != 1 {
+		t.Fatalf("message ran before approval: %q", got)
+	}
+	h.say("/deny")
+	h.waitFor(func() bool { return len(h.calls("start:")) == 2 }, "queued message after denial")
+	if got := h.calls("start:"); !strings.Contains(got[1], "run ls after approval") {
+		t.Fatalf("queued prompt = %q", got[1])
+	}
+}
+
 func TestPermissionIgnoresNonAdmittedSender(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{senders: []string{"u1", "u2"}})

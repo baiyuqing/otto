@@ -280,6 +280,7 @@ const json = async <T>(path: string, init?: RequestInit): Promise<T> => (await r
 const text = async (path: string, init?: RequestInit): Promise<string> => (await request(path, init)).text()
 
 export const api = {
+  approvalMessage: (id: string, text: string) => json<{ text: string; queued: boolean } | null>(`/v1/sessions/${encodeURIComponent(id)}/approvals/message`, { method: 'POST', body: JSON.stringify({ text }) }),
   info: () => json<Info>('/v1/info'),
   usage: (sessionId?: string) =>
     json<UsageSummary>(`/v1/usage${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`),

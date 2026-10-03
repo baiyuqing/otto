@@ -385,6 +385,17 @@ Use small, focused commits with imperative subjects, for example
 flow`. Before committing, run the relevant Rust gates and confirm that the
 working tree contains only intentional changes.
 
+### Agent self-help and approval conversations
+
+`tool::otto` reads installed help from the embedded canonical user manual and
+uses current runner definitions for capabilities. `app::approval_control`
+reuses the provider with an isolated memory transcript and only help/query/
+withdraw/queue tools while the original approval waits. It never grants or
+runs task tools, and only the original runner writes dialogue context from
+its inbox. A dialogue is bound to one session and original request ID;
+withdrawal cannot affect a newer request. Protocol and frontend contracts:
+[self-help and approval control](specs/2026-10-03-agent-self-help-and-approval-control.md).
+
 ### Sandbox read approvals
 
 Bash's optional `sandbox_read_path` requests persistent read access to one

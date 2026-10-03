@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -372,6 +373,26 @@ func TestAttachmentIsIgnoredWithNotice(t *testing.T) {
 	got = h.waitSent(3)
 	if !slices.Contains(got, "echo: see this") || !slices.ContainsFunc(got[1:], func(s string) bool { return strings.Contains(s, "Attachments") }) {
 		t.Fatalf("sent = %q", got)
+	}
+}
+
+func TestConfigProfilesIsHandledByConnectorNotAgent(t *testing.T) {
+	client := managementServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/config/profiles" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"profiles":[{"name":"work","default":true,"provider":"openai-compatible","model":"small"}]}`))
+	})
+	h := newHarness(t, setup{manage: client})
+	h.say("/config profiles")
+	got := h.waitSent(1)
+	if got[0] != "work: openai-compatible / small (default)" {
+		t.Fatalf("reply = %q", got)
+	}
+	settle()
+	if calls := fake.Calls(h.dir); len(calls) != 0 {
+		t.Fatalf("management command reached agent: %q", calls)
 	}
 }
 

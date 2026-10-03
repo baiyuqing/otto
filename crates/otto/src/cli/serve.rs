@@ -840,6 +840,7 @@ pub async fn run(
             runtime: runtime.clone(),
             cancel: serve_cancel.clone(),
         }),
+        config_path: builder.shared.config_path.clone(),
         token,
         // ponytail: `Logger` owns its sink, so the request log goes to the
         // process stderr. Thread a shared writer through if a test ever has to

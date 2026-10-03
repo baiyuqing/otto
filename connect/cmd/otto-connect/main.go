@@ -18,6 +18,7 @@ import (
 	"github.com/baiyuqing/otto/connect/internal/bridge"
 	"github.com/baiyuqing/otto/connect/internal/config"
 	"github.com/baiyuqing/otto/connect/internal/feishu"
+	"github.com/baiyuqing/otto/connect/internal/manage"
 	"github.com/baiyuqing/otto/connect/internal/state"
 	"github.com/baiyuqing/otto/connect/internal/telegram"
 )
@@ -52,6 +53,10 @@ func run() error {
 		return err
 	}
 
+	management, managementErr := manage.FromCommand(cfg.Agent.Command, home)
+	if managementErr != nil {
+		slog.Info("management unavailable", "reason", managementErr)
+	}
 	b := bridge.New(bridge.Options{
 		Agent: agent.New(agent.Options{
 			Command: cfg.Agent.Command,
@@ -59,6 +64,7 @@ func run() error {
 			// The agent and its tools do not need the bot token or app secret.
 			Env: withoutVars(os.Environ(), secretVars...),
 		}),
+		Manage:    management,
 		Platforms: platforms,
 		Access:    access,
 		Store:     store,

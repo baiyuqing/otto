@@ -999,6 +999,79 @@ components:
         type: integer
         minimum: 0
 paths:
+  /v1/config/profiles:
+    get:
+      summary: List non-sensitive Otto provider-profile settings
+      responses:
+        "200":
+          description: Profile summaries; credential values are never returned
+        "401":
+          description: Missing or invalid bearer token when the server listens on TCP
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/config/profiles/{name}:
+    get:
+      summary: Get one non-sensitive provider-profile setting
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Profile summary without credential values }
+        "404": { description: Profile not found }
+  /v1/config/models:
+    get:
+      summary: List model IDs from an OpenAI-compatible profile endpoint
+      parameters:
+        - name: profile
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Sorted model IDs }
+        "400": { description: Invalid profile or unavailable API-key environment variable }
+        "404": { description: Profile not found }
+        "501": { description: ChatGPT profiles cannot enumerate models }
+        "502": { description: Model endpoint request failed }
+  /v1/config/changes:
+    post:
+      summary: Preview a typed, non-secret provider-profile change
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Typed operation: set_default_profile, create_profile, set_profile_field, or remove_profile. Raw TOML and credential values are not accepted.
+      responses:
+        "200": { description: Redacted preview and one-time 10-minute confirmation capability token }
+        "400": { description: Invalid or unsupported profile change }
+  /v1/config/changes/{id}:
+    post:
+      summary: Confirm a one-time provider-profile change preview
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Configuration saved; server restart required }
+        "404": { description: Unknown or already-used confirmation token }
+        "409": { description: Configuration changed since preview }
+        "410": { description: Confirmation token expired }
+    delete:
+      summary: Cancel a pending provider-profile change preview
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Preview cancelled }
+        "404": { description: Unknown or already-used confirmation token }
   /v1/sessions:
     post:
       summary: Create or resume a session

@@ -13,6 +13,7 @@ pub mod agents;
 pub mod approvals;
 pub mod auth;
 pub mod compact;
+pub mod config;
 pub mod diff;
 pub mod fs;
 pub mod listen;
@@ -242,6 +243,9 @@ pub enum WorkspaceRemoveError {
 pub struct Options {
     pub factory: Arc<dyn Factory>,
     pub info: Info,
+    /// The resolved Otto configuration file; config-management routes are the
+    /// only server routes that read or write it.
+    pub config_path: std::path::PathBuf,
     /// When non-empty, required as `Authorization: Bearer <token>` on every
     /// `/v1/` route. Empty means no check, which is only safe behind a Unix
     /// socket with private file modes.
@@ -458,6 +462,10 @@ impl OpenSession {
 pub struct Server {
     factory: Arc<dyn Factory>,
     info: Info,
+    config_path: std::path::PathBuf,
+    /// One-time, in-memory profile-change previews keyed by their capability
+    /// token. Tokens expire in the config route before a write can occur.
+    config_changes: Mutex<HashMap<String, config::PendingChange>>,
     token: String,
     log: Arc<Logger>,
     metrics: Arc<Metrics>,
@@ -483,6 +491,8 @@ impl Server {
         Arc::new(Self {
             factory: options.factory,
             info: options.info,
+            config_path: options.config_path,
+            config_changes: Mutex::new(HashMap::new()),
             token: options.token,
             log: options.logger.unwrap_or_else(|| Arc::new(Logger::stderr())),
             metrics: Arc::new(Metrics::new()),
@@ -595,6 +605,14 @@ impl Server {
     pub fn router(self: &Arc<Self>) -> Router {
         let state = Arc::clone(self);
         Router::new()
+            .route("/v1/config/profiles", get(config::profiles))
+            .route("/v1/config/profiles/{name}", get(config::get_profile))
+            .route("/v1/config/models", get(config::models))
+            .route("/v1/config/changes", post(config::preview))
+            .route(
+                "/v1/config/changes/{id}",
+                post(config::confirm).delete(config::cancel),
+            )
             .route("/v1/sessions", post(create_session).get(list_sessions))
             .route(
                 "/v1/sessions/{id}",
@@ -1302,7 +1320,7 @@ fn route_label(method: &Method, matched: Option<&str>) -> String {
 
 /// Reduces a client-supplied `X-Request-ID` to at most 64 printable ASCII
 /// bytes, per the design's trust-and-safety rule.
-fn request_id(raw: &[u8]) -> String {
+pub(crate) fn request_id(raw: &[u8]) -> String {
     raw.iter()
         .take(64)
         .filter(|byte| (0x20..0x7f).contains(*byte))
@@ -2808,6 +2826,8 @@ mod tests {
         workspace: Option<TempDir>,
         token: String,
         info: Info,
+        /// Initial config.toml bytes for config-management route tests.
+        config_text: Option<String>,
         /// Registers the approval store and the `bash` double that
         /// [`Script::tool_command`] calls.
         elevate: bool,
@@ -2868,6 +2888,10 @@ mod tests {
                     Vec::new(),
                 )));
             }
+            if let Some(config_text) = &options.config_text {
+                std::fs::write(&builder.shared.config_path, config_text)
+                    .expect("write config fixture");
+            }
             let builder = Arc::new(builder);
             let provider = ScriptedProvider::new(options.script);
             // Production always sets `Options.info.workspace` from the same
@@ -2907,6 +2931,7 @@ mod tests {
             let server = Server::new(Options {
                 factory: Arc::clone(&factory) as Arc<dyn Factory>,
                 info,
+                config_path: factory.builder.shared.config_path.clone(),
                 token: options.token,
                 logger: Some(Arc::new(Logger::new(Box::new(SharedSink(Arc::clone(
                     &log,
@@ -4450,11 +4475,77 @@ mod tests {
         assert_eq!(default_list.status, StatusCode::OK, "{}", default_list.body);
     }
 
+    #[tokio::test]
+    async fn config_profiles_are_readable_without_environment_values() {
+        let harness = Harness::with(HarnessOptions {
+            config_text: Some(
+                "default_profile = \"work\"\n\n[profiles.work]\nprovider = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\nmodel = \"small\"\napi_key_env = \"WORK_KEY\"\n".into(),
+            ),
+            ..Default::default()
+        });
+        let reply = harness.send("GET", "/v1/config/profiles", None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert_eq!(reply.json()["profiles"][0]["name"], "work");
+        assert_eq!(reply.json()["profiles"][0]["default"], true);
+        assert_eq!(reply.json()["profiles"][0]["api_key_env"], "WORK_KEY");
+        assert!(!reply.body.contains("WORK_KEY_VALUE"));
+    }
+
+    #[tokio::test]
+    async fn config_change_confirmation_is_one_time_and_requires_restart() {
+        let original = "# preserve\ndefault_profile = \"work\"\n\n[profiles.work]\nprovider = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\nmodel = \"old\"\napi_key_env = \"WORK_KEY\"\n";
+        let harness = Harness::with(HarnessOptions {
+            config_text: Some(original.into()),
+            ..Default::default()
+        });
+        let preview = harness
+            .raw(
+                "POST",
+                "/v1/config/changes",
+                Some(r#"{"kind":"set_profile_field","profile":"work","field":"model","value":"new"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        let body = String::from_utf8(
+            axum::body::to_bytes(preview.into_body(), usize::MAX)
+                .await
+                .expect("body")
+                .to_vec(),
+        )
+        .expect("utf8");
+        let value: Value = serde_json::from_str(&body).expect("preview json");
+        let id = value["id"].as_str().expect("id");
+        assert!(
+            !body.contains("new"),
+            "preview must redact field values: {body}"
+        );
+        let confirm = harness
+            .send("POST", &format!("/v1/config/changes/{id}"), None)
+            .await;
+        assert_eq!(confirm.status, StatusCode::OK, "{}", confirm.body);
+        assert_eq!(confirm.json()["status"], "saved_restart_required");
+        let changed = std::fs::read_to_string(&harness.factory.builder.shared.config_path)
+            .expect("read config");
+        assert_eq!(
+            changed,
+            original.replace("model = \"old\"", "model = \"new\"")
+        );
+        let repeated = harness
+            .send("POST", &format!("/v1/config/changes/{id}"), None)
+            .await;
+        assert_eq!(repeated.status, StatusCode::NOT_FOUND, "{}", repeated.body);
+    }
+
     /// Every API path the router serves.
     ///
     /// ponytail: axum exposes no route table, so this list is written out once
     /// and checked against both the router and `openapi.yaml`.
     const ROUTES: &[&str] = &[
+        "/v1/config/profiles",
+        "/v1/config/profiles/{name}",
+        "/v1/config/models",
+        "/v1/config/changes",
+        "/v1/config/changes/{id}",
         "/v1/sessions",
         "/v1/sessions/{id}",
         "/v1/sessions/{id}/history",

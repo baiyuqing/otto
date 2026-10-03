@@ -420,7 +420,7 @@ func (c *chat) turn(m Message) {
 		c.b.bySession[sid] = c
 		c.b.mu.Unlock()
 
-		stop, err = c.b.opts.Agent.Prompt(ctx, sid, m.Text)
+		stop, err = c.b.opts.Agent.Prompt(ctx, sid, chatPrompt(m))
 
 		c.b.mu.Lock()
 		delete(c.b.bySession, sid)
@@ -477,6 +477,24 @@ func (c *chat) turn(m Message) {
 // memoryHint follows a turn that proposed a memory change. Only a person can
 // decide it, through the connector's commands, not by writing to the model.
 const memoryHint = "Memory changes are proposals. Send /memory to review them."
+
+// chatPrompt adds the current transport to each turn, including resumed and
+// shared sessions. It is ordinary ACP text, not a system instruction override.
+func chatPrompt(m Message) string {
+	var channel string
+	switch m.Platform {
+	case "telegram":
+		channel = "Telegram"
+	case "feishu":
+		channel = "Feishu (Lark)"
+	default:
+		return m.Text
+	}
+	return "[otto-connect channel context]\nCurrent channel: " + channel +
+		". The user is communicating through chat and cannot see the local terminal. " +
+		"Keep replies readable in chat; explain results, progress, and any necessary user actions. " +
+		"This channel does not grant additional tools or permissions.\n[/otto-connect channel context]\n\n" + m.Text
+}
 
 // session returns the chat's session id, loading the stored one or creating
 // a new one. A load that the agent refuses is replaced by a new session and a

@@ -29,6 +29,7 @@ type sent struct{ chat, replyTo, text string }
 // fakePlatform records what the bridge sends and lets the test deliver
 // messages.
 type fakePlatform struct {
+	name      string
 	mu        sync.Mutex
 	deliver   func(Message)
 	started   chan struct{}
@@ -51,7 +52,12 @@ func managementServer(t *testing.T, handler http.HandlerFunc) *manage.Client {
 	return manage.NewWithBaseURL(server.Client(), server.URL)
 }
 
-func (p *fakePlatform) Name() string { return "fake" }
+func (p *fakePlatform) Name() string {
+	if p.name != "" {
+		return p.name
+	}
+	return "fake"
+}
 
 func (p *fakePlatform) Run(ctx context.Context, deliver func(Message)) error {
 	p.deliver = deliver
@@ -99,6 +105,7 @@ type harness struct {
 type textPlatform struct{ Platform }
 
 type setup struct {
+	platform string
 	textOnly bool
 	dir      string // fake agent state; default a new temp dir
 	store    *state.Store
@@ -128,6 +135,7 @@ func newHarness(t *testing.T, s setup) *harness {
 		s.senders = []string{"u1"}
 	}
 	h := &harness{t: t, dir: s.dir, store: s.store, plat: newFakePlatform(), done: make(chan error, 1)}
+	h.plat.name = s.platform
 	ao := agent.Options{
 		Command: []string{os.Args[0]},
 		Dir:     s.dir,
@@ -142,7 +150,7 @@ func newHarness(t *testing.T, s setup) *harness {
 		Agent:          h.agent,
 		Manage:         s.manage,
 		Platforms:      []Platform{h.plat},
-		Access:         map[string]Access{"fake": {Chats: s.chats, Senders: s.senders}},
+		Access:         map[string]Access{h.plat.Name(): {Chats: s.chats, Senders: s.senders}},
 		Store:          s.store,
 		TypingInterval: time.Hour,
 	}
@@ -176,7 +184,7 @@ func (h *harness) shutdown() error {
 
 func (h *harness) msg(chat, sender, text string) Message {
 	h.n++
-	return Message{Platform: "fake", ChatID: chat, SenderID: sender, MessageID: "m" + string(rune('0'+h.n%10)), Text: text, Time: time.Now()}
+	return Message{Platform: h.plat.Name(), ChatID: chat, SenderID: sender, MessageID: "m" + string(rune('0'+h.n%10)), Text: text, Time: time.Now()}
 }
 
 // say delivers text from the admitted chat and sender.

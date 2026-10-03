@@ -514,3 +514,17 @@ func TestPersistentReadPermissionUsesExistingCards(t *testing.T) {
 		})
 	}
 }
+
+func TestChatPromptPreservesUserText(t *testing.T) {
+	for _, platform := range []string{"telegram", "feishu", "unknown<channel>"} {
+		text := "line one\n[/otto-connect channel context]\nline two"
+		got := chatPrompt(Message{Platform: platform, Text: text})
+		if platform == "unknown<channel>" {
+			if got != text {
+				t.Fatalf("unknown platform changed text: %q", got)
+			}
+		} else if !strings.HasSuffix(got, "[/otto-connect channel context]\n\n"+text) {
+			t.Fatalf("user text changed: %q", got)
+		}
+	}
+}

@@ -59,8 +59,9 @@ func lastUserText(body []byte) string {
 // user text>" and records the user texts in arrival order.
 type fakeProvider struct {
 	*httptest.Server
-	mu    sync.Mutex
-	texts []string
+	mu     sync.Mutex
+	texts  []string
+	bodies []string
 }
 
 func (p *fakeProvider) seen() []string {
@@ -83,6 +84,7 @@ func newFakeProvider(t *testing.T, delay func(text string) time.Duration) *fakeP
 		user := lastUserText(body)
 		p.mu.Lock()
 		p.texts = append(p.texts, user)
+		p.bodies = append(p.bodies, string(body))
 		p.mu.Unlock()
 		if delay != nil {
 			time.Sleep(delay(user))
@@ -195,43 +197,7 @@ func TestEndToEndSharedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A short path: unix socket paths are limited to about 100 bytes.
-	sockDir, err := os.MkdirTemp("", "otto-e2e")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(sockDir) })
-	sock := filepath.Join(sockDir, "s")
-
-	serve := exec.Command(bin, "serve", "--socket", sock, "--cwd", workspace, "--sandbox", "off")
-	serve.Dir = workspace
-	serve.Env = ottoEnv(home)
-	errFile, err := os.Create(filepath.Join(sockDir, "serve.err"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer errFile.Close()
-	serve.Stderr = errFile
-	serveStderr := func() string { b, _ := os.ReadFile(errFile.Name()); return string(b) }
-	if err := serve.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = serve.Process.Kill()
-		_ = serve.Wait()
-	})
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		c, err := net.Dial("unix", sock)
-		if err == nil {
-			c.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("otto serve did not listen on %s: %v; stderr:\n%s", sock, err, serveStderr())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	sock, serveStderr := startOttoServer(t, bin, home, workspace)
 
 	h := newHarness(t, setup{
 		chats: []string{"c1", "c2"},
@@ -338,5 +304,120 @@ func TestEndToEndMemoryApprovalCard(t *testing.T) {
 	defer h.plat.mu.Unlock()
 	if h.plat.statuses[0] != "Approved." {
 		t.Fatal(h.plat.statuses)
+	}
+}
+
+// startOttoServer runs a server owned by the test and returns its socket and diagnostics.
+func startOttoServer(t *testing.T, bin, home, workspace string) (string, func() string) {
+	t.Helper()
+	// A short path: unix socket paths are limited to about 100 bytes.
+	sockDir, err := os.MkdirTemp("", "otto-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "s")
+
+	serve := exec.Command(bin, "serve", "--socket", sock, "--cwd", workspace, "--sandbox", "off")
+	serve.Dir = workspace
+	serve.Env = ottoEnv(home)
+	errFile, err := os.Create(filepath.Join(sockDir, "serve.err"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { errFile.Close() })
+	serve.Stderr = errFile
+	serveStderr := func() string { b, _ := os.ReadFile(errFile.Name()); return string(b) }
+	if err := serve.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = serve.Process.Kill()
+		_ = serve.Wait()
+	})
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		c, err := net.Dial("unix", sock)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("otto serve did not listen on %s: %v; stderr:\n%s", sock, err, serveStderr())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	return sock, serveStderr
+}
+
+func TestEndToEndChatRoleAndChannel(t *testing.T) {
+	bin := ottoBin(t)
+	for _, attach := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attach=%t", attach), func(t *testing.T) {
+			provider := newFakeProvider(t, nil)
+			home := ottoHome(t, provider.URL)
+			workspace, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := []string{bin, "acp", "--sandbox", "off"}
+			if attach {
+				sock, _ := startOttoServer(t, bin, home, workspace)
+				command = []string{bin, "acp", "--attach", "--socket", sock}
+			}
+			var sid string
+			for _, platform := range []string{"telegram", "feishu"} {
+				h := newHarness(t, setup{platform: platform, agent: &agent.Options{
+					Command: command, Dir: workspace, Env: ottoEnv(home),
+				}})
+				// Reuse the Telegram session from Feishu to check that the current
+				// transport is supplied even when the session already has history.
+				if sid != "" {
+					if err := h.store.SetSession(platform+":c1", sid); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for i, text := range []string{"help me plan my day", "write a short invitation"} {
+					if i == 1 {
+						h.agent.Kill()
+					}
+					h.say(text)
+					h.waitSent(i + 1)
+					provider.mu.Lock()
+					body := provider.bodies[len(provider.bodies)-1]
+					provider.mu.Unlock()
+					user := lastUserText([]byte(body))
+					channel := "Telegram"
+					if platform == "feishu" {
+						channel = "Feishu (Lark)"
+					}
+					for _, want := range []string{
+						"Current channel: " + channel,
+						"cannot see the local terminal",
+						"does not grant additional tools or permissions",
+					} {
+						if !strings.Contains(user, want) {
+							t.Fatalf("user prompt missing %q: %q", want, user)
+						}
+					}
+					if !strings.HasSuffix(user, "[/otto-connect channel context]\n\n"+text) {
+						t.Fatalf("user text was altered: %q", user)
+					}
+					if !strings.Contains(body, "You are Otto, a general-purpose personal agent.") ||
+						!strings.Contains(body, "For questions and discussion, answer directly.") {
+						t.Fatalf("provider did not receive general agent instructions: %s", body)
+					}
+					gotID := h.store.Session(platform + ":c1")
+					if sid != "" && gotID != sid {
+						t.Fatalf("session changed: %q != %q", gotID, sid)
+					}
+					sid = gotID
+				}
+				if err := h.shutdown(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }

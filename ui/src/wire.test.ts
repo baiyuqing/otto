@@ -171,8 +171,14 @@ describe('phase', () => {
     )
     expect(
       phase('{"type":"provider_retry","retry":{"attempt":2,"max_attempts":3,"delay_ms":250,"reason":"HTTP 503"}}'),
-    ).toBe('retry 2/3 after HTTP 503, waiting 250ms')
+    ).toBe('retry 1/2 after HTTP 503, waiting 1s')
     expect(phase('{"type":"provider_usage"}')).toBeUndefined()
+  })
+
+  it('counts down retries and shows the elapsed retry and turn durations', () => {
+    const event = '{"type":"provider_retry","retry":{"attempt":2,"max_attempts":4,"delay_ms":4000,"reason":"connection interrupted"}}'
+    expect(phase(event, 1500)).toBe('retry 1/3 after connection interrupted, waiting 3s')
+    expect(statusLine(phase(event, 5000)!, 5, 12)).toBe('retry 1/3 after connection interrupted, requesting · 5s · turn 12s')
   })
 
   it('formats the status line with both durations', () => {

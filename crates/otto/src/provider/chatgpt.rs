@@ -22,7 +22,8 @@
 //! the account id redacted.
 //!
 //! Two deliberate decisions:
-//!   - no retry on 429/5xx, so the status is returned on the first attempt.
+//!   - transport failures before any streamed output get up to three retries;
+//!     HTTP status and protocol failures are returned on the first attempt.
 //!   - reqwest exposes no cap on the size of a response header block, so no
 //!     bound is enforced on it. The same gap exists in
 //!     [`crate::provider::openaicompat`].
@@ -61,6 +62,20 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const AUTHORIZATION_FAILED: &str = "chatgpt authorization failed; run 'otto login'";
 /// The request did not complete, with no detail that could carry a secret.
 const REQUEST_FAILED: &str = "chatgpt request failed";
+const RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
+    max_attempts: 4,
+    base: Duration::from_secs(1),
+    max: Duration::from_secs(4),
+    retry_after_cap: Duration::from_secs(4),
+};
+
+// Fixed exponential backoff; no new randomness dependency for three delays.
+struct Backoff;
+impl crate::retry::JitterSource for Backoff {
+    fn full_jitter(&mut self, upper_bound: Duration) -> Duration {
+        upper_bound
+    }
+}
 
 /// A provider backed by a ChatGPT subscription.
 ///
@@ -96,13 +111,71 @@ impl Client {
 
 #[async_trait::async_trait]
 impl Provider for Client {
-    /// Sends one request to the Responses backend and assembles the stream.
-    /// There is no retry: every failure is reported on the first attempt.
     async fn complete(
         &self,
         request: &Request,
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
+    ) -> ProviderSettlement {
+        let mut attempts = 0;
+        loop {
+            let mut output_started = false;
+            let mut retryable = false;
+            let mut settlement = self
+                .attempt(
+                    request,
+                    &mut |event| {
+                        output_started = true;
+                        emit(event);
+                    },
+                    control,
+                    &mut retryable,
+                )
+                .await;
+            if attempts > 0 && settlement.result.is_err() {
+                settlement.outcome.effect_certainty = EffectCertainty::Unknown;
+            }
+            attempts += settlement.attempts;
+            settlement.attempts = attempts;
+            // Retry this completion only. Previously executed tools stay in
+            // the unchanged request; streamed output cannot be replayed.
+            if !retryable || output_started {
+                return settlement;
+            }
+            if let Err(error) = check_running(control) {
+                return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
+            }
+            let Some(delay) = crate::retry::next_delay(
+                RETRY_POLICY,
+                attempts,
+                None,
+                control.remaining().unwrap_or(Duration::MAX),
+                Duration::from_secs(1),
+                &mut Backoff,
+            ) else {
+                return settlement;
+            };
+            emit(StreamEvent::Retry {
+                attempt: attempts + 1,
+                max_attempts: RETRY_POLICY.max_attempts,
+                delay,
+                reason: "connection interrupted".to_owned(),
+            });
+            if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
+                return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
+            }
+        }
+    }
+}
+
+impl Client {
+    /// One request attempt. Only transport failures are eligible for retry.
+    async fn attempt(
+        &self,
+        request: &Request,
+        emit: StreamSink<'_>,
+        control: &dyn OperationControl,
+        retryable: &mut bool,
     ) -> ProviderSettlement {
         if let Err(error) = check_running(control) {
             return chatgpt_failure(error, 0, EffectCertainty::NotStarted, control);
@@ -178,7 +251,8 @@ impl Provider for Client {
             .send();
         let response = match await_control(control, send).await {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => {
+            Ok(Err(error)) => {
+                *retryable = !error.is_builder() && !error.is_redirect();
                 if let Err(error) = check_running(control) {
                     return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
                 }
@@ -207,7 +281,8 @@ impl Provider for Client {
             let chunk = match await_control(control, body.try_next()).await {
                 Ok(Ok(Some(chunk))) => chunk,
                 Ok(Ok(None)) => break,
-                Ok(Err(_)) => {
+                Ok(Err(error)) => {
+                    *retryable = !error.is_builder() && !error.is_redirect();
                     if let Err(error) = check_running(control) {
                         return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
                     }
@@ -928,20 +1003,199 @@ mod tests {
 
     /// A connection that is refused carries no provider text into the error.
     #[tokio::test]
-    async fn a_transport_failure_reports_a_fixed_request_failure() {
+    async fn a_transport_failure_stops_after_three_retries() {
         let client = Client::with_base_url("http://127.0.0.1:1", static_tokens("token"), "acct-1");
-        let (settlement, _) = complete(&client, &Request::default()).await;
+        let (settlement, events) = complete(&client, &Request::default()).await;
+        assert_eq!(settlement.attempts, 4);
         assert_eq!(
-            settlement.result.unwrap_err().to_string(),
-            "chatgpt request failed"
+            settlement.outcome.effect_certainty,
+            EffectCertainty::Unknown
         );
+        assert_eq!(settlement.result.unwrap_err().to_string(), REQUEST_FAILED);
+        assert_eq!(
+            events,
+            (2..=4)
+                .map(|attempt| StreamEvent::Retry {
+                    attempt,
+                    max_attempts: 4,
+                    delay: Duration::from_secs(1 << (attempt - 2)),
+                    reason: "connection interrupted".into(),
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transport_retry_recovers_with_the_same_request() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let server = testserver::spawn(move |_| {
+            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                // Valid headers, then disconnect before any response output.
+                testserver::truncated_sse_response("", 4096)
+            } else {
+                sse_response(CANNED_STREAM)
+            }
+        })
+        .await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let (settlement, events) = complete(&client, &model_request()).await;
+        assert!(settlement.result.is_ok());
+        assert_eq!(settlement.attempts, 2);
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::Retry { attempt: 2, .. })
+        ));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body, requests[1].body);
+    }
+
+    #[tokio::test]
+    async fn a_retry_after_a_tool_result_does_not_execute_the_tool_again() {
+        use otto_core::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct CountingTool(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl ToolExecutor for CountingTool {
+            fn definitions(&self) -> Vec<ToolDefinition> {
+                model_request().tools
+            }
+            async fn execute(&self, call: ToolCall<'_>, _: &dyn OperationControl) -> ToolExecution {
+                assert_eq!(call.name, "get_time");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                ToolExecution::completed(ToolResult {
+                    content: "tool completed once".into(),
+                    ..ToolResult::default()
+                })
+            }
+        }
+        let attempts = AtomicUsize::new(0);
+        let server = testserver::spawn(move |_| match attempts.fetch_add(1, Ordering::SeqCst) {
+            0 => sse_response(CANNED_STREAM),
+            1 => testserver::truncated_sse_response("", 4096),
+            2 => sse_response(&format!(
+                "{}{}",
+                &CANNED_STREAM[..CANNED_STREAM
+                    .find("event: response.output_item.added")
+                    .unwrap()],
+                &CANNED_STREAM[CANNED_STREAM.find("event: response.completed").unwrap()..]
+            )),
+            _ => testserver::status_response(500, "unexpected repeat"),
+        })
+        .await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent = otto_core::agent::Agent::new(
+            Client::with_base_url(&server.url, static_tokens("token"), "acct-1"),
+            CountingTool(calls.clone()),
+            otto_core::session::MemorySession::new(),
+            otto_core::agent::Options {
+                model: "test-model".into(),
+                ..Default::default()
+            },
+        );
+        let mut events = Vec::new();
+        agent
+            .run(
+                "hi",
+                &mut |event| events.push(event),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].body.contains("tool completed once"));
+        assert_eq!(requests[1].body, requests[2].body);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, otto_core::agent::Event::ProviderRetry { .. }))
+        );
+        assert!(matches!(
+            events.last(),
+            Some(otto_core::agent::Event::AgentFinished)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stopping_during_backoff_prevents_another_request() {
+        for reason in [
+            OperationStopReason::UserCancellation,
+            OperationStopReason::Deadline,
+        ] {
+            let server = testserver::spawn(|_| testserver::truncated_sse_response("", 4096)).await;
+            let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+            let control = crate::deadline::Control::new(crate::deadline::Deadline::unlimited());
+            let mut retries = 0;
+            let settlement = client
+                .complete(
+                    &model_request(),
+                    &mut |event| {
+                        assert!(matches!(event, StreamEvent::Retry { .. }));
+                        retries += 1;
+                        control.stop(reason);
+                    },
+                    &control,
+                )
+                .await;
+            assert_eq!(retries, 1);
+            assert_eq!(server.count(), 1);
+            assert_eq!(settlement.attempts, 1);
+            assert_eq!(settlement.outcome.stop_reason, Some(reason));
+            assert_eq!(
+                settlement.outcome.effect_certainty,
+                EffectCertainty::Unknown
+            );
+            assert!(matches!(
+                (reason, settlement.result.unwrap_err()),
+                (
+                    OperationStopReason::UserCancellation,
+                    ProviderError::Cancelled
+                ) | (
+                    OperationStopReason::Deadline,
+                    ProviderError::DeadlineExceeded
+                )
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn insufficient_deadline_budget_skips_backoff() {
+        let server = testserver::spawn(|_| testserver::truncated_sse_response("", 4096)).await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let control = crate::deadline::Control::new(crate::deadline::Deadline::after(
+            Duration::from_millis(1500),
+        ));
+        let settlement = client
+            .complete(
+                &model_request(),
+                &mut |_| panic!("no retry fits the budget"),
+                &control,
+            )
+            .await;
+        assert_eq!(settlement.attempts, 1);
+        assert_eq!(server.count(), 1);
+        assert_eq!(settlement.result.unwrap_err().to_string(), REQUEST_FAILED);
+    }
+
+    #[tokio::test]
+    async fn a_permanent_request_error_is_not_retried() {
+        let client = Client::with_base_url("invalid-url", static_tokens("token"), "acct-1");
+        let (settlement, events) = complete(&client, &model_request()).await;
+        assert_eq!(settlement.attempts, 1);
+        assert_eq!(settlement.result.unwrap_err().to_string(), REQUEST_FAILED);
+        assert!(events.is_empty());
     }
 
     /// A body cut short reports the fixed request failure, with no token or
     /// account id in it.
     #[tokio::test]
     async fn a_body_cut_short_reports_a_fixed_request_failure() {
-        let prefix = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
+        let prefix = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial reply long enough to pass the secret redactor and become visible\"}\n\n";
         let server = testserver::spawn(move |_| {
             testserver::truncated_sse_response(prefix, prefix.len() + 4096)
         })
@@ -951,7 +1205,19 @@ mod tests {
             static_tokens("stream-token-secret"),
             "stream-account-secret",
         );
-        let (settlement, _) = complete(&client, &Request::default()).await;
+        let (settlement, events) = complete(&client, &Request::default()).await;
+        assert_eq!(settlement.attempts, 1);
+        assert_eq!(server.count(), 1);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::TextDelta { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Retry { .. }))
+        );
         let error = settlement.result.unwrap_err().to_string();
         assert_eq!(error, "chatgpt request failed");
     }

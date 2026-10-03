@@ -158,6 +158,39 @@ describe('idle wake follow', () => {
     expect(api.history).toHaveBeenLastCalledWith('sess1', 'wake1')
   })
 
+  it('shows live retry count, countdown and elapsed time, and clears status after failure', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    let push = (_frame: string) => {}
+    let close = () => {}
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (frame) => controller.enqueue(new TextEncoder().encode(frame))
+        close = () => controller.close()
+      },
+    })
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } }))
+    await openIdleSession()
+    await act(async () => {
+      push('id: 0\nevent: provider_retry\ndata: {"type":"provider_retry","retry":{"attempt":2,"max_attempts":4,"delay_ms":4000,"reason":"connection interrupted"}}\n\n')
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    })
+    const footer = () => document.querySelector('.footer')?.textContent
+    expect(footer()).toContain('retry 1/3 after connection interrupted, waiting 4s · 0s · turn 0s')
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+    expect(footer()).toContain('waiting 2s · 2s · turn 2s')
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+    expect(footer()).toContain('requesting · 4s · turn 4s')
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(api.cancelTurn).toHaveBeenCalledWith('sess1', 'turn1')
+    api.getSession.mockResolvedValue({ ...running, turn: { ...running.turn!, status: 'error' } })
+    await act(async () => {
+      close()
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    })
+    expect(footer()).not.toContain('retry')
+  })
+
   it('cancels a running turn when Escape is pressed', async () => {
     const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
     api.createSession.mockResolvedValue(running)

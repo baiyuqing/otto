@@ -315,6 +315,11 @@ const PHASE_ARGS_LIMIT: usize = 60;
 /// The turn phase `event` starts, or `None` when the event leaves the phase
 /// unchanged. Both frontends show the result through [`status_line`].
 pub fn phase(event: &WireEvent) -> Option<String> {
+    phase_at(event, 0)
+}
+
+/// Recomputes a retry countdown using time since its event arrived.
+pub fn phase_at(event: &WireEvent, elapsed_ms: u64) -> Option<String> {
     let phase = match event.event_type.as_str() {
         "agent_started" | "tool_call_finished" | "compaction_completed" => {
             "waiting for model".to_string()
@@ -340,14 +345,17 @@ pub fn phase(event: &WireEvent) -> Option<String> {
         }
         "provider_retry" => {
             let retry = event.retry.clone().unwrap_or_default();
-            let delay = if retry.delay_ms < 1000 {
-                format!("{}ms", retry.delay_ms)
+            let remaining = retry.delay_ms.saturating_sub(elapsed_ms);
+            let progress = if remaining == 0 {
+                "requesting".to_owned()
             } else {
-                format!("{}s", retry.delay_ms as f64 / 1000.0)
+                format!("waiting {}s", remaining.div_ceil(1000))
             };
             format!(
-                "retry {}/{} after {}, waiting {delay}",
-                retry.attempt, retry.max_attempts, retry.reason
+                "retry {}/{} after {}, {progress}",
+                retry.attempt.saturating_sub(1),
+                retry.max_attempts.saturating_sub(1),
+                retry.reason
             )
         }
         _ => return None,
@@ -969,6 +977,23 @@ mod tests {
     }
 
     #[test]
+    fn retry_phase_counts_down_then_shows_the_request_in_flight() {
+        let event: WireEvent = serde_json::from_str(r#"{"type":"provider_retry","retry":{"attempt":2,"max_attempts":4,"delay_ms":4000,"reason":"connection interrupted"}}"#).unwrap();
+        for (elapsed, expected) in [
+            (0, "waiting 4s"),
+            (1500, "waiting 3s"),
+            (3999, "waiting 1s"),
+            (4000, "requesting"),
+            (8000, "requesting"),
+        ] {
+            assert_eq!(
+                phase_at(&event, elapsed).unwrap(),
+                format!("retry 1/3 after connection interrupted, {expected}")
+            );
+        }
+    }
+
+    #[test]
     fn each_turn_event_maps_to_its_phase() {
         let long = "x".repeat(80);
         let cases = [
@@ -988,11 +1013,11 @@ mod tests {
             ),
             (
                 r#"{"type":"provider_retry","retry":{"attempt":2,"max_attempts":3,"delay_ms":250,"reason":"HTTP 503"}}"#.into(),
-                Some("retry 2/3 after HTTP 503, waiting 250ms"),
+                Some("retry 1/2 after HTTP 503, waiting 1s"),
             ),
             (
                 r#"{"type":"provider_retry","retry":{"attempt":3,"max_attempts":3,"delay_ms":2500,"reason":"HTTP 429"}}"#.into(),
-                Some("retry 3/3 after HTTP 429, waiting 2.5s"),
+                Some("retry 2/2 after HTTP 429, waiting 3s"),
             ),
             (r#"{"type":"provider_usage"}"#.into(), None),
             (r#"{"type":"agent_finished"}"#.into(), None),

@@ -94,7 +94,7 @@ export function App() {
   const reflectAbort = useRef<AbortController | null>(null)
   // The running turn's phase and when it and the turn started (ms). A turn
   // re-attached after a reload counts from the attach, not the server start.
-  const [phaseState, setPhaseState] = useState<{ name: string; since: number; turnStart: number } | null>(null)
+  const [phaseState, setPhaseState] = useState<{ name: string; since: number; turnStart: number; retryEvent?: string } | null>(null)
   const [now, setNow] = useState(Date.now())
 
   const fail = useCallback((e: unknown) => setError(describe(e)), [])
@@ -138,7 +138,7 @@ export function App() {
             }
             if (event.type === 'notification') setTasksKey((k) => k + 1)
             const next = phase(raw)
-            if (next) setPhaseState((p) => (p && p.name !== next ? { ...p, name: next, since: Date.now() } : p))
+            if (next) setPhaseState((p) => (p && p.name !== next ? { ...p, name: next, since: Date.now(), retryEvent: event.type === 'provider_retry' ? raw : undefined } : p))
             setItems((prev) => reduce(prev, raw))
           }
           const s = await api.getSession(sessionId)
@@ -746,7 +746,7 @@ export function App() {
         status={
           phaseState &&
           statusLine(
-            phaseState.name,
+            (phaseState.retryEvent ? phase(phaseState.retryEvent, Math.max(0, now - phaseState.since)) : null) ?? phaseState.name,
             Math.max(0, Math.floor((now - phaseState.since) / 1000)),
             Math.max(0, Math.floor((now - phaseState.turnStart) / 1000)),
           )

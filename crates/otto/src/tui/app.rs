@@ -32,6 +32,7 @@ use crate::cli::info::{SandboxInfo, SandboxNetwork};
 use crate::cli::login;
 use crate::cli::repl_commands;
 use crate::cli::sandbox_setup::parse_exclude_entry;
+use crate::memory::{CandidateListRequest, CandidateState};
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 use super::agents_view::AgentsView;
@@ -130,6 +131,26 @@ pub(crate) struct ApprovalDialog {
     pub approve_selected: bool,
 }
 
+/// One scoped pending review row. The dialog is an authorized local review
+/// surface, so it may hold candidate details fetched through the controller's
+/// existing user/workspace scopes. These fields never enter the event signal,
+/// notices, logs, or metrics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemoryReviewRow {
+    pub id: String,
+    pub action: String,
+    pub kind: String,
+    pub key: String,
+    pub text: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MemoryReviewDialog {
+    pub rows: Vec<MemoryReviewRow>,
+    pub selected: usize,
+}
+
 /// Async work [`App::handle_key`] cannot start itself (every
 /// [`Controller`] method it would need is `async`). [`super::run`] awaits
 /// these one at a time, matching [`Controller::begin_operation`]'s
@@ -161,6 +182,10 @@ pub(crate) enum Action {
     /// One validated-later `excluded_commands` entry to add.
     SandboxExclude(String),
     Approve(String),
+    MemoryReview {
+        id: String,
+        accept: bool,
+    },
     /// `--attach` only: deny a waiting approval (the dialog's No).
     Deny(String),
     /// Approve the pending command and exclude its program from the sandbox.
@@ -395,6 +420,9 @@ pub(crate) struct App {
     pub agents: Option<AgentsView>,
     /// Pending elevated Bash approval modal.
     pub approval: Option<ApprovalDialog>,
+    /// Pending human memory-review modal. It contains no candidate body or
+    /// reason; decisions go through the existing scoped review command.
+    pub memory_review: Option<MemoryReviewDialog>,
     /// The highlighted row of the slash-command suggestion panel (see
     /// [`App::suggestions`]). Every composer edit resets it to `0`, so it
     /// only ever indexes the match list the current value produces.
@@ -459,6 +487,7 @@ impl App {
             context: None,
             agents: None,
             approval: None,
+            memory_review: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -654,10 +683,46 @@ impl App {
         None
     }
 
+    /// Opens the local human-review dialog from the current session's scoped
+    /// pending candidates. Details are read only through this authorized scope;
+    /// the signal that opened it never carries them.
+    pub fn open_memory_review(&mut self, controller: &Controller) {
+        let Some((service, user_scope, workspace_scope)) = controller.memory_manager() else {
+            self.push_system("Memory review is unavailable.");
+            return;
+        };
+        match service.list_candidates(&CandidateListRequest {
+            scopes: vec![user_scope, workspace_scope],
+            states: vec![CandidateState::Pending],
+            limit: 20,
+            cursor: String::new(),
+        }) {
+            Ok(page) if page.candidates.is_empty() => {}
+            Ok(page) => {
+                self.memory_review = Some(MemoryReviewDialog {
+                    rows: page
+                        .candidates
+                        .into_iter()
+                        .map(|candidate| MemoryReviewRow {
+                            id: candidate.id,
+                            action: candidate.action.as_str().to_string(),
+                            kind: candidate.proposed.kind,
+                            key: candidate.proposed.key,
+                            text: candidate.proposed.text,
+                            reason: candidate.reason,
+                        })
+                        .collect(),
+                    selected: 0,
+                });
+            }
+            Err(error) => self.push_system(format!("Memory review is unavailable: {error}")),
+        }
+    }
+
     /// Handles one key press. Returns `Some(Action)` for the one key
     /// (submitting a prompt or command) that needs an `async` `Controller`
-    /// call; every purely local effect (composer editing, picker
-    /// navigation, overlays) is applied directly to `self`.
+    /// call; every purely local effect (composer editing, picker navigation,
+    /// overlays) is applied directly to `self`.
     pub fn handle_key(
         &mut self,
         key: KeyEvent,
@@ -668,6 +733,33 @@ impl App {
             self.clear_ctrl_c_arm();
         } else {
             return self.handle_ctrl_c();
+        }
+
+        if let Some(dialog) = &mut self.memory_review {
+            match key.code {
+                KeyCode::Esc => self.memory_review = None,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if !dialog.rows.is_empty() {
+                        dialog.selected =
+                            (dialog.selected + dialog.rows.len() - 1) % dialog.rows.len();
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !dialog.rows.is_empty() {
+                        dialog.selected = (dialog.selected + 1) % dialog.rows.len();
+                    }
+                }
+                KeyCode::Char('a' | 'A') | KeyCode::Char('r' | 'R') => {
+                    let accept = matches!(key.code, KeyCode::Char('a' | 'A'));
+                    let row = dialog.rows.get(dialog.selected)?;
+                    return Some(Action::MemoryReview {
+                        id: row.id.clone(),
+                        accept,
+                    });
+                }
+                _ => {}
+            }
+            return None;
         }
 
         if let Some(approval) = &mut self.approval {
@@ -1238,7 +1330,7 @@ impl App {
     /// command whose semantics match; `/resume`, `/archive`, and `/model` with
     /// no argument open a picker instead of printing text, since a picker is
     /// the TUI-native form of the same command.
-    fn dispatch_line(
+    pub(crate) fn dispatch_line(
         &mut self,
         line: &str,
         backend: &Backend,
@@ -2188,6 +2280,7 @@ mod tests {
             context: None,
             agents: None,
             approval: None,
+            memory_review: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -2224,6 +2317,7 @@ mod tests {
             context: None,
             agents: None,
             approval: None,
+            memory_review: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -2546,6 +2640,7 @@ mod tests {
             context: None,
             agents: None,
             approval: None,
+            memory_review: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -2585,6 +2680,7 @@ mod tests {
             context: None,
             agents: None,
             approval: None,
+            memory_review: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -3390,6 +3486,55 @@ mod tests {
         let missing = app.entries.last().expect("entry").raw.clone();
         assert!(missing.starts_with("/memory: "), "{missing}");
         assert!(missing.contains("not found"), "{missing}");
+    }
+
+    #[tokio::test]
+    async fn memory_review_dialog_reads_scoped_details_and_emits_review_action() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let (service, _, workspace_scope) = controller.memory_manager().expect("memory");
+        let candidate = service
+            .propose(&crate::memory::ProposeRequest {
+                action: crate::memory::CandidateAction::Create,
+                scope: workspace_scope,
+                kind: "preference".into(),
+                key: "editor".into(),
+                text: "private candidate body".into(),
+                reason: "private reason".into(),
+                source: crate::memory::Provenance {
+                    origin: Some(crate::memory::Origin::Model),
+                    ..crate::memory::Provenance::default()
+                },
+                ..crate::memory::ProposeRequest::default()
+            })
+            .expect("proposal")
+            .pop()
+            .expect("candidate");
+        let mut app = App::new(&Backend::Local(&controller));
+        let cancel = CancellationToken::new();
+        app.open_memory_review(&controller);
+        let dialog = app.memory_review.as_ref().expect("dialog");
+        assert_eq!(dialog.rows.len(), 1);
+        assert_eq!(dialog.rows[0].id, candidate.id);
+        assert_eq!(dialog.rows[0].key, "editor");
+        assert_eq!(dialog.rows[0].text, "private candidate body");
+        assert_eq!(dialog.rows[0].reason, "private reason");
+
+        let action = app.handle_key(
+            KeyEvent::from(KeyCode::Char('a')),
+            &Backend::Local(&controller),
+            &cancel,
+        );
+        assert!(
+            matches!(action, Some(Action::MemoryReview { id, accept: true }) if id == candidate.id)
+        );
     }
 
     #[tokio::test]

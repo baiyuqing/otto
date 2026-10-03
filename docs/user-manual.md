@@ -2406,6 +2406,14 @@ user decides a candidate and how, so the model can point the user to
 `/memory`; it still cannot decide one. Editing a candidate during review is
 not available from the chat; use `/memory review` in the REPL or TUI.
 
+The local REPL immediately prints **"Memory review available. Run `/memory
+review`."** after any pending proposal is saved. The local TUI opens a review
+modal for the current user/workspace scopes: use Up/Down to choose, `a` to
+accept, `r` to reject, or Esc to close without changing anything. The modal
+reads that scope's existing candidate details for review. The availability
+signal itself contains no candidate content and is process-local, so attached
+TUI, web, and chat connectors retain their existing refresh/command behavior.
+
 ### Permission requests
 
 When Otto asks to run an unsandboxed `bash` command (see

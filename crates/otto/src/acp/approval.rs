@@ -1,4 +1,4 @@
-//! The `session/request_permission` round trip for one elevated bash command.
+//! The `session/request_permission` round trip for Bash elevation or persistent sandbox read access.
 //!
 //! The request is sent after the turn that produced it has returned. The wait
 //! ends on the client's response, on the session's prompt token, or when the
@@ -15,38 +15,64 @@ use tokio_util::sync::CancellationToken;
 use super::Connection;
 use crate::app::ApprovalDecision as Decision;
 
+// Option IDs are opaque. Keep the legacy ID; the kind and label describe persistence.
 const ALLOW_ONCE: &str = "allow_once";
 const REJECT_ONCE: &str = "reject_once";
 
-/// The `session/request_permission` parameters for one elevated command.
-pub(super) fn permission_params(session_id: &str, tool_call_id: &str, command: &str) -> Value {
+/// The permission request for elevation or a persistent sandbox read grant.
+pub(super) fn permission_params(
+    session_id: &str,
+    tool_call_id: &str,
+    command: &str,
+    read_path: &str,
+    justification: &str,
+) -> Value {
+    let (title, kind, label, option_kind) = if read_path.is_empty() {
+        (
+            command.to_string(),
+            ToolKind::Execute,
+            "Allow once",
+            PermissionOptionKind::AllowOnce,
+        )
+    } else {
+        (
+            format!(
+                "Permanently allow sandbox read access to {read_path}\nSaved to read_paths; commands stay sandboxed.\nCommand: {command}\nReason: {justification}"
+            ),
+            ToolKind::Read,
+            "Save read access",
+            PermissionOptionKind::AllowAlways,
+        )
+    };
     let tool_call = ToolCallUpdate::new(
         tool_call_id.to_string(),
         ToolCallUpdateFields::new()
-            .title(command.to_string())
-            .kind(ToolKind::Execute)
-            .raw_input(json!({ "command": command })),
+            .title(title)
+            .kind(kind)
+            .raw_input(json!({ "command": command, "read_path": read_path })),
     );
     let request = RequestPermissionRequest::new(
         session_id.to_string(),
         tool_call,
         vec![
-            PermissionOption::new(ALLOW_ONCE, "Allow once", PermissionOptionKind::AllowOnce),
+            PermissionOption::new(ALLOW_ONCE, label, option_kind),
             PermissionOption::new(REJECT_ONCE, "Deny", PermissionOptionKind::RejectOnce),
         ],
     );
     serde_json::to_value(request).expect("permission request serializes")
 }
 
-/// Asks the client to allow `command` once and waits for the answer.
+/// Asks the client for the described permission and waits for the answer.
 pub(super) async fn request_permission(
     connection: &Connection,
     session_id: &str,
     tool_call_id: &str,
     command: &str,
+    read_path: &str,
+    justification: &str,
     cancel: &CancellationToken,
 ) -> Decision {
-    let params = permission_params(session_id, tool_call_id, command);
+    let params = permission_params(session_id, tool_call_id, command, read_path, justification);
     let (id, reply) = connection.send_request("session/request_permission", params);
     tokio::select! {
         () = cancel.cancelled() => {
@@ -78,6 +104,18 @@ pub(super) fn decide(frame: &Value) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_permission_discloses_persistence_and_uses_allow_always() {
+        let params = permission_params("s1", "c1", "cat fixture", "/fixture", "read fixture");
+        let title = params["toolCall"]["title"].as_str().unwrap();
+        assert!(title.contains("Permanently"));
+        assert!(title.contains("/fixture"));
+        assert!(title.contains("commands stay sandboxed"));
+        assert_eq!(params["toolCall"]["kind"], "read");
+        assert_eq!(params["options"][0]["kind"], "allow_always");
+        assert_eq!(params["options"][0]["name"], "Save read access");
+    }
 
     #[test]
     fn only_a_selected_allow_once_allows() {

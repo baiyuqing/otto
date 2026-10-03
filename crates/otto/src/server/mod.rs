@@ -1089,12 +1089,14 @@ impl Server {
             id: request.approval_id.clone(),
             decide,
         });
-        turn.push_event(WireEvent::approval_requested(
+        let mut event = WireEvent::approval_requested(
             &request.approval_id,
             &request.tool_call_id,
             &request.command,
             &request.justification,
-        ));
+        );
+        event.read_path = request.read_path.clone();
+        turn.push_event(event);
         self.bump_status();
 
         let (decision, label) = tokio::select! {

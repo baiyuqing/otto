@@ -217,6 +217,8 @@ impl Relay {
                                 session_id,
                                 &event.tool_call_id,
                                 &event.command,
+                                &event.read_path,
+                                &event.justification,
                             );
                             let (request_id, reply) =
                                 connection.send_request("session/request_permission", params);

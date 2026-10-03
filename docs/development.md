@@ -39,7 +39,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
   - `subagent`: child agent construction (`Runner`), task lifecycle, the parent-facing `agent`/`agent_wait`/`agent_status`/`agent_send` tools, the child-only `agent_report` tool, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
   - `workflow`: workspace-scoped TOML DAG discovery, SQLite run/step/attempt/approval/event state, committed-boundary recovery, and the shared CLI/server workflow controller
-  - `acp`: the Agent Client Protocol v1 agent server behind `otto acp`: newline-delimited JSON-RPC on stdin/stdout with a single stdout writer, per-session `Controller`s on one `Builder`, the mapping from agent events and stored history to `session/update`, and the after-turn `session/request_permission` round trip for elevated `bash`. `acp::attach` is the `otto acp --attach` relay: the same transport and dispatcher with every session operation sent to `otto serve` through `client`. Message types come from the `agent-client-protocol-schema` crate; the designs are `docs/specs/2026-10-02-acp-agent-server.md` and `docs/specs/2026-10-02-shared-session.md`
+  - `acp`: the Agent Client Protocol v1 agent server behind `otto acp`: newline-delimited JSON-RPC on stdin/stdout with a single stdout writer, per-session `Controller`s on one `Builder`, the mapping from agent events and stored history to `session/update`, and the after-turn `session/request_permission` round trip for elevated `bash` and persistent sandbox read grants. `acp::attach` is the `otto acp --attach` relay: the same transport and dispatcher with every session operation sent to `otto serve` through `client`. Message types come from the `agent-client-protocol-schema` crate; the designs are `docs/specs/2026-10-02-acp-agent-server.md` and `docs/specs/2026-10-02-shared-session.md`
   - `client`: the HTTP client of `otto serve` over its Unix socket, used by `acp::attach` and `tui::attach` (sessions, history, queued turns and their SSE streams, the `/v1/status` stream, turn cancel, approval decisions, compaction, context, sub-agent tasks, sandbox reload); it maps a failed connection to `Error::Unreachable` and a non-2xx answer to `Error::Http`
   - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI (`ui/dist`, written by `make ui`)
   - `tui`: the terminal frontend on the alternate screen, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle. `App` reaches either the local `Controller` or, through `app::Backend::Attach`, `tui::attach::Remote`; `tui::attach` is `otto --attach`, the loop that sends turns to `otto serve` through `client`, follows the session's turns from the `/v1/status` stream, and reconnects after a lost connection. Both modes apply turn events as wire frames (`App::apply_event`)
@@ -367,3 +367,17 @@ Use small, focused commits with imperative subjects, for example
 `feat: add OpenAI-compatible streaming` or `docs: document the ChatGPT sign-in
 flow`. Before committing, run the relevant Rust gates and confirm that the
 working tree contains only intentional changes.
+
+### Sandbox read approvals
+
+Bash's optional `sandbox_read_path` requests persistent read access to one
+absolute existing path, with a justification and `use_default` permissions.
+`BashApprovals` binds its canonical path and exact command to the session's
+latest approval ID, separately from unsandboxed command grants. The controller
+applies the existing backed-up config amendment and sandbox reload before
+granting a single confined retry. Reload failure rolls back the config; denial
+and cancellation discard the pending request. A changed canonical path requires
+a new request. The optional `read_path` on `approval_requested` distinguishes
+read grants from elevation for attached clients. ACP advertises `allow_always`
+and discloses persistence in the title; the connector routes it through its
+existing cards and callback admission checks.

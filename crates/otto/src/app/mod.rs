@@ -1265,12 +1265,45 @@ impl Controller {
             .ok_or_else(|| "temporary elevation is unavailable".to_string())
     }
 
+    /// Applies an approved sandbox read grant or approves one elevated command.
+    pub async fn approve_tool(&self, id: &str) -> Result<String, String> {
+        let session_id = self.idle_session_id()?;
+        let approvals = self.bash_approvals()?;
+        let path = approvals
+            .pending_read_path(&session_id, id)
+            .ok_or_else(|| "approval request not found".to_string())?;
+        if path.is_empty() {
+            return self.approve_bash(id);
+        }
+        // A symlink must still resolve to the path the user reviewed.
+        if self.resolve_sandbox_read_path(&path)? != path {
+            return Err("sandbox read path changed; request approval again".to_string());
+        }
+        self.amend_sandbox(SandboxChange::AllowReadPath(path))
+            .await?;
+        approvals.approve(&session_id, id).map_err(str::to_string)?;
+        Ok(format!(
+            "The user approved {id} for persistent sandbox read access. Retry the same Bash call inside the sandbox now."
+        ))
+    }
+
+    pub fn deny_tool(&self, id: &str) -> Result<(), String> {
+        let session_id = self.idle_session_id()?;
+        self.bash_approvals()?.discard(&session_id, id);
+        Ok(())
+    }
+
     /// Grants one pending elevated Bash command for the current session.
     pub fn approve_bash(&self, id: &str) -> Result<String, String> {
         let session_id = self.idle_session_id()?;
-        self.bash_approvals()?
-            .approve(&session_id, id)
-            .map_err(str::to_string)?;
+        let approvals = self.bash_approvals()?;
+        if approvals
+            .pending_read_path(&session_id, id)
+            .is_some_and(|path| !path.is_empty())
+        {
+            return Err("this request requires sandbox read approval".to_string());
+        }
+        approvals.approve(&session_id, id).map_err(str::to_string)?;
         Ok(format!(
             "The user approved {id} for one exact command. Retry the same elevated Bash command now."
         ))
@@ -1282,6 +1315,12 @@ impl Controller {
     pub async fn approve_bash_always(&self, id: &str) -> Result<String, String> {
         let session_id = self.idle_session_id()?;
         let approvals = self.bash_approvals()?;
+        if approvals
+            .pending_read_path(&session_id, id)
+            .is_some_and(|path| !path.is_empty())
+        {
+            return self.approve_tool(id).await;
+        }
         let command = approvals
             .pending_command(&session_id, id)
             .ok_or_else(|| "approval request not found".to_string())?;
@@ -1643,6 +1682,93 @@ mod tests {
             controller.approve_bash("approval-1"),
             Err(PROMPT_ACTIVE.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn read_approval_persists_reloads_and_denial_invalidates_the_request() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = outside
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let (controller, approvals, calls) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let session = controller.info().session_id;
+        let id = approvals.request_read_path(&session, "cat fixture", &path);
+        assert!(controller.approve_bash(&id).is_err());
+        assert!(!controller.config_path().exists());
+        controller.deny_tool(&id).unwrap();
+        assert!(controller.approve_tool(&id).await.is_err());
+        assert_eq!(*calls.lock().unwrap(), 0);
+        let id = approvals.request_read_path(&session, "cat fixture", &path);
+        let prompt = controller.approve_tool(&id).await.unwrap();
+        assert!(prompt.contains("inside the sandbox"));
+        assert_eq!(*calls.lock().unwrap(), 1);
+        let config = std::fs::read_to_string(controller.config_path()).unwrap();
+        assert!(config.contains(&path), "{config}");
+        assert!(config.contains("read_paths"));
+        assert!(!config.contains("excluded_commands"));
+        assert!(!approvals.take(&session, "cat fixture"));
+        assert!(approvals.take_read_path(&session, "cat fixture", &path));
+    }
+
+    #[tokio::test]
+    async fn read_approval_reload_failure_rolls_back_and_does_not_grant() {
+        use crate::cli::info::SandboxNetwork;
+        use crate::cli::testutil::{FakeSandbox, seatbelt_info};
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let path = workspace.path().canonicalize().unwrap();
+        let (mut controller, approvals, _) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let info = seatbelt_info(SandboxNetwork::Allowed);
+        controller.sandbox = Some(FakeSandbox::new(info, info, Some("reload failed")).0);
+        let original = "# preserve this config\n";
+        std::fs::write(controller.config_path(), original).unwrap();
+        let session = controller.info().session_id;
+        let id = approvals.request_read_path(&session, "cat fixture", path.to_str().unwrap());
+        assert!(
+            controller
+                .approve_tool(&id)
+                .await
+                .unwrap_err()
+                .contains("rolled back")
+        );
+        assert_eq!(
+            std::fs::read_to_string(controller.config_path()).unwrap(),
+            original
+        );
+        assert!(!approvals.take_read_path(&session, "cat fixture", path.to_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn read_approval_refuses_changed_paths_without_persisting() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = outside.path().join("fixture");
+        std::fs::write(&path, "fixture").unwrap();
+        let path = path.canonicalize().unwrap();
+        let (controller, approvals, calls) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let session = controller.info().session_id;
+        let id = approvals.request_read_path(&session, "cat fixture", path.to_str().unwrap());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(workspace.path(), &path).unwrap();
+        assert!(
+            controller
+                .approve_tool(&id)
+                .await
+                .unwrap_err()
+                .contains("path changed")
+        );
+        assert!(!controller.config_path().exists());
+        assert_eq!(*calls.lock().unwrap(), 0);
     }
 
     #[tokio::test]

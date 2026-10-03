@@ -45,6 +45,7 @@ pub struct ApprovalRequest {
     pub id: String,
     pub command: String,
     pub justification: String,
+    pub read_path: String,
 }
 
 /// Decodes the approval-required result `BashTool::execute` returns for an
@@ -78,6 +79,7 @@ pub fn parse_approval_request(tool_name: &str, result: &ToolResult) -> Option<Ap
         id: id.to_string(),
         command: field("Command: "),
         justification: field("Justification: "),
+        read_path: field("Read path: "),
     })
 }
 
@@ -96,6 +98,8 @@ struct BashArgs {
     #[serde(default)]
     sandbox_permissions: SandboxPermissions,
     #[serde(default)]
+    sandbox_read_path: String,
+    #[serde(default)]
     justification: String,
 }
 
@@ -110,6 +114,7 @@ enum SandboxPermissions {
 struct Approval {
     id: String,
     command: String,
+    read_path: String,
     granted: bool,
 }
 
@@ -119,7 +124,7 @@ struct ApprovalState {
     requests: HashMap<String, Approval>,
 }
 
-/// Process-local, one-shot permission grants for exact Bash commands.
+/// Process-local pending Bash permissions and exact-command retry grants.
 ///
 /// One mutex serializes requests across sessions. A session keeps only its
 /// newest request. A grant is removed before the matching command starts, so
@@ -175,11 +180,20 @@ impl BashApprovals {
     }
 
     pub(crate) fn request(&self, session_id: &str, command: &str) -> String {
+        self.request_read_path(session_id, command, "")
+    }
+
+    pub(crate) fn request_read_path(
+        &self,
+        session_id: &str,
+        command: &str,
+        read_path: &str,
+    ) -> String {
         let mut state = self.state.lock().expect("bash approval mutex");
         if let Some(request) = state
             .requests
             .get(session_id)
-            .filter(|request| request.command == command)
+            .filter(|request| request.command == command && request.read_path == read_path)
         {
             return request.id.clone();
         }
@@ -190,6 +204,7 @@ impl BashApprovals {
             Approval {
                 id: id.clone(),
                 command: command.to_owned(),
+                read_path: read_path.to_owned(),
                 granted: false,
             },
         );
@@ -218,6 +233,28 @@ impl BashApprovals {
             .map(|request| request.command.clone())
     }
 
+    /// The canonical read path, or an empty string for an elevated command.
+    pub fn pending_read_path(&self, session_id: &str, id: &str) -> Option<String> {
+        self.state
+            .lock()
+            .expect("bash approval mutex")
+            .requests
+            .get(session_id)
+            .filter(|request| request.id == id)
+            .map(|request| request.read_path.clone())
+    }
+
+    pub fn discard(&self, session_id: &str, id: &str) {
+        let mut state = self.state.lock().expect("bash approval mutex");
+        if state
+            .requests
+            .get(session_id)
+            .is_some_and(|request| request.id == id)
+        {
+            state.requests.remove(session_id);
+        }
+    }
+
     /// Pending approvals for `session_id`: 0 or 1, since a session keeps only
     /// its newest request.
     pub fn pending_count(&self, session_id: &str) -> usize {
@@ -226,11 +263,14 @@ impl BashApprovals {
     }
 
     pub(crate) fn take(&self, session_id: &str, command: &str) -> bool {
+        self.take_read_path(session_id, command, "")
+    }
+
+    pub(crate) fn take_read_path(&self, session_id: &str, command: &str, read_path: &str) -> bool {
         let mut state = self.state.lock().expect("bash approval mutex");
-        let granted = state
-            .requests
-            .get(session_id)
-            .is_some_and(|request| request.granted && request.command == command);
+        let granted = state.requests.get(session_id).is_some_and(|request| {
+            request.granted && request.command == command && request.read_path == read_path
+        });
         if !granted {
             return false;
         }
@@ -549,7 +589,7 @@ pub fn bash_definition() -> ToolDefinition {
 pub fn bash_definition_with_approvals() -> ToolDefinition {
     definition(
         "bash",
-        "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. Only the user can grant it, by typing /approve in Otto, and the command does not run until they do.",
+        "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. Only the user can grant either request through the approval dialog/card or /approve; the command does not run until approval.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -563,9 +603,13 @@ pub fn bash_definition_with_approvals() -> ToolDefinition {
                     "enum": ["use_default", "require_escalated"],
                     "description": "Use require_escalated to request one-time unsandboxed execution; the user must approve it before the command runs"
                 },
+                "sandbox_read_path": {
+                    "type": "string",
+                    "description": "Request user approval to permanently add one absolute existing path to sandbox read_paths before running this command inside the sandbox"
+                },
                 "justification": {
                     "type": "string",
-                    "description": "Why unsandboxed execution is required: one short sentence, under 80 characters"
+                    "description": "Why the requested permission is required: one short sentence, under 80 characters"
                 }
             },
             "required": ["command"]
@@ -591,14 +635,55 @@ impl Tool for BashTool {
         if args.command.trim().is_empty() {
             return self.argument_error("missing required argument: command");
         }
+        if !args.sandbox_read_path.is_empty() {
+            if args.sandbox_permissions != SandboxPermissions::UseDefault {
+                return self.argument_error(
+                    "sandbox_read_path cannot be combined with elevated execution",
+                );
+            }
+            if args.justification.trim().is_empty() {
+                return self.argument_error("justification is required for sandbox read access");
+            }
+            if !self.dynamic_content || cancel.is_cancelled() {
+                return self.argument_error("sandbox read approval is unavailable or cancelled");
+            }
+            let Some((session_id, approvals)) = &self.approvals else {
+                return self.argument_error("sandbox read approval is unavailable");
+            };
+            let path = Path::new(&args.sandbox_read_path);
+            if !path.is_absolute() {
+                return self.argument_error("sandbox_read_path must be an absolute existing path");
+            }
+            let Ok(path) = path.canonicalize() else {
+                return self.argument_error("sandbox_read_path must be an absolute existing path");
+            };
+            let Some(path) = path.to_str() else {
+                return self.argument_error("sandbox_read_path must be valid UTF-8");
+            };
+            if !approvals.take_read_path(session_id, &args.command, path) {
+                let id = approvals.request_read_path(session_id, &args.command, path);
+                let command = serde_json::to_string(&args.command).expect("string encodes");
+                let justification =
+                    serde_json::to_string(&args.justification).expect("string encodes");
+                let path = serde_json::to_string(path).expect("string encodes");
+                return self.argument_error(&format!(
+                    "approval required for persistent sandbox read access.\n\
+Approve in Otto: /approve {id}\n\
+Command: {command}\n\
+Justification: {justification}\n\
+Read path: {path}\n\
+Approval saves the path to read_paths and reloads the sandbox. The command did not run. \
+Only the user can approve; do not run /approve in a shell. After approval retry this exact Bash call inside the sandbox."
+                ));
+            }
+        }
         if !self.dynamic_content {
             return self.execute_suppressed(&args.command, cancel).await;
         }
         // An excluded command never asks for approval and never consumes one.
-        let excluded = self
-            .excluded
-            .as_ref()
-            .filter(|excluded| excluded.matches(&args.command));
+        let excluded = self.excluded.as_ref().filter(|excluded| {
+            args.sandbox_read_path.is_empty() && excluded.matches(&args.command)
+        });
         let (executor, environment) = match (excluded, args.sandbox_permissions) {
             (Some(excluded), _) => (&excluded.executor, excluded.environment.as_slice()),
             (None, SandboxPermissions::UseDefault) => (&self.executor, self.environment.as_slice()),
@@ -822,6 +907,7 @@ The command did not run.";
                 id: "approval-7".to_string(),
                 command: "git push \"x\"".to_string(),
                 justification: "push branch".to_string(),
+                read_path: String::new(),
             }
         );
         assert_eq!(
@@ -1021,6 +1107,68 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
         let consumed = run_escalated(&tool, "git push", "push the reviewed branch").await;
         assert!(consumed.is_error);
         assert_eq!(elevated.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_approval_is_bound_to_path_command_and_session_and_stays_confined() {
+        let (_dir, workspace) = temp_workspace();
+        let path = tempfile::tempdir().unwrap();
+        let path = path.path().canonicalize().unwrap();
+        let path = path.to_str().unwrap();
+        let confined = Arc::new(FakeExecutor::default());
+        let elevated = Arc::new(FakeExecutor::default());
+        let approvals = Arc::new(BashApprovals::new(elevated.clone(), Vec::new()));
+        let tool = bash(&workspace, confined.clone(), &[], 4096, &[])
+            .with_approvals("s1", approvals.clone())
+            .with_excluded_commands(excluded(&elevated, &["cat *"]));
+        let args = json!({"command": "cat fixture", "sandbox_read_path": path, "justification": "read fixture"}).to_string();
+        let result = tool.execute(&raw(&args), &CancellationToken::new()).await;
+        let request = parse_approval_request("bash", &result).unwrap();
+        assert_eq!(request.read_path, path);
+        assert!(result.content.contains("saves the path to read_paths"));
+        assert_eq!(confined.calls(), 0);
+        assert_eq!(elevated.calls(), 0);
+        assert!(approvals.approve("s2", &request.id).is_err());
+        approvals.approve("s1", &request.id).unwrap();
+        // A read grant cannot become an unsandboxed grant.
+        assert!(!approvals.take("s1", "cat fixture"));
+        assert!(!approvals.take_read_path("s1", "different", path));
+        assert!(!approvals.take_read_path("s1", "cat fixture", "/different"));
+        let result = tool.execute(&raw(&args), &CancellationToken::new()).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(confined.calls(), 1);
+        assert_eq!(elevated.calls(), 0);
+        // The retry marker is consumed, independently of persistent config.
+        let result = tool.execute(&raw(&args), &CancellationToken::new()).await;
+        let fresh = parse_approval_request("bash", &result).unwrap();
+        assert_ne!(fresh.id, request.id);
+        approvals.discard("s1", &request.id);
+        assert_eq!(approvals.pending_count("s1"), 1);
+        approvals.discard("s1", &fresh.id);
+        assert!(approvals.approve("s1", &fresh.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn read_approval_rejects_invalid_paths_missing_reasons_and_elevation() {
+        let (_dir, workspace) = temp_workspace();
+        let executor = Arc::new(FakeExecutor::default());
+        let approvals = Arc::new(BashApprovals::new(executor.clone(), Vec::new()));
+        let tool = bash(&workspace, executor.clone(), &[], 4096, &[])
+            .with_approvals("s1", approvals.clone());
+        for args in [
+            json!({"command": "cat x", "sandbox_read_path": "relative", "justification": "read"}),
+            json!({"command": "cat x", "sandbox_read_path": "/otto-test-missing-read-path", "justification": "read"}),
+            json!({"command": "cat x", "sandbox_read_path": "/tmp"}),
+            json!({"command": "cat x", "sandbox_read_path": "/tmp", "justification": "read", "sandbox_permissions": "require_escalated"}),
+        ] {
+            let result = tool
+                .execute(&raw(&args.to_string()), &CancellationToken::new())
+                .await;
+            assert!(result.is_error);
+            assert!(parse_approval_request("bash", &result).is_none());
+        }
+        assert_eq!(executor.calls(), 0);
+        assert_eq!(approvals.pending_count("s1"), 0);
     }
 
     fn excluded(executor: &Arc<FakeExecutor>, entries: &[&str]) -> Arc<ExcludedCommands> {

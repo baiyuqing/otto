@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
 use otto_core::agent::memory as core_memory;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::sqlite::Store;
@@ -87,6 +88,10 @@ pub struct Service {
     policy: Policy,
     /// What a store-less service answers operations with.
     category: ErrorKind,
+    /// A content-free generation signal incremented only after a pending
+    /// candidate is durably created. Subscribers must query through their own
+    /// scoped review path; this signal contains no candidate data.
+    review_available: watch::Sender<u64>,
     closed: AtomicBool,
 }
 
@@ -99,6 +104,7 @@ impl Service {
             store: Some(store),
             policy,
             category: ErrorKind::Disabled,
+            review_available: watch::channel(0).0,
             closed: AtomicBool::new(false),
         }
     }
@@ -115,8 +121,16 @@ impl Service {
             store: None,
             policy: decide_default_policy,
             category,
+            review_available: watch::channel(0).0,
             closed: AtomicBool::new(false),
         }
+    }
+
+    /// A content-free signal that changes after a pending candidate was
+    /// durably created. The receiver has no candidate id, text, reason, or
+    /// scope; consumers must use their existing scoped review query.
+    pub fn review_available_changed(&self) -> watch::Receiver<u64> {
+        self.review_available.subscribe()
     }
 
     /// Reports whether this service can reach a store at all. A null service
@@ -378,7 +392,12 @@ impl Service {
             result_record_id: String::new(),
             result_revision: 0,
         };
-        store.propose(std::slice::from_ref(&candidate))
+        let candidates = store.propose(std::slice::from_ref(&candidate))?;
+        if !candidates.is_empty() {
+            self.review_available
+                .send_modify(|generation| *generation += 1);
+        }
+        Ok(candidates)
     }
 
     /// Opens one scoped view for a session. The scopes are fixed for the life
@@ -720,6 +739,23 @@ mod tests {
                 .expect_err("no record")
                 .is(ErrorKind::NotFound)
         );
+    }
+
+    #[tokio::test]
+    async fn a_successful_proposal_signals_review_availability_without_payload() {
+        let (_directory, service) = service();
+        let mut changed = service.review_available_changed();
+        let candidates = service
+            .propose(&model_proposal(
+                &user_scope(),
+                "editor",
+                "private candidate text",
+            ))
+            .expect("proposal");
+
+        changed.changed().await.expect("signal sender remains live");
+        assert_eq!(*changed.borrow(), 1);
+        assert_eq!(candidates.len(), 1);
     }
 
     #[test]

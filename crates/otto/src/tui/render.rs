@@ -21,7 +21,7 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, ApprovalDialog, TurnStatus};
+use super::app::{App, ApprovalDialog, MemoryReviewDialog, TurnStatus};
 use super::commands::{Completion, SLASH_COMMANDS};
 use super::entries::Entry;
 use super::layout::{
@@ -98,6 +98,9 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
         draw_agents(frame, area, view);
     } else if let Some(picker) = &app.picker {
         draw_picker(frame, area, picker);
+    }
+    if let Some(dialog) = &app.memory_review {
+        draw_memory_review(frame, area, dialog);
     }
 
     // Last, over whatever ended up on screen: the selection is a property of
@@ -602,6 +605,35 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             .title("Help (Esc to close)"),
     );
     frame.render_widget(list, popup);
+}
+
+fn draw_memory_review(frame: &mut Frame, area: Rect, dialog: &MemoryReviewDialog) {
+    let popup = centered_rect(80, 60, area);
+    let items: Vec<ListItem> = dialog
+        .rows
+        .iter()
+        .map(|row| {
+            ListItem::new(format!(
+                "{} {}/{}\n{}\nReason: {}\n{}",
+                row.action,
+                row.kind,
+                row.key,
+                row.text,
+                row.reason,
+                "a accept · r reject · ↑/↓ select · Esc close"
+            ))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Memory review (no change until a/r)"),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = ListState::default().with_selected(Some(dialog.selected));
+    frame.render_widget(Clear, popup);
+    frame.render_stateful_widget(list, popup, &mut state);
 }
 
 fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {

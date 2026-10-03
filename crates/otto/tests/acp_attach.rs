@@ -716,7 +716,9 @@ mod approval {
         )
     }
 
-    fn start() -> (
+    fn start_with_read(
+        read_grant: bool,
+    ) -> (
         tempfile::TempDir,
         tempfile::TempDir,
         Serve,
@@ -725,7 +727,28 @@ mod approval {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("elevated.txt"), "outside-seatbelt\n").unwrap();
-        let (replies, served) = script();
+        let (mut replies, served) = script();
+        if read_grant {
+            let path = home.path().join("elevated.txt").canonicalize().unwrap();
+            let call = |id| {
+                tool_call_reply(
+                    id,
+                    "bash",
+                    &json!({
+                        "command": format!("cat '{}'", path.display()),
+                        "sandbox_read_path": path,
+                        "justification": "read the fixture",
+                    })
+                    .to_string(),
+                )
+            };
+            replies = vec![
+                call("call-1"),
+                text_reply("approval needed"),
+                call("call-2"),
+                text_reply("done"),
+            ];
+        }
         let (base_url, _requests) = serve(Script {
             replies,
             served: Arc::clone(&served),
@@ -733,6 +756,15 @@ mod approval {
         configure(home.path(), &base_url, None);
         let serve = Serve::start(home.path(), workspace.path(), "seatbelt");
         (home, workspace, serve, served)
+    }
+
+    fn start() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Serve,
+        Arc<AtomicUsize>,
+    ) {
+        start_with_read(false)
     }
 
     fn answered_by_relay(option: &str) -> (Value, Vec<Value>, usize) {
@@ -763,6 +795,44 @@ mod approval {
         let served = served.load(Ordering::SeqCst);
         assert_eq!(relay.close(), Some(0));
         (response, frames, served)
+    }
+
+    #[test]
+    fn persistent_read_permission_survives_the_serve_relay() {
+        for (option, granted) in [("allow_once", true), ("reject_once", false)] {
+            let (home, workspace, serve, served) = start_with_read(true);
+            let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+            relay.initialize();
+            let session_id = relay.new_session(workspace.path());
+            let id = relay.start("session/prompt", prompt(&session_id, "read fixture"));
+            let mut requests = Vec::new();
+            let (frames, response) = relay.finish(id, &mut |frame| {
+                requests.push(frame.clone());
+                json!({"outcome": {"outcome": "selected", "optionId": option}})
+            });
+            assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+            assert_eq!(requests.len(), 1);
+            let params = &requests[0]["params"];
+            assert_eq!(params["toolCall"]["kind"], "read");
+            assert_eq!(params["options"][0]["kind"], "allow_always");
+            assert!(
+                params["toolCall"]["title"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Permanently")
+            );
+            assert_eq!(served.load(Ordering::SeqCst), if granted { 4 } else { 2 });
+            let config =
+                std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
+            assert_eq!(config.contains("read_paths"), granted, "{config}");
+            assert_eq!(
+                serde_json::to_string(&frames)
+                    .unwrap()
+                    .contains("outside-seatbelt"),
+                granted
+            );
+            assert_eq!(relay.close(), Some(0));
+        }
     }
 
     #[test]

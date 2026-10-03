@@ -712,12 +712,18 @@ mod approval {
         response: Value,
         permission_requests: Vec<Value>,
         served: usize,
+        config: String,
     }
 
     fn run(option: &str, replies: Vec<String>) -> Run {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("elevated.txt"), "outside-seatbelt\n").unwrap();
+        let read_path = home.path().join("elevated.txt").canonicalize().unwrap();
+        let replies = replies
+            .into_iter()
+            .map(|reply| reply.replace("__READ_PATH__", read_path.to_str().unwrap()))
+            .collect();
         let served = Arc::new(AtomicUsize::new(0));
         let (base_url, _requests) = serve(Script {
             replies,
@@ -741,6 +747,7 @@ mod approval {
             response,
             permission_requests,
             served,
+            config: std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap(),
         }
     }
 
@@ -752,6 +759,63 @@ mod approval {
         })
         .to_string();
         tool_call_reply(call_id, "bash", &arguments)
+    }
+
+    #[test]
+    fn persistent_read_grant_runs_confined_retry_and_denial_does_not_write_config() {
+        let read_call = |id| {
+            tool_call_reply(
+                id,
+                "bash",
+                &json!({
+                    "command": "cat '__READ_PATH__'",
+                    "sandbox_read_path": "__READ_PATH__",
+                    "justification": "read the fixture",
+                })
+                .to_string(),
+            )
+        };
+        for (option, expected_calls) in [("allow_once", 4), ("reject_once", 2)] {
+            let result = run(
+                option,
+                vec![
+                    read_call("c1"),
+                    text_reply("approval needed"),
+                    read_call("c2"),
+                    text_reply("done"),
+                ],
+            );
+            assert_eq!(
+                result.response["result"]["stopReason"], "end_turn",
+                "{}",
+                result.response
+            );
+            assert_eq!(result.permission_requests.len(), 1);
+            let params = &result.permission_requests[0]["params"];
+            assert_eq!(params["options"][0]["kind"], "allow_always");
+            assert_eq!(params["toolCall"]["kind"], "read");
+            assert!(
+                params["toolCall"]["title"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Permanently")
+            );
+            assert_eq!(result.served, expected_calls);
+            let granted = option == "allow_once";
+            assert_eq!(
+                result.config.contains("read_paths"),
+                granted,
+                "{}",
+                result.config
+            );
+            assert!(!result.config.contains("excluded_commands"));
+            assert_eq!(
+                serde_json::to_string(&result.frames)
+                    .unwrap()
+                    .contains("outside-seatbelt"),
+                granted
+            );
+        }
     }
 
     #[test]

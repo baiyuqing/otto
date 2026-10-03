@@ -793,7 +793,13 @@ Shared commands:
   `[sandbox].read_paths` in the config file, so it also applies to later
   sessions. In the TUI the resolved path is shown in a confirmation picker
   whose selected row is `Cancel`; applying it also asks Otto to retry the
-  command that failed.
+  command that failed. The model can also request the same persistent read
+  grant through Bash's `sandbox_read_path` argument. Otto shows an approval
+  dialog in the TUI or an Allow/Deny card in Telegram and Feishu, including
+  the resolved path and the fact that it will be saved. Approval updates
+  `read_paths`, reloads the sandbox, and asks the model to retry the command
+  inside the sandbox. Denial or expiry leaves the configuration unchanged.
+  This also works through `--attach`.
 - `/sandbox network allow|deny` sets `[sandbox].network` the same way. In the
   TUI, `/sandbox network` without a mode opens a picker with the current mode
   marked.
@@ -1340,7 +1346,7 @@ include a `sandbox_denied:` section between the stderr block and the
 example `file-read-data /Users/me/.ssh/config` or
 `file-write-create /path/to/workspace/.git/hooks/pre-commit`. The system
 prompt instructs the model to answer a denied read outside the workspace by
-suggesting `/sandbox allow <path>`, and a denied write to `.git` metadata or
+requesting a persistent read grant with Bash's `sandbox_read_path` argument, and a denied write to `.git` metadata or
 outside the workspace by requesting `require_escalated`.
 
 Limits:

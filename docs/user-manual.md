@@ -2333,6 +2333,14 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/memory accept <id>` | Accepts one pending candidate, which writes the record. `<id>` is a full candidate id or a unique prefix of at least 4 characters. |
 | `/memory reject <id>` | Rejects one pending candidate; no record is written. |
 
+At startup `otto-connect` sets the Telegram bot's command menu to these
+commands and to `/models` and `/config` (see
+[Provider-profile management](#provider-profile-management)): `setMyCommands`
+for the default scope, then `deleteMyCommands` for the `all_private_chats` and
+`all_group_chats` scopes, whose lists Telegram would show instead. Lists set
+for a single chat, for chat administrators, or for a specific language are not
+changed. A failed call is logged and the connector continues.
+
 `/use` replies with one of these when it does not switch:
 
 | Case | Reply |

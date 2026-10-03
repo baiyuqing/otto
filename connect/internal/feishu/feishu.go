@@ -212,7 +212,7 @@ func stripBotMention(m *types.NormalizedMessage) string {
 
 // Send posts text as Markdown; the SDK splits it at 3500 runes, keeping code
 // fences closed. A non-empty replyTo makes it a reply to that message.
-func (p *Platform) Send(ctx context.Context, chatID, replyTo, text string) error {
+func (p *Platform) Send(ctx context.Context, chatID, replyTo, text string, _ bool) error {
 	_, err := p.ch.Send(ctx, &types.SendInput{ChatID: chatID, Markdown: text, ReplyMessageID: replyTo})
 	if err != nil {
 		return fmt.Errorf("feishu send: %w", err)

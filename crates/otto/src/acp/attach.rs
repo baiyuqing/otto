@@ -158,6 +158,37 @@ impl Relay {
             .collect())
     }
 
+    /// Runs `/compact` or `/context` on serve and returns the reply text;
+    /// `None` when serve cancelled the compaction at shutdown.
+    pub(super) async fn run_command(
+        &self,
+        command: super::command::Command<'_>,
+        session_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
+        use super::command::{Command, compaction_text, context_text};
+        let call = async {
+            match command {
+                Command::Context => self
+                    .client
+                    .context(session_id)
+                    .await
+                    .map(|report| Some(context_text(&report))),
+                Command::Compact { focus } => self
+                    .client
+                    .compact(session_id, focus)
+                    .await
+                    .map(|done| done.map(|done| compaction_text(&done))),
+            }
+        };
+        tokio::select! {
+            biased;
+            () = self.lost.cancelled() => Err(error(INTERNAL_ERROR, LOST)),
+            () = cancel.cancelled() => Ok(None),
+            answered = call => answered.map_err(|failure| self.fail(failure)),
+        }
+    }
+
     /// Runs one prompt as a queued turn on serve, to its stop reason.
     pub(super) async fn prompt(
         &self,

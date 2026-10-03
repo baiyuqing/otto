@@ -23,6 +23,7 @@
 
 mod approval;
 pub mod attach;
+mod command;
 mod memory;
 pub mod update;
 
@@ -34,13 +35,14 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol_schema::ProtocolVersion;
 use agent_client_protocol_schema::v1::{
-    AgentCapabilities, ContentBlock, Error, Implementation, InitializeResponse,
+    AgentCapabilities, ContentBlock, ContentChunk, Error, Implementation, InitializeResponse,
     ListSessionsResponse, McpCapabilities, NewSessionResponse, PromptCapabilities, PromptResponse,
     SessionCapabilities, SessionInfo, SessionListCapabilities, SessionNotification, SessionUpdate,
-    StopReason,
+    StopReason, TextContent,
 };
 use otto_core::config::resolve::Runtime;
 use otto_core::model::Message;
+use otto_core::wire::events::to_wire_compaction;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
@@ -274,8 +276,34 @@ impl Connection {
         result(ListSessionsResponse::new(sessions))
     }
 
-    /// Runs one prompt to its stop reason.
+    /// Sends the command list after a successful `session/new` or
+    /// `session/load` reply, so the client already knows the session id.
+    fn advertise_commands(&self, reply: &Reply) {
+        if let Some(id) = reply
+            .as_ref()
+            .ok()
+            .and_then(|value| value.get("sessionId"))
+            .and_then(Value::as_str)
+        {
+            self.update(id, command::available_commands());
+        }
+    }
+
+    fn say(&self, session_id: &str, text: &str) {
+        self.update(
+            session_id,
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(text),
+            ))),
+        );
+    }
+
+    /// Runs one prompt to its stop reason. `/compact` and `/context` run here
+    /// and never reach the model.
     async fn prompt(&self, session_id: &str, text: String, cancel: &CancellationToken) -> Reply {
+        if let Some(command) = command::parse(&text) {
+            return self.run_command(session_id, command, cancel).await;
+        }
         match &self.backend {
             Backend::Local(local) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
@@ -283,6 +311,73 @@ impl Connection {
                     .await
             }
             Backend::Attach(relay) => relay.prompt(self, session_id, &text, cancel).await,
+        }
+    }
+
+    async fn run_command(
+        &self,
+        session_id: &str,
+        command: command::Command<'_>,
+        cancel: &CancellationToken,
+    ) -> Reply {
+        let end_turn = || result(PromptResponse::new(StopReason::EndTurn));
+        match (&self.backend, command) {
+            (Backend::Local(local), command) => {
+                let session = local.session(session_id).ok_or_else(unknown_session)?;
+                match command {
+                    command::Command::Context => {
+                        let report = session.controller.context_report();
+                        self.say(
+                            session_id,
+                            &report.map_or(command::CONTEXT_UNAVAILABLE.to_string(), |report| {
+                                command::context_text(&report)
+                            }),
+                        );
+                        end_turn()
+                    }
+                    command::Command::Compact { focus } => {
+                        let outcome = session
+                            .controller
+                            .compact(
+                                focus,
+                                &mut |event| {
+                                    if let Some(update) =
+                                        update::event_update(&update::local_wire(&event))
+                                    {
+                                        self.update(session_id, update);
+                                    }
+                                },
+                                cancel,
+                            )
+                            .await;
+                        match outcome {
+                            Ok(done) => {
+                                self.say(
+                                    session_id,
+                                    &command::compaction_text(&to_wire_compaction(&done)),
+                                );
+                                end_turn()
+                            }
+                            Err(_) if cancel.is_cancelled() => {
+                                result(PromptResponse::new(StopReason::Cancelled))
+                            }
+                            Err(failure) => {
+                                Err(error(INTERNAL_ERROR, local.redact(&failure.to_string())))
+                            }
+                        }
+                    }
+                }
+            }
+            (Backend::Attach(relay), command) => {
+                let text = relay.run_command(command, session_id, cancel).await?;
+                match text {
+                    Some(text) => {
+                        self.say(session_id, &text);
+                        end_turn()
+                    }
+                    None => result(PromptResponse::new(StopReason::Cancelled)),
+                }
+            }
         }
     }
 
@@ -575,13 +670,15 @@ impl Dispatcher {
             "session/new" => {
                 self.tasks.spawn(async move {
                     let reply = connection.new_session(params).await;
-                    connection.reply(id, reply);
+                    connection.reply(id, reply.clone());
+                    connection.advertise_commands(&reply);
                 });
             }
             "session/load" => {
                 self.tasks.spawn(async move {
                     let reply = connection.load_session(params).await;
-                    connection.reply(id, reply);
+                    connection.reply(id, reply.clone());
+                    connection.advertise_commands(&reply);
                 });
             }
             "session/list" => {

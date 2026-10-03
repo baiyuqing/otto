@@ -9,14 +9,14 @@
 //! JSON. The digest would never leave the process, and the two detect exactly
 //! the same changes.
 
-use rusqlite::{Connection, Row, params, params_from_iter};
+use crate::storage::{Connection, Row, params, params_from_iter};
 
 use super::codec::{
     encode_record, format_timestamp, fts_labels, parse_timestamp, valid_stored_float,
 };
 use super::cursor::{decode_record_cursor, encode_record_cursor, fingerprint_list};
 use super::query::{Statement, build_list_query, record_projection, tombstone_projection};
-use super::{Store, map_sqlite_error};
+use super::{Store, map_storage_error};
 use crate::memory::guard::guard_record;
 use crate::memory::validate::{
     validate_list_request, validate_record, validate_record_key, validate_record_ref,
@@ -32,13 +32,13 @@ fn corrupt() -> Error {
     Error::new(ErrorKind::Corrupt)
 }
 
-fn text(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<String>> {
+fn text(row: &Row, index: usize) -> crate::storage::Result<Option<String>> {
     row.get(index)
 }
 
 /// Decodes one row of [`record_projection`].
-pub fn decode_record_row(row: &Row<'_>) -> Result<Record> {
-    let valid: Option<i64> = row.get(0).map_err(map_sqlite_error)?;
+pub fn decode_record_row(row: &Row) -> Result<Record> {
+    let valid: Option<i64> = row.get(0).map_err(map_storage_error)?;
     if valid != Some(1) {
         return Err(corrupt());
     }
@@ -46,19 +46,19 @@ pub fn decode_record_row(row: &Row<'_>) -> Result<Record> {
     for index in 1..=9 {
         strings.push(
             text(row, index)
-                .map_err(map_sqlite_error)?
+                .map_err(map_storage_error)?
                 .ok_or_else(corrupt)?,
         );
     }
-    let confidence: Option<f64> = row.get(10).map_err(map_sqlite_error)?;
-    let revision: Option<i64> = row.get(11).map_err(map_sqlite_error)?;
+    let confidence: Option<f64> = row.get(10).map_err(map_storage_error)?;
+    let revision: Option<i64> = row.get(11).map_err(map_storage_error)?;
     let created = text(row, 12)
-        .map_err(map_sqlite_error)?
+        .map_err(map_storage_error)?
         .ok_or_else(corrupt)?;
     let updated = text(row, 13)
-        .map_err(map_sqlite_error)?
+        .map_err(map_storage_error)?
         .ok_or_else(corrupt)?;
-    let expires = text(row, 14).map_err(map_sqlite_error)?;
+    let expires = text(row, 14).map_err(map_storage_error)?;
     let (confidence, revision) = match (confidence, revision) {
         (Some(confidence), Some(revision)) if revision >= 0 => (confidence, revision as u64),
         _ => return Err(corrupt()),
@@ -88,29 +88,29 @@ pub fn decode_record_row(row: &Row<'_>) -> Result<Record> {
 }
 
 /// Decodes one row of [`tombstone_projection`].
-pub fn decode_tombstone_row(row: &Row<'_>) -> Result<Tombstone> {
-    let valid: Option<i64> = row.get(0).map_err(map_sqlite_error)?;
+pub fn decode_tombstone_row(row: &Row) -> Result<Tombstone> {
+    let valid: Option<i64> = row.get(0).map_err(map_storage_error)?;
     if valid != Some(1) {
         return Err(corrupt());
     }
     let id = text(row, 1)
-        .map_err(map_sqlite_error)?
+        .map_err(map_storage_error)?
         .ok_or_else(corrupt)?;
     let namespace = text(row, 2)
-        .map_err(map_sqlite_error)?
+        .map_err(map_storage_error)?
         .ok_or_else(corrupt)?;
     let scope_id = text(row, 3)
-        .map_err(map_sqlite_error)?
+        .map_err(map_storage_error)?
         .ok_or_else(corrupt)?;
-    let revision: Option<i64> = row.get(4).map_err(map_sqlite_error)?;
+    let revision: Option<i64> = row.get(4).map_err(map_storage_error)?;
     let created = text(row, 5)
-        .map_err(map_sqlite_error)?
+        .map_err(map_storage_error)?
         .ok_or_else(corrupt)?;
     let updated = text(row, 6)
-        .map_err(map_sqlite_error)?
+        .map_err(map_storage_error)?
         .ok_or_else(corrupt)?;
     let forgotten = text(row, 7)
-        .map_err(map_sqlite_error)?
+        .map_err(map_storage_error)?
         .ok_or_else(corrupt)?;
     let Some(revision) = revision.filter(|value| *value >= 0) else {
         return Err(corrupt());
@@ -129,8 +129,8 @@ pub fn decode_tombstone_row(row: &Row<'_>) -> Result<Tombstone> {
     Ok(value)
 }
 
-fn no_rows(error: &rusqlite::Error) -> bool {
-    matches!(error, rusqlite::Error::QueryReturnedNoRows)
+fn no_rows(error: &crate::storage::Error) -> bool {
+    matches!(error, crate::storage::Error::QueryReturnedNoRows)
 }
 
 /// Runs `body` inside a deferred read transaction so the generation and the
@@ -141,9 +141,11 @@ pub(crate) fn in_read_transaction<T>(
 ) -> Result<T> {
     connection
         .execute_batch("BEGIN")
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     let outcome = body(connection);
-    let end = connection.execute_batch("COMMIT").map_err(map_sqlite_error);
+    let end = connection
+        .execute_batch("COMMIT")
+        .map_err(map_storage_error);
     match outcome {
         Ok(value) => end.map(|()| value),
         Err(error) => Err(error),
@@ -153,14 +155,15 @@ pub(crate) fn in_read_transaction<T>(
 fn query_record(connection: &Connection, statement: &Statement) -> Result<Record> {
     let mut prepared = connection
         .prepare(&statement.sql)
-        .map_err(map_sqlite_error)?;
-    let outcome = prepared.query_row(params_from_iter(statement.arguments.iter()), |row| {
-        Ok(decode_record_row(row))
-    });
+        .map_err(map_storage_error)?;
+    let outcome = prepared.query_row(
+        params_from_iter(statement.arguments.iter().cloned()),
+        |row| Ok(decode_record_row(row)),
+    );
     match outcome {
         Ok(record) => record,
         Err(error) if no_rows(&error) => Err(Error::new(ErrorKind::NotFound)),
-        Err(error) => Err(map_sqlite_error(error)),
+        Err(error) => Err(map_storage_error(error)),
     }
 }
 
@@ -168,10 +171,10 @@ pub fn read_generation(connection: &Connection) -> Result<u64> {
     let raw: Option<String> = connection
         .query_row(
             "SELECT CASE WHEN typeof(value)='text' AND length(CAST(value AS BLOB)) BETWEEN 1 AND 20 THEN value END FROM memory_meta WHERE key='generation' LIMIT 1",
-            [],
+            (),
             |row| row.get(0),
         )
-        .map_err(|error| if no_rows(&error) { corrupt() } else { map_sqlite_error(error) })?;
+        .map_err(|error| if no_rows(&error) { corrupt() } else { map_storage_error(error) })?;
     let raw = raw.ok_or_else(corrupt)?;
     let generation: u64 = raw.parse().map_err(|_| corrupt())?;
     if generation.to_string() != raw {
@@ -190,7 +193,7 @@ pub fn bump_generation(connection: &Connection) -> Result<u64> {
             "UPDATE memory_meta SET value=? WHERE key='generation' AND value=?",
             params![next.to_string(), generation.to_string()],
         )
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     if changed != 1 {
         return Err(corrupt());
     }
@@ -227,7 +230,7 @@ pub(crate) fn read_mutation_snapshot(
             |row| row.get(0),
         )
         .map_err(|error| {
-            if no_rows(&error) { Error::new(ErrorKind::NotFound) } else { map_sqlite_error(error) }
+            if no_rows(&error) { Error::new(ErrorKind::NotFound) } else { map_storage_error(error) }
         })?;
     match state.as_deref() {
         Some("active") => {
@@ -249,7 +252,7 @@ pub(crate) fn read_mutation_snapshot(
                 "SELECT {} FROM memory_records WHERE state='tombstone' AND scope_namespace=? AND scope_id=? AND id=? LIMIT 1",
                 tombstone_projection()
             );
-            let mut prepared = connection.prepare(&sql).map_err(map_sqlite_error)?;
+            let mut prepared = connection.prepare(&sql).map_err(map_storage_error)?;
             let outcome = prepared.query_row(
                 params![
                     &reference.scope.namespace,
@@ -261,7 +264,7 @@ pub(crate) fn read_mutation_snapshot(
             match outcome {
                 Ok(value) => value.map(MutationSnapshot::Forgotten),
                 Err(error) if no_rows(&error) => Err(Error::new(ErrorKind::NotFound)),
-                Err(error) => Err(map_sqlite_error(error)),
+                Err(error) => Err(map_storage_error(error)),
             }
         }
         _ => Err(corrupt()),
@@ -302,7 +305,7 @@ fn classify_conditional_miss(
     );
     match outcome {
         Err(error) if no_rows(&error) => Error::new(ErrorKind::NotFound),
-        Err(error) => map_sqlite_error(error),
+        Err(error) => map_storage_error(error),
         Ok((Some(1), Some(id), Some(revision))) if revision >= 0 => {
             conflict_record(&id, expected, revision as u64)
         }
@@ -321,13 +324,13 @@ fn require_fts_row_count(connection: &Connection, record_id: &str, expected: usi
     let sql = format!(
         "SELECT CASE WHEN {gate} THEN record_id END FROM memory_records_fts WHERE record_id=? LIMIT 2"
     );
-    let mut prepared = connection.prepare(&sql).map_err(map_sqlite_error)?;
+    let mut prepared = connection.prepare(&sql).map_err(map_storage_error)?;
     let mut rows = prepared
         .query(params![record_id])
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     let mut count = 0usize;
-    while let Some(row) = rows.next().map_err(map_sqlite_error)? {
-        let id: Option<String> = row.get(0).map_err(map_sqlite_error)?;
+    while let Some(row) = rows.next().map_err(map_storage_error)? {
+        let id: Option<String> = row.get(0).map_err(map_storage_error)?;
         if id.as_deref() != Some(record_id) {
             return Err(corrupt());
         }
@@ -351,7 +354,7 @@ fn insert_fts(connection: &Connection, record: &Record) -> Result<()> {
                 fts_labels(&record.labels)
             ],
         )
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     Ok(())
 }
 
@@ -362,7 +365,7 @@ fn replace_fts(connection: &Connection, record: &Record) -> Result<()> {
             "DELETE FROM memory_records_fts WHERE record_id=?",
             params![&record.id],
         )
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     if changed != 1 {
         return Err(corrupt());
     }
@@ -375,16 +378,17 @@ pub(crate) fn insert_accepted_record(connection: &Connection, record: &Record) -
     let encoded = encode_record(record)?;
     let gate =
         format!("typeof(id)='text' AND length(CAST(id AS BLOB)) BETWEEN 1 AND {MAX_ID_BYTES}");
-    let existing: std::result::Result<Option<String>, rusqlite::Error> = connection.query_row(
-        &format!("SELECT CASE WHEN {gate} THEN id END FROM memory_records WHERE id=? LIMIT 1"),
-        params![&record.id],
-        |row| row.get(0),
-    );
+    let existing: std::result::Result<Option<String>, crate::storage::Error> = connection
+        .query_row(
+            &format!("SELECT CASE WHEN {gate} THEN id END FROM memory_records WHERE id=? LIMIT 1"),
+            params![&record.id],
+            |row| row.get(0),
+        );
     match existing {
         Ok(Some(_)) => return Err(Error::conflict("record", &record.id, 0, 0)),
         Ok(None) => return Err(corrupt()),
         Err(error) if no_rows(&error) => {}
-        Err(error) => return Err(map_sqlite_error(error)),
+        Err(error) => return Err(map_storage_error(error)),
     }
     require_fts_row_count(connection, &record.id, 0)?;
     connection
@@ -410,7 +414,7 @@ confidence,revision,created_at,updated_at,expires_at,state,forgotten_at\
                 &encoded.expires,
             ],
         )
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     insert_fts(connection, record)?;
     require_fts_row_count(connection, &record.id, 1)
 }
@@ -444,7 +448,7 @@ WHERE id=? AND scope_namespace=? AND scope_id=? AND state='active' AND revision=
                 expected as i64,
             ],
         )
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     if changed != 1 {
         let reference = RecordRef {
             scope: record.scope.clone(),
@@ -477,7 +481,7 @@ WHERE id=? AND scope_namespace=? AND scope_id=? AND state='active' AND revision=
                 expected as i64,
             ],
         )
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     if changed != 1 {
         let reference = RecordRef {
             scope: tombstone.scope.clone(),
@@ -491,7 +495,7 @@ WHERE id=? AND scope_namespace=? AND scope_id=? AND state='active' AND revision=
             "DELETE FROM memory_records_fts WHERE record_id=?",
             params![&tombstone.id],
         )
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     if removed != 1 {
         return Err(corrupt());
     }
@@ -526,7 +530,7 @@ impl Store {
             tombstone_projection()
         );
         let tombstone = self.with_read(|connection| {
-            let mut prepared = connection.prepare(&sql).map_err(map_sqlite_error)?;
+            let mut prepared = connection.prepare(&sql).map_err(map_storage_error)?;
             let outcome = prepared.query_row(
                 params![
                     &reference.scope.namespace,
@@ -538,7 +542,7 @@ impl Store {
             match outcome {
                 Ok(value) => value,
                 Err(error) if no_rows(&error) => Err(Error::new(ErrorKind::NotFound)),
-                Err(error) => Err(map_sqlite_error(error)),
+                Err(error) => Err(map_storage_error(error)),
             }
         })?;
         self.guard().check(&GuardInput {
@@ -600,12 +604,12 @@ impl Store {
                 let statement = build_list_query(request, cursor.as_ref());
                 let mut prepared = connection
                     .prepare(&statement.sql)
-                    .map_err(map_sqlite_error)?;
+                    .map_err(map_storage_error)?;
                 let mut rows = prepared
-                    .query(params_from_iter(statement.arguments.iter()))
-                    .map_err(map_sqlite_error)?;
+                    .query(params_from_iter(statement.arguments.iter().cloned()))
+                    .map_err(map_storage_error)?;
                 let mut records = Vec::new();
-                while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+                while let Some(row) = rows.next().map_err(map_storage_error)? {
                     if records.len() > MAX_PAGE_SIZE {
                         return Err(corrupt());
                     }
@@ -655,7 +659,7 @@ impl Store {
             let gate = format!(
                 "typeof(id)='text' AND length(CAST(id AS BLOB)) BETWEEN 1 AND {MAX_ID_BYTES}"
             );
-            let existing: std::result::Result<Option<String>, rusqlite::Error> = connection
+            let existing: std::result::Result<Option<String>, crate::storage::Error> = connection
                 .query_row(
                     &format!(
                         "SELECT CASE WHEN {gate} THEN id END FROM memory_records WHERE id=? LIMIT 1"
@@ -667,7 +671,7 @@ impl Store {
                 Ok(Some(_)) => return Err(Error::new(ErrorKind::Conflict)),
                 Ok(None) => return Err(corrupt()),
                 Err(error) if no_rows(&error) => {}
-                Err(error) => return Err(map_sqlite_error(error)),
+                Err(error) => return Err(map_storage_error(error)),
             }
             require_fts_row_count(connection, &stored.id, 0)?;
             connection
@@ -693,7 +697,7 @@ confidence,revision,created_at,updated_at,expires_at,state,forgotten_at\
                         &encoded.expires,
                     ],
                 )
-                .map_err(map_sqlite_error)?;
+                .map_err(map_storage_error)?;
             insert_fts(connection, &stored)?;
             require_fts_row_count(connection, &stored.id, 1)?;
             let generation = bump_generation(connection)?;
@@ -770,7 +774,7 @@ WHERE id=? AND scope_namespace=? AND scope_id=? AND state='active' AND revision=
                         baseline.revision as i64,
                     ],
                 )
-                .map_err(map_sqlite_error)?;
+                .map_err(map_storage_error)?;
             if changed != 1 {
                 return Err(classify_conditional_miss(connection, &reference, expected));
             }
@@ -863,7 +867,7 @@ WHERE id=? AND scope_namespace=? AND scope_id=? AND state='active' AND revision=
                         baseline.revision as i64,
                     ],
                 )
-                .map_err(map_sqlite_error)?;
+                .map_err(map_storage_error)?;
             if changed != 1 {
                 return Err(classify_conditional_miss(connection, &reference, expected));
             }
@@ -873,7 +877,7 @@ WHERE id=? AND scope_namespace=? AND scope_id=? AND state='active' AND revision=
                     "DELETE FROM memory_records_fts WHERE record_id=?",
                     params![&tombstone.id],
                 )
-                .map_err(map_sqlite_error)?;
+                .map_err(map_storage_error)?;
             if removed != 1 {
                 return Err(corrupt());
             }
@@ -922,7 +926,7 @@ pub(crate) mod testsupport {
 mod tests {
     use super::testsupport::{at, sample_record};
     use super::*;
-    use crate::memory::sqlite::testsupport::open_temp;
+    use crate::memory::turso::testsupport::open_temp;
 
     fn user_scope(store: &Store) -> Scope {
         store.identity().expect("identity").user_scope

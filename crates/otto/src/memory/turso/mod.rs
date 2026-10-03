@@ -1,14 +1,7 @@
-//! The SQLite FTS5 memory store.
+//! The local Turso memory store.
 //!
-//! An existing database file written by the previously released binary still
-//! opens, so the schema, the pragmas, the timestamp format and every stored
-//! JSON blob are byte-compatible rather than merely equivalent.
-//!
-//! Hardening left out, none of it on the wire: one mutex-guarded connection
-//! rather than a four-connection retained pool, no file-descriptor delta proofs
-//! around driver opens, no inode retention for the database path, no poisoning
-//! or quarantine state machine, and no retry-backoff loop above SQLite's own
-//! `busy_timeout`.
+//! One mutex guards a local connection; logical imports preserve records and
+//! identity while rebuilding the native search index.
 
 pub mod candidates;
 pub mod codec;
@@ -21,49 +14,32 @@ pub mod schema;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags};
+use crate::storage::Connection;
 
 use super::guard::ContentGuard;
 use super::{Error, ErrorKind, MAX_DUPLICATE_ID_RETRIES, Result, Scope, StoreIdentity, new_id};
 
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// SQLite extended result codes the store distinguishes.
-const SQLITE_BUSY: i32 = 5;
-const SQLITE_LOCKED: i32 = 6;
-const SQLITE_CORRUPT: i32 = 11;
-const SQLITE_CONSTRAINT: i32 = 19;
-const SQLITE_MISUSE: i32 = 21;
-const SQLITE_NOTADB: i32 = 26;
-const SQLITE_CONSTRAINT_CHECK: i32 = 275;
-const SQLITE_CONSTRAINT_FOREIGNKEY: i32 = 787;
-const SQLITE_CONSTRAINT_NOTNULL: i32 = 1299;
-const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
-const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
-
-/// A driver error never crosses the adapter boundary: it becomes one of the
-/// domain errors, so SQLite diagnostics (which can echo row content or file
-/// paths) stay inside the store.
-pub fn map_sqlite_error(error: rusqlite::Error) -> Error {
-    let code = match &error {
-        rusqlite::Error::SqliteFailure(failure, _) => failure.extended_code,
-        _ => return Error::new(ErrorKind::Unavailable),
+/// Driver diagnostics can contain row data; only domain error kinds escape.
+pub fn map_storage_error(error: crate::storage::Error) -> Error {
+    use crate::storage::Error as DriverError;
+    let kind = match error {
+        DriverError::Busy(_) | DriverError::BusySnapshot(_) => ErrorKind::Busy,
+        DriverError::Constraint(message) => {
+            if message.starts_with("UNIQUE constraint failed")
+                || message.starts_with("PRIMARY KEY constraint failed")
+            {
+                ErrorKind::Conflict
+            } else {
+                ErrorKind::Corrupt
+            }
+        }
+        DriverError::Corrupt(_) | DriverError::NotAdb(_) => ErrorKind::Corrupt,
+        DriverError::Misuse(_) => ErrorKind::Closed,
+        _ => ErrorKind::Unavailable,
     };
-    match code {
-        SQLITE_CONSTRAINT_UNIQUE | SQLITE_CONSTRAINT_PRIMARYKEY => {
-            return Error::new(ErrorKind::Conflict);
-        }
-        SQLITE_CONSTRAINT_CHECK | SQLITE_CONSTRAINT_NOTNULL | SQLITE_CONSTRAINT_FOREIGNKEY => {
-            return Error::new(ErrorKind::Corrupt);
-        }
-        _ => {}
-    }
-    match code & 0xff {
-        SQLITE_BUSY | SQLITE_LOCKED => Error::new(ErrorKind::Busy),
-        SQLITE_CORRUPT | SQLITE_NOTADB | SQLITE_CONSTRAINT => Error::new(ErrorKind::Corrupt),
-        SQLITE_MISUSE => Error::new(ErrorKind::Closed),
-        _ => Error::new(ErrorKind::Unavailable),
-    }
+    Error::new(kind)
 }
 
 /// How a [`Store`] is opened.
@@ -91,7 +67,7 @@ struct Inner {
 /// One open memory database.
 ///
 /// Concurrency: every operation takes the connection mutex, so concurrent
-/// callers serialize. SQLite's `busy_timeout` still covers contention with the
+/// callers serialize. Turso's busy timeout still covers contention with the
 /// other binary sharing the file.
 ///
 /// ponytail: one global connection lock. Move to a connection pool only if
@@ -112,13 +88,7 @@ impl Store {
         {
             std::fs::create_dir_all(parent).map_err(|_| Error::new(ErrorKind::Unavailable))?;
         }
-        let connection = Connection::open_with_flags(
-            filename,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(map_sqlite_error)?;
+        let connection = Connection::open(filename).map_err(map_storage_error)?;
         configure_connection(&connection, options.busy_timeout)?;
 
         let ids = super::generate_distinct_ids(2, options.new_id.as_ref())?;
@@ -144,10 +114,12 @@ impl Store {
 
         connection
             .execute_batch("BEGIN IMMEDIATE")
-            .map_err(map_sqlite_error)?;
+            .map_err(map_storage_error)?;
         let outcome = schema::initialize_schema(&connection, &ids[0], &ids[1]);
         let finish = match outcome {
-            Ok(()) => connection.execute_batch("COMMIT").map_err(map_sqlite_error),
+            Ok(()) => connection
+                .execute_batch("COMMIT")
+                .map_err(map_storage_error),
             Err(error) => {
                 let _ = connection.execute_batch("ROLLBACK");
                 return Err(error);
@@ -203,9 +175,7 @@ impl Store {
             .lock()
             .map_err(|_| Error::new(ErrorKind::Unavailable))?;
         match inner.connection.take() {
-            Some(connection) => connection
-                .close()
-                .map_err(|(_, error)| map_sqlite_error(error)),
+            Some(connection) => connection.close().map_err(map_storage_error),
             None => Ok(()),
         }
     }
@@ -239,12 +209,12 @@ impl Store {
         let connection = inner.connection.as_ref().expect("checked by locked");
         connection
             .execute_batch("BEGIN IMMEDIATE")
-            .map_err(map_sqlite_error)?;
+            .map_err(map_storage_error)?;
         match body(connection) {
             Ok((value, generation)) => {
                 connection
                     .execute_batch("COMMIT")
-                    .map_err(map_sqlite_error)?;
+                    .map_err(map_storage_error)?;
                 inner.generation = generation;
                 Ok(value)
             }
@@ -263,50 +233,50 @@ impl Drop for Store {
 }
 
 fn configure_connection(connection: &Connection, busy_timeout: Duration) -> Result<()> {
-    let milliseconds = busy_timeout.as_millis().min(i64::MAX as u128) as i64;
-    for statement in [
-        "PRAGMA foreign_keys=ON".to_string(),
-        "PRAGMA synchronous=FULL".to_string(),
-        format!("PRAGMA busy_timeout={milliseconds}"),
-        "PRAGMA trusted_schema=OFF".to_string(),
-        "PRAGMA writable_schema=OFF".to_string(),
-    ] {
-        connection
-            .execute_batch(&statement)
-            .map_err(|_| Error::new(ErrorKind::Unavailable))?;
-    }
-    for (query, want) in [
-        ("PRAGMA foreign_keys", 1_i64),
-        ("PRAGMA synchronous", 2),
-        ("PRAGMA busy_timeout", milliseconds),
-        ("PRAGMA trusted_schema", 0),
-        ("PRAGMA writable_schema", 0),
-    ] {
-        let got: i64 = connection
-            .query_row(query, [], |row| row.get(0))
-            .map_err(|_| Error::new(ErrorKind::Unsupported))?;
-        if got != want {
-            return Err(Error::new(ErrorKind::Unsupported));
-        }
-    }
-    let mode: String = connection
-        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-        .map_err(map_sqlite_error)?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        return Err(Error::new(ErrorKind::Unavailable));
+    connection
+        .busy_timeout(busy_timeout)
+        .map_err(map_storage_error)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON")
+        .map_err(map_storage_error)?;
+    let enabled: i64 = connection
+        .query_row("PRAGMA foreign_keys", (), |row| row.get(0))
+        .map_err(map_storage_error)?;
+    if enabled != 1 {
+        return Err(Error::new(ErrorKind::Unsupported));
     }
     Ok(())
 }
 
-/// A store whose FTS5 index disagrees with its content table would silently
-/// lose search results, so the failure is fatal at open time rather than at
-/// query time.
+/// Refuse missing, duplicate, tombstoned, or stale search copies at open time.
 fn verify_fts_integrity(connection: &Connection) -> Result<()> {
-    connection
-        .execute_batch(
-            "INSERT INTO memory_records_fts(memory_records_fts) VALUES('integrity-check')",
-        )
-        .map_err(|_| Error::new(ErrorKind::Corrupt))
+    let invalid: i64 = connection.query_row(
+        "SELECT count(*) FROM (
+            SELECT r.id FROM memory_records r LEFT JOIN memory_records_fts f ON f.record_id=r.id
+            WHERE r.state='active' GROUP BY r.id
+            HAVING count(f.record_id)<>1 OR min(f.text_value)<>min(r.text_value)
+                OR min(f.kind)<>min(r.kind) OR min(f.semantic_key)<>min(r.semantic_key)
+            UNION ALL
+            SELECT f.record_id FROM memory_records_fts f LEFT JOIN memory_records r ON f.record_id=r.id
+            WHERE r.id IS NULL OR r.state<>'active'
+        )", (), |row| row.get(0)).map_err(map_storage_error)?;
+    if invalid != 0 {
+        return Err(Error::new(ErrorKind::Corrupt));
+    }
+    let mut statement = connection.prepare(
+        "SELECT r.labels_json,f.labels FROM memory_records r JOIN memory_records_fts f ON f.record_id=r.id WHERE r.state='active'"
+    ).map_err(map_storage_error)?;
+    let mut rows = statement.query(()).map_err(map_storage_error)?;
+    while let Some(row) = rows.next().map_err(map_storage_error)? {
+        let json: String = row.get(0).map_err(map_storage_error)?;
+        let labels: Vec<String> =
+            serde_json::from_str(&json).map_err(|_| Error::new(ErrorKind::Corrupt))?;
+        let indexed: String = row.get(1).map_err(map_storage_error)?;
+        if indexed != codec::fts_labels(&labels) {
+            return Err(Error::new(ErrorKind::Corrupt));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -326,6 +296,62 @@ pub(crate) mod testsupport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn driver_error_details_never_escape_the_domain_boundary() {
+        for (driver, expected) in [
+            (
+                crate::storage::Error::Constraint("UNIQUE constraint failed: secret".into()),
+                ErrorKind::Conflict,
+            ),
+            (
+                crate::storage::Error::Constraint("CHECK constraint failed: secret".into()),
+                ErrorKind::Corrupt,
+            ),
+            (
+                crate::storage::Error::Busy("secret".into()),
+                ErrorKind::Busy,
+            ),
+            (
+                crate::storage::Error::NotAdb("secret".into()),
+                ErrorKind::Corrupt,
+            ),
+        ] {
+            let error = map_storage_error(driver);
+            assert!(error.is(expected));
+            assert!(!format!("{error:?} {error}").contains("secret"));
+        }
+    }
+
+    #[test]
+    fn opening_rejects_a_missing_search_copy() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("memory.db");
+        let store = Store::open(&path, Options::default()).expect("open");
+        let scope = store.identity().expect("identity").user_scope;
+        store
+            .upsert(&crate::memory::UpsertRequest {
+                record: records::testsupport::sample_record(
+                    "rec-1",
+                    &scope,
+                    "editor",
+                    "uses neovim",
+                ),
+                expected_revision: None,
+            })
+            .expect("upsert");
+        store.close().expect("close");
+        let connection = Connection::open(&path).expect("open database");
+        connection
+            .execute("DELETE FROM memory_records_fts", ())
+            .expect("remove copy");
+        connection.close().expect("close database");
+        let error = match Store::open(&path, Options::default()) {
+            Ok(_) => panic!("must reject"),
+            Err(error) => error,
+        };
+        assert!(error.is(ErrorKind::Corrupt));
+    }
 
     #[test]
     fn opening_creates_a_verifiable_schema_and_a_distinct_identity() {

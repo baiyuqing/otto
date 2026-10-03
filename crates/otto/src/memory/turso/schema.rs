@@ -1,4 +1,4 @@
-//! The schema v1 migration, its fingerprint, and the verification that a
+//! The schema v2 migration, its fingerprint, and the verification that a
 //! database on disk was produced by exactly this manifest.
 //!
 //! The statement text must not change: the fingerprint stored in `memory_meta`
@@ -7,12 +7,12 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::Connection;
+use crate::storage::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::memory::{Error, ErrorKind, Result, Scope, StoreIdentity};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 pub const CREATE_MEMORY_META: &str = r#"CREATE TABLE memory_meta (
     key TEXT PRIMARY KEY CHECK (length(key) BETWEEN 1 AND 64),
     value TEXT NOT NULL CHECK (length(value) <= 256)
@@ -110,17 +110,17 @@ ON memory_candidates(scope_namespace, scope_id, state, created_at DESC, id ASC)"
 pub const CREATE_MEMORY_CANDIDATES_OBSERVATION: &str = r#"CREATE INDEX memory_candidates_observation
 ON memory_candidates(observation_id)
 WHERE observation_id IS NOT NULL"#;
-pub const CREATE_MEMORY_RECORDS_FTS: &str = r#"CREATE VIRTUAL TABLE memory_records_fts USING fts5(
-    record_id UNINDEXED,
-    text_value,
-    kind,
-    semantic_key,
-    labels,
-    tokenize = 'unicode61'
-)"#;
+pub const CREATE_MEMORY_RECORDS_FTS: &str = r#"CREATE TABLE memory_records_fts (
+    record_id TEXT NOT NULL,
+    text_value TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    semantic_key TEXT NOT NULL,
+    labels TEXT NOT NULL
+) STRICT"#;
+pub const CREATE_MEMORY_RECORDS_FTS_INDEX: &str = "CREATE INDEX memory_records_search ON memory_records_fts USING fts(text_value,kind,semantic_key,labels) WITH(weights='text_value=1.0,kind=0.5,semantic_key=2.0,labels=1.0')";
 
-/// The nine statements in migration order.
-pub const SCHEMA_STATEMENTS: [&str; 9] = [
+/// The ten statements in migration order.
+pub const SCHEMA_STATEMENTS: [&str; 10] = [
     CREATE_MEMORY_META,
     CREATE_MEMORY_RECORDS,
     CREATE_MEMORY_RECORDS_KEY_ACTIVE,
@@ -130,12 +130,13 @@ pub const SCHEMA_STATEMENTS: [&str; 9] = [
     CREATE_MEMORY_CANDIDATES_LIST,
     CREATE_MEMORY_CANDIDATES_OBSERVATION,
     CREATE_MEMORY_RECORDS_FTS,
+    CREATE_MEMORY_RECORDS_FTS_INDEX,
 ];
 
 /// SHA-256 of the statements joined with `";\n"`. A source constant, never a
 /// value learned from an opened database.
 pub const COMPILED_SCHEMA_FINGERPRINT: &str =
-    "f927b04baf82340748b4af92984d0f165f734acb4ea3e539f190e79dd54847e9";
+    "ec1482e878a9b93d75ed2f166eac6826da20be38f0d420fb8b8c48c40b616b97";
 
 pub fn schema_manifest() -> String {
     SCHEMA_STATEMENTS.join(";\n")
@@ -151,11 +152,23 @@ pub fn fingerprint_manifest(manifest: &str) -> String {
 /// `"type:name"` to the statement that must have created it.
 fn expected_application_objects() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
+        (
+            "table:__turso_internal_fts_dir_memory_records_search",
+            "CREATE TABLE __turso_internal_fts_dir_memory_records_search (path TEXT NOT NULL, chunk_no INTEGER NOT NULL, bytes BLOB NOT NULL)",
+        ),
+        (
+            "index:__turso_internal_fts_dir_memory_records_search_key",
+            "CREATE INDEX IF NOT EXISTS __turso_internal_fts_dir_memory_records_search_key ON __turso_internal_fts_dir_memory_records_search USING backing_btree (path, chunk_no, bytes)",
+        ),
         ("table:memory_meta", CREATE_MEMORY_META),
         ("table:memory_records", CREATE_MEMORY_RECORDS),
         ("table:memory_observations", CREATE_MEMORY_OBSERVATIONS),
         ("table:memory_candidates", CREATE_MEMORY_CANDIDATES),
         ("table:memory_records_fts", CREATE_MEMORY_RECORDS_FTS),
+        (
+            "index:memory_records_search",
+            CREATE_MEMORY_RECORDS_FTS_INDEX,
+        ),
         (
             "index:memory_records_key_active",
             CREATE_MEMORY_RECORDS_KEY_ACTIVE,
@@ -174,11 +187,20 @@ fn expected_application_objects() -> BTreeMap<&'static str, &'static str> {
 
 fn expected_application_object_tables() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
+        (
+            "table:__turso_internal_fts_dir_memory_records_search",
+            "__turso_internal_fts_dir_memory_records_search",
+        ),
+        (
+            "index:__turso_internal_fts_dir_memory_records_search_key",
+            "__turso_internal_fts_dir_memory_records_search",
+        ),
         ("table:memory_meta", "memory_meta"),
         ("table:memory_records", "memory_records"),
         ("table:memory_observations", "memory_observations"),
         ("table:memory_candidates", "memory_candidates"),
         ("table:memory_records_fts", "memory_records_fts"),
+        ("index:memory_records_search", "memory_records_fts"),
         ("index:memory_records_key_active", "memory_records"),
         ("index:memory_records_list", "memory_records"),
         ("index:memory_candidates_list", "memory_candidates"),
@@ -186,7 +208,7 @@ fn expected_application_object_tables() -> BTreeMap<&'static str, &'static str> 
     ])
 }
 
-/// The only SQLite-created indexes schema v1 sanctions. Their `sqlite_schema`
+/// The only automatically created indexes schema v2 sanctions. Their `sqlite_schema`
 /// SQL must stay NULL and their owning table is pinned.
 fn expected_sqlite_autoindexes() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
@@ -200,40 +222,29 @@ fn expected_sqlite_autoindexes() -> BTreeMap<&'static str, &'static str> {
     ])
 }
 
-/// The FTS5 shadow tables the virtual-table statement creates. Accepting merely
-/// compatible names and columns would admit a database whose storage schema was
-/// not produced by the compiled manifest.
-fn expected_fts_shadow_tables() -> BTreeMap<&'static str, &'static str> {
-    BTreeMap::from([
-        (
-            "memory_records_fts_config",
-            "CREATE TABLE 'memory_records_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID",
-        ),
-        (
-            "memory_records_fts_content",
-            "CREATE TABLE 'memory_records_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4)",
-        ),
-        (
-            "memory_records_fts_data",
-            "CREATE TABLE 'memory_records_fts_data'(id INTEGER PRIMARY KEY, block BLOB)",
-        ),
-        (
-            "memory_records_fts_docsize",
-            "CREATE TABLE 'memory_records_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)",
-        ),
-        (
-            "memory_records_fts_idx",
-            "CREATE TABLE 'memory_records_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID",
-        ),
-    ])
-}
-
 /// Normalizes one statement: trim, drop one trailing semicolon, collapse every
 /// whitespace run to a single space.
 pub fn normalize_schema_sql(statement: &str) -> String {
-    let trimmed = statement.trim();
-    let trimmed = trimmed.strip_suffix(';').unwrap_or(trimmed);
-    trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Turso serializes parsed SQL: keyword identifiers gain quotes, <> becomes
+    // !=, and punctuation spacing changes. Preserve every quoted value.
+    statement
+        .trim()
+        .trim_end_matches(';')
+        .split('\'')
+        .enumerate()
+        .map(|(index, part)| {
+            if index % 2 == 1 {
+                return part.to_string();
+            }
+            part.replace("\"key\"", "key")
+                .replace("\"action\"", "action")
+                .replace("<>", "!=")
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect()
+        })
+        .collect::<Vec<_>>()
+        .join("'")
 }
 
 /// A valid database ID: exactly 32 lowercase hex digits.
@@ -245,16 +256,16 @@ pub fn valid_database_id(value: &str) -> bool {
 }
 
 fn user_version(conn: &Connection) -> Result<i64> {
-    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(super::map_sqlite_error)
+    conn.query_row("PRAGMA user_version", (), |row| row.get(0))
+        .map_err(super::map_storage_error)
 }
 
 fn schema_object_count(conn: &Connection) -> Result<i64> {
-    conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
-        .map_err(super::map_sqlite_error)
+    conn.query_row("SELECT count(*) FROM sqlite_schema", (), |row| row.get(0))
+        .map_err(super::map_storage_error)
 }
 
-/// Creates schema v1 in an empty database, or verifies an existing one.
+/// Creates schema v2 in an empty database, or verifies an existing one.
 ///
 /// The caller holds the write transaction; this runs inside `BEGIN IMMEDIATE`
 /// and leaves committing to the caller.
@@ -267,7 +278,7 @@ pub fn initialize_schema(conn: &Connection, database_id: &str, user_id: &str) ->
             }
             for statement in SCHEMA_STATEMENTS {
                 conn.execute_batch(statement)
-                    .map_err(super::map_sqlite_error)?;
+                    .map_err(super::map_storage_error)?;
             }
             for (key, value) in [
                 ("database_id", database_id),
@@ -277,17 +288,17 @@ pub fn initialize_schema(conn: &Connection, database_id: &str, user_id: &str) ->
             ] {
                 conn.execute(
                     "INSERT INTO memory_meta(key,value) VALUES(?,?)",
-                    rusqlite::params![key, value],
+                    crate::storage::params![key, value],
                 )
-                .map_err(super::map_sqlite_error)?;
+                .map_err(super::map_storage_error)?;
             }
-            conn.execute_batch("PRAGMA user_version=1")
-                .map_err(super::map_sqlite_error)?;
+            conn.execute_batch("PRAGMA user_version=2")
+                .map_err(super::map_storage_error)?;
             Ok(())
         }
         v if v == SCHEMA_VERSION => Ok(()),
         v if v > SCHEMA_VERSION => Err(Error::new(ErrorKind::IncompatibleSchema)),
-        _ => Err(Error::new(ErrorKind::Corrupt)),
+        _ => Err(Error::new(ErrorKind::IncompatibleSchema)),
     }
 }
 
@@ -305,9 +316,8 @@ pub fn verify_schema(conn: &Connection) -> Result<StoreIdentity> {
 
     let applications = expected_application_objects();
     let application_tables = expected_application_object_tables();
-    let shadows = expected_fts_shadow_tables();
     let autoindexes = expected_sqlite_autoindexes();
-    let expected_count = (applications.len() + shadows.len() + autoindexes.len()) as i64;
+    let expected_count = (applications.len() + autoindexes.len()) as i64;
     if schema_object_count(conn)? != expected_count {
         return Err(Error::new(ErrorKind::Corrupt));
     }
@@ -315,15 +325,15 @@ pub fn verify_schema(conn: &Connection) -> Result<StoreIdentity> {
     let mut objects: BTreeMap<String, (String, String, Option<String>)> = BTreeMap::new();
     let mut statement = conn
         .prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NULL OR length(sql)<=131072")
-        .map_err(super::map_sqlite_error)?;
-    let mut rows = statement.query([]).map_err(super::map_sqlite_error)?;
-    while let Some(row) = rows.next().map_err(super::map_sqlite_error)? {
-        let name: String = row.get(1).map_err(super::map_sqlite_error)?;
+        .map_err(super::map_storage_error)?;
+    let mut rows = statement.query(()).map_err(super::map_storage_error)?;
+    while let Some(row) = rows.next().map_err(super::map_storage_error)? {
+        let name: String = row.get(1).map_err(super::map_storage_error)?;
         let entry = (
-            row.get::<_, String>(0).map_err(super::map_sqlite_error)?,
-            row.get::<_, String>(2).map_err(super::map_sqlite_error)?,
-            row.get::<_, Option<String>>(3)
-                .map_err(super::map_sqlite_error)?,
+            row.get::<String>(0).map_err(super::map_storage_error)?,
+            row.get::<String>(2).map_err(super::map_storage_error)?,
+            row.get::<Option<String>>(3)
+                .map_err(super::map_storage_error)?,
         );
         if objects.insert(name, entry).is_some() {
             return Err(Error::new(ErrorKind::Corrupt));
@@ -348,17 +358,6 @@ pub fn verify_schema(conn: &Connection) -> Result<StoreIdentity> {
             return Err(Error::new(ErrorKind::Corrupt));
         }
     }
-    for (table, expected) in &shadows {
-        let Some((kind, actual_table, Some(sql))) = objects.get(*table) else {
-            return Err(Error::new(ErrorKind::Corrupt));
-        };
-        if kind != "table"
-            || actual_table != table
-            || normalize_schema_sql(sql) != normalize_schema_sql(expected)
-        {
-            return Err(Error::new(ErrorKind::Corrupt));
-        }
-    }
     for (name, table) in &autoindexes {
         let Some((kind, actual_table, sql)) = objects.get(*name) else {
             return Err(Error::new(ErrorKind::Corrupt));
@@ -369,8 +368,8 @@ pub fn verify_schema(conn: &Connection) -> Result<StoreIdentity> {
     }
 
     let meta_count: i64 = conn
-        .query_row("SELECT count(*) FROM memory_meta", [], |row| row.get(0))
-        .map_err(super::map_sqlite_error)?;
+        .query_row("SELECT count(*) FROM memory_meta", (), |row| row.get(0))
+        .map_err(super::map_storage_error)?;
     if meta_count != 4 {
         return Err(Error::new(ErrorKind::Corrupt));
     }
@@ -382,12 +381,12 @@ pub fn verify_schema(conn: &Connection) -> Result<StoreIdentity> {
                AND typeof(value)='text' AND length(value)<=256
              LIMIT 5",
         )
-        .map_err(super::map_sqlite_error)?;
-    let mut meta_rows = meta_statement.query([]).map_err(super::map_sqlite_error)?;
+        .map_err(super::map_storage_error)?;
+    let mut meta_rows = meta_statement.query(()).map_err(super::map_storage_error)?;
     let mut meta: BTreeMap<String, String> = BTreeMap::new();
-    while let Some(row) = meta_rows.next().map_err(super::map_sqlite_error)? {
-        let key: String = row.get(0).map_err(super::map_sqlite_error)?;
-        let value: String = row.get(1).map_err(super::map_sqlite_error)?;
+    while let Some(row) = meta_rows.next().map_err(super::map_storage_error)? {
+        let key: String = row.get(0).map_err(super::map_storage_error)?;
+        let value: String = row.get(1).map_err(super::map_storage_error)?;
         if meta.len() >= 4 || meta.insert(key, value).is_some() {
             return Err(Error::new(ErrorKind::Corrupt));
         }
@@ -422,9 +421,62 @@ pub fn verify_schema(conn: &Connection) -> Result<StoreIdentity> {
     })
 }
 
+/// Finalizes an explicit logical import of the old SQLite v1 memory tables.
+/// The importer creates this manifest first and restores all application rows,
+/// including old metadata and search copies. The caller owns the transaction.
+/// Identity and generation are retained; legacy files are never changed here.
+pub fn finalize_legacy_import(conn: &Connection) -> Result<StoreIdentity> {
+    let fingerprint: String = conn
+        .query_row(
+            "SELECT value FROM memory_meta WHERE key='schema_fingerprint'",
+            (),
+            |row| row.get(0),
+        )
+        .map_err(super::map_storage_error)?;
+    if fingerprint != "f927b04baf82340748b4af92984d0f165f734acb4ea3e539f190e79dd54847e9" {
+        return Err(Error::new(ErrorKind::IncompatibleSchema));
+    }
+    conn.execute(
+        "UPDATE memory_meta SET value=? WHERE key='schema_fingerprint'",
+        crate::storage::params![COMPILED_SCHEMA_FINGERPRINT],
+    )
+    .map_err(super::map_storage_error)?;
+    conn.execute_batch("PRAGMA user_version=2")
+        .map_err(super::map_storage_error)?;
+    let identity = verify_schema(conn)?;
+    super::verify_fts_integrity(conn)?;
+    Ok(identity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_import_keeps_identity_and_generation_and_requires_known_metadata() {
+        let (_directory, store) = super::super::testsupport::open_temp();
+        let identity = store.identity().expect("identity");
+        store
+            .with_read(|conn| {
+                conn.execute(
+                    "UPDATE memory_meta SET value=? WHERE key='schema_fingerprint'",
+                    crate::storage::params![
+                        "f927b04baf82340748b4af92984d0f165f734acb4ea3e539f190e79dd54847e9"
+                    ],
+                )
+                .map_err(super::super::map_storage_error)?;
+                conn.execute_batch("PRAGMA user_version=1")
+                    .map_err(super::super::map_storage_error)?;
+                assert_eq!(finalize_legacy_import(conn)?, identity);
+                assert!(
+                    finalize_legacy_import(conn)
+                        .unwrap_err()
+                        .is(ErrorKind::IncompatibleSchema)
+                );
+                Ok(())
+            })
+            .expect("import");
+    }
 
     #[test]
     fn the_manifest_fingerprint_matches_the_source_constant() {
@@ -437,10 +489,18 @@ mod tests {
     }
 
     #[test]
-    fn normalization_collapses_whitespace_and_drops_the_terminator() {
+    fn normalization_preserves_literals_and_canonicalizes_driver_formatting() {
         assert_eq!(
             normalize_schema_sql("  CREATE  TABLE\n  t (a);  "),
-            "CREATE TABLE t (a)"
+            "CREATETABLEt(a)"
+        );
+        assert_eq!(
+            normalize_schema_sql("CHECK (value = 'a <> b')"),
+            "CHECK(value='a <> b')"
+        );
+        assert_eq!(
+            normalize_schema_sql("WHERE key <> ''"),
+            normalize_schema_sql("WHERE \"key\" != ''")
         );
     }
 

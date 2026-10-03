@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 pub use agents::{Agents, AgentsRuntime, resolve_agents};
 pub use failover::{Failover, FailoverRuntime, resolve_failover};
 pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
-pub use memory::{Memory, MemoryRuntime, MemorySQLite, resolve_memory};
+pub use memory::{Memory, MemoryRuntime, MemoryTurso, resolve_memory};
 pub use model_limits::ModelLimits;
 pub use projects::{Project, TrustLevel};
 pub use reflection::{Auto, Reflection, ReflectionRuntime, SkillSource, resolve_reflection};

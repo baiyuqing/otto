@@ -44,7 +44,7 @@ const FORBIDDEN: &[(&str, &str)] = &[
 ];
 
 /// Filesystem mutations, allowed only in `skillwrite.rs` (skill files and
-/// history). The stores create their own database files through SQLite and
+/// history). The stores create their own database files through Turso and
 /// `create_dir_all`/`set_permissions`, which are not in this list.
 const FILESYSTEM_WRITES: &[&str] = &[
     "fs::write(",

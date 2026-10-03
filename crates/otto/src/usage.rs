@@ -1,4 +1,4 @@
-//! Provider token usage collection, SQLite storage, and aggregate queries.
+//! Provider token usage collection, local Turso storage, and aggregate queries.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -7,10 +7,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::storage::{Connection, params};
 use chrono::{Days, NaiveDate, SecondsFormat, Utc};
 use otto_core::agent::Event;
 use otto_core::model::Usage;
-use rusqlite::{Connection, OpenFlags, params};
 use serde::Serialize;
 
 const SCHEMA: &str = r#"
@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS usage_events_model
 ON usage_events(provider, model, occurred_at);
 "#;
 
-/// A storage failure carries no SQLite text, paths, or row values across the
+/// A storage failure carries no database text, paths, or row values across the
 /// adapter boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error;
@@ -77,7 +77,7 @@ pub struct UsageRecord {
     pub usage_present: bool,
 }
 
-/// Collection writes through this boundary and has no SQLite dependency.
+/// Collection writes through this boundary and has no storage dependency.
 pub trait Sink: Send + Sync {
     fn append(&self, record: &UsageRecord) -> Result<()>;
 }
@@ -167,7 +167,7 @@ fn date_range(days: u16) -> Result<(NaiveDate, NaiveDate)> {
     Ok((start, today))
 }
 
-/// One local SQLite database shared by collection and read-only analysis.
+/// One local Turso database shared by collection and read-only analysis.
 /// Each operation holds the connection only for one short statement.
 pub struct Store {
     connection: Mutex<Connection>,
@@ -182,20 +182,14 @@ impl Store {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| Error)?;
         }
-        let connection = Connection::open_with_flags(
-            filename,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| Error)?;
+        let connection = Connection::open(filename).map_err(|_| Error)?;
         std::fs::set_permissions(filename, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| Error)?;
         connection
-            .pragma_update(None, "journal_mode", "WAL")
+            .pragma_update("journal_mode", "WAL")
             .map_err(|_| Error)?;
         Self::initialize(connection)
     }

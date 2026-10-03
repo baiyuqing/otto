@@ -365,7 +365,7 @@ fn store_open_rejects_an_unrecognized_schema_version() {
     let connection = Connection::open_in_memory().expect("open");
     connection.execute_batch(SCHEMA).expect("create schema");
     connection
-        .pragma_update(None, "user_version", 999)
+        .pragma_update("user_version", 999)
         .expect("set version");
 
     let error = Store::initialize(connection).expect_err("unknown version");

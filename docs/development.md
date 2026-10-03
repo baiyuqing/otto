@@ -33,12 +33,12 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers
   - `provider`: native HTTP transports for the two provider implementations
   - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
-  - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the SQLite/FTS5 store and retriever
+  - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the Turso/FTS store and retriever
   - `reflection`: the `/reflect` use case: it reads the part of a session no earlier run covered (from the session file, so compacted entries stay reachable), classifies entries as local or external (`taint`), builds one tool-less request (`prompt`), parses and validates the answer (`output`), verifies quoted evidence in code (`evidence`), and queues survivors as memory candidates through `Service::propose` with `Origin::Extractor`. `store` keeps run rows, per-session watermarks, and skill ownership in `~/.otto/reflection.db`. Skills pass `guard` (structure and the rule table), `review` (a fail-closed second-model call), and only then `skillwrite`, the only file that mutates skill files; it accepts only a `guard::Vetted`, which only `guard::approve` builds. `crates/otto/tests/reflection_boundary.rs` fails if this module ever writes, forgets, or reviews a memory record directly, if a file other than `skillwrite.rs` mutates the filesystem, or if `Vetted` is built outside `guard.rs`. A new scan rule goes in the `RULES` table in `guard.rs` with a positive and a negative test case
-  - `usage`: native collection of parent, sub-agent, and compaction token events; append-only SQLite storage; and total/daily aggregate queries consumed by the server
+  - `usage`: native collection of parent, sub-agent, and compaction token events; append-only Turso storage; and total/daily aggregate queries consumed by the server
   - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
   - `subagent`: child agent construction (`Runner`), task lifecycle, the parent-facing `agent`/`agent_wait`/`agent_status`/`agent_send` tools, the child-only `agent_report` tool, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
-  - `workflow`: workspace-scoped TOML DAG discovery, SQLite run/step/attempt/approval/event state, committed-boundary recovery, and the shared CLI/server workflow controller
+  - `workflow`: workspace-scoped TOML DAG discovery, Turso run/step/attempt/approval/event state, committed-boundary recovery, and the shared CLI/server workflow controller
   - `acp`: the Agent Client Protocol v1 agent server behind `otto acp`: newline-delimited JSON-RPC on stdin/stdout with a single stdout writer, per-session `Controller`s on one `Builder`, the mapping from agent events and stored history to `session/update`, and the after-turn `session/request_permission` round trip for elevated `bash` and persistent sandbox read grants. `acp::attach` is the `otto acp --attach` relay: the same transport and dispatcher with every session operation sent to `otto serve` through `client`. Message types come from the `agent-client-protocol-schema` crate; the designs are `docs/specs/2026-10-02-acp-agent-server.md` and `docs/specs/2026-10-02-shared-session.md`
   - `client`: the HTTP client of `otto serve` over its Unix socket, used by `acp::attach` and `tui::attach` (sessions, history, queued turns and their SSE streams, the `/v1/status` stream, turn cancel, approval decisions, compaction, context, sub-agent tasks, sandbox reload); it maps a failed connection to `Error::Unreachable` and a non-2xx answer to `Error::Http`
   - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI (`ui/dist`, written by `make ui`)
@@ -95,7 +95,7 @@ Keep durable workflows separate from ad-hoc sub-agent tasks. Workflow
 definitions snapshot their referenced `AGENT.md` bodies, model choices, and
 tool allowlists when a run is created; resume uses that snapshot and the
 current sandbox. Every attempt has its own append-only Pi v3 transcript.
-SQLite is the workflow state source of truth, and a per-workspace advisory
+Turso is the workflow state source of truth, and a per-workspace advisory
 lock permits only one scheduler process. A process loss changes running steps
 to `interrupted` and the run to `paused`; retry is always explicit because an
 external tool effect may already have happened.
@@ -118,7 +118,7 @@ validated the result; otherwise the typed stop reason wins. Effectful futures
 are never detached with session writers, leases, child processes, or mutable
 workflow handles. Bash process groups and shared stdio MCP servers own their
 TERM/grace/KILL/reap sequence; HTTP MCP abandons only the timed-out request.
-Synchronous filesystem and SQLite boundaries are checked before and after the
+Synchronous filesystem and Turso boundaries are checked before and after the
 call and do not claim a hard wall-clock bound.
 
 Keep `crates/otto`'s `mcp` module behind `crate::mcp`'s client, transport, and
@@ -156,12 +156,29 @@ tests; cover the other states through pure functions such as
 `format_mcp_report` with hand-built `ServerStatus` fixtures instead of a real
 server or OAuth round-trip.
 
+## Native database storage
+
+`crates/otto::storage` owns the synchronous boundary to the pinned Turso Rust
+SDK. Local I/O is polled on a grown native stack because the engine's debug SQL
+compiler can exceed the default worker stack. Services own connection mutexes and transaction lifetimes; the adapter
+drives local I/O with a thread waker without nesting a Tokio runtime. Rows
+remain streaming, dropped transactions roll back, and native diagnostics
+stay inside each service boundary. Turso FTS and multi-process WAL are
+explicitly enabled. The latter is experimental upstream: keep the process
+contention and crash/reopen tests in `tests/turso_storage.rs` as acceptance
+checks. `otto-core` and `otto-web` remain independent of the native engine.
+
+Use `otto storage migrate <legacy.db> <new.db>` for offline legacy import;
+see the user manual for the procedure. Python 3 reads the old SQLite file
+only during that command; Otto links no SQLite engine. The importer validates
+row counts and memory identity/schema/index consistency before publishing.
+
 ## Core contracts
 
 - Keep dependencies explicit and directed toward shared contracts. Reuse existing helpers and concrete types; add traits at real consumer boundaries, not for hypothetical implementations.
 - Use `Message::validate`, `Block::validate`, `ContextMetadata::validate`, and `Usage::validate` in `otto_core::model`. Every type there is an owned value that derives `Clone`; there are no separate deep-copy helpers. Both `otto_core::session::Session` implementations (`MemorySession` in `otto-core` and `Store` in `crates/otto/src/session/store.rs`) enforce neutral validation and tool-call/result sequencing in `append`. Neutral validation permits transient messages without IDs/timestamps; Pi-specific encoding restrictions stay in `otto_core::session`. When adding fields, update ownership tests.
 - `otto_core::provider::Response::message` is the single source of finish reason and usage. `Message::usage == None` means unavailable; `Some(Usage::default())` means explicitly reported zero. Preserve explicit presence (`usage_present` on `CompactionResult` and on the task records) through events, task progress, notifications, aggregates, and supported persistence metadata instead of inferring absence from zero counters. Keep legacy Pi normalization in the decoder.
-- Keep provider-token persistence in `crates/otto::usage`: collection maps neutral agent events to content-free records, SQLite only appends and aggregates those records, and frontends query through the server API. Never store prompts, response text, tool arguments, or tool output in the usage database.
+- Keep provider-token persistence in `crates/otto::usage`: collection maps neutral agent events to content-free records, Turso only appends and aggregates those records, and frontends query through the server API. Never store prompts, response text, tool arguments, or tool output in the usage database.
 - Keep context associations in the typed `ContextMetadata`. Prefer the structured `task_id` over notification wording; text parsing is only a legacy-history fallback. Preserve append-only Pi v3 compatibility and namespaced optional details, including the explicit-zero usage marker. Do not rewrite old records or invent missing historical metadata.
 - `Session::append_custom` writes a Pi v3 `custom` entry; `pi_entry_to_context_messages` skips `custom` entries, so they never reach a model context. The trait method has no default body: every implementor, including wrappers such as `SharedSession`, states whether it writes or drops the entry. The sub-agent runner writes `otto.task_spec` after the task slot is set and `otto.task_result` after the completion notification is pushed, and drops a write failure. When a session is reopened with unanswered tool calls, the first unanswered call gets `MAY_HAVE_RUN_TOOL_RESULT_TEXT` and the later ones `NOT_EXECUTED_TOOL_RESULT_TEXT` (`otto_core::session::context::missing_tool_results`); tool calls run one at a time, so the answered calls are a prefix.
 - `otto_core::tool::ToolResult::persisted_content == None` selects `content`; `Some` selects its value, including `Some("")`; `persisted_text` applies that rule. Preserve redaction and the current-turn full-result overlay. Reuse tool definitions and assembly helpers, including `tool::bash::bash_definition` in `crates/otto`; keep conservative preflight and the `Registry::new` validation.

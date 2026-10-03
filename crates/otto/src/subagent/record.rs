@@ -1,8 +1,8 @@
 //! The cross-process sub-agent task recorder and reader.
 //!
-//! `~/.otto/tasks.db` is one SQLite table, `tasks`, keyed by
+//! `~/.otto/tasks.db` is one Turso table, `tasks`, keyed by
 //! `(parent_session, task_id)`. Every otto process on the machine that runs
-//! sub-agents writes its own rows to the same file; SQLite serialises the
+//! sub-agents writes its own rows to the same file; Turso serialises the
 //! writes, and no row is ever written by two processes, so there is no
 //! conflict to resolve.
 //!
@@ -35,8 +35,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::storage::{Connection, params};
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 
 use super::tasks::Task;
@@ -86,7 +86,7 @@ pid, process_started_at";
 /// dropped, on a character boundary.
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 
-/// A storage failure carries no SQLite text, paths, or row values across the
+/// A storage failure carries no database text, paths, or row values across the
 /// adapter boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error;
@@ -201,7 +201,7 @@ struct Row {
 }
 
 impl Row {
-    fn from_sql(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+    fn from_sql(row: &crate::storage::Row) -> crate::storage::Result<Self> {
         Ok(Self {
             parent_session: row.get(0)?,
             task_id: row.get(1)?,
@@ -397,20 +397,14 @@ impl Store {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| Error)?;
         }
-        let connection = Connection::open_with_flags(
-            filename,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| Error)?;
+        let connection = Connection::open(filename).map_err(|_| Error)?;
         std::fs::set_permissions(filename, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| Error)?;
         connection
-            .pragma_update(None, "journal_mode", "WAL")
+            .pragma_update("journal_mode", "WAL")
             .map_err(|_| Error)?;
         Self::initialize(connection)
     }
@@ -422,13 +416,13 @@ impl Store {
 
     fn initialize(connection: Connection) -> Result<Self> {
         let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .query_row("PRAGMA user_version", (), |row| row.get(0))
             .map_err(|_| Error)?;
         match version {
             0 => {
                 connection.execute_batch(SCHEMA).map_err(|_| Error)?;
                 connection
-                    .pragma_update(None, "user_version", SCHEMA_VERSION)
+                    .pragma_update("user_version", SCHEMA_VERSION)
                     .map_err(|_| Error)?;
             }
             version if version == SCHEMA_VERSION => {}
@@ -527,7 +521,7 @@ impl Store {
     fn query_rows(
         connection: &Connection,
         sql: &str,
-        params: impl rusqlite::Params,
+        params: impl crate::storage::IntoParams,
     ) -> Result<Vec<Row>> {
         let mut statement = connection.prepare(sql).map_err(|_| Error)?;
         statement
@@ -781,7 +775,7 @@ mod tests {
         {
             let connection = Connection::open(&path).expect("create");
             connection
-                .pragma_update(None, "user_version", 999)
+                .pragma_update("user_version", 999)
                 .expect("set version");
         }
         assert!(Store::open(&path).is_err());

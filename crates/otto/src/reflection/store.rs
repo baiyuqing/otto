@@ -12,7 +12,7 @@
 //! every method takes `&self` and holds the lock for one statement or one
 //! transaction.
 //!
-//! Errors: a failure carries no SQLite text, paths, or row values.
+//! Errors: a failure carries no database text, paths, or row values.
 
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use crate::storage::{Connection, OptionalExtension, params};
 
 /// The schema version this build writes and expects. A database with another
 /// version is left untouched and reported as [`Error::UnknownVersion`].
@@ -179,7 +179,7 @@ pub struct SkillWrite {
     pub at: String,
 }
 
-fn generated_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GeneratedSkill> {
+fn generated_from_row(row: &crate::storage::Row) -> crate::storage::Result<GeneratedSkill> {
     Ok(GeneratedSkill {
         name: row.get(0)?,
         hash: row.get(1)?,
@@ -205,20 +205,14 @@ impl Store {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| Error::Io)?;
         }
-        let connection = Connection::open_with_flags(
-            filename,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| Error::Io)?;
+        let connection = Connection::open(filename).map_err(|_| Error::Io)?;
         std::fs::set_permissions(filename, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error::Io)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| Error::Io)?;
         connection
-            .pragma_update(None, "journal_mode", "WAL")
+            .pragma_update("journal_mode", "WAL")
             .map_err(|_| Error::Io)?;
         Self::initialize(connection)
     }
@@ -228,22 +222,22 @@ impl Store {
         Self::initialize(Connection::open_in_memory().map_err(|_| Error::Io)?)
     }
 
-    fn initialize(connection: Connection) -> Result<Self> {
+    fn initialize(mut connection: Connection) -> Result<Self> {
         let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .query_row("PRAGMA user_version", (), |row| row.get(0))
             .map_err(|_| Error::Io)?;
         if version == 0 {
             connection.execute_batch(SCHEMA).map_err(|_| Error::Io)?;
             connection
-                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .pragma_update("user_version", SCHEMA_VERSION)
                 .map_err(|_| Error::Io)?;
         } else if version == 1 {
-            let transaction = connection.unchecked_transaction().map_err(|_| Error::Io)?;
+            let transaction = connection.transaction().map_err(|_| Error::Io)?;
             transaction
                 .execute_batch(MIGRATE_1_TO_2)
                 .map_err(|_| Error::Io)?;
             transaction
-                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .pragma_update("user_version", SCHEMA_VERSION)
                 .map_err(|_| Error::Io)?;
             transaction.commit().map_err(|_| Error::Io)?;
         } else if version != SCHEMA_VERSION {
@@ -320,7 +314,7 @@ impl Store {
             .query_row(
                 "SELECT MAX(started_at) FROM runs WHERE session_id = ?1 AND trigger != 'manual'",
                 params![session_id],
-                |row| row.get::<_, Option<String>>(0),
+                |row| row.get::<Option<String>>(0),
             )
             .map_err(|_| Error::Io)
     }
@@ -348,7 +342,7 @@ impl Store {
             )
             .map_err(|_| Error::Io)?;
         let rows = statement
-            .query_map([], generated_from_row)
+            .query_map((), generated_from_row)
             .map_err(|_| Error::Io)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| Error::Io)
@@ -357,8 +351,8 @@ impl Store {
     /// How many skills reflection currently owns.
     pub fn generated_count(&self) -> Result<usize> {
         self.lock()?
-            .query_row("SELECT COUNT(*) FROM generated_skills", [], |row| {
-                row.get::<_, i64>(0)
+            .query_row("SELECT COUNT(*) FROM generated_skills", (), |row| {
+                row.get::<i64>(0)
             })
             .map(|count| count as usize)
             .map_err(|_| Error::Io)
@@ -403,7 +397,7 @@ impl Store {
             .prepare("SELECT hash FROM skill_versions WHERE name = ?1 ORDER BY id")
             .map_err(|_| Error::Io)?;
         let rows = statement
-            .query_map(params![name], |row| row.get::<_, String>(0))
+            .query_map(params![name], |row| row.get::<String>(0))
             .map_err(|_| Error::Io)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| Error::Io)
@@ -463,7 +457,7 @@ impl Store {
             .query_map(params![session_id], |row| {
                 let status: String = row.get(1)?;
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<String>(0)?,
                     match status.as_str() {
                         "ok" => Status::Ok,
                         "noop" => Status::Noop,
@@ -547,7 +541,7 @@ mod tests {
     fn an_unrecognized_schema_version_is_refused() {
         let connection = Connection::open_in_memory().expect("open");
         connection
-            .pragma_update(None, "user_version", 999)
+            .pragma_update("user_version", 999)
             .expect("set version");
         assert_eq!(
             Store::initialize(connection).expect_err("version"),
@@ -658,7 +652,7 @@ mod tests {
                 )
                 .expect("v1 schema");
             connection
-                .pragma_update(None, "user_version", 1)
+                .pragma_update("user_version", 1)
                 .expect("version");
         }
         let store = Store::open(&path).expect("migrate");

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{ConfigError, duration::parse_go_duration, paths};
 
-const DEFAULT_MEMORY_BACKEND: &str = "sqlite";
+const DEFAULT_MEMORY_BACKEND: &str = "turso";
 const DEFAULT_MEMORY_RECALL_TOKENS: i64 = 2000;
 const DEFAULT_MEMORY_MAX_RESULTS: i64 = 12;
 
@@ -33,13 +33,14 @@ pub struct Memory {
     #[serde(default)]
     pub workspace_ids: HashMap<String, String>,
     #[serde(default)]
-    pub sqlite: MemorySQLite,
+    #[serde(alias = "sqlite")]
+    pub turso: MemoryTurso,
 }
 
-/// The `[memory.sqlite]` table.
+/// The `[memory.turso]` table.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MemorySQLite {
+pub struct MemoryTurso {
     #[serde(default)]
     pub path: String,
     #[serde(default)]
@@ -57,12 +58,12 @@ pub struct MemoryRuntime {
     pub require_encryption: bool,
     pub workspace_ids: HashMap<String, String>,
     /// Absolute path.
-    pub sqlite_path: String,
-    /// Zero when `[memory.sqlite].busy_timeout` is absent.
-    pub sqlite_busy_timeout: Duration,
+    pub turso_path: String,
+    /// Zero when `[memory.turso].busy_timeout` is absent.
+    pub turso_busy_timeout: Duration,
 }
 
-/// Resolves `[memory]`, defaulting the SQLite path to
+/// Resolves `[memory]`, defaulting the Turso path to
 /// `$HOME/.otto/memory/memory.db`.
 ///
 /// Add it back if a real memory override is introduced.
@@ -77,9 +78,15 @@ pub fn resolve_memory(
     } else {
         file.memory.backend.clone()
     };
-    if backend != "sqlite" {
+    // Legacy configuration selects the same Turso engine; there is no SQLite backend.
+    let backend = if backend == "sqlite" {
+        "turso".to_string()
+    } else {
+        backend
+    };
+    if backend != "turso" {
         return Err(ConfigError::new(format!(
-            "unsupported memory backend \"{backend}\": must be sqlite"
+            "unsupported memory backend \"{backend}\": must be turso"
         )));
     }
 
@@ -113,29 +120,28 @@ pub fn resolve_memory(
         None => DEFAULT_MEMORY_MAX_RESULTS,
     };
 
-    let sqlite_path = if !file.memory.sqlite.path.is_empty() {
-        file.memory.sqlite.path.clone()
+    let turso_path = if !file.memory.turso.path.is_empty() {
+        file.memory.turso.path.clone()
     } else {
         let home = paths::home_from_env(env);
         if home.is_empty() {
             return Err(ConfigError::new(
-                "resolve home directory for default memory sqlite path: $HOME is not defined",
+                "resolve home directory for default memory turso path: $HOME is not defined",
             ));
         }
         paths::clean(&format!("{home}/.otto/memory/memory.db"))
     };
 
-    let mut sqlite_busy_timeout = Duration::ZERO;
-    if !file.memory.sqlite.busy_timeout.is_empty() {
-        let nanos = parse_go_duration(&file.memory.sqlite.busy_timeout).map_err(|err| {
-            ConfigError::new(format!("invalid memory sqlite busy_timeout: {err}"))
-        })?;
+    let mut turso_busy_timeout = Duration::ZERO;
+    if !file.memory.turso.busy_timeout.is_empty() {
+        let nanos = parse_go_duration(&file.memory.turso.busy_timeout)
+            .map_err(|err| ConfigError::new(format!("invalid memory turso busy_timeout: {err}")))?;
         if nanos <= 0 {
             return Err(ConfigError::new(
-                "invalid memory sqlite busy_timeout: must be greater than zero",
+                "invalid memory turso busy_timeout: must be greater than zero",
             ));
         }
-        sqlite_busy_timeout = Duration::from_nanos(nanos as u64);
+        turso_busy_timeout = Duration::from_nanos(nanos as u64);
     }
 
     Ok(MemoryRuntime {
@@ -146,8 +152,8 @@ pub fn resolve_memory(
         max_results,
         require_encryption: file.memory.require_encryption,
         workspace_ids: file.memory.workspace_ids.clone(),
-        sqlite_path,
-        sqlite_busy_timeout,
+        turso_path,
+        turso_busy_timeout,
     })
 }
 
@@ -167,12 +173,31 @@ mod tests {
     fn resolves_defaults() {
         let runtime = resolve_memory(&File::default(), &env("/home/u")).expect("resolve");
         assert!(runtime.enabled);
-        assert_eq!(runtime.backend, "sqlite");
+        assert_eq!(runtime.backend, "turso");
         assert_eq!(runtime.recall_tokens, 2000);
         assert_eq!(runtime.max_results, 12);
-        assert_eq!(runtime.sqlite_path, "/home/u/.otto/memory/memory.db");
-        assert_eq!(runtime.sqlite_busy_timeout, Duration::ZERO);
+        assert_eq!(runtime.turso_path, "/home/u/.otto/memory/memory.db");
+        assert_eq!(runtime.turso_busy_timeout, Duration::ZERO);
         assert!(runtime.workspace_ids.is_empty());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn legacy_configuration_resolves_to_turso() {
+        let file: File = toml::from_str(
+            r#"
+[memory]
+backend = "sqlite"
+[memory.sqlite]
+path = "/custom/memory.db"
+busy_timeout = "10s"
+"#,
+        )
+        .expect("legacy config");
+        let runtime = resolve_memory(&file, &HashMap::new()).expect("resolve");
+        assert_eq!(runtime.backend, "turso");
+        assert_eq!(runtime.turso_path, "/custom/memory.db");
+        assert_eq!(runtime.turso_busy_timeout, Duration::from_secs(10));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -187,7 +212,7 @@ mod tests {
     fn applies_toml_overrides() {
         let mut file = File::default();
         file.memory.enabled = Some(false);
-        file.memory.backend = "sqlite".into();
+        file.memory.backend = "turso".into();
         file.memory.required = true;
         file.memory.recall_tokens = Some(500);
         file.memory.max_results = Some(3);
@@ -195,7 +220,7 @@ mod tests {
         file.memory
             .workspace_ids
             .insert("/old/path".into(), "stable-id".into());
-        file.memory.sqlite = MemorySQLite {
+        file.memory.turso = MemoryTurso {
             path: "/custom/memory.db".into(),
             busy_timeout: "10s".into(),
         };
@@ -210,8 +235,8 @@ mod tests {
             runtime.workspace_ids.get("/old/path"),
             Some(&"stable-id".to_string())
         );
-        assert_eq!(runtime.sqlite_path, "/custom/memory.db");
-        assert_eq!(runtime.sqlite_busy_timeout, Duration::from_secs(10));
+        assert_eq!(runtime.turso_path, "/custom/memory.db");
+        assert_eq!(runtime.turso_busy_timeout, Duration::from_secs(10));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -266,7 +291,7 @@ mod tests {
         // real environment (core must never touch real env), so this test
         // injects HOME itself to reach the busy_timeout validation below.
         let mut file = File::default();
-        file.memory.sqlite.busy_timeout = "not-a-duration".into();
+        file.memory.turso.busy_timeout = "not-a-duration".into();
         let err = resolve_memory(&file, &env("/home/u")).unwrap_err();
         assert!(err.to_string().contains("busy_timeout"), "{err}");
     }
@@ -277,7 +302,7 @@ mod tests {
         // ponytail: see rejects_invalid_busy_timeout above for why HOME is
         // injected rather than passing an empty env.
         let mut file = File::default();
-        file.memory.sqlite.busy_timeout = "0s".into();
+        file.memory.turso.busy_timeout = "0s".into();
         let err = resolve_memory(&file, &env("/home/u")).unwrap_err();
         assert!(err.to_string().contains("busy_timeout"), "{err}");
     }

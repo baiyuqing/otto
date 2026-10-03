@@ -4,7 +4,7 @@
 //! shape is wrong reaches the decoder as NULL and is reported as corruption
 //! instead of being silently coerced.
 
-use rusqlite::types::Value;
+use crate::storage::Value;
 
 use super::codec::TIMESTAMP_BYTES;
 use crate::memory::{
@@ -32,10 +32,10 @@ fn meaningful(character: char) -> bool {
 }
 
 fn quote_fts_term(term: &str) -> String {
-    format!("\"{}\"", term.replace('"', "\"\""))
+    format!("\"{}\"", term.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Converts free text into an FTS5 expression of quoted literals joined by
+/// Converts free text into an Turso FTS expression of quoted literals joined by
 /// `OR`. Quoting every term means user text can never become FTS syntax.
 pub fn build_fts_literal_expression(input: &str) -> Result<String> {
     if input.len() > MAX_QUERY_BYTES {
@@ -352,18 +352,34 @@ pub fn build_baseline_query(request: &RetrievalRequest, user: &Scope) -> Stateme
     }
 }
 
-const RANK: &str = "bm25(memory_records_fts,0.0,1.0,0.5,2.0,1.0)";
-
 pub fn build_fts_candidate_query(request: &RetrievalRequest, expression: &str) -> Statement {
     let (mut clauses, mut arguments) = retrieval_filter(request, &request.scopes);
-    clauses.push("memory_records_fts MATCH ?".to_string());
+    let mut parameter = 0;
+    for clause in &mut clauses {
+        *clause = clause
+            .chars()
+            .map(|character| {
+                if character == '?' {
+                    parameter += 1;
+                    format!("?{parameter}")
+                } else {
+                    character.to_string()
+                }
+            })
+            .collect();
+    }
+    let expression_parameter = arguments.len() + 1;
+    let limit_parameter = expression_parameter + 1;
+    let columns = "memory_records_fts.text_value,memory_records_fts.kind,memory_records_fts.semantic_key,memory_records_fts.labels";
+    let rank = format!("fts_score({columns},?{expression_parameter})");
+    clauses.push(format!("fts_match({columns},?{expression_parameter})"));
     arguments.push(text(expression));
     arguments.push(Value::Integer(MAX_RETRIEVAL_CANDIDATES as i64));
     Statement {
         sql: format!(
-            "SELECT {projection},{fts},CASE WHEN typeof({RANK}) IN ('real','integer') THEN {RANK} END \
-FROM memory_records_fts JOIN memory_records r ON memory_records_fts.record_id=r.id WHERE {where_clause} \
-ORDER BY {RANK} ASC,r.updated_at DESC,r.id ASC LIMIT ?",
+            "SELECT {projection},{fts},{rank} FROM memory_records_fts \
+JOIN memory_records r ON memory_records_fts.record_id=r.id WHERE {where_clause} \
+ORDER BY {rank} DESC,r.updated_at DESC,r.id ASC LIMIT ?{limit_parameter}",
             projection = record_projection("r."),
             fts = fts_projection(),
             where_clause = clauses.join(" AND ")
@@ -449,7 +465,7 @@ mod tests {
     #[test]
     fn fts_syntax_in_user_text_is_quoted_rather_than_interpreted() {
         let expression = build_fts_literal_expression(r#"a" OR b NEAR c"#).expect("build");
-        assert!(expression.starts_with(r#""a""" OR "#), "got {expression}");
+        assert!(expression.starts_with(r#""a\"" OR "#), "got {expression}");
         assert!(
             expression.contains(r#""NEAR""#),
             "NEAR was not quoted: {expression}"

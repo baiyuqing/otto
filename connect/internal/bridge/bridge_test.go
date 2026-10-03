@@ -598,3 +598,20 @@ func TestMenuCommandsAreHandled(t *testing.T) {
 		})
 	}
 }
+
+func TestMarkdownFlagSeparatesAgentRepliesFromNotices(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("hello")
+	h.waitSent(1)
+	h.say("/allow") // connector notice: "No pending request."
+	h.waitSent(2)
+	h.plat.mu.Lock()
+	defer h.plat.mu.Unlock()
+	if s := h.plat.sent[0]; s.text != "echo: hello" || !s.markdown {
+		t.Errorf("agent reply = %+v, want markdown true", s)
+	}
+	if s := h.plat.sent[1]; s.text != "No pending request." || s.markdown {
+		t.Errorf("notice = %+v, want markdown false", s)
+	}
+}

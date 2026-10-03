@@ -421,8 +421,14 @@ const (
 	cancel
 )
 
-func (c *chat) send(ctx context.Context, replyTo, text string) {
-	if err := c.p.Send(ctx, c.id, replyTo, text); err != nil && ctx.Err() == nil {
+// send posts a connector notice, which is plain text.
+func (c *chat) send(ctx context.Context, replyTo, text string) { c.post(ctx, replyTo, text, false) }
+
+// sendReply posts the agent's Markdown reply.
+func (c *chat) sendReply(ctx context.Context, replyTo, text string) { c.post(ctx, replyTo, text, true) }
+
+func (c *chat) post(ctx context.Context, replyTo, text string, markdown bool) {
+	if err := c.p.Send(ctx, c.id, replyTo, text, markdown); err != nil && ctx.Err() == nil {
 		slog.Warn("send failed", "platform", c.p.Name(), "chat", c.id, "error", err)
 	}
 }
@@ -555,7 +561,7 @@ func (c *chat) turn(m Message) {
 		if text != "" {
 			text += "\n\n"
 		}
-		c.send(ctx, m.MessageID, text+"Stop reason: "+string(stop))
+		c.sendReply(ctx, m.MessageID, text+"Stop reason: "+string(stop))
 	default:
 		if proposed {
 			if text != "" {
@@ -564,7 +570,7 @@ func (c *chat) turn(m Message) {
 			text += memoryHint
 		}
 		if text != "" {
-			c.send(ctx, m.MessageID, text)
+			c.sendReply(ctx, m.MessageID, text)
 		}
 	}
 	if err == nil && stop == acp.StopReasonEndTurn {

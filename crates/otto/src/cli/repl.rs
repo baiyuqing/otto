@@ -98,7 +98,13 @@ impl<'a> Repl<'a> {
         let mut lines = spawn_reader(input);
         let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
         let mut notices = self.controller.notices_changed();
+        let mut memory_review = self.controller.memory_review_available_changed();
+        let mut memory_review_notice = false;
         loop {
+            if memory_review_notice {
+                let _ = writeln!(self.stdout, "{}", crate::app::MEMORY_REVIEW_AVAILABLE);
+                memory_review_notice = false;
+            }
             // Lines background reflection queued while a turn or command ran.
             for line in self.controller.take_notices() {
                 let _ = writeln!(self.stdout, "{line}");
@@ -135,6 +141,10 @@ impl<'a> Repl<'a> {
                     open = signal => Err(Some(open)),
                     // The top of the loop prints it and shows the prompt again.
                     _ = notices.changed() => Err(None),
+                    _ = memory_review.changed() => {
+                        memory_review_notice = true;
+                        Err(None)
+                    }
                     line = lines.recv() => Ok(line),
                 }
             };

@@ -384,6 +384,9 @@ func TestRunStopsOnContextDuringLongPoll(t *testing.T) {
 		if method == "getMe" {
 			return okR(map[string]any{"id": 99, "username": "OttoBot"})
 		}
+		if method != "getUpdates" {
+			return okR(true)
+		}
 		<-released // hold the poll open until the test ends
 		return okR([]any{})
 	})
@@ -634,5 +637,67 @@ func TestPollingDeliversAndAcknowledgesApproval(t *testing.T) {
 	}
 	if api.byMethod("answerCallbackQuery")[0].body["callback_query_id"] != "query1" {
 		t.Fatal("wrong acknowledgement")
+	}
+}
+
+func TestCommandMenuSynced(t *testing.T) {
+	api := botAPI(t)
+	store, _ := openStore(t)
+	r := start(newBot(api, store))
+	api.waitCalls(t, "getUpdates", 1)
+	r.stop(t)
+
+	var want []any
+	for _, c := range bridge.Commands {
+		want = append(want, map[string]any{"command": c.Name, "description": c.Description})
+	}
+	set := api.byMethod("setMyCommands")
+	if len(set) != 1 || !reflect.DeepEqual(set[0].body, map[string]any{"commands": want}) {
+		t.Fatalf("setMyCommands calls = %+v, want one with commands %v", set, want)
+	}
+	del := api.byMethod("deleteMyCommands")
+	if len(del) != 2 ||
+		!reflect.DeepEqual(del[0].body, map[string]any{"scope": map[string]any{"type": "all_private_chats"}}) ||
+		!reflect.DeepEqual(del[1].body, map[string]any{"scope": map[string]any{"type": "all_group_chats"}}) {
+		t.Fatalf("deleteMyCommands calls = %+v", del)
+	}
+}
+
+func TestCommandMenuFailureDoesNotStopRun(t *testing.T) {
+	var mu sync.Mutex
+	polled := false
+	api := newAPI(t, func(method string, _ map[string]any) resp {
+		switch method {
+		case "getMe":
+			return okR(map[string]any{"id": 99, "username": "OttoBot"})
+		case "setMyCommands", "deleteMyCommands":
+			return errR(400, "Bad Request", 0)
+		case "getUpdates":
+			mu.Lock()
+			defer mu.Unlock()
+			if !polled {
+				polled = true
+				return okR([]any{upd(1, privMsg(1, "hello"))})
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		return okR([]any{})
+	})
+	store, _ := openStore(t)
+	r := start(newBot(api, store))
+	api.waitCalls(t, "deleteMyCommands", 2)
+	select {
+	case m := <-r.msgs:
+		if m.Text != "hello" {
+			t.Fatalf("delivered %q", m.Text)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("update not delivered after command menu failure")
+	}
+	if err, _ := r.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(api.byMethod("setMyCommands")); n != 1 {
+		t.Errorf("setMyCommands called %d times, want 1 (no retry)", n)
 	}
 }

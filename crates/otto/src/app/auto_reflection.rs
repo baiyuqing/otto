@@ -432,8 +432,8 @@ mod tests {
         let memory = tempfile::tempdir().expect("memory");
         let runtime_config = MemoryRuntime {
             enabled: true,
-            backend: "sqlite".into(),
-            sqlite_path: memory
+            backend: "turso".into(),
+            turso_path: memory
                 .path()
                 .join("memory.db")
                 .to_string_lossy()

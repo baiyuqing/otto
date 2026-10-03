@@ -218,7 +218,7 @@ fn status(
     let _ = writeln!(
         stdout,
         "path: {}",
-        redactor.redact_string(&config.sqlite_path)
+        redactor.redact_string(&config.turso_path)
     );
     let _ = writeln!(stdout, "usable: {usable}");
     if !String::from_utf8_lossy(&warning).trim().is_empty() {
@@ -473,7 +473,7 @@ mod tests {
         let path = directory.join("otto.toml");
         std::fs::write(
             &path,
-            format!("[memory]\nenabled = true\n[memory.sqlite]\npath = \"{db_path}\"\n"),
+            format!("[memory]\nenabled = true\n[memory.turso]\npath = \"{db_path}\"\n"),
         )
         .expect("write config");
         path.to_string_lossy().into_owned()
@@ -516,7 +516,7 @@ mod tests {
             home.path(),
         );
         assert_eq!(code, 0, "stderr = {stderr}");
-        for want in ["enabled: true", "backend: sqlite", &db_path, "usable: true"] {
+        for want in ["enabled: true", "backend: turso", &db_path, "usable: true"] {
             assert!(stdout.contains(want), "stdout = {stdout:?}, want {want:?}");
         }
     }
@@ -576,8 +576,8 @@ mod tests {
         let config = memory_config(home.path(), &db_path);
         let runtime = MemoryRuntime {
             enabled: true,
-            backend: "sqlite".into(),
-            sqlite_path: db_path,
+            backend: "turso".into(),
+            turso_path: db_path,
             ..MemoryRuntime::default()
         };
         let (service, user, usable) =
@@ -644,8 +644,8 @@ mod tests {
 
         let runtime = MemoryRuntime {
             enabled: true,
-            backend: "sqlite".into(),
-            sqlite_path: db_path,
+            backend: "turso".into(),
+            turso_path: db_path,
             ..MemoryRuntime::default()
         };
         let (service, _, usable) =
@@ -739,7 +739,7 @@ mod tests {
         let invalid = home.path().join("invalid-memory.toml");
         std::fs::write(
             &invalid,
-            "[memory]\n[memory.sqlite]\nbusy_timeout = \"busy-timeout-secret\"\n",
+            "[memory]\n[memory.turso]\nbusy_timeout = \"busy-timeout-secret\"\n",
         )
         .expect("write config");
         let invalid = invalid.to_string_lossy().into_owned();
@@ -822,8 +822,8 @@ mod tests {
         let secret = secret.to_string_lossy().into_owned();
         let runtime = MemoryRuntime {
             enabled: true,
-            backend: "sqlite".into(),
-            sqlite_path: format!("{secret}/memory.db"),
+            backend: "turso".into(),
+            turso_path: format!("{secret}/memory.db"),
             ..MemoryRuntime::default()
         };
 
@@ -843,7 +843,7 @@ mod tests {
         );
         for want in [
             "enabled: true",
-            "backend: sqlite",
+            "backend: turso",
             "path: ",
             "memory.db",
             "usable: false",

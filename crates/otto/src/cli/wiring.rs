@@ -5,7 +5,7 @@
 //!
 //! Three properties of this wiring:
 //!
-//! - The SQLite store is the only backend and never encrypts at rest, so
+//! - The Turso store is the only backend and never encrypts at rest, so
 //!   `require_encryption` always fails startup.
 //! - The memory binding is created last, after the provider client, so there
 //!   is no failure left to unwind.
@@ -33,7 +33,7 @@ use crate::failover;
 use crate::mcp;
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};
 use crate::memory::scope::new_workspace_scope;
-use crate::memory::sqlite::{Options as StoreOptions, Store};
+use crate::memory::turso::{Options as StoreOptions, Store};
 use crate::memory::{
     BindOptions, Binding, ErrorKind, MAX_EXACT_GUARD_VALUE_BYTES, Scope, Service, new_id,
 };
@@ -111,10 +111,10 @@ pub fn open_memory_service(
         .map_err(|error| format!("build memory secret guard: {error}"))?;
 
     let options = StoreOptions {
-        busy_timeout: if config.sqlite_busy_timeout.is_zero() {
+        busy_timeout: if config.turso_busy_timeout.is_zero() {
             StoreOptions::default().busy_timeout
         } else {
-            config.sqlite_busy_timeout
+            config.turso_busy_timeout
         },
         new_id: Box::new(new_id),
         guard: Box::new(CompositeGuard::new(vec![
@@ -122,7 +122,7 @@ pub fn open_memory_service(
             Box::new(exact),
         ])),
     };
-    let store = match Store::open(std::path::Path::new(&config.sqlite_path), options) {
+    let store = match Store::open(std::path::Path::new(&config.turso_path), options) {
         Ok(store) => store,
         Err(error) => {
             if config.required {
@@ -141,7 +141,7 @@ pub fn open_memory_service(
     };
 
     // require_encryption is a security requirement, not an availability
-    // preference: the SQLite backend never encrypts at rest, so this fails
+    // preference: the Turso backend never encrypts at rest, so this fails
     // startup regardless of `required`.
     if config.require_encryption {
         let _ = store.close();
@@ -1524,8 +1524,8 @@ mod tests {
     fn enabled(path: String) -> MemoryRuntime {
         MemoryRuntime {
             enabled: true,
-            backend: "sqlite".into(),
-            sqlite_path: path,
+            backend: "turso".into(),
+            turso_path: path,
             ..MemoryRuntime::default()
         }
     }
@@ -1595,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn require_encryption_fails_because_sqlite_never_encrypts_at_rest() {
+    fn require_encryption_fails_because_turso_never_encrypts_at_rest() {
         let directory = tempfile::tempdir().expect("directory");
         let config = MemoryRuntime {
             require_encryption: true,

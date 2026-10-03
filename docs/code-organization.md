@@ -42,7 +42,7 @@ crates/otto-web: browser-facing WASM bindings
 ```
 
 `otto-core` must remain buildable for `wasm32-unknown-unknown`. Native-only
-concerns—filesystem access, network transports, process control, SQLite,
+concerns—filesystem access, network transports, process control, Turso,
 authentication, and the sandbox—belong in `otto`, not in `otto-core`.
 `make rust-wasm-check` enforces this boundary.
 
@@ -78,7 +78,7 @@ The other modules group native responsibilities:
 - **Remote and external integrations:** `provider/`, `mcp/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `session/`, `config/`, `memory/`,
-  `reflection/`, `usage.rs`, `failover/`, and `workflow.rs`.
+  `reflection/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, and `workflow.rs`.
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`, and
   `urlprivacy.rs`.

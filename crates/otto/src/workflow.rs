@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::storage::{Connection, OptionalExtension, Transaction, params};
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, Semaphore};
@@ -518,27 +518,21 @@ impl Store {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| unavailable())?;
         }
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| unavailable())?;
+        let connection = Connection::open(path).map_err(|_| unavailable())?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| unavailable())?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| unavailable())?;
         connection
-            .pragma_update(None, "journal_mode", "WAL")
+            .pragma_update("journal_mode", "WAL")
             .map_err(|_| unavailable())?;
         Self::initialize(connection)
     }
 
     #[cfg(test)]
     pub(crate) fn open_in_memory() -> Self {
-        Self::initialize(Connection::open_in_memory().expect("sqlite")).expect("schema")
+        Self::initialize(Connection::open_in_memory().expect("in-memory database")).expect("schema")
     }
 
     fn initialize(connection: Connection) -> Result<Self, String> {
@@ -633,17 +627,17 @@ impl Store {
                 [id],
                 |row| {
                     Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<i64>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, String>(9)?,
-                        row.get::<_, String>(10)?,
+                        row.get::<String>(0)?,
+                        row.get::<String>(1)?,
+                        row.get::<String>(2)?,
+                        row.get::<String>(3)?,
+                        row.get::<String>(4)?,
+                        row.get::<String>(5)?,
+                        row.get::<Option<String>>(6)?,
+                        row.get::<Option<i64>>(7)?,
+                        row.get::<Option<String>>(8)?,
+                        row.get::<String>(9)?,
+                        row.get::<String>(10)?,
                     ))
                 },
             )
@@ -676,19 +670,19 @@ impl Store {
         let rows = statement
             .query_map([id], |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<i64>(6)?,
+                    row.get::<String>(7)?,
+                    row.get::<String>(8)?,
+                    row.get::<String>(9)?,
+                    row.get::<Option<String>>(10)?,
+                    row.get::<Option<String>>(11)?,
+                    row.get::<Option<i64>>(12)?,
                 ))
             })
             .map_err(|_| unavailable())?;
@@ -756,14 +750,14 @@ impl Store {
                 [source_run_id],
                 |row| {
                     Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
+                        row.get::<String>(0)?,
+                        row.get::<String>(1)?,
+                        row.get::<String>(2)?,
+                        row.get::<String>(3)?,
+                        row.get::<String>(4)?,
+                        row.get::<String>(5)?,
+                        row.get::<String>(6)?,
+                        row.get::<String>(7)?,
                     ))
                 },
             )
@@ -883,7 +877,7 @@ impl Store {
             .query_row(
                 "SELECT status, attempt FROM workflow_steps WHERE run_id = ?1 AND id = ?2",
                 params![run_id, step_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?)),
             )
             .optional()
             .map_err(|_| unavailable())?
@@ -1040,13 +1034,13 @@ impl Store {
             let rows = statement
                 .query_map([workspace], |row| {
                     Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
+                        row.get::<String>(0)?,
+                        row.get::<String>(1)?,
+                        row.get::<i64>(2)?,
                     ))
                 })
                 .map_err(|_| unavailable())?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
+            rows.collect::<crate::storage::Result<Vec<_>>>()
                 .map_err(|_| unavailable())?
         };
         let mut runs = HashSet::new();
@@ -1109,10 +1103,10 @@ impl Store {
                 .map_err(|_| unavailable())?;
             let rows = statement
                 .query_map([run_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    Ok((row.get::<String>(0)?, row.get::<i64>(1)?))
                 })
                 .map_err(|_| unavailable())?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
+            rows.collect::<crate::storage::Result<Vec<_>>>()
                 .map_err(|_| unavailable())?
         };
         for (step_id, attempt) in attempts {
@@ -1221,9 +1215,9 @@ impl Store {
                 params![run_id, step_id],
                 |row| {
                     Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<String>(0)?,
+                        row.get::<String>(1)?,
+                        row.get::<String>(2)?,
                     ))
                 },
             )
@@ -1275,9 +1269,9 @@ impl Store {
                 [request_id],
                 |row| {
                     Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<String>(0)?,
+                        row.get::<String>(1)?,
+                        row.get::<String>(2)?,
                     ))
                 },
             )
@@ -1320,7 +1314,7 @@ impl Store {
                 .execute(
                     "UPDATE workflow_steps SET status = 'canceled'
                      WHERE run_id = ?1 AND status NOT IN ('succeeded','failed','canceled')",
-                    [&row.0],
+                    [row.0.as_str()],
                 )
                 .map_err(|_| unavailable())?;
             transaction
@@ -1449,9 +1443,9 @@ impl Store {
                 )
                 .map_err(|_| unavailable())?;
             let rows = statement
-                .query_map([workspace], |row| row.get::<_, String>(0))
+                .query_map([workspace], |row| row.get::<String>(0))
                 .map_err(|_| unavailable())?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
+            rows.collect::<crate::storage::Result<Vec<_>>>()
                 .map_err(|_| unavailable())?
         };
         ids.into_iter()
@@ -1478,7 +1472,7 @@ impl Store {
                 })
             })
             .map_err(|_| unavailable())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
+        rows.collect::<crate::storage::Result<Vec<_>>>()
             .map_err(|_| unavailable())
     }
 
@@ -1523,7 +1517,7 @@ impl Store {
                 })
             })
             .map_err(|_| unavailable())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
+        rows.collect::<crate::storage::Result<Vec<_>>>()
             .map_err(|_| unavailable())
     }
 }
@@ -2075,7 +2069,7 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
             connection
                 .execute(
                     &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
-                    [],
+                    (),
                 )
                 .map_err(|_| unavailable())?;
         }
@@ -2088,7 +2082,7 @@ fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<b
         .prepare(&format!("PRAGMA table_info({table})"))
         .map_err(|_| unavailable())?;
     let rows = statement
-        .query_map([], |row| row.get::<_, String>(1))
+        .query_map((), |row| row.get::<String>(1))
         .map_err(|_| unavailable())?;
     for name in rows {
         if name.map_err(|_| unavailable())? == column {
@@ -2191,10 +2185,10 @@ fn advance_ready(transaction: &Transaction<'_>, run_id: &str) -> Result<(), Stri
             .map_err(|_| unavailable())?;
         let rows = statement
             .query_map([run_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<String>(0)?, row.get::<String>(1)?))
             })
             .map_err(|_| unavailable())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
+        rows.collect::<crate::storage::Result<Vec<_>>>()
             .map_err(|_| unavailable())?
     };
     for (step_id, encoded) in pending {
@@ -2244,7 +2238,7 @@ fn copied_steps_at(
     let rows = statement
         .query_map(params![run_id, boundary_seq], |row| {
             Ok((
-                row.get::<_, String>(0)?,
+                row.get::<String>(0)?,
                 CopiedStep {
                     seq: row.get(1)?,
                     attempt: row.get(2)?,
@@ -2254,7 +2248,7 @@ fn copied_steps_at(
             ))
         })
         .map_err(|_| unavailable())?;
-    rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+    rows.collect::<crate::storage::Result<HashMap<_, _>>>()
         .map_err(|_| unavailable())
 }
 
@@ -3060,9 +3054,9 @@ prompt = "work"
             )
             .expect("query");
         let paths: Vec<String> = statement
-            .query_map([], |row| row.get(0))
+            .query_map((), |row| row.get(0))
             .expect("rows")
-            .collect::<rusqlite::Result<_>>()
+            .collect::<crate::storage::Result<_>>()
             .expect("paths");
         assert_eq!(paths, ["/tmp/attempt-1.jsonl", "/tmp/attempt-2.jsonl"]);
     }

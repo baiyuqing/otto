@@ -220,6 +220,9 @@ pub async fn run(
     cancel: &CancellationToken,
     terminate: &super::terminate::Terminate,
 ) -> i32 {
+    if args.first().is_some_and(|command| command == "storage") {
+        return super::storage::run(&args[1..], stdout, stderr);
+    }
     let startup_started = Instant::now();
     let mut startup_trace: StartupTrace;
     // These dispatch before flag parsing, because their argument grammars are

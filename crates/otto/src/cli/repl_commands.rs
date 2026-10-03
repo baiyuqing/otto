@@ -937,7 +937,7 @@ mod tests {
         }
     }
 
-    /// A controller whose builder carries a usable SQLite memory service.
+    /// A controller whose builder carries a usable Turso memory service.
     async fn controller_with_memory(
         workspace: &Path,
         sessions: &Path,
@@ -946,8 +946,8 @@ mod tests {
         let mut builder = testutil::builder(workspace, sessions);
         let runtime = MemoryRuntime {
             enabled: true,
-            backend: "sqlite".into(),
-            sqlite_path: store_path.to_string_lossy().into_owned(),
+            backend: "turso".into(),
+            turso_path: store_path.to_string_lossy().into_owned(),
             ..MemoryRuntime::default()
         };
         let (service, user_scope, usable) =

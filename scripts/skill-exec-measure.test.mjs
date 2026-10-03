@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { parseSession, windowPeaks, report } from "./skill-exec-measure.mjs";
@@ -66,65 +64,48 @@ test("a malformed line is skipped rather than failing the run", () => {
   assert.equal(parseSession(text).peakInput, 42);
 });
 
-test("window peaks separate the main context from each sub-agent", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "otto-measure-"));
-  try {
-    const database = path.join(directory, "usage.db");
-    await seed(database, [
-      { session: "s-1", task: "", input: 500 },
-      { session: "s-1", task: "", input: 800 },
-      { session: "s-1", task: "t-1", input: 200 },
-      { session: "s-1", task: "t-1", input: 250 },
-      { session: "s-2", task: "", input: 9000 },
-    ]);
+test("window peaks asks Otto for the selected database and session", () => {
+  const response = [
+    { window: "main", peakInput: 800, requests: 2 },
+    { window: "t-1", peakInput: 250, requests: 2 },
+  ];
+  let invocation;
 
-    const peaks = windowPeaks(database, "s-1");
+  const peaks = windowPeaks("usage.db", "s-1", (...args) => {
+    invocation = args;
+    return JSON.stringify(response);
+  });
 
-    assert.deepEqual(peaks, [
-      { window: "main", peakInput: 800, requests: 2 },
-      { window: "t-1", peakInput: 250, requests: 2 },
-    ]);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  assert.deepEqual(peaks, response);
+  assert.deepEqual(invocation, [
+    process.env.OTTO_BIN || "otto",
+    ["storage", "window-peaks", "usage.db", "s-1"],
+    { encoding: "utf8" },
+  ]);
 });
 
-test("the report names the largest window, which is what the design compares", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "otto-measure-"));
-  try {
-    const database = path.join(directory, "usage.db");
-    await seed(database, [
-      { session: "s-1", task: "", input: 800 },
-      { session: "s-1", task: "t-1", input: 250 },
-    ]);
-    const text = [header, assistant("a", 800, [{ tool: "agent", arguments: { agent: "normalize" } }])].join("\n");
-
-    const printed = report(parseSession(text), windowPeaks(database, "s-1"));
-
-    assert.match(printed, /peak across all windows\s*:\s*800/);
-    assert.match(printed, /normalize/);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-/// Writes rows in the shape `crates/otto/src/usage.rs` creates.
-async function seed(database, rows) {
-  const { DatabaseSync } = await import("node:sqlite");
-  const connection = new DatabaseSync(database);
-  connection.exec(`CREATE TABLE usage_events (
-    id INTEGER PRIMARY KEY, occurred_at TEXT NOT NULL, workspace TEXT NOT NULL,
-    session_id TEXT NOT NULL, task_id TEXT NOT NULL, provider TEXT NOT NULL,
-    profile TEXT NOT NULL, model TEXT NOT NULL, kind TEXT NOT NULL,
-    input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
-    cached_input_tokens INTEGER NOT NULL, usage_present INTEGER NOT NULL) STRICT;`);
-  const insert = connection.prepare(
-    `INSERT INTO usage_events (occurred_at, workspace, session_id, task_id, provider,
-      profile, model, kind, input_tokens, output_tokens, cached_input_tokens, usage_present)
-     VALUES (?, '/w', ?, ?, 'openai-compatible', 'p', 'm', 'provider', ?, 1, 0, 1)`,
+test("subprocess errors propagate to the caller", () => {
+  assert.throws(
+    () => windowPeaks("usage.db", "s-1", () => { throw new Error("otto failed"); }),
+    /otto failed/,
   );
-  for (const [index, row] of rows.entries()) {
-    insert.run(`2026-09-22T0${index}:00:00.000000000Z`, row.session, row.task, row.input);
-  }
-  connection.close();
-}
+});
+
+test("the report names the largest window, which is what the design compares", () => {
+  const text = [header, assistant("a", 800, [{ tool: "agent", arguments: { agent: "normalize" } }])].join("\n");
+  const peaks = windowPeaks("usage.db", "s-1", () => JSON.stringify([
+    { window: "main", peakInput: 800, requests: 2 },
+    { window: "t-1", peakInput: 250, requests: 2 },
+  ]));
+
+  const printed = report(parseSession(text), peaks);
+
+  assert.match(printed, /peak across all windows\s*:\s*800/);
+  assert.match(printed, /normalize/);
+});
+
+test("the measurement script has no direct SQLite dependency", async () => {
+  const source = await readFile(new URL("./skill-exec-measure.mjs", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /node:sqlite|DatabaseSync|CREATE TABLE usage_events/);
+});

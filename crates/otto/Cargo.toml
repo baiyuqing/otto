@@ -22,7 +22,10 @@ chrono = { workspace = true, features = ["clock", "std"] }
 libc.workspace = true
 nix.workspace = true
 regex.workspace = true
-rusqlite.workspace = true
+# Turso's debug SQL compiler exceeds the default 2 MiB worker stack.
+stacker = "=0.1.25"
+turso.workspace = true
+tempfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -55,7 +58,6 @@ unicode-width = "=0.2.2"
 agent-client-protocol-schema = { version = "=1.10.2", default-features = false }
 
 [dev-dependencies]
-tempfile.workspace = true
 # `pty` for the TUI's PTY smoke test (crates/otto/tests/tui_pty.rs).
 nix = { workspace = true, features = ["term"] }
 # `start_paused` drives the bash timeout deterministically without real waits.

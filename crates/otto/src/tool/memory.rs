@@ -336,7 +336,7 @@ fn proposal_result(outcome: crate::memory::Result<Vec<crate::memory::Candidate>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::sqlite::testsupport::open_temp;
+    use crate::memory::turso::testsupport::open_temp;
     use crate::memory::{
         CandidateRef, CandidateState, NAMESPACE_USER, RememberRequest, decide_default_policy,
     };

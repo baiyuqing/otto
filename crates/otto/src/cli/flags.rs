@@ -284,6 +284,8 @@ const USAGE: &str = r"Usage: otto [options]
        otto --attach [--socket PATH] [--resume ID | --continue]   terminal UI on a running otto serve
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
+       otto storage migrate <legacy.db> <new.db>
+       otto storage window-peaks <usage.db> <session-id>
        otto memory status|forget <id>
        otto mcp list|add|remove|enable|disable|login|logout ...
        otto workflow run|status|resume|fork|approve|reject|cancel ...

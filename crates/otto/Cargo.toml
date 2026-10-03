@@ -57,13 +57,14 @@ unicode-width = "=0.2.2"
 # insertion order (see docs/development.md).
 agent-client-protocol-schema = { version = "=1.10.2", default-features = false }
 
+tower.workspace = true
+
 [dev-dependencies]
 # `pty` for the TUI's PTY smoke test (crates/otto/tests/tui_pty.rs).
 nix = { workspace = true, features = ["term"] }
 # `start_paused` drives the bash timeout deterministically without real waits.
 # `net` gives the in-file provider tests a loopback TCP origin server.
 tokio = { workspace = true, features = ["test-util", "net"] }
-tower.workspace = true
 
 [[test]]
 name = "mcp_stdio"

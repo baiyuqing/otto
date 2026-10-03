@@ -25,6 +25,7 @@ mod approval;
 pub mod attach;
 mod command;
 mod memory;
+pub mod tcp;
 pub mod update;
 
 use std::collections::HashMap;
@@ -249,21 +250,33 @@ impl Connection {
         Ok(json!({ "sessionId": id }))
     }
 
-    /// A `_otto/memory/*` request. Only the local backend serves them: the
-    /// controller that owns the memory service lives in this process.
+    /// Memory review uses a controller owned by this process, either a local
+    /// ACP session or a serve session opened by this TCP connection.
     fn memory_request(&self, method: &str, params: Value) -> Reply {
-        let Backend::Local(local) = &self.backend else {
+        if matches!(&self.backend, Backend::Attach(relay) if relay.server.is_none()) {
             return Err(error(METHOD_NOT_FOUND, format!("unknown method {method}")));
+        }
+        let session_of = |id: &str| {
+            match &self.backend {
+                Backend::Local(local) => local
+                    .session(id)
+                    .map(|session| Arc::clone(&session.controller)),
+                Backend::Attach(relay) => relay
+                    .server
+                    .as_ref()
+                    .filter(|_| relay.slot(id).is_some())
+                    .and_then(|server| server.controller(id)),
+            }
+            .ok_or_else(unknown_session)
         };
-        let session_of = |id: &str| local.session(id).ok_or_else(unknown_session);
         if method == memory::PENDING_METHOD {
             let params: memory::PendingParams = serde_json::from_value(params)
                 .map_err(|failure| invalid_params(failure.to_string()))?;
-            memory::pending(&session_of(&params.session_id)?.controller, &params)
+            memory::pending(session_of(&params.session_id)?.as_ref(), &params)
         } else {
             let params: memory::ReviewParams = serde_json::from_value(params)
                 .map_err(|failure| invalid_params(failure.to_string()))?;
-            memory::review(&session_of(&params.session_id)?.controller, &params)
+            memory::review(session_of(&params.session_id)?.as_ref(), &params)
         }
     }
 
@@ -576,8 +589,7 @@ fn parse_prompt(params: &Value) -> Result<(String, String), Error> {
     Ok((session_id, text))
 }
 
-/// `local` advertises the `_otto/memory/*` methods, which only the local
-/// backend serves.
+/// Advertise memory review only when the controller lives in this process.
 fn initialize_result(local: bool) -> Reply {
     let capabilities = AgentCapabilities::new()
         .load_session(true)
@@ -664,7 +676,10 @@ impl Dispatcher {
         let connection = Arc::clone(&self.connection);
         match method.as_str() {
             "initialize" => {
-                let local = matches!(connection.backend, Backend::Local(_));
+                let local = match &connection.backend {
+                    Backend::Local(_) => true,
+                    Backend::Attach(relay) => relay.server.is_some(),
+                };
                 connection.reply(id, initialize_result(local));
             }
             "session/new" => {

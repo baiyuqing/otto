@@ -123,8 +123,11 @@ async fn run_serve(
 async fn await_startup(stdout: &LockedBuffer, stderr: &LockedBuffer) -> (String, String) {
     for _ in 0..400 {
         let text = stdout.text();
-        if let Some(line) = text.strip_prefix("otto serve: ")
-            && line.ends_with('\n')
+        if text.ends_with('\n')
+            && let Some(line) = text.lines().find_map(|line| {
+                line.strip_prefix("otto serve: http://")
+                    .map(|rest| format!("http://{rest}"))
+            })
         {
             let line = line.trim();
             let rest = line
@@ -313,4 +316,142 @@ async fn socket_and_tcp_listeners_serve_one_server_with_the_token_on_tcp_only() 
         .expect("serve stops")
         .expect("serve task");
     assert_eq!(code, 0, "stderr {:?}", stderr.text());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+
+    let (provider, _requests) = serve(Script {
+        replies: vec![text_reply("direct ACP reply")],
+        served: Arc::new(AtomicUsize::new(0)),
+    });
+    let mut fixture = fixture(&provider, "");
+    fixture
+        .environment
+        .push(b"OTTO_ACP_TOKEN=test-acp-listener-token".to_vec());
+    let cancel = CancellationToken::new();
+    // No Unix listener: ACP dispatch must remain entirely in process.
+    let (stdout, stderr, handle) = run_serve(
+        &fixture,
+        &[
+            "--sandbox",
+            "off",
+            "--listen",
+            "127.0.0.1:0",
+            "--acp-listen",
+            "127.0.0.1:0",
+        ],
+        cancel.clone(),
+    )
+    .await;
+    let (base, http_token) = await_startup(&stdout, &stderr).await;
+    let address = stdout
+        .text()
+        .lines()
+        .find_map(|line| line.strip_prefix("otto serve: ACP ").map(str::to_string))
+        .unwrap();
+    let stream = TcpStream::connect(&address).await.unwrap();
+    let mut acp = BufReader::new(stream);
+    acp.get_mut()
+        .write_all(b"Authorization: Bearer test-acp-listener-token\n")
+        .await
+        .unwrap();
+    let messages = [
+        json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{"protocolVersion":1, "clientCapabilities":{}}}),
+        json!({"jsonrpc":"2.0", "id":2, "method":"session/new", "params":{"cwd":fixture.workspace, "mcpServers":[]}}),
+    ];
+    let mut sid = String::new();
+    for (index, message) in messages.iter().enumerate() {
+        acp.get_mut()
+            .write_all(format!("{message}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(10), acp.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], index + 1, "{reply}");
+        assert!(reply.get("error").is_none(), "{reply}");
+        if index == 0 {
+            assert_eq!(
+                reply["result"]["agentCapabilities"]["_meta"]["otto"]["memoryReview"],
+                true
+            );
+        } else {
+            sid = reply["result"]["sessionId"].as_str().unwrap().to_string();
+        }
+    }
+    let prompt = json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+        "params":{"sessionId":sid, "prompt":[{"type":"text", "text":"hello TCP"}]}});
+    acp.get_mut()
+        .write_all(format!("{prompt}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut text = String::new();
+    loop {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(10), acp.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        if reply["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+            text.push_str(
+                reply["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap(),
+            );
+        }
+        if reply["id"] == 3 {
+            assert_eq!(reply["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+    assert_eq!(text, "direct ACP reply");
+    let response = reqwest::Client::new()
+        .get(format!("{base}/v1/sessions/{sid}/history"))
+        .bearer_auth(&http_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let history = response.text().await.unwrap();
+    assert!(
+        history.contains("hello TCP") && history.contains("direct ACP reply"),
+        "{history}"
+    );
+    // Shutdown must wake both authenticated protocol readers and clients that
+    // never finish authentication; neither should retain blocking threads.
+    let mut unauthenticated = TcpStream::connect(&address).await.unwrap();
+    cancel.cancel();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(7), handle)
+            .await
+            .expect("serve shutdown hung on ACP")
+            .unwrap(),
+        0,
+        "{}",
+        stderr.text()
+    );
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(1), acp.read_to_end(&mut buf))
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(1), unauthenticated.read_u8())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        closed.kind(),
+        std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    ));
+    assert!(!stdout.text().contains("test-acp-listener-token"));
+    assert!(!stderr.text().contains("test-acp-listener-token"));
 }

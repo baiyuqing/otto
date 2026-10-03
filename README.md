@@ -19,7 +19,7 @@ memory storage.
   sandboxing for shell commands by default.
 - **Keep going without you typing.** Persistent sessions, local memory, reusable
   skills, bounded sub-agents, timers, and `otto-connect` for Telegram and
-  Feishu chats.
+  Feishu chats, including direct ACP TCP access to `otto serve`.
 
 ## Install from source
 

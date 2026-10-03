@@ -718,6 +718,8 @@ pub struct ServeOptions<'a> {
     pub runtime: Runtime,
     /// At least one of its two fields is set; both set binds both listeners.
     pub listen: ServerRuntime,
+    pub acp_listen: String,
+    pub acp_token: String,
     /// The process sandbox the composition root opened, already behind its
     /// switch. [`run`] owns closing it.
     pub control: Arc<SandboxSwitch>,
@@ -749,6 +751,8 @@ pub async fn run(
         builder,
         runtime,
         listen,
+        acp_listen,
+        acp_token,
         control,
         reloader,
         open,
@@ -776,6 +780,17 @@ pub async fn run(
         }
     };
 
+    let acp = if acp_listen.is_empty() {
+        None
+    } else {
+        match crate::acp::tcp::bind(&acp_listen, &acp_token) {
+            Ok(listener) => Some((listener, acp_token)),
+            Err(message) => {
+                let _ = control.close().await;
+                return fail(stderr, &builder.redact_error(&message, Some(&runtime)));
+            }
+        }
+    };
     let serve_cancel = cancel.child_token();
     let bound = match bind(&listen) {
         Ok(bound) => bound,
@@ -785,6 +800,13 @@ pub async fn run(
         }
     };
     let Bound { tcp, socket, token } = bound;
+    if let Some((listener, _)) = &acp {
+        let _ = writeln!(
+            stdout,
+            "otto serve: ACP {}",
+            listener.local_addr().expect("bound address")
+        );
+    }
     if let Some(tcp) = &tcp {
         announce_listen(stdout, &tcp.address(), &token, open);
     }
@@ -850,7 +872,28 @@ pub async fn run(
     });
 
     let _stdin_watch = spawn_stdin_watch(exit_on_stdin_close, serve_cancel.clone());
-    let serve_error = serve_listeners(&server, tcp, socket, &serve_cancel).await;
+    let (serve_error, acp_error) = tokio::join!(
+        serve_listeners(&server, tcp, socket, &serve_cancel),
+        async {
+            if let Some((listener, token)) = acp {
+                let result = crate::acp::tcp::serve(
+                    listener,
+                    token,
+                    Arc::clone(&server),
+                    PathBuf::from(&builder.workspace_path),
+                    &serve_cancel,
+                )
+                .await;
+                if result.is_err() {
+                    serve_cancel.cancel();
+                }
+                result.err()
+            } else {
+                None
+            }
+        }
+    );
+    let serve_error = serve_error.or(acp_error);
     serve_cancel.cancel();
     server.cancel_token().cancel();
     if terminate.migrating() {

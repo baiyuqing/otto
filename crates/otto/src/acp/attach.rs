@@ -53,6 +53,7 @@ struct OpenApproval {
 
 pub(super) struct Relay {
     pub(super) client: Client,
+    pub(super) server: Option<Arc<crate::server::Server>>,
     /// Sessions this connection opened, with their prompt slots.
     sessions: Mutex<HashMap<String, Arc<PromptSlot>>>,
     lost: CancellationToken,
@@ -337,6 +338,7 @@ pub async fn run(
     let lost = CancellationToken::new();
     let relay = Relay {
         client,
+        server: None,
         sessions: Mutex::new(HashMap::new()),
         lost: lost.clone(),
     };
@@ -351,4 +353,31 @@ pub async fn run(
     )
     .await;
     i32::from(lost.is_cancelled())
+}
+
+/// ACP served by the HTTP server process, sharing its router and controllers.
+pub(super) async fn serve_in_process(
+    server: Arc<crate::server::Server>,
+    workspace: PathBuf,
+    input: Box<dyn BufRead + Send>,
+    output: &mut (dyn Write + Send),
+    cancel: &CancellationToken,
+) {
+    let lost = CancellationToken::new();
+    let relay = Relay {
+        client: Client::in_process(server.socket_router()),
+        server: Some(server),
+        sessions: Mutex::new(HashMap::new()),
+        lost: lost.clone(),
+    };
+    drive(
+        workspace,
+        Backend::Attach(relay),
+        input,
+        output,
+        &lost,
+        cancel,
+        |_| (),
+    )
+    .await;
 }

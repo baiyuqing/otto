@@ -1,6 +1,6 @@
-// Package agent runs one ACP agent child process and exposes the session
-// operations the bridge needs. The process is started on first use and
-// restarted on the next use after it exits.
+// Package agent owns one ACP child process or TCP connection and exposes the
+// session operations the bridge needs. It connects on first use and reconnects
+// on the next use after the transport closes.
 package agent
 
 import (
@@ -33,12 +33,16 @@ var ErrClosed = errors.New("agent is closed")
 // ExitError reports that the agent process exited while a call was in
 // flight (or before it could start). Stderr holds the last 20 lines.
 type ExitError struct {
+	Remote bool
 	Status string
 	Stderr []string
 }
 
 func (e *ExitError) Error() string {
 	s := "agent process exited (" + e.Status + ")"
+	if e.Remote {
+		s = "ACP connection closed"
+	}
 	if len(e.Stderr) > 0 {
 		s += "; last stderr lines:\n" + strings.Join(e.Stderr, "\n")
 	}
@@ -58,6 +62,8 @@ type Handler interface {
 // behavior.
 type Options struct {
 	Command []string // program and arguments
+	Address string   // authenticated ACP TCP, instead of a child process
+	Token   string
 	Dir     string   // working directory of the process and cwd of every session; absolute
 	Env     []string // child environment; nil inherits the connector's
 
@@ -171,16 +177,20 @@ func (a *Agent) Cancel(ctx context.Context, id string) error {
 	return p.wrap(p.conn.Cancel(ctx, acp.CancelNotification{SessionId: acp.SessionId(id)}))
 }
 
-// Kill sends SIGKILL to the running process, if any. The next operation
-// starts a new process.
+// Kill terminates the child or disconnects TCP. It never kills a remote
+// server. The next operation starts a process or reconnects.
 func (a *Agent) Kill() {
 	if p := a.live(); p != nil {
-		_ = p.cmd.Process.Kill()
+		if p.cmd != nil {
+			_ = p.cmd.Process.Kill()
+		} else {
+			_ = p.stdin.Close()
+		}
 		<-p.exited
 	}
 }
 
-// Close closes the process's stdin, waits up to CloseWait for it to exit,
+// Close closes the transport, waits up to CloseWait for the child to exit,
 // then kills it. Later calls return ErrClosed.
 func (a *Agent) Close() error {
 	a.mu.Lock()
@@ -195,7 +205,11 @@ func (a *Agent) Close() error {
 	case <-p.exited:
 	case <-time.After(a.opts.CloseWait):
 		slog.Warn("agent did not exit after stdin closed; killing", "wait", a.opts.CloseWait)
-		_ = p.cmd.Process.Kill()
+		if p.cmd != nil {
+			_ = p.cmd.Process.Kill()
+		} else {
+			_ = p.stdin.Close()
+		}
 		<-p.exited
 	}
 	return nil

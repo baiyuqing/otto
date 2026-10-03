@@ -720,6 +720,11 @@ impl Server {
 
     // ---- registry ----
 
+    /// Shared controller for an already-open session; used by ACP memory review.
+    pub(crate) fn controller(&self, id: &str) -> Option<Arc<Controller>> {
+        self.lookup(id).map(|session| Arc::clone(&session.ctrl))
+    }
+
     fn lookup(&self, id: &str) -> Option<Arc<OpenSession>> {
         self.sessions
             .lock()

@@ -343,10 +343,12 @@ Key points:
   remaining deadline; compaction and follow-up work never reset that budget.
   `cancellation_grace` defaults to `5s` and bounds cooperative cleanup before
   Bash or a shared stdio MCP server is force-stopped.
-- Generic provider requests are not automatically retried after dispatch.
-  This includes OpenAI-compatible and ChatGPT requests that receive 429/5xx,
-  lose the connection, or have an interrupted stream, even when no response
-  delta was seen.
+- ChatGPT transport failures before any streamed output are retried up to
+  three times, waiting 1, 2, then 4 seconds within the same turn deadline.
+  Only the current model request is repeated; previously executed tools are
+  not rerun. HTTP errors (including 429/5xx), authorization errors, protocol
+  errors, and failures after streamed output are not retried.
+  OpenAI-compatible requests are not automatically retried after dispatch.
 
 Deadline checks are cooperative at synchronous filesystem and SQLite
 boundaries: Otto checks before and after the call, but does not detach an
@@ -606,9 +608,11 @@ OTTO_UI=repl otto
   `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and the
   seconds since the turn started. The phase is `waiting for model`,
   `reasoning`, `responding`, `compacting`, or `running TOOL ARGS` (arguments
-  truncated to 60 characters). A `retry A/M after REASON, waiting DELAY` phase
-  is reserved for an operation whose concrete adapter has proved replay safe;
-  generic provider failures after dispatch are not retried.
+  truncated to 60 characters). During a ChatGPT transport retry, it shows
+  `retry A/M after REASON, waiting Ns`, with a live countdown, followed by
+  `requesting` once the delay ends. `A/M` counts retries (1/3 through 3/3);
+  the phase and turn elapsed times keep updating. Esc or Ctrl+C cancels the
+  retry, including its wait. The Web UI uses the same status text.
 - When a thinking effort is set and the provider returns reasoning summaries,
   the summary text streams as a dimmed `reasoning` entry before the reply and
   is saved in the session, so a resumed session shows it again.

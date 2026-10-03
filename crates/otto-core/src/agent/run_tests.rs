@@ -1599,7 +1599,14 @@ async fn automatic_compaction_disabled_skips_both_paths() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn a_manual_compaction_persists_the_summary_and_emits_the_plan_first() {
-    let provider = FakeProvider::new(vec![Turn::summary(&structured_summary())]);
+    let mut turn = Turn::summary(&structured_summary());
+    turn.events.push(StreamEvent::Retry {
+        attempt: 2,
+        max_attempts: 4,
+        delay: std::time::Duration::from_secs(1),
+        reason: "connection interrupted".into(),
+    });
+    let provider = FakeProvider::new(vec![turn]);
     let agent = Agent::new(
         provider,
         EchoExecutor::default(),
@@ -1626,6 +1633,7 @@ async fn a_manual_compaction_persists_the_summary_and_emits_the_plan_first() {
         [
             "compaction_started",
             "compaction_planned",
+            "provider_retry",
             "provider_api_call",
             "compaction_completed"
         ]
@@ -2765,24 +2773,36 @@ fn text_request<'a>(user_text: &'a str, maximum_bytes: usize) -> super::oneshot:
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn complete_text_sends_one_tool_less_redacted_message_and_touches_no_history() {
     const SECRET: &str = "sk-live-abcdef";
+    let mut turn = Turn::summary("the answer");
+    turn.events.push(StreamEvent::Retry {
+        attempt: 2,
+        max_attempts: 4,
+        delay: std::time::Duration::from_secs(1),
+        reason: "connection interrupted".into(),
+    });
     let agent = Agent::with_redactor(
-        FakeProvider::new(vec![Turn::summary("the answer")]),
+        FakeProvider::new(vec![turn]),
         EchoExecutor::default(),
         MemorySession::new(),
         options(),
         Redactor::new(&[SECRET.to_owned()]),
     );
 
+    let mut events = Vec::new();
     let response = agent
         .complete_text(
             &text_request(&format!("the key is {SECRET}"), 1024),
-            &mut |_| {},
+            &mut |event| events.push(event),
             &CancellationToken::new(),
         )
         .await
         .expect("complete");
 
     assert_eq!(response.text, "the answer");
+    assert_eq!(names(&events), ["provider_retry", "provider_api_call"]);
+    assert!(
+        matches!(&events[0], Event::ProviderRetry { operation_id, attempt: 2, .. } if !operation_id.as_str().is_empty())
+    );
     assert!(response.usage_present);
     assert_eq!(response.usage.output_tokens, 7);
     let requests = agent.provider().requests();

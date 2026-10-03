@@ -106,6 +106,13 @@ earlier of their local policy and the parent's remaining budget. `otto-core`
 receives only the wasm-safe `operation::OperationControl` capability and must
 not read a native clock. Provider retries, compaction, task queueing, and
 workflow attempts consume the same logical budget rather than restarting it.
+The ChatGPT transport retries only connection/send/body failures before any
+streamed output, at most three times with 1/2/4-second backoff. It repeats only
+the borrowed provider request, never tools or the agent turn. HTTP, auth, and
+stream-codec errors are terminal; retries preserve cancellation, the original
+deadline, actual send-attempt counts, and unknown effect certainty on failure.
+Retry progress uses the existing provider event; core owns countdown formatting
+and native/browser frontends supply elapsed time.
 The fixed race rule is completion-first only after the owner has obtained and
 validated the result; otherwise the typed stop reason wins. Effectful futures
 are never detached with session writers, leases, child processes, or mutable

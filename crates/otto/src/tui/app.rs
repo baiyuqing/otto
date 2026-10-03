@@ -436,6 +436,7 @@ pub(crate) struct App {
     /// The running turn's phase and when it began; see
     /// [`otto_core::wire::transcript::phase`].
     phase: (String, Instant),
+    retry_event: Option<WireEvent>,
     pub status: Option<String>,
     ctrl_c_armed_at: Option<Instant>,
     /// Snapshot of this session's sub-agent registry, refreshed from the
@@ -492,6 +493,7 @@ impl App {
             show_details: false,
             busy_since: None,
             phase: (String::new(), Instant::now()),
+            retry_event: None,
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
@@ -534,6 +536,7 @@ impl App {
         let now = Instant::now();
         self.busy_since = Some(now);
         self.phase = ("waiting for model".into(), now);
+        self.retry_event = None;
     }
 
     pub fn end_turn(&mut self) {
@@ -548,7 +551,16 @@ impl App {
     /// the status line in [`super::render`].
     pub fn thinking(&self) -> Option<TurnStatus> {
         Some(TurnStatus {
-            phase: self.phase.0.clone(),
+            phase: self
+                .retry_event
+                .as_ref()
+                .and_then(|event| {
+                    transcript::phase_at(
+                        event,
+                        self.phase.1.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    )
+                })
+                .unwrap_or_else(|| self.phase.0.clone()),
             phase_elapsed: self.phase.1.elapsed(),
             turn_elapsed: self.busy_since?.elapsed(),
         })
@@ -1720,6 +1732,7 @@ impl App {
             && phase != self.phase.0
         {
             self.phase = (phase, Instant::now());
+            self.retry_event = (event.event_type == "provider_retry").then(|| event.clone());
         }
         match event.event_type.as_str() {
             "reasoning_delta" => {
@@ -2273,6 +2286,7 @@ mod tests {
             show_details: false,
             busy_since: None,
             phase: (String::new(), Instant::now()),
+            retry_event: None,
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
@@ -2309,6 +2323,7 @@ mod tests {
             show_details: false,
             busy_since: None,
             phase: (String::new(), Instant::now()),
+            retry_event: None,
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
@@ -2631,6 +2646,7 @@ mod tests {
             show_details: false,
             busy_since: None,
             phase: (String::new(), Instant::now()),
+            retry_event: None,
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
@@ -2670,6 +2686,7 @@ mod tests {
             show_details: false,
             busy_since: None,
             phase: (String::new(), Instant::now()),
+            retry_event: None,
             status: None,
             ctrl_c_armed_at: None,
             tasks: Vec::new(),
@@ -2953,6 +2970,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn retry_status_counts_down_and_keeps_elapsed_time() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&Backend::Local(&controller));
+        app.start_turn();
+        app.apply_event(&wire_frame(&Event::ProviderRetry {
+            operation_id: otto_core::model::OperationId::new("op_retry").unwrap(),
+            attempt: 2,
+            max_attempts: 4,
+            delay: Duration::from_secs(4),
+            reason: "connection interrupted".into(),
+        }));
+        assert_eq!(
+            app.thinking().unwrap().phase,
+            "retry 1/3 after connection interrupted, waiting 4s"
+        );
+        app.phase.1 = Instant::now() - Duration::from_millis(2100);
+        let status = app.thinking().unwrap();
+        assert_eq!(
+            status.phase,
+            "retry 1/3 after connection interrupted, waiting 2s"
+        );
+        assert_eq!(status.phase_elapsed.as_secs(), 2);
+        app.phase.1 = Instant::now() - Duration::from_secs(5);
+        assert_eq!(
+            app.thinking().unwrap().phase,
+            "retry 1/3 after connection interrupted, requesting"
+        );
+        app.apply_event(&wire_frame(&Event::TextDelta { text: "ok".into() }));
+        assert_eq!(app.thinking().unwrap().phase, "responding");
+        app.end_turn();
+        assert!(app.thinking().is_none());
+    }
+
     /// The phase duration counts from the phase's first event: each further
     /// delta of the same phase does not restart it.
     #[tokio::test]
@@ -2967,6 +3020,7 @@ mod tests {
         let started = app.phase.1;
         app.apply_event(&wire_frame(&Event::ReasoningDelta { text: "b".into() }));
         assert_eq!(app.phase, ("reasoning".to_string(), started));
+        assert!(app.retry_event.is_none());
 
         app.apply_event(&wire_frame(&Event::TextDelta { text: "ok".into() }));
         assert_eq!(app.phase.0, "responding");

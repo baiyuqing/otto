@@ -816,6 +816,22 @@ async fn run_turn<B: Backend>(
     line: String,
     image: Option<Block>,
 ) -> Result<(), ReplError> {
+    if image.is_none() {
+        match controller.approval_message(&line, cancel).await {
+            Ok(Some(reply)) => {
+                app.push_system(reply.text);
+                if reply.queued {
+                    app.queued_input = Some(line);
+                }
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(message) => {
+                app.push_system(message);
+                return Ok(());
+            }
+        }
+    }
     app.start_turn();
     let turn = cancel.child_token();
     let mut error_rendered = false;

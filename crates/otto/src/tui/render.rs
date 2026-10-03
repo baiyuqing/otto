@@ -730,7 +730,7 @@ fn approval_lines(approval: &ApprovalDialog, width: u16) -> Vec<Line<'static>> {
         });
     }
     lines.push(Line::from(Span::styled(
-        "↑/↓ select · Enter confirm · Esc cancel",
+        "↑/↓ select · Enter confirm · Esc cancel · c chat",
         Style::default().add_modifier(Modifier::DIM),
     )));
     lines

@@ -107,6 +107,21 @@ impl Client {
         Ok(Self { http })
     }
 
+    pub async fn approval_message(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/approvals/message"),
+                &json!({"text":text}),
+            ))
+            .await?;
+        serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
+            .map_err(unreachable_error)
+    }
+
     /// `GET /healthz`.
     pub async fn healthz(&self) -> Result<(), Error> {
         self.send(self.http.get(format!("{BASE}/healthz")))

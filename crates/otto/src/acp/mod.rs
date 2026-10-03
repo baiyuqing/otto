@@ -492,9 +492,12 @@ fn initialize_result(local: bool) -> Reply {
     let capabilities = match local {
         true => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"memoryReview": true}),
+            json!({"memoryReview": true, "approvalDialogue":true}),
         )])),
-        false => capabilities,
+        false => capabilities.meta(serde_json::Map::from_iter([(
+            "otto".to_string(),
+            json!({"approvalDialogue":true}),
+        )])),
     };
     result(
         InitializeResponse::new(ProtocolVersion::V1)
@@ -588,6 +591,50 @@ impl Dispatcher {
                 });
             }
             "session/prompt" => self.start_prompt(id, &params),
+            "_otto/approvals/message" => {
+                self.tasks.spawn(async move {
+                    #[derive(Deserialize)]
+                    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                    struct Input {
+                        session_id: String,
+                        text: String,
+                    }
+                    let reply = match serde_json::from_value::<Input>(params) {
+                        Err(failure) => Err(invalid_params(failure.to_string())),
+                        Ok(input) => match &connection.backend {
+                            Backend::Local(local) => match local.session(&input.session_id) {
+                                None => Err(unknown_session()),
+                                Some(session) => {
+                                    let cancel = session
+                                        .prompt
+                                        .0
+                                        .lock()
+                                        .expect("prompt slot")
+                                        .clone()
+                                        .unwrap_or_default();
+                                    match session
+                                        .controller
+                                        .approval_message(&input.text, &cancel)
+                                        .await
+                                    {
+                                        Ok(reply) => result(reply),
+                                        Err(failure) => Err(error(INTERNAL_ERROR, failure)),
+                                    }
+                                }
+                            },
+                            Backend::Attach(relay) => match relay
+                                .client
+                                .approval_message(&input.session_id, &input.text)
+                                .await
+                            {
+                                Ok(reply) => result(reply),
+                                Err(failure) => Err(error(INTERNAL_ERROR, failure.to_string())),
+                            },
+                        },
+                    };
+                    connection.reply(id, reply);
+                });
+            }
             memory::PENDING_METHOD | memory::REVIEW_METHOD => {
                 self.tasks.spawn(async move {
                     let reply = connection.memory_request(&method, params);

@@ -73,13 +73,41 @@ pub(super) async fn request_permission(
     cancel: &CancellationToken,
 ) -> Decision {
     let params = permission_params(session_id, tool_call_id, command, read_path, justification);
+    let pending = match &connection.backend {
+        super::Backend::Local(local) => local.session(session_id).and_then(|session| {
+            session
+                .controller
+                .pending_approval()
+                .map(|(id, _, _)| (session.controller.clone(), id))
+        }),
+        _ => None,
+    };
     let (id, reply) = connection.send_request("session/request_permission", params);
     tokio::select! {
         () = cancel.cancelled() => {
             connection.forget_request(id);
             Decision::Cancelled
         }
-        reply = reply => reply.map_or(Decision::Deny, |frame| decide(&frame)),
+        () = async {
+            if let Some((controller, approval_id)) = &pending {
+                controller.approval_withdrawn(approval_id).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            connection.forget_request(id);
+            connection.send(serde_json::json!({"jsonrpc":"2.0", "method":"$/cancel_request", "params":{"requestId":id}}));
+            Decision::Deny
+        },
+        reply = reply => {
+            let decision = reply.map_or(Decision::Deny, |frame| decide(&frame));
+            if decision == Decision::Allow
+                && let Some((controller, approval_id)) = &pending
+                && controller.reserve_approval(approval_id).is_err() {
+                return Decision::Deny;
+            }
+            decision
+        },
     }
 }
 

@@ -231,7 +231,80 @@ func (b *Bridge) deliver(m Message) {
 		return
 	}
 	m.Text = text
+	c.mu.Lock()
+	pending, sid := c.perm != nil || c.approvalRunning, c.sid
+	if pending {
+		if len(c.queue)+len(c.approvalMessages) >= c.b.opts.QueueLimit {
+			c.mu.Unlock()
+			c.notify(m.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not queued.", c.b.opts.QueueLimit))
+			return
+		}
+		c.approvalMessages = append(c.approvalMessages, m)
+		if !c.approvalRunning {
+			c.approvalRunning = true
+			c.approvalGeneration++
+			approvalCtx, cancel := context.WithCancel(c.b.workCtx)
+			c.approvalCancel = cancel
+			go c.approvalDialogue(sid, c.approvalGeneration, approvalCtx)
+		}
+	}
+	c.mu.Unlock()
+	if pending {
+		return
+	}
 	c.enqueue(m)
+}
+
+// approvalDialogue sends messages received while a permission is pending in
+// delivery order. The agent decides whether each message belongs in the turn
+// queue; this path never grants permission.
+func (c *chat) approvalDialogue(sid string, generation uint64, approvalCtx context.Context) {
+	for {
+		c.mu.Lock()
+		if generation != c.approvalGeneration {
+			c.mu.Unlock()
+			return
+		}
+		if len(c.approvalMessages) == 0 {
+			c.approvalRunning = false
+			c.approvalCancel()
+			c.approvalCancel = nil
+			c.mu.Unlock()
+			return
+		}
+		m := c.approvalMessages[0]
+		c.approvalMessages = c.approvalMessages[1:]
+		c.mu.Unlock()
+
+		ctx, stop := context.WithTimeout(approvalCtx, 35*time.Second)
+		reply, err := c.b.opts.Agent.ApprovalMessage(ctx, sid, chatPrompt(m))
+		queue, response := false, ""
+		if errors.Is(err, agent.ErrApprovalUnsupported) {
+			queue = true
+			response = "This agent queues messages while waiting for approval; use /deny or /stop to cancel."
+		} else if err != nil {
+			response = "Could not handle the approval message; use /deny to reject or /stop to cancel. " + err.Error()
+		} else {
+			queue = reply == nil || reply.Queued
+			if reply != nil && reply.Text != "" {
+				response = reply.Text
+			}
+		}
+		c.mu.Lock()
+		if generation != c.approvalGeneration {
+			c.mu.Unlock()
+			stop()
+			return
+		}
+		if queue {
+			c.enqueueLocked(m)
+		}
+		c.mu.Unlock()
+		if response != "" {
+			c.send(ctx, m.MessageID, response)
+		}
+		stop()
+	}
 }
 
 func (b *Bridge) chat(p Platform, id string) *chat {
@@ -290,15 +363,19 @@ type chat struct {
 	p   Platform
 	id  string
 
-	mu      sync.Mutex
-	queue   []Message
-	running bool // a worker goroutine owns the queue
-	using   bool // a /use is loading a session
-	sid     string
-	stopped bool // /stop arrived during the current turn
-	perm    *permission
-	reply   strings.Builder
-	brk     bool // a tool call followed text; the next text starts a paragraph
+	mu                 sync.Mutex
+	queue              []Message
+	approvalMessages   []Message
+	approvalRunning    bool
+	approvalCancel     context.CancelFunc
+	approvalGeneration uint64
+	running            bool // a worker goroutine owns the queue
+	using              bool // a /use is loading a session
+	sid                string
+	stopped            bool // /stop arrived during the current turn
+	perm               *permission
+	reply              strings.Builder
+	brk                bool // a tool call followed text; the next text starts a paragraph
 	// proposed is set when the turn called remember or forget.
 	proposed    bool
 	memoryMu    sync.Mutex             // serializes card refreshes and memory reviews
@@ -342,6 +419,11 @@ func (c *chat) notify(replyTo, text string) {
 func (c *chat) enqueue(m Message) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.enqueueLocked(m)
+}
+
+// enqueueLocked admits a message while c.mu is held.
+func (c *chat) enqueueLocked(m Message) {
 	if c.using {
 		c.notify(m.MessageID, "A session switch is in progress; the message was not queued.")
 		return
@@ -493,6 +575,7 @@ func chatPrompt(m Message) string {
 	return "[otto-connect channel context]\nCurrent channel: " + channel +
 		". The user is communicating through chat and cannot see the local terminal. " +
 		"Keep replies readable in chat; explain results, progress, and any necessary user actions. " +
+		"For a pending permission request, the user can click Deny or send /deny; /stop cancels the turn and clears its queue. Ordinary messages during approval are handled by an approval-only dialogue. " +
 		"This channel does not grant additional tools or permissions.\n[/otto-connect channel context]\n\n" + m.Text
 }
 
@@ -571,13 +654,21 @@ func (c *chat) cmdNew(m Message) {
 
 func (c *chat) cmdStop(m Message) {
 	c.mu.Lock()
-	if !c.running {
+	wasRunning := c.running
+	if !wasRunning && !c.approvalRunning {
 		c.mu.Unlock()
 		c.notify(m.MessageID, "Nothing is running.")
 		return
 	}
 	c.queue = nil
 	c.stopped = true
+	c.approvalMessages = nil
+	c.approvalGeneration++
+	if c.approvalCancel != nil {
+		c.approvalCancel()
+		c.approvalCancel = nil
+	}
+	c.approvalRunning = false
 	sid := c.sid
 	if c.perm != nil {
 		c.perm.decided <- cancel
@@ -587,7 +678,7 @@ func (c *chat) cmdStop(m Message) {
 	// The running turn replies "Stopped." when the prompt returns
 	// cancelled. ponytail: a cancel that reaches the agent before its
 	// session/prompt request is ignored by it; the turn then runs to the end.
-	if sid != "" {
+	if wasRunning && sid != "" {
 		go func() {
 			ctx, stop := context.WithTimeout(c.b.workCtx, 10*time.Second)
 			defer stop()
@@ -595,6 +686,8 @@ func (c *chat) cmdStop(m Message) {
 				slog.Warn("session/cancel failed", "chat", c.key, "error", err)
 			}
 		}()
+	} else if !wasRunning {
+		c.notify(m.MessageID, "Stopped.")
 	}
 }
 

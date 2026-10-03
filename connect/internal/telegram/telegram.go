@@ -207,6 +207,29 @@ type update struct {
 	Callback *callbackQuery `json:"callback_query"`
 }
 
+// syncCommands sets the default-scope command menu to bridge.Commands and
+// deletes the private-chat and group-chat lists, which Telegram would show
+// instead. Each call is tried once; a failure is logged and the rest still run.
+func (b *Bot) syncCommands(ctx context.Context) {
+	cmds := make([]map[string]string, len(bridge.Commands))
+	for i, c := range bridge.Commands {
+		cmds[i] = map[string]string{"command": c.Name, "description": c.Description}
+	}
+	calls := []struct {
+		method string
+		body   any
+	}{
+		{"setMyCommands", map[string]any{"commands": cmds}},
+		{"deleteMyCommands", map[string]any{"scope": map[string]string{"type": "all_private_chats"}}},
+		{"deleteMyCommands", map[string]any{"scope": map[string]string{"type": "all_group_chats"}}},
+	}
+	for _, c := range calls {
+		if err := b.call(ctx, c.method, c.body, nil); err != nil {
+			slog.Warn("telegram command menu update failed", "method", c.method, "err", err)
+		}
+	}
+}
+
 // Run identifies the bot with getMe, then polls getUpdates until ctx ends.
 // It returns an error only when getMe is rejected with 401 or 404.
 func (b *Bot) Run(ctx context.Context, deliver func(bridge.Message)) error {
@@ -234,6 +257,7 @@ func (b *Bot) Run(ctx context.Context, deliver func(bridge.Message)) error {
 	b.mention = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_])@` + name + `\b\s*`)
 	b.cmdToBot = regexp.MustCompile(`(?i)^(/\w+)@` + name + `\b`)
 	slog.Info("telegram bot ready", "username", me.Username)
+	b.syncCommands(ctx)
 
 	// next is kept in memory so a failed persist does not re-fetch updates
 	// that were already handled.

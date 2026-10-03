@@ -3,10 +3,12 @@ package bridge
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/connect/internal/agent/fake"
 )
@@ -568,5 +570,67 @@ func TestChatPromptPreservesUserText(t *testing.T) {
 		} else if !strings.HasSuffix(got, "[/otto-connect channel context]\n\n"+text) {
 			t.Fatalf("user text changed: %q", got)
 		}
+	}
+}
+
+func TestChatPromptSendsAgentCommandsAsTyped(t *testing.T) {
+	for _, text := range []string{"/compact", " /compact keep the API names", "/compact\nkeep names", "/context"} {
+		if got := chatPrompt(Message{Platform: "telegram", Text: text}); got != text {
+			t.Errorf("chatPrompt(%q) = %q, want the text unchanged", text, got)
+		}
+	}
+	for _, text := range []string{"/contextual question", "/stop", "please /compact"} {
+		if got := chatPrompt(Message{Platform: "telegram", Text: text}); got == text {
+			t.Errorf("chatPrompt(%q) has no channel context", text)
+		}
+	}
+}
+
+func TestMenuCommandsAreHandled(t *testing.T) {
+	t.Parallel()
+	name := regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
+	for _, c := range Commands {
+		if !name.MatchString(c.Name) {
+			t.Errorf("command name %q does not match Telegram's rule", c.Name)
+		}
+		if n := utf8.RuneCountInString(c.Description); n < 1 || n > 256 {
+			t.Errorf("/%s description has %d characters, want 1..256", c.Name, n)
+		}
+		t.Run(c.Name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, setup{})
+			if c.Agent {
+				// The agent runs it: the text reaches it unchanged.
+				h.say("/" + c.Name)
+				h.waitFor(func() bool { return slices.Contains(fake.Calls(h.dir), "start:/"+c.Name) }, "agent command prompt")
+				return
+			}
+			// The chat queue is ordered, so if the command had been
+			// forwarded as a prompt it would start before the marker.
+			h.say("/" + c.Name)
+			settle() // /use refuses messages that arrive while it runs
+			h.say("marker")
+			h.waitFor(func() bool { return slices.Contains(fake.Calls(h.dir), "start:marker") }, "marker prompt")
+			if calls := fake.Calls(h.dir); slices.Contains(calls, "start:/"+c.Name) {
+				t.Errorf("/%s was sent to the agent as a prompt; agent calls = %q", c.Name, calls)
+			}
+		})
+	}
+}
+
+func TestMarkdownFlagSeparatesAgentRepliesFromNotices(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("hello")
+	h.waitSent(1)
+	h.say("/allow") // connector notice: "No pending request."
+	h.waitSent(2)
+	h.plat.mu.Lock()
+	defer h.plat.mu.Unlock()
+	if s := h.plat.sent[0]; s.text != "echo: hello" || !s.markdown {
+		t.Errorf("agent reply = %+v, want markdown true", s)
+	}
+	if s := h.plat.sent[1]; s.text != "No pending request." || s.markdown {
+		t.Errorf("notice = %+v, want markdown false", s)
 	}
 }

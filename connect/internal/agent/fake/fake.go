@@ -78,6 +78,12 @@ func Main() bool {
 	conn := acp.NewAgentSideConnection(a, os.Stdout, os.Stdin)
 	a.conn.Store(conn)
 	<-conn.Done()
+	// Done closes when stdin ends, before the SDK has run the notifications
+	// it already read. Wait for blocked prompts so a session/cancel sent just
+	// before stdin closed is still handled and logged.
+	for deadline := time.Now().Add(time.Second); a.blockedCount() > 0 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
 	if os.Getenv("FAKE_NO_EXIT") != "" {
 		select {}
 	}
@@ -93,6 +99,7 @@ type agent struct {
 
 	mu        sync.Mutex
 	cancels   map[string]chan struct{} // current prompt of each session
+	blocked   int                      // "block" prompts waiting for session/cancel
 	approvals map[string]bool
 }
 
@@ -103,6 +110,12 @@ func (a *agent) log(format string, args ...any) {
 	}
 	defer f.Close()
 	fmt.Fprintf(f, format+"\n", args...)
+}
+
+func (a *agent) blockedCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.blocked
 }
 
 func (a *agent) known(id string) bool {
@@ -235,7 +248,13 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 		_ = a.conn.Load().SessionUpdate(ctx, acp.SessionNotification{SessionId: p.SessionId, Update: acp.StartToolCall("t2", "remember")})
 		a.chunk(ctx, p.SessionId, "Queued.")
 	case text == "block":
+		a.mu.Lock()
+		a.blocked++
+		a.mu.Unlock()
 		<-cancelled
+		a.mu.Lock()
+		a.blocked--
+		a.mu.Unlock()
 		return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
 	case text == "sleep":
 		select {

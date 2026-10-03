@@ -1,5 +1,6 @@
 // Package telegram is the Telegram Bot API platform adapter. It uses
-// getUpdates long polling and plain-text messages, over net/http.
+// getUpdates long polling over net/http. Connector notices are plain text;
+// the agent's Markdown replies are rendered to text and entities.
 package telegram
 
 import (
@@ -207,6 +208,29 @@ type update struct {
 	Callback *callbackQuery `json:"callback_query"`
 }
 
+// syncCommands sets the default-scope command menu to bridge.Commands and
+// deletes the private-chat and group-chat lists, which Telegram would show
+// instead. Each call is tried once; a failure is logged and the rest still run.
+func (b *Bot) syncCommands(ctx context.Context) {
+	cmds := make([]map[string]string, len(bridge.Commands))
+	for i, c := range bridge.Commands {
+		cmds[i] = map[string]string{"command": c.Name, "description": c.Description}
+	}
+	calls := []struct {
+		method string
+		body   any
+	}{
+		{"setMyCommands", map[string]any{"commands": cmds}},
+		{"deleteMyCommands", map[string]any{"scope": map[string]string{"type": "all_private_chats"}}},
+		{"deleteMyCommands", map[string]any{"scope": map[string]string{"type": "all_group_chats"}}},
+	}
+	for _, c := range calls {
+		if err := b.call(ctx, c.method, c.body, nil); err != nil {
+			slog.Warn("telegram command menu update failed", "method", c.method, "err", err)
+		}
+	}
+}
+
 // Run identifies the bot with getMe, then polls getUpdates until ctx ends.
 // It returns an error only when getMe is rejected with 401 or 404.
 func (b *Bot) Run(ctx context.Context, deliver func(bridge.Message)) error {
@@ -234,6 +258,7 @@ func (b *Bot) Run(ctx context.Context, deliver func(bridge.Message)) error {
 	b.mention = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_])@` + name + `\b\s*`)
 	b.cmdToBot = regexp.MustCompile(`(?i)^(/\w+)@` + name + `\b`)
 	slog.Info("telegram bot ready", "username", me.Username)
+	b.syncCommands(ctx)
 
 	// next is kept in memory so a failed persist does not re-fetch updates
 	// that were already handled.
@@ -330,18 +355,48 @@ func chatParam(chatID string) any {
 }
 
 // Send posts text in parts of at most 4096 UTF-16 code units. Only the first
-// part replies to replyTo.
-func (b *Bot) Send(ctx context.Context, chatID, replyTo, text string) error {
-	for i, part := range splitText(text, maxUnits) {
-		params := map[string]any{"chat_id": chatParam(chatID), "text": part}
+// part replies to replyTo. With markdown, text is the agent's Markdown reply:
+// it is rendered to plain text and entities. A part that Telegram rejects with
+// status 400 is resent once without entities.
+func (b *Bot) Send(ctx context.Context, chatID, replyTo, text string, markdown bool) error {
+	var ents []entity
+	if markdown {
+		text, ents = renderMarkdown(text)
+	}
+	for i, part := range splitSpans(text, maxUnits) {
+		params := map[string]any{"chat_id": chatParam(chatID), "text": part.text}
+		if pe := clipEntities(ents, part.start, utf16Len(part.text)); len(pe) > 0 {
+			params["entities"] = pe
+		}
 		if id, err := strconv.ParseInt(replyTo, 10, 64); err == nil && i == 0 {
 			params["reply_parameters"] = map[string]any{"message_id": id, "allow_sending_without_reply": true}
 		}
-		if err := b.sendWithRetry(ctx, params); err != nil {
+		err := b.sendWithRetry(ctx, params)
+		var ae *apiError
+		if _, has := params["entities"]; has && errors.As(err, &ae) && ae.Status == http.StatusBadRequest {
+			slog.Warn("telegram rejected entities; resending part as plain text", "err", err)
+			delete(params, "entities")
+			err = b.sendWithRetry(ctx, params)
+		}
+		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// clipEntities returns the entities that overlap [start, start+length),
+// clipped to it and rebased to start.
+func clipEntities(ents []entity, start, length int) []entity {
+	var out []entity
+	for _, e := range ents {
+		lo, hi := max(e.Offset, start), min(e.Offset+e.Length, start+length)
+		if hi > lo {
+			e.Offset, e.Length = lo-start, hi-lo
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func (b *Bot) sendWithRetry(ctx context.Context, params map[string]any) error {
@@ -377,20 +432,46 @@ func utf16Len(s string) int {
 	return n
 }
 
+// span is a part of split text and the UTF-16 offset of its start in the
+// original text.
+type span struct {
+	text  string
+	start int
+}
+
 // splitText splits text into non-blank parts of at most limit UTF-16 code
 // units. It breaks after newlines where possible; a line longer than limit is
 // cut between runes, so a surrogate pair is never divided. Trailing newlines
 // are removed from each part.
 func splitText(text string, limit int) []string {
 	var parts []string
+	for _, p := range splitSpans(text, limit) {
+		parts = append(parts, p.text)
+	}
+	return parts
+}
+
+// splitSpans is splitText with each part's start offset. The only characters
+// not in any part are the trailing newlines removed from a part and the text
+// of blank parts, so offsets stay exact.
+func splitSpans(text string, limit int) []span {
+	var parts []span
 	var cur strings.Builder
-	curLen := 0
+	curLen, pos, start := 0, 0, 0 // pos: units consumed; start: units before cur
 	flush := func() {
 		if p := strings.TrimRight(cur.String(), "\n"); strings.TrimSpace(p) != "" {
-			parts = append(parts, p)
+			parts = append(parts, span{p, start})
 		}
 		cur.Reset()
 		curLen = 0
+	}
+	add := func(s string, n int) {
+		if curLen == 0 {
+			start = pos
+		}
+		cur.WriteString(s)
+		curLen += n
+		pos += n
 	}
 	for line := range strings.SplitAfterSeq(text, "\n") {
 		n := utf16Len(line)
@@ -400,16 +481,14 @@ func splitText(text string, limit int) []string {
 				if curLen+units(r) > limit {
 					flush()
 				}
-				cur.WriteRune(r)
-				curLen += units(r)
+				add(string(r), units(r))
 			}
 			continue
 		}
 		if curLen+n > limit {
 			flush()
 		}
-		cur.WriteString(line)
-		curLen += n
+		add(line, n)
 	}
 	flush()
 	return parts
@@ -437,7 +516,7 @@ func normalizeCallback(q *callbackQuery) (bridge.Message, bool) {
 func (b *Bot) SendApproval(ctx context.Context, chatID, requestID, text string) (func(context.Context, string) error, error) {
 	parts := splitText(text, maxUnits-64)
 	if len(parts) > 1 {
-		if err := b.Send(ctx, chatID, "", strings.Join(parts[:len(parts)-1], "\n")); err != nil {
+		if err := b.Send(ctx, chatID, "", strings.Join(parts[:len(parts)-1], "\n"), false); err != nil {
 			return nil, err
 		}
 	}

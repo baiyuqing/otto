@@ -21,6 +21,9 @@
 
 pub mod approval;
 pub mod auto_reflection;
+
+/// Fixed, content-free frontend notice for a successful memory proposal.
+pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
 pub mod sandbox;
 pub mod tasks;
 pub mod wake;
@@ -34,6 +37,7 @@ use otto_core::agent::{AgentError, CompactionResult, EventSink};
 use otto_core::config::resolve::Runtime;
 use otto_core::model::{Block, Message, Usage};
 use otto_core::session::{ListResult, RuntimeMetadata, Session};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::info::SandboxInfo;
@@ -252,6 +256,13 @@ impl Controller {
 
     pub fn builder(&self) -> &Arc<Builder> {
         &self.builder
+    }
+
+    /// A content-free generation signal for successfully queued memory review
+    /// candidates. Frontends still use their normal scoped commands to inspect
+    /// or decide a candidate.
+    pub fn memory_review_available_changed(&self) -> watch::Receiver<u64> {
+        self.builder.memory.service.review_available_changed()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {

@@ -557,6 +557,9 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
                 "Approval {} requested for: {}",
                 event.approval_id, event.command
             );
+            if !event.read_path.is_empty() {
+                text.push_str(&format!("\nPermanently allow reading: {}\nSaved to read_paths; commands stay sandboxed.", event.read_path));
+            }
             if !event.justification.is_empty() {
                 text.push_str(&format!("\nReason: {}", event.justification));
             }

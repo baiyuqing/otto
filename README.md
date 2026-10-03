@@ -284,7 +284,10 @@ never retried automatically.
 Configure shell permissions interactively with `otto sandbox setup`; see the
 [setup guide](docs/user-manual.md#interactive-sandbox-setup). In a running
 session, `/sandbox allow <path>` and `/sandbox network allow|deny` write the
-same `[sandbox]` settings and apply them to the current process.
+same `[sandbox]` settings and apply them to the current process. Models can
+also request a persistent read-path grant through a TUI approval dialog or
+a Telegram/Feishu approval card; the prompt shows the path and that it will
+be saved.
 `[sandbox].excluded_commands` lists simple commands, such as `lark-cli *`, that
 run outside the sandbox with the real `HOME`; see the
 [user manual](docs/user-manual.md#configuration).

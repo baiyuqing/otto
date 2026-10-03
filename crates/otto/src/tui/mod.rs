@@ -634,7 +634,7 @@ async fn run_app<B: Backend>(
                 }
                 Action::ApproveAlways(id) => match controller.approve_bash_always(&id).await {
                     Ok(prompt) => {
-                        app.push_system(format!("Approved {id} for one command."));
+                        app.push_system(format!("Approved {id}."));
                         if let Err(error) =
                             run_turn(&mut app, terminal, keys, controller, cancel, prompt, None)
                                 .await
@@ -650,9 +650,9 @@ async fn run_app<B: Backend>(
                     app.dispatch_line(&format!("/memory review {id} {decision}"), &backend, cancel);
                     app.open_memory_review(controller);
                 }
-                Action::Approve(id) => match controller.approve_bash(&id) {
+                Action::Approve(id) => match controller.approve_tool(&id).await {
                     Ok(prompt) => {
-                        app.push_system(format!("Approved {id} for one command."));
+                        app.push_system(format!("Approved {id}."));
                         if let Err(error) =
                             run_turn(&mut app, terminal, keys, controller, cancel, prompt, None)
                                 .await
@@ -662,8 +662,11 @@ async fn run_app<B: Backend>(
                     }
                     Err(message) => app.push_system(format!("/approve: {message}")),
                 },
-                // Raised only by attach mode.
-                Action::Deny(_) => {}
+                Action::Deny(id) => {
+                    if let Err(message) = controller.deny_tool(&id) {
+                        app.push_system(format!("/deny: {message}"));
+                    }
+                }
                 Action::Login(args) => {
                     login_dispatch(&mut app, controller, &args, cancel).await;
                 }

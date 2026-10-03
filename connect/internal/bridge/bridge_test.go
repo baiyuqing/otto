@@ -487,3 +487,30 @@ func TestApprovalCardFailureFallsBackToCommands(t *testing.T) {
 		t.Fatal(h.calls("perm:"))
 	}
 }
+
+func TestPersistentReadPermissionUsesExistingCards(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, reply, want string }{
+		{"allow", "/allow", "read_grant"},
+		{"deny", "/deny", "reject_once"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, setup{})
+			h.say("permread:Permanently allow reading /fixture; saved to read_paths")
+			got := h.waitSent(1)
+			if !strings.Contains(got[0], "Permanently allow reading /fixture") {
+				t.Fatalf("card = %q", got[0])
+			}
+			id := h.plat.approvalID()
+			msg := h.msg("c1", "u1", tc.reply)
+			msg.ApprovalID = id
+			h.plat.deliver(msg)
+			h.waitCall("perm:")
+			if got := h.calls("perm:"); len(got) != 1 || got[0] != "perm:"+tc.want {
+				t.Fatalf("agent outcomes = %q", got)
+			}
+			h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.statuses) == 1 }, "read card resolved")
+		})
+	}
+}

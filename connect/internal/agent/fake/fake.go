@@ -236,7 +236,7 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
 		}
 		a.chunk(ctx, p.SessionId, "echo: "+text)
-	case strings.HasPrefix(text, "perm:"), strings.HasPrefix(text, "permcancel:"):
+	case strings.HasPrefix(text, "perm:"), strings.HasPrefix(text, "permcancel:"), strings.HasPrefix(text, "permread:"):
 		title := text[strings.Index(text, ":")+1:]
 		reqCtx := ctx
 		if strings.HasPrefix(text, "permcancel:") {
@@ -245,11 +245,15 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 			defer stop()
 			time.AfterFunc(200*time.Millisecond, stop)
 		}
+		allowOption := acp.PermissionOption{Kind: acp.PermissionOptionKindAllowOnce, Name: "Allow once", OptionId: "allow_once"}
+		if strings.HasPrefix(text, "permread:") {
+			allowOption = acp.PermissionOption{Kind: acp.PermissionOptionKindAllowAlways, Name: "Save read access", OptionId: "read_grant"}
+		}
 		resp, err := a.conn.Load().RequestPermission(reqCtx, acp.RequestPermissionRequest{
 			SessionId: p.SessionId,
 			ToolCall:  acp.ToolCallUpdate{ToolCallId: "t1", Title: &title},
 			Options: []acp.PermissionOption{
-				{Kind: acp.PermissionOptionKindAllowOnce, Name: "Allow once", OptionId: "allow_once"},
+				allowOption,
 				{Kind: acp.PermissionOptionKindRejectOnce, Name: "Deny", OptionId: "reject_once"},
 			},
 		})

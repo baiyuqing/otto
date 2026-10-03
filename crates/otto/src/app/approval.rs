@@ -1,8 +1,8 @@
-//! The elevated-Bash approval loop `otto acp` and `otto serve` share.
+//! The Bash elevation and persistent-read approval loop `otto acp` and `otto serve` share.
 //!
 //! One call runs a first step (a prompt or a wake turn). When the step ends
-//! with an approval request for an elevated `bash` command, the loop asks the
-//! caller's decision callback. `Allow` grants the command and runs the retry
+//! with a Bash permission request, the loop asks the caller's decision
+//! callback. `Allow` applies the grant and runs the retry
 //! prompt; `Deny` ends the turn normally; `Cancelled` ends it as a cancelled
 //! prompt. The controller is idle while the callback waits, so other
 //! operations are not blocked by it; a frontend that must keep the session
@@ -23,13 +23,14 @@ pub enum Step<'a> {
     Wake(WakeOperation<'a>),
 }
 
-/// The elevated command a turn waits on.
+/// The command and optional persistent read path a turn waits on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalRequest {
     pub approval_id: String,
     pub tool_call_id: String,
     pub command: String,
     pub justification: String,
+    pub read_path: String,
 }
 
 /// What the decision callback returns.
@@ -113,13 +114,31 @@ impl Controller {
                 tool_call_id,
                 command,
                 justification: request.justification,
+                read_path: self
+                    .bash_approvals()
+                    .ok()
+                    .and_then(|a| a.pending_read_path(&session_id, &request.id))
+                    .unwrap_or_default(),
             })
             .await;
+            if cancel.is_cancelled() {
+                let _ = self.deny_tool(&request.id);
+                return Ok(Stop::Cancelled);
+            }
             match decision {
-                ApprovalDecision::Cancelled => return Ok(Stop::Cancelled),
-                ApprovalDecision::Deny => return Ok(Stop::EndTurn),
+                ApprovalDecision::Cancelled => {
+                    let _ = self.deny_tool(&request.id);
+                    return Ok(Stop::Cancelled);
+                }
+                ApprovalDecision::Deny => {
+                    let _ = self.deny_tool(&request.id);
+                    return Ok(Stop::EndTurn);
+                }
                 ApprovalDecision::Allow => {
-                    retry = self.approve_bash(&request.id).map_err(AgentError::Other)?;
+                    retry = self
+                        .approve_tool(&request.id)
+                        .await
+                        .map_err(AgentError::Other)?;
                 }
             }
         }

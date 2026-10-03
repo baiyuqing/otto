@@ -614,9 +614,12 @@ func (c *chat) askPermission(ctx context.Context, req acp.RequestPermissionReque
 		return "", false
 	}
 	allowID, okA := pick(acp.PermissionOptionKindAllowOnce)
+	if !okA {
+		allowID, okA = pick(acp.PermissionOptionKindAllowAlways)
+	}
 	denyID, okD := pick(acp.PermissionOptionKindRejectOnce)
 	if !okA || !okD {
-		slog.Warn("permission request lacks allow_once or reject_once option", "chat", c.key)
+		slog.Warn("permission request lacks allow or reject_once option", "chat", c.key)
 		return cancelled
 	}
 	c.mu.Lock()

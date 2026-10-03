@@ -117,7 +117,7 @@ impl Picker {
     }
 }
 
-/// A pending elevated Bash approval shown above the composer.
+/// A pending Bash elevation or sandbox read approval above the composer.
 ///
 /// The choice is made with the arrow keys and Enter, so it works under any
 /// input method; `y`/`n` and `1`/`2` are shortcuts for the same two options.
@@ -126,8 +126,9 @@ pub(crate) struct ApprovalDialog {
     pub id: String,
     pub command: String,
     pub justification: String,
+    pub read_path: String,
     /// Whether "Yes" is the highlighted option. Starts on "No" so a stray
-    /// Enter never grants an unsandboxed command.
+    /// Enter never grants a permission.
     pub approve_selected: bool,
 }
 
@@ -784,7 +785,7 @@ impl App {
             return if approve {
                 Some(Action::Approve(id))
             } else {
-                self.attached.then_some(Action::Deny(id))
+                Some(Action::Deny(id))
             };
         }
 
@@ -1852,6 +1853,7 @@ impl App {
                     id: event.approval_id.clone(),
                     command: event.command.clone(),
                     justification: event.justification.clone(),
+                    read_path: event.read_path.clone(),
                     ..Default::default()
                 };
                 self.push_system(approval_hint(&approval));
@@ -1883,14 +1885,21 @@ fn bash_approval_request(tool_name: &str, result: &ToolResult) -> Option<Approva
         id: request.id,
         command: request.command,
         justification: request.justification,
+        read_path: request.read_path,
         ..Default::default()
     })
 }
 
 fn approval_hint(approval: &ApprovalDialog) -> String {
     let mut hint =
-        "Bash approval requested. Choose Yes or No above the input box (arrows + Enter, or y/n)."
+        "Permission approval requested. Choose Yes or No above the input box (arrows + Enter, or y/n)."
             .to_string();
+    if !approval.read_path.is_empty() {
+        hint.push_str(&format!(
+            "\nPermanently allow reading: {}\nSaved to read_paths; commands stay sandboxed.",
+            approval.read_path
+        ));
+    }
     if !approval.command.is_empty() {
         hint.push_str("\nCommand: ");
         hint.push_str(&approval.command);
@@ -2879,7 +2888,9 @@ mod tests {
 
         // Enter on the default option ("No") cancels; nothing is granted.
         app.approval = Some(dialog("approval-1"));
-        assert!(press(&mut app, KeyCode::Enter).is_none());
+        assert!(
+            matches!(press(&mut app, KeyCode::Enter), Some(Action::Deny(id)) if id == "approval-1")
+        );
         assert!(app.approval.is_none(), "Enter on No closes the prompt");
 
         // An arrow moves to "Yes"; Enter then grants. No letter key needed.
@@ -2894,7 +2905,9 @@ mod tests {
         app.approval = Some(dialog("approval-3"));
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Tab);
-        assert!(press(&mut app, KeyCode::Enter).is_none());
+        assert!(
+            matches!(press(&mut app, KeyCode::Enter), Some(Action::Deny(id)) if id == "approval-3")
+        );
 
         // Shortcuts still work, and Esc cancels.
         app.approval = Some(dialog("approval-4"));
@@ -2904,7 +2917,9 @@ mod tests {
         let action = press(&mut app, KeyCode::Char('1'));
         assert!(matches!(action, Some(Action::Approve(id)) if id == "approval-5"));
         app.approval = Some(dialog("approval-6"));
-        assert!(press(&mut app, KeyCode::Esc).is_none());
+        assert!(
+            matches!(press(&mut app, KeyCode::Esc), Some(Action::Deny(id)) if id == "approval-6")
+        );
         assert!(app.approval.is_none());
 
         // Unrelated keys, such as typing under an IME, leave it open.

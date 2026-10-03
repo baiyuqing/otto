@@ -4,7 +4,7 @@
 //! runs in the background: deterministic rules run first
 //! ([`context_reference_fires`], [`vague_output_fires`]); if none fires,
 //! [`TypeSafeClient`] asks four questions about the skill's `SKILL.md`. Every
-//! result is appended to an SQLite database and never overwritten. Verdicts
+//! result is appended to a local Turso database and never overwritten. Verdicts
 //! ([`hint_for`]) are computed from the stored answers when displayed, not
 //! stored, so a threshold change is visible immediately.
 //!
@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::storage::{Connection, params};
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -451,7 +451,7 @@ CREATE INDEX IF NOT EXISTS skill_checks_key
 ON skill_checks(content_sha256, questions_sha256, id);
 "#;
 
-/// A storage failure carries no SQLite text, paths, or row values.
+/// A storage failure carries no database text, paths, or row values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StoreError {
     Io,
@@ -520,20 +520,14 @@ impl Store {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| StoreError::Io)?;
         }
-        let connection = Connection::open_with_flags(
-            filename,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| StoreError::Io)?;
+        let connection = Connection::open(filename).map_err(|_| StoreError::Io)?;
         std::fs::set_permissions(filename, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| StoreError::Io)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| StoreError::Io)?;
         connection
-            .pragma_update(None, "journal_mode", "WAL")
+            .pragma_update("journal_mode", "WAL")
             .map_err(|_| StoreError::Io)?;
         Self::initialize(connection)
     }
@@ -545,14 +539,14 @@ impl Store {
 
     fn initialize(connection: Connection) -> StoreResult<Self> {
         let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .query_row("PRAGMA user_version", (), |row| row.get(0))
             .map_err(|_| StoreError::Io)?;
         if version == 0 {
             connection
                 .execute_batch(SCHEMA)
                 .map_err(|_| StoreError::Io)?;
             connection
-                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .pragma_update("user_version", SCHEMA_VERSION)
                 .map_err(|_| StoreError::Io)?;
         } else if version != SCHEMA_VERSION {
             return Err(StoreError::UnknownVersion);
@@ -562,7 +556,7 @@ impl Store {
         })
     }
 
-    fn append(&self, row: &NewRow<'_>) -> StoreResult<()> {
+    fn append(&self, row: &NewRow) -> StoreResult<()> {
         let result = serde_json::to_string(row.result).map_err(|_| StoreError::Io)?;
         self.connection
             .lock()

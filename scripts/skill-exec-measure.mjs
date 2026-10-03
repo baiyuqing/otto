@@ -11,12 +11,15 @@
  * decision, in contrast, is only visible in the parent's transcript, because
  * that is where the model chose between the `skill` and `agent` tools.
  *
- * Reading only: it opens the usage database read-only and never writes.
+ * Reading only: `otto storage window-peaks` reads the usage store and never writes.
  *
- *   node scripts/skill-exec-measure.mjs <session.jsonl> [--usage <path>]
+ *   node scripts/skill-exec-measure.mjs <session.jsonl>... [--usage <path>]
+ *
+ * Set OTTO_BIN when Otto is not on PATH, such as `OTTO_BIN=target/debug/otto`
+ * in a development checkout.
  */
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 
@@ -81,40 +84,15 @@ export function parseSession(text) {
 /**
  * The context peak of every window one session used, main context first.
  *
- * Rows come from `usage_events` as `crates/otto/src/usage.rs` writes them: an
- * empty `task_id` is the main context and every other value is one sub-agent.
+ * Output comes from Otto's storage command: an empty task id is the main
+ * context and every other value is one sub-agent.
  */
-export function windowPeaks(database, sessionId) {
-  const { DatabaseSync } = require_sqlite();
-  const connection = new DatabaseSync(database, { readOnly: true });
-  try {
-    return connection
-      .prepare(
-        `SELECT task_id, MAX(input_tokens) AS peak, COUNT(*) AS requests
-           FROM usage_events
-          WHERE session_id = ? AND usage_present = 1
-          GROUP BY task_id
-          ORDER BY (task_id <> ''), task_id`,
-      )
-      .all(sessionId)
-      .map((row) => ({
-        window: row.task_id === "" ? "main" : row.task_id,
-        peakInput: Number(row.peak),
-        requests: Number(row.requests),
-      }));
-  } finally {
-    connection.close();
-  }
-}
-
-/**
- * Loaded on demand, not at import: `node:sqlite` is experimental and warns on
- * import, and the transcript half of this script needs no database at all.
- * The script only ever reads, so the exposure is a future API change rather
- * than the data.
- */
-function require_sqlite() {
-  return createRequire(import.meta.url)("node:sqlite");
+export function windowPeaks(database, sessionId, execute = execFileSync) {
+  const binary = process.env.OTTO_BIN || "otto";
+  const output = execute(binary, ["storage", "window-peaks", database, sessionId], {
+    encoding: "utf8",
+  });
+  return JSON.parse(output);
 }
 
 /** Renders one session's numbers. */

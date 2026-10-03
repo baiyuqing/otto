@@ -6,7 +6,7 @@
 //! cursor carries an ordinal into that snapshot and is invalidated by any
 //! write.
 
-use rusqlite::{Connection, Row, params_from_iter};
+use crate::storage::{Connection, Row, params_from_iter};
 use sha2::{Digest, Sha256};
 
 use super::codec::fts_labels;
@@ -16,7 +16,7 @@ use super::query::{
     build_fts_literal_expression, build_workspace_replacement_query,
 };
 use super::records::{decode_record_row, in_read_transaction, read_generation};
-use super::{Store, map_sqlite_error};
+use super::{Store, map_storage_error};
 use crate::memory::guard::guard_record;
 use crate::memory::json::encode_string;
 use crate::memory::validate::validate_retrieval_request;
@@ -76,12 +76,12 @@ fn query_records(
 ) -> Result<Vec<Record>> {
     let mut prepared = connection
         .prepare(&statement.sql)
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     let mut rows = prepared
-        .query(params_from_iter(statement.arguments.iter()))
-        .map_err(map_sqlite_error)?;
+        .query(params_from_iter(statement.arguments.iter().cloned()))
+        .map_err(map_storage_error)?;
     let mut records = Vec::new();
-    while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+    while let Some(row) = rows.next().map_err(map_storage_error)? {
         if records.len() >= limit {
             return Err(corrupt());
         }
@@ -92,13 +92,13 @@ fn query_records(
 
 /// Reads the FTS side of one row back and refuses a row whose index copy has
 /// drifted from the record it points at.
-fn check_fts_columns(row: &Row<'_>, record: &Record) -> Result<()> {
+fn check_fts_columns(row: &Row, record: &Record) -> Result<()> {
     let column = |index: usize| -> Result<String> {
-        row.get::<_, Option<String>>(index)
-            .map_err(map_sqlite_error)?
+        row.get::<Option<String>>(index)
+            .map_err(map_storage_error)?
             .ok_or_else(corrupt)
     };
-    let rank: Option<f64> = row.get(20).map_err(map_sqlite_error)?;
+    let rank: Option<f64> = row.get(20).map_err(map_storage_error)?;
     let rank = rank.ok_or_else(corrupt)?;
     if column(15)? != record.id
         || column(16)? != record.text
@@ -115,13 +115,13 @@ fn check_fts_columns(row: &Row<'_>, record: &Record) -> Result<()> {
 fn query_ranked(connection: &Connection, statement: &Statement) -> Result<Vec<RetrievalCandidate>> {
     let mut prepared = connection
         .prepare(&statement.sql)
-        .map_err(map_sqlite_error)?;
+        .map_err(map_storage_error)?;
     let mut rows = prepared
-        .query(params_from_iter(statement.arguments.iter()))
-        .map_err(map_sqlite_error)?;
+        .query(params_from_iter(statement.arguments.iter().cloned()))
+        .map_err(map_storage_error)?;
     let mut result: Vec<RetrievalCandidate> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+    while let Some(row) = rows.next().map_err(map_storage_error)? {
         if result.len() >= MAX_RETRIEVAL_CANDIDATES {
             return Err(corrupt());
         }
@@ -423,8 +423,8 @@ impl Store {
 mod tests {
     use super::*;
     use crate::memory::UpsertRequest;
-    use crate::memory::sqlite::records::testsupport::{at, sample_record};
-    use crate::memory::sqlite::testsupport::open_temp;
+    use crate::memory::turso::records::testsupport::{at, sample_record};
+    use crate::memory::turso::testsupport::open_temp;
 
     fn request(store: &Store, query: &str) -> RetrievalRequest {
         RetrievalRequest {
@@ -478,6 +478,40 @@ mod tests {
             store
                 .retrieve(&request(&store, "kubernetes"))
                 .expect("retrieve")
+                .matches
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn user_fts_operators_are_literal_and_all_indexed_fields_are_searchable() {
+        let (_directory, store) = open_temp();
+        let scope = store.identity().expect("identity").user_scope;
+        store_record(&store, "rec-1", &scope, "editor", "uses neovim daily");
+        store_record(&store, "rec-2", &scope, "tone", "replies briefly");
+        // OR is a literal word here: it must not turn this into a match-all query.
+        assert_eq!(
+            ids(&store
+                .retrieve(&request(&store, "neovim OR absent"))
+                .expect("retrieve")),
+            vec!["rec-1"]
+        );
+        assert_eq!(
+            ids(&store.retrieve(&request(&store, "editor")).expect("key")),
+            vec!["rec-1"]
+        );
+        assert_eq!(
+            store
+                .retrieve(&request(&store, "preference"))
+                .expect("kind")
+                .matches
+                .len(),
+            2
+        );
+        assert!(
+            store
+                .retrieve(&request(&store, r#"" OR * : \"#))
+                .expect("punctuation")
                 .matches
                 .is_empty()
         );

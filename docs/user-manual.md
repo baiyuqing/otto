@@ -350,7 +350,7 @@ Key points:
   errors, and failures after streamed output are not retried.
   OpenAI-compatible requests are not automatically retried after dispatch.
 
-Deadline checks are cooperative at synchronous filesystem and SQLite
+Deadline checks are cooperative at synchronous filesystem and Turso
 boundaries: Otto checks before and after the call, but does not detach an
 in-flight effectful closure or claim a hard wall-clock upper bound for the
 system call itself. A timeout or cancellation also does not prove that an
@@ -1729,7 +1729,7 @@ composer:
   **Agents**. Usage
   shows persisted totals, a Mermaid token-volume chart for the last 7, 30, or
   90 UTC days, and an exact daily table. It reads `GET /v1/usage/daily` and
-  does not expose the SQLite database to the browser.
+  does not expose the Turso database to the browser.
 - **Workflows** lists this workspace's durable runs (`GET /v1/workflows`) and
   starts one from a name and input. Selecting a run shows its steps and
   approval requests and offers **Resume**, **Cancel**, per-step **Retry** and
@@ -1887,7 +1887,7 @@ Each normal provider response, compaction summary, and sub-agent provider
 response appends a content-free row to `~/.otto/usage.db`. The row contains
 time, workspace/session/task identifiers, provider/profile/model, usage
 presence, and token counts; it never contains prompts, response text, tool
-arguments, or tool output. Collection, SQLite storage, and the HTTP/UI query
+arguments, or tool output. Collection, Turso storage, and the HTTP/UI query
 path are separate boundaries.
 
 `GET /v1/usage` returns all recorded totals; pass `session_id` to restrict the
@@ -1922,7 +1922,7 @@ logged.
 ### Sub-agent task records
 
 Every sub-agent task started by the `agent` tool is recorded in
-`~/.otto/tasks.db` (SQLite, file mode `0600`), one row per task, keyed by
+`~/.otto/tasks.db` (Turso, file mode `0600`), one row per task, keyed by
 parent session and task id. Otto writes the row when the task is queued and
 again when it starts, after each provider step and tool call, and when it
 finishes. Each Otto process writes only its own tasks; `/agents`, the Web
@@ -2590,7 +2590,7 @@ export.
 
 ## Memory
 
-Otto has a local, per-workspace/per-user memory store backed by SQLite/FTS5
+Otto has a local, per-workspace/per-user memory store backed by Turso/FTS
 (`crates/otto`'s `memory` module). It is enabled by default.
 
 Config (`[memory]` in TOML; all keys optional):
@@ -2598,13 +2598,13 @@ Config (`[memory]` in TOML; all keys optional):
 ```toml
 [memory]
 enabled = true
-backend = "sqlite"
+backend = "turso"
 required = false
 recall_tokens = 2000
 max_results = 12
 require_encryption = false
 
-[memory.sqlite]
+[memory.turso]
 path = "~/.otto/memory/memory.db"
 busy_timeout = "5s"
 
@@ -2612,7 +2612,42 @@ busy_timeout = "5s"
 "/canonical/path/to/workspace" = "stable-id"
 ```
 
-There are no `--memory-*` CLI flags.
+There are no `--memory-*` CLI flags. Legacy `backend = "sqlite"` and
+`[memory.sqlite]` configuration are accepted as aliases for Turso; they do
+not select a SQLite engine. Turso uses a different full-text tokenizer and
+BM25 implementation, so search ordering can change.
+
+### Migrating an existing database
+
+Stop every Otto process using the database, then run:
+
+```bash
+otto storage migrate ~/.otto/memory/memory.db ~/.otto/memory/memory-turso.db
+```
+
+The destination must be a new path in an existing directory. The command
+requires Python 3 for a read-only export of the legacy SQLite file, imports
+into a temporary Turso database, checks row counts, and preserves the source.
+Memory migration also preserves database/user identity and generations and
+rebuilds the search index. Set `[memory.turso].path` to the destination after
+success. Otto does not automatically migrate a legacy FTS5 memory database.
+
+The same command supports `usage.db`, `tasks.db`, `reflection.db`,
+`skill-checks.db`, and workspace workflow databases. Their ordinary tables
+can also be opened directly by Turso when compatible; use offline migration
+when making a separate copy. For stores with fixed paths, keep the old file
+as a backup and move the migrated file into place while Otto is stopped.
+Do not let an older SQLite-backed Otto and this version access a database
+at the same time.
+
+To inspect usage windows without opening the file with SQLite:
+
+```bash
+otto storage window-peaks ~/.otto/usage.db <session-id>
+```
+
+This prints JSON containing each context window's maximum input-token count
+and request count. It opens the database read-only.
 
 What's wired:
 
@@ -2862,7 +2897,7 @@ frontmatter, to `https://api.typesafe.ai` for an automated review of whether
 the skill's instructions are self-contained and its declared contract
 matches what the body does. A skill flagged by a local pattern check (for
 example, an `output` field too vague to be useful) is judged locally and
-never sent. Results are stored in `~/.otto/skill-checks.db` (SQLite,
+never sent. Results are stored in `~/.otto/skill-checks.db` (Turso,
 append-only) and shown in `/skill <name>` for contract skills.
 
 Enable it with all three of:

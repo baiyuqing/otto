@@ -1,16 +1,22 @@
-//! Schema compatibility for `~/.otto/memory/memory.db`.
-//!
-//! A database file written by the previously released binary must still open,
-//! so the store has to create exactly the schema below, including the FTS5
-//! shadow tables SQLite derives from the virtual-table definition.
+//! Turso memory schema identity and durable record round trips.
 
 use std::collections::BTreeMap;
 
-use otto::memory::sqlite::{Options, Store};
+use otto::memory::turso::{Options, Store};
 use otto::memory::{ListRequest, NAMESPACE_USER, Origin, Provenance, Record, Scope, UpsertRequest};
 
 /// Every object `sqlite_master` must hold, as `(type, name, sql)`.
 const EXPECTED_OBJECTS: &[(&str, &str, &str)] = &[
+    (
+        "table",
+        "__turso_internal_fts_dir_memory_records_search",
+        "CREATE TABLE __turso_internal_fts_dir_memory_records_search (path TEXT NOT NULL, chunk_no INTEGER NOT NULL, bytes BLOB NOT NULL)",
+    ),
+    (
+        "index",
+        "__turso_internal_fts_dir_memory_records_search_key",
+        "CREATE INDEX IF NOT EXISTS __turso_internal_fts_dir_memory_records_search_key ON __turso_internal_fts_dir_memory_records_search USING backing_btree (path, chunk_no, bytes)",
+    ),
     (
         "table",
         "memory_meta",
@@ -143,43 +149,22 @@ WHERE observation_id IS NOT NULL"#,
     (
         "table",
         "memory_records_fts",
-        r#"CREATE VIRTUAL TABLE memory_records_fts USING fts5(
-    record_id UNINDEXED,
-    text_value,
-    kind,
-    semantic_key,
-    labels,
-    tokenize = 'unicode61'
-)"#,
+        r#"CREATE TABLE memory_records_fts (
+    record_id TEXT NOT NULL,
+    text_value TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    semantic_key TEXT NOT NULL,
+    labels TEXT NOT NULL
+) STRICT"#,
     ),
     (
-        "table",
-        "memory_records_fts_config",
-        r#"CREATE TABLE 'memory_records_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID"#,
-    ),
-    (
-        "table",
-        "memory_records_fts_content",
-        r#"CREATE TABLE 'memory_records_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4)"#,
-    ),
-    (
-        "table",
-        "memory_records_fts_data",
-        r#"CREATE TABLE 'memory_records_fts_data'(id INTEGER PRIMARY KEY, block BLOB)"#,
-    ),
-    (
-        "table",
-        "memory_records_fts_docsize",
-        r#"CREATE TABLE 'memory_records_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"#,
-    ),
-    (
-        "table",
-        "memory_records_fts_idx",
-        r#"CREATE TABLE 'memory_records_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"#,
+        "index",
+        "memory_records_search",
+        "CREATE INDEX memory_records_search ON memory_records_fts USING fts(text_value,kind,semantic_key,labels) WITH(weights='text_value=1.0,kind=0.5,semantic_key=2.0,labels=1.0')",
     ),
 ];
 
-/// The indexes SQLite creates for the `TEXT PRIMARY KEY` columns. Their
+/// The indexes Turso creates for the `TEXT PRIMARY KEY` columns. Their
 /// recorded SQL is NULL, which is part of the expected schema.
 const EXPECTED_AUTOINDEXES: &[&str] = &[
     "sqlite_autoindex_memory_candidates_1",
@@ -215,12 +200,12 @@ fn a_new_database_carries_the_expected_schema() {
     let store = Store::open(&path, Options::default()).expect("open");
     store.close().expect("close");
 
-    let connection = rusqlite::Connection::open(&path).expect("reopen");
+    let connection = otto::storage::Connection::open(&path).expect("reopen");
     let mut statement = connection
         .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name")
         .expect("prepare");
     let rows: Vec<(String, String, Option<String>)> = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .query_map((), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .expect("query")
         .collect::<Result<_, _>>()
         .expect("rows");
@@ -232,8 +217,11 @@ fn a_new_database_carries_the_expected_schema() {
             .unwrap_or_else(|| panic!("sqlite_master has no object named {name}"));
         assert_eq!(&found.0, kind, "object {name} has the wrong type");
         assert_eq!(
-            found.2.as_deref(),
-            Some(*sql),
+            found
+                .2
+                .as_deref()
+                .map(otto::memory::turso::schema::normalize_schema_sql),
+            Some(otto::memory::turso::schema::normalize_schema_sql(sql)),
             "object {name} does not match the expected SQL"
         );
     }
@@ -262,9 +250,9 @@ fn a_new_database_carries_the_expected_schema() {
     );
 
     let version: i64 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .query_row("PRAGMA user_version", (), |row| row.get(0))
         .expect("user_version");
-    assert_eq!(version, 1, "the schema stamps user_version 1");
+    assert_eq!(version, 2, "the schema stamps user_version 2");
 }
 
 #[test]

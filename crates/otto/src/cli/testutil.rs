@@ -190,7 +190,7 @@ pub async fn controller(workspace_root: &Path, session_root: &Path) -> Controlle
     Controller::new(builder, true, session, runner, info)
 }
 
-/// A controller whose builder carries a usable SQLite memory service.
+/// A controller whose builder carries a usable Turso memory service.
 /// Shared with `tui::app`'s tests, which need the same fixture to exercise
 /// `/memory`/`/remember` dispatch; `repl_commands.rs`'s own memory tests
 /// keep their private copy since it predates this one.
@@ -202,8 +202,8 @@ pub async fn controller_with_memory(
     let mut builder = builder(workspace, session_root);
     let runtime = MemoryRuntime {
         enabled: true,
-        backend: "sqlite".into(),
-        sqlite_path: store_path.to_string_lossy().into_owned(),
+        backend: "turso".into(),
+        turso_path: store_path.to_string_lossy().into_owned(),
         ..MemoryRuntime::default()
     };
     let (service, user_scope, usable) =

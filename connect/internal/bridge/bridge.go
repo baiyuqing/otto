@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/connect/internal/agent"
+	"github.com/baiyuqing/otto/connect/internal/manage"
 	"github.com/baiyuqing/otto/connect/internal/state"
 	"github.com/coder/acp-go-sdk"
 )
@@ -29,7 +30,10 @@ type Access struct {
 
 // Options configure a Bridge. Zero tunables select the defaults.
 type Options struct {
-	Agent     *agent.Agent
+	Agent *agent.Agent
+	// Manage is non-nil only when the existing agent command uses --attach.
+	// It calls otto serve over that command's Unix socket.
+	Manage    *manage.Client
 	Platforms []Platform
 	Access    map[string]Access // by Platform.Name()
 	Store     *state.Store
@@ -195,6 +199,9 @@ func (b *Bridge) deliver(m Message) {
 		return
 	}
 	text := strings.TrimSpace(m.Text)
+	if c.cmdManage(m, text) {
+		return
+	}
 	switch text {
 	case "/new":
 		c.cmdNew(m)
@@ -296,6 +303,14 @@ type chat struct {
 	proposed    bool
 	memoryMu    sync.Mutex             // serializes card refreshes and memory reviews
 	memoryCards map[string]*memoryCard // request token -> original session/candidate
+	manageMu    sync.Mutex
+	change      *pendingChange // one connector-bound config confirmation
+}
+
+type pendingChange struct {
+	id       string
+	senderID string
+	expires  time.Time
 }
 
 type permission struct {

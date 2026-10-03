@@ -267,12 +267,17 @@ the existing configuration edit helpers and `config::write_bytes` path:
   symlink; and
 - the old configuration is backed up under the existing `backups/` policy.
 
-The server stores previews only in process memory. It binds a preview to the
-request's authenticated caller identity where one exists. For a local private
-socket without a bearer token, the connect-side binding to platform/chat/sender
-is still mandatory; no other HTTP client should be treated as the same caller.
-The final API contract may add a non-secret `actor` field supplied by connect
-for audit correlation, but it is not an authorization mechanism.
+The server stores previews only in process memory. Its opaque preview ID is a
+high-entropy, one-time, 10-minute capability token: confirmation requires the
+exact token, succeeds once at most, and still fails if the captured config
+bytes are stale. With bearer authentication, a server may additionally bind a
+preview to that caller. A private Unix socket has no request-level identity, so
+it relies on its existing same-user filesystem boundary; it must not pretend
+that an untrusted `chat_id`, `sender_id`, or request header authenticates a
+caller. Connect still binds the token to the originating platform/chat/sender
+in memory and refuses cross-chat confirmation. The final API contract may add a
+non-secret `actor` field supplied by connect for audit correlation, but it is
+not an authorization mechanism.
 
 A successful commit returns `{ "status": "saved_restart_required", ... }`.
 On expiration, stale bytes, invalid configuration, or writer failure it returns

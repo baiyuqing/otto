@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{Script, serve, text_reply, tool_call_reply};
+use common::{Script, serve, summary_reply, text_reply, tool_call_reply};
 
 use serde_json::{Value, json};
 
@@ -168,12 +168,19 @@ impl Client {
         response
     }
 
-    fn new_session(&mut self, workspace: &Path) -> String {
+    /// Opens a session and returns its id and the `available_commands_update`
+    /// frame that follows the response.
+    fn new_session_with_commands(&mut self, workspace: &Path) -> (String, Value) {
         let (_, response) = self.call("session/new", json!({"cwd": workspace, "mcpServers": []}));
-        response["result"]["sessionId"]
+        let id = response["result"]["sessionId"]
             .as_str()
             .unwrap_or_else(|| panic!("session/new failed: {response}"))
-            .to_string()
+            .to_string();
+        (id, self.recv())
+    }
+
+    fn new_session(&mut self, workspace: &Path) -> String {
+        self.new_session_with_commands(workspace).0
     }
 
     /// Closes stdin and waits for exit; returns the exit code.
@@ -1067,4 +1074,155 @@ mod approval {
         assert!(!home.path().join("otto-elevated-ran").exists());
         assert_eq!(client.close(), Some(0));
     }
+}
+
+/// Provider request bodies, one entry per request received.
+fn provider_with(replies: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
+    serve(Script {
+        replies,
+        served: Arc::new(AtomicUsize::new(0)),
+    })
+}
+
+fn message_text(frames: &[Value]) -> String {
+    updates(frames)
+        .iter()
+        .filter(|update| update["sessionUpdate"] == "agent_message_chunk")
+        .map(|update| update["content"]["text"].as_str().unwrap_or_default())
+        .collect()
+}
+
+#[test]
+fn session_new_and_load_are_followed_by_the_command_list() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, _requests) = provider_with(vec![text_reply("ok")]);
+    configure(home.path(), &base_url);
+
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let (session_id, frame) = client.new_session_with_commands(workspace.path());
+    assert_eq!(frame["method"], "session/update", "{frame}");
+    assert_eq!(frame["params"]["sessionId"], json!(session_id));
+    let update = &frame["params"]["update"];
+    assert_eq!(update["sessionUpdate"], "available_commands_update");
+    let names: Vec<&Value> = update["availableCommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| &command["name"])
+        .collect();
+    assert_eq!(names, [&json!("compact"), &json!("context")]);
+    assert_eq!(
+        update["availableCommands"][0]["input"]["hint"],
+        "optional focus"
+    );
+    // The session file exists only after a prompt; load it in a new process.
+    client.call("session/prompt", prompt(&session_id, "hi"));
+    assert_eq!(client.close(), Some(0));
+
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let (_, response) = client.call(
+        "session/load",
+        json!({"cwd": workspace.path(), "sessionId": session_id, "mcpServers": []}),
+    );
+    assert!(response["result"].is_object(), "{response}");
+    let frame = client.recv();
+    assert_eq!(
+        frame["params"]["update"]["sessionUpdate"], "available_commands_update",
+        "{frame}"
+    );
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn context_command_answers_with_counts_and_sends_no_provider_request() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, requests) = provider_with(vec![text_reply("MARKER-ASSISTANT-BODY")]);
+    configure(home.path(), &base_url);
+
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    client.call("session/prompt", prompt(&session_id, "MARKER-USER-BODY"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    let first: Value = serde_json::from_str(&requests.lock().unwrap()[0]).unwrap();
+    let system = first["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(system.len() > 40, "system prompt: {system:?}");
+
+    let (frames, response) = client.call("session/prompt", prompt(&session_id, " /context "));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let text = message_text(&frames);
+    assert!(text.contains("Estimated next request: "), "{text}");
+    assert!(text.contains("System prompt: "), "{text}");
+    assert!(text.contains("Messages (2): "), "{text}");
+    for hidden in [&system[..40], "MARKER-USER-BODY", "MARKER-ASSISTANT-BODY"] {
+        assert!(!text.contains(hidden), "{hidden:?} leaked into {text}");
+    }
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "/context called the provider"
+    );
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn compact_command_summarizes_through_the_provider_and_other_slash_text_is_a_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, requests) = provider_with(vec![
+        text_reply("first answer"),
+        text_reply("second answer"),
+        summary_reply("SUMMARY-TEXT"),
+        text_reply("plain answer"),
+    ]);
+    configure(home.path(), &base_url);
+    // A small recent-token budget makes the first turn summarizable; automatic
+    // reflection would add a background provider request after /compact.
+    let config = home.path().join(".config/otto/config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            "{text}\n[agent.compaction]\nkeep_recent_tokens = 1\n\n[reflection]\nauto = \"off\"\n"
+        ),
+    )
+    .unwrap();
+
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    client.call("session/prompt", prompt(&session_id, "first question"));
+    client.call("session/prompt", prompt(&session_id, "second question"));
+    assert_eq!(requests.lock().unwrap().len(), 2);
+
+    let (frames, response) = client.call(
+        "session/prompt",
+        prompt(&session_id, "/compact  keep-the-api-names"),
+    );
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_eq!(requests.lock().unwrap().len(), 3, "no summary request");
+    assert!(requests.lock().unwrap()[2].contains("keep-the-api-names"));
+    let text = message_text(&frames);
+    assert!(
+        text.starts_with("Compacted the session context: ") && text.contains(" tokens before"),
+        "{text}"
+    );
+    assert!(!text.contains("SUMMARY-TEXT"), "{text}");
+
+    let (frames, response) = client.call(
+        "session/prompt",
+        prompt(&session_id, "/contextual question"),
+    );
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_eq!(requests.lock().unwrap().len(), 4);
+    assert!(requests.lock().unwrap()[3].contains("/contextual question"));
+    assert_eq!(message_text(&frames), "plain answer");
+    assert_eq!(client.close(), Some(0));
 }

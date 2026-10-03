@@ -174,22 +174,29 @@ func (b *Bridge) admitted(m Message) bool {
 	return slices.Contains(acc.Chats, m.ChatID) && slices.Contains(acc.Senders, m.SenderID)
 }
 
-// Command is one connector command as offered in a platform's command menu.
-type Command struct{ Name, Description string }
+// Command is one command as offered in a platform's command menu. Agent
+// commands are not handled by the bridge: it forwards their text to the agent
+// as a prompt and the agent runs them.
+type Command struct {
+	Name, Description string
+	Agent             bool
+}
 
-// Commands lists the connector commands the bridge handles, in menu order.
-// Keep it in sync with the dispatch in deliver and cmdManage;
-// TestMenuCommandsAreHandled checks it.
+// Commands lists the commands in menu order. Keep it in sync with the
+// dispatch in deliver and cmdManage, and with the commands `otto acp`
+// advertises; TestMenuCommandsAreHandled checks it.
 var Commands = []Command{
-	{"new", "Start a new session on the next message"},
-	{"stop", "Cancel the running turn and clear the queue"},
-	{"sessions", "List the newest sessions"},
-	{"use", "Switch to a session: /use <id>"},
-	{"memory", "List or review pending memory candidates"},
-	{"models", "List a provider profile's model IDs"},
-	{"config", "Show or change provider profiles"},
-	{"allow", "Allow the pending permission request once"},
-	{"deny", "Deny the pending permission request"},
+	{"new", "Start a new session on the next message", false},
+	{"stop", "Cancel the running turn and clear the queue", false},
+	{"compact", "Compact the session context: /compact [focus]", true},
+	{"context", "Show what the next request sends, with token counts", true},
+	{"sessions", "List the newest sessions", false},
+	{"use", "Switch to a session: /use <id>", false},
+	{"memory", "List or review pending memory candidates", false},
+	{"models", "List a provider profile's model IDs", false},
+	{"config", "Show or change provider profiles", false},
+	{"allow", "Allow the pending permission request once", false},
+	{"deny", "Deny the pending permission request", false},
 }
 
 // deliver handles one inbound message and does not block: sends and agent
@@ -580,7 +587,14 @@ const memoryHint = "Memory changes are proposals. Send /memory to review them."
 
 // chatPrompt adds the current transport to each turn, including resumed and
 // shared sessions. It is ordinary ACP text, not a system instruction override.
+// An agent command is sent as typed: `otto acp` matches only a prompt that is
+// the whole command.
 func chatPrompt(m Message) string {
+	if f := strings.Fields(m.Text); len(f) > 0 && slices.ContainsFunc(Commands, func(c Command) bool {
+		return c.Agent && "/"+c.Name == f[0]
+	}) {
+		return m.Text
+	}
 	var channel string
 	switch m.Platform {
 	case "telegram":

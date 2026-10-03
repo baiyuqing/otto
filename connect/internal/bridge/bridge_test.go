@@ -573,6 +573,19 @@ func TestChatPromptPreservesUserText(t *testing.T) {
 	}
 }
 
+func TestChatPromptSendsAgentCommandsAsTyped(t *testing.T) {
+	for _, text := range []string{"/compact", " /compact keep the API names", "/compact\nkeep names", "/context"} {
+		if got := chatPrompt(Message{Platform: "telegram", Text: text}); got != text {
+			t.Errorf("chatPrompt(%q) = %q, want the text unchanged", text, got)
+		}
+	}
+	for _, text := range []string{"/contextual question", "/stop", "please /compact"} {
+		if got := chatPrompt(Message{Platform: "telegram", Text: text}); got == text {
+			t.Errorf("chatPrompt(%q) has no channel context", text)
+		}
+	}
+}
+
 func TestMenuCommandsAreHandled(t *testing.T) {
 	t.Parallel()
 	name := regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
@@ -586,6 +599,12 @@ func TestMenuCommandsAreHandled(t *testing.T) {
 		t.Run(c.Name, func(t *testing.T) {
 			t.Parallel()
 			h := newHarness(t, setup{})
+			if c.Agent {
+				// The agent runs it: the text reaches it unchanged.
+				h.say("/" + c.Name)
+				h.waitFor(func() bool { return slices.Contains(fake.Calls(h.dir), "start:/"+c.Name) }, "agent command prompt")
+				return
+			}
 			// The chat queue is ordered, so if the command had been
 			// forwarded as a prompt it would start before the marker.
 			h.say("/" + c.Name)

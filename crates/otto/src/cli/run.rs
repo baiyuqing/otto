@@ -826,6 +826,8 @@ pub async fn run(
                 builder,
                 runtime: resolved,
                 listen,
+                acp_listen: options.acp_listen.clone(),
+                acp_token: lookup.get("OTTO_ACP_TOKEN").cloned().unwrap_or_default(),
                 control,
                 reloader,
                 open: options.open,

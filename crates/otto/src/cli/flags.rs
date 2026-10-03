@@ -44,6 +44,7 @@ pub struct CliOptions {
     pub archive_path: String,
     pub socket: String,
     pub listen: String,
+    pub acp_listen: String,
     pub open: bool,
     pub exit_on_stdin_close: bool,
 
@@ -125,6 +126,7 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     options.archive_path = set.string("archive");
     options.socket = set.string("socket");
     options.listen = set.string("listen");
+    options.acp_listen = set.string("acp-listen");
     options.attach = set.bool_value("attach");
     options.open = set.bool_value("open");
     options.exit_on_stdin_close = set.bool_value("exit-on-stdin-close");
@@ -230,6 +232,9 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
     if options.socket_set && !options.serve && !options.attach {
         return Err(reject("otto: --socket requires the serve subcommand"));
     }
+    if !options.acp_listen.is_empty() && !options.serve {
+        return Err(reject("otto: --acp-listen requires the serve subcommand"));
+    }
     if options.listen_set && !options.serve {
         return Err(reject("otto: --listen requires the serve subcommand"));
     }
@@ -318,6 +323,7 @@ Options:
   --socket PATH          unix socket path for the serve subcommand and --attach
   --attach               use the otto serve on the socket instead of running the agent (terminal UI, or acp: relay)
   --listen HOST:PORT     loopback TCP address for the serve subcommand (prints a URL with the access token)
+  --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)
   --open                 open the serve URL in the default browser (TCP listener only)
   --exit-on-stdin-close  exit when stdin closes (TCP listener only)
 ";
@@ -360,6 +366,7 @@ const DECLARED: &[(&str, Kind)] = &[
     ("socket", Kind::Str),
     ("attach", Kind::Bool),
     ("listen", Kind::Str),
+    ("acp-listen", Kind::Str),
     ("open", Kind::Bool),
     ("exit-on-stdin-close", Kind::Bool),
 ];
@@ -536,6 +543,22 @@ mod tests {
     }
 
     #[test]
+    fn acp_tcp_listener_requires_serve() {
+        let got = options(&["serve", "--acp-listen", "127.0.0.1:9001"]);
+        assert_eq!(got.acp_listen, "127.0.0.1:9001");
+        for args in [
+            vec!["--acp-listen", "127.0.0.1:9001"],
+            vec!["acp", "--acp-listen", "127.0.0.1:9001"],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(matches!(
+                parse_flags(&args, &mut Vec::new()),
+                Err(ParseFailure::Rejected(_))
+            ));
+        }
+    }
+
+    #[test]
     fn defaults_the_workspace_to_the_current_directory() {
         let got = options(&[]);
         assert_eq!(got.cwd, ".");
@@ -687,7 +710,8 @@ mod tests {
                 "  --sandbox MODE         sandbox mode: auto, seatbelt, or off (off is unsafe)\n"
             ));
             assert!(text.contains(
-                "  --open                 open the serve URL in the default browser (TCP listener only)\n"
+                "  --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)
+  --open                 open the serve URL in the default browser (TCP listener only)\n"
             ));
             assert!(
                 text.contains(

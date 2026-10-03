@@ -1,5 +1,8 @@
 # Chat connector (`otto-connect`)
 
+Transport update: [ACP TCP](2026-10-03-acp-tcp.md) adds direct connections to
+`otto serve`; the stdio design below remains supported.
+
 Status: approved 2026-10-02 with D1-D6 as written. All three changes of
 "Delivery in three changes" are implemented: 1 (core and Telegram), 2
 (Feishu) and 3 (removal of `[inbound.feishu]`). The user manual's "Chat

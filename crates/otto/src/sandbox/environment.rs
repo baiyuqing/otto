@@ -315,6 +315,9 @@ fn classify_environment_name(name: &str, provider_names: &HashSet<String>) -> Cl
 }
 
 fn is_non_restorable_environment_name(upper: &str) -> bool {
+    if upper == "OTTO_ACP_TOKEN" {
+        return true;
+    }
     upper == "OTTO_SANDBOX"
         || upper.starts_with("OTTO_SANDBOX_")
         || matches!(
@@ -641,6 +644,29 @@ mod tests {
                 format!("VALUE_{index:03}_TOKEN=unique-sensitive-value-{index:03}").into_bytes()
             })
             .collect()
+    }
+
+    #[test]
+    fn acp_token_is_redacted_and_cannot_be_restored_to_tools() {
+        let snapshot = resolve_environment(&EnvironmentOptions {
+            host_entries: vec![b"OTTO_ACP_TOKEN=test-listener-secret".to_vec()],
+            allow_names: vec!["OTTO_ACP_TOKEN".into()],
+            ..Default::default()
+        })
+        .expect("environment");
+        assert!(
+            !snapshot
+                .entries()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.starts_with("OTTO_ACP_TOKEN="))
+        );
+        assert!(
+            snapshot
+                .redaction_values()
+                .iter()
+                .any(|value| value == "test-listener-secret")
+        );
     }
 
     #[test]

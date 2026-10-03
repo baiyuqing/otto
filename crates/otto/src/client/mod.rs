@@ -94,6 +94,7 @@ pub struct SessionRow {
 
 pub struct Client {
     http: reqwest::Client,
+    router: Option<axum::Router>,
 }
 
 impl Client {
@@ -104,7 +105,15 @@ impl Client {
             .no_proxy()
             .build()
             .map_err(unreachable_error)?;
-        Ok(Self { http })
+        Ok(Self { http, router: None })
+    }
+
+    /// Dispatch against the same serve router without a socket or extra process.
+    pub(crate) fn in_process(router: axum::Router) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            router: Some(router),
+        }
     }
 
     pub async fn approval_message(
@@ -423,7 +432,39 @@ impl Client {
     }
 
     async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, Error> {
-        let response = request.send().await.map_err(unreachable_error)?;
+        let response = if let Some(router) = &self.router {
+            use tower::ServiceExt;
+            let request = request.build().map_err(unreachable_error)?;
+            let mut local = axum::http::Request::builder()
+                .method(request.method().clone())
+                .uri(request.url().as_str());
+            *local.headers_mut().expect("request headers") = request.headers().clone();
+            let body = match request.body() {
+                None => Vec::new(),
+                Some(body) => body
+                    .as_bytes()
+                    .ok_or_else(|| {
+                        Error::Unreachable("in-process request body must be buffered".into())
+                    })?
+                    .to_vec(),
+            };
+            let response = router
+                .clone()
+                .oneshot(
+                    local
+                        .body(axum::body::Body::from(body))
+                        .map_err(unreachable_error)?,
+                )
+                .await
+                .map_err(unreachable_error)?;
+            let (parts, body) = response.into_parts();
+            reqwest::Response::from(axum::http::Response::from_parts(
+                parts,
+                reqwest::Body::wrap_stream(body.into_data_stream()),
+            ))
+        } else {
+            request.send().await.map_err(unreachable_error)?
+        };
         let status = response.status();
         if status.is_success() {
             return Ok(response);

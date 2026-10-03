@@ -55,3 +55,15 @@ func TestPlatformsForFeishuOnly(t *testing.T) {
 		t.Errorf("platforms = %v, access = %v, vars = %v, err = %v", platforms, access, secretVars, err)
 	}
 }
+
+func TestPlatformsForWithholdsACPToken(t *testing.T) {
+	cfg := &config.Config{Agent: config.Agent{TokenEnv: "ACP_TOKEN"}, Telegram: &config.Telegram{TokenEnv: "TG_TOKEN"}}
+	_, _, names, err := platformsFor(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := withoutVars([]string{"PATH=/bin", "ACP_TOKEN=test-transport-token", "TG_TOKEN=test-bot-token"}, names...)
+	if !reflect.DeepEqual(got, []string{"PATH=/bin"}) {
+		t.Fatal("transport credentials reached agent environment")
+	}
+}

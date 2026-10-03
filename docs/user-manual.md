@@ -247,6 +247,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume`, `--archive`, or `--no-session`. |
 | `--resume PATH` | Resume a specific session file; with `--attach`, the session id instead of a path. Cannot be combined with `--continue`, `--archive`, or `--no-session`. |
 | `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--prompt`. |
+| `--acp-listen HOST:PORT` | `serve` only. Additional authenticated ACP v1 TCP listener on loopback. Requires `OTTO_ACP_TOKEN` in the environment; see [Direct ACP TCP connection](#direct-acp-tcp-connection). |
 | `--socket PATH` | `serve`, `acp --attach`, or `--attach`. Unix domain socket path of `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. For `serve` with `--listen`, both listeners are opened. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. With `--socket`, both listeners are opened. |
 | `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). A failed launch is not fatal: the URL is still printed. |
@@ -2178,8 +2179,9 @@ with status `1`.
 
 ### Chat access goes through otto-connect
 
-To use Otto from Telegram, run `otto-connect`, which starts `otto acp` as
-its ACP agent. See [Chat connector](#chat-connector).
+To use Otto from Telegram, run `otto-connect`, which starts `otto acp` or
+connects directly to `otto serve` over [ACP TCP](#direct-acp-tcp-connection).
+See [Chat connector](#chat-connector).
 
 ### Not supported over ACP
 
@@ -2191,9 +2193,10 @@ its ACP agent. See [Chat connector](#chat-connector).
 
 ## Chat connector
 
-`otto-connect` connects Telegram and Feishu (Lark) chats to `otto acp`. It is
-a separate Go program in `connect/`: it starts one `otto acp` process as a
-child, acts as its ACP client, and maps each chat to one Otto session.
+`otto-connect` connects Telegram and Feishu (Lark) chats to Otto through ACP.
+It is a separate Go program in `connect/`: it starts one `otto acp` child by
+default or connects directly to `otto serve` over authenticated ACP TCP,
+and maps each chat to one Otto session.
 Telegram and Feishu can be enabled in the same process.
 
 Otto is a general-purpose personal agent for research, writing, planning,
@@ -2302,6 +2305,46 @@ workspace = "/Users/me/work"            # the same workspace the serve clients u
   turns only; turns started in the web UI are not sent to the chat.
 - Use `/sessions` and `/use` (see [Commands](#commands)) to bind a chat to a
   session that was started in another client.
+
+### Direct ACP TCP connection
+
+`otto serve` can also accept ACP directly, without an `otto acp --attach`
+child. Set `OTTO_ACP_TOKEN` in the environment of both programs (for example,
+through your secret manager), then start:
+
+```bash
+otto serve --cwd /Users/me/work --acp-listen 127.0.0.1:9001
+```
+
+Use this agent section in `connect.toml`; keep the Telegram or Feishu section:
+
+```toml
+[agent]
+address = "127.0.0.1:9001"
+token_env = "OTTO_ACP_TOKEN"
+workspace = "/Users/me/work"
+```
+
+`address` and `command` are mutually exclusive. The workspace must match
+serve's startup workspace. Connect starts no agent process and needs no model
+credentials in this mode. Its conversations, cancellation, permission cards,
+and memory review use the sessions held by serve, also accessible through
+`otto --attach` and the web UI. A lost connection is reopened on the next
+message, loading the chat's saved session. Stopping connect closes its
+connection and cancels its turns; it does not stop serve.
+
+The listener is opt-in and accepts only loopback IPs or `localhost`; it has no
+TLS or remote-network support. The token is non-empty printable ASCII without
+spaces, at most 4000 bytes, and is never stored in config or printed. Each TCP
+connection begins with `Authorization: Bearer <token>\n` (one LF-terminated
+line), followed immediately by ordinary newline-delimited ACP v1 JSON-RPC.
+This authentication preface is Otto's transport convention, not part of ACP.
+Authentication must finish within five seconds. The listener allows at most
+64 simultaneous connections. Port `0` selects a free port, printed at startup.
+
+Configuration-management chat commands that require the separate HTTP
+management client remain available with `command = ["otto", "acp", "--attach"]`;
+they are unavailable in direct TCP mode.
 
 ### Admission
 

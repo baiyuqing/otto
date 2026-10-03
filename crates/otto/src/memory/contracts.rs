@@ -2,7 +2,7 @@
 //! error kinds and the ID rules.
 //!
 //! The types stay value-only so the store, the service, and the tools can all
-//! agree on one shape. The SQLite store depends on the size ceilings to build
+//! agree on one shape. The Turso store depends on the size ceilings to build
 //! its defensive projections, so they must not drift.
 
 use std::fmt;
@@ -726,7 +726,7 @@ pub fn decide_default_policy(request: &PolicyRequest) -> PolicyDecision {
     }
 }
 
-/// 16 random bytes, lowercase hex. The SQLite bootstrap rejects anything else
+/// 16 random bytes, lowercase hex. The Turso bootstrap rejects anything else
 /// for the database and user scope IDs.
 pub fn new_id() -> Result<String> {
     let mut raw = [0u8; 16];

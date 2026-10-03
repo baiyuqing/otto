@@ -6,7 +6,7 @@
 //! protects a review compares the decoded candidate rather than a SHA-256
 //! digest of its canonical JSON.
 
-use rusqlite::{Connection, Row, params, params_from_iter, types::Value};
+use crate::storage::{Connection, Row, Value, params, params_from_iter};
 
 use super::codec::{
     MAX_SOURCE_JSON_BYTES, encode_provenance, format_timestamp, parse_timestamp, valid_stored_float,
@@ -17,7 +17,7 @@ use super::records::{
     MutationSnapshot, bump_generation, forget_accepted_record, in_read_transaction,
     insert_accepted_record, read_generation, read_mutation_snapshot, update_accepted_record,
 };
-use super::{Store, map_sqlite_error};
+use super::{Store, map_storage_error};
 use crate::memory::guard::{guard_candidate, guard_record};
 use crate::memory::json::{encode_float, encode_string, encode_string_map, encode_string_slice};
 use crate::memory::validate::{
@@ -253,20 +253,20 @@ pub struct CandidateSnapshot {
     pub observation_id: String,
 }
 
-fn decode_candidate_row(row: &Row<'_>) -> Result<CandidateSnapshot> {
-    let valid: Option<i64> = row.get(0).map_err(map_sqlite_error)?;
+fn decode_candidate_row(row: &Row) -> Result<CandidateSnapshot> {
+    let valid: Option<i64> = row.get(0).map_err(map_storage_error)?;
     if valid != Some(1) {
         return Err(corrupt());
     }
     let string =
-        |index: usize| -> Result<Option<String>> { row.get(index).map_err(map_sqlite_error) };
+        |index: usize| -> Result<Option<String>> { row.get(index).map_err(map_storage_error) };
     let required = |index: usize| -> Result<String> { string(index)?.ok_or_else(corrupt) };
     let id = required(1)?;
     let namespace = required(2)?;
     let scope_id = required(3)?;
     let action = CandidateAction::parse(&required(4)?).ok_or_else(corrupt)?;
     let target_id = required(5)?;
-    let base_revision: Option<i64> = row.get(6).map_err(map_sqlite_error)?;
+    let base_revision: Option<i64> = row.get(6).map_err(map_storage_error)?;
     let observation_id = string(7)?;
     let proposed = required(8)?;
     let reason = required(9)?;
@@ -275,7 +275,7 @@ fn decode_candidate_row(row: &Row<'_>) -> Result<CandidateSnapshot> {
     let decided_at = string(12)?;
     let decision_source = required(13)?;
     let result_record_id = required(14)?;
-    let result_revision: Option<i64> = row.get(15).map_err(map_sqlite_error)?;
+    let result_revision: Option<i64> = row.get(15).map_err(map_storage_error)?;
     let (Some(base_revision), Some(result_revision)) = (base_revision, result_revision) else {
         return Err(corrupt());
     };
@@ -377,8 +377,8 @@ id,scope_namespace,scope_id,action,target_id,base_revision,observation_id,propos
 created_at,decided_at,decision_source,result_record_id,result_revision\
 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
-fn no_rows(error: &rusqlite::Error) -> bool {
-    matches!(error, rusqlite::Error::QueryReturnedNoRows)
+fn no_rows(error: &crate::storage::Error) -> bool {
+    matches!(error, crate::storage::Error::QueryReturnedNoRows)
 }
 
 fn read_candidate_snapshot(
@@ -389,7 +389,7 @@ fn read_candidate_snapshot(
         "SELECT {} FROM memory_candidates WHERE scope_namespace=? AND scope_id=? AND id=? LIMIT 1",
         candidate_projection()
     );
-    let mut prepared = connection.prepare(&sql).map_err(map_sqlite_error)?;
+    let mut prepared = connection.prepare(&sql).map_err(map_storage_error)?;
     let outcome = prepared.query_row(
         params![
             &reference.scope.namespace,
@@ -401,7 +401,7 @@ fn read_candidate_snapshot(
     let snapshot = match outcome {
         Ok(value) => value?,
         Err(error) if no_rows(&error) => return Err(Error::new(ErrorKind::NotFound)),
-        Err(error) => return Err(map_sqlite_error(error)),
+        Err(error) => return Err(map_storage_error(error)),
     };
     if snapshot.candidate.state == CandidateState::Pending {
         let declared = &snapshot.candidate.proposed.source.observation_id;
@@ -517,7 +517,7 @@ impl Store {
                             0i64,
                         ],
                     )
-                    .map_err(map_sqlite_error)?;
+                    .map_err(map_storage_error)?;
             }
             let generation = bump_generation(connection)?;
             Ok(((), generation))
@@ -551,12 +551,12 @@ impl Store {
                 let statement = build_candidate_list_query(request, cursor.as_ref());
                 let mut prepared = connection
                     .prepare(&statement.sql)
-                    .map_err(map_sqlite_error)?;
+                    .map_err(map_storage_error)?;
                 let mut rows = prepared
-                    .query(params_from_iter(statement.arguments.iter()))
-                    .map_err(map_sqlite_error)?;
+                    .query(params_from_iter(statement.arguments.iter().cloned()))
+                    .map_err(map_storage_error)?;
                 let mut candidates = Vec::new();
-                while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+                while let Some(row) = rows.next().map_err(map_storage_error)? {
                     if candidates.len() > MAX_PAGE_SIZE {
                         return Err(corrupt());
                     }
@@ -778,7 +778,7 @@ impl Store {
                         &committed.proposed.scope.id,
                     ],
                 )
-                .map_err(map_sqlite_error)?;
+                .map_err(map_storage_error)?;
             if changed != 1 {
                 return Err(Error::new(ErrorKind::Conflict));
             }
@@ -796,8 +796,8 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::sqlite::records::testsupport::{at, sample_record};
-    use crate::memory::sqlite::testsupport::open_temp;
+    use crate::memory::turso::records::testsupport::{at, sample_record};
+    use crate::memory::turso::testsupport::open_temp;
     use crate::memory::{NAMESPACE_USER, UpsertRequest};
 
     fn proposed(scope: &Scope, key: &str, text: &str) -> Record {

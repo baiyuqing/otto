@@ -920,7 +920,7 @@ mod tests {
                 provider.clone() as Arc<dyn Provider + Send + Sync>,
                 Arc::new(Tasks::new()),
             );
-            let (memory_dir, memory_store) = crate::memory::sqlite::testsupport::open_temp();
+            let (memory_dir, memory_store) = crate::memory::turso::testsupport::open_temp();
             let identity = memory_store.identity().expect("identity");
             let user_scope = identity.user_scope.clone();
             let workspace_scope = Scope::new("workspace", "ws-1");

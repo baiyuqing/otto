@@ -15,7 +15,7 @@
 //!   automatic extraction through a binding is out of scope. The `reflection`
 //!   module queues extractor candidates on demand through [`Service::propose`];
 //!   the store still guards written content.
-//! - The store is the concrete SQLite store and the policy a function, so
+//! - The store is the concrete Turso store and the policy a function, so
 //!   there is no missing-dependency case to reject.
 //! - `close` waits on the store's connection mutex, which an in-flight
 //!   operation already holds; a call that arrives after it sees `Closed`.
@@ -30,7 +30,7 @@ use otto_core::agent::memory as core_memory;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::sqlite::Store;
+use super::turso::Store;
 use super::validate::{
     provenance_zero, validate_bind_scopes, validate_forget_request, validate_propose_request,
     validate_recall_request, validate_remember_request, validate_search_request,
@@ -577,7 +577,7 @@ pub fn human_provenance(session_id: &str) -> Provenance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::sqlite::testsupport::open_temp;
+    use crate::memory::turso::testsupport::open_temp;
     use crate::memory::{CandidateRef, NAMESPACE_USER, NAMESPACE_WORKSPACE};
 
     fn service() -> (tempfile::TempDir, Arc<Service>) {

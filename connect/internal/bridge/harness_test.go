@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/baiyuqing/otto/connect/internal/agent"
 	"github.com/baiyuqing/otto/connect/internal/agent/fake"
+	"github.com/baiyuqing/otto/connect/internal/manage"
 	"github.com/baiyuqing/otto/connect/internal/state"
 )
 
@@ -37,6 +40,16 @@ type fakePlatform struct {
 }
 
 func newFakePlatform() *fakePlatform { return &fakePlatform{started: make(chan struct{})} }
+
+// managementServer supplies an HTTP client to the bridge. Production creates
+// the same API client from the attach command's Unix socket; this test helper
+// uses httptest because the sandbox does not allow listener binds on Unix paths.
+func managementServer(t *testing.T, handler http.HandlerFunc) *manage.Client {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return manage.NewWithBaseURL(server.Client(), server.URL)
+}
 
 func (p *fakePlatform) Name() string { return "fake" }
 
@@ -93,6 +106,7 @@ type setup struct {
 	chats    []string
 	senders  []string
 	mod      func(*Options)
+	manage   *manage.Client
 	agent    *agent.Options // replaces the fake agent's options
 }
 
@@ -126,6 +140,7 @@ func newHarness(t *testing.T, s setup) *harness {
 	h.agent = agent.New(ao)
 	opts := Options{
 		Agent:          h.agent,
+		Manage:         s.manage,
 		Platforms:      []Platform{h.plat},
 		Access:         map[string]Access{"fake": {Chats: s.chats, Senders: s.senders}},
 		Store:          s.store,

@@ -2331,6 +2331,47 @@ A message that arrives while `/use` is loading gets "A session switch is in
 progress; the message was not queued." A failed `session/list` call in
 `/sessions` or `/use` gets "Error: session/list failed: `<error>`".
 
+### Provider-profile management
+
+When the connector starts `otto acp --attach`, the same admitted chat senders
+can manage Otto's existing provider profiles through the running `otto serve`:
+
+```text
+/config
+/config profiles
+/config show <profile>
+/models <profile>
+/config add <profile> --provider <openai-compatible|chatgpt> --model <model> [--base-url <url>] [--api-key-env <name>] [--thinking <level>]
+/config set <profile> <model|thinking|base-url|api-key-env> <value>
+/config use <profile>
+/config remove <profile>
+/config confirm <token>
+/config cancel
+```
+
+`/config` and `/config profiles` list profile names, providers, models and the
+default marker. `/config show` also shows the endpoint and API-key environment
+**variable name**, never its value. `/models` asks an OpenAI-compatible
+endpoint for its model IDs; ChatGPT profiles report that model enumeration is
+not supported rather than guessing an ID.
+
+Every mutation first returns a redacted preview and a one-time confirmation
+token. Send `/config confirm <token>` from the same chat and sender within ten
+minutes to write exactly that change, or `/config cancel` to discard it. The
+connector never accepts API-key values, bot secrets, raw TOML, arbitrary file
+writes, or providers other than `openai-compatible` and `chatgpt`.
+
+A saved profile change requires restarting `otto serve` before it becomes
+available to new sessions; it never silently changes an existing session. These
+commands need attach mode. With direct `otto acp`, the connector replies with
+the attach requirement and does not send the command to the model.
+
+Management failures include a `request_id` when a write preview fails. Search
+connector and Otto server logs for that ID. Normal logs contain lifecycle IDs,
+profile names and outcomes, but never chat text, model text, tool contents,
+configuration bytes, API keys, bot tokens, OAuth credentials, or environment
+variable values.
+
 ### Memory review
 
 `remember` and `forget` only queue candidates; a person decides them. In a

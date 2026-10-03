@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -62,6 +64,7 @@ type fakeProvider struct {
 	mu     sync.Mutex
 	texts  []string
 	bodies []string
+	reply  func(body []byte, request int) string
 }
 
 func (p *fakeProvider) seen() []string {
@@ -73,8 +76,12 @@ func (p *fakeProvider) seen() []string {
 // newFakeProvider starts the provider; delay, when not nil, returns how long
 // to hold the response to a request with the given user text.
 func newFakeProvider(t *testing.T, delay func(text string) time.Duration) *fakeProvider {
+	return newScriptedFakeProvider(t, delay, nil)
+}
+
+func newScriptedFakeProvider(t *testing.T, delay func(text string) time.Duration, reply func(body []byte, request int) string) *fakeProvider {
 	t.Helper()
-	p := &fakeProvider{}
+	p := &fakeProvider{reply: reply}
 	p.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
@@ -83,20 +90,44 @@ func newFakeProvider(t *testing.T, delay func(text string) time.Duration) *fakeP
 		body, _ := io.ReadAll(r.Body)
 		user := lastUserText(body)
 		p.mu.Lock()
+		request := len(p.texts)
 		p.texts = append(p.texts, user)
 		p.bodies = append(p.bodies, string(body))
 		p.mu.Unlock()
 		if delay != nil {
 			time.Sleep(delay(user))
 		}
-		text, _ := json.Marshal("echo: " + user)
+		response := ""
+		if p.reply != nil {
+			response = p.reply(body, request)
+		}
+		if response == "" {
+			response = chatTextReply("echo: " + user)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Write([]byte(`data: {"choices":[{"delta":{"content":` + string(text) + `}}]}` + "\n\n" +
-			`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
-			"data: [DONE]\n\n"))
+		w.Write([]byte(response))
 	}))
 	t.Cleanup(p.Close)
 	return p
+}
+
+func chatTextReply(text string) string {
+	content, _ := json.Marshal(text)
+	return `data: {"choices":[{"delta":{"content":` + string(content) + `}}]}` + "\n\n" +
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n" + "data: [DONE]\n\n"
+}
+
+func chatToolCallReply(id, name, arguments string) string {
+	chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+		"delta": map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": id, "type": "function",
+			"function": map[string]any{"name": name, "arguments": arguments},
+		}}},
+	}}})
+	finish, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+		"delta": map[string]any{}, "finish_reason": "tool_calls",
+	}}})
+	return "data: " + string(chunk) + "\n\n" + "data: " + string(finish) + "\n\n" + "data: [DONE]\n\n"
 }
 
 // ottoHome returns a HOME whose otto config points at the provider.
@@ -304,6 +335,80 @@ func TestEndToEndMemoryApprovalCard(t *testing.T) {
 	defer h.plat.mu.Unlock()
 	if h.plat.statuses[0] != "Approved." {
 		t.Fatal(h.plat.statuses)
+	}
+}
+
+// TestEndToEndApprovalDialogueRevokesPermission exercises cancellation through
+// the real ACP SDK: the model withdraws a pending request, which must close its
+// chat card promptly, and a late Allow click must not run the command.
+func TestEndToEndApprovalDialogueRevokesPermission(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("elevated bash approval requires macOS Seatbelt")
+	}
+	bin := ottoBin(t)
+	requestID := regexp.MustCompile(`Only withdraw request ([^ ]+)\.`)
+	provider := newScriptedFakeProvider(t, nil, func(body []byte, _ int) string {
+		var req struct {
+			Messages []struct {
+				Role string `json:"role"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(body, &req)
+		hasToolResult := false
+		for _, message := range req.Messages {
+			hasToolResult = hasToolResult || message.Role == "tool"
+		}
+		if match := requestID.FindSubmatch(body); len(match) == 2 {
+			if hasToolResult {
+				return chatTextReply("The request was withdrawn.")
+			}
+			arguments, _ := json.Marshal(map[string]string{"id": string(match[1])})
+			return chatToolCallReply("revoke-call", "approval_revoke", string(arguments))
+		}
+		if hasToolResult {
+			return chatTextReply("approval needed")
+		}
+		arguments, _ := json.Marshal(map[string]string{
+			"command":             `printf ran > "$HOME/otto-approval-ran"`,
+			"sandbox_permissions": "require_escalated",
+			"justification":       "create a marker only if this approval is granted",
+		})
+		return chatToolCallReply("approval-command", "bash", string(arguments))
+	})
+	home := ottoHome(t, provider.URL)
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, setup{
+		mod: func(o *Options) { o.PermissionTimeout = 2 * time.Minute },
+		agent: &agent.Options{
+			Command: []string{bin, "acp", "--sandbox", "seatbelt"},
+			Dir:     workspace,
+			Env:     ottoEnv(home),
+		},
+	})
+	h.say("Run the command after I approve it.")
+	h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.approvals) == 1 }, "real Otto approval card")
+	cardID := h.plat.approvalID()
+	started := time.Now()
+	h.say("Cancel that command")
+	h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.statuses) == 1 }, "approval card withdrawal")
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("approval card took %s to close; it may have waited for expiry", elapsed)
+	}
+	h.plat.mu.Lock()
+	status := h.plat.statuses[0]
+	h.plat.mu.Unlock()
+	if status != "Closed; answered elsewhere or cancelled." {
+		t.Fatalf("approval card status = %q, want prompt cancellation", status)
+	}
+	lateAllow := h.msg("c1", "u1", "/allow")
+	lateAllow.ApprovalID = cardID
+	h.plat.deliver(lateAllow)
+	h.waitFor(func() bool { return slices.Contains(h.plat.texts(), "This approval request is no longer pending.") }, "late approval rejection")
+	if _, err := os.Stat(filepath.Join(home, "otto-approval-ran")); !os.IsNotExist(err) {
+		t.Fatalf("withdrawn command left marker behind, stat error = %v", err)
 	}
 }
 

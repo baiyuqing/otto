@@ -764,6 +764,10 @@ impl App {
         }
 
         if let Some(approval) = &mut self.approval {
+            if key.code == KeyCode::Char('c') && key.modifiers.is_empty() {
+                self.approval = None;
+                return None;
+            }
             let approve = match key.code {
                 KeyCode::Char('y' | 'Y' | '1') => true,
                 KeyCode::Esc | KeyCode::Char('n' | 'N' | '2') => false,
@@ -1148,6 +1152,15 @@ impl App {
         cancel: &CancellationToken,
     ) -> Option<Action> {
         if self.queued_input_sent {
+            return None;
+        }
+        if let Backend::Local(controller) = backend
+            && controller.pending_approval().is_some()
+            && self
+                .queued_input
+                .as_ref()
+                .is_some_and(|line| !line.starts_with('/'))
+        {
             return None;
         }
         let queued = self.queued_input.take()?;
@@ -2900,6 +2913,12 @@ mod tests {
         let action = press(&mut app, KeyCode::Enter);
         assert!(matches!(action, Some(Action::Approve(id)) if id == "approval-2"));
         assert!(app.approval.is_none());
+
+        // Chat hides the panel without deciding or submitting anything.
+        app.approval = Some(dialog("approval-chat"));
+        assert!(press(&mut app, KeyCode::Char('c')).is_none());
+        assert!(app.approval.is_none());
+        assert!(app.input.is_empty());
 
         // Moving twice returns to "No".
         app.approval = Some(dialog("approval-3"));

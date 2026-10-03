@@ -96,6 +96,7 @@ export function App() {
   // re-attached after a reload counts from the attach, not the server start.
   const [phaseState, setPhaseState] = useState<{ name: string; since: number; turnStart: number; retryEvent?: string } | null>(null)
   const [now, setNow] = useState(Date.now())
+  const approvalMessageRef = useRef<{ sessionId: string; turnId: string; text: string } | null>(null)
 
   const fail = useCallback((e: unknown) => setError(describe(e)), [])
 
@@ -146,7 +147,9 @@ export function App() {
           if (!s.turn || s.turn.status !== 'running') {
             if (s.turn?.status === 'canceled') setItems((prev) => [...prev, { kind: 'notice', text: 'Turn canceled' }])
             const queued = queuedInputRef.current.trim()
-            const shouldSendQueued = s.turn?.status === 'ok' && queued
+            const pendingMessage = approvalMessageRef.current
+            const awaitingControlReply = pendingMessage !== null && pendingMessage.sessionId === sessionId && pendingMessage.text === queued
+            const shouldSendQueued = s.turn?.status === 'ok' && queued && !awaitingControlReply
             if (shouldSendQueued) {
               queuedInputRef.current = ''
               setQueuedInput('')
@@ -179,6 +182,8 @@ export function App() {
       try {
         const s = await api.createSession(id, workspace)
         location.hash = s.id
+        queuedInputRef.current = ''
+        setQueuedInput('')
         setSession(s)
         const running = s.turn?.status === 'running' ? s.turn.id : undefined
         setItems(fromHistory(await api.history(s.id, running)))
@@ -306,17 +311,73 @@ export function App() {
     // with the next input.
     if (command.kind === 'approve' || command.kind === 'deny') {
       setError('')
+      const sessionId = session.id
+      const decisionTurnId = turnIdRef.current
+      const pendingMessage = approvalMessageRef.current
+      if (pendingMessage && pendingMessage.sessionId === sessionId && pendingMessage.turnId === decisionTurnId) {
+        approvalMessageRef.current = null
+        setQueuedInput(pendingMessage.text)
+      }
       try {
         const decision = command.kind === 'approve' ? 'allow' : 'deny'
-        await api.decideApproval(session.id, command.id, decision)
+        await api.decideApproval(sessionId, command.id, decision)
+        if (sessionRef.current?.id !== sessionId || turnIdRef.current !== decisionTurnId) return
         const verb = decision === 'allow' ? 'Approved' : 'Denied'
         setItems((prev) => [...prev, { kind: 'notice', text: `${verb} ${command.id}.` }])
       } catch (e) {
-        fail(e)
+        if (sessionRef.current?.id === sessionId && turnIdRef.current === decisionTurnId) fail(e)
       }
       return
     }
     if (turnIdRef.current !== null) {
+      if (!image && command.kind === 'prompt') {
+        const sessionId = session.id
+        const originalTurnId = turnIdRef.current
+        const inFlight = approvalMessageRef.current
+        if (inFlight && inFlight.sessionId === sessionId && inFlight.turnId === originalTurnId) {
+          setQueuedInput(text)
+          return
+        }
+        const request = { sessionId, turnId: originalTurnId, text }
+        approvalMessageRef.current = request
+        setQueuedInput(text)
+        try {
+          const reply = await api.approvalMessage(sessionId, text)
+          if (approvalMessageRef.current !== request) return
+          if (sessionRef.current?.id !== sessionId) return
+          if (reply) {
+            if (reply.queued) {
+              if (turnIdRef.current === null) {
+                setQueuedInput((queued) => queued === text ? '' : queued)
+                await send(text)
+              }
+            } else {
+              setItems((prev) => [...prev, { kind: 'notice', text: reply.text }])
+              setQueuedInput((queued) => queued === text ? '' : queued)
+            }
+            return
+          }
+          if (turnIdRef.current !== originalTurnId) {
+            if (turnIdRef.current === null) {
+              setQueuedInput((queued) => queued === text ? '' : queued)
+              await send(text)
+            }
+            return
+          }
+        } catch (e) {
+          if (approvalMessageRef.current !== request) return
+          if (sessionRef.current?.id !== sessionId) return
+          fail(e)
+          if (turnIdRef.current === originalTurnId) setQueuedInput(text)
+          else if (turnIdRef.current === null) {
+            setQueuedInput((queued) => queued === text ? '' : queued)
+            await send(text)
+          }
+          return
+        } finally {
+          if (approvalMessageRef.current === request) approvalMessageRef.current = null
+        }
+      }
       setQueuedInput(text)
       return
     }

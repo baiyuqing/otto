@@ -55,7 +55,8 @@ type process struct {
 
 	startedAt time.Time
 	// memoryReview is set from the initialize response.
-	memoryReview bool
+	memoryReview     bool
+	approvalDialogue bool
 	// endedAt and waitErr are valid after exited is closed.
 	endedAt time.Time
 	waitErr error
@@ -208,6 +209,8 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 		return nil, err
 	}
 	p.memoryReview = advertisesMemoryReview(resp.AgentCapabilities.Meta)
+	otto, _ := resp.AgentCapabilities.Meta["otto"].(map[string]any)
+	p.approvalDialogue, _ = otto["approvalDialogue"].(bool)
 	return p, nil
 }
 

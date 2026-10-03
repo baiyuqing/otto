@@ -239,6 +239,30 @@ fn initialize_advertises_the_implemented_capabilities() {
     );
     assert_eq!(result["authMethods"], json!([]));
     assert_eq!(result["agentInfo"]["name"], "otto");
+    assert_eq!(
+        result["agentCapabilities"]["_meta"]["otto"]["approvalDialogue"],
+        true
+    );
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn approval_message_returns_null_without_a_pending_request() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    configure(home.path(), "http://127.0.0.1:1");
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    let initialized = client.initialize();
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["_meta"]["otto"]["approvalDialogue"],
+        true
+    );
+    let session_id = client.new_session(workspace.path());
+    let (_, response) = client.call(
+        "_otto/approvals/message",
+        json!({"sessionId": session_id, "text": "hello"}),
+    );
+    assert_eq!(response["result"], Value::Null, "{response}");
     assert_eq!(client.close(), Some(0));
 }
 
@@ -761,6 +785,45 @@ mod approval {
         tool_call_reply(call_id, "bash", &arguments)
     }
 
+    fn pending_request(client: &mut Client, session_id: &str) -> (u64, Value) {
+        let prompt_id = client.start("session/prompt", prompt(session_id, "run the command"));
+        let mut frames = Vec::new();
+        loop {
+            let frame = client.recv();
+            if frame["method"] == "session/request_permission" {
+                assert_eq!(frame["params"]["sessionId"], session_id);
+                return (prompt_id, frame);
+            }
+            if frame["id"] == json!(prompt_id) && frame.get("method").is_none() {
+                panic!("prompt ended before approval: {frame}; preceding: {frames:?}");
+            }
+            frames.push(frame);
+        }
+    }
+
+    fn answer_dialogue(client: &mut Client, session_id: &str, text: &str) -> (Vec<Value>, Value) {
+        let dialogue_id = client.start(
+            "_otto/approvals/message",
+            json!({"sessionId": session_id, "text": text}),
+        );
+        client.finish(dialogue_id, &mut |frame| {
+            panic!("unexpected request: {frame}")
+        })
+    }
+
+    fn start_with_replies(replies: Vec<String>) -> (tempfile::TempDir, tempfile::TempDir, Client) {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (base_url, _) = serve(Script {
+            replies,
+            served: Arc::new(AtomicUsize::new(0)),
+        });
+        configure(home.path(), &base_url);
+        let mut client = Client::spawn(home.path(), workspace.path(), "seatbelt");
+        client.initialize();
+        (home, workspace, client)
+    }
+
     #[test]
     fn persistent_read_grant_runs_confined_retry_and_denial_does_not_write_config() {
         let read_call = |id| {
@@ -886,5 +949,122 @@ mod approval {
         );
         let text = serde_json::to_string(&result.frames).unwrap();
         assert!(!text.contains("outside-seatbelt"), "{text}");
+    }
+
+    #[test]
+    fn question_and_ordinary_task_leave_the_permission_pending_until_answered() {
+        let (home, workspace, mut client) = start_with_replies(vec![
+            escalated("call-1"),
+            text_reply("approval needed"),
+            text_reply("It is waiting for approval."),
+            tool_call_reply("control-call", "approval_queue", "{}"),
+            text_reply("The task is queued."),
+            text_reply("The approval was denied."),
+        ]);
+        let session_id = client.new_session(workspace.path());
+        let (prompt_id, permission) = pending_request(&mut client, &session_id);
+        let other_session = client.new_session(workspace.path());
+        let (_, other) = client.call(
+            "_otto/approvals/message",
+            json!({"sessionId": other_session, "text": "cancel it"}),
+        );
+        assert_eq!(other["result"], Value::Null, "{other}");
+
+        let (question_frames, question) =
+            answer_dialogue(&mut client, &session_id, "What is waiting?");
+        assert_eq!(
+            question["result"]["text"], "It is waiting for approval.",
+            "{question}"
+        );
+        assert_eq!(question["result"]["queued"], false, "{question}");
+        assert!(
+            !question_frames
+                .iter()
+                .any(|frame| frame["method"] == "$/cancel_request")
+        );
+
+        let (queue_frames, queued) = answer_dialogue(&mut client, &session_id, "Do another task");
+        assert_eq!(queued["result"]["text"], "The task is queued.", "{queued}");
+        assert_eq!(queued["result"]["queued"], true, "{queued}");
+        assert!(
+            !queue_frames
+                .iter()
+                .any(|frame| frame["method"] == "$/cancel_request")
+        );
+
+        client.send(json!({
+            "jsonrpc": "2.0",
+            "id": permission["id"],
+            "result": {"outcome": {"outcome": "selected", "optionId": "reject_once"}},
+        }));
+        let (_, response) = client.finish(prompt_id, &mut |frame| {
+            panic!("unexpected request: {frame}")
+        });
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert!(!home.path().join("otto-elevated-ran").exists());
+        assert_eq!(client.close(), Some(0));
+    }
+
+    #[test]
+    fn revoke_withdraws_the_request_and_a_late_card_response_cannot_run_it() {
+        let command = "printf ran > \"$HOME/otto-elevated-ran\"";
+        let arguments = json!({
+            "command": command,
+            "sandbox_permissions": "require_escalated",
+            "justification": "write a marker only if approval is granted",
+        })
+        .to_string();
+        let (home, workspace, mut client) = start_with_replies(vec![
+            tool_call_reply("call-1", "bash", &arguments),
+            text_reply("approval needed"),
+            tool_call_reply("control-call", "approval_revoke", r#"{"id":"approval-1"}"#),
+            text_reply("Withdrawn."),
+            text_reply("The request was withdrawn."),
+        ]);
+        let session_id = client.new_session(workspace.path());
+        let (prompt_id, permission) = pending_request(&mut client, &session_id);
+        let other_session = client.new_session(workspace.path());
+        let (_, other) = client.call(
+            "_otto/approvals/message",
+            json!({"sessionId": other_session, "text": "cancel it"}),
+        );
+        assert_eq!(other["result"], Value::Null, "{other}");
+        let (mut frames, dialogue) =
+            answer_dialogue(&mut client, &session_id, "Cancel that command");
+        assert_eq!(dialogue["result"]["text"], "Withdrawn.", "{dialogue}");
+        let cancel = loop {
+            if let Some(cancel) = frames
+                .iter()
+                .find(|frame| frame["method"] == "$/cancel_request")
+            {
+                break cancel.clone();
+            }
+            let frame = client.recv();
+            if frame["method"] == "$/cancel_request" {
+                break frame;
+            }
+            frames.push(frame);
+        };
+        assert_eq!(cancel["params"]["requestId"], permission["id"]);
+
+        client.send(json!({
+            "jsonrpc": "2.0",
+            "id": permission["id"],
+            "result": {"outcome": {"outcome": "selected", "optionId": "allow_once"}},
+        }));
+        let response = frames
+            .iter()
+            .find(|frame| frame.get("method").is_none() && frame["id"] == json!(prompt_id))
+            .cloned()
+            .unwrap_or_else(|| {
+                client
+                    .finish(prompt_id, &mut |frame| {
+                        panic!("unexpected request: {frame}")
+                    })
+                    .1
+            });
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert!(!home.path().join("otto-elevated-ran").exists());
+        assert_eq!(client.close(), Some(0));
     }
 }

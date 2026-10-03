@@ -167,6 +167,30 @@ func TestPromptAfterRestartNeedsLoad(t *testing.T) {
 	}
 }
 
+func TestApprovalMessageRequiresCapabilityAndReturnsNullOutsideApproval(t *testing.T) {
+	t.Run("unsupported", func(t *testing.T) {
+		a, _, _ := fakeAgent(t)
+		id, err := a.New(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.ApprovalMessage(context.Background(), id, "hello"); !errors.Is(err, ErrApprovalUnsupported) {
+			t.Fatalf("ApprovalMessage error = %v, want ErrApprovalUnsupported", err)
+		}
+	})
+	t.Run("idle", func(t *testing.T) {
+		a, _, _ := fakeAgent(t, "FAKE_APPROVAL_DIALOGUE=1")
+		id, err := a.New(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		reply, err := a.ApprovalMessage(context.Background(), id, "hello")
+		if err != nil || reply != nil {
+			t.Fatalf("ApprovalMessage = (%+v, %v), want (nil, nil)", reply, err)
+		}
+	})
+}
+
 func TestLoadUnknownSessionIsNotExitError(t *testing.T) {
 	a, _, _ := fakeAgent(t)
 	err := a.Load(context.Background(), strings.Repeat("a", 32))

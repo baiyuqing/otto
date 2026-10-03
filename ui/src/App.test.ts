@@ -18,6 +18,7 @@ const api = vi.hoisted(() => ({
   listMcp: vi.fn(),
   cancelTurn: vi.fn(),
   startTurn: vi.fn(),
+  approvalMessage: vi.fn(),
   decideApproval: vi.fn(),
   compact: vi.fn(),
   reflect: vi.fn(),
@@ -316,6 +317,158 @@ describe('idle wake follow', () => {
     expect(api.decideApproval).toHaveBeenNthCalledWith(2, 'sess1', 'a2', 'deny')
     expect(api.startTurn).not.toHaveBeenCalled()
     expect(screen.queryByText(/Queued next input/)).toBeNull()
+  })
+
+  it('queues input when no approval is waiting', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    api.approvalMessage.mockResolvedValue(null)
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'unrelated task' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => { await Promise.resolve() })
+
+    expect(api.approvalMessage).toHaveBeenCalledWith('sess1', 'unrelated task')
+    expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
+    expect(api.startTurn).not.toHaveBeenCalled()
+  })
+
+  it('shows approval dialogue replies without queueing the prompt', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    api.approvalMessage.mockResolvedValue({ text: 'The command needs approval. You can deny it with /deny a1.', queued: false })
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'Why is this waiting?' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => { await Promise.resolve() })
+
+    expect(screen.getByText('The command needs approval. You can deny it with /deny a1.')).toBeTruthy()
+    expect(screen.queryByText(/Queued next input/)).toBeNull()
+    expect(api.startTurn).not.toHaveBeenCalled()
+  })
+
+  it('keeps the prompt queued and reports an approval dialogue failure', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    api.approvalMessage.mockRejectedValue(new Error('approval dialogue unavailable'))
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'continue with the task' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => { await Promise.resolve() })
+
+    expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
+    expect(screen.getByText('approval dialogue unavailable')).toBeTruthy()
+  })
+
+  it('queues a second prompt while an approval dialogue request is in flight', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    let finish: (value: null) => void = () => {}
+    api.approvalMessage.mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'explain the approval' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    fireEvent.change(input, { target: { value: 'next task' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(api.approvalMessage).toHaveBeenCalledTimes(1)
+    expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
+
+    await act(async () => { finish(null); await Promise.resolve() })
+    expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
+  })
+
+  it('preserves an unrelated queued prompt when a dialogue reply is handled', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    let finish: (value: { text: string; queued: boolean }) => void = () => {}
+    api.approvalMessage.mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'explain the approval' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    fireEvent.change(input, { target: { value: 'next task' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => {
+      finish({ text: 'The command was withdrawn.', queued: false })
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText('The command was withdrawn.')).toBeTruthy()
+    expect(screen.getByText('next task')).toBeTruthy()
+    expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
+    expect(api.startTurn).not.toHaveBeenCalled()
+  })
+
+  it('does not resend a handled control prompt when its reply arrives after the turn ends', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    const done: Session = { ...running, turn: { ...running.turn!, status: 'canceled' } }
+    let closeStream = () => {}
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream({ start(controller) { closeStream = () => controller.close() } }), { headers: { 'Content-Type': 'text/event-stream' } }))
+    api.getSession.mockResolvedValue(done)
+    let finish: (value: { text: string; queued: boolean }) => void = () => {}
+    api.approvalMessage.mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'continue after approval' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => {
+      closeStream()
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    })
+    await act(async () => {
+      finish({ text: 'The approval ended.', queued: false })
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    })
+
+    expect(api.startTurn).not.toHaveBeenCalled()
+    expect(screen.getByText('The approval ended.')).toBeTruthy()
+    expect(screen.queryAllByText(/Queued next input/)).toHaveLength(0)
+  })
+
+  it('flushes ordinary input when no approval reply arrives after the turn ends', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    const done: Session = { ...running, turn: { ...running.turn!, status: 'ok' } }
+    let closeStream = () => {}
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream({ start(controller) { closeStream = () => controller.close() } }), { headers: { 'Content-Type': 'text/event-stream' } }))
+    api.getSession.mockResolvedValue(done)
+    let finish: (value: null) => void = () => {}
+    api.approvalMessage.mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    api.startTurn.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream', 'Otto-Turn-Id': 'turn2' } }))
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'ordinary task' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => {
+      closeStream()
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    })
+    await act(async () => {
+      finish(null)
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+    })
+
+    expect(api.startTurn).toHaveBeenCalledTimes(1)
+    expect(api.startTurn).toHaveBeenCalledWith('sess1', 'ordinary task', undefined)
   })
 
   it('reloads history when a wake finished between polls', async () => {

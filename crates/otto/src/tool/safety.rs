@@ -14,6 +14,10 @@ use otto_core::model::RetrySafety;
 /// A tool absent from this table, including every MCP tool, is treated as
 /// `NonIdempotent`.
 const BASE_SAFETY: &[(&str, RetrySafety)] = &[
+    ("otto_help", RetrySafety::ReadOnly),
+    ("approval_pending", RetrySafety::ReadOnly),
+    ("approval_revoke", RetrySafety::NonIdempotent),
+    ("approval_queue", RetrySafety::NonIdempotent),
     ("read", RetrySafety::ReadOnly),
     ("ls", RetrySafety::ReadOnly),
     ("grep", RetrySafety::ReadOnly),

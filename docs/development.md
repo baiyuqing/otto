@@ -1,8 +1,9 @@
 # Development guide
 
-`AGENTS.md` is the short entry point and canonical repository rulebook. This
-page holds the detailed package contracts and development workflow. The
-wasm32 architecture boundary is enforced by `make rust-wasm-check`, which
+[Code organization](code-organization.md) is the repository navigation map,
+and `AGENTS.md` is the short, canonical repository rulebook. This page holds
+the detailed package contracts and development workflow. The wasm32
+architecture boundary is enforced by `make rust-wasm-check`, which
 requires `crates/otto-core` and `crates/otto-web` to stay buildable for
 `wasm32-unknown-unknown`; the rationale and compatibility details are in the
 [architecture contract design](specs/2026-09-05-architecture-contracts.md).

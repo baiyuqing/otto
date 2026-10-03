@@ -24,7 +24,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-type sent struct{ chat, replyTo, text string }
+type sent struct {
+	chat, replyTo, text string
+	markdown            bool
+}
 
 // fakePlatform records what the bridge sends and lets the test deliver
 // messages.
@@ -66,9 +69,9 @@ func (p *fakePlatform) Run(ctx context.Context, deliver func(Message)) error {
 	return nil
 }
 
-func (p *fakePlatform) Send(_ context.Context, chat, replyTo, text string) error {
+func (p *fakePlatform) Send(_ context.Context, chat, replyTo, text string, markdown bool) error {
 	p.mu.Lock()
-	p.sent = append(p.sent, sent{chat, replyTo, text})
+	p.sent = append(p.sent, sent{chat, replyTo, text, markdown})
 	p.mu.Unlock()
 	return nil
 }
@@ -256,7 +259,7 @@ func (p *fakePlatform) SendApproval(ctx context.Context, chat, id, text string) 
 	if err != nil {
 		return nil, err
 	}
-	p.Send(ctx, chat, "", text)
+	p.Send(ctx, chat, "", text, false)
 	return func(_ context.Context, status string) error {
 		p.mu.Lock()
 		defer p.mu.Unlock()

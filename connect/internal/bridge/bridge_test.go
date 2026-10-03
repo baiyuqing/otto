@@ -3,10 +3,12 @@ package bridge
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/connect/internal/agent/fake"
 )
@@ -568,5 +570,31 @@ func TestChatPromptPreservesUserText(t *testing.T) {
 		} else if !strings.HasSuffix(got, "[/otto-connect channel context]\n\n"+text) {
 			t.Fatalf("user text changed: %q", got)
 		}
+	}
+}
+
+func TestMenuCommandsAreHandled(t *testing.T) {
+	t.Parallel()
+	name := regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
+	for _, c := range Commands {
+		if !name.MatchString(c.Name) {
+			t.Errorf("command name %q does not match Telegram's rule", c.Name)
+		}
+		if n := utf8.RuneCountInString(c.Description); n < 1 || n > 256 {
+			t.Errorf("/%s description has %d characters, want 1..256", c.Name, n)
+		}
+		t.Run(c.Name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, setup{})
+			// The chat queue is ordered, so if the command had been
+			// forwarded as a prompt it would start before the marker.
+			h.say("/" + c.Name)
+			settle() // /use refuses messages that arrive while it runs
+			h.say("marker")
+			h.waitFor(func() bool { return slices.Contains(fake.Calls(h.dir), "start:marker") }, "marker prompt")
+			if calls := fake.Calls(h.dir); slices.Contains(calls, "start:/"+c.Name) {
+				t.Errorf("/%s was sent to the agent as a prompt; agent calls = %q", c.Name, calls)
+			}
+		})
 	}
 }

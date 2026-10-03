@@ -2148,6 +2148,13 @@ a separate Go program in `connect/`: it starts one `otto acp` process as a
 child, acts as its ACP client, and maps each chat to one Otto session.
 Telegram and Feishu can be enabled in the same process.
 
+Otto is a general-purpose personal agent for research, writing, planning,
+coding, and practical tasks, using the tools and permissions available in
+the session. The connector includes the current channel with each message,
+including after a session is resumed or shared, so Otto can adapt replies
+for chat without assuming you can see its local terminal. This context is
+ordinary prompt text; it does not change tool availability or permissions.
+
 ### Building and running
 
 Building requires Go at the version in `connect/go.mod`.

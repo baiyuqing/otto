@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"sync"
@@ -140,13 +141,16 @@ func (p *process) exitError() *ExitError {
 	if p.waitErr != nil {
 		status = p.waitErr.Error()
 	}
-	return &ExitError{Status: status, Stderr: p.tail.lines()}
+	return &ExitError{Remote: p.cmd == nil, Status: status, Stderr: p.tail.lines()}
 }
 
 // start launches the command and runs the ACP initialize handshake. On a
 // handshake failure the process is left in a.cur, exited, so the next call
 // applies the restart delay. a.mu is held.
 func (a *Agent) start(ctx context.Context) (*process, error) {
+	if a.opts.Address != "" {
+		return a.connect(ctx)
+	}
 	if len(a.opts.Command) == 0 {
 		return nil, errors.New("agent command is empty")
 	}
@@ -190,6 +194,10 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 	}()
 	a.cur = p
 
+	return a.initialize(ctx, p)
+}
+
+func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 	resp, err := p.conn.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		ClientInfo:      &acp.Implementation{Name: "otto-connect"},
@@ -200,7 +208,9 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 	if err != nil {
 		err = p.wrap(err)
 		_ = p.stdin.Close()
-		_ = cmd.Process.Kill()
+		if p.cmd != nil {
+			_ = p.cmd.Process.Kill()
+		}
 		<-p.exited
 		var ee *ExitError
 		if !errors.As(err, &ee) {
@@ -332,4 +342,55 @@ func (t *tail) lines() []string {
 		}
 	}
 	return out
+}
+
+// connect opens a transport, never starts or kills the server process.
+func (a *Agent) connect(ctx context.Context) (*process, error) {
+	address := a.opts.Address
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, errors.New("invalid ACP address")
+	}
+	if host == "localhost" {
+		address = net.JoinHostPort("127.0.0.1", port)
+	} else {
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return nil, errors.New("ACP requires a loopback address")
+		}
+	}
+	if a.opts.Token == "" || len(a.opts.Token) > 4000 {
+		return nil, errors.New("invalid ACP token")
+	}
+	for _, b := range []byte(a.opts.Token) {
+		if b < 33 || b > 126 {
+			return nil, errors.New("invalid ACP token")
+		}
+	}
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("connect ACP: %w", err)
+	}
+	// A deadline covers authentication plus initialize, then normal turns have no timeout.
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(conn, "Authorization: Bearer "+a.opts.Token+"\n"); err != nil {
+		conn.Close()
+		return nil, errors.New("ACP authentication write failed")
+	}
+	p := &process{stdin: conn, exited: make(chan struct{}), writeFailed: make(chan struct{}),
+		tail: &tail{level: a.opts.StderrLevel}, startedAt: a.opts.Now(), open: map[string]bool{}, loading: map[string]bool{}}
+	p.conn = acp.NewClientSideConnection(&client{a: a, p: p, handler: a.handler}, &stdinWriter{p: p}, conn)
+	a.cur = p
+	go func() {
+		<-p.conn.Done()
+		conn.Close()
+		p.waitErr = errors.New("ACP connection closed")
+		p.endedAt = a.opts.Now()
+		close(p.exited)
+	}()
+	result, err := a.initialize(ctx, p)
+	if err == nil {
+		_ = conn.SetDeadline(time.Time{})
+	}
+	return result, err
 }

@@ -295,6 +295,12 @@ func TestEndToEndSharedSession(t *testing.T) {
 // The real ACP agent must turn remember's pending candidate into an actionable
 // connector card; a tool-call notification alone is not a permission request.
 func TestEndToEndMemoryApprovalCard(t *testing.T) {
+	for _, tcp := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tcp=%t", tcp), func(t *testing.T) { testEndToEndMemoryApprovalCard(t, tcp) })
+	}
+}
+
+func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 	bin := ottoBin(t)
 	var calls int
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +320,12 @@ func TestEndToEndMemoryApprovalCard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := newHarness(t, setup{agent: &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}})
+	options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}
+	if tcp {
+		_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
+		options = tcpAgentOptions(t, diagnostics, workspace)
+	}
+	h := newHarness(t, setup{agent: options})
 	h.say("Remember my preference for tabs.")
 	waitCards(h, 1)
 	if got := h.waitSent(2); !strings.Contains(got[1], "prefers tabs") {
@@ -342,6 +353,12 @@ func TestEndToEndMemoryApprovalCard(t *testing.T) {
 // the real ACP SDK: the model withdraws a pending request, which must close its
 // chat card promptly, and a late Allow click must not run the command.
 func TestEndToEndApprovalDialogueRevokesPermission(t *testing.T) {
+	for _, tcp := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tcp=%t", tcp), func(t *testing.T) { testEndToEndApprovalDialogueRevokesPermission(t, tcp) })
+	}
+}
+
+func testEndToEndApprovalDialogueRevokesPermission(t *testing.T, tcp bool) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("elevated bash approval requires macOS Seatbelt")
 	}
@@ -380,14 +397,12 @@ func TestEndToEndApprovalDialogueRevokesPermission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := newHarness(t, setup{
-		mod: func(o *Options) { o.PermissionTimeout = 2 * time.Minute },
-		agent: &agent.Options{
-			Command: []string{bin, "acp", "--sandbox", "seatbelt"},
-			Dir:     workspace,
-			Env:     ottoEnv(home),
-		},
-	})
+	options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "seatbelt"}, Dir: workspace, Env: ottoEnv(home)}
+	if tcp {
+		_, diagnostics := startOttoServer(t, bin, home, workspace, "--sandbox", "seatbelt", "--acp-listen", "127.0.0.1:0")
+		options = tcpAgentOptions(t, diagnostics, workspace)
+	}
+	h := newHarness(t, setup{mod: func(o *Options) { o.PermissionTimeout = 2 * time.Minute }, agent: options})
 	h.say("Run the command after I approve it.")
 	h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.approvals) == 1 }, "real Otto approval card")
 	cardID := h.plat.approvalID()
@@ -413,7 +428,7 @@ func TestEndToEndApprovalDialogueRevokesPermission(t *testing.T) {
 }
 
 // startOttoServer runs a server owned by the test and returns its socket and diagnostics.
-func startOttoServer(t *testing.T, bin, home, workspace string) (string, func() string) {
+func startOttoServer(t *testing.T, bin, home, workspace string, extra ...string) (string, func() string) {
 	t.Helper()
 	// A short path: unix socket paths are limited to about 100 bytes.
 	sockDir, err := os.MkdirTemp("", "otto-e2e")
@@ -423,15 +438,16 @@ func startOttoServer(t *testing.T, bin, home, workspace string) (string, func() 
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 	sock := filepath.Join(sockDir, "s")
 
-	serve := exec.Command(bin, "serve", "--socket", sock, "--cwd", workspace, "--sandbox", "off")
+	serve := exec.Command(bin, append([]string{"serve", "--socket", sock, "--cwd", workspace, "--sandbox", "off"}, extra...)...)
 	serve.Dir = workspace
-	serve.Env = ottoEnv(home)
+	serve.Env = append(ottoEnv(home), "OTTO_ACP_TOKEN=connect-test-acp-token")
 	errFile, err := os.Create(filepath.Join(sockDir, "serve.err"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { errFile.Close() })
 	serve.Stderr = errFile
+	serve.Stdout = errFile
 	serveStderr := func() string { b, _ := os.ReadFile(errFile.Name()); return string(b) }
 	if err := serve.Start(); err != nil {
 		t.Fatal(err)
@@ -525,4 +541,71 @@ func TestEndToEndChatRoleAndChannel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TCP drives serve directly: no ACP child, persistent shared sessions and a
+// transport reconnect that leaves serve and its HTTP clients alive.
+func TestEndToEndTCPSharedSession(t *testing.T) {
+	bin := ottoBin(t)
+	provider := newFakeProvider(t, nil)
+	home := ottoHome(t, provider.URL)
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
+	address := tcpAgentOptions(t, diagnostics, workspace).Address
+	options := func(token string) *agent.Options {
+		return &agent.Options{Address: address, Token: token, Dir: workspace}
+	}
+	bad := agent.New(*options("wrong-token"))
+	if _, err := bad.New(context.Background()); err == nil {
+		t.Fatal("bad authentication admitted")
+	}
+	bad.Close()
+	h := newHarness(t, setup{agent: options("connect-test-acp-token")})
+	h.say("first over TCP")
+	if got := h.waitSent(1); got[0] != "echo: first over TCP" {
+		t.Fatal(got)
+	}
+	sid := h.store.Session("fake:c1")
+	page, err := h.agent.MemoryPending(context.Background(), sid, "")
+	if err != nil || len(page.Candidates) != 0 {
+		t.Fatalf("TCP memory review unavailable: %v", err)
+	}
+
+	// The existing stdio relay accesses the same serve-owned session.
+	local := agent.New(agent.Options{Command: []string{bin, "acp", "--attach", "--socket", sock}, Dir: workspace, Env: ottoEnv(home)})
+	local.SetHandler(h.b)
+	defer local.Close()
+	if err := local.Load(context.Background(), sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := local.Prompt(context.Background(), sid, "shared from HTTP relay"); err != nil {
+		t.Fatal(err)
+	}
+	h.agent.Kill() // disconnect transport only; the server must remain alive
+	h.say("after TCP reconnect")
+	if got := h.waitSent(2); got[1] != "echo: after TCP reconnect" {
+		t.Fatalf("reconnect: %q; %s", got, diagnostics())
+	}
+	if h.store.Session("fake:c1") != sid {
+		t.Fatal("reconnect changed the session")
+	}
+	if len(provider.seen()) != 3 {
+		t.Fatal(provider.seen())
+	}
+	h.agent.Close()
+	if _, err := local.List(context.Background()); err != nil {
+		t.Fatalf("closing TCP stopped serve: %v", err)
+	}
+}
+
+func tcpAgentOptions(t *testing.T, diagnostics func() string, workspace string) *agent.Options {
+	t.Helper()
+	match := regexp.MustCompile(`otto serve: ACP ([^\s]+)`).FindStringSubmatch(diagnostics())
+	if len(match) != 2 {
+		t.Fatalf("missing ACP address: %s", diagnostics())
+	}
+	return &agent.Options{Address: match[1], Token: "connect-test-acp-token", Dir: workspace}
 }

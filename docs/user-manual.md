@@ -2328,6 +2328,20 @@ a log line.
 
 ### Messages and replies
 
+- On Telegram, `otto-connect` converts the Markdown of Otto's replies to
+  Telegram formatting and sends the text with message entities, not with a
+  parse mode. Backslash escapes and HTML entity references are resolved,
+  except inside inline code. Bold, italic, strikethrough, inline code, links, block quotes, and
+  fenced or indented code blocks (with the language of the fence) keep their
+  formatting. Headings are bold lines. Images become a link on their alt
+  text. A link or image whose destination is not an `http://`, `https://`, or
+  `tg://` URL, such as a relative file path, keeps only its text. Bullet and numbered lists are written as "•" and "N." lines, nested
+  two spaces per level. Tables are sent as monospace blocks with padded
+  columns; the padding counts characters, so East Asian wide characters do
+  not align. Raw HTML such as `<id>` is shown as written. Messages from the
+  connector itself (command output, errors, permission requests) stay plain
+  text. If Telegram rejects a formatted part with status 400, that part is
+  resent as plain text. Feishu renders the Markdown itself and is unchanged.
 - Each chat has one Otto session. The first message creates it; after a
   restart of `otto-connect` or of the agent, the next message loads it.
   The replayed history of a loaded session is not sent to the chat.

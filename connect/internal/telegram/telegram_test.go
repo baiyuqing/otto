@@ -414,7 +414,7 @@ func TestSendSplitsAtLineBoundaries(t *testing.T) {
 	b := newBot(api, nil)
 	line := strings.Repeat("a", 2000) + "\n"
 	text := line + line + line // 3 lines of 2001 units
-	if err := b.Send(context.Background(), "42", "777", text); err != nil {
+	if err := b.Send(context.Background(), "42", "777", text, false); err != nil {
 		t.Fatal(err)
 	}
 	got := sends(api)
@@ -444,7 +444,7 @@ func TestSendCountsUTF16Units(t *testing.T) {
 	check := func(name, text string, wantParts int) {
 		t.Helper()
 		api := botAPI(t)
-		if err := newBot(api, nil).Send(ctx, "1", "", text); err != nil {
+		if err := newBot(api, nil).Send(ctx, "1", "", text, false); err != nil {
 			t.Fatal(err)
 		}
 		got := sends(api)
@@ -482,7 +482,7 @@ func TestSendEmptyTextSendsNothing(t *testing.T) {
 	api := botAPI(t)
 	b := newBot(api, nil)
 	for _, text := range []string{"", "  \n "} {
-		if err := b.Send(context.Background(), "1", "2", text); err != nil {
+		if err := b.Send(context.Background(), "1", "2", text, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -504,7 +504,7 @@ func TestSendRetriesRateLimit(t *testing.T) {
 		return okR(true)
 	})
 	b := newBot(api, nil)
-	if err := b.Send(context.Background(), "1", "", "hi"); err != nil {
+	if err := b.Send(context.Background(), "1", "", "hi", false); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(sends(api)); n != 2 {
@@ -515,7 +515,7 @@ func TestSendRetriesRateLimit(t *testing.T) {
 	limited = 100
 	mu.Unlock()
 	before := len(sends(api))
-	err := b.Send(context.Background(), "1", "", "hi")
+	err := b.Send(context.Background(), "1", "", "hi", false)
 	var ae *apiError
 	if !errors.As(err, &ae) || ae.Code != 429 {
 		t.Fatalf("err = %v, want a 429 apiError", err)
@@ -527,7 +527,7 @@ func TestSendRetriesRateLimit(t *testing.T) {
 
 func TestSendReturnsAPIError(t *testing.T) {
 	api := newAPI(t, func(string, map[string]any) resp { return errR(400, "Bad Request: chat not found", 0) })
-	err := newBot(api, nil).Send(context.Background(), "1", "", "hi")
+	err := newBot(api, nil).Send(context.Background(), "1", "", "hi", false)
 	if err == nil || !strings.Contains(err.Error(), "chat not found") {
 		t.Errorf("err = %v", err)
 	}
@@ -567,7 +567,7 @@ func TestTokenNeverInErrors(t *testing.T) {
 	b := newBot(botAPI(t), nil)
 	b.APIBase = closed.URL
 	closed.Close()
-	assertClean("send/refused", b.Send(ctx, "1", "", "x"))
+	assertClean("send/refused", b.Send(ctx, "1", "", "x", false))
 	assertClean("typing/refused", b.Typing(ctx, "1"))
 
 	// Transport failure whose own message contains the URL.
@@ -575,13 +575,13 @@ func TestTokenNeverInErrors(t *testing.T) {
 	b.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return nil, errors.New("boom at " + r.URL.String())
 	})}
-	assertClean("send/custom transport", b.Send(ctx, "1", "", "x"))
+	assertClean("send/custom transport", b.Send(ctx, "1", "", "x", false))
 
 	// Bot API error whose description echoes the token, and a non-JSON 5xx.
 	api := newAPI(t, func(string, map[string]any) resp { return errR(400, "bad bot"+testToken, 0) })
-	assertClean("send/api error", newBot(api, nil).Send(ctx, "1", "", "x"))
+	assertClean("send/api error", newBot(api, nil).Send(ctx, "1", "", "x", false))
 	api = newAPI(t, func(string, map[string]any) resp { return resp{502, "<html>/bot" + testToken + "</html>"} })
-	assertClean("send/502", newBot(api, nil).Send(ctx, "1", "", "x"))
+	assertClean("send/502", newBot(api, nil).Send(ctx, "1", "", "x", false))
 
 	// Run's getMe failure path.
 	api = newAPI(t, func(string, map[string]any) resp { return errR(401, "Unauthorized", 0) })
@@ -699,5 +699,84 @@ func TestCommandMenuFailureDoesNotStopRun(t *testing.T) {
 	}
 	if n := len(api.byMethod("setMyCommands")); n != 1 {
 		t.Errorf("setMyCommands called %d times, want 1 (no retry)", n)
+	}
+}
+
+func entsOf(t *testing.T, body map[string]any) []entity {
+	t.Helper()
+	raw, _ := json.Marshal(body["entities"])
+	var ents []entity
+	if err := json.Unmarshal(raw, &ents); err != nil {
+		t.Fatal(err)
+	}
+	return ents
+}
+
+func TestSendMarkdownPostsTextAndEntities(t *testing.T) {
+	api := botAPI(t)
+	if err := newBot(api, nil).Send(context.Background(), "1", "", "hi **there**", true); err != nil {
+		t.Fatal(err)
+	}
+	got := sends(api)
+	if len(got) != 1 || got[0]["text"] != "hi there" {
+		t.Fatalf("sends = %v", got)
+	}
+	if _, ok := got[0]["parse_mode"]; ok {
+		t.Error("parse_mode must not be set")
+	}
+	if want := []entity{{Type: "bold", Offset: 3, Length: 5}}; !reflect.DeepEqual(entsOf(t, got[0]), want) {
+		t.Errorf("entities = %v, want %v", got[0]["entities"], want)
+	}
+}
+
+func TestSendMarkdownClipsEntitiesAcrossParts(t *testing.T) {
+	api := botAPI(t)
+	a, b := strings.Repeat("a", 3000), strings.Repeat("b", 3000)
+	// Bold spans the line break that splitting drops; "z" is bold after it.
+	in := "**" + a + "\n" + b + "**\n\nend **z**"
+	if err := newBot(api, nil).Send(context.Background(), "1", "", in, true); err != nil {
+		t.Fatal(err)
+	}
+	got := sends(api)
+	if len(got) != 2 || got[0]["text"] != a || got[1]["text"] != b+"\n\nend z" {
+		t.Fatalf("unexpected parts: %d", len(got))
+	}
+	if want := []entity{{Type: "bold", Offset: 0, Length: 3000}}; !reflect.DeepEqual(entsOf(t, got[0]), want) {
+		t.Errorf("part 1 entities = %v", got[0]["entities"])
+	}
+	want := []entity{{Type: "bold", Offset: 0, Length: 3000}, {Type: "bold", Offset: 3006, Length: 1}}
+	if !reflect.DeepEqual(entsOf(t, got[1]), want) {
+		t.Errorf("part 2 entities = %v, want %v", got[1]["entities"], want)
+	}
+}
+
+func TestSendMarkdownFallsBackToPlainOnBadRequest(t *testing.T) {
+	api := newAPI(t, func(_ string, body map[string]any) resp {
+		if _, ok := body["entities"]; ok {
+			return errR(400, "Bad Request: can't parse entities", 0)
+		}
+		return okR(true)
+	})
+	if err := newBot(api, nil).Send(context.Background(), "1", "", "a [b](nope) **c**", true); err != nil {
+		t.Fatal(err)
+	}
+	got := sends(api)
+	if len(got) != 2 || got[0]["entities"] == nil {
+		t.Fatalf("sends = %v", got)
+	}
+	if _, ok := got[1]["entities"]; ok || got[1]["text"] != got[0]["text"] || got[1]["text"] != "a b c" {
+		t.Errorf("fallback = %v", got[1])
+	}
+}
+
+func TestSendPlainKeepsTextAndOmitsEntities(t *testing.T) {
+	api := botAPI(t)
+	text := "* 0000000b  title **x**"
+	if err := newBot(api, nil).Send(context.Background(), "1", "", text, false); err != nil {
+		t.Fatal(err)
+	}
+	got := sends(api)
+	if _, ok := got[0]["entities"]; ok || got[0]["text"] != text {
+		t.Errorf("plain send = %v", got[0])
 	}
 }

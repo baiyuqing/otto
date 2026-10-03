@@ -143,6 +143,9 @@ pub struct WireEvent {
     pub command: String,
     #[serde(default, skip_serializing_if = "is_empty")]
     pub justification: String,
+    /// `approval_requested`: persistent sandbox read grant; empty for elevation.
+    #[serde(default, skip_serializing_if = "is_empty")]
+    pub read_path: String,
     /// `approval_decided`: `allow`, `deny` or `timeout`.
     #[serde(default, skip_serializing_if = "is_empty")]
     pub decision: String,

@@ -311,6 +311,8 @@ impl Connection {
                         session_id,
                         &request.tool_call_id,
                         &request.command,
+                        &request.read_path,
+                        &request.justification,
                         cancel,
                     )
                     .await

@@ -421,13 +421,13 @@ impl<'a> Repl<'a> {
                     let approved = if always {
                         self.controller.approve_bash_always(id).await
                     } else {
-                        self.controller.approve_bash(id)
+                        self.controller.approve_tool(id).await
                     };
                     let retry = approved.map_err(|message| Error::Command {
                         command: "/approve".to_string(),
                         message,
                     })?;
-                    let _ = writeln!(self.stdout, "Approved {id} for one command.");
+                    let _ = writeln!(self.stdout, "Approved {id}.");
                     self.prompt(&retry, cancel).await?;
                     Some(false)
                 }

@@ -667,15 +667,32 @@ fn approval_lines(approval: &ApprovalDialog, width: u16) -> Vec<Line<'static>> {
     let inner_width = width.saturating_sub(4) as usize;
     let accent = Style::default().fg(Color::Yellow);
     let mut lines = vec![Line::from(Span::styled(
-        "Run Bash outside the sandbox?",
+        if approval.read_path.is_empty() {
+            "Run Bash outside the sandbox?"
+        } else {
+            "Permanently allow sandbox read access?"
+        },
         Style::default().add_modifier(Modifier::BOLD),
     ))];
+    if !approval.read_path.is_empty() {
+        lines.extend(label_value_lines(
+            "Read path: ",
+            &approval.read_path,
+            inner_width,
+            2,
+        ));
+        lines.push(Line::from("Saved to read_paths; commands stay sandboxed."));
+    }
     if !approval.command.is_empty() {
         lines.extend(label_value_lines(
             "Command: ",
             &approval.command,
             inner_width,
-            APPROVAL_COMMAND_LINES,
+            if approval.read_path.is_empty() {
+                APPROVAL_COMMAND_LINES
+            } else {
+                1
+            },
         ));
     }
     if !approval.justification.is_empty() {
@@ -683,12 +700,23 @@ fn approval_lines(approval: &ApprovalDialog, width: u16) -> Vec<Line<'static>> {
             "Reason:  ",
             &approval.justification,
             inner_width,
-            APPROVAL_REASON_LINES,
+            if approval.read_path.is_empty() {
+                APPROVAL_REASON_LINES
+            } else {
+                1
+            },
         ));
     }
     lines.push(Line::default());
     for (label, is_yes) in [
-        ("Yes, run it outside the sandbox", true),
+        (
+            if approval.read_path.is_empty() {
+                "Yes, run it outside the sandbox"
+            } else {
+                "Yes, save read access"
+            },
+            true,
+        ),
         ("No, cancel", false),
     ] {
         let selected = approval.approve_selected == is_yes;
@@ -1328,6 +1356,28 @@ mod tests {
         assert!(screen.contains("❯ No, cancel"), "{screen}");
         assert!(screen.contains("  Yes, run it"), "{screen}");
         assert!(screen.contains("Enter confirm"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn read_approval_panel_discloses_persistence_and_keeps_choices_visible() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.approval = Some(ApprovalDialog {
+            id: "approval-read".to_string(),
+            read_path: "/fixture".to_string(),
+            command: "cat fixture".to_string(),
+            justification: "read fixture".to_string(),
+            ..Default::default()
+        });
+        let screen = rendered(&app, 80, 16);
+        assert!(
+            screen.contains("Permanently allow sandbox read access?"),
+            "{screen}"
+        );
+        assert!(screen.contains("Read path: /fixture"), "{screen}");
+        assert!(screen.contains("Saved to read_paths"), "{screen}");
+        assert!(screen.contains("Yes, save read access"), "{screen}");
+        assert!(screen.contains("❯ No, cancel"), "{screen}");
+        assert!(!screen.contains("outside the sandbox"), "{screen}");
     }
 
     #[tokio::test]

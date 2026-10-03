@@ -117,3 +117,25 @@ pub fn serve(script: Script) -> (String, Arc<Mutex<Vec<String>>>) {
     });
     (base_url, requests)
 }
+
+/// A compaction summary that passes the structure check, with `note` under
+/// every heading.
+pub fn summary_reply(note: &str) -> String {
+    let body = [
+        "## Goal",
+        "## Constraints & Preferences",
+        "## Observations",
+        "## Progress",
+        "### Done",
+        "### In Progress",
+        "### Blocked",
+        "## Key Decisions",
+        "## Next Steps",
+        "## Critical Context",
+    ]
+    .iter()
+    .map(|heading| format!("{heading}\n{note}\n"))
+    .collect::<Vec<_>>()
+    .join("\n");
+    text_reply(&body)
+}

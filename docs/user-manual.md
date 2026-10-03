@@ -2076,6 +2076,34 @@ come from Otto's own configuration (see [MCP servers](#mcp-servers)). Otto
 does not call the client's `fs/*` or `terminal/*` methods; tools run inside
 Otto as in the other frontends.
 
+### `/compact` and `/context` are slash commands
+
+After `session/new` and `session/load` has replied, Otto sends a
+`session/update` of type `available_commands_update` listing two commands:
+`compact`, with an unstructured input hint `optional focus`, and `context`.
+A `session/prompt` whose trimmed text is exactly `/context`, exactly
+`/compact`, or `/compact` followed by whitespace and a focus text is run by
+Otto itself and is not sent to the model; any other text, such as `/compactx`
+or a sentence that contains `/context`, is a normal prompt. `otto acp
+--attach` does the same, running the command on `otto serve`
+(`POST .../compact`, `GET .../context`). Each command answers with one
+`agent_message_chunk` and the stop reason `end_turn`; `session/cancel` during
+`/compact` answers `cancelled`. Like a turn, a command is rejected while the
+session runs a prompt.
+
+- `/compact [focus]` summarizes earlier messages as in the other frontends
+  and replies `Compacted the session context: <n> tokens before, about <m>
+  tokens after (estimated).`, or `Nothing was compacted: the session has no
+  earlier messages that can be summarized safely.`
+- `/context` replies with plain text, one item per line: model, context
+  window (`not configured` when unset), automatic compaction threshold (`off`
+  when disabled), estimated tokens of the next request, the input tokens the
+  provider reported last (omitted when unknown), and one line with the token
+  count of each non-empty part (system prompt, tools, MCP tools, compaction
+  summary, memory, messages). It never includes the text of any part. When
+  the session withholds dynamic content, the reply is "The context report is
+  not available in this session."
+
 During a prompt Otto sends assistant text as `agent_message_chunk`,
 reasoning as `agent_thought_chunk`, and each tool call as a `tool_call`
 followed by a `tool_call_update` with status `completed` or `failed`.
@@ -2158,8 +2186,8 @@ its ACP agent. See [Chat connector](#chat-connector).
 - `session/resume`, `session/close`, `session/delete`, session modes and
   config options, and client-supplied MCP servers.
 - Image, audio, and embedded-resource prompt content.
-- Slash commands such as `/approve` or `/sandbox`: text from the client
-  reaches the model as a user message.
+- Slash commands other than `/compact` and `/context`, such as `/approve` or
+  `/sandbox`: text from the client reaches the model as a user message.
 
 ## Chat connector
 
@@ -2174,6 +2202,8 @@ the session. The connector includes the current channel with each message,
 including after a session is resumed or shared, so Otto can adapt replies
 for chat without assuming you can see its local terminal. This context is
 ordinary prompt text; it does not change tool availability or permissions.
+`/compact` and `/context` are sent without it, because Otto runs them only
+when the prompt is the whole command.
 
 ### Building and running
 
@@ -2352,13 +2382,17 @@ a log line.
 ### Commands
 
 A message whose whole text is one of these commands (for `/use`, the
-command and its argument) is handled by `otto-connect` and not sent to Otto.
+command and its argument) is handled by `otto-connect` and not sent to Otto,
+except `/compact` and `/context`, which are sent to Otto as typed, without
+the channel context.
 Any other text, including other words starting with `/`, is a prompt.
 
 | Command | Effect |
 | --- | --- |
 | `/new` | The chat's next message starts a new session. The old session stays in Otto's session store. |
 | `/stop` | Cancels the running turn (reply "Stopped.") and clears the chat's queue. With nothing running: "Nothing is running." |
+| `/compact [focus]` | Sent to Otto as a prompt; `otto acp` runs it as `/compact` (see [`/compact` and `/context` are slash commands](#compact-and-context-are-slash-commands)) and replies with the token counts before and after. Like any prompt it waits in the chat's queue behind a running turn. |
+| `/context` | Sent to Otto as a prompt; `otto acp` replies with the token counts of the next request, part by part. It waits in the chat's queue like any prompt. |
 | `/allow` | Answers the pending permission request with Allow once. |
 | `/deny` | Answers the pending permission request with Deny. |
 | `/sessions` | Lists the 10 newest sessions of the workspace, one per line: `*` for the chat's session or a space, the first 8 characters of the id, the last change as `YYYY-MM-DD HH:MM` (`-` when unknown), and the title (`(untitled)` when empty). With none: "No sessions." |
@@ -2368,7 +2402,7 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/memory reject <id>` | Rejects one pending candidate; no record is written. |
 
 At startup `otto-connect` sets the Telegram bot's command menu to these
-commands and to `/models` and `/config` (see
+commands, including `/compact` and `/context`, and to `/models` and `/config` (see
 [Provider-profile management](#provider-profile-management)): `setMyCommands`
 for the default scope, then `deleteMyCommands` for the `all_private_chats` and
 `all_group_chats` scopes, whose lists Telegram would show instead. Lists set

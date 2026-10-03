@@ -482,13 +482,18 @@ fn a_relayed_prompt_sends_the_same_updates_as_local_acp() {
     let init = relay.initialize();
     assert_eq!(init["result"]["agentInfo"]["name"], "otto");
     assert_eq!(init["result"]["agentCapabilities"]["loadSession"], true);
-    assert!(
-        init["result"]["agentCapabilities"]["_meta"].is_null(),
-        "the relay must not advertise memory review: {init}"
+    assert_eq!(
+        init["result"]["agentCapabilities"]["_meta"]["otto"]["approvalDialogue"], true,
+        "the relay advertises approval dialogue: {init}"
     );
     let session_id = relay.new_session(workspace.path());
     let (_, memory) = relay.call("_otto/memory/pending", json!({"sessionId": session_id}));
     assert_eq!(memory["error"]["code"], -32601, "{memory}");
+    let (_, approval) = relay.call(
+        "_otto/approvals/message",
+        json!({"sessionId": session_id, "text": "hello"}),
+    );
+    assert_eq!(approval["result"], Value::Null, "{approval}");
     let (relay_frames, response) = relay.call("session/prompt", prompt(&session_id, "read hello"));
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
 
@@ -758,6 +763,52 @@ mod approval {
         (home, workspace, serve, served)
     }
 
+    fn start_with_replies(
+        replies: Vec<String>,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Serve,
+        Arc<AtomicUsize>,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let served = Arc::new(AtomicUsize::new(0));
+        let (base_url, _) = serve(Script {
+            replies,
+            served: Arc::clone(&served),
+        });
+        configure(home.path(), &base_url, None);
+        let serve = Serve::start(home.path(), workspace.path(), "seatbelt");
+        (home, workspace, serve, served)
+    }
+
+    fn pending_request(relay: &mut Client, session_id: &str) -> (u64, Value) {
+        let prompt_id = relay.start("session/prompt", prompt(session_id, "run the command"));
+        let mut frames = Vec::new();
+        loop {
+            let frame = relay.recv();
+            if frame["method"] == "session/request_permission" {
+                assert_eq!(frame["params"]["sessionId"], session_id);
+                return (prompt_id, frame);
+            }
+            if frame["id"] == json!(prompt_id) && frame.get("method").is_none() {
+                panic!("prompt ended before approval: {frame}; preceding: {frames:?}");
+            }
+            frames.push(frame);
+        }
+    }
+
+    fn answer_dialogue(relay: &mut Client, session_id: &str, text: &str) -> (Vec<Value>, Value) {
+        let dialogue_id = relay.start(
+            "_otto/approvals/message",
+            json!({"sessionId": session_id, "text": text}),
+        );
+        relay.finish(dialogue_id, &mut |frame| {
+            panic!("unexpected request: {frame}")
+        })
+    }
+
     fn start() -> (
         tempfile::TempDir,
         tempfile::TempDir,
@@ -928,6 +979,132 @@ mod approval {
         assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
         assert!(agent_text(&frames).ends_with("done"), "{frames:?}");
         assert_eq!(served.load(Ordering::SeqCst), 4);
+        assert_eq!(relay.close(), Some(0));
+    }
+
+    #[test]
+    fn question_and_ordinary_task_leave_the_permission_pending_until_answered() {
+        let arguments = json!({
+            "command": "printf ran > \"$HOME/otto-elevated-ran\"",
+            "sandbox_permissions": "require_escalated",
+            "justification": "write a marker only if approval is granted",
+        })
+        .to_string();
+        let (home, workspace, serve, _) = start_with_replies(vec![
+            tool_call_reply("call-1", "bash", &arguments),
+            text_reply("approval needed"),
+            text_reply("It is waiting for approval."),
+            tool_call_reply("control-call", "approval_queue", "{}"),
+            text_reply("The task is queued."),
+            text_reply("The approval was denied."),
+        ]);
+        let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+        relay.initialize();
+        let session_id = relay.new_session(workspace.path());
+        let (prompt_id, permission) = pending_request(&mut relay, &session_id);
+        let other_session = relay.new_session(workspace.path());
+        let (_, other) = relay.call(
+            "_otto/approvals/message",
+            json!({"sessionId": other_session, "text": "cancel it"}),
+        );
+        assert_eq!(other["result"], Value::Null, "{other}");
+
+        let (question_frames, question) =
+            answer_dialogue(&mut relay, &session_id, "What is waiting?");
+        assert_eq!(
+            question["result"]["text"], "It is waiting for approval.",
+            "{question}"
+        );
+        assert_eq!(question["result"]["queued"], false, "{question}");
+        assert!(
+            !question_frames
+                .iter()
+                .any(|frame| frame["method"] == "$/cancel_request")
+        );
+
+        let (queue_frames, queued) = answer_dialogue(&mut relay, &session_id, "Do another task");
+        assert_eq!(queued["result"]["text"], "The task is queued.", "{queued}");
+        assert_eq!(queued["result"]["queued"], true, "{queued}");
+        assert!(
+            !queue_frames
+                .iter()
+                .any(|frame| frame["method"] == "$/cancel_request")
+        );
+
+        relay.send(json!({
+            "jsonrpc": "2.0",
+            "id": permission["id"],
+            "result": {"outcome": {"outcome": "selected", "optionId": "reject_once"}},
+        }));
+        let (_, response) = relay.finish(prompt_id, &mut |frame| {
+            panic!("unexpected request: {frame}")
+        });
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert!(!home.path().join("otto-elevated-ran").exists());
+        assert_eq!(relay.close(), Some(0));
+    }
+
+    #[test]
+    fn revoke_withdraws_the_request_and_a_late_card_response_cannot_run_it() {
+        let arguments = json!({
+            "command": "printf ran > \"$HOME/otto-elevated-ran\"",
+            "sandbox_permissions": "require_escalated",
+            "justification": "write a marker only if approval is granted",
+        })
+        .to_string();
+        let (home, workspace, serve, _) = start_with_replies(vec![
+            tool_call_reply("call-1", "bash", &arguments),
+            text_reply("approval needed"),
+            tool_call_reply("control-call", "approval_revoke", r#"{"id":"approval-1"}"#),
+            text_reply("Withdrawn."),
+            text_reply("The request was withdrawn."),
+        ]);
+        let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+        relay.initialize();
+        let session_id = relay.new_session(workspace.path());
+        let (prompt_id, permission) = pending_request(&mut relay, &session_id);
+        let other_session = relay.new_session(workspace.path());
+        let (_, other) = relay.call(
+            "_otto/approvals/message",
+            json!({"sessionId": other_session, "text": "cancel it"}),
+        );
+        assert_eq!(other["result"], Value::Null, "{other}");
+        let (mut frames, dialogue) =
+            answer_dialogue(&mut relay, &session_id, "Cancel that command");
+        assert_eq!(dialogue["result"]["text"], "Withdrawn.", "{dialogue}");
+        let cancel = loop {
+            if let Some(cancel) = frames
+                .iter()
+                .find(|frame| frame["method"] == "$/cancel_request")
+            {
+                break cancel.clone();
+            }
+            let frame = relay.recv();
+            if frame["method"] == "$/cancel_request" {
+                break frame;
+            }
+            frames.push(frame);
+        };
+        assert_eq!(cancel["params"]["requestId"], permission["id"], "{cancel}");
+
+        relay.send(json!({
+            "jsonrpc": "2.0",
+            "id": permission["id"],
+            "result": {"outcome": {"outcome": "selected", "optionId": "allow_once"}},
+        }));
+        let response = frames
+            .iter()
+            .find(|frame| frame.get("method").is_none() && frame["id"] == json!(prompt_id))
+            .cloned()
+            .unwrap_or_else(|| {
+                relay
+                    .finish(prompt_id, &mut |frame| {
+                        panic!("unexpected request: {frame}")
+                    })
+                    .1
+            });
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert!(!home.path().join("otto-elevated-ran").exists());
         assert_eq!(relay.close(), Some(0));
     }
 }

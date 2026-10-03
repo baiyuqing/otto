@@ -52,7 +52,7 @@ struct OpenApproval {
 }
 
 pub(super) struct Relay {
-    client: Client,
+    pub(super) client: Client,
     /// Sessions this connection opened, with their prompt slots.
     sessions: Mutex<HashMap<String, Arc<PromptSlot>>>,
     lost: CancellationToken,

@@ -135,10 +135,15 @@ impl Controller {
                     return Ok(Stop::EndTurn);
                 }
                 ApprovalDecision::Allow => {
-                    retry = self
-                        .approve_tool(&request.id)
-                        .await
-                        .map_err(AgentError::Other)?;
+                    match self.approve_tool(&request.id).await {
+                        Ok(prompt) => retry = prompt,
+                        Err(message) => {
+                            // A decided request whose grant failed must not
+                            // remain reserved after its frontend waiter ends.
+                            let _ = self.deny_tool(&request.id);
+                            return Err(AgentError::Other(message));
+                        }
+                    }
                 }
             }
         }

@@ -20,6 +20,7 @@
 //! [`SESSION_OPERATION_UNAVAILABLE`].
 
 pub mod approval;
+pub mod approval_control;
 pub mod auto_reflection;
 
 /// Fixed, content-free frontend notice for a successful memory proposal.
@@ -186,6 +187,7 @@ pub struct Controller {
     auto_running: Arc<std::sync::atomic::AtomicBool>,
     /// Cancelled by `request_close`, which stops a background run.
     auto_cancel: CancellationToken,
+    approval_control: tokio::sync::Mutex<()>,
 }
 
 /// One admitted operation. Dropping it releases admission and performs a
@@ -243,6 +245,7 @@ impl Controller {
             notices: Arc::new(auto_reflection::Notices::new()),
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
+            approval_control: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -1265,10 +1268,18 @@ impl Controller {
             .ok_or_else(|| "temporary elevation is unavailable".to_string())
     }
 
+    /// Called only by human/client decision handlers, never by model tools.
+    pub fn reserve_approval(&self, id: &str) -> Result<(), String> {
+        self.bash_approvals()?
+            .reserve(&self.info().session_id, id)
+            .map_err(str::to_string)
+    }
+
     /// Applies an approved sandbox read grant or approves one elevated command.
     pub async fn approve_tool(&self, id: &str) -> Result<String, String> {
         let session_id = self.idle_session_id()?;
         let approvals = self.bash_approvals()?;
+        let _decision = approvals.decision.lock().await;
         let path = approvals
             .pending_read_path(&session_id, id)
             .ok_or_else(|| "approval request not found".to_string())?;
@@ -1321,6 +1332,7 @@ impl Controller {
         {
             return self.approve_tool(id).await;
         }
+        let _decision = approvals.decision.lock().await;
         let command = approvals
             .pending_command(&session_id, id)
             .ok_or_else(|| "approval request not found".to_string())?;
@@ -1437,6 +1449,7 @@ impl Controller {
             notices: Arc::new(auto_reflection::Notices::new()),
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
+            approval_control: tokio::sync::Mutex::new(()),
         }
     }
 }

@@ -95,12 +95,19 @@ impl<'a> Repl<'a> {
         }
         let _ = writeln!(self.stdout, "Sandbox: {}", info.sandbox.summary());
 
+        let mut approval_queue = std::collections::VecDeque::<String>::new();
         let mut lines = spawn_reader(input);
         let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
         let mut notices = self.controller.notices_changed();
         let mut memory_review = self.controller.memory_review_available_changed();
         let mut memory_review_notice = false;
         loop {
+            if self.controller.pending_approval().is_none()
+                && let Some(line) = approval_queue.pop_front()
+            {
+                self.prompt(&line, cancel).await?;
+                continue;
+            }
             if memory_review_notice {
                 let _ = writeln!(self.stdout, "{}", crate::app::MEMORY_REVIEW_AVAILABLE);
                 memory_review_notice = false;
@@ -174,6 +181,20 @@ impl<'a> Repl<'a> {
                     return Ok(());
                 }
                 continue;
+            }
+            match self.controller.approval_message(&line, cancel).await {
+                Ok(Some(reply)) => {
+                    let _ = writeln!(self.stdout, "{}", reply.text);
+                    if reply.queued {
+                        approval_queue.push_back(line);
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(message) => {
+                    let _ = writeln!(self.stderr, "{message}");
+                    continue;
+                }
             }
             match self.prompt(&line, cancel).await {
                 Ok(()) => {}
@@ -1184,6 +1205,7 @@ mod tests {
     fn exit_does_not_wait_for_the_next_blocking_stdin_read_on_runtime_drop() {
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let thread_release = Arc::clone(&release);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1197,6 +1219,7 @@ mod tests {
                 let stdout = Buffer::default();
                 let stderr = Buffer::default();
                 let mut repl = Repl::new(&controller, Box::new(stdout), Box::new(stderr));
+                let _ = ready_tx.send(());
                 repl.run(
                     std::io::BufReader::new(ExitThenBlock::new(thread_release)),
                     &CancellationToken::new(),
@@ -1208,12 +1231,26 @@ mod tests {
             let _ = done_tx.send(());
         });
 
-        let finished = done_rx.recv_timeout(std::time::Duration::from_millis(500));
-        {
+        let release_reader = || {
             let (lock, signal) = &*release;
             *lock.lock().expect("release lock") = true;
             signal.notify_all();
+        };
+        let ready = ready_rx.recv_timeout(std::time::Duration::from_secs(30));
+        if ready.is_err() {
+            release_reader();
+            match done_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    worker.join().expect("runtime thread");
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => drop(worker),
+            }
+            assert!(ready.is_ok(), "REPL setup did not become ready in time");
+            return;
         }
+
+        let finished = done_rx.recv_timeout(std::time::Duration::from_millis(500));
+        release_reader();
         worker.join().expect("runtime thread");
         assert!(
             finished.is_ok(),

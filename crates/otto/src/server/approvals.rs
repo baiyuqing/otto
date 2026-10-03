@@ -43,6 +43,11 @@ pub async fn decide(
             .as_ref()
             .is_some_and(|waiting| waiting.id == approval_id)
         {
+            if decision == ApprovalDecision::Allow
+                && let Err(message) = session.ctrl.reserve_approval(&approval_id)
+            {
+                return error_response(StatusCode::CONFLICT, "approval_failed", &message);
+            }
             let waiting = state.waiting.take().expect("checked above");
             state.remember_decided(&approval_id);
             // The receiver is gone only when the turn is ending; the decision
@@ -64,4 +69,34 @@ pub async fn decide(
     }
     server.bump_status();
     json_response(StatusCode::OK, &DecisionResponse { decision: label })
+}
+
+/// Separate from task-turn admission: only the controller's restricted tools
+/// are available, and no original-session writer is opened.
+pub async fn message(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input {
+        text: String,
+    }
+    let input: Input = match serde_json::from_slice(&body) {
+        Ok(input) => input,
+        Err(_) => return bad_request("expected text"),
+    };
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let cancel = session
+        .lock()
+        .turn
+        .as_ref()
+        .map_or_else(|| session.closed.clone(), |turn| turn.cancel_token());
+    match session.ctrl.approval_message(&input.text, &cancel).await {
+        Ok(reply) => json_response(StatusCode::OK, &reply),
+        Err(message) => error_response(StatusCode::CONFLICT, "approval_failed", &message),
+    }
 }

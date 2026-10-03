@@ -22,6 +22,7 @@ pub mod ls;
 pub mod mcp;
 pub mod memory;
 pub mod models;
+pub mod otto;
 pub mod read;
 pub mod registry;
 pub mod remind;

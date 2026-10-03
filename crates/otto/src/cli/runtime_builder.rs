@@ -406,6 +406,7 @@ impl Session for SharedSession {
 /// The agent never reaches the client when the boundary is closed, because
 /// `Run` checks the redactor first. This enum keeps the provider slot
 /// non-optional, so the agent's type parameter stays concrete.
+#[derive(Clone)]
 pub enum ProviderClient {
     Compat {
         client: Arc<Client>,
@@ -686,6 +687,52 @@ impl Runner {
             });
         }
         Ok(response)
+    }
+
+    /// A bounded approval-only dialogue. It has an isolated memory transcript,
+    /// the existing provider and usage collector, and no effectful task tools.
+    pub async fn approval_dialogue(
+        &self,
+        text: &str,
+        tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>>,
+        runtime: &Runtime,
+        system_prompt: String,
+        redaction_values: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<String, AgentError> {
+        let registry = Registry::new(tools).map_err(AgentError::Other)?;
+        let options = Options {
+            model: runtime.model.clone(),
+            provider_name: runtime.provider.clone(),
+            thinking: runtime.thinking.clone(),
+            system_prompt,
+            now: Box::new(Utc::now),
+            new_operation_id: Box::new(new_operation_id),
+            ..Options::default()
+        };
+        let agent = Agent::with_redactor(
+            self.provider().clone(),
+            registry,
+            SharedSession::memory(self.session().header()),
+            options,
+            Redactor::new(redaction_values),
+        );
+        let control = Control::new(Deadline::after(Duration::from_secs(30)));
+        let mut discard = |_| {};
+        let mut sink = self.collecting(&mut discard);
+        drive_with_control(
+            agent.run_with_control(&self.redact_text(text), &mut sink, &control),
+            cancel,
+            &control,
+        )
+        .await?;
+        Ok(agent
+            .session()
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| message.role == otto_core::model::Role::Assistant)
+            .map_or_else(String::new, |message| self.redact_text(&message.text())))
     }
 
     /// Redacts transcript text exactly as a provider request would be.
@@ -1455,6 +1502,20 @@ impl Builder {
         )?;
         mark_build_trace(&mut trace, "runner/subagents");
 
+        if self.boundary_allows_dynamic(Some(runtime)) {
+            if let Some(approvals) = &self.bash_approvals {
+                tools.extend(crate::tool::otto::controls(&session.header().id, approvals));
+            }
+            let mut definitions: Vec<_> = tools.iter().map(|tool| tool.definition()).collect();
+            definitions.push(
+                crate::tool::otto::Help {
+                    definitions: Vec::new(),
+                }
+                .definition(),
+            );
+            tools.push(Box::new(crate::tool::otto::Help { definitions }));
+        }
+
         let registry =
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
         let registry = with_lease_guard(registry, session, &self.workspace_path);
@@ -2135,7 +2196,8 @@ mod tests {
                 "agent_send",
                 "remind",
                 "remind_status",
-                "remind_cancel"
+                "remind_cancel",
+                "otto_help"
             ]
         );
     }
@@ -2409,7 +2471,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");
         assert!(prompt.ends_with("</otto_system_prompt>"), "{prompt}");

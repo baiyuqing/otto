@@ -341,7 +341,9 @@ async fn run_app<B: Backend>(
     let mut tasks_refresh: Option<tokio::time::Interval> = None;
     let mut notices = controller.notices_changed();
     let mut memory_review = controller.memory_review_available_changed();
+    let mut approval_refresh = tokio::time::interval(std::time::Duration::from_millis(500));
     loop {
+        sync_shared_approval(&mut app, controller);
         // Anything queued while a turn or command ran shows before the next wait.
         let queued = controller.take_notices();
         if !queued.is_empty() {
@@ -405,6 +407,7 @@ async fn run_app<B: Backend>(
                 open = signal => IdleEvent::Registry(open),
                 () = tick => IdleEvent::AgentsTick,
                 () = tasks_tick => IdleEvent::TasksTick,
+                _ = approval_refresh.tick()=> { redraw(terminal,&mut app,controller)?; IdleEvent::Notices },
                 changed = notices.changed() => {
                     // The sender lives as long as the controller.
                     let _ = changed;
@@ -483,6 +486,17 @@ async fn run_app<B: Backend>(
         let mut action = app.handle_key(key, &backend, cancel);
         while let Some(current_action) = action.take() {
             match current_action {
+                Action::DecideApproval {
+                    id,
+                    allow,
+                    feedback,
+                } => {
+                    if let Err(error) =
+                        controller.decide_shared_approval(&id, allow, &feedback, "tui")
+                    {
+                        app.push_system(error.to_string());
+                    }
+                }
                 Action::Exit => return Ok(()),
                 Action::Prompt(line) => {
                     let result = run_turn(
@@ -650,6 +664,34 @@ async fn run_app<B: Backend>(
                     app.dispatch_line(&format!("/memory review {id} {decision}"), &backend, cancel);
                     app.open_memory_review(controller);
                 }
+                Action::Approve(id)
+                    if controller
+                        .approval_service()
+                        .get(
+                            &id,
+                            &controller.info().workspace,
+                            Some(&controller.info().session_id),
+                        )
+                        .is_ok() =>
+                {
+                    if let Err(error) = controller.decide_shared_approval(&id, true, "", "tui") {
+                        app.push_system(error.to_string());
+                    }
+                }
+                Action::Deny(id)
+                    if controller
+                        .approval_service()
+                        .get(
+                            &id,
+                            &controller.info().workspace,
+                            Some(&controller.info().session_id),
+                        )
+                        .is_ok() =>
+                {
+                    if let Err(error) = controller.decide_shared_approval(&id, false, "", "tui") {
+                        app.push_system(error.to_string());
+                    }
+                }
                 Action::Approve(id) => match controller.approve_tool(&id).await {
                     Ok(prompt) => {
                         app.push_system(format!("Approved {id}."));
@@ -757,7 +799,9 @@ async fn drive_turn<B: Backend, T, E>(
                     view.tick(backend);
                 }
             }
-            _ = frames.tick() => {}
+            _ = frames.tick() => {
+                if let app::Backend::Local(controller) = backend { sync_shared_approval(app,controller); }
+            }
         }
         app.refresh_tasks(backend);
         let _ = terminal.draw(|frame| render::draw(frame, app));
@@ -785,11 +829,52 @@ fn apply_turn_key<B: Backend>(
     match event {
         TuiEvent::Key(key) => {
             app.selection = None;
+            if let app::Backend::Local(controller) = backend
+                && let Some(dialog) = &app.approval
+                && controller
+                    .approval_service()
+                    .get(
+                        &dialog.id,
+                        &controller.info().workspace,
+                        Some(&controller.info().session_id),
+                    )
+                    .is_ok()
+            {
+                if let Some(action) = app.handle_key(key, backend, turn) {
+                    let decision = match action {
+                        Action::DecideApproval {
+                            id,
+                            allow,
+                            feedback,
+                        } => Some((id, allow, feedback)),
+                        Action::Approve(id) => Some((id, true, String::new())),
+                        Action::Deny(id) => Some((id, false, String::new())),
+                        _ => None,
+                    };
+                    if let Some((id, allow, feedback)) = decision
+                        && let Err(error) =
+                            controller.decide_shared_approval(&id, allow, &feedback, "tui")
+                    {
+                        app.push_system(error.to_string());
+                    }
+                }
+                return;
+            }
             if app.handle_turn_key(key, backend) {
                 turn.cancel();
             }
         }
-        TuiEvent::Paste(text) => app.insert_text(&text),
+        TuiEvent::Paste(text) => {
+            if let Some(dialog) = &mut app.approval
+                && dialog.feedback_mode
+            {
+                if dialog.feedback.len() + text.len() <= 8192 {
+                    dialog.feedback.push_str(&text);
+                }
+            } else {
+                app.insert_text(&text);
+            }
+        }
         TuiEvent::Wheel { up } => app.scroll_wheel(up),
         TuiEvent::Select { phase, col, row } => {
             // The turn loop redraws on every tick anyway, so a failed draw
@@ -801,6 +886,13 @@ fn apply_turn_key<B: Backend>(
             }
         }
         TuiEvent::Redraw => {}
+    }
+}
+
+fn sync_shared_approval(app: &mut App, controller: &Controller) {
+    match controller.approval_snapshot() {
+        Ok(snapshot) => app.sync_approvals(&snapshot.requests),
+        Err(error) => app.push_system(error.to_string()),
     }
 }
 

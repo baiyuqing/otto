@@ -116,6 +116,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 			errc <- err
 		}()
 	}
+	b.restoreApprovalWatches()
 	var first error
 	done := 0
 	select {
@@ -227,6 +228,13 @@ func (b *Bridge) deliver(m Message) {
 	if c.cmdManage(m, text) {
 		return
 	}
+	for _, command := range []string{"/allow", "/deny"} {
+		if text == command || strings.HasPrefix(text, command+" ") {
+			if c.cmdSharedDecision(m, command == "/allow", strings.TrimSpace(strings.TrimPrefix(text, command))) {
+				return
+			}
+		}
+	}
 	switch text {
 	case "/new":
 		c.cmdNew(m)
@@ -257,7 +265,7 @@ func (b *Bridge) deliver(m Message) {
 	}
 	m.Text = text
 	c.mu.Lock()
-	pending, sid := c.perm != nil || c.approvalRunning, c.sid
+	pending, sid := c.perm != nil || c.approvalRunning || c.sharedBlocking, c.sid
 	if pending {
 		if len(c.queue)+len(c.approvalMessages) >= c.b.opts.QueueLimit {
 			c.mu.Unlock()
@@ -383,10 +391,14 @@ func (b *Bridge) Permission(ctx context.Context, sid string, req acp.RequestPerm
 
 // chat is the state of one "<platform>:<chat id>".
 type chat struct {
-	b   *Bridge
-	key string
-	p   Platform
-	id  string
+	approvalViewMu   sync.Mutex
+	sharedCards      map[string]*sharedCard
+	approvalWatchSID string
+	sharedBlocking   bool
+	b                *Bridge
+	key              string
+	p                Platform
+	id               string
 
 	mu                 sync.Mutex
 	queue              []Message
@@ -533,6 +545,7 @@ func (c *chat) turn(m Message) {
 		c.b.bySession[sid] = c
 		c.b.mu.Unlock()
 
+		c.startApprovalWatch(sid)
 		stop, err = c.b.opts.Agent.Prompt(ctx, sid, chatPrompt(m))
 
 		c.b.mu.Lock()

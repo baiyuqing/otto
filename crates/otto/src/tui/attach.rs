@@ -397,6 +397,7 @@ enum Ev {
     Compact(Result<Option<WireCompaction>, Error>),
     Retry,
     AgentsTick,
+    ApprovalsTick,
     Tick,
 }
 
@@ -425,6 +426,7 @@ async fn run_loop<B: TerminalBackend>(
     };
     let mut retry = tokio::time::interval(RETRY_INTERVAL);
     let mut agents = tokio::time::interval(agents_view::REFRESH_INTERVAL);
+    let mut approvals = tokio::time::interval(Duration::from_millis(500));
     let mut frames = tokio::time::interval(render::SPINNER_FRAME);
     draw(terminal, &mut ui.app)?;
     loop {
@@ -465,6 +467,7 @@ async fn run_loop<B: TerminalBackend>(
                 result = compaction => Ev::Compact(result),
                 () = reconnect => Ev::Retry,
                 _ = agents.tick() => Ev::AgentsTick,
+                _ = approvals.tick(), if connected => Ev::ApprovalsTick,
                 _ = frames.tick() => Ev::Tick,
             }
         };
@@ -478,6 +481,29 @@ async fn run_loop<B: TerminalBackend>(
             Ev::AgentsTick => {
                 if let Some(view) = &mut ui.app.agents {
                     view.tick(&Backend::Attach(remote));
+                }
+            }
+            Ev::ApprovalsTick => {
+                let session = remote.session();
+                match within(remote.client.shared_approval(
+                    "_otto/approvals/list",
+                    &session,
+                    "",
+                    0,
+                    "",
+                    "",
+                    0,
+                ))
+                .await
+                {
+                    Ok(value) => match serde_json::from_value::<crate::approval::Snapshot>(value) {
+                        Ok(snapshot) => ui.app.sync_approvals(&snapshot.requests),
+                        Err(_) => ui.report(
+                            "approval",
+                            Error::Unreachable("invalid approval snapshot".into()),
+                        ),
+                    },
+                    Err(error) => ui.report("approval", error),
                 }
             }
             Ev::Tick => {
@@ -818,6 +844,36 @@ impl<'a> Ui<'a> {
                 }
                 Err(error) => self.report("/sandbox reload", error),
             },
+            Action::DecideApproval {
+                id,
+                allow,
+                feedback,
+            } => {
+                let session = self.remote.session();
+                let result = async {
+                    let request = self
+                        .remote
+                        .client
+                        .shared_approval("_otto/approvals/get", &session, &id, 0, "", "", 0)
+                        .await?;
+                    self.remote
+                        .client
+                        .shared_approval(
+                            "_otto/approvals/decide",
+                            &session,
+                            &id,
+                            request["revision"].as_u64().unwrap_or(0),
+                            if allow { "approve" } else { "reject" },
+                            &feedback,
+                            0,
+                        )
+                        .await
+                }
+                .await;
+                if let Err(error) = result {
+                    self.report("approval", error);
+                }
+            }
             Action::Approve(id) => self.decide(&session, &id, true).await,
             Action::Deny(id) => self.decide(&session, &id, false).await,
             // The other actions come from commands that print

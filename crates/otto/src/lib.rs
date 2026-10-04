@@ -3,6 +3,7 @@
 
 pub mod acp;
 pub mod app;
+pub mod approval;
 pub mod auth;
 pub mod cli;
 pub mod client;

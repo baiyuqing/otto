@@ -466,6 +466,9 @@ impl ServeFactory {
 
 #[async_trait::async_trait]
 impl Factory for ServeFactory {
+    fn approval_service(&self) -> Option<Arc<crate::approval::Service>> {
+        Some(self.workspaces.startup_host().builder.approvals.clone())
+    }
     async fn create(&self, workspace: Option<&str>) -> Result<Controller, String> {
         let host = match workspace {
             Some(path) => self

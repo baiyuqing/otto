@@ -332,6 +332,18 @@ func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 		t.Fatal(got)
 	}
 	token := h.plat.approvalID()
+	// Restart with the persisted chat binding. The pending card must return
+	// without sending a new message or creating another approval identity.
+	store := h.store
+	if err := h.shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	h = newHarness(t, setup{agent: options, store: store})
+	waitCards(h, 1)
+	if h.plat.approvalID() != token {
+		t.Fatal("restart replaced the durable approval identity")
+	}
+	h.agent.Kill() // a card must still work after ACP transport/process reconnect
 	memoryClick(h, "c1", "u1", token, "/allow")
 	h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.statuses) == 1 }, "real memory review")
 	sid := h.store.Session("fake:c1")
@@ -608,4 +620,43 @@ func tcpAgentOptions(t *testing.T, diagnostics func() string, workspace string) 
 		t.Fatalf("missing ACP address: %s", diagnostics())
 	}
 	return &agent.Options{Address: match[1], Token: "connect-test-acp-token", Dir: workspace}
+}
+
+func TestEndToEndModelInitiatedApproval(t *testing.T) {
+	for _, tcp := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tcp=%t", tcp), func(t *testing.T) {
+			bin := ottoBin(t)
+			provider := newScriptedFakeProvider(t, nil, func(body []byte, _ int) string {
+				if !strings.Contains(string(body), `"role":"tool"`) && !strings.Contains(string(body), `"role": "tool"`) {
+					return chatToolCallReply("plan-call", "request_approval", `{"title":"Review parser scope","reason":"Confirm before changing code","proposal":"Change only parsing"}`)
+				}
+				return chatTextReply("The approval decision was received.")
+			})
+			defer provider.Close()
+			home := ottoHome(t, provider.URL)
+			workspace, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}
+			if tcp {
+				_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
+				options = tcpAgentOptions(t, diagnostics, workspace)
+			}
+			h := newHarness(t, setup{agent: options})
+			h.say("Ask me to approve the plan before continuing.")
+			waitCards(h, 1)
+			id := h.plat.approvalID()
+			h.say("/allow " + id + " Keep the scope narrow")
+			h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.statuses) > 0 }, "plan card decision")
+			h.waitFor(func() bool {
+				for _, text := range h.plat.texts() {
+					if strings.Contains(text, "The approval decision was received.") {
+						return true
+					}
+				}
+				return false
+			}, "plan continuation")
+		})
+	}
 }

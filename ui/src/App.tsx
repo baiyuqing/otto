@@ -4,6 +4,7 @@ import { parseWebCommand, supportedCommands } from './commands'
 import { fromHistory, phase, reduce, statusLine, type Info, type Item, type Session, type SessionListRow, type Usage } from './wire'
 import { Sidebar } from './Sidebar'
 import { TranscriptView } from './TranscriptView'
+import { Approvals } from './Approvals'
 import { Composer } from './Composer'
 import { Footer } from './Footer'
 import { ContextPanel } from './ContextPanel'
@@ -739,6 +740,7 @@ export function App() {
         />
       )}
       {view === 'chat' && session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
+      {view === 'chat' && session && <Approvals key={`approvals:${session.id}`} sessionId={session.id} />}
       {view === 'chat' && (
         <Composer
           key={session?.id ?? 'closed'}

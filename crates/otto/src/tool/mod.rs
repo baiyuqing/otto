@@ -12,6 +12,7 @@
 //! Cancellation: long-running tools check the token between filesystem steps
 //! and return the `context canceled` text.
 
+pub mod approval;
 pub mod bash;
 pub mod edit;
 pub mod find;
@@ -43,12 +44,55 @@ use tokio_util::sync::CancellationToken;
 /// The text reported when the request is already cancelled.
 pub(crate) const CONTEXT_CANCELED: &str = "context canceled";
 
+pub struct ApprovalSpec {
+    pub version: String,
+    pub source: String,
+    pub title: String,
+    pub reason: String,
+    pub details: String,
+    pub persistent: bool,
+}
+
 /// One callable tool.
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     /// The schema advertised to the provider. The returned value is owned by
     /// the caller.
     fn definition(&self) -> ToolDefinition;
+
+    fn approval_spec(&self, _arguments: &RawValue) -> Result<Option<ApprovalSpec>, ToolResult> {
+        Ok(None)
+    }
+
+    async fn apply_approval(
+        &self,
+        _arguments: &RawValue,
+        _cancel: &CancellationToken,
+        _request: &crate::approval::Request,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn batch_control(&self) -> otto_core::approval::BatchControl {
+        otto_core::approval::BatchControl::Continue
+    }
+
+    async fn execute_approved(
+        &self,
+        call: otto_core::tool::ToolCall<'_>,
+        cancel: &CancellationToken,
+        _request: &crate::approval::Request,
+    ) -> ToolResult {
+        self.execute_call(call, cancel).await
+    }
+
+    async fn execute_call(
+        &self,
+        call: otto_core::tool::ToolCall<'_>,
+        cancel: &CancellationToken,
+    ) -> ToolResult {
+        self.execute(call.arguments, cancel).await
+    }
 
     /// Runs one call. `arguments` is borrowed for the duration of the call.
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult;

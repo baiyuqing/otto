@@ -185,9 +185,11 @@ impl Controller {
         let running = Running(Arc::clone(&self.auto_running));
         let notices = Arc::clone(&self.notices);
         let cancel = self.auto_cancel.child_token();
+        let approvals = self.builder.approvals.clone();
         tokio::spawn(async move {
             let _running = running;
             let context = reflection::Context {
+                approvals: Some(&approvals),
                 runner: &runner,
                 session_id: &session_id,
                 session_path: &session_path,
@@ -242,6 +244,7 @@ impl Controller {
         let session_path = session.path();
         let skill_roots = self.reflection_skill_roots();
         let context = reflection::Context {
+            approvals: Some(&self.builder.approvals),
             runner: &runner,
             session_id: &session_id,
             session_path: &session_path,

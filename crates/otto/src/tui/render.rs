@@ -53,7 +53,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     );
     // A pending approval sits directly above the composer, where the eyes are,
     // in the slot the suggestion list would use.
-    let approval = app.approval.as_ref().filter(|_| !app.busy());
+    let approval = app.approval.as_ref();
     let suggestions = if approval.is_some() {
         Vec::new()
     } else {
@@ -667,11 +667,14 @@ fn approval_lines(approval: &ApprovalDialog, width: u16) -> Vec<Line<'static>> {
     let inner_width = width.saturating_sub(4) as usize;
     let accent = Style::default().fg(Color::Yellow);
     let mut lines = vec![Line::from(Span::styled(
-        if approval.read_path.is_empty() {
+        if !approval.title.is_empty() {
+            approval.title.as_str()
+        } else if approval.read_path.is_empty() {
             "Run Bash outside the sandbox?"
         } else {
             "Permanently allow sandbox read access?"
-        },
+        }
+        .to_owned(),
         Style::default().add_modifier(Modifier::BOLD),
     ))];
     if !approval.read_path.is_empty() {
@@ -685,7 +688,11 @@ fn approval_lines(approval: &ApprovalDialog, width: u16) -> Vec<Line<'static>> {
     }
     if !approval.command.is_empty() {
         lines.extend(label_value_lines(
-            "Command: ",
+            if approval.title.is_empty() {
+                "Command: "
+            } else {
+                "Details: "
+            },
             &approval.command,
             inner_width,
             if approval.read_path.is_empty() {
@@ -707,10 +714,24 @@ fn approval_lines(approval: &ApprovalDialog, width: u16) -> Vec<Line<'static>> {
             },
         ));
     }
+    if !approval.title.is_empty() {
+        lines.extend(label_value_lines(
+            if approval.feedback_mode {
+                "Feedback (Enter finishes): "
+            } else {
+                "Feedback (f to edit): "
+            },
+            &approval.feedback,
+            inner_width,
+            2,
+        ));
+    }
     lines.push(Line::default());
     for (label, is_yes) in [
         (
-            if approval.read_path.is_empty() {
+            if !approval.title.is_empty() {
+                "Approve"
+            } else if approval.read_path.is_empty() {
                 "Yes, run it outside the sandbox"
             } else {
                 "Yes, save read access"
@@ -1336,6 +1357,9 @@ mod tests {
         let (_workspace, _sessions, mut app) = app_fixture().await;
         let long_command = format!("git push {}", "very-long-ref-name-".repeat(12));
         app.approval = Some(ApprovalDialog {
+            feedback: String::new(),
+            feedback_mode: false,
+            title: String::new(),
             id: "approval-1".to_string(),
             command: long_command.clone(),
             justification: "publish the reviewed branch".to_string(),
@@ -1362,6 +1386,9 @@ mod tests {
     async fn read_approval_panel_discloses_persistence_and_keeps_choices_visible() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
         app.approval = Some(ApprovalDialog {
+            feedback: String::new(),
+            feedback_mode: false,
+            title: String::new(),
             id: "approval-read".to_string(),
             read_path: "/fixture".to_string(),
             command: "cat fixture".to_string(),
@@ -1384,6 +1411,9 @@ mod tests {
     async fn approval_panel_sits_above_the_composer_and_wraps_a_long_reason() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
         app.approval = Some(ApprovalDialog {
+            feedback: String::new(),
+            feedback_mode: false,
+            title: String::new(),
             id: "approval-1".to_string(),
             command: "git fetch origin main".to_string(),
             justification:

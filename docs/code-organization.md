@@ -51,6 +51,7 @@ authentication, and the sandbox—belong in `otto`, not in `otto-core`.
 `crates/otto-core` contains no native runtime integration. Its principal
 modules are:
 
+- `approval`: frontend-neutral approval requests, choices and lifecycle values.
 - `model`: provider-neutral messages, blocks, validation, and usage types.
 - `provider`: the provider-neutral completion contract.
 - `openaicompat` and `openairesponses`: provider wire formats and streaming
@@ -77,7 +78,7 @@ The other modules group native responsibilities:
 - **User entry points:** `cli/`, `tui/`, `server/`, and `acp/`.
 - **Remote and external integrations:** `provider/`, `mcp/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
-- **Local state and reliability:** `session/`, `config/`, `memory/`,
+- **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
   `reflection/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, and `workflow.rs`.
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`, and
@@ -105,6 +106,7 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 | A CLI command, flag, REPL command, or process lifecycle behavior | `crates/otto/src/cli/` | `app/` and the relevant frontend tests |
 | Shared agent turn behavior, messages, tool schemas, or session encoding | `crates/otto-core/src/agent/`, `model.rs`, `tool.rs`, or `session/` | Native callers and WASM compatibility |
 | Provider HTTP behavior | `crates/otto/src/provider/` | The matching wire module in `otto-core` |
+| Shared approvals and model-initiated consent | `approval/`, `otto-core/src/approval.rs`, `tool/approval.rs` | Domain adapters, TUI, HTTP, ACP and chat connector |
 | Agent self-help and pending approval dialogue | `tool/otto.rs`, `app/approval_control.rs` | `cli/runtime_builder.rs`, ACP, HTTP, chat and TUI input paths |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
 | Web API or browser behavior | `crates/otto/src/server/` or `ui/` | `crates/otto-web/` for shared browser wire codecs |

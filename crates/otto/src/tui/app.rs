@@ -123,6 +123,9 @@ impl Picker {
 /// input method; `y`/`n` and `1`/`2` are shortcuts for the same two options.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ApprovalDialog {
+    pub feedback: String,
+    pub feedback_mode: bool,
+    pub title: String,
     pub id: String,
     pub command: String,
     pub justification: String,
@@ -157,6 +160,11 @@ pub(crate) struct MemoryReviewDialog {
 /// these one at a time, matching [`Controller::begin_operation`]'s
 /// single-admission-at-a-time contract.
 pub(crate) enum Action {
+    DecideApproval {
+        id: String,
+        allow: bool,
+        feedback: String,
+    },
     Exit,
     Prompt(String),
     Image(String),
@@ -421,6 +429,7 @@ pub(crate) struct App {
     pub agents: Option<AgentsView>,
     /// Pending elevated Bash approval modal.
     pub approval: Option<ApprovalDialog>,
+    approval_hidden: Option<String>,
     /// Pending human memory-review modal. It contains no candidate body or
     /// reason; decisions go through the existing scoped review command.
     pub memory_review: Option<MemoryReviewDialog>,
@@ -469,6 +478,62 @@ fn skill_state_completions(name: &str, prefix: &str) -> Vec<Completion> {
 }
 
 impl App {
+    /// Reconcile the authoritative queue even when no turn is running. Preserve
+    /// the current review and its feedback while it remains pending.
+    pub(crate) fn sync_approvals(&mut self, requests: &[crate::approval::Request]) {
+        if self
+            .approval_hidden
+            .as_ref()
+            .is_some_and(|id| requests.iter().any(|request| &request.id == id))
+        {
+            return;
+        }
+        self.approval_hidden = None;
+        let current = self.approval.as_ref().map(|dialog| dialog.id.as_str());
+        let request = requests
+            .iter()
+            .find(|request| Some(request.id.as_str()) == current)
+            .or_else(|| requests.first());
+        let Some(request) = request else {
+            if self
+                .approval
+                .as_ref()
+                .is_some_and(|dialog| !dialog.title.is_empty())
+            {
+                self.approval = None;
+            }
+            return;
+        };
+        if current == Some(request.id.as_str())
+            && self
+                .approval
+                .as_ref()
+                .is_some_and(|dialog| !dialog.title.is_empty())
+        {
+            return;
+        }
+        self.push_system(format!(
+            "Approval {}: {}\n{}\nReason: {}\nAuthorization: {}",
+            request.id,
+            request.title,
+            request.subject.details,
+            request.reason,
+            if request.kind == crate::approval::Kind::Confirmation {
+                "proposal confirmation"
+            } else if request.persistent {
+                "persistent"
+            } else {
+                "once"
+            }
+        ));
+        self.approval = Some(ApprovalDialog {
+            title: request.title.clone(),
+            id: request.id.clone(),
+            command: request.subject.details.clone(),
+            justification: request.reason.clone(),
+            ..Default::default()
+        });
+    }
     pub fn new(backend: &Backend) -> Self {
         let (entries, usage) = entries::entries_from_history(&backend.history());
         let history = History::seeded(prompt_history(&entries));
@@ -488,6 +553,7 @@ impl App {
             context: None,
             agents: None,
             approval: None,
+            approval_hidden: None,
             memory_review: None,
             suggestion: 0,
             show_help: false,
@@ -583,6 +649,7 @@ impl App {
         self.info = backend.info();
         self.scroll = None;
         self.approval = None;
+        self.approval_hidden = None;
     }
 
     pub fn refresh_info(&mut self, backend: &Backend) {
@@ -730,6 +797,9 @@ impl App {
         backend: &Backend,
         cancel: &CancellationToken,
     ) -> Option<Action> {
+        if key.code == KeyCode::Enter && self.approval.is_none() {
+            self.approval_hidden = None;
+        }
         if key.code != KeyCode::Char('c') || !key.modifiers.contains(KeyModifiers::CONTROL) {
             self.clear_ctrl_c_arm();
         } else {
@@ -764,7 +834,28 @@ impl App {
         }
 
         if let Some(approval) = &mut self.approval {
+            if approval.feedback_mode {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Esc => approval.feedback_mode = false,
+                    KeyCode::Backspace => {
+                        approval.feedback.pop();
+                    }
+                    KeyCode::Char(c)
+                        if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                            && approval.feedback.len() + c.len_utf8() <= 8192 =>
+                    {
+                        approval.feedback.push(c);
+                    }
+                    _ => {}
+                }
+                return None;
+            }
+            if key.code == KeyCode::Char('f') && !approval.title.is_empty() {
+                approval.feedback_mode = true;
+                return None;
+            }
             if key.code == KeyCode::Char('c') && key.modifiers.is_empty() {
+                self.approval_hidden = Some(approval.id.clone());
                 self.approval = None;
                 return None;
             }
@@ -785,7 +876,16 @@ impl App {
                 _ => return None,
             };
             let id = approval.id.clone();
+            let shared = !approval.title.is_empty();
+            let feedback = approval.feedback.clone();
             self.approval = None;
+            if shared {
+                return Some(Action::DecideApproval {
+                    id,
+                    allow: approve,
+                    feedback,
+                });
+            }
             return if approve {
                 Some(Action::Approve(id))
             } else {
@@ -1861,8 +1961,62 @@ impl App {
             "notification" => {
                 self.push_system(format!("[task {}] {}", event.task_id, event.text));
             }
+            "approval_changed" => {
+                if let Some(request) = &event.approval {
+                    if request.state == crate::approval::State::Pending {
+                        if self.approval_hidden.is_none()
+                            && self.approval.as_ref().is_none_or(|dialog| {
+                                dialog.id == request.id && dialog.title.is_empty()
+                            })
+                        {
+                            self.push_system(format!(
+                                "Approval {}: {}\n{}",
+                                request.id, request.title, request.subject.details
+                            ));
+                            self.approval = Some(ApprovalDialog {
+                                feedback: String::new(),
+                                feedback_mode: false,
+                                title: request.title.clone(),
+                                id: request.id.clone(),
+                                command: request.subject.details.clone(),
+                                justification: request.reason.clone(),
+                                read_path: String::new(),
+                                approve_selected: false,
+                            });
+                        }
+                    } else if self
+                        .approval
+                        .as_ref()
+                        .is_some_and(|dialog| dialog.id == request.id)
+                    {
+                        self.approval = None;
+                    }
+                }
+            }
             APPROVAL_REQUESTED => {
+                if let Some(request) = &event.approval {
+                    if self.approval_hidden.is_some()
+                        || self
+                            .approval
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.id != request.id)
+                    {
+                        return false;
+                    }
+                    if request.state == crate::approval::State::Pending {
+                        self.sync_approvals(std::slice::from_ref(request));
+                    }
+                    return false;
+                }
+                if self.approval.is_some()
+                    || self.approval_hidden.as_ref() == Some(&event.approval_id)
+                {
+                    return false;
+                }
                 let approval = ApprovalDialog {
+                    feedback: String::new(),
+                    feedback_mode: false,
+                    title: String::new(),
                     id: event.approval_id.clone(),
                     command: event.command.clone(),
                     justification: event.justification.clone(),
@@ -1895,6 +2049,9 @@ impl App {
 fn bash_approval_request(tool_name: &str, result: &ToolResult) -> Option<ApprovalDialog> {
     let request = crate::tool::bash::parse_approval_request(tool_name, result)?;
     Some(ApprovalDialog {
+        feedback: String::new(),
+        feedback_mode: false,
+        title: String::new(),
         id: request.id,
         command: request.command,
         justification: request.justification,
@@ -2240,6 +2397,106 @@ mod tests {
         Picker::new(PickerKind::Resume, rows)
     }
 
+    #[tokio::test]
+    async fn restored_approval_queue_preserves_feedback_and_advances_after_decision() {
+        let remote = super::super::attach::Remote::offline(Vec::new());
+        let mut app = App::new(&Backend::Attach(&remote));
+        let service = crate::approval::Service::in_memory().unwrap();
+        let create = |id: &str| {
+            service
+                .create(crate::approval::Proposal {
+                    kind: crate::approval::Kind::Confirmation,
+                    scope: crate::approval::Scope {
+                        workspace: "/work".into(),
+                        session_id: "s1".into(),
+                        task_id: String::new(),
+                        run_id: String::new(),
+                    },
+                    subject: crate::approval::Subject {
+                        tool_call_id: id.into(),
+                        source: "conversation".into(),
+                        id: id.into(),
+                        version: "v1".into(),
+                        details: "Review the complete plan".into(),
+                    },
+                    title: id.into(),
+                    reason: "Before proceeding".into(),
+                    persistent: false,
+                    blocking: true,
+                    expires_at: None,
+                })
+                .unwrap()
+        };
+        let first = create("first");
+        let second = create("second");
+        app.sync_approvals(&[first.clone(), second.clone()]);
+        assert!(!app.busy(), "background review requires no running turn");
+        let dialog = app.approval.as_mut().unwrap();
+        assert_eq!(dialog.id, first.id);
+        assert!(!dialog.approve_selected);
+        dialog.feedback = "Limit the scope".into();
+        dialog.feedback_mode = true;
+        app.sync_approvals(&[second.clone(), first.clone()]);
+        assert_eq!(app.approval.as_ref().unwrap().feedback, "Limit the scope");
+        app.apply_event(&WireEvent {
+            event_type: "approval_changed".into(),
+            approval: Some(second.clone()),
+            ..Default::default()
+        });
+        app.apply_event(&WireEvent::approval_requested(
+            &first.id,
+            "call-first",
+            "compatibility command",
+            "compatibility reason",
+        ));
+        let mut concurrent = WireEvent::approval_requested(
+            &second.id,
+            "call-second",
+            "second command",
+            "second reason",
+        );
+        concurrent.approval = Some(second.clone());
+        app.apply_event(&concurrent);
+        assert_eq!(app.approval.as_ref().unwrap().id, first.id);
+        assert_eq!(app.approval.as_ref().unwrap().title, first.title);
+        assert_eq!(app.approval.as_ref().unwrap().feedback, "Limit the scope");
+        app.approval.as_mut().unwrap().feedback_mode = false;
+        let cancel = CancellationToken::new();
+        app.handle_key(
+            key(KeyCode::Char('c'), KeyModifiers::NONE),
+            &Backend::Attach(&remote),
+            &cancel,
+        );
+        app.sync_approvals(&[first.clone(), second.clone()]);
+        assert!(
+            app.approval.is_none(),
+            "refresh must leave the discussion composer accessible"
+        );
+        app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &Backend::Attach(&remote),
+            &cancel,
+        );
+        app.sync_approvals(&[first.clone(), second.clone()]);
+        assert!(app.approval.is_some());
+        app.sync_approvals(std::slice::from_ref(&second));
+        assert_eq!(app.approval.as_ref().unwrap().id, second.id);
+        assert!(app.approval.as_ref().unwrap().feedback.is_empty());
+        app.sync_approvals(&[]);
+        assert!(app.approval.is_none());
+        let mut compatibility = WireEvent::approval_requested(
+            &first.id,
+            "call-first",
+            "compatibility command",
+            "compatibility reason",
+        );
+        app.apply_event(&compatibility);
+        assert!(app.approval.as_ref().unwrap().title.is_empty());
+        compatibility.approval = Some(first.clone());
+        app.apply_event(&compatibility);
+        assert_eq!(app.approval.as_ref().unwrap().title, first.title);
+    }
+
     #[test]
     fn a_picker_row_names_the_session_workspace() {
         let row = session_row(&SessionInfo {
@@ -2302,6 +2559,7 @@ mod tests {
             context: None,
             agents: None,
             approval: None,
+            approval_hidden: None,
             memory_review: None,
             suggestion: 0,
             show_help: false,
@@ -2339,6 +2597,7 @@ mod tests {
             context: None,
             agents: None,
             approval: None,
+            approval_hidden: None,
             memory_review: None,
             suggestion: 0,
             show_help: false,
@@ -2662,6 +2921,7 @@ mod tests {
             context: None,
             agents: None,
             approval: None,
+            approval_hidden: None,
             memory_review: None,
             suggestion: 0,
             show_help: false,
@@ -2702,6 +2962,7 @@ mod tests {
             context: None,
             agents: None,
             approval: None,
+            approval_hidden: None,
             memory_review: None,
             suggestion: 0,
             show_help: false,
@@ -2886,6 +3147,9 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut app = App::new(&Backend::Local(&controller));
         let dialog = |id: &str| ApprovalDialog {
+            feedback: String::new(),
+            feedback_mode: false,
+            title: String::new(),
             id: id.to_string(),
             command: "git push".to_string(),
             justification: "push branch".to_string(),

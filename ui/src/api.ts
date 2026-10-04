@@ -279,7 +279,27 @@ const json = async <T>(path: string, init?: RequestInit): Promise<T> => (await r
 
 const text = async (path: string, init?: RequestInit): Promise<string> => (await request(path, init)).text()
 
+export type ApprovalRequest = {
+  id: string
+  revision: number
+  kind: 'authorization' | 'confirmation'
+  title: string
+  reason: string
+  persistent: boolean
+  blocking: boolean
+  subject: { source: string; id: string; version: string; details: string }
+  state: string
+  application: string
+  application_error: string
+}
+
 export const api = {
+  sharedApproval: (sessionId: string, id: string) => json<ApprovalRequest>(`/v1/approvals/${encodeURIComponent(id)}?session_id=${encodeURIComponent(sessionId)}`),
+  approvals: (sessionId: string) => json<{ requests: ApprovalRequest[]; cursor: number }>(`/v1/approvals?session_id=${encodeURIComponent(sessionId)}`),
+  decideSharedApproval: (sessionId: string, id: string, revision: number, option: 'approve' | 'reject' | 'withdraw', feedback: string) =>
+    json<ApprovalRequest>(`/v1/approvals/${encodeURIComponent(id)}/${option === 'withdraw' ? 'withdraw' : 'decision'}`, {
+      method: 'POST', body: JSON.stringify({ session_id: sessionId, revision, option_id: option, feedback }),
+    }),
   approvalMessage: (id: string, text: string) => json<{ text: string; queued: boolean } | null>(`/v1/sessions/${encodeURIComponent(id)}/approvals/message`, { method: 'POST', body: JSON.stringify({ text }) }),
   info: () => json<Info>('/v1/info'),
   usage: (sessionId?: string) =>

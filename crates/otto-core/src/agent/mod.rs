@@ -456,9 +456,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             let had_tool_call = !tool_calls.is_empty();
             // Tool calls run one at a time, so a frontend can reserve bounded
             // delivery for the terminal event of the single active call.
+            let mut replan = false;
             for block in tool_calls {
-                self.run_tool_call(emit, &mut state, control, &block, None)
+                let batch = self
+                    .run_tool_call(emit, &mut state, control, &block, None, replan)
                     .await?;
+                replan |= batch == crate::approval::BatchControl::Replan;
             }
 
             if !had_tool_call {
@@ -494,7 +497,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
         block: &Block,
         prior: Option<(OperationId, u32)>,
-    ) -> Result<(), AgentError> {
+        skipped: bool,
+    ) -> Result<crate::approval::BatchControl, AgentError> {
         let arguments = block.arguments.clone().unwrap_or_else(empty_object);
         let (operation_id, attempt) = match prior {
             Some((operation_id, attempts)) => (operation_id, attempts + 1),
@@ -527,12 +531,22 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             tool_call_id: block.tool_call_id.clone(),
             arguments: arguments.get().to_owned(),
         });
-        let mut execution = if let Some(reason) = control.admission_stop_reason() {
+        let mut execution = if skipped {
+            ToolExecution {
+                result: ToolResult::error("Not started: a preceding approval requires replanning."),
+                outcome: OperationOutcome {
+                    disposition: OperationDisposition::Error,
+                    effect_certainty: EffectCertainty::NotStarted,
+                    stop_reason: None,
+                },
+            }
+        } else if let Some(reason) = control.admission_stop_reason() {
             stopped_tool_execution(reason)
         } else {
             self.tools
                 .execute(
                     ToolCall {
+                        tool_call_id: &block.tool_call_id,
                         operation_id: &operation_id,
                         name: &block.tool_name,
                         arguments: &arguments,
@@ -559,6 +573,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
             None => execution.result.content.clone(),
         };
+        let batch_control = self.tools.batch_control(&block.tool_name, &execution);
         let is_error = execution.result.is_error;
         let terminal = OperationFact::terminal(
             operation_id.clone(),
@@ -615,7 +630,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 },
             ));
         }
-        Ok(())
+        Ok(batch_control)
     }
 
     /// Runs again the calls a takeover left without a result, when every one
@@ -655,7 +670,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
         }
         for (call, prior) in pending.iter().zip(priors) {
-            self.run_tool_call(emit, state, control, call, prior)
+            self.run_tool_call(emit, state, control, call, prior, false)
                 .await?;
         }
         Ok(())

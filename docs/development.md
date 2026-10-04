@@ -385,6 +385,37 @@ Use small, focused commits with imperative subjects, for example
 flow`. Before committing, run the relevant Rust gates and confirm that the
 working tree contains only intentional changes.
 
+### Unified approval contract
+
+`otto-core::approval` owns neutral requests, choices, scopes and separate
+human/application states. `otto::approval` stores them in `approvals.db`; the
+same decision authority is injected into the parent and child native registries,
+HTTP, ACP and terminal surfaces. Models discover `request_approval` in actual
+runner definitions and system guidance, and choose when conversational consent
+is needed. Models can query/withdraw but cannot decide an approval.
+
+Authorization is prepared before tool dispatch, bound to the logical operation,
+exact arguments and relevant domain version. Decisions/events commit together.
+An application claim has a process identity; maintenance must not take over a
+live owner's work. Domain handlers reconcile memory candidates, workflow gates,
+config previews and vetted skill artifacts through their canonical receipts.
+External actions with an uncertain effect are not replayed automatically.
+
+Confirmation/rejection forces a new provider step: later calls in the same
+assistant batch receive `NotStarted` results. Skill proposals never write when
+approval service composition is missing. Memory review text stays in the
+candidate store; the approval journal retains references and digests only.
+
+HTTP exposes `/v1/approvals`, per-request decisions/withdrawal and resumable
+changes/events. ACP uses standard permission requests for tool authorization,
+negotiated elicitation for confirmation, and `_otto/approvals/*` for durable
+queues. Connector cards and commands bind the exact request/version; feedback
+returns to the waiting model. MCP calls pass the same native authorization
+boundary; unsupported inbound elicitation modes are not advertised and cannot
+be interpreted as authorization.
+
+Design: [unified approval](specs/2026-10-04-unified-approval.md).
+
 ### Agent self-help and approval conversations
 
 `tool::otto` reads installed help from the embedded canonical user manual and

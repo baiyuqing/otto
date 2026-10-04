@@ -19,6 +19,7 @@ use crate::model::{
 /// The model request for one attempt of a logical tool operation.
 #[derive(Debug, Clone, Copy)]
 pub struct ToolCall<'a> {
+    pub tool_call_id: &'a str,
     pub operation_id: &'a OperationId,
     pub name: &'a str,
     pub arguments: &'a RawValue,
@@ -167,6 +168,15 @@ pub trait ToolExecutor {
     /// false, so an executor opts in per tool.
     fn replayable(&self, _name: &str) -> bool {
         false
+    }
+
+    /// Whether this tool forces a new provider step before later batch calls.
+    fn batch_control(
+        &self,
+        _name: &str,
+        _execution: &ToolExecution,
+    ) -> crate::approval::BatchControl {
+        crate::approval::BatchControl::Continue
     }
 
     /// Runs one attempt. A name this executor does not serve must settle as

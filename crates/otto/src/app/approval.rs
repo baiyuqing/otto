@@ -85,14 +85,14 @@ impl Controller {
                     }
                     emit(event);
                 };
-                match first.take() {
-                    Some(Step::Text(text)) => self.prompt(text, &mut sink, cancel).await,
-                    Some(Step::Image(text, image)) => {
-                        self.prompt_with_image(text, image, &mut sink, cancel).await
-                    }
-                    Some(Step::Wake(wake)) => wake.run(&mut sink, cancel).await,
-                    None => self.prompt(&retry, &mut sink, cancel).await,
-                }
+                self.step_with_shared_approvals(
+                    first.take(),
+                    &retry,
+                    &mut sink,
+                    cancel,
+                    &mut decide,
+                )
+                .await
             };
             if cancel.is_cancelled() {
                 return Ok(Stop::Cancelled);
@@ -142,6 +142,64 @@ impl Controller {
                             // remain reserved after its frontend waiter ends.
                             let _ = self.deny_tool(&request.id);
                             return Err(AgentError::Other(message));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn step_with_shared_approvals<F, Fut>(
+        &self,
+        first: Option<Step<'_>>,
+        retry: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+        decide: &mut F,
+    ) -> Result<(), AgentError>
+    where
+        F: FnMut(ApprovalRequest) -> Fut,
+        Fut: Future<Output = ApprovalDecision>,
+    {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut sink = |event| {
+            let _ = events.send(event);
+        };
+        let run = async {
+            match first {
+                Some(Step::Text(text)) => self.prompt(text, &mut sink, cancel).await,
+                Some(Step::Image(text, image)) => {
+                    self.prompt_with_image(text, image, &mut sink, cancel).await
+                }
+                Some(Step::Wake(wake)) => wake.run(&mut sink, cancel).await,
+                None => self.prompt(retry, &mut sink, cancel).await,
+            }
+        };
+        tokio::pin!(run);
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+        let mut presented = std::collections::HashSet::new();
+        let scope = self.approval_scope();
+        loop {
+            tokio::select! {
+                result = &mut run => {
+                    while let Ok(event) = received.try_recv() { emit(event); }
+                    return result;
+                },
+                Some(event) = received.recv() => emit(event),
+                _ = tick.tick() => {
+                    let pending = self.approval_service().snapshot(&scope.workspace,Some(&scope.session_id))
+                        .map_err(|e| AgentError::Other(e.to_string()))?;
+                    if let Some(request) = pending.requests.into_iter().find(|r| r.blocking && presented.insert(r.id.clone())) {
+                        let decision = decide(ApprovalRequest {
+                            approval_id: request.id.clone(),tool_call_id: request.subject.tool_call_id.clone(),
+                            command:serde_json::from_str::<serde_json::Value>(&request.subject.details).ok().and_then(|input|input["command"].as_str().map(str::to_string)).unwrap_or_else(||format!("{}\n{}",request.title,request.subject.details)),
+                            justification:request.reason.clone(),read_path:serde_json::from_str::<serde_json::Value>(&request.subject.details).ok().and_then(|v|v["read_path"].as_str().map(str::to_string)).unwrap_or_default(),
+                        }).await;
+                        drop(self.approval_control.lock().await);
+                        if decision == ApprovalDecision::Cancelled || cancel.is_cancelled() {
+                            let _ = self.approval_service().withdraw(&request.id,&request.scope,request.revision);
+                        } else {
+                            let _ = self.decide_shared_approval(&request.id,decision == ApprovalDecision::Allow,"","frontend");
                         }
                     }
                 }

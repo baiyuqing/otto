@@ -55,6 +55,7 @@ pub fn environment() -> HashMap<String, String> {
 
 pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
     let shared = Arc::new(Shared {
+        approvals: Arc::new(crate::approval::Service::in_memory().expect("approval store")),
         config_path: workspace_root.join("config.toml"),
         config: config(),
         environment: environment(),
@@ -111,6 +112,7 @@ pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {
     let mut environment = environment();
     environment.insert("HOME".to_string(), root.to_string_lossy().into_owned());
     Arc::new(Shared {
+        approvals: Arc::new(crate::approval::Service::in_memory().expect("approval store")),
         config_path: root.join("config.toml"),
         config,
         environment,
@@ -143,6 +145,7 @@ pub fn shared_with_sandbox_driver_override(root: &Path, driver: &str) -> Arc<Sha
     let mut environment = environment();
     environment.insert("HOME".to_string(), root.to_string_lossy().into_owned());
     Arc::new(Shared {
+        approvals: Arc::new(crate::approval::Service::in_memory().expect("approval store")),
         config_path: root.join("config.toml"),
         config,
         environment,

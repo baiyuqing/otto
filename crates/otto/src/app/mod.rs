@@ -652,6 +652,126 @@ impl Controller {
         warnings
     }
 
+    pub fn approval_service(&self) -> &Arc<crate::approval::Service> {
+        &self.builder.approvals
+    }
+
+    pub fn approval_scope(&self) -> crate::approval::Scope {
+        let info = self.info();
+        crate::approval::Scope {
+            workspace: info.workspace,
+            session_id: info.session_id,
+            task_id: String::new(),
+            run_id: String::new(),
+        }
+    }
+
+    pub fn review_memory(
+        &self,
+        request: &crate::memory::ReviewRequest,
+        transport: &str,
+    ) -> crate::memory::Result<crate::memory::ReviewResult> {
+        use crate::memory::{CandidateState, Error, ErrorKind, ReviewDecision};
+        let (memory, user, workspace) = self
+            .memory_manager()
+            .ok_or_else(|| Error::new(ErrorKind::Unavailable))?;
+        if request.reference.scope != user && request.reference.scope != workspace {
+            return Err(Error::new(ErrorKind::NotFound));
+        }
+        let candidate = memory.get_candidate(&request.reference)?;
+        if candidate.state != CandidateState::Pending {
+            return Err(Error::new(ErrorKind::Conflict));
+        }
+        let snapshot = self
+            .approval_snapshot()
+            .map_err(|_| Error::new(ErrorKind::Unavailable))?;
+        let id = format!(
+            "{}/{}/{}/{}",
+            user.id,
+            request.reference.scope.namespace,
+            request.reference.scope.id,
+            request.reference.id
+        );
+        let approval = snapshot
+            .requests
+            .into_iter()
+            .find(|r| r.subject.source == "memory" && r.subject.id == id)
+            .ok_or_else(|| Error::new(ErrorKind::Unavailable))?;
+        self.approval_service()
+            .decide_and_claim(
+                &approval.id,
+                &approval.scope,
+                approval.revision,
+                request.decision == ReviewDecision::Accept,
+                &crate::approval::Actor::local(transport),
+            )
+            .map_err(|_| Error::new(ErrorKind::Conflict))?;
+        let result = memory.review(request);
+        let state = if result.is_ok() {
+            crate::approval::ApplicationState::Applied
+        } else {
+            crate::approval::ApplicationState::Failed
+        };
+        self.approval_service()
+            .application(
+                &approval.id,
+                &approval.scope,
+                crate::approval::ApplicationState::Applying,
+                state,
+                if result.is_err() {
+                    "Memory review could not be applied."
+                } else {
+                    ""
+                },
+            )
+            .map_err(|_| Error::new(ErrorKind::Unavailable))?;
+        result
+    }
+
+    pub fn approval_snapshot(&self) -> Result<crate::approval::Snapshot, crate::approval::Error> {
+        let scope = self.approval_scope();
+        if let Some((memory, user, workspace)) = self.memory_manager() {
+            crate::approval::memory::attach(
+                self.approval_service(),
+                &memory,
+                vec![user.clone(), workspace.clone()],
+                &scope.workspace,
+            )?;
+            crate::approval::memory::reconcile(
+                self.approval_service(),
+                &memory,
+                &[user, workspace],
+                &scope.workspace,
+            )?;
+        }
+        self.approval_service().apply_available(&scope.workspace)?;
+        self.approval_service()
+            .snapshot(&scope.workspace, Some(&scope.session_id))
+    }
+
+    pub fn decide_shared_approval(
+        &self,
+        id: &str,
+        allow: bool,
+        feedback: &str,
+        transport: &str,
+    ) -> Result<crate::approval::Request, crate::approval::Error> {
+        let scope = self.approval_scope();
+        let request = self
+            .approval_service()
+            .get(id, &scope.workspace, Some(&scope.session_id))?;
+        let decided = self.approval_service().decide(
+            id,
+            &request.scope,
+            request.revision,
+            allow,
+            feedback,
+            &crate::approval::Actor::local(transport),
+        )?;
+        self.approval_service().apply_available(&scope.workspace)?;
+        Ok(decided)
+    }
+
     // ---- turns ----
 
     pub async fn prompt(

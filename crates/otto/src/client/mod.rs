@@ -116,6 +116,28 @@ impl Client {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn shared_approval(
+        &self,
+        method: &str,
+        session: &str,
+        id: &str,
+        revision: u64,
+        option: &str,
+        feedback: &str,
+        after: i64,
+    ) -> Result<Value, Error> {
+        let response = match method {
+            "_otto/approvals/list" => self.send(self.http.get(format!("{BASE}/v1/approvals")).query(&[("session_id",session)])).await?,
+            "_otto/approvals/get" => self.send(self.http.get(format!("{BASE}/v1/approvals/{id}")).query(&[("session_id",session)])).await?,
+            "_otto/approvals/watch" => self.send(self.http.get(format!("{BASE}/v1/approvals/changes")).query(&[("session_id",session),("after",&after.to_string())])).await?,
+            _ => self.send(self.post(&format!("{BASE}/v1/approvals/{id}/{}",if method.ends_with("withdraw") {"withdraw"} else {"decision"}),
+                &json!({"session_id":session,"revision":revision,"option_id":option,"feedback":feedback}))).await?,
+        };
+        serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
+            .map_err(unreachable_error)
+    }
+
     pub async fn approval_message(
         &self,
         session_id: &str,

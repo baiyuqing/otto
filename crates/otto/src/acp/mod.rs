@@ -25,6 +25,7 @@ mod approval;
 pub mod attach;
 mod command;
 mod memory;
+mod shared_approval;
 pub mod tcp;
 pub mod update;
 
@@ -145,6 +146,7 @@ enum Backend {
 
 /// State shared by the read loop and its request tasks.
 struct Connection {
+    client_capabilities: Mutex<Value>,
     /// The canonical workspace every request's `cwd` must match.
     workspace: PathBuf,
     backend: Backend,
@@ -414,6 +416,24 @@ impl Connection {
                 },
                 cancel,
                 |request| async move {
+                    let scope = session.controller.approval_scope();
+                    if let Ok(shared) = session.controller.approval_service().get(
+                        &request.approval_id,
+                        &scope.workspace,
+                        Some(&scope.session_id),
+                    ) && (shared.kind == crate::approval::Kind::Confirmation
+                        || self
+                            .client_capabilities
+                            .lock()
+                            .expect("ACP capabilities")
+                            .pointer("/_meta/otto/approvals/version")
+                            .and_then(serde_json::Value::as_u64)
+                            == Some(1))
+                    {
+                        return self
+                            .confirmation(&session.controller, &shared, cancel)
+                            .await;
+                    }
                     request_permission(
                         self,
                         session_id,
@@ -599,11 +619,11 @@ fn initialize_result(local: bool) -> Reply {
     let capabilities = match local {
         true => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"memoryReview": true, "approvalDialogue":true}),
+            json!({"memoryReview": true, "approvalDialogue":true,"approvals":{"version":1}}),
         )])),
         false => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"approvalDialogue":true}),
+            json!({"approvalDialogue":true,"approvals":{"version":1}}),
         )])),
     };
     result(
@@ -680,6 +700,10 @@ impl Dispatcher {
                     Backend::Local(_) => true,
                     Backend::Attach(relay) => relay.server.is_some(),
                 };
+                *connection
+                    .client_capabilities
+                    .lock()
+                    .expect("ACP capabilities") = params;
                 connection.reply(id, initialize_result(local));
             }
             "session/new" => {
@@ -744,6 +768,16 @@ impl Dispatcher {
                             },
                         },
                     };
+                    connection.reply(id, reply);
+                });
+            }
+            "_otto/approvals/list"
+            | "_otto/approvals/watch"
+            | "_otto/approvals/get"
+            | "_otto/approvals/decide"
+            | "_otto/approvals/withdraw" => {
+                self.tasks.spawn(async move {
+                    let reply = connection.shared_approval(&method, params).await;
                     connection.reply(id, reply);
                 });
             }
@@ -880,6 +914,7 @@ async fn drive<T>(
         out,
         pending: Mutex::new(HashMap::new()),
         next_request_id: AtomicU64::new(1),
+        client_capabilities: Mutex::new(Value::Null),
     });
     let mut lines = read_lines(stdin);
     let read_loop = async {

@@ -832,7 +832,7 @@ mod approval {
     }
 
     #[test]
-    fn persistent_read_grant_runs_confined_retry_and_denial_does_not_write_config() {
+    fn persistent_read_grant_executes_prepared_call_and_denial_does_not_write_config() {
         let read_call = |id| {
             tool_call_reply(
                 id,
@@ -845,16 +845,8 @@ mod approval {
                 .to_string(),
             )
         };
-        for (option, expected_calls) in [("allow_once", 4), ("reject_once", 2)] {
-            let result = run(
-                option,
-                vec![
-                    read_call("c1"),
-                    text_reply("approval needed"),
-                    read_call("c2"),
-                    text_reply("done"),
-                ],
-            );
+        for option in ["allow_once", "reject_once"] {
+            let result = run(option, vec![read_call("c1"), text_reply("done")]);
             assert_eq!(
                 result.response["result"]["stopReason"], "end_turn",
                 "{}",
@@ -870,7 +862,10 @@ mod approval {
                     .unwrap()
                     .contains("Permanently")
             );
-            assert_eq!(result.served, expected_calls);
+            assert_eq!(
+                result.served, 2,
+                "the prepared call must not require a model-generated retry"
+            );
             let granted = option == "allow_once";
             assert_eq!(
                 result.config.contains("read_paths"),
@@ -889,16 +884,8 @@ mod approval {
     }
 
     #[test]
-    fn allow_once_runs_the_retry_in_the_same_prompt() {
-        let result = run(
-            "allow_once",
-            vec![
-                escalated("call-1"),
-                text_reply("approval needed"),
-                escalated("call-2"),
-                text_reply("done"),
-            ],
-        );
+    fn allow_once_executes_the_prepared_call_once_in_the_same_prompt() {
+        let result = run("allow_once", vec![escalated("call-1"), text_reply("done")]);
         assert_eq!(
             result.response["result"]["stopReason"], "end_turn",
             "{}",
@@ -924,7 +911,16 @@ mod approval {
             options,
             [("allow_once", "allow_once"), ("reject_once", "reject_once")]
         );
-        assert_eq!(result.served, 4);
+        assert_eq!(result.served, 2);
+        assert_eq!(
+            result
+                .frames
+                .iter()
+                .filter(|frame| frame["params"]["update"]["sessionUpdate"] == "tool_call")
+                .count(),
+            1,
+            "approval must resume the exact original call, not dispatch a second call"
+        );
         let text = serde_json::to_string(&result.frames).unwrap();
         assert!(text.contains("outside-seatbelt"), "{text}");
         assert_eq!(
@@ -935,15 +931,7 @@ mod approval {
 
     #[test]
     fn reject_once_ends_the_turn_without_a_retry() {
-        let result = run(
-            "reject_once",
-            vec![
-                escalated("call-1"),
-                text_reply("approval needed"),
-                escalated("call-2"),
-                text_reply("done"),
-            ],
-        );
+        let result = run("reject_once", vec![escalated("call-1"), text_reply("done")]);
         assert_eq!(
             result.response["result"]["stopReason"], "end_turn",
             "{}",
@@ -962,7 +950,6 @@ mod approval {
     fn question_and_ordinary_task_leave_the_permission_pending_until_answered() {
         let (home, workspace, mut client) = start_with_replies(vec![
             escalated("call-1"),
-            text_reply("approval needed"),
             text_reply("It is waiting for approval."),
             tool_call_reply("control-call", "approval_queue", "{}"),
             text_reply("The task is queued."),
@@ -1023,8 +1010,11 @@ mod approval {
         .to_string();
         let (home, workspace, mut client) = start_with_replies(vec![
             tool_call_reply("call-1", "bash", &arguments),
-            text_reply("approval needed"),
-            tool_call_reply("control-call", "approval_revoke", r#"{"id":"approval-1"}"#),
+            tool_call_reply(
+                "control-call",
+                "approval_revoke",
+                r#"{"id":"$EXACT_APPROVAL_ID"}"#,
+            ),
             text_reply("Withdrawn."),
             text_reply("The request was withdrawn."),
         ]);

@@ -127,6 +127,9 @@ pub struct CompactionSettings {
 /// Events are delivered synchronously and in order from inside `run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    ApprovalChanged {
+        request: Box<crate::approval::Request>,
+    },
     AgentStarted,
     AgentFinished,
     TextDelta {
@@ -213,6 +216,7 @@ impl Event {
     /// names.
     pub fn name(&self) -> &'static str {
         match self {
+            Self::ApprovalChanged { .. } => "approval_changed",
             Self::AgentStarted => "agent_started",
             Self::AgentFinished => "agent_finished",
             Self::TextDelta { .. } => "text_delta",

@@ -14,7 +14,8 @@ pub mod tools;
 pub mod worker;
 
 pub use store::{
-    CreateError, Delivery, Error, Item, NewItem, Result, Store, delivery_text, run_text,
+    CreateError, Delivery, Error, Item, NewItem, Result, Store, delivery_text, parse_label,
+    run_text,
 };
 
 /// Platforms an otto-connect chat can belong to.

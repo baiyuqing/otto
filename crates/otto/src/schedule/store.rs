@@ -148,6 +148,14 @@ pub struct Item {
     pub updated_at: DateTime<Utc>,
 }
 
+/// The row id of a label such as `s7`, the inverse of [`Item::label`].
+pub fn parse_label(label: &str) -> Option<i64> {
+    label
+        .strip_prefix('s')
+        .and_then(|digits| digits.parse::<i64>().ok())
+        .filter(|number| *number > 0)
+}
+
 impl Item {
     /// The id as the model sees it, `s7`.
     pub fn label(&self) -> String {

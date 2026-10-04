@@ -346,11 +346,7 @@ impl Tool for CancelTool {
             return error_result(CONTEXT_CANCELED).cancelled_not_started();
         }
         let id = args.id.trim();
-        let Some(number) = id
-            .strip_prefix('s')
-            .and_then(|digits| digits.parse::<i64>().ok())
-            .filter(|number| *number > 0)
-        else {
+        let Some(number) = crate::schedule::parse_label(id) else {
             return preflight_error(format!("id must look like s7, got {id:?}"));
         };
         let (store, origin) = match self.0.available() {

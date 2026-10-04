@@ -2724,8 +2724,8 @@ can manage Otto's existing provider profiles through the running `otto serve`:
 /config profiles
 /config show <profile>
 /models <profile>
-/config add <profile> --provider <openai-compatible|chatgpt> --model <model> [--base-url <url>] [--api-key-env <name>] [--thinking <level>]
-/config set <profile> <model|thinking|base-url|api-key-env> <value>
+/config add <profile> --provider chatgpt --model <model> [--thinking <level>]
+/config set <profile> <model|thinking> <value>
 /config use <profile>
 /config remove <profile>
 /config confirm <token>
@@ -2743,6 +2743,15 @@ token. Send `/config confirm <token>` from the same chat and sender within ten
 minutes to write exactly that change, or `/config cancel` to discard it. The
 connector never accepts API-key values, bot secrets, raw TOML, arbitrary file
 writes, or providers other than `openai-compatible` and `chatgpt`.
+
+A profile's base URL and API-key environment variable name can only be changed
+on the host, through the web UI, the TUI or the config file. Together they
+decide which environment variable of `otto serve` is sent as a bearer token and
+to which URL, so a chat sender who could set them could send any of the
+server's environment variables to a server of their choice. `/config add` with
+`--base-url` or `--api-key-env`, `/config add --provider openai-compatible`
+(which needs a base URL), and `/config set <profile> base-url|api-key-env`
+reply that these fields are host-only and send nothing to `otto serve`.
 
 A saved profile change requires restarting `otto serve` before it becomes
 available to new sessions; it never silently changes an existing session. These

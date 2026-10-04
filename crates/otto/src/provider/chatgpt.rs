@@ -1330,8 +1330,8 @@ mod tests {
     #[tokio::test]
     async fn hosted_web_search_is_advertised_only_when_enabled_and_its_items_are_ignored() {
         let server = testserver::spawn(|_| sse_response(HOSTED_SEARCH_STREAM)).await;
-        let off = Client::with_base_url(&server.url, static_tokens("t"), "acct-1");
-        let on = Client::with_base_url(&server.url, static_tokens("t"), "acct-1")
+        let off = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1");
+        let on = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1")
             .with_hosted_web_search(true);
 
         let (settlement, _) = complete(&off, &model_request()).await;

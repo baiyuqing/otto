@@ -1,12 +1,13 @@
 // Package agent owns one ACP child process or TCP connection and exposes the
-// session operations the bridge needs. It connects on first use and reconnects
-// on the next use after the transport closes.
+// session operations the bridge needs. It connects on first use or through
+// Keep, and reconnects on the next use or by Keep after the transport closes.
 package agent
 
 import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -80,9 +81,12 @@ type Agent struct {
 
 	mu      sync.Mutex // guards the fields below; held while starting a process
 	handler Handler
-	cur     *process
-	delay   time.Duration // restart delay owed after the last exit
-	closed  bool
+	// platforms are the configured platform names, sent at initialize as
+	// _meta.otto.scheduleDelivery.
+	platforms []string
+	cur       *process
+	delay     time.Duration // restart delay owed after the last exit
+	closed    bool
 }
 
 // New returns an Agent that has not started a process.
@@ -104,6 +108,42 @@ func (a *Agent) SetHandler(h Handler) {
 	a.mu.Lock()
 	a.handler = h
 	a.mu.Unlock()
+}
+
+// SetPlatforms must be called before the first process starts.
+func (a *Agent) SetPlatforms(names []string) {
+	a.mu.Lock()
+	a.platforms = slices.Clone(names)
+	a.mu.Unlock()
+}
+
+// Keep connects at once and after every exit of the process, using the
+// restart delay of process, and calls onUp after each successful connect. It
+// returns when ctx ends or the agent is closed. A failed start is retried
+// after a delay that doubles from minDelay to maxDelay.
+func (a *Agent) Keep(ctx context.Context, onUp func()) {
+	var backoff time.Duration
+	for ctx.Err() == nil {
+		p, err := a.process(ctx)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, ErrClosed) {
+				return
+			}
+			slog.Warn("connecting to agent failed", "error", err)
+			backoff = restartDelay(backoff, 0)
+			if a.opts.Sleep(ctx, backoff) != nil {
+				return
+			}
+			continue
+		}
+		backoff = 0
+		onUp()
+		select {
+		case <-p.exited:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // New creates a session and returns its id.
@@ -157,12 +197,13 @@ func (a *Agent) List(ctx context.Context) ([]acp.SessionInfo, error) {
 // not be cancelled to stop a turn: the agent ignores the SDK's request
 // cancellation, so use Cancel and keep waiting.
 func (a *Agent) Prompt(ctx context.Context, id, text string) (acp.StopReason, error) {
-	return a.PromptWithChannel(ctx, id, text, "", text)
+	return a.PromptWithChannel(ctx, id, text, "", "", text)
 }
 
 // PromptWithChannel sends structured channel metadata when the connected
-// agent advertises support, and uses legacyText with older agents.
-func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, legacyText string) (acp.StopReason, error) {
+// agent advertises support, and uses legacyText with older agents. chat is
+// "<platform>:<chat id>" and is sent as _meta.otto.chat next to the channel.
+func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, chat, legacyText string) (acp.StopReason, error) {
 	p := a.live()
 	if p == nil || !p.isOpen(id) {
 		return "", ErrNotOpen
@@ -173,7 +214,11 @@ func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, legacy
 	request := acp.PromptRequest{SessionId: acp.SessionId(id), Prompt: []acp.ContentBlock{acp.TextBlock(text)}}
 	if p.channelContext && channel != "" {
 		if channel == "telegram" || channel == "feishu" {
-			request.Meta = map[string]any{"otto": map[string]any{"channel": channel}}
+			meta := map[string]any{"channel": channel}
+			if chat != "" {
+				meta["chat"] = chat
+			}
+			request.Meta = map[string]any{"otto": meta}
 		}
 	}
 	resp, err := p.conn.Prompt(ctx, request)

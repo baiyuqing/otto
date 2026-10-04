@@ -38,6 +38,7 @@ use serde_json::{Value, json};
 use crate::app::Channel;
 use crate::cli::info::{SandboxMode, SandboxNetwork};
 use crate::mcp::sse::SseParser;
+use crate::schedule::Origin;
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 const BASE: &str = "http://otto";
@@ -282,29 +283,35 @@ impl Client {
         decode(self.send(request).await?).await
     }
 
-    /// `POST /v1/sessions/{id}/turns` with `queue: true`. `image` is an
-    /// image block; its data and MIME type go in the `image` field.
+    /// `POST /v1/sessions/{id}/turns` with `queue: true` and origin
+    /// `terminal`, for the attach TUI. `image` is an image block; its data
+    /// and MIME type go in the `image` field.
     pub async fn start_turn(
         &self,
         session_id: &str,
         text: &str,
         image: Option<&Block>,
     ) -> Result<TurnStream, Error> {
-        self.start_turn_with_channel(session_id, text, image, None)
+        self.start_turn_with_channel(session_id, text, image, None, Some(&Origin::terminal()))
             .await
     }
 
-    /// Starts a queued turn with optional per-turn chat channel metadata.
+    /// Starts a queued turn with optional per-turn chat channel metadata and
+    /// origin. Without an origin the server records the turn as `web`.
     pub async fn start_turn_with_channel(
         &self,
         session_id: &str,
         text: &str,
         image: Option<&Block>,
         channel: Option<Channel>,
+        origin: Option<&Origin>,
     ) -> Result<TurnStream, Error> {
         let mut body = json!({ "text": text, "queue": true });
         if let Some(channel) = channel {
             body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
+        }
+        if let Some(origin) = origin {
+            body["origin"] = json!(origin.as_str());
         }
         if let Some(image) = image {
             body["image"] = json!({ "data": image.data, "mime_type": image.mime_type });
@@ -1005,7 +1012,13 @@ mod tests {
         assert_eq!(stream.turn_id, "t1");
         client.start_turn("s1", "plain", None).await.unwrap();
         client
-            .start_turn_with_channel("s1", "chat text", None, Some(Channel::Feishu))
+            .start_turn_with_channel(
+                "s1",
+                "chat text",
+                None,
+                Some(Channel::Feishu),
+                Some(&Origin::chat("feishu", "oc_1").unwrap()),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1015,17 +1028,23 @@ mod tests {
                 json!({
                     "text": "look",
                     "queue": true,
+                    "origin": "terminal",
                     "image": { "data": "QUJD", "mime_type": "image/png" }
                 })
             )
         );
         assert_eq!(
             request(&seen, 1).1,
-            json!({ "text": "plain", "queue": true })
+            json!({ "text": "plain", "queue": true, "origin": "terminal" })
         );
         assert_eq!(
             request(&seen, 2).1,
-            json!({ "text": "chat text", "queue": true, "channel": "feishu" })
+            json!({
+                "text": "chat text",
+                "queue": true,
+                "channel": "feishu",
+                "origin": "chat:feishu:oc_1"
+            })
         );
     }
 

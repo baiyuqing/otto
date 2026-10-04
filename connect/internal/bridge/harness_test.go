@@ -41,6 +41,7 @@ type fakePlatform struct {
 	approvals []string
 	statuses  []string
 	cardErr   error
+	sendErr   error
 }
 
 func newFakePlatform() *fakePlatform { return &fakePlatform{started: make(chan struct{})} }
@@ -72,8 +73,9 @@ func (p *fakePlatform) Run(ctx context.Context, deliver func(Message)) error {
 func (p *fakePlatform) Send(_ context.Context, chat, replyTo, text string, markdown bool) error {
 	p.mu.Lock()
 	p.sent = append(p.sent, sent{chat, replyTo, text, markdown})
+	err := p.sendErr
 	p.mu.Unlock()
-	return nil
+	return err
 }
 
 func (p *fakePlatform) Typing(context.Context, string) error {
@@ -271,4 +273,16 @@ func (p *fakePlatform) approvalID() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.approvals[len(p.approvals)-1]
+}
+
+// agentWork returns the agent calls other than the connection handshake,
+// which the connector now makes at startup.
+func agentWork(dir string) []string {
+	var out []string
+	for _, c := range fake.Calls(dir) {
+		if !strings.HasPrefix(c, "init:") && !strings.HasPrefix(c, "schedule_delivery:") {
+			out = append(out, c)
+		}
+	}
+	return out
 }

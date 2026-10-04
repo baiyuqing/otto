@@ -27,6 +27,8 @@
 // serves _otto/tasks/control and _otto/tasks/steer while a prompt is active.
 // FAKE_NO_TASK_CONTROL_METHODS=1 keeps the capability but returns method-not-found.
 //
+// "ext:<method> <json>" calls that agent-to-client extension method.
+//
 // Every call is appended to <dir>/calls as one line: init:<pid>, new:<id>,
 // load:<id>, start:<text>, end:<text>, cancel:<id>, perm:<outcome>,
 // task_control:<text>, and steer:<text>.
@@ -140,8 +142,12 @@ func (a *agent) known(id string) bool {
 	return false
 }
 
-func (a *agent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {
+func (a *agent) Initialize(_ context.Context, req acp.InitializeRequest) (acp.InitializeResponse, error) {
 	a.log("init:%d", os.Getpid())
+	if otto, ok := req.ClientCapabilities.Meta["otto"].(map[string]any); ok {
+		raw, _ := json.Marshal(otto["scheduleDelivery"])
+		a.log("schedule_delivery:%s", raw)
+	}
 	caps := acp.AgentCapabilities{LoadSession: true, SessionCapabilities: acp.SessionCapabilities{List: &acp.SessionListCapabilities{}}}
 	meta := map[string]any{}
 	if os.Getenv("FAKE_NO_MEMORY") == "" {
@@ -246,6 +252,11 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 	if channel := channelFromMeta(p.Meta); channel != "" {
 		a.log("channel:%s", channel)
 	}
+	if otto, ok := p.Meta["otto"].(map[string]any); ok {
+		if chat, _ := otto["chat"].(string); chat != "" {
+			a.log("chat:%s", chat)
+		}
+	}
 	defer func() { a.log("end:%s", text) }()
 	cancelled := make(chan struct{})
 	a.mu.Lock()
@@ -327,6 +338,16 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
 		}
 		a.chunk(ctx, p.SessionId, "outcome="+outcome)
+	case strings.HasPrefix(text, "ext:"):
+		// ext:<method> <json params> calls an agent-to-client method and
+		// logs ext_result:<error or result>.
+		method, params, _ := strings.Cut(text[len("ext:"):], " ")
+		raw, err := a.conn.Load().CallExtension(ctx, method, json.RawMessage(params))
+		if err != nil {
+			a.log("ext_result:error:%s", err)
+		} else {
+			a.log("ext_result:%s", raw)
+		}
 	case text == "exit":
 		fmt.Fprintln(os.Stderr, "fatal: boom")
 		os.Exit(3)

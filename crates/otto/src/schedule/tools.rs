@@ -218,6 +218,15 @@ fn build_item(
     now: chrono::DateTime<Utc>,
 ) -> Result<NewItem, String> {
     let (kind, body, max) = match (args.text, args.prompt) {
+        // Some tool-call encoders emit every string property and use an empty
+        // string for the unselected variant. Ignore only that placeholder;
+        // a sole blank body still reaches the ordinary length validation.
+        (Some(text), Some(prompt)) if text.trim().is_empty() && !prompt.trim().is_empty() => {
+            (Kind::Prompt, prompt, MAX_PROMPT_CHARS)
+        }
+        (Some(text), Some(prompt)) if !text.trim().is_empty() && prompt.trim().is_empty() => {
+            (Kind::Text, text, MAX_TEXT_CHARS)
+        }
         (Some(text), None) => (Kind::Text, text, MAX_TEXT_CHARS),
         (None, Some(prompt)) => (Kind::Prompt, prompt, MAX_PROMPT_CHARS),
         _ => return Err("give exactly one of text and prompt".into()),
@@ -429,6 +438,36 @@ mod tests {
             lines[0]
         );
         assert!(lines[1].starts_with("now: 20"), "{}", lines[1]);
+    }
+
+    #[tokio::test]
+    async fn schedule_ignores_a_blank_unselected_body_field() {
+        let cases = [
+            (
+                r#"{"text":"","prompt":"weather in Beijing","seconds":5}"#,
+                Kind::Prompt,
+                "weather in Beijing",
+            ),
+            (
+                r#"{"text":"stand up","prompt":"  \t","seconds":5}"#,
+                Kind::Text,
+                "stand up",
+            ),
+        ];
+        for (arguments, kind, body) in cases {
+            let context = context(Some(telegram()));
+            let result = call(&context, "schedule", arguments).await;
+            assert!(!result.is_error, "{arguments} => {result:?}");
+            let items = context
+                .store
+                .as_ref()
+                .unwrap()
+                .list(&telegram(), Utc::now())
+                .unwrap();
+            assert_eq!(items.len(), 1, "{arguments}");
+            assert_eq!(items[0].kind, kind, "{arguments}");
+            assert_eq!(items[0].body, body, "{arguments}");
+        }
     }
 
     #[tokio::test]

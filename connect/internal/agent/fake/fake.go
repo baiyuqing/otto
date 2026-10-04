@@ -143,6 +143,9 @@ func (a *agent) Initialize(context.Context, acp.InitializeRequest) (acp.Initiali
 	if os.Getenv("FAKE_APPROVAL_DIALOGUE") != "" {
 		meta["approvalDialogue"] = true
 	}
+	if os.Getenv("FAKE_NO_CHANNEL_CONTEXT") == "" {
+		meta["channelContext"] = true
+	}
 	if len(meta) > 0 {
 		caps.Meta = map[string]any{"otto": meta}
 	}
@@ -230,6 +233,9 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 	text := p.Prompt[0].Text.Text
 	id := string(p.SessionId)
 	a.log("start:%s", text)
+	if channel := channelFromMeta(p.Meta); channel != "" {
+		a.log("channel:%s", channel)
+	}
 	defer func() { a.log("end:%s", text) }()
 	cancelled := make(chan struct{})
 	a.mu.Lock()
@@ -376,6 +382,7 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 		var req struct {
 			SessionID string `json:"sessionId"`
 			Text      string `json:"text"`
+			Channel   string `json:"channel"`
 		}
 		if err := json.Unmarshal(params, &req); err != nil {
 			return nil, err
@@ -387,10 +394,19 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 			return nil, nil
 		}
 		a.log("approval:%s", req.Text)
+		if req.Channel != "" {
+			a.log("approval_channel:%s", req.Channel)
+		}
 		if req.Text == "Why do you need this?" {
 			return map[string]any{"text": "The agent needs approval to run this tool call.", "queued": false}, nil
 		}
 		return map[string]any{"text": "I will handle that after approval.", "queued": true}, nil
 	}
 	return nil, acp.NewMethodNotFound(method)
+}
+
+func channelFromMeta(meta map[string]any) string {
+	otto, _ := meta["otto"].(map[string]any)
+	channel, _ := otto["channel"].(string)
+	return channel
 }

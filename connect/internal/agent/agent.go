@@ -157,11 +157,26 @@ func (a *Agent) List(ctx context.Context) ([]acp.SessionInfo, error) {
 // not be cancelled to stop a turn: the agent ignores the SDK's request
 // cancellation, so use Cancel and keep waiting.
 func (a *Agent) Prompt(ctx context.Context, id, text string) (acp.StopReason, error) {
+	return a.PromptWithChannel(ctx, id, text, "", text)
+}
+
+// PromptWithChannel sends structured channel metadata when the connected
+// agent advertises support, and uses legacyText with older agents.
+func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, legacyText string) (acp.StopReason, error) {
 	p := a.live()
 	if p == nil || !p.isOpen(id) {
 		return "", ErrNotOpen
 	}
-	resp, err := p.conn.Prompt(ctx, acp.PromptRequest{SessionId: acp.SessionId(id), Prompt: []acp.ContentBlock{acp.TextBlock(text)}})
+	if !p.channelContext {
+		text = legacyText
+	}
+	request := acp.PromptRequest{SessionId: acp.SessionId(id), Prompt: []acp.ContentBlock{acp.TextBlock(text)}}
+	if p.channelContext && channel != "" {
+		if channel == "telegram" || channel == "feishu" {
+			request.Meta = map[string]any{"otto": map[string]any{"channel": channel}}
+		}
+	}
+	resp, err := p.conn.Prompt(ctx, request)
 	if err != nil {
 		return "", p.wrap(err)
 	}

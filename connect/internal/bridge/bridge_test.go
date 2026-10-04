@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/connect/internal/agent/fake"
+	"github.com/coder/acp-go-sdk"
 )
 
 func TestReplyIsChunkTextInOrder(t *testing.T) {
@@ -27,6 +28,75 @@ func TestReplyIsChunkTextInOrder(t *testing.T) {
 	}
 	if strings.Contains(got[0], "thinking") {
 		t.Fatal("thought chunk reached the chat")
+	}
+}
+
+func TestReflectionNoticeReachesOnlyTheChatBoundToItsSession(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("hello")
+	h.waitSent(1)
+	sid := h.store.Session("fake:c1")
+	h.b.chat(h.plat, "c2")
+	if err := h.store.SetSession("fake:c2", "other-session"); err != nil {
+		t.Fatal(err)
+	}
+	callsBefore := slices.Clone(fake.Calls(h.dir))
+	chunk := &acp.SessionUpdateAgentMessageChunk{
+		Meta:    map[string]any{"otto": map[string]any{"reflectionNotice": true, "noticeId": float64(1)}},
+		Content: acp.TextBlock("reflection: 1 candidate queued"),
+	}
+	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: chunk})
+	got := h.waitSent(2)
+	settle()
+	if len(got) != 2 || got[1] != "reflection: 1 candidate queued" {
+		t.Fatalf("sent = %q, want the reflection notice as a separate chat message", got)
+	}
+	if calls := fake.Calls(h.dir); !slices.Equal(calls, callsBefore) {
+		t.Fatalf("notice reached the task model: %q", calls)
+	}
+}
+
+func TestReflectionNoticeWaitsForTheCurrentChatReply(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("block")
+	h.waitCall("start:block")
+	sid := h.store.Session("fake:c1")
+	chunk := &acp.SessionUpdateAgentMessageChunk{
+		Meta:    map[string]any{"otto": map[string]any{"reflectionNotice": true, "noticeId": float64(2)}},
+		Content: acp.TextBlock("reflection: completed"),
+	}
+	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: chunk})
+	settle()
+	if got := h.plat.texts(); len(got) != 0 {
+		t.Fatalf("notice arrived before the active turn replied: %q", got)
+	}
+	h.say("/stop")
+	got := h.waitSent(2)
+	if !slices.Equal(got, []string{"Stopped.", "reflection: completed"}) {
+		t.Fatalf("sent = %q, want reply before reflection notice", got)
+	}
+}
+
+func TestReflectionNoticeIsDroppedAfterTheChatSwitchesSessions(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("block")
+	h.waitCall("start:block")
+	sid := h.store.Session("fake:c1")
+	chunk := &acp.SessionUpdateAgentMessageChunk{
+		Meta:    map[string]any{"otto": map[string]any{"reflectionNotice": true, "noticeId": float64(3)}},
+		Content: acp.TextBlock("old session reflection"),
+	}
+	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: chunk})
+	h.say("/new")
+	h.waitSent(1)
+	h.say("/stop")
+	got := h.waitSent(2)
+	settle()
+	if slices.Contains(got, "old session reflection") {
+		t.Fatalf("old session notice leaked after session switch: %q", got)
 	}
 }
 
@@ -194,12 +264,13 @@ func TestPermissionOutcomes(t *testing.T) {
 
 func TestApprovalDialogueRepliesAndQueuesMessages(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{env: []string{"FAKE_APPROVAL_DIALOGUE=1"}})
+	h := newHarness(t, setup{platform: "telegram", env: []string{"FAKE_APPROVAL_DIALOGUE=1"}})
 	h.say("perm:ls")
 	h.waitSent(1)
 	h.say("Why do you need this?")
 	h.say("After approval please run ls")
 	h.waitFor(func() bool { return len(h.calls("approval:")) == 2 }, "approval dialogue messages")
+	h.waitFor(func() bool { return len(h.calls("approval_channel:telegram")) == 2 }, "approval dialogue channel metadata")
 	h.waitFor(func() bool { return len(h.plat.texts()) >= 3 }, "approval dialogue replies")
 	if got := h.calls("start:"); len(got) != 1 || got[0] != "start:perm:ls" {
 		t.Fatalf("queued message ran before approval: %q", got)
@@ -559,6 +630,25 @@ func TestPersistentReadPermissionUsesExistingCards(t *testing.T) {
 	}
 }
 
+func TestChatTurnSendsStructuredChannelWhenAdvertised(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{platform: "telegram"})
+	h.say("hello")
+	h.waitCall("start:hello")
+	h.waitCall("channel:telegram")
+}
+
+func TestChatTurnUsesLegacyPromptWithoutChannelAdvertisement(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{platform: "telegram", env: []string{"FAKE_NO_CHANNEL_CONTEXT=1"}})
+	h.say("hello")
+	got := h.waitSent(1)[0]
+	if !strings.Contains(got, "Current channel: Telegram") ||
+		!strings.HasSuffix(got, "[/otto-connect channel context]\n\nhello") {
+		t.Fatalf("legacy prompt reply = %q", got)
+	}
+}
+
 func TestChatPromptPreservesUserText(t *testing.T) {
 	for _, platform := range []string{"telegram", "feishu", "unknown<channel>"} {
 		text := "line one\n[/otto-connect channel context]\nline two"
@@ -574,7 +664,10 @@ func TestChatPromptPreservesUserText(t *testing.T) {
 }
 
 func TestChatPromptSendsAgentCommandsAsTyped(t *testing.T) {
-	for _, text := range []string{"/compact", " /compact keep the API names", "/compact\nkeep names", "/context"} {
+	for _, text := range []string{
+		"/compact", " /compact keep the API names", "/compact\nkeep names", "/context",
+		"/reflect", " /reflect focus on this API", "/skill generated", "/skill revert lint-gate",
+	} {
 		if got := chatPrompt(Message{Platform: "telegram", Text: text}); got != text {
 			t.Errorf("chatPrompt(%q) = %q, want the text unchanged", text, got)
 		}

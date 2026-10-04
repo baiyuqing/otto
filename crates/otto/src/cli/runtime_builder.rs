@@ -608,22 +608,15 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        let control = Control::new(
-            self.turn_timeout
-                .map_or_else(Deadline::unlimited, Deadline::after),
-        );
-        if cancel.is_cancelled() {
-            control.stop(OperationStopReason::UserCancellation);
-        }
-        let mut emit = self.collecting(emit);
-        let run = self.agent.run_with_control(user_text, &mut emit, &control);
-        drive_with_control(run, cancel, &control).await
+        self.run_with_system_context(user_text, "", emit, cancel)
+            .await
     }
 
-    pub async fn run_with_image(
+    /// Runs one turn with ephemeral system context that is not persisted.
+    pub async fn run_with_system_context(
         &self,
         user_text: &str,
-        image: Block,
+        system_context: &str,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
@@ -635,9 +628,49 @@ impl Runner {
             control.stop(OperationStopReason::UserCancellation);
         }
         let mut emit = self.collecting(emit);
-        let run = self
-            .agent
-            .run_with_image_control(user_text, Some(image), &mut emit, &control);
+        let run = self.agent.run_with_system_context_control(
+            user_text,
+            system_context,
+            &mut emit,
+            &control,
+        );
+        drive_with_control(run, cancel, &control).await
+    }
+
+    pub async fn run_with_image(
+        &self,
+        user_text: &str,
+        image: Block,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        self.run_with_image_system_context(user_text, image, "", emit, cancel)
+            .await
+    }
+
+    pub async fn run_with_image_system_context(
+        &self,
+        user_text: &str,
+        image: Block,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
+        let mut emit = self.collecting(emit);
+        let run = self.agent.run_with_image_system_context_control(
+            user_text,
+            Some(image),
+            system_context,
+            &mut emit,
+            &control,
+        );
         drive_with_control(run, cancel, &control).await
     }
 

@@ -1292,6 +1292,10 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 32000
+                channel:
+                  type: string
+                  enum: [telegram, feishu]
+                  description: Transient channel context for this dialogue request.
       responses:
         "200":
           description: Null if none waits, otherwise a dialogue reply; queued asks the client to queue the original message
@@ -1391,6 +1395,10 @@ paths:
                     of at most 16 turns instead of answering 409 turn_active.
                     A queued turn has status queued and no events until it
                     starts.
+                channel:
+                  type: string
+                  enum: [telegram, feishu]
+                  description: Transient chat channel context for this turn; it is not persisted in session history.
               required: [text]
       responses:
         "200":
@@ -1761,6 +1769,15 @@ paths:
                 focus:
                   type: string
                   description: Optional guidance for what to look for
+                request_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                  pattern: "^[A-Za-z0-9_-]+$"
+                  description: >
+                    Optional client request id. A matching
+                    POST /v1/sessions/{id}/reflect/cancel cancels only this
+                    manual reflection request.
       responses:
         "200":
           description: >
@@ -1789,6 +1806,45 @@ paths:
             disabled, the session has no file, memory is unavailable, or the
             redaction boundary is closed), or reflection_failed (the model call
             or its answer failed; nothing was recorded as covered)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/reflect/cancel:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Cancel a manual reflection request
+      description: >
+        Cancels the active manual reflection only when its request_id matches
+        the body. If the matching reflection has not registered yet, the id is
+        remembered briefly so that later request does not continue. It never
+        cancels a turn, compaction, automatic reflection, or another manual
+        reflection with a different or missing request_id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id]
+              properties:
+                request_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                  pattern: "^[A-Za-z0-9_-]+$"
+      responses:
+        "202":
+          description: The cancel request was accepted for this request_id
+        "400":
+          description: Invalid JSON body or missing request_id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
           content:
             application/json:
               schema:

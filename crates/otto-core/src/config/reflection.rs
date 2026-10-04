@@ -34,7 +34,10 @@ pub enum Auto {
     /// Once when a terminal session closes normally, over what no earlier run
     /// covered, if it has at least `min_turns` user messages.
     OnExit,
-    /// In the background after each successful compaction (the default).
+    /// In the background after a successful compaction or a completed agent
+    /// turn that used at least ten successful tools (the default).
+    OnWork,
+    /// In the background after each successful compaction.
     OnCompaction,
 }
 
@@ -116,7 +119,7 @@ fn default_max_memories() -> usize {
 }
 
 fn default_auto() -> Auto {
-    Auto::OnCompaction
+    Auto::OnWork
 }
 
 fn default_min_turns() -> usize {
@@ -228,7 +231,7 @@ mod tests {
             ReflectionRuntime {
                 enabled: true,
                 memories: true,
-                auto: Auto::OnCompaction,
+                auto: Auto::OnWork,
                 min_turns: 4,
                 skills: true,
                 skill_source: SkillSource::Untainted,
@@ -307,6 +310,7 @@ mod tests {
         for (text, mode) in [
             ("off", Auto::Off),
             ("on_exit", Auto::OnExit),
+            ("on_work", Auto::OnWork),
             ("on_compaction", Auto::OnCompaction),
         ] {
             let file = parse(&format!("[reflection]\nauto = \"{text}\"\n")).expect("parse");

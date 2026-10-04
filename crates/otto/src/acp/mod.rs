@@ -28,7 +28,7 @@ mod memory;
 pub mod tcp;
 pub mod update;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,7 +50,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{Controller, SandboxControl, Step, Stop};
+use crate::app::{Channel, Controller, SandboxControl, Step, Stop};
 use crate::cli::runtime_builder::Builder;
 use crate::session::{MAX_LIST_SESSIONS, is_session_id, session_directory};
 
@@ -152,6 +152,9 @@ struct Connection {
     /// Requests sent to the client, by id, waiting for their response frame.
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     next_request_id: AtomicU64,
+    notice_stop: CancellationToken,
+    watching_notices: Mutex<HashSet<String>>,
+    notice_ready: Mutex<HashMap<String, oneshot::Sender<()>>>,
 }
 
 impl Connection {
@@ -220,17 +223,23 @@ impl Connection {
         }
     }
 
-    async fn new_session(&self, params: Value) -> Reply {
+    async fn new_session(self: &Arc<Self>, params: Value) -> Reply {
         let params = SessionParams::parse(params)?;
         self.check_cwd(params.cwd.as_deref())?;
         params.check_mcp_servers()?;
-        match &self.backend {
+        let reply = match &self.backend {
             Backend::Local(local) => local.new_session().await,
             Backend::Attach(relay) => relay.new_session(&self.workspace).await,
-        }
+        }?;
+        let id = reply
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        self.start_notice_watcher(id).await;
+        Ok(reply)
     }
 
-    async fn load_session(&self, params: Value) -> Reply {
+    async fn load_session(self: &Arc<Self>, params: Value) -> Reply {
         let params = SessionParams::parse(params)?;
         self.check_cwd(params.cwd.as_deref())?;
         params.check_mcp_servers()?;
@@ -247,7 +256,114 @@ impl Connection {
         for update in update::history_updates(&history) {
             self.update(&id, update);
         }
+        self.start_notice_watcher(&id).await;
         Ok(json!({ "sessionId": id }))
+    }
+
+    /// Starts at the current notice cursor and follows new notices until the
+    /// connection ends, without replaying old outcomes on reconnect.
+    async fn start_notice_watcher(self: &Arc<Self>, session_id: &str) {
+        if !self
+            .watching_notices
+            .lock()
+            .expect("notice watcher set")
+            .insert(session_id.into())
+        {
+            return;
+        }
+        let id = session_id.to_string();
+        let connection = Arc::clone(self);
+        let stop = self.notice_stop.child_token();
+        let (ready, start) = oneshot::channel();
+        self.notice_ready
+            .lock()
+            .expect("notice ready map")
+            .insert(id.clone(), ready);
+        match &self.backend {
+            Backend::Local(local) => {
+                let Some(session) = local.session(&id) else {
+                    return;
+                };
+                let controller = Arc::clone(&session.controller);
+                let changed = controller.notices_changed();
+                let (_, after) = controller.notices_since(0);
+                tokio::spawn(async move {
+                    if !notice_watcher_ready(start, &stop).await {
+                        return;
+                    }
+                    watch_controller_notices(connection, controller, id, stop, changed, after)
+                        .await;
+                });
+            }
+            Backend::Attach(relay) => {
+                if let Some(server) = &relay.server {
+                    let Some(controller) = server.controller(&id) else {
+                        return;
+                    };
+                    let changed = controller.notices_changed();
+                    let (_, after) = controller.notices_since(0);
+                    tokio::spawn(async move {
+                        if !notice_watcher_ready(start, &stop).await {
+                            return;
+                        }
+                        watch_controller_notices(connection, controller, id, stop, changed, after)
+                            .await;
+                    });
+                    return;
+                }
+                let initial = tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return,
+                    result = relay.client.reflection_notices(&id, 0) => result,
+                };
+                let initial = match initial {
+                    Ok(initial) => initial,
+                    Err(failure) => {
+                        relay.fail(failure);
+                        return;
+                    }
+                };
+                let connection = Arc::clone(&connection);
+                tokio::spawn(async move {
+                    if !notice_watcher_ready(start, &stop).await {
+                        return;
+                    }
+                    let mut after = initial.last;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            () = stop.cancelled() => return,
+                            () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                        }
+                        let result = match &connection.backend {
+                            Backend::Attach(relay) => tokio::select! {
+                                biased;
+                                () = stop.cancelled() => return,
+                                result = relay.client.reflection_notices(&id, after) => result,
+                            },
+                            Backend::Local(_) => return,
+                        };
+                        match result {
+                            Ok(page) => {
+                                emit_notices(
+                                    &connection,
+                                    &id,
+                                    page.notices.into_iter().map(|n| (n.id, n.text)).collect(),
+                                );
+                                after = page.last;
+                            }
+                            Err(crate::client::Error::Http { status: 404, .. }) => return,
+                            Err(failure) => {
+                                if let Backend::Attach(relay) = &connection.backend {
+                                    relay.fail(failure);
+                                }
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        }
     }
 
     /// Memory review uses a controller owned by this process, either a local
@@ -302,6 +418,22 @@ impl Connection {
         }
     }
 
+    fn notices_ready(&self, reply: &Reply) {
+        if let Some(id) = reply
+            .as_ref()
+            .ok()
+            .and_then(|value| value.get("sessionId"))
+            .and_then(Value::as_str)
+            && let Some(ready) = self
+                .notice_ready
+                .lock()
+                .expect("notice ready map")
+                .remove(id)
+        {
+            let _ = ready.send(());
+        }
+    }
+
     fn say(&self, session_id: &str, text: &str) {
         self.update(
             session_id,
@@ -311,19 +443,38 @@ impl Connection {
         );
     }
 
-    /// Runs one prompt to its stop reason. `/compact` and `/context` run here
-    /// and never reach the model.
-    async fn prompt(&self, session_id: &str, text: String, cancel: &CancellationToken) -> Reply {
+    fn reflection_notice(&self, session_id: &str, notice_id: u64, text: &str) {
+        let meta = serde_json::Map::from_iter([(
+            "otto".to_string(),
+            json!({"reflectionNotice": true, "noticeId": notice_id}),
+        )]);
+        self.update(
+            session_id,
+            SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new(text))).meta(meta),
+            ),
+        );
+    }
+
+    /// Runs one prompt to its stop reason. Local slash commands run here and
+    /// never reach the task model.
+    async fn prompt(
+        &self,
+        session_id: &str,
+        text: String,
+        channel: Option<Channel>,
+        cancel: &CancellationToken,
+    ) -> Reply {
         if let Some(command) = command::parse(&text) {
             return self.run_command(session_id, command, cancel).await;
         }
         match &self.backend {
             Backend::Local(local) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
-                self.local_prompt(local, &session, session_id, text, cancel)
+                self.local_prompt(local, &session, session_id, text, channel, cancel)
                     .await
             }
-            Backend::Attach(relay) => relay.prompt(self, session_id, &text, cancel).await,
+            Backend::Attach(relay) => relay.prompt(self, session_id, &text, channel, cancel).await,
         }
     }
 
@@ -379,6 +530,36 @@ impl Connection {
                             }
                         }
                     }
+                    command::Command::Reflect { focus } => {
+                        match session.controller.reflect(focus, cancel).await {
+                            Ok(report) => {
+                                self.say(session_id, &report.line());
+                                end_turn()
+                            }
+                            Err(_) if cancel.is_cancelled() => {
+                                result(PromptResponse::new(StopReason::Cancelled))
+                            }
+                            Err(failure) => {
+                                Err(error(INTERNAL_ERROR, local.redact(&failure.to_string())))
+                            }
+                        }
+                    }
+                    command::Command::Skill { args } => {
+                        let words: Vec<_> = args.split_whitespace().collect();
+                        let text = match words.as_slice() {
+                            ["generated"] => crate::cli::repl_commands::skill_report(
+                                &session.controller,
+                                "generated",
+                            ),
+                            ["revert", name] => crate::cli::repl_commands::skill_report(
+                                &session.controller,
+                                &format!("revert {name}"),
+                            ),
+                            _ => "Usage: /skill generated | /skill revert <name>".to_string(),
+                        };
+                        self.say(session_id, &text);
+                        end_turn()
+                    }
                 }
             }
             (Backend::Attach(relay), command) => {
@@ -401,12 +582,14 @@ impl Connection {
         session: &Session,
         session_id: &str,
         text: String,
+        channel: Option<Channel>,
         cancel: &CancellationToken,
     ) -> Reply {
         let outcome = session
             .controller
-            .run_with_approvals(
+            .run_with_channel(
                 Step::Text(&text),
+                channel,
                 &mut |event| {
                     if let Some(update) = update::event_update(&update::local_wire(&event)) {
                         self.update(session_id, update);
@@ -432,6 +615,42 @@ impl Connection {
             Ok(Stop::Cancelled) => result(PromptResponse::new(StopReason::Cancelled)),
             Err(failure) => Err(error(INTERNAL_ERROR, local.redact(&failure.to_string()))),
         }
+    }
+}
+
+async fn watch_controller_notices(
+    connection: Arc<Connection>,
+    controller: Arc<Controller>,
+    session_id: String,
+    stop: CancellationToken,
+    mut changed: tokio::sync::watch::Receiver<u64>,
+    mut after: u64,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => return,
+            result = changed.changed() => if result.is_err() { return },
+        }
+        let (notices, last) = controller.notices_since(after);
+        after = last;
+        for (notice_id, text) in notices {
+            connection.reflection_notice(&session_id, notice_id, &text);
+        }
+    }
+}
+
+async fn notice_watcher_ready(start: oneshot::Receiver<()>, stop: &CancellationToken) -> bool {
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => false,
+        result = start => result.is_ok(),
+    }
+}
+
+fn emit_notices(connection: &Connection, session_id: &str, notices: Vec<(u64, String)>) {
+    for (notice_id, text) in notices {
+        connection.reflection_notice(session_id, notice_id, &text);
     }
 }
 
@@ -561,7 +780,7 @@ impl SessionParams {
 
 /// The prompt text of a `session/prompt` request: `text` blocks and
 /// `resource_link` lines joined with `\n`.
-fn parse_prompt(params: &Value) -> Result<(String, String), Error> {
+fn parse_prompt(params: &Value) -> Result<(String, String, Option<Channel>), Error> {
     let session_id = params
         .get("sessionId")
         .and_then(Value::as_str)
@@ -586,7 +805,19 @@ fn parse_prompt(params: &Value) -> Result<(String, String), Error> {
     if text.trim().is_empty() {
         return Err(invalid_params("prompt is empty"));
     }
-    Ok((session_id, text))
+    let channel_value = params
+        .get("_meta")
+        .and_then(|meta| meta.get("otto"))
+        .and_then(|otto| otto.get("channel"));
+    let channel = match channel_value {
+        None => None,
+        Some(Value::String(value)) => Some(
+            serde_json::from_value::<Channel>(Value::String(value.clone()))
+                .map_err(|_| invalid_params("_meta.otto.channel must be telegram or feishu"))?,
+        ),
+        Some(_) => return Err(invalid_params("_meta.otto.channel must be a string")),
+    };
+    Ok((session_id, text, channel))
 }
 
 /// Advertise memory review only when the controller lives in this process.
@@ -599,11 +830,11 @@ fn initialize_result(local: bool) -> Reply {
     let capabilities = match local {
         true => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"memoryReview": true, "approvalDialogue":true}),
+            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true}),
         )])),
         false => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"approvalDialogue":true}),
+            json!({"approvalDialogue":true, "channelContext": true}),
         )])),
     };
     result(
@@ -687,6 +918,7 @@ impl Dispatcher {
                     let reply = connection.new_session(params).await;
                     connection.reply(id, reply.clone());
                     connection.advertise_commands(&reply);
+                    connection.notices_ready(&reply);
                 });
             }
             "session/load" => {
@@ -694,6 +926,7 @@ impl Dispatcher {
                     let reply = connection.load_session(params).await;
                     connection.reply(id, reply.clone());
                     connection.advertise_commands(&reply);
+                    connection.notices_ready(&reply);
                 });
             }
             "session/list" => {
@@ -710,6 +943,8 @@ impl Dispatcher {
                     struct Input {
                         session_id: String,
                         text: String,
+                        #[serde(default)]
+                        channel: Option<Channel>,
                     }
                     let reply = match serde_json::from_value::<Input>(params) {
                         Err(failure) => Err(invalid_params(failure.to_string())),
@@ -726,7 +961,11 @@ impl Dispatcher {
                                         .unwrap_or_default();
                                     match session
                                         .controller
-                                        .approval_message(&input.text, &cancel)
+                                        .approval_message_with_channel(
+                                            &input.text,
+                                            input.channel,
+                                            &cancel,
+                                        )
                                         .await
                                     {
                                         Ok(reply) => result(reply),
@@ -736,7 +975,11 @@ impl Dispatcher {
                             },
                             Backend::Attach(relay) => match relay
                                 .client
-                                .approval_message(&input.session_id, &input.text)
+                                .approval_message_with_channel(
+                                    &input.session_id,
+                                    &input.text,
+                                    input.channel,
+                                )
                                 .await
                             {
                                 Ok(reply) => result(reply),
@@ -764,7 +1007,7 @@ impl Dispatcher {
     /// loop, so a `session/cancel` read next already finds it.
     fn start_prompt(&mut self, id: Value, params: &Value) {
         let connection = Arc::clone(&self.connection);
-        let (session_id, text) = match parse_prompt(params) {
+        let (session_id, text, channel) = match parse_prompt(params) {
             Ok(parsed) => parsed,
             Err(failure) => return connection.reply(id, Err(failure)),
         };
@@ -778,7 +1021,7 @@ impl Dispatcher {
             );
         };
         self.tasks.spawn(async move {
-            let reply = connection.prompt(&session_id, text, &token).await;
+            let reply = connection.prompt(&session_id, text, channel, &token).await;
             slot.end();
             connection.reply(id, reply);
         });
@@ -874,12 +1117,16 @@ async fn drive<T>(
     collect: impl FnOnce(&Connection) -> T,
 ) -> T {
     let (out, frames) = mpsc::unbounded_channel();
+    let notice_stop = CancellationToken::new();
     let connection = Arc::new(Connection {
         workspace,
         backend,
         out,
         pending: Mutex::new(HashMap::new()),
         next_request_id: AtomicU64::new(1),
+        notice_ready: Mutex::new(HashMap::new()),
+        notice_stop: notice_stop.clone(),
+        watching_notices: Mutex::new(HashSet::new()),
     });
     let mut lines = read_lines(stdin);
     let read_loop = async {
@@ -904,6 +1151,7 @@ async fn drive<T>(
             }
         }
         dispatcher.stop.cancel();
+        connection.notice_stop.cancel();
         while dispatcher.tasks.join_next().await.is_some() {}
         let collected = collect(&connection);
         // Dropping the dispatcher and the connection drops the last sender,
@@ -914,4 +1162,53 @@ async fn drive<T>(
     };
     let (collected, ()) = tokio::join!(read_loop, write_frames(stdout, frames));
     collected
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+
+    fn prompt(meta: Value) -> Value {
+        json!({
+            "sessionId": "s1",
+            "prompt": [{"type":"text", "text":"plain user text"}],
+            "_meta": meta,
+        })
+    }
+
+    #[test]
+    fn channel_metadata_is_structured_and_never_changes_prompt_text() {
+        let (session, text, channel) = parse_prompt(&prompt(json!({
+            "otto": {"channel": "telegram"}
+        })))
+        .unwrap();
+        assert_eq!(session, "s1");
+        assert_eq!(text, "plain user text");
+        assert_eq!(channel, Some(Channel::Telegram));
+    }
+
+    #[test]
+    fn unknown_metadata_is_ignored_but_invalid_channel_is_rejected() {
+        let (_, text, channel) =
+            parse_prompt(&prompt(json!({ "other": {"channel": "slack"} }))).unwrap();
+        assert_eq!(text, "plain user text");
+        assert_eq!(channel, None);
+        let error = parse_prompt(&prompt(json!({
+            "otto": {"channel": "slack"}
+        })))
+        .unwrap_err();
+        let code: i32 = error.code.into();
+        assert_eq!(code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn channel_context_capability_is_advertised() {
+        for local in [false, true] {
+            let reply = initialize_result(local).unwrap();
+            assert_eq!(
+                reply["agentCapabilities"]["_meta"]["otto"]["channelContext"],
+                true
+            );
+        }
+    }
 }

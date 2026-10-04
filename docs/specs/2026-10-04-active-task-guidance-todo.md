@@ -19,22 +19,25 @@ Last updated: 2026-10-04. No implementation gate has passed yet.
 
 ## Implementation
 
-- [ ] **In progress — core owner:** transient steering mailbox, generation binding,
+- [x] **Core implemented and package-tested:** transient steering mailbox, generation binding,
   safe-point delivery, atomic final close, cancellation/drop cleanup, and tests.
-- [ ] **In progress — core owner:** model-originated follow-up input preserving
+- [x] **Core implemented and package-tested:** model-originated follow-up input preserving
   `Role::Context` / `agent_followup` provenance.
-- [ ] **In progress — core owner:** failed ACP-visible tool completion on terminal
+- [x] **Core implemented and package-tested:** failed ACP-visible tool completion on terminal
   persistence failure, with an injected-failure regression test.
-- [ ] **Design integration — native owner:** controller steering/control dialogue,
+- [ ] **In progress — native owner:** controller steering/control dialogue,
   isolated tools, captured active-task context, 30-second bound, serialized input.
-- [ ] **Design integration — native owner:** real `task_queue` tool, bounded shared
+- [ ] **In progress — native owner:** real `task_queue` tool, bounded shared
   follow-up execution after the logical turn/approval, cancellation cleanup.
 - [ ] **Native owner:** durable capability policy and accurate registered schemas;
   request-capture tests after compaction, reload, and approval retry.
-- [ ] HTTP routes/client operations and OpenAPI fixtures for control operations.
-- [ ] ACP local/attach/TCP operations and capability negotiation; optional
+- [ ] **In progress — protocol owner:** HTTP routes/client operations and OpenAPI
+  fixtures for control operations.
+- [ ] **In progress — protocol owner:** ACP local/attach/TCP operations and
+  capability negotiation; optional
   `/steer` and `/queue` commands with bounded local follow-up admission.
-- [ ] Connector immediate natural-message routing and explicit commands; reply
+- [ ] **In progress — connector owner:** immediate natural-message routing and
+  explicit commands; reply
   isolation, queue limits, session generation, and old-agent fallback.
 - [ ] Telegram shortcut entries, user manual, and relevant navigation docs.
 
@@ -60,6 +63,16 @@ test/command and result here; static inspection does not count as runtime proof.
 - [ ] `make connect-check`.
 - [ ] Full `make check` on supported macOS host.
 - [ ] Integration review, PR creation, CI reporting, and issue progress links.
+
+### Verified so far
+
+- Core owner: `cargo test -p otto-core --lib` passed **579/579**; focused guidance,
+  cancellation cleanup, agent-source follow-up, terminal persistence failure,
+  and existing Inbox input tests passed. This is core behavior proof, not ACP
+  or connector end-to-end proof.
+- Core owner: `cargo check -p otto-core --target wasm32-unknown-unknown` passed.
+- Core owner: formatting of its three modified files passed. Whole-workspace
+  formatting and the full gates are pending while other files are being edited.
 
 ## Deferred
 

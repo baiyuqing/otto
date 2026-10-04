@@ -389,6 +389,198 @@ async fn image_without_text_is_persisted_and_sent() {
     );
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn steering_is_delivered_to_the_active_run_and_closed_before_finish() {
+    let steering = Arc::new(super::steering::Steering::default());
+    let provider = FakeProvider::new(vec![Turn::text("first"), Turn::text("second")]);
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            steering: Arc::clone(&steering),
+            ..options()
+        },
+    );
+    let submitted = Arc::new(AtomicUsize::new(0));
+    let submit = Arc::clone(&submitted);
+    let mut ticket = None;
+    agent
+        .run(
+            "hello",
+            &mut |event| match event {
+                Event::ProviderApiCall { .. } if submit.fetch_add(1, Ordering::SeqCst) == 0 => {
+                    let current = steering.ticket().expect("active run ticket");
+                    ticket = Some(current);
+                    steering
+                        .submit_for(current, "change course")
+                        .expect("steer active run");
+                    steering
+                        .submit_for(current, "and check the result")
+                        .expect("second steer active run");
+                }
+                Event::AgentFinished => {
+                    assert_eq!(steering.ticket(), None, "completion closes acceptance");
+                    assert_eq!(
+                        steering.submit_for(ticket.expect("captured ticket"), "too late"),
+                        Err(super::steering::SubmitError::Inactive)
+                    );
+                }
+                _ => {}
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+    let messages = agent.session().messages();
+    assert_eq!(messages[0].text(), "hello");
+    let guidance: Vec<_> = messages
+        .iter()
+        .filter(|message| message.role == Role::User && message.text() != "hello")
+        .map(|message| message.text())
+        .collect();
+    assert_eq!(guidance, ["change course", "and check the result"]);
+    let requests = agent.provider().normal_requests();
+    assert_eq!(requests.len(), 2);
+    let request_guidance: Vec<_> = requests[1]
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::User && message.text() != "hello")
+        .map(|message| message.text())
+        .collect();
+    assert_eq!(request_guidance, ["change course", "and check the result"]);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn steering_waits_until_the_full_tool_batch_finishes() {
+    let steering = Arc::new(super::steering::Steering::default());
+    let agent = Agent::new(
+        FakeProvider::new(vec![two_tool_calls(), Turn::text("done")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            steering: Arc::clone(&steering),
+            ..options()
+        },
+    );
+    let submitted = AtomicUsize::new(0);
+    agent
+        .run(
+            "hello",
+            &mut |event| {
+                if matches!(event, Event::ToolCallStarted { .. })
+                    && submitted.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    steering
+                        .submit("change course")
+                        .expect("active run accepts guidance");
+                }
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+    let messages = agent.session().messages();
+    let guidance = messages
+        .iter()
+        .position(|message| message.role == Role::User && message.text() == "change course")
+        .expect("guidance persisted");
+    let second_result = messages
+        .iter()
+        .position(|message| message.role == Role::Tool && message.blocks[0].tool_call_id == "c2")
+        .expect("second tool result persisted");
+    assert!(guidance > second_result, "guidance split the tool batch");
+    let requests = agent.provider().normal_requests();
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| { message.role == Role::User && message.text() == "change course" })
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn cancellation_discards_undelivered_steering() {
+    let steering = Arc::new(super::steering::Steering::default());
+    let cancel = CancellationToken::new();
+    let agent = Agent::new(
+        FakeProvider::new(vec![two_tool_calls()]),
+        CancellingExecutor {
+            cancel: cancel.clone(),
+        },
+        MemorySession::new(),
+        Options {
+            steering: Arc::clone(&steering),
+            ..options()
+        },
+    );
+    let submitted = AtomicUsize::new(0);
+    let error = agent
+        .run(
+            "hello",
+            &mut |event| {
+                if matches!(event, Event::ToolCallStarted { .. })
+                    && submitted.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    steering.submit("do not leak").expect("active run");
+                }
+            },
+            &cancel,
+        )
+        .await
+        .expect_err("tool cancellation stops the run");
+    assert!(error.is_cancelled());
+    assert_eq!(steering.ticket(), None);
+    assert!(
+        !agent
+            .session()
+            .messages()
+            .iter()
+            .any(|message| message.text() == "do not leak")
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn followup_request_is_context_not_user_authority() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("done")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent
+        .run_followup_with_system_context_control(
+            "continue the analysis",
+            "",
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("follow-up");
+
+    let messages = agent.session().messages();
+    assert_eq!(messages[0].role, Role::Context);
+    assert_eq!(messages[0].context_type, "agent_followup");
+    assert!(messages[0].display);
+    assert_eq!(
+        messages[0].text(),
+        "[Agent follow-up]\ncontinue the analysis"
+    );
+    let request = &agent.provider().normal_requests()[0];
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| { message.text() == "[Agent follow-up]\ncontinue the analysis" })
+    );
+}
+
 // -- inbox and wake turns --------------------------------------------------
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -2552,14 +2744,40 @@ async fn a_failed_terminal_fact_stops_after_dispatch_without_a_tool_result() {
         OperationFailingSession::new(1),
         options(),
     );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&events);
 
     let error = agent
-        .run("hello", &mut |_| {}, &CancellationToken::new())
+        .run(
+            "hello",
+            &mut |event| captured.lock().expect("events").push(event),
+            &CancellationToken::new(),
+        )
         .await
         .expect_err("terminal fact failure stops the run");
     assert!(error.to_string().contains("operation terminal"), "{error}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(agent.session().operation_history().len(), 1);
+    let finished: Vec<_> = collect(&events)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::ToolCallFinished {
+                outcome, result, ..
+            } => Some((outcome, result)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finished.len(), 1);
+    assert!(finished[0].1.is_error);
+    assert!(finished[0].1.content.contains("outcome unknown"));
+    assert_eq!(
+        finished[0].0,
+        crate::model::OperationOutcome {
+            disposition: crate::model::OperationDisposition::Error,
+            effect_certainty: crate::model::EffectCertainty::Unknown,
+            stop_reason: None,
+        }
+    );
     assert!(
         !agent
             .session()

@@ -25,6 +25,8 @@ const api = vi.hoisted(() => ({
   generatedSkills: vi.fn(),
   revertSkill: vi.fn(),
   notices: vi.fn(),
+  scheduleClaim: vi.fn(),
+  scheduleDelivered: vi.fn(),
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
   getWorkspaceDiff: vi.fn(),
@@ -116,6 +118,7 @@ describe('idle wake follow', () => {
     api.startTurn.mockResolvedValue(new Response('', { headers: { 'Content-Type': 'text/event-stream' } }))
     api.compact.mockResolvedValue({ noop: true })
     api.notices.mockResolvedValue({ notices: [], last: 0 })
+    api.scheduleClaim.mockResolvedValue({ items: [] })
     api.listWorkspaces.mockResolvedValue({ startup: '/tmp/otto-work', roots: [], workspaces: [{ path: '/tmp/otto-work', open_sessions: 1, workflows: true }] })
   })
 

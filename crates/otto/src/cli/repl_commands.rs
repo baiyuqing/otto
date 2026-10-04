@@ -692,13 +692,16 @@ pub(crate) fn repl_memory_command(
                     format!("candidate {id} not found"),
                 ));
             };
-            let result = service
-                .review(&ReviewRequest {
-                    reference,
-                    decision,
-                    edited: None,
-                    target_revision: None,
-                })
+            let result = controller
+                .review_memory(
+                    &ReviewRequest {
+                        reference,
+                        decision,
+                        edited: None,
+                        target_revision: None,
+                    },
+                    "memory-command",
+                )
                 .map_err(|error| command_error("/memory review", error))?;
             let line = match (decision, &result.record, &result.tombstone) {
                 (ReviewDecision::Reject, _, _) => format!("rejected {id}"),
@@ -1469,7 +1472,34 @@ mod tests {
         )
         .await;
         assert!(stdout.contains(&format!("rejected {rejected}")), "{stdout}");
-        assert!(!stdout.contains("uses emacs"), "{stdout}");
+        // The unified queue may show the candidate before the rejection. Check
+        // the canonical store, rather than confusing review text with a write.
+        let (memory, user, workspace) = controller.memory_manager().unwrap();
+        let records = memory
+            .list(&crate::memory::ListRequest {
+                scopes: vec![user, workspace.clone()],
+                all_scopes: false,
+                kinds: Vec::new(),
+                labels: Vec::new(),
+                limit: 50,
+                cursor: String::new(),
+                now: Utc::now(),
+                include_expired: false,
+            })
+            .unwrap()
+            .records;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].text, "uses vim");
+        assert_eq!(
+            memory
+                .get_candidate(&crate::memory::CandidateRef {
+                    scope: workspace,
+                    id: rejected.clone()
+                })
+                .unwrap()
+                .state,
+            crate::memory::CandidateState::Rejected
+        );
         assert!(stdout.contains("no pending candidates"), "{stdout}");
     }
 

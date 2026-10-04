@@ -196,6 +196,7 @@ mod tests {
         let execution = registry
             .execute(
                 ToolCall {
+                    tool_call_id: "",
                     operation_id: &operation_id,
                     name: "write",
                     arguments: &arguments,

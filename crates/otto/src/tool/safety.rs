@@ -16,6 +16,7 @@ use otto_core::model::RetrySafety;
 const BASE_SAFETY: &[(&str, RetrySafety)] = &[
     ("otto_help", RetrySafety::ReadOnly),
     ("approval_pending", RetrySafety::ReadOnly),
+    ("request_approval", RetrySafety::NonIdempotent),
     ("approval_revoke", RetrySafety::NonIdempotent),
     ("approval_queue", RetrySafety::NonIdempotent),
     ("read", RetrySafety::ReadOnly),

@@ -7,6 +7,7 @@
 //! that rule.
 
 pub mod agent;
+pub mod approval;
 pub mod config;
 pub mod model;
 pub mod openaicompat;

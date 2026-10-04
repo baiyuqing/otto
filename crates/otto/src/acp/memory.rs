@@ -116,13 +116,16 @@ pub(super) fn review(controller: &Controller, params: &ReviewParams) -> Reply {
         })
         .find(|reference| service.get_candidate(reference).is_ok())
         .ok_or_else(|| error(RESOURCE_NOT_FOUND, format!("candidate {id} not found")))?;
-    let result = service
-        .review(&ReviewRequest {
-            reference,
-            decision,
-            edited: None,
-            target_revision: None,
-        })
+    let result = controller
+        .review_memory(
+            &ReviewRequest {
+                reference,
+                decision,
+                edited: None,
+                target_revision: None,
+            },
+            "acp-client",
+        )
         .map_err(|failure| memory_error(&failure))?;
     Ok(json!({
         "decision": decision.as_str(),

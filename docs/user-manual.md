@@ -22,6 +22,7 @@ what the CLI actually does today.
 9. [Sessions](#sessions)
 10. [Context compaction](#context-compaction)
 11. [Tools and safety](#tools-and-safety)
+    [Unified approvals](#unified-approvals)
 12. [Headless mode](#headless-mode)
 13. [Agent server](#agent-server)
 14. [ACP agent server](#acp-agent-server)
@@ -1140,6 +1141,37 @@ window), but reactive one-shot recovery can still happen after a typed provider
 overflow. For private deployments, set `context_window` and optionally
 `compaction_window` on the selected profile.
 
+## Unified approvals
+
+Otto uses one approval service for tool permissions, memory review, workflow
+gates, generated skills and profile changes. Pending requests survive in
+`~/.otto/approvals.db`. A decision and the outcome of applying it are separate:
+approving an operation does not mean it has succeeded.
+
+The model knows the `request_approval` tool and decides when it needs your
+confirmation of a concrete plan or approach. The tool waits for your decision
+and optional feedback. Later tool calls in that same batch do not run; the model
+must consider your answer first. A plan confirmation gives no additional
+sandbox or external-tool permission. Mandatory domain checks still apply.
+
+- TUI: review the displayed request, use arrows and Enter or y/n; for a general
+  approval press **f** to edit feedback, then Enter to return to the choices.
+  Complete details are also shown in the transcript.
+- Web: the approval queue shows the full proposal, feedback input, approve,
+  reject and withdraw controls. It refreshes pending state across clients.
+- Telegram/Feishu: use the request's card buttons, or
+  `/allow <request-id> [feedback]` and `/deny <request-id> [feedback]`.
+  With multiple requests, select an explicit ID.
+
+The same request closes on all connected surfaces after a decision. Old
+buttons cannot approve a new request. Ordinary messages while a foreground
+request waits use a restricted discussion; they do not silently approve it.
+Memory/workflow reviews remain independent of the foreground turn.
+
+Generated skills still pass the rule scan and configured model review, then
+wait for human approval. Saving a profile change still requires a restart.
+Read-path requests explicitly disclose persistence; commands remain sandboxed.
+
 ## Tools and safety
 
 Startup reads `AGENTS.md` (or `CLAUDE.md`) through the workspace directory
@@ -1367,16 +1399,17 @@ and `bash` runs unsandboxed as your current user. In that mode,
 `network = "deny"`, private-home/cache replacement, and `read_paths` no longer
 constrain the shell.
 
-In an interactive parent session using Seatbelt, the model may set
-`sandbox_permissions` to `require_escalated` and provide a justification. Otto
-does not run the command; it returns an approval ID. Review the exact command
-and reason, then enter `/approve <id>`. The matching command runs once through
-the existing unconfined driver with the same filtered environment rules as
-other Bash commands. Approval is never automatic, is unavailable to child
-agents and one-shot `--prompt` runs, remains pending until it is replaced,
-consumed, or Otto exits. `/approve <id>` does not modify sandbox
-configuration; `/approve <id> always` also adds the program to
-`[sandbox].excluded_commands`.
+Under Seatbelt, the model may set `sandbox_permissions` to
+`require_escalated` with a justification. Otto prepares the exact command and
+waits for a human decision before dispatch. Approve it through the TUI, Web,
+chat card, or `/approve <request-id> [feedback]` in the REPL; use
+`/deny <request-id> [feedback]` or `/withdraw <request-id>` to decline or withdraw.
+The approved command runs once through the unconfined driver with the same
+filtered environment. It does not require the model to issue the command again.
+Subagent requests use the same service and are scoped to their task. A proposal
+confirmation cannot grant elevation. Execution requests expire after ten
+minutes; cancellation withdraws pending foreground requests. Persistent
+read-path requests explicitly disclose that they change sandbox configuration.
 
 Commands matching `[sandbox].excluded_commands` run through the same unconfined
 driver without an approval. They apply to child agents and `otto --prompt`
@@ -1653,8 +1686,7 @@ executable. An empty topic lists section titles; `capabilities` lists this
 session's actual tool names and descriptions. User commands and HTTP/ACP APIs
 are not automatically model-callable tools.
 
-`approval_pending` queries this session's unapproved Bash or persistent read
-request. `approval_revoke` withdraws it by exact ID. It cannot approve, undo an
+`approval_pending` queries the pending requests visible to this session. `approval_revoke` withdraws it by exact ID. It cannot approve, undo an
 executed command, remove permanent grants, or affect another session.
 
 While approval waits, you can ask why it is needed or ask Otto to withdraw it.
@@ -1707,8 +1739,7 @@ connector to use natural routing.
 
 ### Approvals inside a turn
 
-When a step of a serve turn ends with an elevated Bash command waiting for
-approval, the turn does not end. Its stream emits `approval_requested` with
+When a prepared tool call in a serve turn waits for approval, the turn does not end. Its stream emits `approval_requested` with
 `approval_id`, `tool_call_id`, `command`, and `justification`, and the turn
 stays `running` while it waits; other turns queue behind it.
 `POST /v1/sessions/{id}/approvals/{approval_id}` with `{"decision":"allow"}`
@@ -1717,16 +1748,18 @@ or `{"decision":"deny"}` decides it, from any client:
 - The first decision returns `200 {"decision": ...}`. A later decision for
   the same request returns `409 approval_decided`; an id that is not waiting
   returns `409 approval_failed`.
-- `allow` grants the command once and the server retries it inside the same
-  turn, with the same turn id and stream. The client sends no prompt.
-- `deny` ends the turn with status `ok`.
-- A request with no decision after 10 minutes is denied.
+- `allow` authorizes the prepared call and the server executes that exact call
+  inside the same turn, with the same turn id and stream. The client sends no prompt.
+- `deny` prevents the prepared action and later calls in that batch from running;
+  the model receives the decision before replanning.
+- An execution request without a decision expires after 10 minutes.
 - Each outcome emits `approval_decided` with `approval_id` and `decision`
   (`allow`, `deny`, or `timeout`). Cancelling the turn during the wait ends
   it `canceled`.
 
-Excluding the command's program from the sandbox (the TUI's
-`/approve always`) is not available through the API.
+The neutral `/v1/approvals` API also exposes scoped queues, decisions with
+feedback, withdrawal, and application outcomes. Approval does not imply that
+the operation succeeded.
 
 ### Web UI
 

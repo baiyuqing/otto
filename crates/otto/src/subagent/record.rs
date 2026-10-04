@@ -289,6 +289,24 @@ fn interrupted(pid: i64, process_started_at: &str) -> bool {
     }
 }
 
+/// Approval recovery requires evidence of a dead/replaced owner, not a guess
+/// from unavailable process telemetry.
+#[allow(unsafe_code)]
+pub(crate) fn process_matches(pid: i64, started: &str) -> Option<bool> {
+    let pid_u32 = u32::try_from(pid).ok()?;
+    let recorded = DateTime::parse_from_rfc3339(started).ok()?;
+    if let Some(actual) = os_process_start_time(pid_u32) {
+        return Some(actual == recorded.with_timezone(&Utc));
+    }
+    // SAFETY: signal 0 only tests process existence; it sends no signal.
+    let status = unsafe { libc::kill(i32::try_from(pid).ok()?, 0) };
+    if status < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// The current process's pid and start time, for [`TaskContext::pid`] and
 /// [`TaskContext::process_started_at`].
 pub fn current_process() -> (i64, String) {

@@ -92,6 +92,9 @@ pub struct Info {
 /// such capability.
 #[async_trait::async_trait]
 pub trait Factory: Send + Sync {
+    fn approval_service(&self) -> Option<Arc<crate::approval::Service>> {
+        None
+    }
     /// A brand new session. `workspace` is the canonical path of an already
     /// admitted-and-loaded workspace; `None` means the startup workspace.
     async fn create(&self, workspace: Option<&str>) -> Result<Controller, String>;
@@ -506,7 +509,7 @@ pub struct Server {
     config_path: std::path::PathBuf,
     /// One-time, in-memory profile-change previews keyed by their capability
     /// token. Tokens expire in the config route before a write can occur.
-    config_changes: Mutex<HashMap<String, config::PendingChange>>,
+    approvals: Option<Arc<crate::approval::Service>>,
     token: String,
     log: Arc<Logger>,
     metrics: Arc<Metrics>,
@@ -530,11 +533,24 @@ pub struct Server {
 
 impl Server {
     pub fn new(options: Options) -> Arc<Self> {
+        let approvals = options.factory.approval_service();
+        if let Some(service) = &approvals {
+            service.start();
+            service
+                .register_domain(
+                    &options.info.workspace,
+                    "config",
+                    Arc::new(crate::approval::config::Adapter {
+                        path: options.config_path.clone(),
+                    }),
+                )
+                .expect("approval domain registry");
+        }
         Arc::new(Self {
             factory: options.factory,
             info: options.info,
             config_path: options.config_path,
-            config_changes: Mutex::new(HashMap::new()),
+            approvals,
             token: options.token,
             log: options.logger.unwrap_or_else(|| Arc::new(Logger::stderr())),
             metrics: Arc::new(Metrics::new()),
@@ -654,6 +670,18 @@ impl Server {
     pub fn router(self: &Arc<Self>) -> Router {
         let state = Arc::clone(self);
         Router::new()
+            .route("/v1/approvals", get(approvals::list_shared))
+            .route("/v1/approvals/changes", get(approvals::changes_shared))
+            .route("/v1/approvals/events", get(approvals::events_shared))
+            .route("/v1/approvals/{id}", get(approvals::get_shared))
+            .route(
+                "/v1/approvals/{id}/decision",
+                post(approvals::decide_shared),
+            )
+            .route(
+                "/v1/approvals/{id}/withdraw",
+                post(approvals::withdraw_shared),
+            )
             .route("/v1/config/profiles", get(config::profiles))
             .route("/v1/config/profiles/{name}", get(config::get_profile))
             .route("/v1/config/models", get(config::models))
@@ -1168,6 +1196,16 @@ impl Server {
             &request.justification,
         );
         event.read_path = request.read_path.clone();
+        let scope = session.ctrl.approval_scope();
+        event.approval = session
+            .ctrl
+            .approval_service()
+            .get(
+                &request.approval_id,
+                &scope.workspace,
+                Some(&scope.session_id),
+            )
+            .ok();
         turn.push_event(event);
         self.bump_status();
 
@@ -1178,6 +1216,15 @@ impl Server {
                 _ => (ApprovalDecision::Deny, "deny"),
             },
             () = cancel.cancelled() => (ApprovalDecision::Cancelled, ""),
+            shared = async {
+                let scope = session.ctrl.approval_scope();
+                if let Ok(shared) = session.ctrl.approval_service().get(&request.approval_id,&scope.workspace,Some(&scope.session_id)) {
+                    session.ctrl.approval_service().wait(&shared.id,&shared.scope,cancel).await.ok()
+                } else { std::future::pending().await }
+            } => match shared {
+                Some(r) if r.state == crate::approval::State::Approved => (ApprovalDecision::Allow,"allow"),
+                _ => (ApprovalDecision::Deny,"deny"),
+            },
             () = session.ctrl.approval_withdrawn(&request.approval_id) => (ApprovalDecision::Deny, "deny"),
             () = tokio::time::sleep(APPROVAL_TIMEOUT) => (ApprovalDecision::Deny, "timeout"),
         };
@@ -2694,6 +2741,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Factory for TestFactory {
+        fn approval_service(&self) -> Option<Arc<crate::approval::Service>> {
+            Some(self.builder.approvals.clone())
+        }
         async fn create(&self, workspace: Option<&str>) -> Result<Controller, String> {
             self.create_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(error) = &self.create_error {

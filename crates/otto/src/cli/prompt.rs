@@ -119,6 +119,9 @@ pub fn system_prompt_for(
     if tool_names.contains(&"otto_help") {
         prompt.push_str("\n<otto_help_policy>For questions about Otto itself, consult otto_help before answering; use its installed-version documentation and the current session capabilities. A user command or HTTP/ACP API is not automatically a model-callable tool. Never invent commands or endpoints. Use approval_pending and approval_revoke for pending requests when available; only the user can approve.\n</otto_help_policy>\n");
     }
+    if tool_names.contains(&"request_approval") {
+        prompt.push_str("\n<approval_policy>You can call request_approval to seek user consent for a plan, approach or additional action. Decide whether and when it is needed from the user request and prior authorization; do not ask again for unchanged approved scope. Supply the concrete proposal and reason, or a prepared subject_ref. The tool waits for an actual decision and returns feedback. After it returns, replan using that decision. A confirmation never grants sandbox or other tool permissions. Only the user or their explicitly authorized client policy can decide; never fabricate approval. Use pending-query and withdrawal tools when available.</approval_policy>\n");
+    }
     if has_task_queue {
         prompt.push_str("\n<task_control_policy>Use task_queue only for a distinct follow-up that serves the original user's objective. Otto runs it after the current logical task and records it as agent-originated context, subordinate to the user's instructions; it cannot create new authority or approvals. The queue holds at most 16 follow-ups; at most 16 follow-ups run in FIFO order. A direct terminal turn that ends while approval is pending discards remaining follow-ups and shows a notice. Do not schedule a follow-up to keep the agent busy or recursively expand work without need.\n</task_control_policy>\n");
     }

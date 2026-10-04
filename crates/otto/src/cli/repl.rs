@@ -101,11 +101,20 @@ impl<'a> Repl<'a> {
         let mut notices = self.controller.notices_changed();
         let mut memory_review = self.controller.memory_review_available_changed();
         let mut memory_review_notice = false;
+        let mut shown_approvals = std::collections::BTreeSet::new();
+        let mut approval_tick = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             if self.controller.pending_approval().is_none()
                 && let Some(line) = approval_queue.pop_front()
             {
-                self.prompt(&line, cancel).await?;
+                if line.trim().starts_with('/') {
+                    if self.command(line.trim(), cancel).await? {
+                        return Ok(());
+                    }
+                } else {
+                    self.interactive_prompt(&line, cancel, &mut lines, &mut approval_queue)
+                        .await?;
+                }
                 continue;
             }
             if memory_review_notice {
@@ -143,8 +152,33 @@ impl<'a> Repl<'a> {
                         None => std::future::pending().await,
                     }
                 };
+                let approval_signal = async {
+                    loop {
+                        approval_tick.tick().await;
+                        if let Ok(snapshot) = self.controller.approval_snapshot() {
+                            shown_approvals.retain(|id| {
+                                snapshot.requests.iter().any(|request| &request.id == id)
+                            });
+                            let added: Vec<_> = snapshot
+                                .requests
+                                .into_iter()
+                                .filter(|request| shown_approvals.insert(request.id.clone()))
+                                .collect();
+                            if !added.is_empty() {
+                                return added;
+                            }
+                        }
+                    }
+                };
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(Error::Cancelled),
+                    requests = approval_signal => {
+                        for request in requests {
+                            render_event(&mut *self.stdout, &mut *self.stderr,
+                                &Event::ApprovalChanged { request: Box::new(request) });
+                        }
+                        Err(None)
+                    },
                     open = signal => Err(Some(open)),
                     // The top of the loop prints it and shows the prompt again.
                     _ = notices.changed() => Err(None),
@@ -196,7 +230,10 @@ impl<'a> Repl<'a> {
                     continue;
                 }
             }
-            match self.prompt(&line, cancel).await {
+            match self
+                .interactive_prompt(&line, cancel, &mut lines, &mut approval_queue)
+                .await
+            {
                 Ok(()) => {}
                 Err(Error::Turn { fatal: false, .. }) => {}
                 Err(error) => return Err(error),
@@ -322,6 +359,117 @@ impl<'a> Repl<'a> {
         }
     }
 
+    /// Keep reading the trusted terminal while a prepared call waits. Ordinary
+    /// work stays queued; approving never sends a replacement model prompt.
+    async fn interactive_prompt(
+        &mut self,
+        line: &str,
+        cancel: &CancellationToken,
+        lines: &mut tokio::sync::mpsc::Receiver<Result<String, Error>>,
+        queue: &mut std::collections::VecDeque<String>,
+    ) -> Result<(), Error> {
+        let controller = self.controller;
+        let turn = cancel.child_token();
+        let (send, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let mut sink = |event| {
+            let _ = send.send(event);
+        };
+        let run = controller.prompt(line, &mut sink, &turn);
+        tokio::pin!(run);
+        let mut waiting = false;
+        let mut input_closed = false;
+        let mut input_error = None;
+        let mut error_rendered = false;
+        let result = loop {
+            tokio::select! {
+                result = &mut run => break result,
+                Some(event) = events.recv() => {
+                    if let Event::ApprovalChanged { request } = &event {
+                        waiting = request.blocking && request.state == crate::approval::State::Pending;
+                    }
+                    error_rendered |= render_event(&mut *self.stdout, &mut *self.stderr, &event);
+                    let _ = self.stdout.flush();
+                }
+                input = lines.recv(), if waiting && !input_closed => {
+                    let Some(input) = input else {
+                        input_closed = true;
+                        turn.cancel();
+                        continue;
+                    };
+                    let input = match input {
+                        Ok(input) => input,
+                        Err(error) => {
+                            input_error = Some(error);
+                            input_closed = true;
+                            turn.cancel();
+                            continue;
+                        }
+                    };
+                    let trimmed = input.trim();
+                    if trimmed == "/exit" || trimmed == "/stop" {
+                        turn.cancel();
+                        if trimmed == "/exit" { queue.push_front(input); }
+                        continue;
+                    }
+                    let mut words = trimmed.splitn(3, char::is_whitespace);
+                    let command = words.next().unwrap_or("");
+                    let id = words.next().unwrap_or("");
+                    let feedback = words.next().unwrap_or("").trim();
+                    if matches!(command, "/approve" | "/deny" | "/withdraw") {
+                        let scope = controller.approval_scope();
+                        let service = controller.approval_service();
+                        let decision = service.get(id, &scope.workspace, Some(&scope.session_id))
+                            .and_then(|request| {
+                                if command == "/withdraw" {
+                                    service.withdraw(id, &request.scope, request.revision)
+                                } else {
+                                    service.decide(id, &request.scope, request.revision,
+                                        command == "/approve", feedback,
+                                        &crate::approval::Actor::local("repl"))
+                                }
+                            });
+                        match decision {
+                            Ok(request) => {
+                                let _ = writeln!(self.stdout, "Approval {id}: {:?}.", request.state);
+                            }
+                            Err(error) => { let _ = writeln!(self.stderr, "{error}"); }
+                        }
+                    } else if !trimmed.is_empty() && !trimmed.starts_with('/') {
+                        match controller.approval_message(trimmed, &turn).await {
+                            Ok(Some(reply)) => {
+                                let _ = writeln!(self.stdout, "{}", reply.text);
+                                if reply.queued { queue.push_back(input); }
+                            }
+                            Ok(None) => queue.push_back(input),
+                            Err(error) => { let _ = writeln!(self.stderr, "{error}"); }
+                        }
+                    } else if !trimmed.is_empty() {
+                        queue.push_back(input);
+                    }
+                }
+            }
+        };
+        while let Ok(event) = events.try_recv() {
+            error_rendered |= render_event(&mut *self.stdout, &mut *self.stderr, &event);
+        }
+        if let Err(error) = &result
+            && !error_rendered
+        {
+            let _ = writeln!(self.stderr, "{error}");
+        }
+        let _ = writeln!(self.stdout);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if let Some(error) = input_error {
+            return Err(error);
+        }
+        result.map_err(|error| Error::Turn {
+            fatal: is_fatal_persistence(&error),
+            message: error.to_string(),
+        })
+    }
+
     /// Dispatches one `/command`. Returns true when the loop should stop.
     async fn command(&mut self, command: &str, cancel: &CancellationToken) -> Result<bool, Error> {
         let outcome: Option<bool> = 'dispatch: {
@@ -433,7 +581,53 @@ impl<'a> Repl<'a> {
                     Some(false)
                 }
                 "sandbox" => self.sandbox(args).await?.then_some(false),
-                "approve" => {
+                "approve" | "deny" | "withdraw" => {
+                    let mut parts = args.trim().splitn(2, char::is_whitespace);
+                    let shared_id = parts.next().unwrap_or("");
+                    let feedback = parts.next().unwrap_or("").trim();
+                    let scope = self.controller.approval_scope();
+                    let service = self.controller.approval_service();
+                    if let Ok(request) =
+                        service.get(shared_id, &scope.workspace, Some(&scope.session_id))
+                    {
+                        if name == "approve" && feedback == "always" && !request.persistent {
+                            return Err(Error::Command { command: "/approve".into(), message: "This request grants only one operation; persistent changes need their own review.".into() });
+                        }
+                        let decided = if name == "withdraw" {
+                            service.withdraw(shared_id, &request.scope, request.revision)
+                        } else {
+                            service.decide(
+                                shared_id,
+                                &request.scope,
+                                request.revision,
+                                name == "approve",
+                                feedback,
+                                &crate::approval::Actor::local("repl"),
+                            )
+                        }
+                        .map_err(|error| Error::Command {
+                            command: format!("/{name}"),
+                            message: error.to_string(),
+                        })?;
+                        let decided = service.finish_decision(decided).await.map_err(|error| {
+                            Error::Command {
+                                command: format!("/{name}"),
+                                message: error.to_string(),
+                            }
+                        })?;
+                        let _ = writeln!(
+                            self.stdout,
+                            "Approval {shared_id}: {:?}; application: {:?}. {}",
+                            decided.state, decided.application, decided.application_error
+                        );
+                        break 'dispatch Some(false);
+                    }
+                    if name != "approve" {
+                        return Err(Error::Command {
+                            command: format!("/{name}"),
+                            message: "approval not found".into(),
+                        });
+                    }
                     let (id, always) = match args.split_whitespace().collect::<Vec<_>>()[..] {
                         [id] => (id, false),
                         [id, "always"] => (id, true),
@@ -834,6 +1028,20 @@ impl<'a> Repl<'a> {
 /// does not print the same failure twice.
 fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -> bool {
     match event {
+        Event::ApprovalChanged { request } => {
+            let _ = writeln!(
+                stdout,
+                "\n[approval] {} ({}) {:?}\n{}",
+                request.title, request.id, request.state, request.subject.details
+            );
+            if request.state == crate::approval::State::Pending {
+                let _ = writeln!(
+                    stdout,
+                    "Approve in Otto: /approve {}\nReject: /deny {} [feedback]\nWithdraw: /withdraw {}",
+                    request.id, request.id, request.id
+                );
+            }
+        }
         Event::TextDelta { text } => {
             let _ = write!(stdout, "{text}");
         }
@@ -1168,6 +1376,59 @@ mod tests {
             )
             .await;
         (stdout.text(), stderr.text(), result)
+    }
+
+    #[tokio::test]
+    async fn idle_repl_decides_a_restored_confirmation_with_feedback_without_a_retry() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let service = controller.approval_service();
+        let request = service
+            .create(crate::approval::Proposal {
+                kind: crate::approval::Kind::Confirmation,
+                scope: controller.approval_scope(),
+                subject: crate::approval::Subject {
+                    tool_call_id: "plan-call".into(),
+                    source: "conversation".into(),
+                    id: "restored-operation".into(),
+                    version: "v1".into(),
+                    details: "Keep parsing narrow".into(),
+                },
+                title: "Review scope".into(),
+                reason: "Before proceeding".into(),
+                persistent: false,
+                blocking: true,
+                expires_at: None,
+            })
+            .unwrap();
+        let (stdout, stderr, result) = session(
+            &format!("/approve {} Keep the old syntax\n/exit\n", request.id),
+            &controller,
+        )
+        .await;
+        assert!(result.is_ok(), "{stderr}");
+        let decided = service
+            .get(
+                &request.id,
+                &request.scope.workspace,
+                Some(&request.scope.session_id),
+            )
+            .unwrap();
+        assert_eq!(decided.state, crate::approval::State::Approved);
+        assert_eq!(decided.decision.unwrap().feedback, "Keep the old syntax");
+        assert_eq!(
+            decided.application,
+            crate::approval::ApplicationState::NotRequired
+        );
+        assert!(
+            stdout.contains("Approved; application: NotRequired"),
+            "{stdout}"
+        );
+        assert!(
+            !stdout.contains("[tool]"),
+            "a confirmation cannot dispatch an operation"
+        );
     }
 
     struct ExitThenBlock {

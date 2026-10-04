@@ -83,6 +83,8 @@ fn normalize_query(query: &str) -> String {
 
 /// The working memory service, or the no-resource stand-in for disabled or
 /// unavailable memory when built with [`Service::null`].
+type ReviewPublisher = Arc<dyn Fn(&[Candidate]) -> Result<()> + Send + Sync>;
+
 pub struct Service {
     store: Option<Store>,
     policy: Policy,
@@ -92,6 +94,7 @@ pub struct Service {
     /// candidate is durably created. Subscribers must query through their own
     /// scoped review path; this signal contains no candidate data.
     review_available: watch::Sender<u64>,
+    publishers: std::sync::Mutex<std::collections::BTreeMap<String, ReviewPublisher>>,
     closed: AtomicBool,
 }
 
@@ -105,6 +108,7 @@ impl Service {
             policy,
             category: ErrorKind::Disabled,
             review_available: watch::channel(0).0,
+            publishers: std::sync::Mutex::new(Default::default()),
             closed: AtomicBool::new(false),
         }
     }
@@ -122,8 +126,16 @@ impl Service {
             policy: decide_default_policy,
             category,
             review_available: watch::channel(0).0,
+            publishers: std::sync::Mutex::new(Default::default()),
             closed: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn set_review_publisher(&self, workspace: &str, publisher: ReviewPublisher) {
+        self.publishers
+            .lock()
+            .expect("memory publishers")
+            .insert(workspace.into(), publisher);
     }
 
     /// A content-free signal that changes after a pending candidate was
@@ -366,6 +378,16 @@ impl Service {
         if !candidates.is_empty() {
             self.review_available
                 .send_modify(|generation| *generation += 1);
+        }
+        let publishers: Vec<_> = self
+            .publishers
+            .lock()
+            .expect("memory publishers")
+            .values()
+            .cloned()
+            .collect();
+        for publish in publishers {
+            publish(&candidates)?;
         }
         Ok(candidates)
     }

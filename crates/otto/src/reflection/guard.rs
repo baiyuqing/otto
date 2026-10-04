@@ -36,7 +36,7 @@ const MAXIMUM_REASON_BYTES: usize = 2 * 1024;
 const BLOB_CHARS: usize = 200;
 
 /// One skill proposal that passed the output contract and its evidence check.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Candidate {
     pub action: SkillAction,
     pub name: String,

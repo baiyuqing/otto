@@ -523,6 +523,15 @@ impl Builder {
         let session_for_inbox = session_for_children.clone();
         let session = session.clone();
         let (runner, warnings) = SubagentRunner::new(RunnerConfig {
+            approval: Some((
+                self.approvals.clone(),
+                crate::approval::Scope {
+                    workspace: self.workspace_path.clone(),
+                    session_id: session.header().id,
+                    task_id: String::new(),
+                    run_id: String::new(),
+                },
+            )),
             provider,
             tools: child_tools,
             redaction_values: redaction_values.to_vec(),
@@ -662,6 +671,12 @@ impl Builder {
                 redaction_values,
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
+            if let Some(approvals) = &self.bash_approvals {
+                tool = tool.with_approvals(String::new(), approvals.clone());
+            }
+            if let Some(control) = &self.grant_control {
+                tool = tool.with_grant_control(self.config_path.clone(), control.clone());
+            }
             if let Some(excluded) = &self.excluded_commands {
                 tool = tool.with_excluded_commands(Arc::clone(excluded));
             }

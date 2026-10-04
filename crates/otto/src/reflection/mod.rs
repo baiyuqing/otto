@@ -112,6 +112,7 @@ pub struct Report {
     pub dropped: BTreeMap<&'static str, usize>,
     /// Skills written, with what was done to each.
     pub skills: Vec<(String, skillwrite::Written)>,
+    pub skill_approvals: Vec<String>,
     /// Whether skill output was withheld because the slice held external
     /// content (`[reflection].skill_source = "untainted"`).
     pub skills_withheld: bool,
@@ -133,6 +134,7 @@ impl Report {
             candidates: Vec::new(),
             dropped: BTreeMap::new(),
             skills: Vec::new(),
+            skill_approvals: Vec::new(),
             skills_withheld: false,
             entries: 0,
             tainted: false,
@@ -149,7 +151,7 @@ impl Report {
     /// Whether the run did anything a user needs to hear about: it queued a
     /// candidate or wrote a skill.
     pub fn changed_something(&self) -> bool {
-        !self.candidates.is_empty() || !self.skills.is_empty()
+        !self.candidates.is_empty() || !self.skills.is_empty() || !self.skill_approvals.is_empty()
     }
 
     /// One line for a frontend.
@@ -164,6 +166,12 @@ impl Report {
                     self.candidates.len(),
                     dropped
                 );
+                if !self.skill_approvals.is_empty() {
+                    line.push_str(&format!(
+                        "; {} skill approval(s) pending",
+                        self.skill_approvals.len()
+                    ));
+                }
                 for (name, written) in &self.skills {
                     let verb = match written {
                         skillwrite::Written::Created => "created",
@@ -216,6 +224,7 @@ pub const AUTO_MINIMUM_INTERVAL_SECONDS: i64 = 600;
 
 /// What a run reads and writes besides the model call.
 pub struct Context<'a> {
+    pub approvals: Option<&'a Arc<crate::approval::Service>>,
     pub runner: &'a Runner,
     pub session_id: &'a str,
     /// The session file; empty for a `--no-session` session.
@@ -378,6 +387,7 @@ impl Reflector {
             candidates: Vec::new(),
             dropped: BTreeMap::new(),
             skills: Vec::new(),
+            skill_approvals: Vec::new(),
             skills_withheld: false,
             entries: slice.entries.len(),
             tainted: slice.tainted(),
@@ -545,6 +555,29 @@ impl Reflector {
             .is_ok_and(|text| skillwrite::hash(&text) == row.hash)
     }
 
+    pub fn attach_approvals(
+        &self,
+        service: &Arc<crate::approval::Service>,
+        workspace: &str,
+        roots: skillwrite::Roots,
+    ) -> Result<(), String> {
+        if let Some(store) = &self.store {
+            service
+                .register_domain(
+                    workspace,
+                    "reflection_skill",
+                    Arc::new(crate::approval::reflection::Adapter {
+                        store: store.clone(),
+                        roots,
+                        maximum: self.config.max_generated_skills,
+                        require_review: self.config.skill_review,
+                    }),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Runs each skill candidate through the rest of the vetting pipeline
     /// (structure and rule scan, then the model review) and writes the ones
     /// that pass. Each failure is counted on the report by reason.
@@ -603,18 +636,28 @@ impl Reflector {
                 guard::Verdict::NotRequested
             };
             let vetted = guard::approve(checked, verdict);
-            match skillwrite::apply(
-                store,
-                roots,
-                &vetted,
-                run_id,
-                context.session_id,
-                &now(),
-                self.config.max_generated_skills,
-            ) {
-                Ok(written) => report.skills.push((vetted.name().to_owned(), written)),
-                Err(reason) => *report.dropped.entry(reason).or_default() += 1,
+            if let Some(approvals) = context.approvals {
+                match crate::approval::reflection::publish(
+                    approvals,
+                    store.clone(),
+                    roots,
+                    self.config.max_generated_skills,
+                    &context.runner.session().header().workspace,
+                    context.session_id,
+                    context.session_path,
+                    run_id,
+                    &vetted,
+                    self.config.skill_review,
+                ) {
+                    Ok(request) => report.skill_approvals.push(request.id),
+                    Err(_) => *report.dropped.entry("skill_approval_failed").or_default() += 1,
+                }
+                continue;
             }
+            *report
+                .dropped
+                .entry("skill_approval_unavailable")
+                .or_default() += 1;
         }
         Ok(())
     }
@@ -1036,9 +1079,11 @@ mod tests {
         ) -> Result<Report, Error> {
             let path = self.session.path();
             let header = self.session.header();
-            reflector
+            let approvals = Arc::new(crate::approval::Service::in_memory().expect("approvals"));
+            let mut report = reflector
                 .run(
                     &Context {
+                        approvals: Some(&approvals),
                         runner: &self.runner,
                         session_id: &header.id,
                         session_path: &path,
@@ -1051,7 +1096,49 @@ mod tests {
                     "",
                     cancel,
                 )
-                .await
+                .await?;
+            for id in report.skill_approvals.clone() {
+                let request = approvals
+                    .get(&id, &header.workspace, None)
+                    .expect("skill request");
+                let name = request
+                    .subject
+                    .id
+                    .rsplit(':')
+                    .next()
+                    .expect("skill name")
+                    .to_string();
+                let action = if self.store.generated(&name).expect("generated").is_some() {
+                    skillwrite::Written::Revised
+                } else {
+                    skillwrite::Written::Created
+                };
+                // A vetted model proposal must not reach the filesystem before
+                // this explicit simulated human decision.
+                if action == skillwrite::Written::Created {
+                    assert!(!self.roots.write_root.join(&name).exists());
+                }
+                approvals
+                    .decide(
+                        &id,
+                        &request.scope,
+                        request.revision,
+                        true,
+                        "",
+                        &crate::approval::Actor::local("test-human"),
+                    )
+                    .expect("decide");
+                approvals.apply_available(&header.workspace).expect("apply");
+                assert_eq!(
+                    approvals
+                        .get(&id, &header.workspace, None)
+                        .expect("applied")
+                        .application,
+                    crate::approval::ApplicationState::Applied
+                );
+                report.skills.push((name, action));
+            }
+            Ok(report)
         }
 
         fn pending(&self) -> Vec<crate::memory::Candidate> {
@@ -1468,6 +1555,7 @@ mod tests {
             .reflector(enabled())
             .run(
                 &Context {
+                    approvals: None,
                     runner: &fixture.runner,
                     session_id: &header.id,
                     session_path: "",
@@ -2050,6 +2138,7 @@ mod tests {
         reflector
             .run(
                 &Context {
+                    approvals: None,
                     runner: &fixture.runner,
                     session_id: &header.id,
                     session_path: &path,

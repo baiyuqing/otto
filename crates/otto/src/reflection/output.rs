@@ -30,7 +30,7 @@ pub enum Action {
 }
 
 /// What a skill proposal asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SkillAction {
     Create,
     Revise,

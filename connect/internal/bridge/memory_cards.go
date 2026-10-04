@@ -23,6 +23,12 @@ func (c *chat) showMemory(ctx context.Context, sid, replyTo string, explicit boo
 	if ctx.Err() != nil {
 		return
 	}
+	if !explicit {
+		if page, err := c.b.opts.Agent.SharedApprovals(ctx, sid); err == nil {
+			c.showApprovals(ctx, sid, page.Requests)
+			return
+		}
+	}
 	p, buttons := c.p.(ApprovalPlatform)
 	if !buttons && !explicit {
 		return
@@ -100,6 +106,9 @@ func (c *chat) showMemory(ctx context.Context, sid, replyTo string, explicit boo
 // Only normalized, admitted button events reach here. Taking the memory lock
 // in the goroutine keeps platform callbacks non-blocking.
 func (c *chat) cmdApprovalButton(m Message) {
+	if c.decideSharedCard(m) {
+		return
+	}
 	c.mu.Lock()
 	bash := c.perm != nil && c.perm.id == m.ApprovalID
 	c.mu.Unlock()

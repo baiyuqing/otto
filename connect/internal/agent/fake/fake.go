@@ -89,7 +89,10 @@ func Main() bool {
 		time.Sleep(time.Millisecond)
 	}
 	if os.Getenv("FAKE_NO_EXIT") != "" {
-		select {}
+		// Keep a timer pending so the runtime does not report a deadlock.
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	os.Exit(0)
 	return true

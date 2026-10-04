@@ -319,7 +319,12 @@ impl<'a> EditMatcher<'a> {
         total: usize,
     ) -> Result<ResolvedEdit, String> {
         let content = self.content;
-        let (first_match, count) = occurrences(content, old_text);
+        if old_text.is_empty() {
+            // Only a stripped byte-order mark reaches here empty; an empty
+            // needle would match everywhere.
+            return Err(match_error(index, total, &not_found(path)));
+        }
+        let (first_match, count) = occurrences(content, old_text, |_| true);
         if count == 1 {
             let start = first_match.expect("one match exists");
             return Ok(ResolvedEdit {
@@ -339,7 +344,21 @@ impl<'a> EditMatcher<'a> {
         if fuzzy_old.trim().is_empty() {
             return Err(match_error(index, total, &not_found(path)));
         }
-        let (first_match, count) = occurrences(fuzzy, &fuzzy_old);
+        // The fuzzy view drops whitespace only where a line ends. When the last
+        // line of old_text is text followed by whitespace, a match must also
+        // end where a file line does, or `a\t` would match `ab` and the
+        // whitespace new_text keeps from it would be lost. A last line of only
+        // whitespace is the next line's indentation and keeps matching loosely.
+        let tail_start = old_text.rfind('\n').map_or(0, |index| index + 1);
+        let tail_end = trim_trailing_fuzzy_whitespace(old_text, tail_start, old_text.len());
+        let ends_line = tail_start < tail_end && tail_end < old_text.len();
+        let (first_match, count) = occurrences(fuzzy, &fuzzy_old, |at| {
+            !ends_line
+                || matches!(
+                    fuzzy.as_bytes().get(at + fuzzy_old.len()),
+                    None | Some(b'\n')
+                )
+        });
         if count == 0 {
             return Err(match_error(index, total, &not_found(path)));
         }
@@ -379,17 +398,25 @@ impl<'a> EditMatcher<'a> {
     }
 }
 
-/// The first occurrence of `needle` in `haystack` and the number of
-/// occurrences, counting overlapping ones: `aa` occurs twice in `aaa`, so it is
-/// ambiguous there rather than unique.
-fn occurrences(haystack: &str, needle: &str) -> (Option<usize>, usize) {
+/// The first occurrence of the non-empty `needle` in `haystack` that `accept`
+/// admits by its offset, and the number of admitted occurrences, counting
+/// overlapping ones: `aa` occurs twice in `aaa`, so it is ambiguous there
+/// rather than unique.
+fn occurrences(
+    haystack: &str,
+    needle: &str,
+    accept: impl Fn(usize) -> bool,
+) -> (Option<usize>, usize) {
+    debug_assert!(!needle.is_empty(), "an empty needle matches everywhere");
     let mut first = None;
     let mut count = 0;
     let mut from = 0;
     while let Some(index) = haystack[from..].find(needle) {
         let at = from + index;
-        first.get_or_insert(at);
-        count += 1;
+        if accept(at) {
+            first.get_or_insert(at);
+            count += 1;
+        }
         from = at + rune_len(haystack, at);
     }
     (first, count)
@@ -1181,6 +1208,78 @@ mod tests {
             "{result:?}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "abc  \n");
+    }
+
+    /// Stripping the byte-order mark leaves an empty needle, which once
+    /// panicked while counting occurrences.
+    #[tokio::test]
+    async fn a_bom_only_old_text_is_rejected() {
+        let (root, path) = sample("\u{feff}hello\n");
+        let workspace = workspace(root.path());
+        let arguments = serde_json::json!({
+            "path": "sample.txt",
+            "old_text": "\u{feff}",
+            "new_text": "X",
+        })
+        .to_string();
+        let result = run(&EditTool::new(&workspace), &arguments).await;
+        assert!(
+            result.is_error && result.content.contains("old_text was not found"),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\u{feff}hello\n");
+    }
+
+    /// Trailing whitespace of old_text is ignored only where a file line ends:
+    /// mid-line it must not match other text and lose new_text's whitespace.
+    #[tokio::test]
+    async fn trailing_old_text_whitespace_matches_only_at_a_line_end() {
+        for (name, file, old_text, new_text, want) in [
+            (
+                "mid-line tab is not ignored",
+                "x = foo_bar \u{2014} 1\n",
+                "foo\t",
+                "baz\t",
+                None,
+            ),
+            (
+                "line-end whitespace still matches",
+                "say \u{201c}hi\u{201d}\nnext\n",
+                "say \"hi\"  ",
+                "say \"bye\"  ",
+                Some("say \u{201c}bye\u{201d}\nnext\n"),
+            ),
+            (
+                "only line-end candidates count toward ambiguity",
+                "a \u{2014} b\na \u{2014} bc\n",
+                "a - b ",
+                "a - B ",
+                Some("a \u{2014} B\na \u{2014} bc\n"),
+            ),
+        ] {
+            let (root, path) = sample(file);
+            let workspace = workspace(root.path());
+            let arguments = serde_json::json!({
+                "path": "sample.txt",
+                "old_text": old_text,
+                "new_text": new_text,
+            })
+            .to_string();
+            let result = run(&EditTool::new(&workspace), &arguments).await;
+            match want {
+                Some(want) => {
+                    assert!(!result.is_error, "{name}: {result:?}");
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{name}");
+                }
+                None => {
+                    assert!(
+                        result.is_error && result.content.contains("old_text was not found"),
+                        "{name}: {result:?}"
+                    );
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), file, "{name}");
+                }
+            }
+        }
     }
 
     #[tokio::test]

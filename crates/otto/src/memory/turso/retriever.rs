@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use super::codec::fts_labels;
 use super::cursor::{decode_retrieval_cursor, encode_retrieval_cursor, fingerprint_retrieval};
 use super::query::{
-    RetrievalKey, Statement, build_baseline_query, build_fts_candidate_query,
-    build_fts_literal_expression, build_workspace_replacement_query,
+    RetrievalKey, Statement, build_fts_candidate_query, build_fts_literal_expression,
+    build_standing_query, build_workspace_replacement_query,
 };
 use super::records::{decode_record_row, in_read_transaction, read_generation};
 use super::{Store, map_storage_error};
@@ -21,9 +21,9 @@ use crate::memory::guard::guard_record;
 use crate::memory::json::encode_string;
 use crate::memory::validate::validate_retrieval_request;
 use crate::memory::{
-    Error, ErrorKind, MAX_BASELINE_RECORDS, MAX_RETRIEVAL_CANDIDATES, NAMESPACE_USER,
-    NAMESPACE_WORKSPACE, Record, Result, RetrievalMatch, RetrievalRequest, RetrievalResult, Scope,
-    TokenEstimator,
+    Error, ErrorKind, MAX_RETRIEVAL_CANDIDATES, MAX_STANDING_TOKENS, NAMESPACE_USER,
+    NAMESPACE_WORKSPACE, Record, Result, RetrievalMatch, RetrievalRequest, RetrievalResult,
+    STANDING_ROW_GUARD, Scope, TokenEstimator,
 };
 
 /// One record in the ranked snapshot. `lexical` is the record's 1-based place
@@ -69,7 +69,7 @@ fn retrieval_scopes(scopes: &[Scope]) -> (Scope, Option<Scope>) {
     (user, workspace)
 }
 
-fn query_records(
+pub(super) fn query_records(
     connection: &Connection,
     statement: &Statement,
     limit: usize,
@@ -158,6 +158,13 @@ fn merge_candidates(
 
 fn sort_candidates(candidates: &mut [RetrievalCandidate]) {
     candidates.sort_by(|left, right| {
+        if left.baseline && right.baseline {
+            return left
+                .record
+                .created_at
+                .cmp(&right.record.created_at)
+                .then_with(|| left.record.id.cmp(&right.record.id));
+        }
         right
             .baseline
             .cmp(&left.baseline)
@@ -303,6 +310,11 @@ fn budget_text(record: &Record) -> String {
     out
 }
 
+/// The token cost of one record against a recall budget.
+pub(crate) fn record_cost(estimator: Option<TokenEstimator>, record: &Record) -> usize {
+    estimate_tokens(estimator, &budget_text(record))
+}
+
 fn estimate_tokens(estimator: Option<TokenEstimator>, text: &str) -> usize {
     if let Some(estimator) = estimator {
         return estimator(text).max(1);
@@ -332,19 +344,37 @@ impl Store {
 
         let mut result = RetrievalResult::default();
         let mut last_examined = start;
+        // Standing records lead the snapshot and do not count against
+        // `limit` or `token_budget`; they have their own budget, filled
+        // oldest first, and the first one that does not fit closes it.
+        let mut standing_used = 0;
+        let mut standing_closed = false;
+        let mut plain = 0;
         for (index, candidate) in candidates.iter().enumerate().skip(start) {
             guard_record(self.guard(), &candidate.record)?;
-            let estimate =
-                estimate_tokens(request.estimate_tokens, &budget_text(&candidate.record));
+            let estimate = record_cost(request.estimate_tokens, &candidate.record);
+            if candidate.baseline {
+                last_examined = index + 1;
+                if standing_closed || standing_used + estimate > MAX_STANDING_TOKENS {
+                    standing_closed = true;
+                    continue;
+                }
+                standing_used += estimate;
+                result.matches.push(RetrievalMatch {
+                    record: candidate.record.clone(),
+                    rank: index + 1,
+                    standing: true,
+                });
+                continue;
+            }
             if estimate > request.token_budget {
                 // An individually oversized record is examined and permanently
                 // skipped rather than blocking the page behind it.
                 last_examined = index + 1;
                 continue;
             }
-            if result.matches.len() >= request.limit
-                || (!result.matches.is_empty()
-                    && estimate > request.token_budget - result.used_tokens)
+            if plain >= request.limit
+                || (plain > 0 && estimate > request.token_budget - result.used_tokens)
             {
                 if last_examined == 0 {
                     return Err(corrupt());
@@ -360,7 +390,9 @@ impl Store {
             result.matches.push(RetrievalMatch {
                 record: candidate.record.clone(),
                 rank: index + 1,
+                standing: false,
             });
+            plain += 1;
             result.used_tokens += estimate;
             last_examined = index + 1;
         }
@@ -384,8 +416,8 @@ impl Store {
                 }
                 let mut candidates: Vec<RetrievalCandidate> = Vec::new();
                 if request.include_baseline {
-                    let statement = build_baseline_query(request, &user);
-                    for record in query_records(connection, &statement, MAX_BASELINE_RECORDS)? {
+                    let statement = build_standing_query(request, &user, STANDING_ROW_GUARD);
+                    for record in query_records(connection, &statement, STANDING_ROW_GUARD)? {
                         candidates.push(make_candidate(record, true, usize::MAX));
                     }
                 }

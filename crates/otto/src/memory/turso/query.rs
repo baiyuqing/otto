@@ -8,10 +8,10 @@ use crate::storage::Value;
 
 use super::codec::TIMESTAMP_BYTES;
 use crate::memory::{
-    Error, ListRequest, MAX_BASELINE_RECORDS, MAX_FTS_TERM_BYTES, MAX_FTS_TERMS, MAX_ID_BYTES,
-    MAX_KIND_BYTES, MAX_LABEL_BYTES, MAX_LABELS, MAX_METADATA_BYTES, MAX_NAMESPACE_BYTES,
-    MAX_QUERY_BYTES, MAX_RECORD_TEXT_BYTES, MAX_RETRIEVAL_CANDIDATES, MAX_SCOPE_ID_BYTES,
-    MAX_SEMANTIC_KEY_BYTES, Result, RetrievalRequest, Scope, invalid_request,
+    Error, ListRequest, MAX_FTS_TERM_BYTES, MAX_FTS_TERMS, MAX_ID_BYTES, MAX_KIND_BYTES,
+    MAX_LABEL_BYTES, MAX_LABELS, MAX_METADATA_BYTES, MAX_NAMESPACE_BYTES, MAX_QUERY_BYTES,
+    MAX_RECORD_TEXT_BYTES, MAX_RETRIEVAL_CANDIDATES, MAX_SCOPE_ID_BYTES, MAX_SEMANTIC_KEY_BYTES,
+    Result, RetrievalRequest, Scope, invalid_request,
 };
 
 use super::codec::{MAX_LABELS_JSON_BYTES, MAX_SOURCE_JSON_BYTES, format_timestamp};
@@ -332,19 +332,20 @@ fn retrieval_filter(request: &RetrievalRequest, scopes: &[Scope]) -> (Vec<String
     (clauses, arguments)
 }
 
-/// The records every recall starts from: the user's own keyed preferences and
-/// instructions, newest first, regardless of the query text.
-pub fn build_baseline_query(request: &RetrievalRequest, user: &Scope) -> Statement {
+/// The standing set: the user's own keyed preferences and instructions,
+/// oldest first so a newer record never displaces an older one, regardless of
+/// the query text.
+pub fn build_standing_query(request: &RetrievalRequest, user: &Scope, limit: usize) -> Statement {
     let (mut clauses, mut arguments) = retrieval_filter(request, std::slice::from_ref(user));
     clauses.push("r.semantic_key<>?".to_string());
     clauses.push("r.kind IN (?,?)".to_string());
     arguments.push(text(""));
     arguments.push(text("preference"));
     arguments.push(text("instruction"));
-    arguments.push(Value::Integer(MAX_BASELINE_RECORDS as i64));
+    arguments.push(Value::Integer(limit.min(i64::MAX as usize) as i64));
     Statement {
         sql: format!(
-            "SELECT {} FROM memory_records r WHERE {} ORDER BY r.updated_at DESC,r.id ASC LIMIT ?",
+            "SELECT {} FROM memory_records r WHERE {} ORDER BY r.created_at ASC,r.id ASC LIMIT ?",
             record_projection("r."),
             clauses.join(" AND ")
         ),

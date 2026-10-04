@@ -8,7 +8,7 @@ use serde::Deserialize;
 use url::Url;
 
 /// The environment variable holding the Brave Search API key.
-pub const KEY_ENV: &str = "OTTO_SEARCH_API_KEY";
+pub const KEY_ENV: &str = "BRAVE_API_KEY";
 
 const ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";
 

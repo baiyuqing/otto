@@ -135,13 +135,18 @@ pub fn format_args(args: Option<&RawValue>) -> String {
     if text.starts_with('"') {
         return serde_json::from_str::<String>(text).unwrap_or_else(|_| text.to_string());
     }
-    pretty_json(text)
+    format_json(text, true)
 }
 
-/// Reformats valid, compact JSON text with two-space indentation while
-/// keeping member order. Scalars pass through verbatim, so number literals
-/// and string escapes are not renormalized.
-fn pretty_json(src: &str) -> String {
+/// Formats arguments as compact JSON, preserving member order and number literals.
+/// Strings stay quoted, with literal backslashes and controls still escaped.
+pub fn format_args_compact(args: Option<&RawValue>) -> String {
+    args.map_or_else(String::new, |raw| format_json(raw.get().trim(), false))
+}
+
+/// Reformats valid JSON while keeping member order and number literals.
+/// String tokens are decoded and re-encoded for display only.
+fn format_json(src: &str, pretty: bool) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len() + src.len() / 4 + 8);
     let mut depth = 0usize;
@@ -161,7 +166,13 @@ fn pretty_json(src: &str) -> String {
                         _ => index += 1,
                     }
                 }
-                out.push_str(&src[start..index.min(bytes.len())]);
+                let token = &src[start..index.min(bytes.len())];
+                match serde_json::from_str::<String>(token) {
+                    Ok(decoded) => out.push_str(
+                        &serde_json::to_string(&decoded).expect("a string always encodes"),
+                    ),
+                    Err(_) => out.push_str(token),
+                }
             }
             b' ' | b'\n' | b'\t' | b'\r' => index += 1,
             open @ (b'{' | b'[') => {
@@ -177,22 +188,28 @@ fn pretty_json(src: &str) -> String {
                 }
                 depth += 1;
                 out.push(open as char);
-                newline(&mut out, depth);
+                if pretty {
+                    newline(&mut out, depth);
+                }
                 index += 1;
             }
             close @ (b'}' | b']') => {
                 depth = depth.saturating_sub(1);
-                newline(&mut out, depth);
+                if pretty {
+                    newline(&mut out, depth);
+                }
                 out.push(close as char);
                 index += 1;
             }
             b',' => {
                 out.push(',');
-                newline(&mut out, depth);
+                if pretty {
+                    newline(&mut out, depth);
+                }
                 index += 1;
             }
             b':' => {
-                out.push_str(": ");
+                out.push_str(if pretty { ": " } else { ":" });
                 index += 1;
             }
             other => {
@@ -328,7 +345,7 @@ pub fn phase_at(event: &WireEvent, elapsed_ms: u64) -> Option<String> {
         "text_delta" => "responding".to_string(),
         "compaction_started" => "compacting".to_string(),
         "tool_call_started" => {
-            let raw = event.tool_args.as_deref().map_or("", RawValue::get);
+            let raw = format_args_compact(event.tool_args.as_deref());
             let flat: String = raw
                 .chars()
                 .map(|c| if c.is_whitespace() { ' ' } else { c })
@@ -959,6 +976,61 @@ mod tests {
             assert_eq!(format_args(Some(&raw)), want, "input {input}");
         }
         assert_eq!(format_args(None), "");
+    }
+
+    #[test]
+    fn argument_display_decodes_strings_without_changing_json_values() {
+        let input = r#"{"\u8def\u5f84":"\u4e2d\u6587/\ud83d\ude80\u0026\u003c\u003e","literal":"\\u0026","controls":"\u001b\u000a\u0009","quote":"\u0022\\","n":123456789012345678901234567890,"exp":1e+09}"#;
+        let raw = RawValue::from_string(input.into()).unwrap();
+        let expected = r#"{"路径":"中文/🚀&<>","literal":"\\u0026","controls":"\u001b\n\t","quote":"\"\\","n":123456789012345678901234567890,"exp":1e+09}"#;
+        assert_eq!(format_args_compact(Some(&raw)), expected);
+        let pretty = format_args(Some(&raw));
+        assert!(pretty.contains(r#""路径": "中文/🚀&<>""#), "{pretty}");
+        assert!(pretty.contains(r#""literal": "\\u0026""#), "{pretty}");
+        assert!(pretty.contains("123456789012345678901234567890"));
+        assert!(pretty.contains("1e+09"));
+        // The display is still valid JSON and can safely be parsed by Web summaries.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&pretty).unwrap(),
+            serde_json::from_str::<serde_json::Value>(input).unwrap(),
+        );
+    }
+
+    #[test]
+    fn compact_string_arguments_keep_quotes_backslashes_and_controls() {
+        let raw =
+            RawValue::from_string(r#""\u4e2d\u6587\u0026\\u0026\u001b\u000a""#.into()).unwrap();
+        assert_eq!(format_args_compact(Some(&raw)), r#""中文&\\u0026\u001b\n""#);
+    }
+
+    #[test]
+    fn argument_display_preserves_unpaired_surrogates_without_panicking() {
+        // RawValue accepts JSON syntax without requiring strings to be UTF-8 decodable.
+        let raw = RawValue::from_string(r#"{"s":"\ud800"}"#.into()).unwrap();
+        assert_eq!(format_args_compact(Some(&raw)), raw.get());
+        assert_eq!(format_args(Some(&raw)), "{\n  \"s\": \"\\ud800\"\n}");
+    }
+
+    #[test]
+    fn live_history_and_phase_decode_argument_escapes() {
+        let args =
+            r#"{"command":"echo \u4e2d\u6587\ud83d\ude80 \u0026\u003c\u003e","literal":"\\u0026"}"#;
+        let history = format!(
+            r#"[{{"role":"assistant","blocks":[{{"type":"tool_call","tool_call_id":"c1","tool_name":"bash","arguments":{args}}}]}}]"#
+        );
+        let event = format!(
+            r#"{{"type":"tool_call_started","tool_call_id":"c1","tool_name":"bash","tool_args":{args}}}"#
+        );
+        let stored = from_history(&history).unwrap();
+        let event: WireEvent = serde_json::from_str(&event).unwrap();
+        let live = reduce(&[], &event);
+        assert_eq!(stored, live);
+        let Item::Tool { args, .. } = &live[0] else {
+            panic!("expected tool")
+        };
+        assert!(args.contains("echo 中文🚀 &<>"), "{args}");
+        assert!(args.contains(r#"\\u0026"#), "{args}");
+        assert!(phase(&event).unwrap().contains("echo 中文🚀 &<>"));
     }
 
     #[test]

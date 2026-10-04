@@ -2464,7 +2464,10 @@ commands, including `/compact`, `/context`, `/reflect`, and `/skill`, and to `/m
 for the default scope, then `deleteMyCommands` for the `all_private_chats` and
 `all_group_chats` scopes, whose lists Telegram would show instead. Lists set
 for a single chat, for chat administrators, or for a specific language are not
-changed. A failed call is logged and the connector continues.
+changed. It also uses `setChatMenuButton` to select the commands menu for the
+bot default and every configured private chat; group IDs are skipped because
+this API applies to private chats. This replaces any custom Web App menu button
+for those private chats. A failed call is logged and the connector continues.
 
 `/use` replies with one of these when it does not switch:
 

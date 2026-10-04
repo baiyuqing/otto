@@ -39,6 +39,7 @@ type Bot struct {
 	client *http.Client
 
 	backoffMin, backoffMax time.Duration
+	menuChatIDs            []string
 
 	// Set by Run before the first update is handled; read only by Run.
 	botID    int64
@@ -48,8 +49,9 @@ type Bot struct {
 
 var _ bridge.Platform = (*Bot)(nil)
 
-// New returns a Bot that persists its getUpdates offset in store.
-func New(token string, store *state.Store) *Bot {
+// New returns a Bot that persists its getUpdates offset in store. Positive
+// numeric menuChatIDs receive a per-chat commands menu button.
+func New(token string, store *state.Store, menuChatIDs ...string) *Bot {
 	return &Bot{
 		APIBase:     "https://api.telegram.org",
 		PollTimeout: 50 * time.Second,
@@ -58,6 +60,7 @@ func New(token string, store *state.Store) *Bot {
 		client:      &http.Client{},
 		backoffMin:  time.Second,
 		backoffMax:  30 * time.Second,
+		menuChatIDs: append([]string(nil), menuChatIDs...),
 	}
 }
 
@@ -208,9 +211,9 @@ type update struct {
 	Callback *callbackQuery `json:"callback_query"`
 }
 
-// syncCommands sets the default-scope command menu to bridge.Commands and
-// deletes the private-chat and group-chat lists, which Telegram would show
-// instead. Each call is tried once; a failure is logged and the rest still run.
+// syncCommands sets the default command list, clears private/group overrides,
+// and selects the commands menu button globally and for configured private
+// chats. Each call is tried once; a failure is logged and the rest still run.
 func (b *Bot) syncCommands(ctx context.Context) {
 	cmds := make([]map[string]string, len(bridge.Commands))
 	for i, c := range bridge.Commands {
@@ -223,6 +226,20 @@ func (b *Bot) syncCommands(ctx context.Context) {
 		{"setMyCommands", map[string]any{"commands": cmds}},
 		{"deleteMyCommands", map[string]any{"scope": map[string]string{"type": "all_private_chats"}}},
 		{"deleteMyCommands", map[string]any{"scope": map[string]string{"type": "all_group_chats"}}},
+		{"setChatMenuButton", map[string]any{"menu_button": map[string]string{"type": "commands"}}},
+	}
+	for _, configured := range b.menuChatIDs {
+		chatID, err := strconv.ParseInt(configured, 10, 64)
+		if err != nil || chatID <= 0 {
+			continue
+		}
+		calls = append(calls, struct {
+			method string
+			body   any
+		}{"setChatMenuButton", map[string]any{
+			"chat_id":     chatID,
+			"menu_button": map[string]string{"type": "commands"},
+		}})
 	}
 	for _, c := range calls {
 		if err := b.call(ctx, c.method, c.body, nil); err != nil {

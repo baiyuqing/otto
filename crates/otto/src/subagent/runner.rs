@@ -71,8 +71,9 @@ use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result}
 
 /// Tools a child never receives: the agent-control tools, because delegation
 /// depth is fixed at one; the memory tools, because a child gets no memory
-/// binding; and the timer tools, which read and wake the parent session.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 11] = [
+/// binding; the timer tools, which read and wake the parent session; and the schedule
+/// tools, which deliver to the parent conversation's origin.
+pub const EXCLUDED_CHILD_TOOLS: [&str; 14] = [
     "agent",
     "agent_wait",
     "agent_status",
@@ -84,6 +85,9 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 11] = [
     "remind",
     "remind_status",
     "remind_cancel",
+    "schedule",
+    "schedule_list",
+    "schedule_cancel",
 ];
 
 /// Appended to a child's system prompt inside `<subagent_role>` when it has

@@ -125,7 +125,7 @@ impl std::fmt::Display for ReminderError {
 /// shape `agent_status` and `/tasks` use for theirs.
 pub const NO_TIMERS: &str = "no timers in this session";
 
-const DESCRIPTION: &str = "Schedule a reminder that arrives later as a [timer] message and starts a wake turn. Returns immediately; does not block. Timers are kept with the session across a restart (at most 8 at once, 1 to 3600 seconds); /new starts a fresh session without them, and archiving a session cancels them. Use this when you need to continue after a delay without waiting in the current turn. Use remind_status to see what is outstanding and remind_cancel to stop one.";
+const DESCRIPTION: &str = "Schedule a reminder that arrives later as a [timer] message and starts a wake turn. Returns immediately; does not block. Timers are kept with the session across a restart (at most 8 at once, 1 to 3600 seconds); /new starts a fresh session without them, and archiving a session cancels them. Use this when you need to continue after a delay without waiting in the current turn. It is your own timer inside this conversation; for results the user asked to receive later or repeatedly, use schedule. Use remind_status to see what is outstanding and remind_cancel to stop one.";
 
 const STATUS_DESCRIPTION: &str = "List the timers outstanding in this session: one line each with the id, how long until it fires, and the message. Use the id with remind_cancel.";
 

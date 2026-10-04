@@ -31,6 +31,7 @@ pub(crate) mod root;
 pub mod safety;
 mod search;
 pub mod skill;
+pub(crate) mod task_control;
 pub mod workspace;
 pub mod write;
 

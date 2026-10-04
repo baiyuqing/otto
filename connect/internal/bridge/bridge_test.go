@@ -100,24 +100,24 @@ func TestReflectionNoticeIsDroppedAfterTheChatSwitchesSessions(t *testing.T) {
 	}
 }
 
-func TestSecondMessageWaitsForFirst(t *testing.T) {
+func TestNaturalMessageDuringActiveTaskUsesControlDialogue(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
 	h.say("sleep")
 	h.waitCall("start:sleep")
 	h.say("second")
 	h.waitSent(2)
-	if got := h.plat.texts(); !slices.Equal(got, []string{"echo: sleep", "echo: second"}) {
+	if got := h.plat.texts(); !slices.Equal(got, []string{"Guidance accepted.", "echo: sleep"}) {
 		t.Fatalf("sent = %q", got)
 	}
 	var seq []string
 	for _, c := range fake.Calls(h.dir) {
-		if strings.HasPrefix(c, "start:") || strings.HasPrefix(c, "end:") {
+		if strings.HasPrefix(c, "start:") || strings.HasPrefix(c, "end:") || strings.HasPrefix(c, "task_control:") {
 			seq = append(seq, c)
 		}
 	}
-	if want := []string{"start:sleep", "end:sleep", "start:second", "end:second"}; !slices.Equal(seq, want) {
-		t.Fatalf("agent saw %q, want %q", seq, want)
+	if want := []string{"start:sleep", "task_control:second", "end:sleep"}; !slices.Equal(seq, want) {
+		t.Fatalf("agent saw %q, want active-task control %q", seq, want)
 	}
 	if n := len(h.calls("new:")); n != 1 {
 		t.Fatalf("session/new called %d times, want 1", n)
@@ -130,22 +130,29 @@ func TestQueueLimitAndStop(t *testing.T) {
 	h.say("block")
 	h.waitCall("start:block")
 	for i := 1; i <= 10; i++ {
-		h.say(fmt.Sprintf("q%d", i))
+		h.say(fmt.Sprintf("/queue q%d", i))
 	}
-	h.say("q11")
-	got := h.waitSent(1)
-	if !strings.Contains(got[0], "Queue is full") || h.plat.sent[0].replyTo == "" {
-		t.Fatalf("11th message got %+v", h.plat.sent[0])
+	h.say("/queue q11")
+	h.waitFor(func() bool {
+		return len(h.plat.texts()) >= 11 && slices.ContainsFunc(h.plat.texts(), func(text string) bool { return strings.Contains(text, "Queue is full") })
+	}, "queue acknowledgements and rejection")
+	h.plat.mu.Lock()
+	var rejection *sent
+	for _, message := range h.plat.sent {
+		if strings.Contains(message.text, "Queue is full") {
+			rejection = &message
+			break
+		}
 	}
-	settle()
-	if n := len(h.plat.texts()); n != 1 {
-		t.Fatalf("sent = %q", h.plat.texts())
+	h.plat.mu.Unlock()
+	if rejection == nil || rejection.replyTo == "" {
+		t.Fatalf("queue rejection did not reply to command: %+v", rejection)
 	}
 
 	h.say("/stop")
-	h.waitSent(2)
-	if got := h.plat.texts(); got[1] != "Stopped." {
-		t.Fatalf("sent = %q, want Stopped.", got)
+	got := h.waitSent(12)
+	if !slices.Contains(got, "Stopped.") {
+		t.Fatalf("sent = %q, missing Stopped.", got)
 	}
 	sid := h.store.Session("fake:c1")
 	if c := h.calls("cancel:"); len(c) != 1 || c[0] != "cancel:"+sid {
@@ -155,18 +162,19 @@ func TestQueueLimitAndStop(t *testing.T) {
 	if p := h.calls("start:"); len(p) != 1 {
 		t.Fatalf("queued messages reached the agent after /stop: %q", p)
 	}
-	if n := len(h.plat.texts()); n != 2 {
+	if n := len(h.plat.texts()); n != 12 {
 		t.Fatalf("sent = %q", h.plat.texts())
 	}
 
 	// The chat is usable again and /stop with nothing running says so.
 	h.say("/stop")
-	got = h.waitSent(3)
-	if got[2] != "Nothing is running." {
+	got = h.waitSent(13)
+	if got[12] != "Nothing is running." {
 		t.Fatalf("sent = %q", got)
 	}
 	h.say("after")
-	if got = h.waitSent(4); got[3] != "echo: after" {
+	got = h.waitFor(func() bool { return slices.Contains(h.plat.texts(), "echo: after") }, "chat usable after stop")
+	if !slices.Contains(got, "echo: after") {
 		t.Fatalf("sent = %q", got)
 	}
 }
@@ -274,6 +282,9 @@ func TestApprovalDialogueRepliesAndQueuesMessages(t *testing.T) {
 	h.waitFor(func() bool { return len(h.plat.texts()) >= 3 }, "approval dialogue replies")
 	if got := h.calls("start:"); len(got) != 1 || got[0] != "start:perm:ls" {
 		t.Fatalf("queued message ran before approval: %q", got)
+	}
+	if got := h.calls("task_control:"); len(got) != 0 {
+		t.Fatalf("pending-approval messages bypassed the restricted dialogue: %q", got)
 	}
 	if got := h.plat.texts(); !slices.Contains(got, "The agent needs approval to run this tool call.") || !slices.Contains(got, "I will handle that after approval.") {
 		t.Fatalf("dialogue replies = %q", got)

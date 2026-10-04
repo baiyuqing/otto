@@ -90,6 +90,18 @@ impl Relay {
         }
     }
 
+    pub(super) fn task_control_error(
+        &self,
+        failure: ClientError,
+    ) -> agent_client_protocol_schema::v1::Error {
+        match &failure {
+            ClientError::Http {
+                status: 404, code, ..
+            } if code.is_empty() => super::task_control_error(failure),
+            _ => self.fail(failure),
+        }
+    }
+
     pub(super) async fn new_session(&self, workspace: &Path) -> Reply {
         let id = self
             .client
@@ -174,6 +186,24 @@ impl Relay {
                 return self.reflect_command(session_id, focus, cancel).await;
             }
             Command::Skill { args } => return self.skill_command(session_id, args).await,
+            Command::Steer { guidance } => {
+                let accepted = self
+                    .client
+                    .steer(session_id, guidance)
+                    .await
+                    .map_err(|failure| self.task_control_error(failure))?;
+                return Ok(Some(if accepted {
+                    "Guidance accepted for the active task; it will be delivered at the next safe boundary."
+                        .to_string()
+                } else {
+                    "The active task did not accept guidance.".to_string()
+                }));
+            }
+            Command::Queue { .. } => {
+                return Ok(Some(
+                    "Nested /queue is not supported; submit a top-level /queue prompt".to_string(),
+                ));
+            }
             command => command,
         };
         let call = async {
@@ -188,7 +218,10 @@ impl Relay {
                     .compact(session_id, focus)
                     .await
                     .map(|done| done.map(|done| compaction_text(&done))),
-                Command::Reflect { .. } | Command::Skill { .. } => unreachable!(),
+                Command::Reflect { .. }
+                | Command::Skill { .. }
+                | Command::Steer { .. }
+                | Command::Queue { .. } => unreachable!(),
             }
         };
         tokio::select! {
@@ -298,13 +331,43 @@ impl Relay {
         channel: Option<Channel>,
         cancel: &CancellationToken,
     ) -> Reply {
-        let mut stream = tokio::select! {
+        let stream = tokio::select! {
             biased;
             () = self.lost.cancelled() => return Err(error(INTERNAL_ERROR, LOST)),
             started = self.client.start_turn_with_channel(session_id, text, None, channel) => {
                 started.map_err(|failure| self.fail(failure))?
             }
         };
+        self.stream_turn(connection, session_id, stream, cancel)
+            .await
+    }
+
+    /// Starts one separately admitted ACP `/queue` follow-up on serve.
+    pub(super) async fn start_queued_prompt(
+        &self,
+        session_id: &str,
+        text: &str,
+        channel: Option<Channel>,
+    ) -> Result<crate::client::TurnStream, agent_client_protocol_schema::v1::Error> {
+        if self.lost.is_cancelled() {
+            return Err(error(INTERNAL_ERROR, LOST));
+        }
+        let stream = self
+            .client
+            .start_turn_with_channel(session_id, text, None, channel)
+            .await
+            .map_err(|failure| self.fail(failure))?;
+        Ok(stream)
+    }
+
+    /// Forwards one already-started server turn as ACP session updates.
+    pub(super) async fn stream_turn(
+        &self,
+        connection: &Connection,
+        session_id: &str,
+        mut stream: crate::client::TurnStream,
+        cancel: &CancellationToken,
+    ) -> Reply {
         let mut cancel_sent = false;
         let mut approval: Option<OpenApproval> = None;
         loop {

@@ -82,8 +82,10 @@ The other modules group native responsibilities:
   `reflection/`, `typesafe/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, `workflow.rs`,
   and `schedule/` (scheduled deliveries: store, tools, worker).
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
-- **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`, and
-  `urlprivacy.rs`.
+- **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`,
+  `urlprivacy.rs`, and `log.rs` (the process logger: one instance built at the
+  composition root and passed to its consumers; event names and fields are in
+  [observability](specs/2026-10-04-observability.md)).
 
 Place native tool execution and workspace enforcement in `tool/`; `bash`
 execution goes through `sandbox/`. Keep session persistence append-only.

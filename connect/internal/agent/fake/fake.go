@@ -256,6 +256,9 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 		if chat, _ := otto["chat"].(string); chat != "" {
 			a.log("chat:%s", chat)
 		}
+		if id, _ := otto["requestId"].(string); id != "" {
+			a.log("request_id:%s", id)
+		}
 	}
 	defer func() { a.log("end:%s", text) }()
 	cancelled := make(chan struct{})

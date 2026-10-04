@@ -2124,13 +2124,14 @@ backend is involved.
 `otto_tool_calls_total{tool,status}`, `otto_tool_call_duration_seconds{tool}`,
 `otto_provider_tokens_total{kind}`, `otto_event_stream_clients`,
 `otto_tasks_started_total`, `otto_tasks_finished_total{status}`,
-`otto_tasks_running`, `otto_workflow_runs{status}`, and
-`otto_workflow_steps{status}`.
+`otto_tasks_running`, `otto_workflow_runs{status}`,
+`otto_workflow_steps{status}`, `otto_schedule_runs_total{outcome}`,
+`otto_schedule_deliveries_total{channel,outcome}`,
+`otto_build_info{version}`, and `process_start_time_seconds`.
 
-Otto logs one line per HTTP request (method, route, status, duration, request
-ID) and one line per turn start and finish (session ID, turn ID, status,
-duration, token usage). Prompt text and tool arguments or output are never
-logged.
+Otto logs one line per HTTP request, turn, provider request, and tool call.
+See [Logs, metrics, and request correlation](#logs-metrics-and-request-correlation)
+for the events, their fields, and a Prometheus scrape configuration.
 
 ### Sub-agent task records
 
@@ -2490,6 +2491,9 @@ app_secret_env = "OTTO_CONNECT_FEISHU_APP_SECRET"
 domain = "feishu"                  # the default; "lark" for Lark (larksuite.com)
 chats = ["oc_xxx"]
 senders = ["ou_xxx"]
+
+[metrics]
+listen = "127.0.0.1:9465"          # the default; "" turns the endpoint off
 ```
 
 - A platform is enabled when its section is present. At least one of
@@ -2508,8 +2512,12 @@ senders = ["ou_xxx"]
   the `chatgpt` provider after `otto login`.
 - State is kept in `~/.otto/connect/state.json` (mode `0600`): the session id
   of each chat and the Telegram update offset.
+- `[metrics].listen` is the loopback address of the connector's `/metrics`
+  and `/healthz` endpoints. Only `127.0.0.1`, `::1`, and `localhost` are
+  accepted. If the port cannot be bound, the connector logs
+  `metrics_listen_failed` and runs without the endpoint.
 - Log lines contain chat ids, sender ids, and errors. Message text is not
-  logged.
+  logged. See [Logs, metrics, and request correlation](#logs-metrics-and-request-correlation).
 
 ### Feishu app
 
@@ -2595,9 +2603,10 @@ they are unavailable in direct TCP mode.
 A message is handled only when its chat id is in `chats` and its sender id
 is in `senders`. An empty list admits nothing, and startup logs a warning
 that the platform will ignore all messages. A rejected message gets no reply
-and is logged with its chat and sender ids; send the bot a message and read
-that log line to find the ids to add. In a Telegram private chat the chat
-id equals the user id; Telegram group ids are negative numbers.
+and is logged as `chat_rejected` with its `chat_id` and `sender_id`; send the
+bot a message and read that log line to find the ids to add. In a Telegram
+private chat the chat id equals the user id; Telegram group ids are negative
+numbers.
 
 In a Telegram group, a message must also mention the bot (`@BotName`), reply
 to one of the bot's messages, or be a command addressed to it
@@ -2609,8 +2618,8 @@ private chat with the bot has its own `oc_` chat id, which must be in
 `chats` as well. In a Feishu group, a message must mention the bot; the
 mention is removed from the prompt, so `@Bot /stop` is the `/stop` command.
 The Feishu SDK applies the same lists before `otto-connect` sees a message;
-the messages it rejects are logged with the same `message rejected` line and
-a `reason`. A group message that does not mention the bot is ignored without
+the messages it rejects are logged with the same `chat_rejected` event and
+the SDK's `reason`. A group message that does not mention the bot is ignored without
 a log line.
 
 ### Messages and replies
@@ -2863,6 +2872,158 @@ at `<path>`: `<error>`". Both reach the chat as an agent exit. Restart
 - Streaming partial replies; the reply is sent when the turn ends.
 - Images, files, and other attachments.
 - Running as a login service (launchd or systemd).
+
+## Logs, metrics, and request correlation
+
+`otto serve` and `otto-connect` write structured log lines to stderr and
+serve Prometheus metrics on `/metrics`. Neither process writes log files;
+redirect stderr or let the process supervisor collect it, for example:
+
+```sh
+otto serve --socket ~/.otto/otto.sock --listen 127.0.0.1:9464 2>>~/.otto/serve.log
+otto-connect 2>>~/.otto/connect.log
+```
+
+The terminal UI writes no log lines, because they would overwrite its screen.
+Plain `otto acp` writes to stderr; when `otto-connect` starts it, the
+connector logs each of those lines as `agent stderr: <line>`.
+
+### Log format
+
+Every line has the form
+
+```text
+time=2026-10-04T10:15:02.114+08:00 level=INFO msg=turn_finished session_id=... turn_id=... duration_ms=8123
+```
+
+`msg` is a stable event name; values that contain spaces or quotes are
+quoted. Levels are `INFO`, `WARN`, and `ERROR`; there is no level setting.
+Message text, model output, prompts, tool arguments and results, tokens, and
+secrets are never logged. Chat ids and sender ids are logged; protect the log
+files accordingly.
+
+`otto serve` events:
+
+| Event | Fields |
+| --- | --- |
+| `http_request` | `method`, `route`, `status`, `duration_ms`, `request_id` |
+| `turn_started` | `session_id`, `turn_id`, `trigger`, `request_id`, `inbox_kind` on wake turns |
+| `provider_request_finished` | `session_id`, `turn_id`, `request_id`, `provider`, `model`, `status`, `attempts`, `duration_ms` |
+| `tool_call_finished` | `session_id`, `turn_id`, `request_id`, `tool`, `status`, `duration_ms` |
+| `turn_finished` | `session_id`, `turn_id`, `trigger`, `request_id`, `status`, `duration_ms`, `provider_requests`, `provider_ms`, `tool_calls`, `tool_ms`, `input_tokens`, `output_tokens` |
+| `turn_error` | `session_id`, `turn_id`, `trigger`, `request_id`, `error` |
+| `schedule_run_finished` | `schedule_id`, `due_at`, `outcome`, `duration_ms` |
+| `schedule_delivery_finished` | `channel`, `outcome`, `error` on failure |
+| `schedule_store_error` | `operation`, `error` |
+| `workflow_step_finished` | `run_id`, `workflow`, `step_id`, `status`, `duration_ms` |
+| `workflow_run_finished` | `run_id`, `workflow`, `status`, `duration_ms` |
+| `mcp_server_connected` | `server`, `transport`, `tools` |
+| `mcp_server_failed` | `server`, `transport`, `error` |
+
+`request_id` is present only on turns whose request carried one. The
+schedule, workflow, and MCP events are also written by `otto acp` and
+`otto workflow`, which run the same code.
+
+- `schedule_run_finished`: `outcome` is `reply`, `failed_before_tools`, or
+  `failed`. It is written after the run is recorded; if recording fails, a
+  `schedule_store_error` line (`WARN`) is written instead.
+- `schedule_delivery_finished`: `outcome` is `ok` or `error` (`WARN`, with the
+  same error text the schedule store records). `channel` is `telegram`,
+  `feishu`, `terminal`, or `web`.
+- `workflow_step_finished`: `status` is `succeeded`, `failed`, `canceled`, or
+  `interrupted` (the run's deadline passed). `workflow_run_finished` is
+  written once, when the run ends as `succeeded`, `failed`, or `canceled`; its
+  `duration_ms` counts from the run's creation, approval waits included.
+- `mcp_server_connected`: `tools` is the number of tools kept after filtering.
+  `mcp_server_failed` is `WARN` and carries the error `/mcp` shows. A server
+  that needs `otto mcp login` or is disabled writes neither event.
+
+`otto-connect` events:
+
+| Event | Fields |
+| --- | --- |
+| `connector_started` | `platforms`, `agent_mode`, `metrics_listen` |
+| `connector_stopping` | `reason` |
+| `chat_received` | `request_id`, `platform`, `chat_id`, `sender_id`, `message_id` |
+| `chat_rejected` | `platform`, `chat_id`, `sender_id`, `reason` |
+| `chat_queued`, `chat_queue_full` | `request_id`, `platform`, `chat_id`, `queue_length` |
+| `session_created`, `session_loaded` | `request_id`, `platform`, `chat_id`, `session_id` |
+| `session_load_failed` | `request_id`, `platform`, `chat_id`, `session_id`, `error` |
+| `turn_started` | `request_id`, `platform`, `chat_id`, `session_id` |
+| `turn_finished` | `request_id`, `platform`, `chat_id`, `session_id`, `stop_reason`, `duration_ms`, `reply_bytes` |
+| `turn_failed` | `request_id`, `platform`, `chat_id`, `session_id`, `duration_ms`, `error` |
+| `chat_reply_sent`, `chat_reply_failed` | `request_id`, `platform`, `chat_id`, `bytes`, `error` on failure |
+| `agent_started` | `pid`, `command` |
+| `agent_exited` | `status` |
+| `agent_restart_scheduled` | `delay_ms` |
+| `metrics_listen_failed` | `address`, `error` |
+
+`chat_queue_full`, `session_load_failed`, `turn_failed`, `chat_reply_failed`,
+`agent_exited`, and `metrics_listen_failed` are `WARN`; the others are `INFO`.
+`connector_stopping` has `reason=signal` or `reason=error`. `chat_reply_sent`
+is written for agent replies only; `chat_reply_failed` is written for every
+failed send, with an empty `request_id` when the text was a connector notice
+(for example `Stopped.`). The Feishu adapter writes `chat_rejected` itself for
+messages its SDK refuses, with the SDK's reason.
+
+### Following one chat message
+
+The connector gives each admitted chat message a `request_id` (32 hex
+characters) and sends it with the prompt. Otto attaches it to the turn the
+prompt starts when the prompt reaches `otto serve`: through `otto acp
+--attach` or through the direct ACP TCP connection. To follow a message:
+
+```sh
+grep 'request_id=<id>' ~/.otto/connect.log   # chat_received ... chat_reply_sent, with session_id
+grep 'request_id=<id>' ~/.otto/serve.log     # turn_started, each provider request and tool call, turn_finished
+```
+
+`turn_finished` in the serve log splits the turn's time into `provider_ms`
+and `tool_ms`; each `provider_request_finished` and `tool_call_finished` line
+gives one call's duration. A `/config` command's error reply quotes its
+`request_id`. With plain `otto acp` (no `otto serve`), only the connector's
+events carry the ID.
+
+### Prometheus
+
+Prometheus cannot read a Unix socket, so start `otto serve` with a loopback
+TCP listener next to the socket (see [Listener](#listener)); `/metrics` and
+`/healthz` need no token. `otto-connect` serves its metrics on
+`[metrics].listen`, by default `127.0.0.1:9465`.
+
+```yaml
+scrape_configs:
+  - job_name: otto
+    static_configs:
+      - targets: ["127.0.0.1:9464"]
+  - job_name: otto-connect
+    static_configs:
+      - targets: ["127.0.0.1:9465"]
+```
+
+The serve metric families are listed under [HTTP API](#http-api). The
+connector exports:
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `otto_connect_build_info` | gauge | `version` |
+| `otto_connect_messages_total` | counter | `platform`, `outcome` (`accepted`, `rejected`, `queue_full`) |
+| `otto_connect_turns_total` | counter | `platform`, `stop_reason` |
+| `otto_connect_turn_duration_seconds` | histogram | `platform` |
+| `otto_connect_replies_total` | counter | `platform`, `outcome` (`ok`, `error`) |
+| `otto_connect_agent_restarts_total` | counter | none |
+| `otto_connect_agent_up` | gauge | none |
+
+`accepted` counts every message that passed the chat and sender lists and was
+not refused by a full queue, including commands and messages too old to run.
+`otto_connect_replies_total` counts sends of agent replies only.
+`otto_connect_agent_restarts_total` increases each time the connector replaces
+an agent process or connection that ended. `otto_connect_agent_up` is 1 while
+a started agent process or connection has not ended. The `version` label is
+the module version (`(devel)` for a local build), followed by `+` and the first 7 characters of the Git
+revision when the binary was built from a checkout.
+
+No metric has a chat, sender, session, or request label.
 
 ## Durable workflows
 

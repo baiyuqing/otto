@@ -19,6 +19,7 @@ import (
 
 	"github.com/baiyuqing/otto/connect/internal/agent"
 	"github.com/baiyuqing/otto/connect/internal/manage"
+	"github.com/baiyuqing/otto/connect/internal/metrics"
 	"github.com/baiyuqing/otto/connect/internal/state"
 	"github.com/coder/acp-go-sdk"
 )
@@ -40,6 +41,7 @@ type Options struct {
 	Platforms []Platform
 	Access    map[string]Access // by Platform.Name()
 	Store     *state.Store
+	Metrics   *metrics.Metrics // nil disables counting
 
 	QueueLimit        int           // default 10
 	PermissionTimeout time.Duration // default 10 min
@@ -289,14 +291,24 @@ var Commands = []Command{
 // notifications run on their own goroutines.
 func (b *Bridge) deliver(m Message) {
 	if !b.admitted(m) {
-		slog.Info("message rejected: chat or sender not allowed",
-			"platform", m.Platform, "chat", m.ChatID, "sender", m.SenderID)
+		slog.Info("chat_rejected", "platform", m.Platform, "chat_id", m.ChatID, "sender_id", m.SenderID,
+			"reason", "chat or sender not allowed")
+		b.opts.Metrics.Message(m.Platform, "rejected")
 		return
 	}
 	p := b.platforms[m.Platform]
 	if p == nil {
 		return
 	}
+	m.RequestID = newRequestID()
+	m.queueFull = new(bool)
+	slog.Info("chat_received", "request_id", m.RequestID, "platform", m.Platform, "chat_id", m.ChatID,
+		"sender_id", m.SenderID, "message_id", m.MessageID)
+	defer func() {
+		if !*m.queueFull {
+			b.opts.Metrics.Message(m.Platform, "accepted")
+		}
+	}()
 	c := b.chat(p, m.ChatID)
 	if !m.Time.IsZero() && b.opts.Now().Sub(m.Time) > b.opts.StaleAfter {
 		c.notify(m.MessageID, fmt.Sprintf("Message from %s was not run: it is older than %s.",
@@ -368,6 +380,7 @@ func (b *Bridge) deliver(m Message) {
 		accepted := c.enqueueApprovalMessageLocked(sid, m)
 		c.mu.Unlock()
 		if !accepted {
+			c.queueFull(m, c.b.opts.QueueLimit)
 			c.notify(m.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not queued.", c.b.opts.QueueLimit))
 		}
 		return
@@ -382,6 +395,7 @@ func (b *Bridge) deliver(m Message) {
 		accepted := c.enqueueTaskControlLocked(controlItem{message: m})
 		c.mu.Unlock()
 		if !accepted {
+			c.queueFull(m, c.b.opts.QueueLimit)
 			c.notify(m.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not routed to the active task.", c.b.opts.QueueLimit))
 		}
 		return
@@ -602,14 +616,30 @@ const (
 )
 
 // send posts a connector notice, which is plain text.
-func (c *chat) send(ctx context.Context, replyTo, text string) { c.post(ctx, replyTo, text, false) }
+func (c *chat) send(ctx context.Context, replyTo, text string) { c.post(ctx, "", replyTo, text, false) }
 
-// sendReply posts the agent's Markdown reply.
-func (c *chat) sendReply(ctx context.Context, replyTo, text string) { c.post(ctx, replyTo, text, true) }
+// sendReply posts the agent's Markdown reply for the message with requestID.
+func (c *chat) sendReply(ctx context.Context, requestID, replyTo, text string) {
+	c.post(ctx, requestID, replyTo, text, true)
+}
 
-func (c *chat) post(ctx context.Context, replyTo, text string, markdown bool) {
-	if err := c.p.Send(ctx, c.id, replyTo, text, markdown); err != nil && ctx.Err() == nil {
-		slog.Warn("send failed", "platform", c.p.Name(), "chat", c.id, "error", err)
+// post sends text. A send with a requestID is a reply to that message and is
+// counted in replies_total; its success is logged too. Failures of any send
+// are logged.
+func (c *chat) post(ctx context.Context, requestID, replyTo, text string, markdown bool) {
+	err := c.p.Send(ctx, c.id, replyTo, text, markdown)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("chat_reply_failed", "request_id", requestID, "platform", c.p.Name(), "chat_id", c.id, "bytes", len(text), "error", err)
+			if requestID != "" {
+				c.b.opts.Metrics.Reply(c.p.Name(), "error")
+			}
+		}
+		return
+	}
+	if requestID != "" {
+		slog.Info("chat_reply_sent", "request_id", requestID, "platform", c.p.Name(), "chat_id", c.id, "bytes", len(text))
+		c.b.opts.Metrics.Reply(c.p.Name(), "ok")
 	}
 }
 
@@ -618,6 +648,15 @@ func (c *chat) post(ctx context.Context, replyTo, text string, markdown bool) {
 // outbox if ordering of notices matters.
 func (c *chat) notify(replyTo, text string) {
 	go c.send(c.b.workCtx, replyTo, text)
+}
+
+// queueFull logs a refused message and marks it for the messages_total outcome.
+func (c *chat) queueFull(m Message, length int) {
+	slog.Warn("chat_queue_full", "request_id", m.RequestID, "platform", c.p.Name(), "chat_id", c.id, "queue_length", length)
+	c.b.opts.Metrics.Message(c.p.Name(), "queue_full")
+	if m.queueFull != nil {
+		*m.queueFull = true
+	}
 }
 
 func (c *chat) enqueue(m Message) bool {
@@ -633,10 +672,12 @@ func (c *chat) enqueueLocked(m Message) bool {
 		return false
 	}
 	if len(c.queue) >= c.b.opts.QueueLimit {
+		c.queueFull(m, len(c.queue))
 		c.notify(m.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not queued.", c.b.opts.QueueLimit))
 		return false
 	}
 	c.queue = append(c.queue, m)
+	slog.Info("chat_queued", "request_id", m.RequestID, "platform", c.p.Name(), "chat_id", c.id, "queue_length", len(c.queue))
 	if c.running {
 		return true
 	}
@@ -773,7 +814,7 @@ func (c *chat) taskControlDialogue(sid string, generation uint64, taskCtx contex
 		c.mu.Unlock()
 		if response != "" {
 			if markdown {
-				c.sendReply(c.b.workCtx, item.message.MessageID, response)
+				c.sendReply(c.b.workCtx, item.message.RequestID, item.message.MessageID, response)
 			} else {
 				c.send(c.b.workCtx, item.message.MessageID, response)
 			}
@@ -853,6 +894,7 @@ func (c *chat) turn(m Message) {
 		close(turnDone)
 	}()
 
+	started := time.Now()
 	ctx := c.b.workCtx
 	typingDone := make(chan struct{})
 	defer close(typingDone)
@@ -865,7 +907,7 @@ func (c *chat) turn(m Message) {
 		generation uint64
 	)
 	for attempt := 0; attempt < 2; attempt++ {
-		if sid, err = c.session(ctx, m.MessageID); err != nil {
+		if sid, err = c.session(ctx, m); err != nil {
 			break
 		}
 		lock := c.b.sessionLock(sid)
@@ -893,7 +935,8 @@ func (c *chat) turn(m Message) {
 		c.b.mu.Unlock()
 
 		c.startApprovalWatch(sid)
-		stop, err = c.b.opts.Agent.PromptWithChannel(ctx, sid, m.Text, m.Platform, m.Platform+":"+m.ChatID, chatPrompt(m))
+		slog.Info("turn_started", "request_id", m.RequestID, "platform", m.Platform, "chat_id", m.ChatID, "session_id", sid)
+		stop, err = c.b.opts.Agent.PromptWithChannel(ctx, sid, m.Text, m.Platform, m.Platform+":"+m.ChatID, m.RequestID, chatPrompt(m))
 
 		c.b.mu.Lock()
 		delete(c.b.bySession, sid)
@@ -914,9 +957,18 @@ func (c *chat) turn(m Message) {
 	if ctx.Err() != nil {
 		return
 	}
+	elapsed := time.Since(started)
+	if err != nil {
+		slog.Warn("turn_failed", "request_id", m.RequestID, "platform", m.Platform, "chat_id", m.ChatID, "session_id", sid,
+			"duration_ms", elapsed.Milliseconds(), "error", err)
+		c.b.opts.Metrics.Turn(m.Platform, "error", elapsed)
+	} else {
+		slog.Info("turn_finished", "request_id", m.RequestID, "platform", m.Platform, "chat_id", m.ChatID, "session_id", sid,
+			"stop_reason", string(stop), "duration_ms", elapsed.Milliseconds(), "reply_bytes", len(text))
+		c.b.opts.Metrics.Turn(m.Platform, string(stop), elapsed)
+	}
 	switch {
 	case err != nil:
-		slog.Warn("prompt failed", "chat", c.key, "error", err)
 		var ee *agent.ExitError
 		if errors.As(err, &ee) {
 			c.send(ctx, m.MessageID, ee.Error())
@@ -929,7 +981,7 @@ func (c *chat) turn(m Message) {
 		if text != "" {
 			text += "\n\n"
 		}
-		c.sendReply(ctx, m.MessageID, text+"Stop reason: "+string(stop))
+		c.sendReply(ctx, m.RequestID, m.MessageID, text+"Stop reason: "+string(stop))
 	default:
 		if proposed {
 			if text != "" {
@@ -938,7 +990,7 @@ func (c *chat) turn(m Message) {
 			text += memoryHint
 		}
 		if text != "" {
-			c.sendReply(ctx, m.MessageID, text)
+			c.sendReply(ctx, m.RequestID, m.MessageID, text)
 		}
 	}
 	if err == nil && stop == acp.StopReasonEndTurn {
@@ -964,7 +1016,7 @@ func (c *chat) sendBackground(sessionID, text string, markdown bool) {
 			}
 		}
 		if c.b.opts.Store.Session(c.key) == sessionID {
-			c.post(c.b.workCtx, "", text, markdown)
+			c.post(c.b.workCtx, "", "", text, markdown)
 		}
 	}()
 }
@@ -1001,17 +1053,19 @@ func chatPrompt(m Message) string {
 // session returns the chat's session id, loading the stored one or creating
 // a new one. A load that the agent refuses is replaced by a new session and a
 // notice.
-func (c *chat) session(ctx context.Context, replyTo string) (string, error) {
+func (c *chat) session(ctx context.Context, m Message) (string, error) {
+	replyTo := m.MessageID
 	if id := c.b.opts.Store.Session(c.key); id != "" {
 		err := c.b.load(ctx, id)
 		if err == nil {
+			slog.Info("session_loaded", "request_id", m.RequestID, "platform", m.Platform, "chat_id", m.ChatID, "session_id", id)
 			return id, nil
 		}
 		var ee *agent.ExitError
 		if errors.As(err, &ee) || ctx.Err() != nil {
 			return "", err
 		}
-		slog.Warn("session load failed; creating a new session", "chat", c.key, "error", err)
+		slog.Warn("session_load_failed", "request_id", m.RequestID, "platform", m.Platform, "chat_id", m.ChatID, "session_id", id, "error", err)
 		c.send(ctx, replyTo, "The previous session could not be loaded; started a new one.")
 	}
 	id, err := c.b.opts.Agent.New(ctx)
@@ -1021,6 +1075,7 @@ func (c *chat) session(ctx context.Context, replyTo string) (string, error) {
 	if err := c.b.opts.Store.SetSession(c.key, id); err != nil {
 		slog.Warn("saving session id failed", "chat", c.key, "error", err)
 	}
+	slog.Info("session_created", "request_id", m.RequestID, "platform", m.Platform, "chat_id", m.ChatID, "session_id", id)
 	return id, nil
 }
 

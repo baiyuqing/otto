@@ -332,6 +332,7 @@ impl PromptSlot {
                     queued.text,
                     queued.channel,
                     queued.origin,
+                    None,
                     &token,
                 )
                 .await;
@@ -890,6 +891,7 @@ impl Connection {
         text: String,
         channel: Option<Channel>,
         origin: Option<Origin>,
+        request_id: Option<&str>,
         cancel: &CancellationToken,
     ) -> Reply {
         if let Some(command) = command::parse(&text) {
@@ -903,7 +905,14 @@ impl Connection {
             }
             Backend::Attach(relay) => {
                 relay
-                    .prompt(self, session_id, &text, channel, origin.as_ref(), cancel)
+                    .prompt(
+                        self,
+                        session_id,
+                        &text,
+                        (channel, origin.as_ref()),
+                        request_id,
+                        cancel,
+                    )
                     .await
             }
         }
@@ -917,6 +926,7 @@ impl Connection {
         text: String,
         channel: Option<Channel>,
         origin: Option<Origin>,
+        request_id: Option<&str>,
         cancel: &CancellationToken,
     ) -> Reply {
         match &self.backend {
@@ -927,7 +937,14 @@ impl Connection {
             }
             Backend::Attach(relay) => {
                 relay
-                    .prompt(self, session_id, &text, channel, origin.as_ref(), cancel)
+                    .prompt(
+                        self,
+                        session_id,
+                        &text,
+                        (channel, origin.as_ref()),
+                        request_id,
+                        cancel,
+                    )
                     .await
             }
         }
@@ -1460,6 +1477,19 @@ fn parse_origin(params: &Value, channel: Option<Channel>) -> Option<Origin> {
     }
 }
 
+/// The correlation ID of a `session/prompt`, from `_meta.otto.requestId`,
+/// reduced by the same rule as the `X-Request-Id` header. A missing,
+/// non-string, or empty-after-sanitizing value is absent; it never rejects
+/// the prompt.
+fn parse_request_id(params: &Value) -> Option<String> {
+    let raw = params
+        .get("_meta")?
+        .get("otto")?
+        .get("requestId")?
+        .as_str()?;
+    Some(crate::log::request_id(raw.as_bytes())).filter(|id| !id.is_empty())
+}
+
 fn channel_name(channel: Channel) -> &'static str {
     match channel {
         Channel::Telegram => "telegram",
@@ -1746,6 +1776,7 @@ impl Dispatcher {
             Err(failure) => return connection.reply(id, Err(failure)),
         };
         let origin = parse_origin(params, channel);
+        let request_id = parse_request_id(params);
         let Some(slot) = connection.slot(&session_id) else {
             return connection.reply(id, Err(unknown_session()));
         };
@@ -1818,7 +1849,13 @@ impl Dispatcher {
                                 return;
                             }
                             let started = relay
-                                .start_queued_prompt(&session_id, &prompt, channel, origin.as_ref())
+                                .start_queued_prompt(
+                                    &session_id,
+                                    &prompt,
+                                    channel,
+                                    origin.as_ref(),
+                                    request_id.as_deref(),
+                                )
                                 .await;
                             match started {
                                 Ok(stream) => {
@@ -1860,7 +1897,14 @@ impl Dispatcher {
                             .reply(id, result(PromptResponse::new(StopReason::Cancelled)));
                     }
                     let reply = connection
-                        .prompt(&session_id, text, channel, origin, &token)
+                        .prompt(
+                            &session_id,
+                            text,
+                            channel,
+                            origin,
+                            request_id.as_deref(),
+                            &token,
+                        )
                         .await;
                     // A prompt response is an admission boundary for an ACP client:
                     // release the slot before the writer can expose the response.
@@ -1876,7 +1920,14 @@ impl Dispatcher {
         };
         self.tasks.spawn(async move {
             let reply = connection
-                .prompt(&session_id, text, channel, origin, &token)
+                .prompt(
+                    &session_id,
+                    text,
+                    channel,
+                    origin,
+                    request_id.as_deref(),
+                    &token,
+                )
                 .await;
             // A prompt response is an admission boundary for an ACP client:
             // release the slot before the writer can expose the response.

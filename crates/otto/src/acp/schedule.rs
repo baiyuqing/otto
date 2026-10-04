@@ -44,7 +44,7 @@ pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Op
     if platforms.is_empty() {
         return None;
     }
-    let (store, run) = match &connection.backend {
+    let (store, run, logger, metrics) = match &connection.backend {
         Backend::Local(local) => {
             let runner = LocalRunner {
                 builder: Arc::clone(&local.config.builder),
@@ -55,9 +55,24 @@ pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Op
                 workspace: Some(local.config.workspace.to_string_lossy().into_owned()),
                 runner: Arc::new(runner),
             };
-            (local.config.builder.schedule.clone()?, Some(run))
+            (
+                local.config.builder.schedule.clone()?,
+                Some(run),
+                Arc::clone(&local.config.builder.logger),
+                None,
+            )
         }
-        Backend::Attach(relay) => (relay.schedule.clone()?, None),
+        // In-process ACP (`otto serve --acp-listen`) counts into serve's
+        // `/metrics`; `otto acp --attach` has no registry of its own.
+        Backend::Attach(relay) => (
+            relay.schedule.clone()?,
+            None,
+            Arc::clone(&relay.logger),
+            relay
+                .server
+                .as_ref()
+                .map(|server| Arc::clone(server.metrics())),
+        ),
     };
     let sink = AcpSink {
         connection: Arc::clone(connection),
@@ -70,6 +85,8 @@ pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Op
             scope: Scope::Chats(platforms),
             sink: Arc::new(sink),
         }),
+        logger,
+        metrics,
     })
 }
 
@@ -549,18 +566,27 @@ mod tests {
     /// Sends `prompt_text` with `meta` through a relay whose server records
     /// the start-turn bodies, and returns the body it received.
     async fn relayed_turn_body(prompt_text: &str, meta: Value) -> Value {
-        let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        relayed_turn(prompt_text, meta).await.0
+    }
+
+    /// Like [`relayed_turn_body`], plus the `X-Request-Id` header.
+    async fn relayed_turn(prompt_text: &str, meta: Value) -> (Value, Option<String>) {
+        let bodies = Arc::new(Mutex::new(Vec::<(Value, Option<String>)>::new()));
         let recorded = Arc::clone(&bodies);
-        let router = axum::Router::new().fallback(move |body: String| {
-            let recorded = Arc::clone(&recorded);
-            async move {
-                recorded
-                    .lock()
-                    .unwrap()
-                    .push(serde_json::from_str(&body).unwrap());
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR
-            }
-        });
+        let router =
+            axum::Router::new().fallback(move |headers: axum::http::HeaderMap, body: String| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    let id = headers
+                        .get("x-request-id")
+                        .map(|value| value.to_str().unwrap().to_string());
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push((serde_json::from_str(&body).unwrap(), id));
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                }
+            });
         let relay = super::super::attach::Relay::with_router(router);
         relay.register("s1");
         let (mut wire, handle) = start(Backend::Attach(relay), "/work", |_| ());
@@ -591,6 +617,23 @@ mod tests {
             assert_eq!(body["channel"], "telegram", "{text}: {body}");
             let body = relayed_turn_body(text, json!({"otto": {"channel": "telegram"}})).await;
             assert!(body.get("origin").is_none(), "{text}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_attach_relay_sends_a_valid_request_id_header_and_drops_an_invalid_one() {
+        for text in ["hello", "/queue later"] {
+            let meta = json!({"otto": {"requestId": "0123abcd"}});
+            assert_eq!(
+                relayed_turn(text, meta).await.1.as_deref(),
+                Some("0123abcd"),
+                "{text}"
+            );
+            for invalid in [json!("\u{1}\u{2}"), json!(""), json!(7)] {
+                let meta = json!({"otto": {"requestId": invalid}});
+                assert_eq!(relayed_turn(text, meta).await.1, None, "{text}");
+            }
+            assert_eq!(relayed_turn(text, json!({})).await.1, None, "{text}");
         }
     }
 }

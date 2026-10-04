@@ -1413,6 +1413,9 @@ func renderPending(page agent.MemoryPage) string {
 			text = string(r[:candidateText]) + "…"
 		}
 		fmt.Fprintf(&sb, "\n%s  %s %s/%s  %s  (%s)", cand.ID[:min(len(cand.ID), shortID)], cand.Action, cand.Kind, cand.Key, text, cand.Origin)
+		if cand.Advice != "" {
+			fmt.Fprintf(&sb, "\n    %s", cand.Advice)
+		}
 	}
 	if page.NextCursor != "" {
 		sb.WriteString("\nMore are pending; decide some, then send /memory again.")

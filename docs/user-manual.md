@@ -2113,7 +2113,7 @@ is rejected.
 | `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Returns `end_turn`, or `cancelled` after `session/cancel`. |
 | `_otto/approvals/message` | Restricted pending-approval dialogue with `sessionId` and `text`; advertised by `_meta.otto.approvalDialogue`. Returns `null` or `{"text","queued"}`. Available in local and attach mode. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
-| `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}`; `nextCursor` is `""` on the last page. |
+| `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}` plus an optional string `advice` (the one-line advice, omitted when there is none); `nextCursor` is `""` on the last page. |
 | `_otto/memory/review` | Extension. Params `{sessionId, candidateId, decision}` with `decision` `accept` or `reject`; decides one candidate as a human review and returns `{decision, candidateId, record, forgotten}`. Errors: `-32010` memory is not available in the session, `-32011` the candidate was already decided or changed, `-32002` unknown session or candidate, `-32602` bad parameters or cursor. `otto acp` advertises both with `agentCapabilities._meta.otto.memoryReview`; `otto acp --attach` does not serve them. |
 
 `mcpServers` in `session/new` and `session/load` must be empty: MCP servers
@@ -2832,7 +2832,7 @@ rebuilds the search index. Set `[memory.turso].path` to the destination after
 success. Otto does not automatically migrate a legacy FTS5 memory database.
 
 The same command supports `usage.db`, `tasks.db`, `reflection.db`,
-`skill-checks.db`, and workspace workflow databases. Their ordinary tables
+`skill-checks.db`, `memory-advice.db`, and workspace workflow databases. Their ordinary tables
 can also be opened directly by Turso when compatible; use offline migration
 when making a separate copy. For stores with fixed paths, keep the old file
 as a backup and move the migrated file into place while Otto is stopped.
@@ -2880,6 +2880,40 @@ Model-originated writes always land as pending candidates for human review.
 scope, action, kind, key, text, reason, confidence, origin), and `/memory review <id> accept`
 or `/memory review <id> reject` decides one. Accepting creates the active record (or applies the
 update or forget); rejecting leaves memory unchanged.
+
+#### Advice on candidates
+
+Before a candidate from `remember` or from `/reflect` is queued, Otto asks a
+model three questions: whether it applies to all workspaces or only this one,
+whether it duplicates or conflicts with a standing user-scope record, and
+whether it is durable or a one-off request. The answers are stored with the
+candidate and shown as one line in `/memory review`, in the TUI review
+dialog, and as the `advice` field of `_otto/memory/pending` (so the chat
+connector shows it too), for example:
+
+```text
+Advice (session model gpt-x): all workspaces · duplicates plan-first · one-off request
+Advice (auxiliary model jev-latest): all workspaces 91% · new 84% · durable 77%
+```
+
+When the advised scope differs from the candidate's, the scope part ends with
+` (proposed: workspace)` or ` (proposed: user)`. Advice is a hint only: it
+never accepts, rejects or changes a candidate. By default the question goes to the
+session's own provider, model and thinking setting (token usage is recorded under
+the task id `memory-advice`); when `TYPESAFE_API_KEY` is set and non-empty it
+goes to the `jev-latest` model at `https://api.typesafe.ai`, which also gives
+percentages. `jev-latest` is an auxiliary model used only for this advice and
+for skill checks: it does not run turns or tools, and it is not a provider or
+a model you can configure. The request holds the candidate's kind, key, scope, text and
+reason, and the keys and texts of the user-scope standing records. A candidate
+that the memory service refuses is never sent. Each request has a 20 s limit; on
+a timeout, an error or an unusable answer the candidate is queued without
+advice. Each exchange is appended to `~/.otto/memory-advice.db`, table
+`memory_advice`, with the columns `created_at`, `model`, `auxiliary`,
+`candidate_id`, `scope`, `request` (the body or prompt as sent, never the API
+key), `response`, `outcome` (`ok`, `timeout`, `error` or `invalid`), `error`
+and `latency_ms`. A failed write there does not stop the candidate from being
+queued and is not reported.
 Human `/remember` and `/memory forget` apply immediately.
 
 When a session opens (start, `/new`, or resume) and the current user and

@@ -78,7 +78,7 @@ The other modules group native responsibilities:
 - **Remote and external integrations:** `provider/`, `mcp/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `session/`, `config/`, `memory/`,
-  `reflection/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, and `workflow.rs`.
+  `reflection/`, `typesafe/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, and `workflow.rs`.
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`, and
   `urlprivacy.rs`.

@@ -599,7 +599,13 @@ pub struct Runner {
     /// `Runner::close_mcp` (awaited, bounded) shut its clients down.
     pub(crate) mcp: Arc<crate::mcp::Servers>,
     pub(crate) task_control: Arc<crate::app::task_control::TaskControl>,
+    /// Adds advisory hints to memory candidates, absent when memory is off.
+    /// Reflection reads it from the active runner.
+    pub(crate) advisor: Option<Arc<crate::memory::advice::Advisor>>,
 }
+
+/// The tool-less agent behind the session-model advice backend.
+pub type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
 
 impl Runner {
     /// Runs one turn.
@@ -985,7 +991,15 @@ impl Runner {
             agents: crate::subagent::Catalog::default(),
             mcp: Arc::new(crate::mcp::Servers::default()),
             task_control,
+            advisor: None,
         }
+    }
+
+    /// Gives a [`Self::scripted`] runner an advisor.
+    #[cfg(test)]
+    pub fn with_advisor(mut self, advisor: Arc<crate::memory::advice::Advisor>) -> Self {
+        self.advisor = Some(advisor);
+        self
     }
 
     /// Replaces the MCP servers a [`Self::scripted`] runner was built with.
@@ -1453,6 +1467,30 @@ impl Builder {
             .await
     }
 
+    /// The provider client for `runtime`; `Unavailable` when the redaction
+    /// boundary is closed.
+    fn provider_client(&self, runtime: &Runtime) -> Result<ProviderClient, BuildError> {
+        Ok(if !self.boundary_allows_dynamic(Some(runtime)) {
+            ProviderClient::Unavailable
+        } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
+            ProviderClient::ChatGpt {
+                client: Arc::new(super::login::chatgpt_client(
+                    &self.auth_path,
+                    &self.auth_credentials,
+                    self.auth_credentials_loaded,
+                )?),
+                timeout: runtime.resilience.deadlines.provider_timeout,
+                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
+            }
+        } else {
+            ProviderClient::Compat {
+                client: Arc::new(Client::new(&runtime.base_url, &runtime.api_key)),
+                timeout: runtime.resilience.deadlines.provider_timeout,
+                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
+            }
+        })
+    }
+
     async fn build_runner_inner(
         &self,
         session: &SharedSession,
@@ -1488,9 +1526,33 @@ impl Builder {
             }
             tools.push(Box::new(tool));
         }
-        if self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
-            tools.extend(self.memory_tools(max_output));
-        }
+        let redactor = self.boundary_redactor(Some(runtime));
+        let client = self.provider_client(runtime)?;
+        let advisor = if self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
+            let advice_agent = Agent::with_redactor(
+                client.clone(),
+                Registry::new(Vec::new()).map_err(|error| format!("advice registry: {error}"))?,
+                SharedSession::memory(session.header()),
+                Options {
+                    model: runtime.model.clone(),
+                    provider_name: runtime.provider.clone(),
+                    thinking: runtime.thinking.clone(),
+                    now: Box::new(Utc::now),
+                    new_operation_id: Box::new(new_operation_id),
+                    ..Options::default()
+                },
+                self.boundary_redactor(Some(runtime)),
+            );
+            let advisor = self.advisor(
+                advice_agent,
+                &runtime.model,
+                self.usage_collector(session, runtime),
+            );
+            tools.extend(self.memory_tools(max_output, advisor.clone()));
+            advisor
+        } else {
+            None
+        };
         mark_build_trace(&mut trace, "runner/setup");
         let catalogs = self.build_catalogs(&mut tools, max_output, warnings)?;
         mark_build_trace(&mut trace, "runner/catalogs");
@@ -1507,26 +1569,6 @@ impl Builder {
         tools.extend(mcp_tools);
         mark_build_trace(&mut trace, "runner/mcp");
 
-        let redactor = self.boundary_redactor(Some(runtime));
-        let client = if !self.boundary_allows_dynamic(Some(runtime)) {
-            ProviderClient::Unavailable
-        } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
-            ProviderClient::ChatGpt {
-                client: Arc::new(super::login::chatgpt_client(
-                    &self.auth_path,
-                    &self.auth_credentials,
-                    self.auth_credentials_loaded,
-                )?),
-                timeout: runtime.resilience.deadlines.provider_timeout,
-                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
-            }
-        } else {
-            ProviderClient::Compat {
-                client: Arc::new(Client::new(&runtime.base_url, &runtime.api_key)),
-                timeout: runtime.resilience.deadlines.provider_timeout,
-                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
-            }
-        };
         if let ProviderClient::Compat { client, .. } = &client {
             tools.push(Box::new(models::ListModelsTool::new(
                 Arc::clone(client),
@@ -1678,6 +1720,7 @@ impl Builder {
                 agents: catalogs.agent_catalog.clone(),
                 mcp: mcp_servers,
                 task_control,
+                advisor,
             },
             trace_entries,
         ))

@@ -102,6 +102,13 @@ test/command and result here; static inspection does not count as runtime proof.
 
 ### Integration review follow-ups
 
+- [x] Resolve the later conflict with main `4cb1003` (#307): retain both
+  `Runner.task_control` and `Runner.advisor` in the type and both constructors.
+  Automatic-merge review found no semantic conflict. `make check-fast`, all
+  2,246 native unit tests, ACP stdio 26/26 and attach 15/15, and host
+  `make connect-check` (Go vet/race and actual connector E2E) passed after merge.
+  Earlier CI passed at `2d80268`; the merge push requires fresh CI.
+
 - [x] Approval decision cleanup must bind the original session/request even if
   the controller closes or changes during the callback. Hold admission through
   applying an Allow and admitting its retry; cover lifecycle races with tests.

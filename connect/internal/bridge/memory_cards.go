@@ -80,7 +80,7 @@ func (c *chat) showMemory(ctx context.Context, sid, replyTo string, explicit boo
 			return
 		}
 		token := hex.EncodeToString(nonce[:])
-		text := fmt.Sprintf("Memory review: %s %s/%s\n\n%s\n\nReason: %s\nOrigin: %s\n\n/memory accept %s or /memory reject %s", cand.Action, cand.Kind, cand.Key, cand.Text, cand.Reason, cand.Origin, cand.ID, cand.ID)
+		text := memoryCardText(cand)
 		finish, err := p.SendApproval(ctx, c.id, token, text)
 		if err != nil {
 			slog.Warn("memory card send failed", "chat", c.key, "error", err)
@@ -171,4 +171,14 @@ func (c *chat) finishMemory(ctx context.Context, sid, id, status string) {
 			c.closeMemory(ctx, token, status)
 		}
 	}
+}
+
+// memoryCardText is the approval card text for one candidate. The advice line
+// is omitted when the server sent none.
+func memoryCardText(cand agent.MemoryCandidate) string {
+	advice := ""
+	if cand.Advice != "" {
+		advice = "\n" + cand.Advice
+	}
+	return fmt.Sprintf("Memory review: %s %s/%s\n\n%s\n\nReason: %s\nOrigin: %s%s\n\n/memory accept %s or /memory reject %s", cand.Action, cand.Kind, cand.Key, cand.Text, cand.Reason, cand.Origin, advice, cand.ID, cand.ID)
 }

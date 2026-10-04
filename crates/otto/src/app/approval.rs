@@ -520,6 +520,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_followups_wait_for_approval_and_are_discarded_on_denial() {
+        use otto_core::session::Session;
+
+        for decision in [ApprovalDecision::Allow, ApprovalDecision::Deny] {
+            let workspace = tempfile::tempdir().unwrap();
+            let sessions = tempfile::tempdir().unwrap();
+            let (controller, _, _) =
+                scripted_approval_controller(workspace.path(), sessions.path(), false).await;
+            let control = controller.runner().unwrap().task_control();
+            let mut discard = |_| {};
+            let stop = controller
+                .run_with_approvals(
+                    Step::Text("finish the reviewed task"),
+                    &mut discard,
+                    &CancellationToken::new(),
+                    |_| {
+                        control.queue_followup("write the final report").unwrap();
+                        async move { decision }
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(stop, Stop::EndTurn);
+            let history = controller.current_session().messages();
+            let followup = history
+                .iter()
+                .position(|message| message.context_type == "agent_followup");
+            match decision {
+                ApprovalDecision::Allow => {
+                    let retry = history
+                        .iter()
+                        .position(|message| {
+                            message.role == Role::User
+                                && message.text().contains("The user approved")
+                        })
+                        .expect("approval retry");
+                    assert!(followup.expect("accepted follow-up") > retry);
+                }
+                ApprovalDecision::Deny => {
+                    assert!(followup.is_none(), "denied work must not continue")
+                }
+                ApprovalDecision::Cancelled => unreachable!(),
+            }
+            assert!(control.queue_followup("late work").is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn replacing_the_runner_during_approval_cleans_only_the_captured_request() {
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();

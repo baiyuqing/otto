@@ -972,7 +972,7 @@ mod approval {
             .map(|reply| reply.replace("__READ_PATH__", read_path.to_str().unwrap()))
             .collect();
         let served = Arc::new(AtomicUsize::new(0));
-        let (base_url, _requests) = serve(Script {
+        let (base_url, requests) = serve(Script {
             replies,
             served: Arc::clone(&served),
         });
@@ -989,6 +989,9 @@ mod approval {
         });
         let served = served.load(Ordering::SeqCst);
         assert_eq!(client.close(), Some(0));
+        for body in requests.lock().unwrap().iter() {
+            assert_task_queue_capability(body);
+        }
         Run {
             frames,
             response,

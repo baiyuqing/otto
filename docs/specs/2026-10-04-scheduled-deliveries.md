@@ -116,8 +116,9 @@ the current conversation. `remind`'s description gets the same sentence.
 `<platform>` is `telegram` or `feishu`. `<chat id>` is 1-128 characters with no
 whitespace or control characters. The HTTP API rejects an invalid `origin`
 with 400. An invalid `_meta.otto.chat` on an ACP prompt is ignored with a
-warning and the turn has no origin. When both `channel` and a chat origin are
-given, their platforms must match.
+warning on stderr and the turn has no origin. When both `channel` and a chat origin are given, their
+platforms must match: the HTTP API returns 400 otherwise, and ACP ignores the
+origin.
 
 `app::Controller::run_with_channel` takes the origin next to the channel. A
 user turn records its origin in the session's runner, where the schedule
@@ -235,8 +236,8 @@ the workspace with its factory). `run_with_channel(Step::Text, None, no origin,
 ```
 
 The reply is collected the way wake replies are: text deltas, with a blank
-line after each tool call. The collector in `app/approval.rs` becomes a shared
-helper. The run is cancelled after 10 min. The session is kept and appears in
+line after each tool call. The collector is shared with wake turns
+(`app::scheduled::ReplyCollector`). The run is cancelled after 10 min. The session is kept and appears in
 the session list. Sub-agent tasks it starts are not awaited.
 
 ## Delivery to each frontend
@@ -278,8 +279,9 @@ Each row is appended as a `Role::Context` message with
 ```
 
 The row is marked appended after the session append succeeds. A crash between
-the two appends it again on the next turn. A store error is logged and the
-turn continues. Wake turns and scheduled runs append nothing.
+the two appends it again on the next turn. A store or append error ends the
+write-back for that turn without an error to the user and the turn continues;
+the rows stay unappended, so the next user turn retries them. Wake turns and scheduled runs append nothing.
 
 ## `otto-connect` changes
 

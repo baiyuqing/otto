@@ -23,7 +23,8 @@ use tokio_util::sync::CancellationToken;
 use super::result::{capped_text_result, decode_strict_json};
 use super::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 use crate::memory::{
-    CandidateAction, Origin, ProposeRequest, Provenance, Scope, SearchRequest, Service,
+    CandidateAction, ErrorKind, Origin, ProposeRequest, Provenance, RecordRef, Scope,
+    SearchRequest, Service,
 };
 
 const MEMORY_SEARCH_LIMIT: usize = 20;
@@ -51,13 +52,14 @@ impl MemorySearchTool {
 struct MemorySearchArgs {
     #[serde(default)]
     query: String,
+    id: Option<String>,
 }
 
 /// The schema advertised for `memory_search`.
 pub fn memory_search_definition() -> ToolDefinition {
     definition(
         "memory_search",
-        "Search remembered facts and preferences for the current user and workspace",
+        "Search remembered facts and preferences for the current user and workspace. Previous turns retain only record IDs; use id to read the current scope and revision before proposing an update or forget.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -65,6 +67,10 @@ pub fn memory_search_definition() -> ToolDefinition {
                 "query": {
                     "type": "string",
                     "description": "Search terms; empty lists recently active records"
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Exact record ID to look up in this session's scopes; omit query when using id"
                 }
             }
         }),
@@ -85,18 +91,39 @@ impl Tool for MemorySearchTool {
         if cancel.is_cancelled() {
             return error_result(CONTEXT_CANCELED);
         }
-        let result = match self.service.search(&SearchRequest {
-            query: args.query,
-            scopes: self.scopes.clone(),
-            limit: MEMORY_SEARCH_LIMIT,
-            token_budget: MEMORY_SEARCH_TOKEN_BUDGET,
-            now: Utc::now(),
-            ..SearchRequest::default()
-        }) {
-            Ok(result) => result,
-            Err(error) => return error_result(error),
+        let records = if let Some(id) = args.id {
+            if !args.query.is_empty() {
+                return error_result("use either id or query, not both");
+            }
+            let mut records = Vec::new();
+            for scope in &self.scopes {
+                match self.service.get(&RecordRef {
+                    scope: scope.clone(),
+                    id: id.clone(),
+                }) {
+                    Ok(record) => {
+                        records.push(record);
+                        break;
+                    }
+                    Err(error) if error.is(ErrorKind::NotFound) => {}
+                    Err(error) => return error_result(error),
+                }
+            }
+            records
+        } else {
+            match self.service.search(&SearchRequest {
+                query: args.query,
+                scopes: self.scopes.clone(),
+                limit: MEMORY_SEARCH_LIMIT,
+                token_budget: MEMORY_SEARCH_TOKEN_BUDGET,
+                now: Utc::now(),
+                ..SearchRequest::default()
+            }) {
+                Ok(result) => result.records,
+                Err(error) => return error_result(error),
+            }
         };
-        if result.records.is_empty() {
+        if records.is_empty() {
             return ToolResult {
                 content: "no matching records".into(),
                 persisted_content: Some("0 records".into()),
@@ -106,8 +133,8 @@ impl Tool for MemorySearchTool {
         }
 
         let mut content = String::new();
-        let mut ids = Vec::with_capacity(result.records.len());
-        for record in &result.records {
+        let mut ids = Vec::with_capacity(records.len());
+        for record in &records {
             ids.push(record.id.as_str());
             let _ = writeln!(
                 content,
@@ -122,11 +149,7 @@ impl Tool for MemorySearchTool {
             );
         }
         let mut rendered = capped_text_result(&content, self.max_output_bytes);
-        rendered.persisted_content = Some(format!(
-            "{} records: {}",
-            result.records.len(),
-            ids.join(", ")
-        ));
+        rendered.persisted_content = Some(format!("{} records: {}", records.len(), ids.join(", ")));
         rendered
     }
 }
@@ -260,7 +283,7 @@ struct ForgetArgs {
 pub fn forget_definition() -> ToolDefinition {
     definition(
         "forget",
-        "Propose forgetting a remembered record found via memory_search; a human reviews it before it takes effect",
+        "Propose forgetting a remembered record found via memory_search; a human reviews it before it takes effect. If only the record ID is available, first call memory_search with id to read its current scope and revision.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -338,7 +361,8 @@ mod tests {
     use super::*;
     use crate::memory::turso::testsupport::open_temp;
     use crate::memory::{
-        CandidateRef, CandidateState, NAMESPACE_USER, RememberRequest, decide_default_policy,
+        CandidateRef, CandidateState, NAMESPACE_USER, RememberRequest, ReviewDecision,
+        ReviewRequest, decide_default_policy,
     };
     use crate::tool::testutil::{MAX_OUTPUT_BYTES, run};
 
@@ -421,6 +445,121 @@ mod tests {
         assert_eq!(result.persisted_content.as_deref(), Some("0 records"));
     }
 
+    #[tokio::test]
+    async fn search_by_id_refreshes_metadata_for_a_reviewed_forget() {
+        let (_directory, service) = service();
+        let workspace = Scope::new("workspace", "project-1");
+        let original = service
+            .remember(&RememberRequest {
+                scope: workspace.clone(),
+                kind: "fact".into(),
+                text: "old text".into(),
+                ..RememberRequest::default()
+            })
+            .unwrap();
+        let updated = service
+            .remember(&RememberRequest {
+                id: original.id.clone(),
+                scope: workspace.clone(),
+                kind: "fact".into(),
+                text: "current text".into(),
+                expected_revision: Some(original.revision),
+                ..RememberRequest::default()
+            })
+            .unwrap();
+        let scopes = vec![scope(), workspace.clone()];
+        let search = MemorySearchTool::new(Arc::clone(&service), scopes.clone(), MAX_OUTPUT_BYTES);
+        let result = run(&search, &json!({"id": original.id}).to_string()).await;
+        assert!(!result.is_error, "{result:?}");
+        assert!(result.content.contains("current text"), "{result:?}");
+        assert!(!result.content.contains("old text"), "{result:?}");
+        assert_eq!(
+            result.persisted_content,
+            Some(format!("1 records: {}", updated.id))
+        );
+
+        let fields: Vec<_> = result.content.split_whitespace().collect();
+        let (namespace, scope_id) = fields
+            .iter()
+            .find_map(|field| field.strip_prefix("scope="))
+            .unwrap()
+            .split_once('/')
+            .unwrap();
+        let revision: u64 = fields
+            .iter()
+            .find_map(|field| field.strip_prefix("revision="))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(revision, updated.revision);
+        let forget = ForgetTool::new(Arc::clone(&service), scopes);
+        let proposal = run(
+            &forget,
+            &json!({
+                "id": updated.id,
+                "scope_namespace": namespace,
+                "scope_id": scope_id,
+                "revision": revision,
+            })
+            .to_string(),
+        )
+        .await;
+        assert!(!proposal.is_error, "{proposal:?}");
+        let reference = RecordRef {
+            scope: workspace.clone(),
+            id: updated.id.clone(),
+        };
+        assert_eq!(service.get(&reference).unwrap().revision, revision);
+        let candidate = CandidateRef {
+            scope: workspace,
+            id: candidate_id(&proposal.content),
+        };
+        assert_eq!(
+            service.get_candidate(&candidate).unwrap().state,
+            CandidateState::Pending
+        );
+        service
+            .review(&ReviewRequest {
+                reference: candidate,
+                decision: ReviewDecision::Accept,
+                edited: None,
+                target_revision: None,
+            })
+            .unwrap();
+        assert!(service.get(&reference).unwrap_err().is(ErrorKind::NotFound));
+        let after = run(&search, &json!({"id": updated.id}).to_string()).await;
+        assert_eq!(after.content, "no matching records");
+    }
+
+    #[tokio::test]
+    async fn search_by_id_does_not_disclose_unbound_records() {
+        let (_directory, service) = service();
+        let foreign = remember_record(&service, "editor", "private preference");
+        for scopes in [vec![Scope::new("user", "someone-else")], vec![]] {
+            let search = MemorySearchTool::new(Arc::clone(&service), scopes, MAX_OUTPUT_BYTES);
+            for id in [&foreign, "missing-record"] {
+                let result = run(&search, &json!({"id": id}).to_string()).await;
+                assert!(!result.is_error, "{result:?}");
+                assert_eq!(result.content, "no matching records");
+                assert_eq!(result.persisted_content.as_deref(), Some("0 records"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn search_by_id_rejects_invalid_or_conflicting_arguments() {
+        let (_directory, service) = service();
+        let search = MemorySearchTool::new(service, vec![scope()], MAX_OUTPUT_BYTES);
+        for args in [
+            json!({"id": ""}),
+            json!({"id": "bad/id"}),
+            json!({"id": "rec-1", "query": "editor"}),
+        ] {
+            let result = run(&search, &args.to_string()).await;
+            assert!(result.is_error, "{args}: {result:?}");
+        }
+    }
+
     /// A closed service stands in for a reader that returns an error.
     #[tokio::test]
     async fn search_surfaces_a_service_error() {
@@ -428,9 +567,11 @@ mod tests {
         service.close().expect("close");
         let tool = MemorySearchTool::new(service, vec![scope()], MAX_OUTPUT_BYTES);
 
-        let result = run(&tool, r#"{"query":"x"}"#).await;
-        assert!(result.is_error, "{result:?}");
-        assert!(result.content.contains("closed"), "{result:?}");
+        for args in [r#"{"query":"x"}"#, r#"{"id":"rec-1"}"#] {
+            let result = run(&tool, args).await;
+            assert!(result.is_error, "{result:?}");
+            assert!(result.content.contains("closed"), "{result:?}");
+        }
     }
 
     #[tokio::test]

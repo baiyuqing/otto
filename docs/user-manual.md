@@ -2786,6 +2786,15 @@ What's wired:
 - Standalone CLI: `otto memory status`, `otto memory list`, `otto memory show <id>`, and
   `otto memory forget <id>`.
 
+`memory_search` accepts `query` for text search (empty lists recent records), or
+`id` for an exact record lookup within the current session's user and workspace
+scopes. Before proposing a deletion by ID, the agent can use
+`memory_search({"id":"<record-id>"})` to read the current scope and revision,
+then call `forget`. Search results stored in session history retain only IDs;
+the full record is available to the model during the search turn. In Telegram
+and Feishu, the user reviews the resulting deletion proposal with the memory
+card or `/memory accept <candidate-id>`.
+
 `/memory list` and `otto memory list` page active records in stable update-time order. They
 show the current user and workspace scopes by default; use `--scope user` or `--scope workspace`
 to narrow that set, or explicit `--scope all` to inventory every stored workspace. A page prints

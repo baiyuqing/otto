@@ -103,8 +103,9 @@ desktop-app: desktop-sidecar ## build Otto.app for this Mac with an ad-hoc signa
 	cd $(DESKTOP_DIR) && PATH=/usr/bin:$$PATH APPLE_SIGNING_IDENTITY=- cargo tauri build --target $(DESKTOP_TARGET)
 	@echo "built $(DESKTOP_APP)"
 
-clean: ## remove the built binary
+clean: ## remove the built binary and all Cargo build outputs in target/
 	rm -f ./$(BINARY)
+	cargo clean
 
 help: ## list targets
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make [target]\n\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)

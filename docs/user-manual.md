@@ -962,7 +962,8 @@ Notes:
   `remind` timer, a `[feishu]` message) are written to
   `<session-id>.inbox.json` beside the session file, mode `0600`, and removed
   from it once delivered to the model. Reopening the session restores them,
-  and the REPL, the TUI, and `otto serve` start a wake turn to deliver them.
+  and the REPL, the TUI, `otto serve`, and `otto acp` start a wake turn to
+  deliver them.
   A turn started by user input delivers pending notifications before the
   user's message. Delivery is at least once: a notification appended to the session just
   before Otto exits can be delivered again after the session is reopened.
@@ -1010,7 +1011,7 @@ lease in `<session-id>.lease/` beside the session file.
   once and was interrupted again gets the error result instead. Otto then queues one notification to the model that names
   the stopped host and pid, the calls without results (marked "may have run"
   or "not executed"), and each sub-agent task that had not finished, and starts
-  a wake turn in the REPL, the TUI, and `otto serve`. With `--prompt`, the
+  a wake turn in the REPL, the TUI, `otto serve`, and `otto acp`. With `--prompt`, the
   notification is delivered before the prompt. Each listed task is recorded as
   `interrupted`; a task that cannot be recorded is reported as a warning on
   standard error. No notification is queued when there is nothing to report
@@ -1187,7 +1188,9 @@ initial workspace.
 it assigned, such as `scheduled r1 in 10s: check the build`. When the delay
 elapses, Otto delivers a `[timer]` notification and the idle wake loop
 starts a turn, the same way a finished sub-agent does. At most eight timers
-can be outstanding. Each delay is 1 to 3600 seconds.
+can be outstanding. Each delay is 1 to 3600 seconds. In a chat through
+`otto-connect`, the text the model writes in that turn is sent to the chat
+(see [Messages and replies](#messages-and-replies)).
 
 `remind_status` lists the outstanding timers of the current session, one per
 line, sorted by fire time: the id, the remaining time (`due` once the fire
@@ -1835,6 +1838,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/reflection/skills` | List the skills reflection wrote and not reverted, with the run, session, time, reason, and `owned` (false once the file was edited by hand). `enabled:false` when reflection is turned off. |
 | `POST /v1/sessions/{id}/reflection/skills/{name}/revert` | Restore the previous version of a skill reflection wrote, or remove it if reflection created it (`result` is `restored` or `removed`). `404` when reflection did not write it; `409 skill_not_owned` when it was edited by hand; `409 skills_unavailable` when `[skills]` is disabled. These act on the user's `~/.otto/skills`, not on the session, and are as exposed as the skill enable and disable routes: any holder of the token or socket may call them. |
 | `GET /v1/sessions/{id}/notices` | The lines background reflection queued for this session, `{"notices":[{"id":1,"text":"..."}],"last":1}`; pass `?after=<last>` to read only newer ones. They are not removed by reading, so every client sees each one, and only the 20 newest are kept. |
+| `GET /v1/sessions/{id}/wake-replies` | The assistant text of this session's finished wake turns, in the shape and with the rules of `.../notices`. `otto acp --attach` reads it to send wake replies to its ACP client. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn runs or is queued, or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
 | `POST /v1/sessions/{id}/tasks/steer` | Accept `{"text":"..."}` as guidance for the active run and return `{"accepted":true}`. Nonblank text, at most 32,000 UTF-8 bytes; `409 task_steer_failed` when idle, awaiting approval, or no longer accepting guidance. |
 | `POST /v1/sessions/{id}/tasks/control` | Interpret `{"text":"...","channel":"telegram"}` (`channel` optional, `telegram` or `feishu`) using the restricted control dialogue. Returns null if no active dialogue applies, otherwise `{"text","queued"}`. `queued:true` means the caller must submit the original message as a queued turn; this route does not itself admit a follow-up. `409 task_control_failed` reports routing failure. |
@@ -2181,10 +2185,21 @@ cancelled request, or `session/cancel` ends the prompt; the approval stays
 pending as when a TUI user does not enter `/approve`. There is no "always"
 option over ACP.
 
-### Background results arrive with the next prompt
+### Background results start a wake turn
 
-`otto acp` does not start turns on its own. A finished sub-agent, a timer,
-or another inbox item reaches the model before the next prompt's text.
+When a session is open and no prompt runs, a pending notification (a fired
+`remind` timer, a finished sub-agent, or another inbox item) starts a wake
+turn, as in the REPL. Otto checks when the session is opened with
+`session/new` or `session/load`, when a sub-agent task changes, and when a
+prompt ends. The wake turn sends no `session/update` while it runs, and an
+elevated `bash` request in it is denied. A `session/prompt` sent during a wake
+turn waits for it to end and then runs; `session/cancel` cancels both.
+
+If the wake turn writes assistant text, Otto sends it after the turn as one
+`agent_message_chunk` outside any prompt, with
+`_meta: {"otto": {"wakeReply": true, "replyId": N}}`. `replyId` starts at 1
+for each session and increases by one. A wake turn that writes no text sends
+nothing.
 
 ### Shutdown
 
@@ -2224,7 +2239,14 @@ with status `1`.
 | `session/cancel` | Cancels the prompt's turn, queued or running. |
 
 - Only turns started by this process are forwarded; turns from other
-  clients of the same session are not sent as `session/update`.
+  clients of the same session are not sent as `session/update`. The
+  exception is a wake turn that `otto serve` runs for the session: its text
+  is sent as one tagged update, as in
+  [`otto acp`](#background-results-start-a-wake-turn). The relay reads
+  `GET /v1/sessions/{id}/wake-replies` once a second, starting after the
+  newest reply that existed when the session was opened, so earlier replies
+  are not sent again. Over [ACP TCP](#direct-acp-tcp-connection), `otto serve`
+  sends the same update without polling.
 - A turn that ends with an error answers the prompt with a JSON-RPC error
   carrying the redacted message.
 - An elevated `bash` command sends `session/request_permission` while the
@@ -2365,7 +2387,9 @@ workspace = "/Users/me/work"            # the same workspace the serve clients u
   credentials; the serve process needs them.
 - A chat's message and a web UI message on the same session wait in serve's
   turn queue and run one after the other. The chat gets the reply of its own
-  turns only; turns started in the web UI are not sent to the chat.
+  turns only; turns started in the web UI are not sent to the chat. A wake
+  turn that serve runs for the session, such as a fired `remind` timer, is
+  sent to the chat while the connector has the session open.
 - Use `/sessions` and `/use` (see [Commands](#commands)) to bind a chat to a
   session that was started in another client.
 
@@ -2448,8 +2472,11 @@ a log line.
   connector itself (command output, errors, permission requests) stay plain
   text. If Telegram rejects a formatted part with status 400, that part is
   resent as plain text. Feishu renders the Markdown itself and is unchanged.
-- Each chat has one Otto session. The first message creates it; after a
-  restart of `otto-connect` or of the agent, the next message loads it.
+- Each chat has one Otto session. The first message creates it. At startup
+  `otto-connect` loads the session of each chat of a configured platform,
+  once per session, so timers armed before a restart fire again; a session
+  that fails to load is logged as a warning and the chat keeps it. After a
+  restart of the agent, the next message loads it.
   The replayed history of a loaded session is not sent to the chat.
 - If the session cannot be loaded (for example, without `--attach`, it is
   open in the TUI or in `otto serve`), the chat gets "The previous session
@@ -2463,6 +2490,12 @@ a log line.
   Chats bound to the same session (with `/use`) take turns: one prompt runs
   on a session at a time, and when three or more chats wait for the same
   session, the order in which they run is not guaranteed.
+- The text of a wake turn (a fired `remind` timer, a finished sub-agent, or
+  another notification that Otto handles while no prompt runs; see
+  [Background results start a wake turn](#background-results-start-a-wake-turn))
+  is sent to every chat bound to that session, formatted like other replies
+  and not as a reply to a message. If that chat has a prompt running, the
+  wake text is sent after that prompt's reply.
 - The reply is sent when the turn ends, as a reply to the message that
   started it. It contains the assistant text only: reasoning and tool calls
   are not sent, and text before and after a tool call is separated by a

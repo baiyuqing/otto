@@ -393,10 +393,32 @@ pub async fn notices(
     Path(id): Path<String>,
     Query(query): Query<NoticesQuery>,
 ) -> Response {
-    let Some(session) = server.lookup(&id) else {
+    notice_page(&server, &id, query.after, app::Controller::notices_since)
+}
+
+/// `GET /v1/sessions/{id}/wake-replies`: the model-written texts of wake
+/// turns, in the notices page shape.
+pub async fn wake_replies(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    Query(query): Query<NoticesQuery>,
+) -> Response {
+    notice_page(
+        &server,
+        &id,
+        query.after,
+        app::Controller::wake_replies_since,
+    )
+}
+
+/// A controller's notices or wake replies after a cursor, and the newest id.
+type Since = fn(&app::Controller, u64) -> (Vec<(u64, String)>, u64);
+
+fn notice_page(server: &Server, id: &str, after: u64, since: Since) -> Response {
+    let Some(session) = server.lookup(id) else {
         return not_found("session not found");
     };
-    let (lines, last) = session.ctrl.notices_since(query.after);
+    let (lines, last) = since(&session.ctrl, after);
     json_response(
         StatusCode::OK,
         &NoticeList {

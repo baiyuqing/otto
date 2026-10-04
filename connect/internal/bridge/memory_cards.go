@@ -124,7 +124,7 @@ func (c *chat) cmdApprovalButton(m Message) {
 			c.send(ctx, "", "This card belongs to a previous session; send /memory to refresh.")
 			return
 		}
-		if err := c.b.opts.Agent.Load(ctx, card.session); err != nil {
+		if err := c.b.load(ctx, card.session); err != nil {
 			c.send(ctx, "", memoryError(err))
 			return
 		}

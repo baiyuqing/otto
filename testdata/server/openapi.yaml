@@ -1964,6 +1964,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/wake-replies:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: after
+        in: query
+        required: false
+        schema: { type: integer, minimum: 0 }
+        description: Return only replies with a larger id
+    get:
+      summary: Texts the model wrote in wake turns of this session
+      description: >
+        A wake turn is the turn otto starts when a timer or sub-agent
+        notification is due and no prompt is running. The assistant text it
+        streamed is queued here when the turn ends without error and was not
+        cancelled. Replies
+        are read by id and not removed. At most the 20 newest are kept. The
+        body has the shape of `GET /v1/sessions/{id}/notices`.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoticeList"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}/reflection/skills:
     parameters:
       - $ref: "#/components/parameters/sessionID"

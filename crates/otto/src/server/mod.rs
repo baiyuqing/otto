@@ -686,6 +686,10 @@ impl Server {
             .route("/v1/sessions/{id}/reflect/cancel", post(reflection::cancel))
             .route("/v1/sessions/{id}/notices", get(reflection::notices))
             .route(
+                "/v1/sessions/{id}/wake-replies",
+                get(reflection::wake_replies),
+            )
+            .route(
                 "/v1/sessions/{id}/reflection/skills",
                 get(reflection::list_skills),
             )
@@ -4665,6 +4669,7 @@ mod tests {
         "/v1/sessions/{id}/reflect",
         "/v1/sessions/{id}/reflect/cancel",
         "/v1/sessions/{id}/notices",
+        "/v1/sessions/{id}/wake-replies",
         "/v1/sessions/{id}/reflection/skills",
         "/v1/sessions/{id}/reflection/skills/{name}/revert",
         "/v1/sessions/{id}/tasks",
@@ -5247,6 +5252,36 @@ mod tests {
         assert_eq!(reply.json(), serde_json::json!({"notices": [], "last": 2}));
         let reply = harness
             .send("GET", "/v1/sessions/missing/notices", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn wake_replies_are_listed_after_the_cursor_and_unknown_sessions_are_404() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let path = format!("/v1/sessions/{id}/wake-replies");
+        let session = harness.server.lookup(&id).expect("session");
+        session.ctrl.push_notice("reflection: not a wake reply");
+        session.ctrl.push_wake_reply("first");
+        session.ctrl.push_wake_reply("second");
+
+        let reply = harness.send("GET", &path, None).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(
+            reply.json(),
+            serde_json::json!({
+                "notices": [{"id": 1, "text": "first"}, {"id": 2, "text": "second"}],
+                "last": 2,
+            })
+        );
+        let reply = harness.send("GET", &format!("{path}?after=1"), None).await;
+        assert_eq!(
+            reply.json()["notices"],
+            serde_json::json!([{"id": 2, "text": "second"}])
+        );
+        let reply = harness
+            .send("GET", "/v1/sessions/missing/wake-replies", None)
             .await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND);
     }

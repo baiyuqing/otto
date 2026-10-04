@@ -57,6 +57,11 @@ fn serve_stalled() -> (String, Arc<AtomicUsize>) {
 }
 
 fn serve_gated(replies: Vec<String>) -> (String, Arc<AtomicUsize>, Sender<()>) {
+    serve_gated_at(replies, 0)
+}
+
+/// Like `serve_gated`, but the request with index `gated` waits for the release.
+fn serve_gated_at(replies: Vec<String>, gated: usize) -> (String, Arc<AtomicUsize>, Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
     let base_url = format!("http://{}", listener.local_addr().expect("local address"));
     let served = Arc::new(AtomicUsize::new(0));
@@ -91,7 +96,7 @@ fn serve_gated(replies: Vec<String>) -> (String, Arc<AtomicUsize>, Sender<()>) {
                 }
             }
             let index = counter.fetch_add(1, Ordering::SeqCst);
-            if index == 0 {
+            if index == gated {
                 let _ = gate.recv_timeout(TIMEOUT);
             }
             let reply = replies
@@ -1538,4 +1543,71 @@ fn task_queue_capability_survives_compaction_and_session_reload() {
     assert_eq!(requests.lock().unwrap().len(), 5);
     assert_task_queue_capability(&requests.lock().unwrap()[4]);
     assert_eq!(loaded.close(), Some(0));
+}
+
+/// Reads frames until a wake reply update arrives and returns its text.
+fn next_wake_reply(client: &mut Client) -> String {
+    loop {
+        let frame = client.recv();
+        let update = &frame["params"]["update"];
+        if update["_meta"]["otto"]["wakeReply"] == true {
+            assert_eq!(update["sessionUpdate"], "agent_message_chunk");
+            assert_eq!(update["_meta"]["otto"]["replyId"], 1);
+            return update["content"]["text"].as_str().unwrap().to_string();
+        }
+    }
+}
+
+#[test]
+fn a_timer_wake_turn_reply_reaches_the_client_outside_any_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, _requests) = provider_with(vec![
+        tool_call_reply("c1", "remind", r#"{"seconds":1,"message":"ping"}"#),
+        text_reply("timer set"),
+        text_reply("the timer fired"),
+    ]);
+    configure(home.path(), &base_url);
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    let (_, response) = client.call("session/prompt", prompt(&session_id, "remind me"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+
+    assert_eq!(next_wake_reply(&mut client), "the timer fired");
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn a_prompt_sent_during_a_wake_turn_waits_and_then_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    // Request 2 is the wake turn's provider call.
+    let (base_url, served, release) = serve_gated_at(
+        vec![
+            tool_call_reply("c1", "remind", r#"{"seconds":1,"message":"ping"}"#),
+            text_reply("timer set"),
+            text_reply("the timer fired"),
+            text_reply("second answer"),
+        ],
+        2,
+    );
+    configure(home.path(), &base_url);
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    let (_, response) = client.call("session/prompt", prompt(&session_id, "remind me"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    wait_for_count(&served, 3);
+
+    let id = client.start("session/prompt", prompt(&session_id, "meanwhile"));
+    release.send(()).unwrap();
+    let (frames, response) = client.finish(id, &mut |frame| panic!("unexpected request: {frame}"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert!(
+        message_text(&frames).contains("second answer"),
+        "{frames:?}"
+    );
+    assert_eq!(served.load(Ordering::SeqCst), 4);
+    assert_eq!(client.close(), Some(0));
 }

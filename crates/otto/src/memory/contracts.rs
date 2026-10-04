@@ -320,7 +320,18 @@ impl PolicyDecision {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct Scope {
     pub namespace: String,
     pub id: String,
@@ -421,7 +432,7 @@ pub struct RecordKey {
     pub key: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CandidateRef {
     pub scope: Scope,
     pub id: String,

@@ -99,6 +99,8 @@ pub struct WireRetry {
 /// browser with its key order and number literals unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WireEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<crate::approval::Request>,
     #[serde(rename = "type")]
     pub event_type: String,
     #[serde(default, skip_serializing_if = "is_empty")]
@@ -205,7 +207,8 @@ impl PartialEq for WireEvent {
     /// `tool_args` compares by raw JSON text, since [`RawValue`] has no
     /// `PartialEq`.
     fn eq(&self, other: &Self) -> bool {
-        self.event_type == other.event_type
+        self.approval == other.approval
+            && self.event_type == other.event_type
             && self.turn_id == other.turn_id
             && self.task_id == other.task_id
             && self.text == other.text
@@ -241,6 +244,10 @@ pub fn to_wire(event: &Event) -> WireEvent {
         ..WireEvent::default()
     };
     match event {
+        Event::ApprovalChanged { request } => {
+            wire.approval = Some((**request).clone());
+            wire.approval_id = request.id.clone();
+        }
         Event::TextDelta { text } | Event::ReasoningDelta { text } => wire.text = text.clone(),
         Event::ToolCallStarted {
             operation_id,

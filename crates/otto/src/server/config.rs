@@ -4,9 +4,7 @@
 //! TOML, environment values, or credentials; writes go through the native
 //! configuration module's preview and CAS-backed commit path.
 
-use std::fs::File;
-use std::io::Read;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -14,9 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{
-    self as native, ProfileChange, ProfileChangePreview, ProfileField, ProfileProvider,
-};
+use crate::config::{self as native, ProfileChange, ProfileField, ProfileProvider};
 use crate::provider::openaicompat::Client as OpenAiClient;
 
 use super::{Server, error_response, json_response};
@@ -29,11 +25,6 @@ fn correlation(headers: &HeaderMap) -> String {
         .get("x-otto-request-id")
         .map(|value| super::request_id(value.as_bytes()))
         .unwrap_or_default()
-}
-
-pub(super) struct PendingChange {
-    pub expires: Instant,
-    pub preview: ProfileChangePreview,
 }
 
 #[derive(Serialize)]
@@ -263,20 +254,6 @@ struct ChangeResponse {
     diff: String,
 }
 
-fn token() -> Result<String, Box<Response>> {
-    let mut bytes = [0u8; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .map_err(|_| {
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "random_unavailable",
-                "cannot create confirmation token",
-            )
-        })?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
 pub(super) async fn preview(
     State(server): State<std::sync::Arc<Server>>,
     headers: HeaderMap,
@@ -297,10 +274,60 @@ pub(super) async fn preview(
             );
         }
     };
-    let id = match token() {
-        Ok(id) => id,
-        Err(reply) => return *reply,
+    let Some(service) = &server.approvals else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "approval_unavailable",
+            "approval service unavailable",
+        );
     };
+    let artifact = crate::approval::config::Artifact::prepare(change, &preview);
+    let details = match serde_json::to_string(&artifact) {
+        Ok(json) => json,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "approval_unavailable",
+                "cannot prepare change",
+            );
+        }
+    };
+    let approval = match service.create(crate::approval::Proposal {
+        kind: crate::approval::Kind::Authorization,
+        scope: crate::approval::Scope {
+            workspace: server.info.workspace.clone(),
+            session_id: String::new(),
+            task_id: String::new(),
+            run_id: String::new(),
+        },
+        subject: crate::approval::Subject {
+            tool_call_id: String::new(),
+            source: "config".into(),
+            id: match super::new_id() {
+                Ok(id) => id,
+                Err(_) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "approval_unavailable",
+                        "cannot create request identity",
+                    );
+                }
+            },
+            version: crate::approval::digest(&details),
+            details,
+        },
+        title: format!("Confirm profile {}", preview.metadata.profile),
+        reason: "Save the reviewed profile change; restart is required.".into(),
+        persistent: true,
+        blocking: false,
+        expires_at: Some(chrono::Utc::now().timestamp() + CHANGE_TTL.as_secs() as i64),
+    }) {
+        Ok(request) => request,
+        Err(error) => {
+            return error_response(StatusCode::CONFLICT, "approval_failed", &error.to_string());
+        }
+    };
+    let id = approval.id;
     let response = ChangeResponse {
         id: id.clone(),
         expires_in_seconds: CHANGE_TTL.as_secs(),
@@ -312,18 +339,6 @@ pub(super) async fn preview(
             .map(|field| format!("{field:?}").to_lowercase()),
         diff: preview.redacted_diff.clone(),
     };
-    let mut pending = server
-        .config_changes
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    pending.retain(|_, change| change.expires > Instant::now());
-    pending.insert(
-        id,
-        PendingChange {
-            expires: Instant::now() + CHANGE_TTL,
-            preview,
-        },
-    );
     server.logger().info(
         "config_change_previewed",
         &[
@@ -341,41 +356,71 @@ pub async fn confirm(
     headers: HeaderMap,
 ) -> Response {
     let request_id = correlation(&headers);
-    let pending = server
-        .config_changes
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .remove(&id);
-    let Some(pending) = pending else {
+    let Some(service) = &server.approvals else {
         return error_response(
-            StatusCode::NOT_FOUND,
-            "change_not_found",
-            "configuration change was not found",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "approval_unavailable",
+            "approval service unavailable",
         );
     };
-    if pending.expires <= Instant::now() {
+    let request = match service.get(&id, &server.info.workspace, None) {
+        Ok(request)
+            if request.subject.source == "config"
+                && request.state == crate::approval::State::Pending =>
+        {
+            request
+        }
+        _ => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "change_not_found",
+                "configuration change was not found",
+            );
+        }
+    };
+    if request
+        .expires_at
+        .is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp())
+    {
         return error_response(
             StatusCode::GONE,
             "change_expired",
-            "configuration change expired; submit it again",
+            "configuration change expired",
         );
     }
-    match native::commit_profile_change(&server.config_path, &pending.preview) {
-        Ok(()) => {
+    if let Err(error) = service.decide(
+        &id,
+        &request.scope,
+        request.revision,
+        true,
+        "",
+        &crate::approval::Actor::local("config-confirm"),
+    ) {
+        return error_response(StatusCode::CONFLICT, "approval_failed", &error.to_string());
+    }
+    if let Err(error) = service.apply_available(&server.info.workspace) {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "approval_unavailable",
+            &error.to_string(),
+        );
+    }
+    match service.get(&id, &server.info.workspace, None) {
+        Ok(request) if request.application == crate::approval::ApplicationState::Applied => {
             server.logger().info(
                 "config_change_confirmed",
-                &[
-                    ("request_id", request_id),
-                    ("operation", pending.preview.metadata.operation.to_string()),
-                    ("profile", pending.preview.metadata.profile),
-                ],
+                &[("request_id", request_id), ("approval_id", id)],
             );
             json_response(
                 StatusCode::OK,
                 &serde_json::json!({"status":"saved_restart_required"}),
             )
         }
-        Err(error) => error_response(StatusCode::CONFLICT, "change_stale", &error.to_string()),
+        _ => error_response(
+            StatusCode::CONFLICT,
+            "change_stale",
+            "configuration change could not be applied; review the current file",
+        ),
     }
 }
 
@@ -383,18 +428,26 @@ pub async fn cancel(
     Path(id): Path<String>,
     State(server): State<std::sync::Arc<Server>>,
 ) -> Response {
-    let removed = server
-        .config_changes
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .remove(&id);
-    if removed.is_some() {
-        json_response(StatusCode::NO_CONTENT, &serde_json::json!({}))
-    } else {
-        error_response(
+    let Some(service) = &server.approvals else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "approval_unavailable",
+            "approval service unavailable",
+        );
+    };
+    match service.get(&id, &server.info.workspace, None) {
+        Ok(request) if request.subject.source == "config" => {
+            match service.withdraw(&id, &request.scope, request.revision) {
+                Ok(_) => json_response(StatusCode::NO_CONTENT, &serde_json::json!({})),
+                Err(error) => {
+                    error_response(StatusCode::CONFLICT, "approval_failed", &error.to_string())
+                }
+            }
+        }
+        _ => error_response(
             StatusCode::NOT_FOUND,
             "change_not_found",
             "configuration change was not found",
-        )
+        ),
     }
 }

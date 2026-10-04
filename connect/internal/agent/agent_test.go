@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"slices"
@@ -186,6 +187,63 @@ func TestLoadDropsReplayedUpdates(t *testing.T) {
 	}
 	if n := rec.count(); n != 5 {
 		t.Fatalf("updates after prompt = %d, want 5", n)
+	}
+}
+
+func TestConcurrentLoadAfterReconnectReplaysOneSessionOnce(t *testing.T) {
+	a, rec, dir := fakeAgent(t, "FAKE_REPLAY=5000")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	id, err := a.New(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Kill()
+	results := make(chan error, 32)
+	var callers sync.WaitGroup
+	for range 32 {
+		callers.Add(1)
+		go func() { defer callers.Done(); results <- a.Load(ctx, id) }()
+	}
+	callers.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	loads := 0
+	for _, call := range fake.Calls(dir) {
+		if call == "load:"+id {
+			loads++
+		}
+	}
+	if loads != 1 {
+		t.Fatalf("session replayed %d times", loads)
+	}
+	if rec.count() != 0 {
+		t.Fatal("replayed updates reached the chat handler")
+	}
+}
+
+func TestUnifiedApprovalCapabilityRequiresTheSupportedVersion(t *testing.T) {
+	for _, tc := range []struct {
+		meta      string
+		supported bool
+	}{
+		{`{"otto":{"approvals":{"version":1}}}`, true},
+		{`{"otto":{"approvals":{"version":2}}}`, false},
+		{`{"otto":{"approvals":{"version":"1"}}}`, false},
+		{`{"otto":{"approvals":{}}}`, false},
+		{`{}`, false},
+	} {
+		var meta map[string]any
+		if err := json.Unmarshal([]byte(tc.meta), &meta); err != nil {
+			t.Fatal(err)
+		}
+		if advertisesSharedApprovals(meta) != tc.supported {
+			t.Fatalf("incorrect capability negotiation: %s", tc.meta)
+		}
 	}
 }
 

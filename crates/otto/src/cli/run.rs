@@ -599,7 +599,14 @@ pub async fn run(
         reflection_store,
     ));
 
+    let approvals =
+        match crate::approval::Service::open(&Path::new(&home).join(".otto/approvals.db")) {
+            Ok(service) => Arc::new(service),
+            Err(error) => return fail(stderr, &error.to_string()),
+        };
+    approvals.start();
     let shared = Arc::new(Shared {
+        approvals,
         config_path: PathBuf::from(&config_path),
         config: config_file.clone(),
         environment: environment.clone(),
@@ -702,6 +709,9 @@ pub async fn run(
     let control = composed.control;
     let approval_executor = composed.approval_executor;
     let reloader = composed.reloader;
+    builder.grant_control = reloader
+        .as_ref()
+        .map(|control| control.clone() as Arc<dyn crate::app::SandboxControl>);
 
     let dynamic_content = builder.boundary_allows_dynamic(Some(&resolved));
     if (prepared_initial.is_some() || options.serve || options.acp || workflow_command.is_some())

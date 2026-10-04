@@ -533,7 +533,7 @@ pub fn set_profile_thinking_file(
 
 /// A provider permitted in a profile change. This intentionally has no
 /// catch-all string variant: profile management never accepts other providers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProfileProvider {
     OpenAiCompatible,
     ChatGpt,
@@ -549,7 +549,7 @@ impl ProfileProvider {
 }
 
 /// One editable, non-secret profile field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProfileField {
     Model,
     Thinking,
@@ -572,7 +572,7 @@ impl ProfileField {
 ///
 /// `api_key_env` is an environment-variable *name*, never an API-key value.
 /// There is deliberately no generic TOML edit operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProfileChange {
     SetDefault {
         profile: String,

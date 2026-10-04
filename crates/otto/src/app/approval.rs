@@ -284,74 +284,91 @@ impl Controller {
                     }
                     emit(event);
                 };
-                match step.take() {
-                    Some(Step::Text(text)) => {
-                        let _admission = match first_admission.take() {
-                            Some(admission) => admission,
-                            None => self
-                                .begin_runner_operation(runner)
-                                .map_err(AgentError::Other)?,
-                        };
-                        self.run_prompt_step(runner, text, system_context, &mut sink, cancel)
-                            .await
-                    }
-                    Some(Step::Image(text, image)) => {
-                        let _admission = match first_admission.take() {
-                            Some(admission) => admission,
-                            None => self
-                                .begin_runner_operation(runner)
-                                .map_err(AgentError::Other)?,
-                        };
-                        let observation = super::auto_reflection::RunObservation::default();
-                        let result = runner
-                            .run_with_image_system_context(
-                                text,
-                                image,
-                                system_context,
-                                &mut super::auto_reflection::observing_prompt(
-                                    &mut sink,
-                                    &observation,
-                                ),
-                                cancel,
-                            )
-                            .await;
-                        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
-                        result
-                    }
-                    Some(Step::Followup(text)) => {
-                        let _admission = match first_admission.take() {
-                            Some(admission) => admission,
-                            None => self
-                                .begin_runner_operation(runner)
-                                .map_err(AgentError::Other)?,
-                        };
-                        task_run.set_current_task(text);
-                        self.run_followup_step(runner, text, system_context, &mut sink, cancel)
-                            .await
-                    }
-                    Some(Step::Wake(wake)) => wake.run(&mut sink, cancel).await,
-                    None => {
-                        let _admission = match first_admission.take() {
-                            Some(admission) => admission,
-                            None => self
-                                .begin_runner_operation(runner)
-                                .map_err(AgentError::Other)?,
-                        };
-                        if followup {
-                            self.run_followup_step(
-                                runner,
-                                &retry,
-                                system_context,
-                                &mut sink,
-                                cancel,
-                            )
-                            .await
-                        } else {
-                            self.run_prompt_step(runner, &retry, system_context, &mut sink, cancel)
+                let (events, received) = tokio::sync::mpsc::unbounded_channel();
+                let mut send = |event| {
+                    let _ = events.send(event);
+                };
+                let run = async {
+                    match step.take() {
+                        Some(Step::Text(text)) => {
+                            let _admission = match first_admission.take() {
+                                Some(admission) => admission,
+                                None => self
+                                    .begin_runner_operation(runner)
+                                    .map_err(AgentError::Other)?,
+                            };
+                            self.run_prompt_step(runner, text, system_context, &mut send, cancel)
                                 .await
                         }
+                        Some(Step::Image(text, image)) => {
+                            let _admission = match first_admission.take() {
+                                Some(admission) => admission,
+                                None => self
+                                    .begin_runner_operation(runner)
+                                    .map_err(AgentError::Other)?,
+                            };
+                            let observation = super::auto_reflection::RunObservation::default();
+                            let result = runner
+                                .run_with_image_system_context(
+                                    text,
+                                    image,
+                                    system_context,
+                                    &mut super::auto_reflection::observing_prompt(
+                                        &mut send,
+                                        &observation,
+                                    ),
+                                    cancel,
+                                )
+                                .await;
+                            self.after_prompt(
+                                &observation,
+                                result.is_ok() && !cancel.is_cancelled(),
+                            );
+                            result
+                        }
+                        Some(Step::Followup(text)) => {
+                            let _admission = match first_admission.take() {
+                                Some(admission) => admission,
+                                None => self
+                                    .begin_runner_operation(runner)
+                                    .map_err(AgentError::Other)?,
+                            };
+                            task_run.set_current_task(text);
+                            self.run_followup_step(runner, text, system_context, &mut send, cancel)
+                                .await
+                        }
+                        Some(Step::Wake(wake)) => wake.run(&mut send, cancel).await,
+                        None => {
+                            let _admission = match first_admission.take() {
+                                Some(admission) => admission,
+                                None => self
+                                    .begin_runner_operation(runner)
+                                    .map_err(AgentError::Other)?,
+                            };
+                            if followup {
+                                self.run_followup_step(
+                                    runner,
+                                    &retry,
+                                    system_context,
+                                    &mut send,
+                                    cancel,
+                                )
+                                .await
+                            } else {
+                                self.run_prompt_step(
+                                    runner,
+                                    &retry,
+                                    system_context,
+                                    &mut send,
+                                    cancel,
+                                )
+                                .await
+                            }
+                        }
                     }
-                }
+                };
+                self.step_with_shared_approvals(run, received, &mut sink, cancel, decide)
+                    .await
             };
             if cancel.is_cancelled() {
                 return Ok(Stop::Cancelled);
@@ -425,6 +442,50 @@ impl Controller {
                         return Err(AgentError::Other(message));
                     }
                 },
+            }
+        }
+    }
+
+    async fn step_with_shared_approvals<F, Fut>(
+        &self,
+        run: impl Future<Output = Result<(), AgentError>>,
+        mut received: tokio::sync::mpsc::UnboundedReceiver<Event>,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+        decide: &mut F,
+    ) -> Result<(), AgentError>
+    where
+        F: FnMut(ApprovalRequest) -> Fut,
+        Fut: Future<Output = ApprovalDecision>,
+    {
+        tokio::pin!(run);
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+        let mut presented = std::collections::HashSet::new();
+        let scope = self.approval_scope();
+        loop {
+            tokio::select! {
+                result = &mut run => {
+                    while let Ok(event) = received.try_recv() { emit(event); }
+                    return result;
+                },
+                Some(event) = received.recv() => emit(event),
+                _ = tick.tick() => {
+                    let pending = self.approval_service().snapshot(&scope.workspace,Some(&scope.session_id))
+                        .map_err(|e| AgentError::Other(e.to_string()))?;
+                    if let Some(request) = pending.requests.into_iter().find(|r| r.blocking && presented.insert(r.id.clone())) {
+                        let decision = decide(ApprovalRequest {
+                            approval_id: request.id.clone(),tool_call_id: request.subject.tool_call_id.clone(),
+                            command:serde_json::from_str::<serde_json::Value>(&request.subject.details).ok().and_then(|input|input["command"].as_str().map(str::to_string)).unwrap_or_else(||format!("{}\n{}",request.title,request.subject.details)),
+                            justification:request.reason.clone(),read_path:serde_json::from_str::<serde_json::Value>(&request.subject.details).ok().and_then(|v|v["read_path"].as_str().map(str::to_string)).unwrap_or_default(),
+                        }).await;
+                        drop(self.approval_control.lock().await);
+                        if decision == ApprovalDecision::Cancelled || cancel.is_cancelled() {
+                            let _ = self.approval_service().withdraw(&request.id,&request.scope,request.revision);
+                        } else {
+                            let _ = self.decide_shared_approval(&request.id,decision == ApprovalDecision::Allow,"","frontend");
+                        }
+                    }
+                }
             }
         }
     }

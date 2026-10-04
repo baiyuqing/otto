@@ -126,11 +126,34 @@ pub fn serve(script: Script) -> (String, Arc<Mutex<Vec<String>>>) {
                 .unwrap()
                 .push(String::from_utf8_lossy(&body).into_owned());
             let index = script.served.fetch_add(1, Ordering::SeqCst);
-            let reply = script
+            let mut reply = script
                 .replies
                 .get(index)
                 .cloned()
                 .unwrap_or_else(|| text_reply("out of script"));
+            // Tests that revoke approvals must use the exact service-generated
+            // ID advertised to the model, never assume a sequential ID format.
+            if reply.contains("$EXACT_APPROVAL_ID") {
+                let request: serde_json::Value =
+                    serde_json::from_slice(&body).expect("provider request");
+                let system = request["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .iter()
+                    .find(|message| message["role"] == "system")
+                    .expect("system message")["content"]
+                    .as_str()
+                    .expect("system prompt")
+                    .to_string();
+                let id = system
+                    .split("Only withdraw request ")
+                    .nth(1)
+                    .expect("bound approval")
+                    .split('.')
+                    .next()
+                    .expect("approval ID");
+                reply = reply.replace("$EXACT_APPROVAL_ID", id);
+            }
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
                 reply.len()

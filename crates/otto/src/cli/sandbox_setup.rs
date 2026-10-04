@@ -364,6 +364,14 @@ pub fn parse_exclude_entry(rest: &str) -> Result<String, String> {
 /// would not resolve is rejected before anything is written, and a read path
 /// already present is left alone rather than repeated.
 pub fn amend_sandbox_config(path: &Path, change: &SandboxChange) -> Result<Amendment, String> {
+    amend_sandbox_config_checked(path, change, None)
+}
+
+pub fn amend_sandbox_config_checked(
+    path: &Path,
+    change: &SandboxChange,
+    expected: Option<&str>,
+) -> Result<Amendment, String> {
     let original = match std::fs::read(path) {
         Ok(content) => Some(content),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -375,6 +383,12 @@ pub fn amend_sandbox_config(path: &Path, change: &SandboxChange) -> Result<Amend
             .map_err(|_| "configuration is invalid; no changes made".to_string())?,
     };
     let original = original.unwrap_or_default();
+    if let Some(expected) = expected {
+        use sha2::Digest;
+        if format!("{:x}", sha2::Sha256::digest(&original)) != expected {
+            return Err("configuration changed after approval; request approval again".into());
+        }
+    }
 
     let mut proposed = file.sandbox.clone();
     match change {

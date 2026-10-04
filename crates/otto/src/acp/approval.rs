@@ -82,6 +82,23 @@ pub(super) async fn request_permission(
         }),
         _ => None,
     };
+    // Bind withdrawal observation to the exact tool-call request. This does
+    // not decide anything; only the actual client reply below can allow it.
+    let shared = match &connection.backend {
+        super::Backend::Local(local) => local.session(session_id).and_then(|session| {
+            let scope = session.controller.approval_scope();
+            session
+                .controller
+                .approval_service()
+                .snapshot(&scope.workspace, Some(&scope.session_id))
+                .ok()?
+                .requests
+                .into_iter()
+                .find(|r| r.subject.tool_call_id == tool_call_id)
+                .map(|r| (session.controller.clone(), r.id))
+        }),
+        _ => None,
+    };
     let (id, reply) = connection.send_request("session/request_permission", params);
     tokio::select! {
         () = cancel.cancelled() => {
@@ -89,7 +106,7 @@ pub(super) async fn request_permission(
             Decision::Cancelled
         }
         () = async {
-            if let Some((controller, approval_id)) = &pending {
+            if let Some((controller, approval_id)) = shared.as_ref().or(pending.as_ref()) {
                 controller.approval_withdrawn(approval_id).await;
             } else {
                 std::future::pending::<()>().await;

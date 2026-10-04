@@ -434,6 +434,14 @@ impl ToolExecutor for ChildTools {
         definitions
     }
 
+    fn batch_control(
+        &self,
+        name: &str,
+        execution: &ToolExecution,
+    ) -> otto_core::approval::BatchControl {
+        self.registry.batch_control(name, execution)
+    }
+
     async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution {
         let local = |mut result: ToolResult| {
             let outcome =
@@ -496,7 +504,34 @@ impl ToolExecutor for ChildTools {
         if let Err(message) = self.permits_write_tool(call.name, call.arguments) {
             return local(crate::tool::error_result(message).not_started());
         }
-        self.registry.execute(call, control).await
+        if let Some((service, mut scope)) = self.registry.approval_binding() {
+            scope.task_id = self.task_id.clone();
+            if call.name == "request_approval" {
+                return local(
+                    crate::tool::approval::RequestApproval { service, scope }
+                        .execute_call(call, control.cancellation_token())
+                        .await,
+                );
+            }
+            if matches!(call.name, "approval_pending" | "approval_revoke") {
+                return local(
+                    crate::tool::approval::Control {
+                        service,
+                        scope,
+                        revoke: call.name == "approval_revoke",
+                        expected_id: None,
+                        legacy: None,
+                    }
+                    .execute(call.arguments, control.cancellation_token())
+                    .await,
+                );
+            }
+            self.registry
+                .execute_with_scope(call, control, Some(&scope))
+                .await
+        } else {
+            self.registry.execute(call, control).await
+        }
     }
 }
 
@@ -546,6 +581,7 @@ pub type ParentSession = Arc<dyn Fn() -> Vec<Message> + Send + Sync>;
 
 /// Everything a [`Runner`] needs from the parent runtime.
 pub struct Config {
+    pub approval: Option<(Arc<crate::approval::Service>, crate::approval::Scope)>,
     pub provider: Arc<dyn Provider + Send + Sync>,
     /// The parent's tool set; the runner drops [`EXCLUDED_CHILD_TOOLS`] by name
     /// to build the child registry. These are the children's own tool
@@ -642,12 +678,22 @@ impl Runner {
             config.max_output_bytes = DEFAULT_MAX_OUTPUT_BYTES;
         }
 
-        let child_tools: Vec<Box<dyn Tool + Send + Sync>> = std::mem::take(&mut config.tools)
+        let mut child_tools: Vec<Box<dyn Tool + Send + Sync>> = std::mem::take(&mut config.tools)
             .into_iter()
             .filter(|tool| !EXCLUDED_CHILD_TOOLS.contains(&tool.definition().name.as_str()))
             .collect();
+        if let Some((service, scope)) = &config.approval {
+            child_tools.push(Box::new(crate::tool::approval::RequestApproval {
+                service: service.clone(),
+                scope: scope.clone(),
+            }));
+        }
         let child_registry = Registry::new(child_tools)
             .map_err(|error| format!("subagent: child registry: {error}"))?;
+        let child_registry = match &config.approval {
+            Some((service, scope)) => child_registry.with_approval(service.clone(), scope.clone()),
+            None => child_registry,
+        };
         let child_registry = match &config.lease {
             Some(lease) => child_registry.with_guard(Arc::new(failover::CommitGuard::new(
                 Arc::clone(lease),
@@ -1797,6 +1843,7 @@ mod tests {
         tools
             .execute(
                 ToolCall {
+                    tool_call_id: "",
                     operation_id: &operation_id,
                     name,
                     arguments: &arguments,

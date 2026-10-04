@@ -154,6 +154,7 @@ mod tests {
             out,
             pending: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
+            client_capabilities: Mutex::new(Value::Null),
             task_stop: CancellationToken::new(),
             notice_stop: CancellationToken::new(),
             watching_notices: Mutex::new(HashSet::new()),

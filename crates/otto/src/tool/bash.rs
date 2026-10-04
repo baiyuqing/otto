@@ -26,6 +26,7 @@ use otto_core::tool::ToolResult;
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::value::RawValue;
+use sha2::Digest;
 use tokio_util::sync::CancellationToken;
 
 use crate::sandbox::{
@@ -358,6 +359,7 @@ pub struct InvalidConfiguration;
 
 /// Executes a shell command in the sandbox.
 pub struct BashTool {
+    grant_control: Option<(PathBuf, Arc<dyn crate::app::SandboxControl>)>,
     workspace_root: PathBuf,
     executor: Arc<dyn CommandExecutor>,
     shell: String,
@@ -457,6 +459,7 @@ impl BashTool {
         }
 
         Ok(Self {
+            grant_control: None,
             workspace_root: workspace.root().to_path_buf(),
             executor,
             shell: shell.to_owned(),
@@ -473,6 +476,15 @@ impl BashTool {
     }
 
     /// Enables explicit, one-shot elevation for this session.
+    pub fn with_grant_control(
+        mut self,
+        path: PathBuf,
+        control: Arc<dyn crate::app::SandboxControl>,
+    ) -> Self {
+        self.grant_control = Some((path, control));
+        self
+    }
+
     pub fn with_approvals(
         mut self,
         session_id: impl Into<String>,
@@ -696,7 +708,125 @@ impl Tool for BashTool {
         }
     }
 
+    fn approval_spec(
+        &self,
+        arguments: &RawValue,
+    ) -> Result<Option<super::ApprovalSpec>, ToolResult> {
+        let args: BashArgs = decode_strict_json(arguments.get(), &["command"])
+            .map_err(|e| self.argument_error(&e))?;
+        if args.sandbox_read_path.is_empty()
+            && (args.sandbox_permissions == SandboxPermissions::UseDefault
+                || self
+                    .excluded
+                    .as_ref()
+                    .is_some_and(|e| e.matches(&args.command)))
+        {
+            return Ok(None);
+        }
+        if !self.dynamic_content
+            || self.approvals.is_none()
+            || args.command.trim().is_empty()
+            || args.justification.trim().is_empty()
+        {
+            return Err(
+                self.argument_error("approval is unavailable or command/justification is missing")
+            );
+        }
+        let read_path = if args.sandbox_read_path.is_empty() {
+            String::new()
+        } else {
+            if args.sandbox_permissions != SandboxPermissions::UseDefault
+                || self.grant_control.is_none()
+            {
+                return Err(self.argument_error("persistent sandbox read approval is unavailable"));
+            }
+            let path = Path::new(&args.sandbox_read_path);
+            if !path.is_absolute() {
+                return Err(self.argument_error("read path must be absolute"));
+            }
+            path.canonicalize()
+                .map_err(|_| self.argument_error("read path is unavailable"))?
+                .to_str()
+                .ok_or_else(|| self.argument_error("read path must be UTF-8"))?
+                .to_string()
+        };
+        let config_version = if let Some((config, _)) = &self.grant_control {
+            let bytes = match std::fs::read(config) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => vec![],
+                Err(_) => return Err(self.argument_error("configuration is unavailable")),
+            };
+            format!("{:x}", sha2::Sha256::digest(&bytes))
+        } else {
+            String::new()
+        };
+        let version=serde_json::json!({"arguments":crate::approval::digest(arguments.get()),"config":config_version,"path":read_path}).to_string();
+        Ok(Some(super::ApprovalSpec { version,source:"sandbox".into(),
+            title:if read_path.is_empty() { "Run an unsandboxed command?" } else { "Save persistent sandbox read access?" }.into(),
+            reason:args.justification, persistent:!read_path.is_empty(),
+            details:serde_json::json!({"command":args.command,"workspace":self.workspace_root,"read_path":read_path}).to_string(),
+        }))
+    }
+
+    async fn apply_approval(
+        &self,
+        arguments: &RawValue,
+        cancel: &CancellationToken,
+        request: &crate::approval::Request,
+    ) -> Result<(), String> {
+        let args: BashArgs =
+            serde_json::from_str(arguments.get()).map_err(|_| "invalid Bash arguments")?;
+        self.approvals.as_ref().ok_or("approval unavailable")?;
+        if cancel.is_cancelled() {
+            return Err("approval operation cancelled".into());
+        }
+        if !args.sandbox_read_path.is_empty() {
+            let path = Path::new(&args.sandbox_read_path)
+                .canonicalize()
+                .map_err(|_| "read path unavailable")?;
+            let path = path.to_str().ok_or("read path is not UTF-8")?;
+            let (config, control) = self
+                .grant_control
+                .as_ref()
+                .ok_or("sandbox reload unavailable")?;
+            let expected: serde_json::Value = serde_json::from_str(&request.subject.version)
+                .map_err(|_| "invalid authorization revision")?;
+            if expected["path"].as_str() != Some(path) {
+                return Err("read path changed after approval".into());
+            }
+            let amendment = crate::cli::sandbox_setup::amend_sandbox_config_checked(
+                config,
+                &crate::cli::sandbox_setup::SandboxChange::AllowReadPath(path.into()),
+                expected["config"].as_str(),
+            )?;
+            if let Err(error) = control.reload().await {
+                let rollback = crate::cli::sandbox_setup::revert_sandbox_config(config, &amendment);
+                return Err(format!("{error}; rollback: {rollback:?}"));
+            }
+        }
+        Ok(())
+    }
+
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
+        self.execute_inner(arguments, cancel, false).await
+    }
+    async fn execute_approved(
+        &self,
+        call: otto_core::tool::ToolCall<'_>,
+        cancel: &CancellationToken,
+        _request: &crate::approval::Request,
+    ) -> ToolResult {
+        self.execute_inner(call.arguments, cancel, true).await
+    }
+}
+
+impl BashTool {
+    async fn execute_inner(
+        &self,
+        arguments: &RawValue,
+        cancel: &CancellationToken,
+        authorized: bool,
+    ) -> ToolResult {
         let args: BashArgs = match decode_strict_json(arguments.get(), &["command"]) {
             Ok(args) => args,
             Err(message) => return self.argument_error(&message),
@@ -729,7 +859,7 @@ impl Tool for BashTool {
             let Some(path) = path.to_str() else {
                 return self.argument_error("sandbox_read_path must be valid UTF-8");
             };
-            if !approvals.take_read_path(session_id, &args.command, path) {
+            if !authorized && !approvals.take_read_path(session_id, &args.command, path) {
                 let id = approvals.request_read_path(session_id, &args.command, path);
                 let command = serde_json::to_string(&args.command).expect("string encodes");
                 let justification =
@@ -763,7 +893,7 @@ Only the user can approve; do not run /approve in a shell. After approval retry 
                 let Some((session_id, approvals)) = &self.approvals else {
                     return self.argument_error("elevated execution is unavailable");
                 };
-                if !approvals.take(session_id, &args.command) {
+                if !authorized && !approvals.take(session_id, &args.command) {
                     let id = approvals.request(session_id, &args.command);
                     let command = serde_json::to_string(&args.command).expect("string encodes");
                     let justification =
@@ -2508,6 +2638,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
         let result = otto_core::tool::ToolExecutor::execute(
             &registry,
             otto_core::tool::ToolCall {
+                tool_call_id: "test",
                 operation_id: &operation_id,
                 name: "bash",
                 arguments: &arguments,

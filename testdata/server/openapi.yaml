@@ -121,6 +121,56 @@ components:
               items:
                 $ref: "#/components/schemas/WorkspaceReload"
           required: [workspaces]
+    SharedApproval:
+      type: object
+      properties:
+        schema_version: {type: integer, const: 1}
+        id: {type: string}
+        revision: {type: integer, minimum: 1}
+        kind: {type: string, enum: [authorization, confirmation]}
+        scope:
+          type: object
+          properties:
+            workspace: {type: string}
+            session_id: {type: string}
+            task_id: {type: string}
+            run_id: {type: string}
+        subject:
+          type: object
+          properties:
+            source: {type: string}
+            id: {type: string}
+            version: {type: string}
+            tool_call_id: {type: string}
+            details: {type: string}
+        title: {type: string}
+        reason: {type: string}
+        persistent: {type: boolean}
+        blocking: {type: boolean}
+        state: {type: string, enum: [pending, approved, rejected, withdrawn, expired, superseded]}
+        application: {type: string, enum: [not_required, not_started, applying, applied, failed, unknown]}
+        application_error: {type: string}
+        created_at: {type: integer}
+        expires_at: {type: [integer, 'null']}
+        decision: {type: [object, 'null']}
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string, enum: [approve, reject]}
+              label: {type: string}
+              scope: {type: string, enum: [once, persistent]}
+      required: [id, revision, kind, scope, subject, title, reason, state, application]
+    SharedApprovalDecision:
+      type: object
+      additionalProperties: false
+      properties:
+        session_id: {type: string}
+        revision: {type: integer, minimum: 1}
+        option_id: {type: string, enum: [approve, reject, withdraw]}
+        feedback: {type: string, maxLength: 8192}
+      required: [session_id, revision, option_id]
     ApprovalDecision:
       type: object
       properties:
@@ -682,9 +732,12 @@ components:
         One SSE frame's data payload; shape depends on the event's type
         (see docs/specs/2026-09-03-agent-server-design.md#wire-events).
       properties:
+        approval:
+          $ref: '#/components/schemas/SharedApproval'
         type:
           type: string
           enum:
+            - approval_changed
             - agent_started
             - agent_finished
             - text_delta
@@ -999,6 +1052,122 @@ components:
         type: integer
         minimum: 0
 paths:
+  /v1/approvals:
+    get:
+      summary: List scoped approvals
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Scoped snapshot or changes; event sequence is durable. Snapshot includes requests and cursor.
+        '404':
+          description: Session or request not found.
+        '503':
+          description: Approval storage or domain details unavailable.
+  /v1/approvals/events:
+    get:
+      summary: Events scoped approvals
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema: {type: string}
+        - name: after
+          in: query
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: Scoped snapshot or changes; event sequence is durable. Snapshot includes requests and cursor.
+        '404':
+          description: Session or request not found.
+        '503':
+          description: Approval storage or domain details unavailable.
+  /v1/approvals/changes:
+    get:
+      summary: Changes scoped approvals
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema: {type: string}
+        - name: after
+          in: query
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: Scoped snapshot or changes; event sequence is durable. Snapshot includes requests and cursor.
+        '404':
+          description: Session or request not found.
+        '503':
+          description: Approval storage or domain details unavailable.
+  /v1/approvals/{id}:
+    get:
+      summary: Get scoped approvals
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema: {type: string}
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Scoped snapshot or changes; event sequence is durable. Snapshot includes requests and cursor.
+        '404':
+          description: Session or request not found.
+        '503':
+          description: Approval storage or domain details unavailable.
+  /v1/approvals/{id}/decision:
+    post:
+      summary: Decide one exact approval version
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SharedApprovalDecision'
+      responses:
+        '200':
+          description: Committed decision and current application state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SharedApproval'
+        '409':
+          description: Already decided differently, stale version, expired or unauthorized scope.
+  /v1/approvals/{id}/withdraw:
+    post:
+      summary: Withdraw one exact approval version
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SharedApprovalDecision'
+      responses:
+        '200':
+          description: Committed decision and current application state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SharedApproval'
+        '409':
+          description: Already decided differently, stale version, expired or unauthorized scope.
   /v1/config/profiles:
     get:
       summary: List non-sensitive Otto provider-profile settings

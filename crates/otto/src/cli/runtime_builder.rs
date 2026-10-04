@@ -577,6 +577,7 @@ impl RequestSizer for ScriptedSizer {
 }
 
 pub struct Runner {
+    approvals: Option<(Arc<crate::approval::Service>, crate::approval::Scope)>,
     agent: Agent<ProviderClient, Registry, SharedSession>,
     turn_timeout: Option<Duration>,
     system_prompt: String,
@@ -636,14 +637,19 @@ impl Runner {
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
         }
-        let mut emit = self.collecting(emit);
+        let (events, received) = tokio::sync::mpsc::unbounded_channel();
+        let mut send = |event| {
+            let _ = events.send(event);
+        };
+        let mut collecting = self.collecting(&mut send);
         let run = self.agent.run_with_system_context_control(
             user_text,
             system_context,
-            &mut emit,
+            &mut collecting,
             &control,
         );
-        drive_with_control(run, cancel, &control).await
+        self.monitor_approvals(drive_with_control(run, cancel, &control), received, emit)
+            .await
     }
 
     /// Runs one model-originated follow-up as display-only context.
@@ -661,14 +667,19 @@ impl Runner {
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
         }
-        let mut emit = self.collecting(emit);
+        let (events, received) = tokio::sync::mpsc::unbounded_channel();
+        let mut send = |event| {
+            let _ = events.send(event);
+        };
+        let mut collecting = self.collecting(&mut send);
         let run = self.agent.run_followup_with_system_context_control(
             text,
             system_context,
-            &mut emit,
+            &mut collecting,
             &control,
         );
-        drive_with_control(run, cancel, &control).await
+        self.monitor_approvals(drive_with_control(run, cancel, &control), received, emit)
+            .await
     }
 
     pub async fn run_with_image(
@@ -697,15 +708,51 @@ impl Runner {
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
         }
-        let mut emit = self.collecting(emit);
+        let (events, received) = tokio::sync::mpsc::unbounded_channel();
+        let mut send = |event| {
+            let _ = events.send(event);
+        };
+        let mut collecting = self.collecting(&mut send);
         let run = self.agent.run_with_image_system_context_control(
             user_text,
             Some(image),
             system_context,
-            &mut emit,
+            &mut collecting,
             &control,
         );
-        drive_with_control(run, cancel, &control).await
+        self.monitor_approvals(drive_with_control(run, cancel, &control), received, emit)
+            .await
+    }
+
+    async fn monitor_approvals<T>(
+        &self,
+        future: impl Future<Output = T>,
+        mut events: tokio::sync::mpsc::UnboundedReceiver<otto_core::agent::Event>,
+        emit: EventSink<'_>,
+    ) -> T {
+        tokio::pin!(future);
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut cursor = self
+            .approvals
+            .as_ref()
+            .and_then(|(service, scope)| {
+                service
+                    .snapshot(&scope.workspace, Some(&scope.session_id))
+                    .ok()
+            })
+            .map_or(0, |s| s.cursor);
+        loop {
+            tokio::select! {
+                result=&mut future=>{while let Ok(event)=events.try_recv(){emit(event);}return result},
+                Some(event)=events.recv()=>emit(event),
+                _=tick.tick(),if self.approvals.is_some()=>{
+                    while let Ok(event)=events.try_recv(){emit(event);}
+                    if let Some((service,scope))=&self.approvals && let Ok(changes)=service.events(&scope.workspace,Some(&scope.session_id),cursor) {
+                        for change in changes {cursor=change.sequence;emit(otto_core::agent::Event::ApprovalChanged{request:Box::new(change.request)});}
+                    }
+                }
+            }
+        }
     }
 
     /// Compacts the transcript.
@@ -980,6 +1027,7 @@ impl Runner {
                     ..Options::default()
                 },
             ),
+            approvals: None,
             turn_timeout: None,
             system_prompt: String::new(),
             definitions,
@@ -1025,6 +1073,7 @@ impl Runner {
 /// more than one workspace builds this once and calls
 /// [`Builder::for_workspace`] once per workspace.
 pub struct Shared {
+    pub approvals: Arc<crate::approval::Service>,
     pub config_path: PathBuf,
     pub config: File,
     pub environment: HashMap<String, String>,
@@ -1104,6 +1153,7 @@ pub struct Builder {
     pub workspace_path: String,
     pub command_executor: Option<Arc<dyn CommandExecutor>>,
     pub bash_approvals: Option<Arc<bash::BashApprovals>>,
+    pub grant_control: Option<Arc<dyn crate::app::SandboxControl>>,
     pub excluded_commands: Option<Arc<bash::ExcludedCommands>>,
     pub sandbox_environment: Option<Vec<String>>,
     pub sandbox_info: SandboxInfo,
@@ -1155,6 +1205,7 @@ impl Builder {
             workspace_path,
             command_executor: None,
             bash_approvals: None,
+            grant_control: None,
             excluded_commands: None,
             sandbox_environment: None,
             sandbox_info: SandboxInfo::default(),
@@ -1282,6 +1333,7 @@ impl Builder {
             .map(|tool| tool.definition())
             .collect();
         definitions.extend(self.boundary_memory_definitions(max_output));
+        definitions.push(crate::tool::approval::request_definition());
         if self.planned_bash_available() {
             definitions.push(match self.bash_approvals.is_some() {
                 true => bash::bash_definition_with_approvals(),
@@ -1506,7 +1558,21 @@ impl Builder {
         warnings: &mut (dyn std::io::Write + Send),
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let redaction_values = self.secret_values(Some(runtime));
+        self.approvals
+            .protect_secrets(&redaction_values)
+            .map_err(|e| e.to_string())?;
         let max_output = output_cap(runtime.max_output_bytes);
+        let skills = otto_core::config::resolve_skills(
+            &self.config,
+            &self.environment,
+            &self.workspace_path,
+        );
+        if skills.enabled
+            && let Some(roots) = crate::reflection::skill_roots(&self.home, &skills.roots)
+        {
+            self.reflector
+                .attach_approvals(&self.approvals, &self.workspace_path, roots)?;
+        }
         let mut tools = self.builtin_file_tools(max_output);
         if self.bash_configured() {
             let executor = self
@@ -1527,6 +1593,9 @@ impl Builder {
             if let Some(approvals) = &self.bash_approvals {
                 tool = tool.with_approvals(session.header().id, Arc::clone(approvals));
             }
+            if let Some(control) = &self.grant_control {
+                tool = tool.with_grant_control(self.config_path.clone(), control.clone());
+            }
             if let Some(excluded) = &self.excluded_commands {
                 tool = tool.with_excluded_commands(Arc::clone(excluded));
             }
@@ -1535,6 +1604,20 @@ impl Builder {
         let redactor = self.boundary_redactor(Some(runtime));
         let client = self.provider_client(runtime)?;
         let advisor = if self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
+            crate::approval::memory::attach(
+                &self.approvals,
+                &self.memory.service,
+                vec![self.memory.user_scope.clone(), self.workspace_scope.clone()],
+                &self.workspace_path,
+            )
+            .map_err(|e| e.to_string())?;
+            crate::approval::memory::reconcile(
+                &self.approvals,
+                &self.memory.service,
+                &[self.memory.user_scope.clone(), self.workspace_scope.clone()],
+                &self.workspace_path,
+            )
+            .map_err(|e| e.to_string())?;
             let advice_agent = Agent::with_redactor(
                 client.clone(),
                 Registry::new(Vec::new()).map_err(|error| format!("advice registry: {error}"))?,
@@ -1623,8 +1706,28 @@ impl Builder {
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
-            if let Some(approvals) = &self.bash_approvals {
-                tools.extend(crate::tool::otto::controls(&session.header().id, approvals));
+            tools.push(Box::new(crate::tool::approval::RequestApproval {
+                service: self.approvals.clone(),
+                scope: crate::approval::Scope {
+                    workspace: self.workspace_path.clone(),
+                    session_id: session.header().id,
+                    task_id: String::new(),
+                    run_id: String::new(),
+                },
+            }));
+            for revoke in [false, true] {
+                tools.push(Box::new(crate::tool::approval::Control {
+                    service: self.approvals.clone(),
+                    scope: crate::approval::Scope {
+                        workspace: self.workspace_path.clone(),
+                        session_id: session.header().id,
+                        task_id: String::new(),
+                        run_id: String::new(),
+                    },
+                    revoke,
+                    expected_id: None,
+                    legacy: self.bash_approvals.clone(),
+                }));
             }
             tools.extend(crate::schedule::tools::tools(
                 &crate::schedule::tools::Context {
@@ -1650,6 +1753,15 @@ impl Builder {
 
         let registry =
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
+        let registry = registry.with_approval(
+            self.approvals.clone(),
+            crate::approval::Scope {
+                workspace: self.workspace_path.clone(),
+                session_id: session.header().id,
+                task_id: String::new(),
+                run_id: String::new(),
+            },
+        );
         let registry = with_lease_guard(registry, session, &self.workspace_path);
         let definitions = registry.definitions();
         let base_prompt = system_prompt_for(
@@ -1723,6 +1835,15 @@ impl Builder {
         let trace_entries = trace.map(|trace| trace.entries).unwrap_or_default();
         Ok((
             Runner {
+                approvals: Some((
+                    self.approvals.clone(),
+                    crate::approval::Scope {
+                        workspace: self.workspace_path.clone(),
+                        session_id: session.header().id,
+                        task_id: String::new(),
+                        run_id: String::new(),
+                    },
+                )),
                 agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
                 turn_timeout: runtime.resilience.deadlines.turn_timeout,
                 system_prompt,
@@ -2140,6 +2261,7 @@ mod tests {
 
     fn shared(root: &Path) -> Arc<Shared> {
         Arc::new(Shared {
+            approvals: Arc::new(crate::approval::Service::in_memory().expect("approval store")),
             config_path: root.join("config.toml"),
             config: File::default(),
             environment: HashMap::new(),
@@ -2334,6 +2456,9 @@ mod tests {
                 "remind",
                 "remind_status",
                 "remind_cancel",
+                "request_approval",
+                "approval_pending",
+                "approval_revoke",
                 "schedule",
                 "schedule_list",
                 "schedule_cancel",
@@ -2376,6 +2501,7 @@ mod tests {
         let result = registry
             .execute(
                 otto_core::tool::ToolCall {
+                    tool_call_id: "test",
                     operation_id: &operation_id,
                     name: "write",
                     arguments: &arguments,
@@ -2612,7 +2738,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");

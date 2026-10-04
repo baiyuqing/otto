@@ -79,6 +79,9 @@ pub enum ParseFailure {
 pub enum Parsed {
     /// `--help` was given; usage has already been written to stdout.
     Help,
+    /// `--version` was given; the version line has already been written to
+    /// stdout.
+    Version,
     Options(Box<CliOptions>),
 }
 
@@ -103,6 +106,10 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     if set.bool_value("help") || set.bool_value("h") {
         print_usage(stdout);
         return Ok(Parsed::Help);
+    }
+    if set.bool_value("version") || set.bool_value("V") {
+        let _ = writeln!(stdout, "otto {}", crate::VERSION);
+        return Ok(Parsed::Version);
     }
     if !scan.is_empty() {
         return Err(reject("otto: unexpected positional arguments"));
@@ -304,6 +311,7 @@ File tools always stay within the selected workspace.
 
 Options:
   --help                 show help
+  --version, -V          print version and exit
   --config PATH          configuration file
   --cwd PATH             workspace directory
   --profile NAME         configuration profile
@@ -346,6 +354,8 @@ struct FlagSet {
 const DECLARED: &[(&str, Kind)] = &[
     ("help", Kind::Bool),
     ("h", Kind::Bool),
+    ("version", Kind::Bool),
+    ("V", Kind::Bool),
     ("config", Kind::Str),
     ("cwd", Kind::Str),
     ("profile", Kind::Str),
@@ -531,7 +541,7 @@ mod tests {
     fn options(args: &[&str]) -> CliOptions {
         match parse(args).expect("parse") {
             Parsed::Options(options) => *options,
-            Parsed::Help => panic!("unexpected help"),
+            Parsed::Help | Parsed::Version => panic!("unexpected help or version"),
         }
     }
 
@@ -687,6 +697,19 @@ mod tests {
         assert!(got.exit_on_stdin_close);
         assert!(got.listen_set);
         assert!(!options(&["serve", "--listen", "127.0.0.1:0"]).exit_on_stdin_close);
+    }
+
+    #[test]
+    fn version_prints_build_version_and_stops() {
+        for flag in ["--version", "-V"] {
+            let mut stdout = Vec::new();
+            let outcome = parse_flags(&[flag.to_string()], &mut stdout).expect("parse");
+            assert_eq!(outcome, Parsed::Version);
+            assert_eq!(
+                String::from_utf8(stdout).expect("utf-8"),
+                format!("otto {}\n", crate::VERSION)
+            );
+        }
     }
 
     #[test]

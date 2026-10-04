@@ -323,7 +323,7 @@ pub async fn run(
     };
 
     let options = match parse_flags(flag_args, stdout) {
-        Ok(Parsed::Help) => return 0,
+        Ok(Parsed::Help | Parsed::Version) => return 0,
         Ok(Parsed::Options(options)) => *options,
         Err(ParseFailure::Unsafe) => {
             let _ = stderr.write_all(b"otto: invalid command-line arguments\n");

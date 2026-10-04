@@ -14,7 +14,7 @@ DESKTOP_APP := $(DESKTOP_DIR)/target/$(DESKTOP_TARGET)/release/bundle/macos/Otto
 # `cargo tauri build` runs `xattr -crs` on the bundle; /usr/bin comes first so
 # a pip-installed `xattr` earlier on PATH, which has no -r, is not used.
 
-.PHONY: all build install check-fast check check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
+.PHONY: all build install check-fast check check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test bump release-tag test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
 
 all: build
 
@@ -48,6 +48,13 @@ rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
 
 scripts-test: ## run the Node tests beside scripts/ (offline, no build needed)
 	node --test scripts/*.test.mjs
+
+bump: ## set a new release version in every manifest and lockfile (VERSION=X.Y.Z)
+	@test -n "$(VERSION)" || { echo "usage: make bump VERSION=X.Y.Z"; exit 1; }
+	node scripts/release.mjs bump $(VERSION)
+
+release-tag: ## tag origin/main with the Cargo.toml version, push the tag and create the GitHub release (needs gh)
+	node scripts/release.mjs tag
 
 test-tui: ## run the TUI PTY tests, local and --attach (need a real PTY)
 	cargo test -p otto --test tui_pty --test tui_attach_pty

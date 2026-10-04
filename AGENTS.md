@@ -41,6 +41,7 @@ Apply these requirements to every feature, fix, and refactor:
 - Feature work and bug fixes ship with tests that check the behavior the change adds or fixes; a test must fail when that behavior breaks. Writing tests before the code is not required. Run the focused tests, then the broader relevant gates. Docs-only changes are exempt.
 - The parent owns planning, interfaces, integration review, and acceptance. Delegated work has bounded file ownership; hand off overlapping file ownership and preserve other workers' changes.
 - Keep dependencies and abstractions minimal, reuse existing contracts, and preserve append-only session history and compatibility. See the [development guide](docs/development.md) before changing shared contracts.
+- Version numbers change only in a release PR made with `make bump VERSION=X.Y.Z`; see [Releases](docs/development.md#releases).
 - New features are on by default. Do not add a config switch that defaults to off or an opt-in flag for them. A feature that needs input the user must supply, such as an API key from an environment variable, runs when that input is present and is skipped otherwise.
 
 ## Safety

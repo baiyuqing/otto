@@ -232,6 +232,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | Flag | Description |
 | --- | --- |
 | `--help` | Show help and exit. |
+| `--version`, `-V` | Print the version and exit. The output is `otto X.Y.Z+<commit>`, where `<commit>` is the 12-character git commit the binary was built from, with `.dirty` appended if tracked files had uncommitted changes at build time; `+unknown` means the build had no git information. |
 | `--config PATH` | Configuration file. Defaults to `~/.config/otto/config.toml`. |
 | `--cwd PATH` | Workspace directory. Defaults to `.`. |
 | `--profile NAME` | Configuration profile. |

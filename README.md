@@ -40,6 +40,7 @@ git clone https://github.com/baiyuqing/otto.git
 cd otto
 make install
 otto --help
+otto --version   # otto 0.1.0+a1b2c3d4e5f6; `.dirty` is appended for uncommitted changes
 ```
 
 `make install` refreshes and embeds the Web UI, builds Otto and otto-connect, installs both to `~/.local/bin/`, and installs bundled skills under `~/.otto/skills/`. Make sure `~/.local/bin` is on your `PATH`. A direct `cargo build` without a prior `make ui` embeds a one-line placeholder instead.

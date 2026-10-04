@@ -181,7 +181,7 @@ pub fn modern_meta(params: Value) -> Value {
         "io.modelcontextprotocol/clientInfo".to_string(),
         json!({
             "name": "otto",
-            "version": env!("CARGO_PKG_VERSION")
+            "version": crate::VERSION
         }),
     );
 
@@ -196,7 +196,7 @@ pub fn initialize_params() -> Value {
         "capabilities": {},
         "clientInfo": {
             "name": "otto",
-            "version": env!("CARGO_PKG_VERSION")
+            "version": crate::VERSION
         }
     })
 }

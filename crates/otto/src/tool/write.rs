@@ -164,7 +164,10 @@ pub(crate) fn write_file_atomic(
         return Err(before_rename(error.to_string()));
     }
     drop(temporary);
-    if let Err(error) = root.rename(&temporary_path, path) {
+    let refuse_git = |resolved: &[std::ffi::OsString]| {
+        super::workspace::refuse_git_read_only(resolved.iter().map(|part| part.as_os_str()), path)
+    };
+    if let Err(error) = root.rename(&temporary_path, path, &refuse_git) {
         let _ = root.remove(&temporary_path);
         return Err(before_rename(error.to_string()));
     }
@@ -250,6 +253,89 @@ mod tests {
 
     fn fail_directory_sync(_directory: &std::fs::File) -> std::io::Result<()> {
         Err(std::io::Error::other("injected directory sync failure"))
+    }
+
+    #[tokio::test]
+    async fn git_config_and_hooks_are_refused_and_other_git_files_are_written() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(root.path().join(".git/info")).unwrap();
+        std::fs::write(root.path().join(".git/config"), "old").unwrap();
+        std::os::unix::fs::symlink(".git", root.path().join("g")).unwrap();
+        let workspace = workspace(root.path());
+        let tool = WriteTool::new(&workspace);
+
+        for path in [
+            ".git/config",
+            ".GIT/config",
+            "g/config",
+            ".git/hooks/pre-commit",
+        ] {
+            let result = run(&tool, &format!(r#"{{"path":"{path}","content":"new"}}"#)).await;
+            assert!(
+                result.is_error && result.content.contains("read-only"),
+                "{path}: {result:?}"
+            );
+            assert_eq!(
+                result.outcome_override.unwrap().effect_certainty,
+                EffectCertainty::NotStarted
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".git/config")).unwrap(),
+            "old"
+        );
+        assert!(!root.path().join(".git/hooks/pre-commit").exists());
+
+        let ok = run(&tool, r#"{"path":".git/info/exclude","content":"x"}"#).await;
+        assert!(!ok.is_error, "{ok:?}");
+    }
+
+    /// The check in `write_relative` runs before the write; a symlink created
+    /// after it must still be refused, so the rename re-checks the path it
+    /// resolves. Calling `write_file_atomic` directly skips the first check.
+    #[test]
+    fn the_atomic_write_refuses_git_paths_reached_through_a_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".git/hooks")).unwrap();
+        std::fs::write(root.path().join(".git/config"), "old").unwrap();
+        std::os::unix::fs::symlink(".git", root.path().join("g")).unwrap();
+        let workspace = workspace(root.path());
+
+        for path in [
+            "g/config",
+            "g/hoo\u{212A}s/pre-commit",
+            "g/hook\u{17F}/pre-commit",
+        ] {
+            let error = write_file_atomic(&workspace, Path::new(path), b"new", sync_directory)
+                .expect_err(path);
+            assert!(
+                matches!(&error, AtomicWriteError::BeforeRename(message) if message.contains("read-only")),
+                "{path}: {error:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".git/config")).unwrap(),
+            "old"
+        );
+        assert!(!root.path().join(".git/hooks/pre-commit").exists());
+        let leftovers: Vec<_> = walkdir(root.path().join(".git"))
+            .into_iter()
+            .filter(|name| name.contains(".otto-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+    }
+
+    fn walkdir(directory: std::path::PathBuf) -> Vec<String> {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                names.extend(walkdir(entry.path()));
+            }
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        names
     }
 
     #[tokio::test]

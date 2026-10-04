@@ -10,7 +10,7 @@ use agent_client_protocol_schema::v1::{
     ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use otto_core::agent::Event;
-use otto_core::model::{BlockType, Message, Role};
+use otto_core::model::{BlockType, Message, OperationDisposition, Role};
 use otto_core::wire::events::{WireEvent, to_wire};
 use serde_json::Value;
 
@@ -55,6 +55,10 @@ fn status(is_error: bool) -> ToolCallStatus {
     } else {
         ToolCallStatus::Completed
     }
+}
+
+fn failed(is_error: bool, disposition: Option<OperationDisposition>) -> bool {
+    is_error || disposition.is_some_and(|value| value != OperationDisposition::Succeeded)
 }
 
 fn tool_call(tool_name: &str, id: &str, input: Value, status: ToolCallStatus) -> SessionUpdate {
@@ -108,10 +112,13 @@ pub fn event_update(event: &WireEvent) -> Option<SessionUpdate> {
                 ToolCallStatus::InProgress,
             ))
         }
-        "tool_call_finished" => event
-            .result
-            .as_ref()
-            .map(|result| tool_result(&event.tool_call_id, &result.content, result.is_error)),
+        "tool_call_finished" => event.result.as_ref().map(|result| {
+            tool_result(
+                &event.tool_call_id,
+                &result.content,
+                failed(result.is_error, result.disposition),
+            )
+        }),
         _ => None,
     }
 }
@@ -146,7 +153,13 @@ pub fn history_updates(history: &[Message]) -> Vec<SessionUpdate> {
                 (Role::Tool, BlockType::ToolResult) => Some(tool_result(
                     &block.tool_call_id,
                     &block.text,
-                    block.is_error,
+                    failed(
+                        block.is_error,
+                        block
+                            .operation_metadata
+                            .as_ref()
+                            .map(|meta| meta.disposition),
+                    ),
                 )),
                 _ => None,
             };
@@ -269,6 +282,49 @@ mod tests {
         let update = to_json(&event_update(&local_wire(&finished(failed))).unwrap());
         assert_eq!(update["status"], "failed");
         assert_eq!(update["content"][0]["content"]["text"], "boom");
+    }
+
+    #[test]
+    fn stopped_operations_are_failed_live_and_after_history_replay() {
+        use otto_core::model::ToolResultMetadata;
+        use otto_core::wire::events::WireToolResult;
+
+        for disposition in [
+            OperationDisposition::Cancelled,
+            OperationDisposition::DeadlineExceeded,
+            OperationDisposition::Interrupted,
+            OperationDisposition::Error,
+        ] {
+            let event = WireEvent {
+                event_type: "tool_call_finished".into(),
+                tool_call_id: "call-1".into(),
+                result: Some(WireToolResult {
+                    content: "execution stopped".into(),
+                    is_error: false,
+                    disposition: Some(disposition),
+                    ..WireToolResult::default()
+                }),
+                ..WireEvent::default()
+            };
+            let live = to_json(&event_update(&event).unwrap());
+            assert_eq!(live["status"], "failed", "{disposition:?}");
+            let mut block = Block::text("execution stopped");
+            block.block_type = BlockType::ToolResult;
+            block.tool_call_id = "call-1".into();
+            block.operation_metadata = Some(ToolResultMetadata {
+                operation_id: None,
+                disposition,
+                effect_certainty: EffectCertainty::Unknown,
+                stop_reason: None,
+            });
+            let replay = history_updates(&[message(Role::Tool, vec![block])]);
+            assert_eq!(to_json(&replay[0]), live, "{disposition:?}");
+        }
+        assert!(
+            !failed(false, None),
+            "legacy successful results remain completed"
+        );
+        assert!(!failed(false, Some(OperationDisposition::Succeeded)));
     }
 
     fn message(role: Role, blocks: Vec<Block>) -> Message {

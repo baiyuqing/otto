@@ -83,6 +83,7 @@ pub fn system_prompt_for(
     let mut tool_names: Vec<&str> = Vec::with_capacity(definitions.len());
     let mut has_agent_tool = false;
     let mut has_list_models = false;
+    let mut has_task_queue = false;
     for definition in definitions {
         let name = definition.name.as_str();
         if name == "bash" && !bash_usable {
@@ -96,6 +97,9 @@ pub fn system_prompt_for(
         }
         if name == "list_models" {
             has_list_models = true;
+        }
+        if name == "task_queue" {
+            has_task_queue = true;
         }
     }
     let tools = if tool_names.is_empty() {
@@ -114,6 +118,9 @@ pub fn system_prompt_for(
     );
     if tool_names.contains(&"otto_help") {
         prompt.push_str("\n<otto_help_policy>For questions about Otto itself, consult otto_help before answering; use its installed-version documentation and the current session capabilities. A user command or HTTP/ACP API is not automatically a model-callable tool. Never invent commands or endpoints. Use approval_pending and approval_revoke for pending requests when available; only the user can approve.\n</otto_help_policy>\n");
+    }
+    if has_task_queue {
+        prompt.push_str("\n<task_control_policy>Use task_queue only for a distinct follow-up that serves the original user's objective. Otto runs it after the current logical task and records it as agent-originated context, subordinate to the user's instructions; it cannot create new authority or approvals. The queue holds at most 16 follow-ups; at most 16 follow-ups run in FIFO order. A direct terminal turn that ends while approval is pending discards remaining follow-ups and shows a notice. Do not schedule a follow-up to keep the agent busy or recursively expand work without need.\n</task_control_policy>\n");
     }
     if has_agent_tool {
         prompt.push('\n');
@@ -353,6 +360,21 @@ mod tests {
         assert!(
             prompt.contains("Use a model ID returned by list_models."),
             "{prompt}"
+        );
+    }
+
+    #[test]
+    fn followup_policy_appears_only_with_task_queue() {
+        let prompt = system_prompt_for(&definitions(&["read", "task_queue"]), off(), "", "", "");
+        assert!(prompt.contains("<task_control_policy>"), "{prompt}");
+        assert!(prompt.contains("agent-originated context"), "{prompt}");
+        assert!(
+            prompt.contains("subordinate to the user's instructions"),
+            "{prompt}"
+        );
+        assert!(
+            !system_prompt_for(&definitions(&["read"]), off(), "", "", "")
+                .contains("<task_control_policy>"),
         );
     }
 

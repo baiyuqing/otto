@@ -23,9 +23,13 @@
 // answers it with -32010; a candidate id starting with "dddd" conflicts on
 // review), one "<id>\t<kind>\t<text>" per line. A review removes the
 // line and is logged as review:<id>:<decision>.
+// It advertises _meta.otto.taskControl unless FAKE_NO_TASK_CONTROL=1 and
+// serves _otto/tasks/control and _otto/tasks/steer while a prompt is active.
+// FAKE_NO_TASK_CONTROL_METHODS=1 keeps the capability but returns method-not-found.
 //
 // Every call is appended to <dir>/calls as one line: init:<pid>, new:<id>,
-// load:<id>, start:<text>, end:<text>, cancel:<id>, perm:<outcome>.
+// load:<id>, start:<text>, end:<text>, cancel:<id>, perm:<outcome>,
+// task_control:<text>, and steer:<text>.
 // Sessions persist in <dir>/sessions so a restarted agent can load them;
 // loading an unknown id fails. A line is "<id>" or
 // "<id>\t<updatedAt>\t<title>"; session/list returns the lines newest
@@ -146,6 +150,9 @@ func (a *agent) Initialize(context.Context, acp.InitializeRequest) (acp.Initiali
 	if os.Getenv("FAKE_NO_CHANNEL_CONTEXT") == "" {
 		meta["channelContext"] = true
 	}
+	if os.Getenv("FAKE_NO_TASK_CONTROL") == "" {
+		meta["taskControl"] = true
+	}
 	if len(meta) > 0 {
 		caps.Meta = map[string]any{"otto": meta}
 	}
@@ -241,6 +248,13 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 	a.mu.Lock()
 	a.cancels[id] = cancelled
 	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		if a.cancels[id] == cancelled {
+			delete(a.cancels, id)
+		}
+		a.mu.Unlock()
+	}()
 
 	end := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
 	switch {
@@ -405,6 +419,57 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 			return map[string]any{"text": "The agent needs approval to run this tool call.", "queued": false}, nil
 		}
 		return map[string]any{"text": "I will handle that after approval.", "queued": true}, nil
+	case "_otto/tasks/control":
+		if os.Getenv("FAKE_NO_TASK_CONTROL_METHODS") != "" {
+			return nil, acp.NewMethodNotFound(method)
+		}
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Text      string `json:"text"`
+			Channel   string `json:"channel"`
+		}
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		a.mu.Lock()
+		active := a.cancels[req.SessionID] != nil && !a.approvals[req.SessionID]
+		a.mu.Unlock()
+		a.log("task_control:%s", req.Text)
+		if req.Channel != "" {
+			a.log("task_control_channel:%s", req.Channel)
+		}
+		if strings.HasPrefix(req.Text, "slow-follow-up: ") || req.Text == "hold-control" {
+			time.Sleep(200 * time.Millisecond)
+		}
+		if !active || req.Text == "no-decision" {
+			return nil, nil
+		}
+		if req.Text == "control-error" {
+			return nil, &acp.RequestError{Code: -32020, Message: "task control failed"}
+		}
+		if strings.HasPrefix(req.Text, "follow-up: ") {
+			return map[string]any{"text": "I will handle that after the current task.", "queued": true}, nil
+		}
+		return map[string]any{"text": "Guidance accepted.", "queued": false}, nil
+	case "_otto/tasks/steer":
+		if os.Getenv("FAKE_NO_TASK_CONTROL_METHODS") != "" {
+			return nil, acp.NewMethodNotFound(method)
+		}
+		var req struct {
+			SessionID string `json:"sessionId"`
+			Text      string `json:"text"`
+		}
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		a.mu.Lock()
+		active := a.cancels[req.SessionID] != nil && !a.approvals[req.SessionID]
+		a.mu.Unlock()
+		if !active {
+			return nil, &acp.RequestError{Code: -32021, Message: "no active task"}
+		}
+		a.log("steer:%s", req.Text)
+		return map[string]any{"accepted": true}, nil
 	}
 	return nil, acp.NewMethodNotFound(method)
 }

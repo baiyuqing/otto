@@ -1,5 +1,6 @@
 //! The slash commands `otto acp` runs itself: `/compact [focus]`,
-//! `/context`, `/reflect [focus]`, and the reflection skill commands.
+//! `/context`, `/reflect [focus]`, `/steer <guidance>`, `/queue <prompt>`,
+//! and the reflection skill commands.
 //!
 //! They are advertised with `available_commands_update` and arrive as the
 //! text of an ordinary `session/prompt`. [`parse`] decides whether a prompt is
@@ -15,12 +16,14 @@ use agent_client_protocol_schema::v1::{
 use otto_core::agent::context_report::{ContextReport, SectionKind};
 use otto_core::wire::events::WireCompaction;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Command<'a> {
     Context,
     Compact { focus: &'a str },
     Reflect { focus: &'a str },
     Skill { args: &'a str },
+    Steer { guidance: &'a str },
+    Queue { prompt: &'a str },
 }
 
 /// `Some` when the whole prompt is one of the supported slash commands.
@@ -38,6 +41,20 @@ pub(super) fn parse(text: &str) -> Option<Command<'_>> {
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     {
         return Some(Command::Reflect { focus: rest.trim() });
+    }
+    if let Some(rest) = text.strip_prefix("/steer")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        return Some(Command::Steer {
+            guidance: rest.trim(),
+        });
+    }
+    if let Some(rest) = text.strip_prefix("/queue")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        return Some(Command::Queue {
+            prompt: rest.trim(),
+        });
     }
     if let Some(rest) = text.strip_prefix("/compact")
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
@@ -74,6 +91,16 @@ pub(super) fn available_commands() -> SessionUpdate {
         )
         .input(AvailableCommandInput::Unstructured(
             UnstructuredCommandInput::new("generated | revert <name>"),
+        )),
+        AvailableCommand::new("steer", "Guide the active task at its next safe boundary").input(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("guidance")),
+        ),
+        AvailableCommand::new(
+            "queue",
+            "Queue a separate follow-up prompt for this session",
+        )
+        .input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("prompt"),
         )),
     ]))
 }
@@ -159,6 +186,20 @@ mod tests {
         assert_eq!(parse("/compact\tx"), Some(Command::Compact { focus: "x" }));
         assert_eq!(parse("/reflect"), Some(Command::Reflect { focus: "" }));
         assert_eq!(
+            parse("/steer  finish the current tool call first "),
+            Some(Command::Steer {
+                guidance: "finish the current tool call first"
+            })
+        );
+        assert_eq!(parse("/steer"), Some(Command::Steer { guidance: "" }));
+        assert_eq!(
+            parse("/queue  check the implementation "),
+            Some(Command::Queue {
+                prompt: "check the implementation"
+            })
+        );
+        assert_eq!(parse("/queue"), Some(Command::Queue { prompt: "" }));
+        assert_eq!(
             parse("/reflect  remember API limits "),
             Some(Command::Reflect {
                 focus: "remember API limits"
@@ -182,6 +223,8 @@ mod tests {
             "please /compact",
             "/Compact",
             "/reflectx",
+            "/steerx",
+            "/queuex",
             "/skillx",
             "compact",
             "",
@@ -201,6 +244,8 @@ mod tests {
         assert!(commands[1].get("input").is_none());
         assert_eq!(commands[2]["name"], "reflect");
         assert_eq!(commands[3]["name"], "skill");
+        assert_eq!(commands[4]["name"], "steer");
+        assert_eq!(commands[5]["name"], "queue");
     }
 
     #[test]

@@ -1815,8 +1815,10 @@ impl Dispatcher {
                     let reply = connection
                         .prompt(&session_id, text, channel, origin, &token)
                         .await;
-                    connection.reply(id, reply);
+                    // A prompt response is an admission boundary for an ACP client:
+                    // release the slot before the writer can expose the response.
                     slot.end();
+                    connection.reply(id, reply);
                 });
                 return;
             }
@@ -1829,8 +1831,10 @@ impl Dispatcher {
             let reply = connection
                 .prompt(&session_id, text, channel, origin, &token)
                 .await;
-            connection.reply(id, reply);
+            // A prompt response is an admission boundary for an ACP client:
+            // release the slot before the writer can expose the response.
             slot.end();
+            connection.reply(id, reply);
         });
     }
 }

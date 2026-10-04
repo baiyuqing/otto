@@ -186,6 +186,8 @@ pub struct Controller {
     close_signal: Condvar,
     /// Lines from background reflection for a frontend to show.
     notices: Arc<auto_reflection::Notices>,
+    /// Model-written texts of finished wake turns, for ACP clients.
+    wake_replies: auto_reflection::Notices,
     /// Whether a background reflection run is in flight; one at a time.
     auto_running: Arc<std::sync::atomic::AtomicBool>,
     /// Cancelled by `request_close`, which stops a background run.
@@ -246,6 +248,7 @@ impl Controller {
             }),
             close_signal: Condvar::new(),
             notices: Arc::new(auto_reflection::Notices::new()),
+            wake_replies: auto_reflection::Notices::new(),
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
@@ -1734,6 +1737,7 @@ impl Controller {
             }),
             close_signal: Condvar::new(),
             notices: Arc::new(auto_reflection::Notices::new()),
+            wake_replies: auto_reflection::Notices::new(),
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),

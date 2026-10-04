@@ -14,6 +14,10 @@ use tokio_util::sync::CancellationToken;
 mod common;
 use common::{Script, serve, text_reply, tool_call_reply};
 
+/// Wait for one ACP frame. Session creation takes about 0.9 s alone and about
+/// 10 s when this file's tests run in parallel in a debug build.
+const ACP_READ: Duration = Duration::from_secs(30);
+
 /// Lets a test read serve's stdout while the server task is still writing.
 #[derive(Clone, Default)]
 struct LockedBuffer(Arc<Mutex<Vec<u8>>>);
@@ -455,7 +459,7 @@ async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
             .await
             .unwrap();
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(10), acp.read_line(&mut line))
+        tokio::time::timeout(ACP_READ, acp.read_line(&mut line))
             .await
             .unwrap()
             .unwrap();
@@ -484,7 +488,7 @@ async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
     let mut text = String::new();
     loop {
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(10), acp.read_line(&mut line))
+        tokio::time::timeout(ACP_READ, acp.read_line(&mut line))
             .await
             .unwrap()
             .unwrap();
@@ -537,7 +541,7 @@ async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
             .await
             .unwrap();
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(10), acp.read_line(&mut line))
+        tokio::time::timeout(ACP_READ, acp.read_line(&mut line))
             .await
             .unwrap()
             .unwrap();
@@ -591,4 +595,98 @@ async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
     ));
     assert!(!stdout.text().contains("test-acp-listener-token"));
     assert!(!stderr.text().contains("test-acp-listener-token"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn acp_tcp_client_receives_the_reply_of_a_wake_turn_started_by_serve() {
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+
+    let (provider, _requests) = serve(Script {
+        replies: vec![
+            tool_call_reply("c1", "remind", r#"{"seconds":1,"message":"ping"}"#),
+            text_reply("timer set"),
+            text_reply("the timer fired"),
+        ],
+        served: Arc::new(AtomicUsize::new(0)),
+    });
+    let mut fixture = fixture(&provider, "");
+    fixture
+        .environment
+        .push(b"OTTO_ACP_TOKEN=test-acp-listener-token".to_vec());
+    let cancel = CancellationToken::new();
+    let (stdout, stderr, handle) = run_serve(
+        &fixture,
+        &[
+            "--sandbox",
+            "off",
+            "--listen",
+            "127.0.0.1:0",
+            "--acp-listen",
+            "127.0.0.1:0",
+        ],
+        cancel.clone(),
+    )
+    .await;
+    let _ = await_startup(&stdout, &stderr).await;
+    let address = stdout
+        .text()
+        .lines()
+        .find_map(|line| line.strip_prefix("otto serve: ACP ").map(str::to_string))
+        .unwrap();
+    let mut acp = BufReader::new(TcpStream::connect(&address).await.unwrap());
+    acp.get_mut()
+        .write_all(b"Authorization: Bearer test-acp-listener-token\n")
+        .await
+        .unwrap();
+    let mut sid = String::new();
+    let requests = [
+        json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{"protocolVersion":1, "clientCapabilities":{}}}),
+        json!({"jsonrpc":"2.0", "id":2, "method":"session/new", "params":{"cwd":fixture.workspace, "mcpServers":[]}}),
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+            "params":{"sessionId":"", "prompt":[{"type":"text", "text":"remind me"}]}}),
+    ];
+    let mut wake_reply = None;
+    let mut prompt_done = false;
+    for mut request in requests {
+        if request["id"] == 3 {
+            request["params"]["sessionId"] = json!(sid);
+        }
+        acp.get_mut()
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        loop {
+            let mut line = String::new();
+            tokio::time::timeout(ACP_READ, acp.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            if frame["id"] == request["id"] {
+                if request["id"] == 2 {
+                    sid = frame["result"]["sessionId"].as_str().unwrap().to_string();
+                }
+                prompt_done = request["id"] == 3;
+                break;
+            }
+        }
+    }
+    assert!(prompt_done);
+    while wake_reply.is_none() {
+        let mut line = String::new();
+        tokio::time::timeout(ACP_READ, acp.read_line(&mut line))
+            .await
+            .expect("no wake reply in time")
+            .unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        let update = &frame["params"]["update"];
+        if update["_meta"]["otto"]["wakeReply"] == true {
+            wake_reply = update["content"]["text"].as_str().map(str::to_string);
+        }
+    }
+    assert_eq!(wake_reply.unwrap(), "the timer fired");
+    cancel.cancel();
+    assert_eq!(handle.await.unwrap(), 0, "{}", stderr.text());
 }

@@ -394,3 +394,44 @@ func TestWriteAfterStdinClosedIsExitError(t *testing.T) {
 		t.Fatalf("err = %v, want *ExitError with exit status 5 and stderr gone", err)
 	}
 }
+
+func wakeChunk(meta map[string]any, content acp.ContentBlock) acp.SessionUpdate {
+	return acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Meta: meta, Content: content}}
+}
+
+func TestWakeReplyShape(t *testing.T) {
+	otto := func(m map[string]any) map[string]any { return map[string]any{"otto": m} }
+	valid := otto(map[string]any{"wakeReply": true, "replyId": float64(1)})
+	if text, ok := WakeReply(wakeChunk(valid, acp.TextBlock("**hi**"))); !ok || text != "**hi**" {
+		t.Fatalf("valid wake reply = %q, %v", text, ok)
+	}
+	for name, u := range map[string]acp.SessionUpdate{
+		"missing flag":    wakeChunk(otto(map[string]any{"replyId": float64(1)}), acp.TextBlock("x")),
+		"false flag":      wakeChunk(otto(map[string]any{"wakeReply": false, "replyId": float64(1)}), acp.TextBlock("x")),
+		"missing id":      wakeChunk(otto(map[string]any{"wakeReply": true}), acp.TextBlock("x")),
+		"string id":       wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": "1"}), acp.TextBlock("x")),
+		"zero id":         wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": float64(0)}), acp.TextBlock("x")),
+		"fractional id":   wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": 1.5}), acp.TextBlock("x")),
+		"non-text":        wakeChunk(valid, acp.ImageBlock("", "image/png")),
+		"reflection only": wakeChunk(otto(map[string]any{"reflectionNotice": true, "noticeId": float64(1)}), acp.TextBlock("x")),
+		"no meta":         acp.UpdateAgentMessageText("x"),
+	} {
+		if _, ok := WakeReply(u); ok {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+func TestSessionUpdateDeliversWakeReplyDuringLoad(t *testing.T) {
+	rec := &recorder{}
+	c := &client{p: &process{loading: map[string]bool{"s1": true}}, handler: rec}
+	u := wakeChunk(map[string]any{"otto": map[string]any{"wakeReply": true, "replyId": float64(1)}}, acp.TextBlock("timer"))
+	if err := c.SessionUpdate(context.Background(), acp.SessionNotification{SessionId: "s1", Update: u}); err != nil {
+		t.Fatal(err)
+	}
+	u.AgentMessageChunk.Meta = map[string]any{"otto": map[string]any{"wakeReply": true, "replyId": float64(0)}}
+	_ = c.SessionUpdate(context.Background(), acp.SessionNotification{SessionId: "s1", Update: u})
+	if rec.count() != 1 {
+		t.Fatalf("delivered %d updates, want only the valid wake reply", rec.count())
+	}
+}

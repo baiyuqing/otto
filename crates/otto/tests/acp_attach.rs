@@ -1342,3 +1342,30 @@ fn cancelling_attached_reflection_releases_server_admission() {
     );
     assert_eq!(relay.close(), Some(0));
 }
+
+#[test]
+fn a_relay_receives_the_reply_of_a_wake_turn_started_by_serve() {
+    let (home, workspace, base_url) = fixture(vec![
+        tool_call_reply("c1", "remind", r#"{"seconds":1,"message":"ping"}"#),
+        text_reply("timer set"),
+        text_reply("the timer fired"),
+    ]);
+    configure(home.path(), &base_url, None);
+    let serve = Serve::start(home.path(), workspace.path(), "off");
+    let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+    relay.initialize();
+    let session_id = relay.new_session(workspace.path());
+    let (_, response) = relay.call("session/prompt", prompt(&session_id, "remind me"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+
+    // The relay polls serve once a second; the update arrives outside any prompt.
+    let text = loop {
+        let frame = relay.recv();
+        let update = &frame["params"]["update"];
+        if update["_meta"]["otto"]["wakeReply"] == true {
+            break update["content"]["text"].as_str().unwrap().to_string();
+        }
+    };
+    assert_eq!(text, "the timer fired");
+    assert_eq!(relay.close(), Some(0));
+}

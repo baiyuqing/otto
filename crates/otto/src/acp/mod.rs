@@ -50,7 +50,9 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{Channel, Controller, SandboxControl, Step, Stop};
+use crate::app::{
+    ApprovalDecision, CLOSED, Channel, Controller, PROMPT_ACTIVE, SandboxControl, Step, Stop,
+};
 use crate::cli::runtime_builder::Builder;
 use crate::session::{MAX_LIST_SESSIONS, is_session_id, session_directory};
 
@@ -137,6 +139,10 @@ struct PromptState {
     active: Option<CancellationToken>,
     queue: std::collections::VecDeque<QueuedPrompt>,
     draining: bool,
+    /// True while `active` belongs to a wake turn rather than a prompt.
+    wake: bool,
+    /// An ordinary prompt waiting for a wake turn to end.
+    waiting: Option<CancellationToken>,
     followups: HashMap<u64, CancellationToken>,
     next_followup: u64,
     next_followup_admission: u64,
@@ -147,9 +153,69 @@ struct PromptSlot {
     state: Mutex<PromptState>,
     changed: Notify,
     followup_changed: Notify,
+    /// Counts releases of the slot, for the wake loop. Separate from
+    /// `changed`, whose permits belong to the `/queue` worker.
+    released: tokio::sync::watch::Sender<u64>,
 }
 
 impl PromptSlot {
+    fn signal_released(&self) {
+        self.released.send_modify(|count| *count += 1);
+    }
+
+    /// Claims the slot for a wake turn when nothing else holds or awaits it.
+    fn begin_wake(&self, parent: &CancellationToken) -> Option<CancellationToken> {
+        let mut state = self.state.lock().expect("prompt slot");
+        if state.active.is_some()
+            || state.draining
+            || !state.followups.is_empty()
+            || state.waiting.is_some()
+        {
+            return None;
+        }
+        let token = parent.child_token();
+        state.active = Some(token.clone());
+        state.wake = true;
+        Some(token)
+    }
+
+    /// Registers an ordinary prompt to run after the wake turn that holds the
+    /// slot. `None` when the slot is held by anything else or already awaited.
+    fn wait_for_wake(&self, parent: &CancellationToken) -> Option<CancellationToken> {
+        let mut state = self.state.lock().expect("prompt slot");
+        if !state.wake || state.waiting.is_some() {
+            return None;
+        }
+        let token = parent.child_token();
+        state.waiting = Some(token.clone());
+        Some(token)
+    }
+
+    /// Waits until the slot is free and installs the waiting prompt's token as
+    /// active. `false` when the wait was cancelled.
+    async fn claim_after_wake(&self, token: &CancellationToken) -> bool {
+        let mut released = self.released.subscribe();
+        loop {
+            {
+                let mut state = self.state.lock().expect("prompt slot");
+                if token.is_cancelled() {
+                    state.waiting = None;
+                    return false;
+                }
+                if state.active.is_none() && !state.draining && state.followups.is_empty() {
+                    state.waiting = None;
+                    state.active = Some(token.clone());
+                    return true;
+                }
+            }
+            tokio::select! {
+                biased;
+                () = token.cancelled() => {}
+                _ = released.changed() => {}
+            }
+        }
+    }
+
     /// Installs a normal prompt only when no prompt or explicit queue is active.
     fn begin(&self, parent: &CancellationToken) -> Option<CancellationToken> {
         let mut state = self.state.lock().expect("prompt slot");
@@ -162,8 +228,13 @@ impl PromptSlot {
     }
 
     fn end(&self) {
-        self.state.lock().expect("prompt slot").active = None;
+        {
+            let mut state = self.state.lock().expect("prompt slot");
+            state.active = None;
+            state.wake = false;
+        }
         self.changed.notify_one();
+        self.signal_released();
     }
 
     fn cancel(&self) -> usize {
@@ -171,6 +242,9 @@ impl PromptSlot {
         let dropped = state.queue.len();
         state.queue.clear();
         if let Some(token) = state.active.as_ref() {
+            token.cancel();
+        }
+        if let Some(token) = state.waiting.as_ref() {
             token.cancel();
         }
         for token in state.followups.values() {
@@ -211,6 +285,8 @@ impl PromptSlot {
                 if stop.is_cancelled() {
                     state.queue.clear();
                     state.draining = false;
+                    drop(state);
+                    self.signal_released();
                     return;
                 }
                 if state.active.is_some() {
@@ -221,6 +297,8 @@ impl PromptSlot {
                     Some((queued, token))
                 } else {
                     state.draining = false;
+                    drop(state);
+                    self.signal_released();
                     return;
                 }
             };
@@ -292,6 +370,7 @@ impl PromptSlot {
             .expect("prompt slot")
             .followups
             .remove(&id);
+        self.signal_released();
     }
 }
 
@@ -326,7 +405,9 @@ struct Connection {
     task_stop: CancellationToken,
     notice_stop: CancellationToken,
     watching_notices: Mutex<HashSet<String>>,
-    notice_ready: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    notice_ready: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    /// One wake loop per local session; awaited before `serve` returns.
+    wake_loops: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl Connection {
@@ -407,6 +488,7 @@ impl Connection {
             .get("sessionId")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        self.start_wake_loop(id);
         self.start_notice_watcher(id).await;
         Ok(reply)
     }
@@ -428,8 +510,53 @@ impl Connection {
         for update in update::history_updates(&history) {
             self.update(&id, update);
         }
+        self.start_wake_loop(&id);
         self.start_notice_watcher(&id).await;
         Ok(json!({ "sessionId": id }))
+    }
+
+    /// Runs the session's wake turns until the connection ends: a due
+    /// sub-agent or timer notification starts a turn whenever nothing else
+    /// holds the session. The turn streams nothing; its reply text is queued
+    /// on the controller and sent by the wake-reply watcher.
+    fn start_wake_loop(&self, session_id: &str) {
+        let Backend::Local(local) = &self.backend else {
+            return;
+        };
+        let Some(session) = local.session(session_id) else {
+            return;
+        };
+        let Some(tasks) = session.controller.subagent_tasks() else {
+            return;
+        };
+        let mut loops = self.wake_loops.lock().expect("wake loops");
+        if loops.contains_key(session_id) {
+            return;
+        }
+        let stop = self.task_stop.clone();
+        loops.insert(
+            session_id.to_string(),
+            tokio::spawn(async move {
+                let mut updates = tasks.updates();
+                let mut released = session.prompt.released.subscribe();
+                loop {
+                    if wake_turn(&session, &stop).await {
+                        // A failed turn leaves its notification queued; wait
+                        // before retrying so a persistent error does not spin.
+                        tokio::select! {
+                            () = stop.cancelled() => return,
+                            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                        }
+                    }
+                    tokio::select! {
+                        biased;
+                        () = stop.cancelled() => return,
+                        changed = updates.changed() => if changed.is_err() { return },
+                        changed = released.changed() => if changed.is_err() { return },
+                    }
+                }
+            }),
+        );
     }
 
     /// Follows the session's notices until the connection ends. A local
@@ -448,7 +575,7 @@ impl Connection {
         let id = session_id.to_string();
         let connection = Arc::clone(self);
         let stop = self.notice_stop.child_token();
-        let (ready, start) = oneshot::channel();
+        let (ready, start) = tokio::sync::watch::channel(false);
         self.notice_ready
             .lock()
             .expect("notice ready map")
@@ -462,11 +589,31 @@ impl Connection {
                 let changed = controller.notices_changed();
                 // This session owns the controller, so every notice it holds,
                 // including one queued when it was built, is new to this client.
+                let replies_changed = controller.wake_replies_changed();
+                let (wake_connection, wake_controller) =
+                    (Arc::clone(&connection), Arc::clone(&controller));
+                let (wake_id, wake_stop, wake_start) = (id.clone(), stop.clone(), start.clone());
+                tokio::spawn(async move {
+                    if !notice_watcher_ready(wake_start, &wake_stop).await {
+                        return;
+                    }
+                    watch_controller_notices(
+                        wake_connection,
+                        wake_controller,
+                        wake_id,
+                        wake_stop,
+                        replies_changed,
+                        0,
+                        true,
+                    )
+                    .await;
+                });
                 tokio::spawn(async move {
                     if !notice_watcher_ready(start, &stop).await {
                         return;
                     }
-                    watch_controller_notices(connection, controller, id, stop, changed, 0).await;
+                    watch_controller_notices(connection, controller, id, stop, changed, 0, false)
+                        .await;
                 });
             }
             Backend::Attach(relay) => {
@@ -476,12 +623,35 @@ impl Connection {
                     };
                     let changed = controller.notices_changed();
                     let (_, after) = controller.notices_since(0);
+                    let replies_changed = controller.wake_replies_changed();
+                    let (_, replies_after) = controller.wake_replies_since(0);
+                    let (wake_connection, wake_controller) =
+                        (Arc::clone(&connection), Arc::clone(&controller));
+                    let (wake_id, wake_stop, wake_start) =
+                        (id.clone(), stop.clone(), start.clone());
+                    tokio::spawn(async move {
+                        if !notice_watcher_ready(wake_start, &wake_stop).await {
+                            return;
+                        }
+                        watch_controller_notices(
+                            wake_connection,
+                            wake_controller,
+                            wake_id,
+                            wake_stop,
+                            replies_changed,
+                            replies_after,
+                            true,
+                        )
+                        .await;
+                    });
                     tokio::spawn(async move {
                         if !notice_watcher_ready(start, &stop).await {
                             return;
                         }
-                        watch_controller_notices(connection, controller, id, stop, changed, after)
-                            .await;
+                        watch_controller_notices(
+                            connection, controller, id, stop, changed, after, false,
+                        )
+                        .await;
                     });
                     return;
                 }
@@ -496,6 +666,20 @@ impl Connection {
                         relay.fail(failure);
                         return;
                     }
+                };
+                // An older serve has no wake-replies route; only this polling
+                // stops then.
+                let mut replies_after = tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return,
+                    result = relay.client.wake_replies(&id, 0) => match result {
+                        Ok(initial) => Some(initial.last),
+                        Err(crate::client::Error::Http { status: 404, .. }) => None,
+                        Err(failure) => {
+                            relay.fail(failure);
+                            return;
+                        }
+                    },
                 };
                 let connection = Arc::clone(&connection);
                 tokio::spawn(async move {
@@ -517,12 +701,43 @@ impl Connection {
                             },
                             Backend::Local(_) => return,
                         };
+                        if let Some(replies_cursor) = replies_after {
+                            let polled = match &connection.backend {
+                                Backend::Attach(relay) => tokio::select! {
+                                    biased;
+                                    () = stop.cancelled() => return,
+                                    result = relay.client.wake_replies(&id, replies_cursor) => result,
+                                },
+                                Backend::Local(_) => return,
+                            };
+                            match polled {
+                                Ok(page) => {
+                                    emit_notices(
+                                        &connection,
+                                        &id,
+                                        page.notices.into_iter().map(|n| (n.id, n.text)).collect(),
+                                        true,
+                                    );
+                                    replies_after = Some(page.last);
+                                }
+                                Err(crate::client::Error::Http { status: 404, .. }) => {
+                                    replies_after = None;
+                                }
+                                Err(failure) => {
+                                    if let Backend::Attach(relay) = &connection.backend {
+                                        relay.fail(failure);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
                         match result {
                             Ok(page) => {
                                 emit_notices(
                                     &connection,
                                     &id,
                                     page.notices.into_iter().map(|n| (n.id, n.text)).collect(),
+                                    false,
                                 );
                                 after = page.last;
                             }
@@ -604,7 +819,7 @@ impl Connection {
                 .expect("notice ready map")
                 .remove(id)
         {
-            let _ = ready.send(());
+            let _ = ready.send(true);
         }
     }
 
@@ -621,6 +836,19 @@ impl Connection {
         let meta = serde_json::Map::from_iter([(
             "otto".to_string(),
             json!({"reflectionNotice": true, "noticeId": notice_id}),
+        )]);
+        self.update(
+            session_id,
+            SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new(text))).meta(meta),
+            ),
+        );
+    }
+
+    fn wake_reply(&self, session_id: &str, reply_id: u64, text: &str) {
+        let meta = serde_json::Map::from_iter([(
+            "otto".to_string(),
+            json!({"wakeReply": true, "replyId": reply_id}),
         )]);
         self.update(
             session_id,
@@ -885,6 +1113,35 @@ impl Connection {
     }
 }
 
+/// Runs one wake turn when a notification is pending and nothing else holds
+/// the session. Returns true when the turn failed.
+async fn wake_turn(session: &Session, stop: &CancellationToken) -> bool {
+    let Some(token) = session.prompt.begin_wake(stop) else {
+        return false;
+    };
+    let controller = &session.controller;
+    let failure = match controller.prepare_wake() {
+        Ok(None) => None,
+        Ok(Some(wake)) => controller
+            .run_with_channel(Step::Wake(wake), None, &mut |_| {}, &token, |_| async {
+                ApprovalDecision::Deny
+            })
+            .await
+            .err()
+            .map(|failure| failure.to_string()),
+        Err(message) if message == PROMPT_ACTIVE || message == CLOSED => None,
+        Err(message) => Some(message),
+    };
+    session.prompt.end();
+    if let Some(message) = &failure {
+        eprintln!(
+            "acp: wake turn failed: {}",
+            controller.redact_error(message)
+        );
+    }
+    failure.is_some()
+}
+
 async fn watch_controller_notices(
     connection: Arc<Connection>,
     controller: Arc<Controller>,
@@ -892,15 +1149,18 @@ async fn watch_controller_notices(
     stop: CancellationToken,
     mut changed: tokio::sync::watch::Receiver<u64>,
     mut after: u64,
+    wake_replies: bool,
 ) {
     // A receiver subscribed before a line was queued does not fire for it
     // again, so read what is already queued before the first wait.
     loop {
-        let (notices, last) = controller.notices_since(after);
+        let (notices, last) = if wake_replies {
+            controller.wake_replies_since(after)
+        } else {
+            controller.notices_since(after)
+        };
         after = last;
-        for (notice_id, text) in notices {
-            connection.reflection_notice(&session_id, notice_id, &text);
-        }
+        emit_notices(&connection, &session_id, notices, wake_replies);
         tokio::select! {
             biased;
             () = stop.cancelled() => return,
@@ -909,17 +1169,29 @@ async fn watch_controller_notices(
     }
 }
 
-async fn notice_watcher_ready(start: oneshot::Receiver<()>, stop: &CancellationToken) -> bool {
+async fn notice_watcher_ready(
+    mut start: tokio::sync::watch::Receiver<bool>,
+    stop: &CancellationToken,
+) -> bool {
     tokio::select! {
         biased;
         () = stop.cancelled() => false,
-        result = start => result.is_ok(),
+        result = start.wait_for(|ready| *ready) => result.is_ok(),
     }
 }
 
-fn emit_notices(connection: &Connection, session_id: &str, notices: Vec<(u64, String)>) {
+fn emit_notices(
+    connection: &Connection,
+    session_id: &str,
+    notices: Vec<(u64, String)>,
+    wake_replies: bool,
+) {
     for (notice_id, text) in notices {
-        connection.reflection_notice(session_id, notice_id, &text);
+        if wake_replies {
+            connection.wake_reply(session_id, notice_id, &text);
+        } else {
+            connection.reflection_notice(session_id, notice_id, &text);
+        }
     }
 }
 
@@ -1449,6 +1721,19 @@ impl Dispatcher {
             _ => {}
         }
         let Some(token) = slot.begin(&self.stop) else {
+            // A wake turn is not a prompt: wait for it, then run.
+            if let Some(token) = slot.wait_for_wake(&self.stop) {
+                self.tasks.spawn(async move {
+                    if !slot.claim_after_wake(&token).await {
+                        return connection
+                            .reply(id, result(PromptResponse::new(StopReason::Cancelled)));
+                    }
+                    let reply = connection.prompt(&session_id, text, channel, &token).await;
+                    connection.reply(id, reply);
+                    slot.end();
+                });
+                return;
+            }
             return connection.reply(
                 id,
                 Err(error(INTERNAL_ERROR, "a prompt is already running")),
@@ -1563,6 +1848,7 @@ async fn drive<T>(
         notice_ready: Mutex::new(HashMap::new()),
         notice_stop: notice_stop.clone(),
         watching_notices: Mutex::new(HashSet::new()),
+        wake_loops: Mutex::new(HashMap::new()),
     });
     let mut lines = read_lines(stdin);
     let read_loop = async {
@@ -1589,6 +1875,16 @@ async fn drive<T>(
         dispatcher.stop.cancel();
         connection.notice_stop.cancel();
         while dispatcher.tasks.join_next().await.is_some() {}
+        let wake_loops: Vec<_> = connection
+            .wake_loops
+            .lock()
+            .expect("wake loops")
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        for handle in wake_loops {
+            let _ = handle.await;
+        }
         let collected = collect(&connection);
         // Dropping the dispatcher and the connection drops the last sender,
         // which ends the writer.

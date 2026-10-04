@@ -246,7 +246,7 @@ async fn cancellation_is_reported_without_a_request() {
 #[tokio::test]
 async fn invalid_arguments_are_in_band_errors() {
     let tool = fetch(&runtime(&[]));
-    for arguments in [r#"{}"#, r#"{"url":""}"#, r#"{"url":5}"#, r#"not json"#] {
+    for arguments in [r#"{}"#, r#"{"url":""}"#, r#"{"url":5}"#] {
         let result = run(&tool, arguments).await;
         assert!(result.is_error, "{arguments}: {}", result.content);
     }

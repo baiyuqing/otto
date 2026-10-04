@@ -1857,7 +1857,10 @@ composer:
   a newline. Assistant text renders as GitHub-Flavored Markdown, with KaTeX
   math for `$...$` and `$$...$$`, plus Mermaid diagrams in fenced
   `mermaid` code blocks. Each tool call is a collapsible block with its
-  arguments and result.
+  arguments and result. The page is served with
+  `Content-Security-Policy: img-src 'self' data: blob:`, so a Markdown image
+  that points to another host is not loaded: model output such as
+  `![](https://host/?q=<text>)` cannot make the browser send a request.
 - **Image** selects one PNG, JPEG, or WebP image; pasting a screenshot selects
   it too. The composer shows a preview, and the image can be sent without text.
   Sending stores the original image with the prompt in session history and

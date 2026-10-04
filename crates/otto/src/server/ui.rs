@@ -29,7 +29,13 @@ pub fn dist_file(path: &str) -> Option<&'static [u8]> {
     DIST.get_file(path).map(|file| file.contents())
 }
 
-/// `GET /`. `Cache-Control: no-cache` is set on both branches.
+/// Restricts images to the page's own origin, `data:` and `blob:` URLs, so
+/// model Markdown such as `![](https://host/?d=...)` cannot make the browser
+/// request a remote URL. Other directives stay unrestricted.
+const CONTENT_SECURITY_POLICY: &str = "img-src 'self' data: blob:";
+
+/// `GET /`. `Cache-Control: no-cache` and the Content-Security-Policy are set
+/// on both branches.
 pub fn index_response(page: Option<&[u8]>) -> Response {
     let (content_type, body) = match page {
         Some(page) => ("text/html; charset=utf-8", page.to_vec()),
@@ -38,6 +44,7 @@ pub fn index_response(page: Option<&[u8]>) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY)
         .header(header::CONTENT_TYPE, content_type)
         .body(Body::from(body))
         .expect("static header values")
@@ -107,6 +114,20 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("no-cache")
         );
+    }
+
+    #[test]
+    fn the_index_restricts_images_to_local_sources() {
+        for page in [Some(&b"<!doctype html>"[..]), None] {
+            let response = index_response(page);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .and_then(|value| value.to_str().ok()),
+                Some("img-src 'self' data: blob:")
+            );
+        }
     }
 
     #[test]

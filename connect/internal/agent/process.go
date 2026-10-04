@@ -263,7 +263,9 @@ func (c *client) SessionUpdate(_ context.Context, n acp.SessionNotification) err
 		return nil
 	}
 	if c.p.isLoading(string(n.SessionId)) {
-		if _, notice := ReflectionNotice(n.Update); !notice {
+		_, notice := ReflectionNotice(n.Update)
+		_, wake := WakeReply(n.Update)
+		if !notice && !wake {
 			return nil
 		}
 	}
@@ -273,15 +275,27 @@ func (c *client) SessionUpdate(_ context.Context, n acp.SessionNotification) err
 
 // ReflectionNotice returns the text of a valid Otto background notice.
 func ReflectionNotice(u acp.SessionUpdate) (string, bool) {
+	return ottoChunk(u, "reflectionNotice", "noticeId")
+}
+
+// WakeReply returns the Markdown text of a valid Otto wake-turn reply, which
+// Otto sends outside any prompt.
+func WakeReply(u acp.SessionUpdate) (string, bool) {
+	return ottoChunk(u, "wakeReply", "replyId")
+}
+
+// ottoChunk returns the text of an agent message chunk whose _meta.otto has
+// flag == true and an integer idKey >= 1.
+func ottoChunk(u acp.SessionUpdate, flag, idKey string) (string, bool) {
 	chunk := u.AgentMessageChunk
 	if chunk == nil || chunk.Content.Text == nil {
 		return "", false
 	}
 	otto, ok := chunk.Meta["otto"].(map[string]any)
-	if !ok || otto["reflectionNotice"] != true {
+	if !ok || otto[flag] != true {
 		return "", false
 	}
-	id, ok := otto["noticeId"].(float64)
+	id, ok := otto[idKey].(float64)
 	if !ok || id < 1 || math.Trunc(id) != id {
 		return "", false
 	}

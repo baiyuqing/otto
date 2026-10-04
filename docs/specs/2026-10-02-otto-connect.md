@@ -389,6 +389,8 @@ connector was stopped.
 - Running as a login service (#267).
 - Delivering otto's background results (for example `remind`) to the chat
   outside a prompt: `otto acp` sends no updates outside a prompt.
+  (Superseded on 2026-10-04 by
+  [wake-turn replies over ACP](2026-10-04-acp-wake-replies.md).)
 - Streaming replies, buttons, attachments, session listing and switching
   from the chat (later added as `/sessions` and `/use`; see
   [shared session](2026-10-02-shared-session.md)), more than one workspace

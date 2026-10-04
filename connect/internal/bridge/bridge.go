@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -59,6 +60,7 @@ type Bridge struct {
 	bySession map[string]*chat // chats with a running prompt, by session id
 	closing   bool
 	sessLocks map[string]*sync.Mutex // one per session id; guarded by mu
+	loadMu    sync.Mutex             // serializes session/load calls
 }
 
 // New returns a Bridge and registers it as the agent's handler.
@@ -106,6 +108,8 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 	platCtx, stopPlatforms := context.WithCancel(ctx)
 	defer stopPlatforms()
+	b.wg.Add(1)
+	go b.loadBoundSessions()
 	errc := make(chan error, len(b.opts.Platforms))
 	for _, p := range b.opts.Platforms {
 		go func() {
@@ -149,6 +153,45 @@ func (b *Bridge) Run(ctx context.Context) error {
 		slog.Warn("closing agent", "error", err)
 	}
 	return first
+}
+
+// load opens session id in the agent process. Agent.Load returns nil for a
+// session that is already open but does not wait for a load of the same id in
+// flight, so loads are serialized here: the startup loader and a chat worker
+// must not send session/load twice for one session. A slow load delays loads
+// of other sessions; a per-session lock removes that if it matters.
+func (b *Bridge) load(ctx context.Context, id string) error {
+	b.loadMu.Lock()
+	defer b.loadMu.Unlock()
+	return b.opts.Agent.Load(ctx, id)
+}
+
+// loadBoundSessions loads each distinct session bound to a chat of a
+// configured platform, one at a time. This restores the session's persisted
+// timers in a restarted agent process and makes the agent follow the session,
+// so wake replies reach the chat. A failed load is logged and does not remove
+// the binding.
+func (b *Bridge) loadBoundSessions() {
+	defer b.wg.Done()
+	sessions := b.opts.Store.Sessions()
+	keys := slices.Sorted(maps.Keys(sessions))
+	loaded := map[string]bool{}
+	for _, key := range keys {
+		name, id, ok := strings.Cut(key, ":")
+		p := b.platforms[name]
+		if !ok || p == nil {
+			continue
+		}
+		b.chat(p, id)
+		sid := sessions[key]
+		if loaded[sid] {
+			continue
+		}
+		loaded[sid] = true
+		if err := b.load(b.workCtx, sid); err != nil && b.workCtx.Err() == nil {
+			slog.Warn("loading bound session at startup failed", "chat", key, "session", sid, "error", err)
+		}
+	}
 }
 
 // shutdown sends session/cancel for every running prompt and stops the chat
@@ -405,7 +448,13 @@ func (b *Bridge) sessionLock(id string) *sync.Mutex {
 
 // Update implements agent.Handler. It only takes a mutex.
 func (b *Bridge) Update(sid string, u acp.SessionUpdate) {
-	if text, ok := agent.ReflectionNotice(u); ok {
+	text, markdown := "", false
+	ok := false
+	if text, ok = agent.ReflectionNotice(u); !ok {
+		text, ok = agent.WakeReply(u)
+		markdown = ok
+	}
+	if ok {
 		b.mu.Lock()
 		chats := make([]*chat, 0, len(b.chats))
 		for _, c := range b.chats {
@@ -414,7 +463,7 @@ func (b *Bridge) Update(sid string, u acp.SessionUpdate) {
 		b.mu.Unlock()
 		for _, c := range chats {
 			if b.opts.Store.Session(c.key) == sid {
-				c.sendReflectionNotice(sid, text)
+				c.sendBackground(sid, text, markdown)
 			}
 		}
 		return
@@ -848,7 +897,10 @@ func (c *chat) turn(m Message) {
 	}
 }
 
-func (c *chat) sendReflectionNotice(sessionID, text string) {
+// sendBackground sends a reflection notice (plain text) or a wake reply
+// (Markdown) after the chat's current turn has replied, and only while the
+// chat is still bound to sessionID.
+func (c *chat) sendBackground(sessionID, text string, markdown bool) {
 	c.mu.Lock()
 	turnDone := c.turnDone
 	c.mu.Unlock()
@@ -861,7 +913,7 @@ func (c *chat) sendReflectionNotice(sessionID, text string) {
 			}
 		}
 		if c.b.opts.Store.Session(c.key) == sessionID {
-			c.send(c.b.workCtx, "", text)
+			c.post(c.b.workCtx, "", text, markdown)
 		}
 	}()
 }
@@ -900,7 +952,7 @@ func chatPrompt(m Message) string {
 // notice.
 func (c *chat) session(ctx context.Context, replyTo string) (string, error) {
 	if id := c.b.opts.Store.Session(c.key); id != "" {
-		err := c.b.opts.Agent.Load(ctx, id)
+		err := c.b.load(ctx, id)
 		if err == nil {
 			return id, nil
 		}
@@ -1299,7 +1351,7 @@ func (c *chat) cmdUse(m Message, arg string) {
 			reply(fmt.Sprintf("No listed session starts with %q.", arg))
 			return
 		}
-		if err := c.b.opts.Agent.Load(ctx, id); err != nil {
+		if err := c.b.load(ctx, id); err != nil {
 			reply("Error: could not load session " + id + ": " + err.Error())
 			return
 		}
@@ -1338,7 +1390,7 @@ func (c *chat) cmdMemory(m Message, args []string) {
 		}
 		ctx, stop := context.WithTimeout(c.b.workCtx, 2*time.Minute)
 		defer stop()
-		if err := c.b.opts.Agent.Load(ctx, sid); err != nil {
+		if err := c.b.load(ctx, sid); err != nil {
 			reply("Error: could not load session " + sid + ": " + err.Error())
 			return
 		}

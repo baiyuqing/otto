@@ -219,6 +219,9 @@ The retry prompt is stored in the session as a user message, as in the TUI.
 
 ## Background results reach the model at the next prompt
 
+Superseded on 2026-10-04 by [wake-turn replies over ACP](2026-10-04-acp-wake-replies.md):
+`otto acp` runs wake turns and sends their text as a tagged update.
+
 `otto acp` does not run wake turns. A finished sub-agent or an inbox item
 is delivered to the model before the next user message
 (`agent/mod.rs:353`). ACP v1 has no agent-initiated turn, and cc-connect at
@@ -402,7 +405,8 @@ one chat: prompt, tool call, approval allow and deny, `/stop`, `/new`,
 ## Not in this change
 
 - Wake turns over ACP; revisit if cc-connect PR #1936 (out-of-turn text
-  delivery) merges.
+  delivery) merges. (Superseded on 2026-10-04 by
+  [wake-turn replies over ACP](2026-10-04-acp-wake-replies.md).)
 - `session/resume`, `session/close`, `session/delete`, config options
   (model, thinking), `usage_update`, `available_commands_update`, image
   prompts, client-supplied MCP servers.

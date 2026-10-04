@@ -4,8 +4,8 @@ Canonical design: [active-task guidance](2026-10-04-active-task-guidance.md).
 Issue: [#305](https://github.com/baiyuqing/otto/issues/305).
 Branch: `baiyuqing/active-task-guidance`.
 Worktree: primary checkout `.worktree/active-task-guidance`.
-Last updated: 2026-10-04. Focused checks and `make check-fast` passed; full host
-acceptance is in progress.
+Last updated: 2026-10-04. Implementation and full host acceptance passed after
+integrating main at `8593f0c` (#306). PR publication and CI status are pending.
 
 ## Completed investigation
 
@@ -51,55 +51,52 @@ acceptance is in progress.
 Check an item only after its behavior is implemented and verified. Record the
 test/command and result here; static inspection does not count as runtime proof.
 
-- [ ] Guidance during a blocked provider/tool, FIFO ordering, exact-turn final
+- [x] Guidance during a blocked provider/tool, FIFO ordering, exact-turn final
   completion race, no cross-turn leakage, cancellation/failure cleanup.
-- [ ] Idle/approval rejection, full queue/invalid input, session isolation.
-- [ ] Natural guidance vs follow-up routing, model tool effects, no-decision/error
+- [x] Idle/approval rejection, full queue/invalid input, session isolation.
+- [x] Natural guidance vs follow-up routing, model tool effects, no-decision/error
   behavior, stale control dialogue, and no approval bypass.
-- [ ] Model-originated follow-up provenance, execution order, no automatic loop
+- [x] Model-originated follow-up provenance, execution order, no automatic loop
   beyond the budget, and cleanup across approval/cancellation.
 - [x] Direct terminal prompt pending-approval boundary: no early execution or
   silent follow-up loss; persisted visible notice and accurate tool contract.
-- [ ] Capability instructions and callable schemas in real requests after history
+- [x] Capability instructions and callable schemas in real requests after history
   compaction, restored session, and approval retry; disabled capabilities absent.
-- [ ] Default configuration exposes tools, persistent capability instructions,
+- [x] Default configuration exposes tools, persistent capability instructions,
   natural-message routing, and command discovery without enable flags.
-- [ ] ACP local, attached server, direct TCP, and connector end-to-end coverage.
-- [ ] Exactly one terminal tool update on success, active-tool cancellation,
+- [x] ACP local, attached server, direct TCP, and connector end-to-end coverage.
+- [x] Exactly one terminal tool update on success, active-tool cancellation,
   approval denial, execution failure, and persistence failure.
 - [x] Focused Rust/Go tests.
 - [x] `make check-fast` (passed as the first stage of the host `make check`).
-- [ ] `make connect-check`.
-- [ ] Full `make check` on supported macOS host.
-- [ ] Integration review, PR creation, CI reporting, and issue progress links.
+- [x] `make connect-check`.
+- [x] Full `make check` on supported macOS host.
+- [ ] PR creation, CI reporting, and issue progress links (authorized; next step).
 
-### Verified so far
+### Verification evidence
 
-- Core owner: `cargo test -p otto-core --lib` passed **579/579**; focused guidance,
-  cancellation cleanup, agent-source follow-up, terminal persistence failure,
-  and existing Inbox input tests passed. This is core behavior proof, not ACP
-  or connector end-to-end proof.
-- Core owner: `cargo check -p otto-core --target wasm32-unknown-unknown` passed.
-- Core owner: formatting of its three modified files passed. Whole-workspace
-  formatting and the full gates are pending while other files are being edited.
-- Connector owner: `go test ./internal/agent` and focused bridge routing tests
-  passed (guidance/follow-up, unsupported capability, error/null responses,
-  queue bounds, late control reply after stop, approval preservation). Full
-  Go race and actual Otto/connector end-to-end gates are pending.
-- Parent: direct ACP TCP integration test passed: default capability negotiation,
-  actual `task_queue` schema/system policy in the provider request, idle control
-  returning JSON null without a model call, and idle steering rejection.
-- Native owner: 7 matching `--lib task_control` tests, prompt policy, direct
-  pending-approval notice, natural steer/queue/reply routing (including a failed
-  final model reply after accepted steering), local ACP FIFO, compact/reload
-  capability capture, and attached queued cancellation passed.
-- Parent: real HTTP model `task_queue` execution passed: follow-up starts after
-  the original answer, replies are separated, and provider/history retain agent
-  provenance.
-- Parent: `go test -race ./internal/agent ./internal/bridge ./internal/telegram`
-  passed, including the added steering-order regression.
-- Parent: host `make check` passed its `make check-fast` stage (formatting,
-  workspace Clippy, 579 core tests, diff check); full acceptance is in progress.
+- Final host `make check` passed at `03d8c24` after merging #306: formatting,
+  workspace Clippy, **580 core tests**, **2,210 native unit tests**, full Rust
+  integration/ACP tests, Go vet/race with real Otto connector end-to-end tests,
+  wasm builds/tests, scripts, PTY tests, and **125 UI tests**.
+- Real macOS approval tests passed for local and attached ACP, including one-time
+  elevation, persistent read grants, denial, and late/revoked responses.
+- Captured provider requests retain actual `task_queue` schemas/policy before
+  and after compaction, restored sessions, and approval retries.
+- Actual model tool -> queued follow-up HTTP execution verifies ordering,
+  separated answers, and agent provenance. Shared approval tests verify the
+  follow-up scope survives approval and denial discards pending model work.
+- Natural control tests cover steer/queue/read-only choices, exact original user
+  text, restricted tool schemas, and accepted effects despite a failed final
+  control-model reply. Connector tests cover legacy fallbacks, limits, FIFO,
+  approval isolation, stop invalidating late replies, and command discovery.
+- Tool-state tests verify exactly one terminal update for completed, denied,
+  and actively cancelled calls in local/attached ACP; injected persistence
+  failure closes the display as unknown failure. Live/replay use the same
+  disposition mapping.
+- Logs: `/tmp/otto-active-task-merged-check.log` (final full gate),
+  `/tmp/otto-approval-capability-tests.log`, and
+  `/tmp/otto-followup-approval-test.log` (focused proofs before the final gate).
 
 ### Integration review follow-ups
 
@@ -113,13 +110,13 @@ test/command and result here; static inspection does not count as runtime proof.
   priority insertion and verified the connector race/regression tests.
 - [x] Update default-tool/prompt regression expectations to include `task_queue`;
   both focused tests pass. The first full native run passed 2,186 tests and
-  failed only these two outdated expectations; the full gate must be rerun.
+  failed only these two outdated expectations; the final full gate passed after updating them.
 - [x] Actual active-tool cancellation exposed `completed` display status despite
   a cancelled operation. Live/replay ACP mapping now uses disposition; both local
   and attached active-tool cancellation tests pass with exactly one failed update.
 - [x] Native approval lifecycle regressions pass for replacement, close, busy
   admission, and duplicate request IDs; read-grant/rollback/approve-always checks
-  pass. Final host acceptance verifies the real permission path.
+  pass. Final host acceptance passed the real permission path.
 
 ## Deferred
 

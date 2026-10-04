@@ -123,12 +123,19 @@ fn bare_host(entry: &str) -> Option<String> {
 /// `[sandbox].network = "deny"` as of this build; a runner is rebuilt when the
 /// sandbox reloads, so a changed mode applies from the next runner. `secrets`
 /// are exact values a URL or query may not contain; the search keys are added.
+///
+/// `hosted_search` means the model provider runs web searches itself (the
+/// `chatgpt` provider's hosted tool). The local `web_search` is then left out
+/// unless a keyed backend (Google or Brave) is configured, so the model is
+/// not offered two searches; the keyless Bing page is what hosted search
+/// replaces.
 pub fn tools(
     runtime: &Arc<Runtime>,
     max_output: usize,
     network_denied: bool,
     secrets: &[String],
     env: &dyn Fn(&str) -> Option<String>,
+    hosted_search: bool,
 ) -> Vec<Box<dyn Tool + Send + Sync>> {
     let backend = search::Backend::from_env(env);
     let mut secrets: Vec<String> = secrets.to_vec();
@@ -139,12 +146,19 @@ pub fn tools(
         network_denied,
         secrets,
     };
-    vec![
-        Box::new(WebFetch {
-            shared: shared.clone(),
-        }),
-        Box::new(WebSearch { shared, backend }),
-    ]
+    let mut tools: Vec<Box<dyn Tool + Send + Sync>> = vec![Box::new(WebFetch {
+        shared: shared.clone(),
+    })];
+    if !(hosted_search && backend.is_keyless()) {
+        tools.push(Box::new(WebSearch { shared, backend }));
+    }
+    tools
+}
+
+/// Whether `env` configures no keyed search backend, so that a provider's
+/// hosted search may stand in for the keyless one.
+pub fn search_is_keyless(env: &dyn Fn(&str) -> Option<String>) -> bool {
+    search::Backend::from_env(env).is_keyless()
 }
 
 #[derive(Clone)]
@@ -465,11 +479,12 @@ impl WebSearch {
             )));
         }
         self.shared.preflight(SEARCH_NAME, &query)?;
-        let count = args
-            .count
-            .filter(|c| *c > 0)
-            .unwrap_or(DEFAULT_RESULTS)
-            .min(MAX_RESULTS);
+        let count = self.backend.max_count(
+            args.count
+                .filter(|c| *c > 0)
+                .unwrap_or(DEFAULT_RESULTS)
+                .min(MAX_RESULTS),
+        );
         Ok((query, count))
     }
 }

@@ -533,21 +533,38 @@ async fn search_refuses_a_credential_in_the_query_and_reports_service_errors() {
 #[test]
 fn both_tools_are_always_registered_and_the_backend_comes_from_the_environment() {
     let runtime = Runtime::new(&[]);
-    let names = |vars: &'static [(&'static str, &'static str)]| -> Vec<String> {
-        tools(&runtime, 1000, false, &[], &|name| {
-            vars.iter()
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| value.to_string())
-        })
+    let names = |vars: &'static [(&'static str, &'static str)], hosted: bool| -> Vec<String> {
+        tools(
+            &runtime,
+            1000,
+            false,
+            &[],
+            &|name| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            },
+            hosted,
+        )
         .iter()
         .map(|tool| tool.definition().name)
         .collect()
     };
-    assert_eq!(names(&[]), vec!["web_fetch", "web_search"]);
+    assert_eq!(names(&[], false), vec!["web_fetch", "web_search"]);
     assert_eq!(
-        names(&[("BRAVE_API_KEY", "k1234567")]),
+        names(&[("BRAVE_API_KEY", "k1234567")], false),
         vec!["web_fetch", "web_search"]
     );
+    // A provider-hosted search replaces only the keyless backend.
+    assert_eq!(names(&[], true), vec!["web_fetch"]);
+    assert_eq!(
+        names(&[("BRAVE_API_KEY", "k1234567")], true),
+        vec!["web_fetch", "web_search"]
+    );
+    assert!(search_is_keyless(&|_| None));
+    assert!(!search_is_keyless(
+        &|name| (name == "BRAVE_API_KEY").then(|| "k".to_string())
+    ));
 }
 
 #[tokio::test]

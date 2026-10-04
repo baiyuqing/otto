@@ -1363,9 +1363,20 @@ runner is built, by the first rule that applies:
 1. **Google** (Custom Search JSON API) when both `GOOGLE_API_KEY` and
    `GOOGLE_SEARCH_ENGINE_ID` are set.
 2. **Brave Search** (API) when `BRAVE_API_KEY` is set.
-3. **Bing**, with no key: Otto reads Bing's public results page.
+3. **ChatGPT's hosted search**, with the `chatgpt` provider and no key above:
+   Otto asks the backend to run its own `web_search` tool, and no local
+   `web_search` tool is offered.
+4. **Bing**, with no key and any other provider: Otto reads Bing's public
+   results page.
 
-Each backend needs its own approval, since each is a different host
+Hosted search runs at OpenAI inside the model response. It does not use Otto's
+host approvals, Otto does not see the queries or the pages read, and
+`/reflect` cannot tell that an answer drew on the web, so its source isolation
+does not cover it. `[sandbox].network = "deny"` turns it off. Whether a ChatGPT
+subscription accepts the hosted tool depends on the backend; if searches fail,
+set a Google or Brave key to use a local backend instead.
+
+Each local backend needs its own approval, since each is a different host
 (`www.googleapis.com`, `api.search.brave.com`, `www.bing.com`). A failure of the
 chosen backend, such as an exhausted quota, is reported as an error; Otto does
 not switch to another backend for that call. The Bing backend reads an HTML

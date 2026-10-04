@@ -1335,7 +1335,7 @@ impl Builder {
         let mut definitions: Vec<ToolDefinition> = self
             .builtin_file_tools(max_output)
             .iter()
-            .chain(self.web_tools(max_output, &[]).iter())
+            .chain(self.web_tools(max_output, &[], runtime).iter())
             .map(|tool| tool.definition())
             .collect();
         definitions.extend(self.boundary_memory_definitions(max_output));
@@ -1469,14 +1469,30 @@ impl Builder {
         &self,
         max_output: usize,
         secrets: &[String],
+        runtime: Option<&Runtime>,
     ) -> Vec<Box<dyn Tool + Send + Sync>> {
         crate::tool::web::tools(
             &self.web,
             max_output,
-            self.planned_sandbox_info().network == SandboxNetwork::Denied,
+            self.web_network_denied(),
             secrets,
             &|name| self.environment.get(name).cloned(),
+            self.hosted_search(runtime),
         )
+    }
+
+    fn web_network_denied(&self) -> bool {
+        self.planned_sandbox_info().network == SandboxNetwork::Denied
+    }
+
+    /// Whether the model provider runs web searches itself: the `chatgpt`
+    /// provider's hosted `web_search`, used when no Google or Brave key is
+    /// configured and `[sandbox].network` is not `deny`. The hosted search
+    /// runs at OpenAI, outside Otto's host approvals.
+    pub(crate) fn hosted_search(&self, runtime: Option<&Runtime>) -> bool {
+        runtime.is_some_and(|runtime| runtime.provider == otto_core::config::PROVIDER_CHATGPT)
+            && !self.web_network_denied()
+            && crate::tool::web::search_is_keyless(&|name| self.environment.get(name).cloned())
     }
 
     /// Composes one runnable agent.
@@ -1554,11 +1570,14 @@ impl Builder {
             ProviderClient::Unavailable
         } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
             ProviderClient::ChatGpt {
-                client: Arc::new(super::login::chatgpt_client(
-                    &self.auth_path,
-                    &self.auth_credentials,
-                    self.auth_credentials_loaded,
-                )?),
+                client: Arc::new(
+                    super::login::chatgpt_client(
+                        &self.auth_path,
+                        &self.auth_credentials,
+                        self.auth_credentials_loaded,
+                    )?
+                    .with_hosted_web_search(self.hosted_search(Some(runtime))),
+                ),
                 timeout: runtime.resilience.deadlines.provider_timeout,
                 cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
             }
@@ -1596,7 +1615,7 @@ impl Builder {
                 .attach_approvals(&self.approvals, &self.workspace_path, roots)?;
         }
         let mut tools = self.builtin_file_tools(max_output);
-        tools.extend(self.web_tools(max_output, &redaction_values));
+        tools.extend(self.web_tools(max_output, &redaction_values, Some(runtime)));
         if self.bash_configured() {
             let executor = self
                 .command_executor

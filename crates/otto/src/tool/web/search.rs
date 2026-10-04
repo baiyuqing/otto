@@ -95,6 +95,11 @@ impl Backend {
         }
     }
 
+    /// Whether this is the backend that needs no key.
+    pub(super) fn is_keyless(&self) -> bool {
+        matches!(self, Self::Bing { .. })
+    }
+
     pub(super) fn label(&self) -> &'static str {
         match self {
             Self::Google { .. } => "Google",

@@ -35,7 +35,7 @@ use crate::auth::token::TokenSource;
 use futures_util::TryStreamExt;
 use otto_core::agent::redactor::{Redactor, StreamRedactor};
 use otto_core::model::{EffectCertainty, Message, OperationStopReason};
-use otto_core::openairesponses::protocol::{build_request, serialized_request_size};
+use otto_core::openairesponses::protocol::{build_request_with, serialized_request_size_with};
 use otto_core::openairesponses::stream::StreamAssembler;
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
@@ -85,6 +85,8 @@ pub struct Client {
     base_url: String,
     tokens: TokenSource,
     account_id: String,
+    /// Advertise the backend-hosted `web_search` tool with every request.
+    hosted_web_search: bool,
     /// `Err` records why the HTTP client could not be built. Construction never
     /// fails; the message becomes the first `complete` failure.
     http: Result<reqwest::Client, String>,
@@ -97,6 +99,13 @@ impl Client {
         Self::with_base_url(DEFAULT_BASE_URL, tokens, account_id)
     }
 
+    /// Whether requests also advertise the backend-hosted `web_search` tool.
+    /// The backend runs the search itself; Otto sees no tool call for it.
+    pub fn with_hosted_web_search(mut self, enabled: bool) -> Self {
+        self.hosted_web_search = enabled;
+        self
+    }
+
     /// A client for `base_url`. One trailing `/` is trimmed so the path is
     /// never doubled.
     pub fn with_base_url(base_url: &str, tokens: TokenSource, account_id: &str) -> Self {
@@ -104,6 +113,7 @@ impl Client {
             base_url: base_url.trim_end_matches('/').to_owned(),
             tokens,
             account_id: account_id.to_owned(),
+            hosted_web_search: false,
             http: default_http_client().map_err(|error| error.to_string()),
         }
     }
@@ -225,7 +235,8 @@ impl Client {
             );
         }
 
-        let payload = match serde_json::to_vec(&build_request(request)) {
+        let payload = match serde_json::to_vec(&build_request_with(request, self.hosted_web_search))
+        {
             Ok(payload) => payload,
             Err(error) => {
                 return ProviderSettlement::failed(
@@ -360,7 +371,7 @@ impl Client {
 impl RequestSizer for Client {
     /// The exact number of bytes the request occupies on the wire.
     fn serialized_request_size(&self, request: &Request) -> Result<usize, ProviderError> {
-        serialized_request_size(request)
+        serialized_request_size_with(request, self.hosted_web_search)
             .map_err(|error| ProviderError::Other(format!("encode responses request: {error}")))
     }
 }
@@ -1291,6 +1302,69 @@ mod tests {
         .unwrap()
         .len();
         assert_eq!(client.serialized_request_size(&request).unwrap(), expected);
+    }
+
+    /// A stream in which the backend ran its own web search: the hosted call's
+    /// output items and a citation annotation must not disturb the text.
+    const HOSTED_SEARCH_STREAM: &str = concat!(
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"in_progress\"}}\n",
+        "\n",
+        "event: response.web_search_call.searching\n",
+        "data: {\"type\":\"response.web_search_call.searching\",\"item_id\":\"ws_1\"}\n",
+        "\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"rust\"}}}\n",
+        "\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Rust is a language.\"}\n",
+        "\n",
+        "event: response.output_text.annotation.added\n",
+        "data: {\"type\":\"response.output_text.annotation.added\",\"annotation\":{\"type\":\"url_citation\",\"url\":\"https://www.rust-lang.org/\"}}\n",
+        "\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n",
+        "\n",
+    );
+
+    #[tokio::test]
+    async fn hosted_web_search_is_advertised_only_when_enabled_and_its_items_are_ignored() {
+        let server = testserver::spawn(|_| sse_response(HOSTED_SEARCH_STREAM)).await;
+        let off = Client::with_base_url(&server.url, static_tokens("t"), "acct-1");
+        let on = Client::with_base_url(&server.url, static_tokens("t"), "acct-1")
+            .with_hosted_web_search(true);
+
+        let (settlement, _) = complete(&off, &model_request()).await;
+        settlement.result.unwrap();
+        let (settlement, _) = complete(&on, &model_request()).await;
+        let response = settlement.result.unwrap();
+
+        let sent = server.requests();
+        let tools = |index: usize| -> Vec<serde_json::Value> {
+            let body: serde_json::Value = serde_json::from_str(&sent[index].body).unwrap();
+            body["tools"].as_array().unwrap().clone()
+        };
+        assert!(tools(0).iter().all(|tool| tool["type"] == "function"));
+        let enabled = tools(1);
+        assert_eq!(
+            enabled.last().unwrap(),
+            &serde_json::json!({"type": "web_search"})
+        );
+        assert_eq!(enabled.len(), tools(0).len() + 1);
+
+        assert_eq!(
+            response.message.blocks.len(),
+            1,
+            "no tool call for a hosted search"
+        );
+        assert_eq!(response.message.blocks[0].block_type, BlockType::Text);
+        assert_eq!(response.message.blocks[0].text, "Rust is a language.");
+        assert_eq!(response.message.finish_reason, Some(FinishReason::Stop));
+        // The size estimate counts the extra tool.
+        assert_eq!(
+            on.serialized_request_size(&model_request()).unwrap(),
+            sent[1].body.len()
+        );
     }
 
     fn redaction_marker(values: &[String]) -> String {

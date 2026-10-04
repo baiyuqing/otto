@@ -1085,6 +1085,7 @@ impl Connection {
             .run_with_channel(
                 Step::Text(&text),
                 channel,
+                None,
                 &mut |event| {
                     if let Some(update) = update::event_update(&update::local_wire(&event)) {
                         self.update(session_id, update);
@@ -1123,9 +1124,14 @@ async fn wake_turn(session: &Session, stop: &CancellationToken) -> bool {
     let failure = match controller.prepare_wake() {
         Ok(None) => None,
         Ok(Some(wake)) => controller
-            .run_with_channel(Step::Wake(wake), None, &mut |_| {}, &token, |_| async {
-                ApprovalDecision::Deny
-            })
+            .run_with_channel(
+                Step::Wake(wake),
+                None,
+                None,
+                &mut |_| {},
+                &token,
+                |_| async { ApprovalDecision::Deny },
+            )
             .await
             .err()
             .map(|failure| failure.to_string()),

@@ -571,6 +571,16 @@ pub async fn run(
                 None
             }
         };
+    let schedule = match crate::schedule::Store::open(&Path::new(&home).join(".otto/schedule.db")) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(_) => {
+            let _ = writeln!(
+                stderr,
+                "warning: schedule store unavailable, continuing without scheduled deliveries"
+            );
+            None
+        }
+    };
     let skill_checker = skill_checker(&config_file, &environment, &home, &mut *stderr);
     let reflection_config = match resolve_reflection(&config_file) {
         Ok(config) => config,
@@ -614,6 +624,7 @@ pub async fn run(
         auth_credentials_loaded: captured_auth.loaded,
         usage,
         task_recorder,
+        schedule,
         skill_checker,
         memory: Default::default(),
         reflector,
@@ -933,6 +944,26 @@ pub async fn run(
         None => controller,
     };
     let controller = Arc::new(controller);
+    let schedule_worker = match (&frontend, controller.builder().schedule.clone()) {
+        (Frontend::Repl | Frontend::Tui, Some(store)) => Some(tokio::spawn(
+            crate::schedule::worker::Worker {
+                store,
+                run: Some(crate::schedule::worker::RunRole {
+                    scope: crate::schedule::Scope::Terminal,
+                    workspace: Some(controller.builder().workspace_path.clone()),
+                    runner: Arc::new(crate::app::scheduled::ControllerRunner(Arc::clone(
+                        &controller,
+                    ))),
+                }),
+                deliver: Some(crate::schedule::worker::DeliverRole {
+                    scope: crate::schedule::Scope::Terminal,
+                    sink: Arc::new(crate::app::scheduled::NoticeSink(Arc::clone(&controller))),
+                }),
+            }
+            .run(cancel.child_token()),
+        )),
+        _ => None,
+    };
     let mcp_swap = background_mcp.then(|| {
         spawn_mcp_runner_swap(
             Arc::clone(&controller),
@@ -985,6 +1016,9 @@ pub async fn run(
     cancel.cancel();
     if let Some(task) = mcp_swap {
         task.abort();
+    }
+    if let Some(task) = schedule_worker {
+        let _ = task.await;
     }
     if terminate.migrating() {
         for warning in controller.migrate().await {

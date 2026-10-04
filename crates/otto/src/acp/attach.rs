@@ -334,7 +334,7 @@ impl Relay {
         let stream = tokio::select! {
             biased;
             () = self.lost.cancelled() => return Err(error(INTERNAL_ERROR, LOST)),
-            started = self.client.start_turn_with_channel(session_id, text, None, channel) => {
+            started = self.client.start_turn_with_channel(session_id, text, None, channel, None) => {
                 started.map_err(|failure| self.fail(failure))?
             }
         };
@@ -354,7 +354,7 @@ impl Relay {
         }
         let stream = self
             .client
-            .start_turn_with_channel(session_id, text, None, channel)
+            .start_turn_with_channel(session_id, text, None, channel, None)
             .await
             .map_err(|failure| self.fail(failure))?;
         Ok(stream)

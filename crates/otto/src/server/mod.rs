@@ -1093,7 +1093,7 @@ impl Server {
             let (server, open, running, token) = (&**self, &**session, &**turn, &cancel);
             session
                 .ctrl
-                .run_with_channel(first, channel, &mut emit, &cancel, |request| {
+                .run_with_channel(first, channel, None, &mut emit, &cancel, |request| {
                     server.wait_for_approval(open, running, token, request)
                 })
                 .await

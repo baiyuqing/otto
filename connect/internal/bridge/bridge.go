@@ -3,9 +3,11 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -92,6 +94,11 @@ func New(opts Options) *Bridge {
 		b.platforms[p.Name()] = p
 	}
 	opts.Agent.SetHandler(b)
+	names := make([]string, 0, len(opts.Platforms))
+	for _, p := range opts.Platforms {
+		names = append(names, p.Name())
+	}
+	opts.Agent.SetPlatforms(names)
 	return b
 }
 
@@ -108,8 +115,13 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 	platCtx, stopPlatforms := context.WithCancel(ctx)
 	defer stopPlatforms()
+	// The connection stays open so the agent can deliver scheduled messages
+	// even when no chat is bound.
 	b.wg.Add(1)
-	go b.loadBoundSessions()
+	go func() {
+		defer b.wg.Done()
+		b.opts.Agent.Keep(b.workCtx, b.loadBoundSessions)
+	}()
 	errc := make(chan error, len(b.opts.Platforms))
 	for _, p := range b.opts.Platforms {
 		go func() {
@@ -172,7 +184,6 @@ func (b *Bridge) load(ctx context.Context, id string) error {
 // so wake replies reach the chat. A failed load is logged and does not remove
 // the binding.
 func (b *Bridge) loadBoundSessions() {
-	defer b.wg.Done()
 	sessions := b.opts.Store.Sessions()
 	keys := slices.Sorted(maps.Keys(sessions))
 	loaded := map[string]bool{}
@@ -210,6 +221,33 @@ func (b *Bridge) shutdown() {
 		cancel()
 	}
 	b.stopWork()
+}
+
+// Extension implements agent.ExtensionHandler. _otto/schedule/deliver sends
+// text to a chat that is in its platform's chats allowlist. The connector
+// keeps no state for it; the agent retries failed deliveries.
+func (b *Bridge) Extension(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if method != "_otto/schedule/deliver" {
+		return nil, acp.NewMethodNotFound(method)
+	}
+	var req struct {
+		Chat string `json:"chat"`
+		Text string `json:"text"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(params))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || req.Chat == "" || req.Text == "" {
+		return nil, errors.New("chat and text are required")
+	}
+	name, id, _ := strings.Cut(req.Chat, ":")
+	p := b.platforms[name]
+	if p == nil || id == "" || !slices.Contains(b.opts.Access[name].Chats, id) {
+		return nil, errors.New("chat is not an allowed chat of a configured platform")
+	}
+	if err := p.Send(ctx, id, "", req.Text, true); err != nil {
+		return nil, err
+	}
+	return map[string]any{}, nil
 }
 
 func (b *Bridge) admitted(m Message) bool {
@@ -842,7 +880,7 @@ func (c *chat) turn(m Message) {
 		c.b.bySession[sid] = c
 		c.b.mu.Unlock()
 
-		stop, err = c.b.opts.Agent.PromptWithChannel(ctx, sid, m.Text, m.Platform, chatPrompt(m))
+		stop, err = c.b.opts.Agent.PromptWithChannel(ctx, sid, m.Text, m.Platform, m.Platform+":"+m.ChatID, chatPrompt(m))
 
 		c.b.mu.Lock()
 		delete(c.b.bySession, sid)

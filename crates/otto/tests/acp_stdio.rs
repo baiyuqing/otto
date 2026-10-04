@@ -285,6 +285,8 @@ fn client_with_pending_candidate(
     let (base_url, _requests) = serve(Script {
         replies: vec![
             tool_call_reply("call-1", "remember", &arguments),
+            // The advisor's request takes this reply; it is not valid advice.
+            text_reply("no advice"),
             text_reply("queued"),
         ],
         served,
@@ -393,11 +395,13 @@ fn memory_pending_pages_with_a_cursor_and_rejects_bad_paging() {
                 "remember",
                 r#"{"kind":"fact","key":"a","text":"first"}"#,
             ),
+            text_reply("no advice"),
             tool_call_reply(
                 "c2",
                 "remember",
                 r#"{"kind":"fact","key":"b","text":"second"}"#,
             ),
+            text_reply("no advice"),
             text_reply("queued"),
         ],
         served: Arc::new(AtomicUsize::new(0)),

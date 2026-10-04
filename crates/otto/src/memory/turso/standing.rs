@@ -71,6 +71,12 @@ pub(super) fn check_standing_budget(connection: &Connection, record: &Record) ->
 }
 
 impl Store {
+    /// The standing set of `user`, oldest first: every record recall injects
+    /// when the budget allows.
+    pub fn standing_records(&self, user: &Scope, now: DateTime<Utc>) -> Result<Vec<Record>> {
+        self.with_read(|connection| read_standing(connection, user, now))
+    }
+
     /// How much of the standing budget `user` uses, counting the same way
     /// recall injects: oldest first, stopping at the first record that does
     /// not fit.

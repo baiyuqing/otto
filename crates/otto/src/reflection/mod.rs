@@ -460,7 +460,8 @@ impl Reflector {
         };
         report.dropped = plan.dropped.clone();
         let skill_candidates = plan.skills.clone();
-        self.apply(context, &run_id, plan, &mut report);
+        self.apply(context, &run_id, plan, &mut report, cancel)
+            .await;
         if let Err(Error::Cancelled) = self
             .apply_skills(
                 context,
@@ -619,9 +620,19 @@ impl Reflector {
     }
 
     /// Queues each proposal as a candidate, dropping what the store refuses
-    /// and what is already pending for review.
-    fn apply(&self, context: &Context<'_>, run_id: &str, plan: Plan, report: &mut Report) {
+    /// and what is already pending for review. The runner's advisor, when it
+    /// has one, asks for review hints on all proposals concurrently first; a
+    /// canceled run queues nothing further.
+    async fn apply(
+        &self,
+        context: &Context<'_>,
+        run_id: &str,
+        plan: Plan,
+        report: &mut Report,
+        cancel: &CancellationToken,
+    ) {
         let seen = known_candidates(context);
+        let mut requests = Vec::new();
         for proposal in plan.proposals {
             let scope = match proposal.scope {
                 ScopeChoice::User => context.user_scope.clone(),
@@ -631,8 +642,25 @@ impl Reflector {
                 *report.dropped.entry("duplicate_candidate").or_default() += 1;
                 continue;
             }
-            let request = propose_request(context, run_id, scope, &proposal);
-            match context.service.propose(&request) {
+            requests.push(propose_request(context, run_id, scope, &proposal));
+        }
+        let results = match &context.runner.advisor {
+            Some(advisor) => {
+                match advisor
+                    .propose(context.service, context.user_scope, requests, cancel)
+                    .await
+                {
+                    Some(results) => results,
+                    None => return,
+                }
+            }
+            None => requests
+                .iter()
+                .map(|request| context.service.propose(request))
+                .collect(),
+        };
+        for result in results {
+            match result {
                 Ok(candidates) => report
                     .candidates
                     .extend(candidates.into_iter().map(|candidate| candidate.id)),
@@ -1117,6 +1145,79 @@ mod tests {
         assert!(
             records.records.is_empty(),
             "reflection must not write records"
+        );
+    }
+
+    struct FixedAdvice;
+
+    #[async_trait::async_trait]
+    impl crate::memory::advice::Backend for FixedAdvice {
+        fn model(&self) -> String {
+            "gpt-test".into()
+        }
+
+        fn auxiliary(&self) -> bool {
+            false
+        }
+
+        async fn ask(
+            &self,
+            _state: &str,
+            _questions: &[crate::memory::advice::Question],
+            _limit: std::time::Duration,
+        ) -> crate::memory::advice::Exchange {
+            let answer = |choice: &str| crate::memory::advice::Answer {
+                choice: choice.to_owned(),
+                probability: None,
+            };
+            crate::memory::advice::Exchange {
+                request: "request".into(),
+                response: None,
+                result: Ok(std::collections::HashMap::from([
+                    ("scope".to_owned(), answer("all_workspaces")),
+                    ("durable".to_owned(), answer("yes")),
+                ])),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_with_an_advisor_queues_candidates_with_advice() {
+        let mut fixture = Fixture::new(Vec::new()).await;
+        fixture.runner = Runner::scripted(
+            fixture.session.clone(),
+            fixture.provider.clone() as Arc<dyn Provider + Send + Sync>,
+            Arc::new(Tasks::new()),
+        )
+        .with_advisor(Arc::new(crate::memory::advice::Advisor::new(
+            Box::new(FixedAdvice),
+            None,
+        )));
+        let user = fixture
+            .say(Role::User, "From now on always answer in Chinese please.")
+            .await;
+        fixture.say(Role::Assistant, "Understood.").await;
+        fixture
+            .provider
+            .replies
+            .lock()
+            .expect("lock")
+            .push(Reply::Text(answer(
+                &user,
+                "always answer in Chinese",
+                "language",
+            )));
+
+        let report = fixture
+            .run(&fixture.reflector(enabled()), &CancellationToken::new())
+            .await
+            .expect("run");
+
+        assert_eq!(report.candidates.len(), 1, "{report:?}");
+        let pending = fixture.pending();
+        assert_eq!(
+            crate::memory::advice::advice_line(&pending[0].proposed).as_deref(),
+            Some("Advice (session model gpt-test): all workspaces · new · durable")
         );
     }
 

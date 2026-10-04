@@ -1,5 +1,6 @@
 //! Durable memory contracts, policy, guards, local Turso storage, and service.
 
+pub mod advice;
 pub mod contracts;
 pub mod guard;
 pub mod json;

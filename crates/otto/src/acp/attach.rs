@@ -60,6 +60,8 @@ pub(super) struct Relay {
     pub(super) server: Option<Arc<crate::server::Server>>,
     /// The store this connection delivers scheduled items from.
     pub(super) schedule: Option<Arc<crate::schedule::Store>>,
+    /// The process log, for the connection's schedule worker.
+    pub(super) logger: Arc<crate::log::Logger>,
     /// Sessions this connection opened, with their prompt slots.
     sessions: Mutex<HashMap<String, Arc<PromptSlot>>>,
     lost: CancellationToken,
@@ -73,6 +75,7 @@ impl Relay {
             client: Client::in_process(router),
             server: None,
             schedule: None,
+            logger: Arc::new(crate::log::Logger::discard()),
             sessions: Mutex::new(HashMap::new()),
             lost: CancellationToken::new(),
         }
@@ -85,6 +88,7 @@ impl Relay {
             client: Client::new(Path::new("/nonexistent/otto.sock")).expect("client"),
             server: None,
             schedule,
+            logger: Arc::new(crate::log::Logger::discard()),
             sessions: Mutex::new(HashMap::new()),
             lost: CancellationToken::new(),
         }
@@ -357,14 +361,14 @@ impl Relay {
         connection: &Connection,
         session_id: &str,
         text: &str,
-        channel: Option<Channel>,
-        origin: Option<&Origin>,
+        (channel, origin): (Option<Channel>, Option<&Origin>),
+        request_id: Option<&str>,
         cancel: &CancellationToken,
     ) -> Reply {
         let stream = tokio::select! {
             biased;
             () = self.lost.cancelled() => return Err(error(INTERNAL_ERROR, LOST)),
-            started = self.client.start_turn_with_channel(session_id, text, None, channel, origin) => {
+            started = self.client.start_turn_with_channel(session_id, text, None, channel, origin, request_id) => {
                 started.map_err(|failure| self.fail(failure))?
             }
         };
@@ -379,13 +383,14 @@ impl Relay {
         text: &str,
         channel: Option<Channel>,
         origin: Option<&Origin>,
+        request_id: Option<&str>,
     ) -> Result<crate::client::TurnStream, agent_client_protocol_schema::v1::Error> {
         if self.lost.is_cancelled() {
             return Err(error(INTERNAL_ERROR, LOST));
         }
         let stream = self
             .client
-            .start_turn_with_channel(session_id, text, None, channel, origin)
+            .start_turn_with_channel(session_id, text, None, channel, origin, request_id)
             .await
             .map_err(|failure| self.fail(failure))?;
         Ok(stream)
@@ -516,10 +521,12 @@ fn turn_end_reply(event: &WireEvent) -> Reply {
 /// Serves ACP on `stdin`/`stdout` as a relay to the `otto serve` on `socket`
 /// and returns the process exit code: 1 when serve is not reachable at start
 /// or was lost later, else 0.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     socket: &Path,
     workspace: PathBuf,
     schedule: Option<Arc<crate::schedule::Store>>,
+    logger: Arc<crate::log::Logger>,
     stdin: Box<dyn BufRead + Send + 'static>,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
@@ -545,6 +552,7 @@ pub async fn run(
         client,
         server: None,
         schedule,
+        logger,
         sessions: Mutex::new(HashMap::new()),
         lost: lost.clone(),
     };
@@ -573,6 +581,7 @@ pub(super) async fn serve_in_process(
     let relay = Relay {
         client: Client::in_process(server.socket_router()),
         schedule: server.schedule_store(),
+        logger: Arc::clone(server.logger()),
         server: Some(server),
         sessions: Mutex::new(HashMap::new()),
         lost: lost.clone(),

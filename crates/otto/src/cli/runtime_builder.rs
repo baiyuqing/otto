@@ -1135,6 +1135,10 @@ pub struct Shared {
     /// The reflection use case: resolved `[reflection]` settings and, when
     /// enabled, the `~/.otto/reflection.db` store.
     pub reflector: Arc<crate::reflection::Reflector>,
+    /// The process log, built once at the composition root. Interactive
+    /// frontends get `Logger::discard()` because stderr would overwrite the
+    /// screen.
+    pub logger: Arc<crate::log::Logger>,
 }
 
 /// The composition root for one workspace.
@@ -2326,6 +2330,7 @@ mod tests {
             skill_checker: None,
             memory: Default::default(),
             reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
+            logger: Arc::new(crate::log::Logger::discard()),
         })
     }
 

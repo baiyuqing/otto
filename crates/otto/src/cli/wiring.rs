@@ -830,6 +830,11 @@ impl Builder {
                         },
                         None,
                     );
+                    self.log_mcp_failed(
+                        &server.name,
+                        transport_kind,
+                        SECRETS_EXCEED_REDACTION_LIMITS,
+                    );
                     let _ = writeln!(
                         warnings,
                         "warning: mcp server {:?} failed to connect: {SECRETS_EXCEED_REDACTION_LIMITS}",
@@ -868,6 +873,14 @@ impl Builder {
                         .filter(|(index, _)| keep.contains(index))
                         .map(|(_, tool)| tool.definition().name)
                         .collect();
+                    self.logger.info(
+                        "mcp_server_connected",
+                        &[
+                            ("server", server.name.clone()),
+                            ("transport", transport_kind.to_string()),
+                            ("tools", tool_names.len().to_string()),
+                        ],
+                    );
                     servers.push(
                         mcp::ServerStatus {
                             name: server.name.clone(),
@@ -904,6 +917,7 @@ impl Builder {
                     );
                 }
                 McpConnectResult::Failed(message) => {
+                    self.log_mcp_failed(&server.name, transport_kind, &message);
                     servers.push(
                         mcp::ServerStatus {
                             name: server.name.clone(),
@@ -923,6 +937,18 @@ impl Builder {
         }
         tools.extend(mcp_router_tools(&connected, max_output));
         (tools, connected, servers)
+    }
+
+    /// `message` is the redacted text `/mcp` shows for the failure.
+    fn log_mcp_failed(&self, server: &str, transport: &str, message: &str) {
+        self.logger.warn(
+            "mcp_server_failed",
+            &[
+                ("server", server.to_string()),
+                ("transport", transport.to_string()),
+                ("error", message.to_string()),
+            ],
+        );
     }
 
     /// Builds the transport for one configured server and connects it.
@@ -1185,6 +1211,98 @@ mod mcp_tests {
         let text = String::from_utf8(warnings).expect("utf-8 warnings");
         assert!(text.contains("broken"), "{text:?}");
         assert!(text.starts_with("warning: "), "{text:?}");
+    }
+
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A stdio server in `/bin/sh` that answers the legacy handshake and lists
+    /// one tool. It uses only shell builtins, because the child's environment
+    /// has no `PATH`.
+    fn shell_mcp_server(name: &str, cwd: &std::path::Path) -> McpServerRuntime {
+        let script = format!(
+            r#"while IFS= read -r line; do
+  id=${{line#*'"id":'}}; id=${{id%%[,\}}]*}}
+  case "$line" in
+    *'"method":"server/discover"'*) printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32601,"message":"no"}}}}\n' "$id";;
+    *'"method":"initialize"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"{}"}}}}\n' "$id";;
+    *'"method":"tools/list"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"tools":[{{"name":"echo","inputSchema":{{"type":"object"}}}}]}}}}\n' "$id";;
+  esac
+done"#,
+            mcp::LEGACY_VERSION
+        );
+        McpServerRuntime {
+            name: name.to_string(),
+            enabled: true,
+            transport: McpTransport::Stdio {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), script],
+                env: Vec::new(),
+                cwd: cwd.to_string_lossy().into_owned(),
+            },
+            secrets: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connected_and_a_failed_server_each_write_their_event() {
+        let directory = tempfile::tempdir().expect("directory");
+        let mut builder = builder_with_servers(
+            directory.path(),
+            vec![
+                shell_mcp_server("good", directory.path()),
+                stdio_server(
+                    "broken",
+                    true,
+                    "otto-mcp-test-nonexistent-command",
+                    directory.path(),
+                ),
+            ],
+        );
+        let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        builder.shared_mut().logger = Arc::new(crate::log::Logger::new(Box::new(CapturedLog(
+            Arc::clone(&bytes),
+        ))));
+
+        let mut warnings = Vec::new();
+        let (_tools, _connected, servers) = builder.connect_mcp(65536, &mut warnings).await;
+        let status = servers.status();
+        let shown = match &status[1].state {
+            mcp::ServerState::Failed(message) => message.clone(),
+            other => panic!("{other:?}"),
+        };
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let connected = text
+            .lines()
+            .find(|line| line.contains("msg=mcp_server_connected"))
+            .unwrap_or_else(|| panic!("no connected event in:\n{text}"));
+        for field in ["level=INFO", "server=good", "transport=stdio", "tools=1"] {
+            assert!(connected.contains(field), "{field} missing in {connected}");
+        }
+        let failed = text
+            .lines()
+            .find(|line| line.contains("msg=mcp_server_failed"))
+            .unwrap_or_else(|| panic!("no failed event in:\n{text}"));
+        for field in ["level=WARN", "server=broken", "transport=stdio"] {
+            assert!(failed.contains(field), "{field} missing in {failed}");
+        }
+        let quoted = serde_json::to_string(&shown).unwrap();
+        assert!(
+            failed.contains(&format!("error={quoted}"))
+                || failed.contains(&format!("error={shown}")),
+            "the logged error must equal the /mcp text {shown:?}: {failed}"
+        );
+        servers.close().await;
     }
 
     #[tokio::test]

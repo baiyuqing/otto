@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/baiyuqing/otto/connect/internal/metrics"
 	"github.com/coder/acp-go-sdk"
 )
 
@@ -65,8 +66,9 @@ type Options struct {
 	Command []string // program and arguments
 	Address string   // authenticated ACP TCP, instead of a child process
 	Token   string
-	Dir     string   // working directory of the process and cwd of every session; absolute
-	Env     []string // child environment; nil inherits the connector's
+	Dir     string           // working directory of the process and cwd of every session; absolute
+	Env     []string         // child environment; nil inherits the connector's
+	Metrics *metrics.Metrics // nil disables counting
 
 	// Test hooks.
 	Now         func() time.Time
@@ -199,13 +201,15 @@ func (a *Agent) List(ctx context.Context) ([]acp.SessionInfo, error) {
 // not be cancelled to stop a turn: the agent ignores the SDK's request
 // cancellation, so use Cancel and keep waiting.
 func (a *Agent) Prompt(ctx context.Context, id, text string) (acp.StopReason, error) {
-	return a.PromptWithChannel(ctx, id, text, "", "", text)
+	return a.PromptWithChannel(ctx, id, text, "", "", "", text)
 }
 
 // PromptWithChannel sends structured channel metadata when the connected
 // agent advertises support, and uses legacyText with older agents. chat is
 // "<platform>:<chat id>" and is sent as _meta.otto.chat next to the channel.
-func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, chat, legacyText string) (acp.StopReason, error) {
+// A non-empty requestID is sent as _meta.otto.requestId whether or not the
+// agent advertises channelContext.
+func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, chat, requestID, legacyText string) (acp.StopReason, error) {
 	p := a.live()
 	if p == nil || !p.isOpen(id) {
 		return "", ErrNotOpen
@@ -214,14 +218,18 @@ func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, chat, 
 		text = legacyText
 	}
 	request := acp.PromptRequest{SessionId: acp.SessionId(id), Prompt: []acp.ContentBlock{acp.TextBlock(text)}}
-	if p.channelContext && channel != "" {
-		if channel == "telegram" || channel == "feishu" {
-			meta := map[string]any{"channel": channel}
-			if chat != "" {
-				meta["chat"] = chat
-			}
-			request.Meta = map[string]any{"otto": meta}
+	meta := map[string]any{}
+	if p.channelContext && (channel == "telegram" || channel == "feishu") {
+		meta["channel"] = channel
+		if chat != "" {
+			meta["chat"] = chat
 		}
+	}
+	if requestID != "" {
+		meta["requestId"] = requestID
+	}
+	if len(meta) > 0 {
+		request.Meta = map[string]any{"otto": meta}
 	}
 	resp, err := p.conn.Prompt(ctx, request)
 	if err != nil {
@@ -300,15 +308,24 @@ func (a *Agent) process(ctx context.Context) (*process, error) {
 		if !a.cur.isDone() {
 			return a.cur, nil
 		}
+		a.opts.Metrics.AgentRestart()
 		ended := a.cur.endedAt
 		a.delay = restartDelay(a.delay, ended.Sub(a.cur.startedAt))
 		a.cur = nil
 		if wait := ended.Add(a.delay).Sub(a.opts.Now()); a.delay > 0 && wait > 0 {
-			slog.Info("restarting agent after delay", "delay", wait)
+			slog.Info("agent_restart_scheduled", "delay_ms", wait.Milliseconds())
 			if err := a.opts.Sleep(ctx, wait); err != nil {
 				return nil, err
 			}
 		}
 	}
-	return a.start(ctx)
+	p, err := a.start(ctx)
+	if err == nil {
+		a.opts.Metrics.AgentUp(1)
+		go func() {
+			<-p.exited
+			a.opts.Metrics.AgentUp(-1)
+		}()
+	}
+	return p, err
 }

@@ -868,10 +868,7 @@ pub async fn run(
         factory: Arc::clone(&factory),
         config_path: builder.shared.config_path.clone(),
         token,
-        // ponytail: `Logger` owns its sink, so the request log goes to the
-        // process stderr. Thread a shared writer through if a test ever has to
-        // read it.
-        logger: None,
+        logger: Some(Arc::clone(&builder.logger)),
         workflows: host.workflows.clone(),
         schedule: builder.schedule.clone(),
     });
@@ -888,6 +885,8 @@ pub async fn run(
                     runner: Arc::new(crate::server::schedule::FactoryRunner(factory)),
                 }),
                 deliver: None,
+                logger: Arc::clone(server.logger()),
+                metrics: Some(Arc::clone(server.metrics())),
             }
             .run(serve_cancel.child_token()),
         )

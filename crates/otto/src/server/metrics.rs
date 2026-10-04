@@ -129,6 +129,9 @@ struct State {
     tasks_running: i64,
     workflow_runs: BTreeMap<String, i64>,
     workflow_steps: BTreeMap<String, i64>,
+
+    schedule_runs_total: BTreeMap<String, u64>,
+    schedule_deliveries_total: BTreeMap<ToolKey, u64>,
 }
 
 /// The whole metric registry. Every method is `&self`: one registry is shared
@@ -136,6 +139,8 @@ struct State {
 #[derive(Debug)]
 pub struct Metrics {
     state: Mutex<State>,
+    /// Unix seconds when this registry was created.
+    started_at: u64,
 }
 
 impl Default for Metrics {
@@ -151,6 +156,9 @@ impl Metrics {
                 turn_duration: Some(Histogram::new(TURN_TOOL_BUCKETS)),
                 ..State::default()
             }),
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs()),
         }
     }
 
@@ -290,6 +298,22 @@ impl Metrics {
         }
     }
 
+    pub fn schedule_run(&self, outcome: &str) {
+        *self
+            .lock()
+            .schedule_runs_total
+            .entry(outcome.to_string())
+            .or_default() += 1;
+    }
+
+    pub fn schedule_delivery(&self, channel: &str, outcome: &str) {
+        *self
+            .lock()
+            .schedule_deliveries_total
+            .entry((channel.to_string(), outcome.to_string()))
+            .or_default() += 1;
+    }
+
     pub fn stream_clients(&self, delta: i64) {
         self.lock().stream_clients += delta;
     }
@@ -344,6 +368,23 @@ impl Metrics {
     pub fn render(&self) -> String {
         let state = self.lock();
         let mut out = String::new();
+        write_help(
+            &mut out,
+            "otto_build_info",
+            "gauge",
+            "Build version of this otto binary; the value is always 1.",
+        );
+        let _ = writeln!(
+            out,
+            "otto_build_info{{version={}}} 1",
+            quote_label(crate::VERSION)
+        );
+        write_gauge(
+            &mut out,
+            "process_start_time_seconds",
+            "Start time of the process in Unix seconds.",
+            self.started_at as i64,
+        );
         write_counter_http_requests(&mut out, &state.http_total);
         write_histogram_by_label(
             &mut out,
@@ -444,6 +485,27 @@ impl Metrics {
             "Durable workflow steps by current status.",
             &state.workflow_steps,
         );
+        write_counter_by_label(
+            &mut out,
+            "otto_schedule_runs_total",
+            "outcome",
+            "Total scheduled prompt runs by outcome.",
+            &state.schedule_runs_total,
+        );
+        write_help(
+            &mut out,
+            "otto_schedule_deliveries_total",
+            "counter",
+            "Total scheduled deliveries by channel and outcome.",
+        );
+        for ((channel, outcome), value) in &state.schedule_deliveries_total {
+            let _ = writeln!(
+                out,
+                "otto_schedule_deliveries_total{{channel={},outcome={}}} {value}",
+                quote_label(channel),
+                quote_label(outcome)
+            );
+        }
         out
     }
 }
@@ -991,6 +1053,42 @@ mod tests {
             &[
                 "# HELP otto_http_requests_total",
                 "# TYPE otto_http_requests_total counter",
+            ],
+        );
+    }
+
+    #[test]
+    fn build_info_and_start_time_render_with_their_documented_names() {
+        let body = Metrics::new().render();
+        assert_lines(
+            &body,
+            &[
+                "# TYPE otto_build_info gauge",
+                &format!("otto_build_info{{version=\"{}\"}} 1", crate::VERSION),
+                "# TYPE process_start_time_seconds gauge",
+            ],
+        );
+        let start = body
+            .lines()
+            .find_map(|line| line.strip_prefix("process_start_time_seconds "))
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("start time sample");
+        assert!(start > 1_700_000_000, "{start}");
+    }
+
+    #[test]
+    fn schedule_counters_render_with_their_documented_names_and_labels() {
+        let metrics = Metrics::new();
+        metrics.schedule_run("reply");
+        metrics.schedule_run("reply");
+        metrics.schedule_delivery("telegram", "error");
+        assert_lines(
+            &metrics.render(),
+            &[
+                "# TYPE otto_schedule_runs_total counter",
+                "otto_schedule_runs_total{outcome=\"reply\"} 2",
+                "# TYPE otto_schedule_deliveries_total counter",
+                "otto_schedule_deliveries_total{channel=\"telegram\",outcome=\"error\"} 1",
             ],
         );
     }

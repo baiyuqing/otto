@@ -20,11 +20,31 @@ use super::{Server, error_response, json_response};
 const CHANGE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_MODEL_IDS: usize = 2_000;
 
+/// `X-Request-Id`, or `X-Otto-Request-Id` as sent by older connect builds.
 fn correlation(headers: &HeaderMap) -> String {
+    let id = super::client_request_id(headers);
+    if !id.is_empty() {
+        return id;
+    }
     headers
         .get("x-otto-request-id")
         .map(|value| super::request_id(value.as_bytes()))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod correlation_tests {
+    use super::*;
+
+    #[test]
+    fn x_request_id_wins_and_the_old_header_is_the_fallback() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(correlation(&headers), "");
+        headers.insert("x-otto-request-id", "old".parse().unwrap());
+        assert_eq!(correlation(&headers), "old");
+        headers.insert("x-request-id", "new".parse().unwrap());
+        assert_eq!(correlation(&headers), "new");
+    }
 }
 
 #[derive(Serialize)]

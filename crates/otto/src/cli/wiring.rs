@@ -346,6 +346,7 @@ impl Builder {
             )),
             Box::new(RememberTool::new(
                 Arc::clone(&self.memory.service),
+                self.memory.user_scope.clone(),
                 self.workspace_scope.clone(),
             )),
             Box::new(ForgetTool::new(Arc::clone(&self.memory.service), scopes)),
@@ -1621,6 +1622,7 @@ mod tests {
             .remember(&RememberRequest {
                 scope,
                 kind: "preference".into(),
+                key: "credentials".into(),
                 text: "the api key is sk-configured-secret".into(),
                 ..RememberRequest::default()
             })

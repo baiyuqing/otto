@@ -21,7 +21,7 @@ the runtime, session history, and default memory storage.
   sessions across the terminal, browser, and chats.
 - **Keep useful context.** Persistent sessions, memory that requires human
   review, reusable skills, and selective reflection after completed work.
-- **Carry work forward.** Workspace tools and MCP integrations, bounded
+- **Carry work forward.** Workspace tools, web fetch and search, and MCP integrations, bounded
   sub-agents, timers, and durable workflows with approvals and restart recovery.
 - **Control access.** Workspace-confined file tools, macOS Seatbelt shell
   sandboxing by default, and explicit permission requests for additional access.

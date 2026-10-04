@@ -1167,6 +1167,9 @@ pub struct Builder {
     /// or the configured stable id (`workspace_memory_scope`). The service
     /// itself and the user scope are process-wide and live on `Shared`.
     pub workspace_scope: crate::memory::Scope,
+    /// Host grants and the HTTP client of the `web_fetch` and `web_search`
+    /// tools, shared by every runner built for this workspace.
+    pub web: Arc<crate::tool::web::Runtime>,
     /// The resolved `[mcp]` configuration. `connect_mcp` reads this at
     /// `build_runner` time; the servers themselves are not connected until
     /// then.
@@ -1203,8 +1206,10 @@ impl Builder {
     ) -> Builder {
         let sandbox_secrets = shared.sandbox_secrets_baseline.clone();
         let sandbox_secrets_complete = shared.sandbox_secrets_baseline_complete;
+        let web = crate::tool::web::Runtime::new(&shared.config.web.allow_hosts);
         Builder {
             shared,
+            web,
             workspace,
             workspace_path,
             command_executor: None,
@@ -1334,6 +1339,7 @@ impl Builder {
         let mut definitions: Vec<ToolDefinition> = self
             .builtin_file_tools(max_output)
             .iter()
+            .chain(self.web_tools(max_output, &[], runtime).iter())
             .map(|tool| tool.definition())
             .collect();
         definitions.extend(self.boundary_memory_definitions(max_output));
@@ -1461,6 +1467,38 @@ impl Builder {
         ]
     }
 
+    /// The web tools: `web_fetch` and `web_search`; the search backend is
+    /// chosen from the environment. `secrets` are values a URL or query may not contain.
+    pub(crate) fn web_tools(
+        &self,
+        max_output: usize,
+        secrets: &[String],
+        runtime: Option<&Runtime>,
+    ) -> Vec<Box<dyn Tool + Send + Sync>> {
+        crate::tool::web::tools(
+            &self.web,
+            max_output,
+            self.web_network_denied(),
+            secrets,
+            &|name| self.environment.get(name).cloned(),
+            self.hosted_search(runtime),
+        )
+    }
+
+    fn web_network_denied(&self) -> bool {
+        self.planned_sandbox_info().network == SandboxNetwork::Denied
+    }
+
+    /// Whether the model provider runs web searches itself: the `chatgpt`
+    /// provider's hosted `web_search`, used when no Google or Brave key is
+    /// configured and `[sandbox].network` is not `deny`. The hosted search
+    /// runs at OpenAI, outside Otto's host approvals.
+    pub(crate) fn hosted_search(&self, runtime: Option<&Runtime>) -> bool {
+        runtime.is_some_and(|runtime| runtime.provider == otto_core::config::PROVIDER_CHATGPT)
+            && !self.web_network_denied()
+            && crate::tool::web::search_is_keyless(&|name| self.environment.get(name).cloned())
+    }
+
     /// Composes one runnable agent.
     ///
     /// This convenience entry point preserves the command/server behavior of
@@ -1536,11 +1574,14 @@ impl Builder {
             ProviderClient::Unavailable
         } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
             ProviderClient::ChatGpt {
-                client: Arc::new(super::login::chatgpt_client(
-                    &self.auth_path,
-                    &self.auth_credentials,
-                    self.auth_credentials_loaded,
-                )?),
+                client: Arc::new(
+                    super::login::chatgpt_client(
+                        &self.auth_path,
+                        &self.auth_credentials,
+                        self.auth_credentials_loaded,
+                    )?
+                    .with_hosted_web_search(self.hosted_search(Some(runtime))),
+                ),
                 timeout: runtime.resilience.deadlines.provider_timeout,
                 cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
             }
@@ -1578,6 +1619,7 @@ impl Builder {
                 .attach_approvals(&self.approvals, &self.workspace_path, roots)?;
         }
         let mut tools = self.builtin_file_tools(max_output);
+        tools.extend(self.web_tools(max_output, &redaction_values, Some(runtime)));
         if self.bash_configured() {
             let executor = self
                 .command_executor
@@ -2453,6 +2495,8 @@ mod tests {
                 "ls",
                 "write",
                 "edit",
+                "web_fetch",
+                "web_search",
                 "list_models",
                 "agent",
                 "agent_wait",
@@ -2606,7 +2650,7 @@ mod tests {
             .await
             .expect("runner");
         let names = tool_names(&runner);
-        assert_eq!(names.iter().position(|name| name == "bash"), Some(6));
+        assert_eq!(names.iter().position(|name| name == "bash"), Some(8));
     }
 
     #[tokio::test]
@@ -2743,7 +2787,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");

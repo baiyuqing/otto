@@ -14,7 +14,7 @@ DESKTOP_APP := $(DESKTOP_DIR)/target/$(DESKTOP_TARGET)/release/bundle/macos/Otto
 # `cargo tauri build` runs `xattr -crs` on the bundle; /usr/bin comes first so
 # a pip-installed `xattr` earlier on PATH, which has no -r, is not used.
 
-.PHONY: all build install check-fast check check-linux ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
+.PHONY: all build install check-fast check check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
 
 all: build
 
@@ -65,20 +65,22 @@ check-fast: rust-fmt rust-lint ## quick feedback: formatting, lint, focused core
 	cargo test -p otto-core
 	@git diff --check
 
-check: check-fast build rust-test connect-check rust-wasm-check rust-wasm-test scripts-test test-tui ui-test ## full macOS acceptance, including host integration, PTY and web UI tests
+check: rust-fmt rust-lint ui rust-test connect-check rust-wasm-test scripts-test test-tui ui-test ## full macOS acceptance: format, lint, web UI build, all Rust tests, host integration, PTY and web UI tests (no release build; see `build`)
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 check-linux: rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test test-tui ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
-ui: ## build the web UI into ui/dist (needs Node 24+ and wasm-pack)
-	rm -rf ui/dist/assets ui/dist/index.html
+ui-deps: ## build the wasm package and install web UI dependencies (needs Node 24+ and wasm-pack)
 	wasm-pack build --target web crates/otto-web
-	cd ui && npm ci && npm run build
+	cd ui && npm ci
 
-ui-test: ## run the web UI unit tests (needs Node 24+ and wasm-pack)
-	wasm-pack build --target web crates/otto-web
-	cd ui && npm ci && npm test
+ui: ui-deps ## build the web UI into ui/dist (needs Node 24+ and wasm-pack)
+	rm -rf ui/dist/assets ui/dist/index.html
+	cd ui && npm run build
+
+ui-test: ui-deps ## run the web UI unit tests (needs Node 24+ and wasm-pack)
+	cd ui && npm test
 
 desktop-sidecar: ## build otto for arm64 and copy it to the path Tauri bundles it from
 	cargo build --release --target $(DESKTOP_TARGET) -p otto

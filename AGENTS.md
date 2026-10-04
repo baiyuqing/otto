@@ -56,7 +56,7 @@ Use the Makefile targets as the canonical commands:
 
 ```bash
 make check-fast   # rustfmt, clippy, focused otto-core tests, git diff --check
-make check        # full macOS build/lint/all-tests/wasm/PTY/UI gate
+make check        # full macOS lint/UI-build/all-tests/wasm-test/PTY/UI-test gate (no release build)
 make check-linux  # the Linux gate: the same minus Seatbelt conformance and the UI
 ```
 

@@ -135,7 +135,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/approve",
-        description: "allow one exact elevated Bash command; <id> always also excludes its program",
+        description: "allow one exact elevated Bash command; <id> always also excludes that exact command",
         kind: SlashCommandKind::Approve,
     },
     SlashCommand {

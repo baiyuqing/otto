@@ -20,7 +20,9 @@ use super::store::{CreateError, Item, NewItem};
 use super::time::{format_duration, format_local, next_occurrence, resolve_at};
 use super::{Kind, Origin, Repeat, State, Store};
 use crate::tool::result::decode_strict_json;
-use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, preflight_error, text_result};
+use crate::tool::{
+    ApprovalSpec, CONTEXT_CANCELED, Tool, definition, error_result, preflight_error, text_result,
+};
 
 pub const NAMES: [&str; 3] = ["schedule", "schedule_list", "schedule_cancel"];
 
@@ -166,6 +168,41 @@ struct ScheduleTool(Context);
 impl Tool for ScheduleTool {
     fn definition(&self) -> ToolDefinition {
         schedule_definition()
+    }
+
+    /// A `prompt` item runs the agent with its tools, without the user
+    /// present, at every due time, so creating one needs approval. A `text`
+    /// item only delivers a message. Arguments that do not parse, or that
+    /// give both or neither of `text` and `prompt`, return `None` here;
+    /// `execute` rejects the same input with its usual validation error
+    /// before it creates anything.
+    fn approval_spec(&self, arguments: &RawValue) -> Result<Option<ApprovalSpec>, ToolResult> {
+        let Ok(args) = decode_strict_json::<ScheduleArgs>(arguments.get(), &[]) else {
+            return Ok(None);
+        };
+        let (None, Some(prompt)) = (present(args.text), present(args.prompt)) else {
+            return Ok(None);
+        };
+        let repeat = present(args.repeat).unwrap_or_else(|| "once".into());
+        let title = match repeat.as_str() {
+            "daily" | "weekdays" => format!("Schedule a {repeat} unattended run?"),
+            _ => "Schedule an unattended run?".into(),
+        };
+        let details = json!({
+            "prompt": prompt,
+            "at": present(args.at),
+            "seconds": args.seconds,
+            "repeat": repeat,
+        })
+        .to_string();
+        Ok(Some(ApprovalSpec {
+            version: crate::approval::digest(arguments.get()),
+            source: "schedule".into(),
+            title,
+            reason: "At the due time this prompt runs the agent with its tools, including file edits and sandboxed commands, without the user present. Approval requests during that run are denied.".into(),
+            details,
+            persistent: false,
+        }))
     }
 
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
@@ -446,6 +483,60 @@ mod tests {
             lines[0]
         );
         assert!(lines[1].starts_with("now: 20"), "{}", lines[1]);
+    }
+
+    fn spec(arguments: &str) -> Option<ApprovalSpec> {
+        let context = context(Some(telegram()));
+        by_name(&context, "schedule")
+            .approval_spec(&crate::tool::testutil::raw(arguments))
+            .unwrap()
+    }
+
+    #[test]
+    fn prompt_items_need_approval_and_text_items_do_not() {
+        for (arguments, title, repeat) in [
+            (
+                r#"{"prompt":"check the build","seconds":60}"#,
+                "Schedule an unattended run?",
+                "once",
+            ),
+            (
+                r#"{"prompt":"check the build","at":"08:00","repeat":"daily","text":""}"#,
+                "Schedule a daily unattended run?",
+                "daily",
+            ),
+        ] {
+            let spec = spec(arguments).expect(arguments);
+            assert_eq!(spec.source, "schedule");
+            assert_eq!(spec.title, title);
+            assert_eq!(spec.version, crate::approval::digest(arguments));
+            assert!(!spec.persistent);
+            let details: serde_json::Value = serde_json::from_str(&spec.details).unwrap();
+            assert_eq!(details["prompt"], "check the build");
+            assert_eq!(details["repeat"], repeat);
+        }
+        assert!(spec(r#"{"text":"stand up","seconds":60}"#).is_none());
+        assert!(spec(r#"{"text":"stand up","prompt":"","seconds":60}"#).is_none());
+    }
+
+    #[tokio::test]
+    async fn requests_without_an_approval_spec_never_create_a_prompt_item() {
+        let context = context(Some(telegram()));
+        for arguments in [
+            r#"{"text":"a","prompt":"b","seconds":60}"#,
+            r#"{"seconds":60}"#,
+            r#"{"prompt":"b","seconds":60,"extra":1}"#,
+            r#"[1]"#,
+        ] {
+            assert!(spec(arguments).is_none(), "{arguments}");
+            let result = call(&context, "schedule", arguments).await;
+            assert!(result.is_error, "{arguments}: {result:?}");
+        }
+        let listing = call(&context, "schedule_list", "{}").await;
+        assert!(
+            listing.content.contains("no scheduled items"),
+            "{listing:?}"
+        );
     }
 
     #[tokio::test]

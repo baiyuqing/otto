@@ -159,16 +159,20 @@ func (c *chat) config(m Message, args []string) {
 			c.previewChange(m, client, map[string]any{"kind": "remove_profile", "profile": args[1]})
 		case "add":
 			if len(args) < 6 || len(args)%2 != 0 || args[2] != "--provider" || args[4] != "--model" {
-				c.notify(m.MessageID, "Usage: /config add <profile> --provider <openai-compatible|chatgpt> --model <model> [--base-url <url>] [--api-key-env <name>] [--thinking <level>]")
+				c.notify(m.MessageID, "Usage: /config add <profile> --provider chatgpt --model <model> [--thinking <level>]")
+				return
+			}
+			// An openai-compatible profile needs a base URL, which chat cannot set.
+			if args[3] == "openai-compatible" {
+				c.notify(m.MessageID, hostOnlyMessage)
 				return
 			}
 			change := map[string]any{"kind": "create_profile", "profile": args[1], "provider": args[3], "model": args[5]}
 			for i := 6; i+1 < len(args); i += 2 {
 				switch args[i] {
-				case "--base-url":
-					change["base_url"] = args[i+1]
-				case "--api-key-env":
-					change["api_key_env"] = args[i+1]
+				case "--base-url", "--api-key-env":
+					c.notify(m.MessageID, hostOnlyMessage)
+					return
 				case "--thinking":
 					change["thinking"] = args[i+1]
 				default:
@@ -179,12 +183,17 @@ func (c *chat) config(m Message, args []string) {
 			c.previewChange(m, client, change)
 		case "set":
 			if len(args) < 4 {
-				c.notify(m.MessageID, "Usage: /config set <profile> <model|thinking|base-url|api-key-env> <value>")
+				c.notify(m.MessageID, "Usage: /config set <profile> <model|thinking> <value>")
 				return
 			}
 			field := strings.ReplaceAll(args[2], "-", "_")
-			if field != "model" && field != "thinking" && field != "base_url" && field != "api_key_env" {
-				c.notify(m.MessageID, "Only model, thinking, base-url, and api-key-env can be changed.")
+			switch field {
+			case "model", "thinking":
+			case "base_url", "api_key_env":
+				c.notify(m.MessageID, hostOnlyMessage)
+				return
+			default:
+				c.notify(m.MessageID, "Only model and thinking can be changed.")
 				return
 			}
 			c.previewChange(m, client, map[string]any{"kind": "set_profile_field", "profile": args[1], "field": field, "value": strings.Join(args[3:], " ")})
@@ -193,6 +202,11 @@ func (c *chat) config(m Message, args []string) {
 		}
 	}()
 }
+
+// hostOnlyMessage answers chat requests to change base_url or api_key_env.
+// These fields select which environment variable is sent to which URL, so
+// only the host user may change them.
+const hostOnlyMessage = "Base URL and API-key variable can only be changed on the host (web UI, TUI, or the otto config file)."
 
 func (c *chat) previewChange(m Message, client *manage.Client, change any) {
 	requestID := managementRequestID()

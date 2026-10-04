@@ -284,6 +284,16 @@ pub fn scan(text: &str) -> Option<&'static str> {
         .map(|rule| rule.id)
 }
 
+/// Returns the id of the first `scan_secret_*` rule that fires on `text`, if
+/// any. Unlike [`scan`], an invisible character does not hide a secret.
+pub fn secret(text: &str) -> Option<&'static str> {
+    RULES
+        .iter()
+        .filter(|rule| rule.id.starts_with("scan_secret"))
+        .find(|rule| rule.pattern.is_match(text))
+        .map(|rule| rule.id)
+}
+
 /// Zero-width, bidirectional-control, byte-order-mark, tag, and other control
 /// characters (newline and tab are fine).
 fn invisible(character: char) -> bool {

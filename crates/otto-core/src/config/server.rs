@@ -70,7 +70,7 @@ pub fn resolve_server(
         .server
         .workspace_roots
         .iter()
-        .map(|root| expand_tilde(root, env, "workspace root"))
+        .map(|root| paths::expand_tilde(root, env, "workspace root"))
         .collect::<Result<_, _>>()?;
     Ok(runtime)
 }
@@ -80,28 +80,9 @@ fn resolve_socket(
     env: &HashMap<String, String>,
 ) -> Result<ServerRuntime, ConfigError> {
     Ok(ServerRuntime {
-        socket: expand_tilde(socket, env, "server socket")?,
+        socket: paths::expand_tilde(socket, env, "server socket")?,
         ..Default::default()
     })
-}
-
-/// Expands a leading `~/` against `env`'s home directory, like `--cwd` and
-/// `[server].socket` both do; a plain path is only cleaned.
-fn expand_tilde(
-    path: &str,
-    env: &HashMap<String, String>,
-    what: &str,
-) -> Result<String, ConfigError> {
-    let Some(rest) = path.strip_prefix("~/") else {
-        return Ok(paths::clean(path));
-    };
-    let home = paths::home_from_env(env);
-    if home.is_empty() {
-        return Err(ConfigError::new(format!(
-            "resolve home directory for {what} \"{path}\""
-        )));
-    }
-    Ok(paths::clean(&paths::join(home, rest)))
 }
 
 #[cfg(test)]

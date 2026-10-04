@@ -2974,7 +2974,8 @@ busy_timeout = "5s"
 "/canonical/path/to/workspace" = "stable-id"
 ```
 
-There are no `--memory-*` CLI flags. Legacy `backend = "sqlite"` and
+A leading `~/` in `[memory.turso].path` is the home directory. There are no
+`--memory-*` CLI flags. Legacy `backend = "sqlite"` and
 `[memory.sqlite]` configuration are accepted as aliases for Turso; they do
 not select a SQLite engine. Turso uses a different full-text tokenizer and
 BM25 implementation, so search ordering can change.
@@ -3139,8 +3140,9 @@ durable facts and preferences are worth remembering, and which procedures are wo
 reusing as skills. Each memory survivor is queued as a pending candidate (origin
 `extractor`) that you review with `/memory review`; reflection never writes a memory
 record itself, and it appends nothing to the session file. Skills are different: a skill
-that passes every check below is **written and active without a review step**, as
-described under [Generated skills](#generated-skills). `focus` is free text that steers
+that passes every check below is published as an approval request, and the file is
+written only after that request is approved, as described under
+[Generated skills](#generated-skills). `focus` is free text that steers
 what to look for.
 
 What reflection checks before queueing a candidate, all in code rather than by asking the
@@ -3162,7 +3164,17 @@ model:
   rejected candidate's content, so a rejected proposal can be proposed again by a later run.
 
 Each run is recorded in `~/.otto/reflection.db` (ids, entry ranges, counts, and status; no
-transcript text). A completed run advances a per-session watermark, so the next run covers
+transcript text). Each run that starts, whether it completes, proposes nothing, fails, or is
+canceled, also writes a Markdown log to `~/.otto/reflection/runs/<time>-<id>.md` (mode 0600;
+the directory is mode 0700). The log lists every proposal the model returned, in two groups
+(memories, then skills), with its text, the reason the model gave, the entries it cited, and
+its outcome: `queued as candidate <id>`, `approval request <id>`, or `dropped: <reason>`.
+It also lists the ids of the external entries whose content was withheld, why skills were not
+requested when they were not, and, for a run that failed on an unparseable answer, the raw
+answer. Each text field is redacted like a request, and a field that still matches a secret
+rule is replaced by `(withheld: <rule>)`; a field is cut at 16 KiB. A run that is skipped
+(the cooldown or `min_turns`) or that fails before it starts writes no log. Otto does not
+remove log files. A completed run advances a per-session watermark, so the next run covers
 only newer entries; a failed or canceled run leaves it in place and the next run covers the
 same entries again. Provider usage is recorded in the usage history under the task id
 `reflection:<run id>`. A session started with `--no-session` has no file to read and cannot
@@ -3172,8 +3184,13 @@ be reflected on.
 
 When a run's slice is clean, the model may also propose skills: short task-scoped
 procedures that you asked for or approved and that ran successfully in the slice. A
-proposal becomes `~/.otto/skills/<name>/SKILL.md` only after all of these pass, in order.
-Any failure drops the skill and is counted; nothing is partly written.
+proposal that passes all of these, in order, is published as an approval request that shows
+the skill name, the target path, and the full content. `~/.otto/skills/<name>/SKILL.md` is
+written only when that request is approved; before then nothing is written. On approval the
+write is checked again: it fails if the cited session entries no longer pass the checks or
+if the existing skill file changed since the request was made. When no approval service is available the skill is dropped
+(`skill_approval_unavailable`). Any failure drops the skill and is counted; nothing is partly
+written.
 
 1. **Source isolation.** If the slice contains any external entry (see above), skills are not
    requested at all and the run says so. `skill_source = "any"` lifts this; external entries
@@ -3196,9 +3213,11 @@ Any failure drops the skill and is counted; nothing is partly written.
 
 A generated skill carries only `name` and `description`: it never declares an `input`/`output`
 contract, so it is never run as a sub-agent, and it has no `allowed-tools`. At most
-`max_skills` are written per run and `max_generated_skills` in total. Each write is announced
-on the `/reflect` result line with the undo command, and the skill becomes visible to the model
-at the next catalog discovery (`/new`, `/resume`, `/model`, or a restart), like any new skill.
+`max_skills` are proposed per run and `max_generated_skills` may be owned in total. The
+`/reflect` result line reports the number of pending skill approvals; after an approved
+write, the skill becomes visible to the model
+at the next catalog discovery (`/new`, `/resume`, `/model`, or a restart), like any new skill,
+and can be undone with `/skill revert <name>`.
 Skills are written only to `~/.otto/skills`; if you changed `[skills].paths` so that root is
 not listed, they are written but not discovered.
 
@@ -3260,8 +3279,10 @@ Background runs never delay the task response and are single-flight. `on_work` a
 start; a failed run counts too. All existing evidence, source-isolation, and skill-review
 checks still apply. `/reflect` is not held back by this cooldown.
 
-A run that proposed a memory or wrote a skill queues one result line; a run that found
-nothing stays quiet, and a failed run reports its error once. The REPL, TUI, and Web UI
+Every automatic run that starts queues a start line (`reflection: running (<trigger>)`) and,
+when it ends, one result line. The result line of a completed run names the run log, also
+when the run proposed nothing; a failed run reports its error once, with the log directory. A
+canceled run and a skipped run queue no result line. The REPL, TUI, and Web UI
 show these lines. ACP sends new notices as tagged agent message chunks, and the chat
 connector sends them after the active task reply. A connection through `otto serve`
 starts at the current notice cursor without replaying older notices; a local

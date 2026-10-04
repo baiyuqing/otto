@@ -145,7 +145,8 @@ The selected model and OpenAI-compatible endpoint must support image input.
   `/timers cancel <id>` stops one.
 - [Scheduled deliveries](docs/user-manual.md#schedule): `schedule` sends a
   message or the reply of a prompt run at a later time, once or daily, to the
-  chat, terminal or browser UI that asked for it.
+  chat, terminal or browser UI that asked for it. A prompt run needs the
+  user's approval when it is created.
 - [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
   socket or a loopback TCP port, with an embedded browser UI.
   [`otto --attach`](docs/user-manual.md#the-tui-attached-to-otto-serve) runs

@@ -1271,7 +1271,11 @@ and a restart.
 | `repeat` | `once` (default), `daily` or `weekdays`; the latter two at the `HH:MM` given in `at`. |
 
 Exactly one of `text` and `prompt` and exactly one of `seconds` and `at` are
-required. An empty or blank string counts as an absent field. Each origin (see
+required. Creating a `prompt` item asks the user for approval first, whatever
+its `repeat`: the request shows the prompt, `at` or `seconds`, and `repeat`,
+because the run uses the agent's tools (file edits and sandboxed commands)
+with no user present. A denied request creates nothing. A `text` item needs no
+approval. An empty or blank string counts as an absent field. Each origin (see
 below) has at most 32 active items. The result names the id, the first due
 time with its UTC offset, where the item will be delivered, and the current
 local time:

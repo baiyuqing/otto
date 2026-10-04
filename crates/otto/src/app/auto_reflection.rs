@@ -65,7 +65,7 @@ impl Notices {
         }
     }
 
-    fn push(&self, line: String) {
+    pub(super) fn push(&self, line: String) {
         {
             let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
             if queue.lines.len() >= MAXIMUM_NOTICES {

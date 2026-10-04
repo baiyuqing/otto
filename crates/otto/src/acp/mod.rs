@@ -260,8 +260,10 @@ impl Connection {
         Ok(json!({ "sessionId": id }))
     }
 
-    /// Starts at the current notice cursor and follows new notices until the
-    /// connection ends, without replaying old outcomes on reconnect.
+    /// Follows the session's notices until the connection ends. A local
+    /// session starts at the beginning, which includes the notices queued when
+    /// its controller was built. An attached session starts at the current
+    /// cursor, so a reconnect does not replay old outcomes.
     async fn start_notice_watcher(self: &Arc<Self>, session_id: &str) {
         if !self
             .watching_notices
@@ -286,13 +288,13 @@ impl Connection {
                 };
                 let controller = Arc::clone(&session.controller);
                 let changed = controller.notices_changed();
-                let (_, after) = controller.notices_since(0);
+                // This session owns the controller, so every notice it holds,
+                // including one queued when it was built, is new to this client.
                 tokio::spawn(async move {
                     if !notice_watcher_ready(start, &stop).await {
                         return;
                     }
-                    watch_controller_notices(connection, controller, id, stop, changed, after)
-                        .await;
+                    watch_controller_notices(connection, controller, id, stop, changed, 0).await;
                 });
             }
             Backend::Attach(relay) => {
@@ -626,16 +628,18 @@ async fn watch_controller_notices(
     mut changed: tokio::sync::watch::Receiver<u64>,
     mut after: u64,
 ) {
+    // A receiver subscribed before a line was queued does not fire for it
+    // again, so read what is already queued before the first wait.
     loop {
-        tokio::select! {
-            biased;
-            () = stop.cancelled() => return,
-            result = changed.changed() => if result.is_err() { return },
-        }
         let (notices, last) = controller.notices_since(after);
         after = last;
         for (notice_id, text) in notices {
             connection.reflection_notice(&session_id, notice_id, &text);
+        }
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => return,
+            result = changed.changed() => if result.is_err() { return },
         }
     }
 }

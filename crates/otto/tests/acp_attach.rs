@@ -1252,8 +1252,16 @@ fn a_relay_advertises_commands_and_runs_context_and_compact_on_serve() {
     assert_eq!(update["availableCommands"][4]["name"], "steer");
     assert_eq!(update["availableCommands"][5]["name"], "queue");
 
-    relay.call("session/prompt", prompt(&session_id, "MARKER-USER-1"));
-    relay.call("session/prompt", prompt(&session_id, "MARKER-USER-2"));
+    let (_, first_response) = relay.call("session/prompt", prompt(&session_id, "MARKER-USER-1"));
+    assert_eq!(
+        first_response["result"]["stopReason"], "end_turn",
+        "{first_response}"
+    );
+    let (_, second_response) = relay.call("session/prompt", prompt(&session_id, "MARKER-USER-2"));
+    assert_eq!(
+        second_response["result"]["stopReason"], "end_turn",
+        "{second_response}"
+    );
     assert_eq!(requests.lock().unwrap().len(), 2);
     let first: Value = serde_json::from_str(&requests.lock().unwrap()[0]).unwrap();
     let system = first["messages"][0]["content"]

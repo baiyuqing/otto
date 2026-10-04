@@ -1729,8 +1729,10 @@ impl Dispatcher {
                             .reply(id, result(PromptResponse::new(StopReason::Cancelled)));
                     }
                     let reply = connection.prompt(&session_id, text, channel, &token).await;
-                    connection.reply(id, reply);
+                    // A prompt response is an admission boundary for an ACP client:
+                    // release the slot before the writer can expose the response.
                     slot.end();
+                    connection.reply(id, reply);
                 });
                 return;
             }
@@ -1741,8 +1743,10 @@ impl Dispatcher {
         };
         self.tasks.spawn(async move {
             let reply = connection.prompt(&session_id, text, channel, &token).await;
-            connection.reply(id, reply);
+            // A prompt response is an admission boundary for an ACP client:
+            // release the slot before the writer can expose the response.
             slot.end();
+            connection.reply(id, reply);
         });
     }
 }

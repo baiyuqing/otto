@@ -96,6 +96,8 @@ pub struct File {
     pub failover: Failover,
     #[serde(default, skip_serializing_if = "Reflection::is_default")]
     pub reflection: Reflection,
+    #[serde(default, skip_serializing_if = "Web::is_default")]
+    pub web: Web,
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
     #[serde(default)]
@@ -115,6 +117,22 @@ pub struct Experimental {
 }
 
 impl Experimental {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The `[web]` table: hosts the `web_fetch` and `web_search` tools may reach
+/// without asking. Entries are bare lowercase host names (no scheme, port or
+/// path); anything else is ignored by the tools.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Web {
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+}
+
+impl Web {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }

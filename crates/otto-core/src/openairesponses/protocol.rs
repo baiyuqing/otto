@@ -28,7 +28,7 @@ pub struct WireRequest {
     #[serde(serialize_with = "serialize_input")]
     pub input: Vec<WireItem>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<WireTool>,
+    pub tools: Vec<WireToolEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<WireReasoning>,
     pub stream: bool,
@@ -42,6 +42,24 @@ pub struct WireRequest {
 pub struct WireReasoning {
     pub effort: String,
     pub summary: String,
+}
+
+/// One entry of the request `tools` array: a function Otto executes, or a
+/// tool the backend hosts and runs itself.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum WireToolEntry {
+    Function(WireTool),
+    Hosted(WireHostedTool),
+}
+
+/// A backend-hosted tool, identified by its type alone. Otto never receives a
+/// call for it: the backend runs it inside the response and the model's text
+/// carries the outcome, so the stream reader ignores its output items.
+#[derive(Debug, Clone, Serialize)]
+pub struct WireHostedTool {
+    #[serde(rename = "type")]
+    pub tool_type: String,
 }
 
 /// One advertised tool. The Responses API flattens the function definition
@@ -185,6 +203,12 @@ pub struct InputTokensDetails {
 /// block. A tool message expands into one `function_call_output` item per
 /// tool-result block; its other blocks are dropped.
 pub fn build_request(request: &Request) -> WireRequest {
+    build_request_with(request, false)
+}
+
+/// [`build_request`], additionally advertising the backend-hosted
+/// `web_search` tool when `hosted_web_search` is set.
+pub fn build_request_with(request: &Request, hosted_web_search: bool) -> WireRequest {
     let mut input: Vec<WireItem> = Vec::new();
     for message in &request.messages {
         match message.role {
@@ -235,12 +259,19 @@ pub fn build_request(request: &Request) -> WireRequest {
         tools: request
             .tools
             .iter()
-            .map(|tool| WireTool {
-                tool_type: "function".into(),
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                parameters: tool.parameters.clone(),
+            .map(|tool| {
+                WireToolEntry::Function(WireTool {
+                    tool_type: "function".into(),
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters: tool.parameters.clone(),
+                })
             })
+            .chain(hosted_web_search.then(|| {
+                WireToolEntry::Hosted(WireHostedTool {
+                    tool_type: "web_search".into(),
+                })
+            }))
             .collect(),
         reasoning: if request.thinking.is_empty() {
             None
@@ -273,7 +304,15 @@ pub fn finish_reason(has_tool_calls: bool, status: &str, incomplete_reason: &str
 
 /// The byte length the request occupies on the wire.
 pub fn serialized_request_size(request: &Request) -> Result<usize, serde_json::Error> {
-    Ok(serde_json::to_vec(&build_request(request))?.len())
+    serialized_request_size_with(request, false)
+}
+
+/// [`serialized_request_size`] for a request built by [`build_request_with`].
+pub fn serialized_request_size_with(
+    request: &Request,
+    hosted_web_search: bool,
+) -> Result<usize, serde_json::Error> {
+    Ok(serde_json::to_vec(&build_request_with(request, hosted_web_search))?.len())
 }
 
 /// Reports whether the accumulated argument text is a complete JSON value.
@@ -349,6 +388,40 @@ mod tests {
 
     fn raw(text: &str) -> Box<RawValue> {
         RawValue::from_string(text.to_owned()).expect("valid JSON")
+    }
+
+    #[test]
+    fn hosted_web_search_is_one_extra_typed_tool_after_the_functions() {
+        let request = Request {
+            model: "m".into(),
+            tools: vec![ToolDefinition {
+                name: "read".into(),
+                description: "d".into(),
+                parameters: None,
+            }],
+            ..Request::default()
+        };
+        let with = serde_json::to_string(&build_request_with(&request, true)).unwrap();
+        assert!(
+            with.contains(r#""tools":[{"type":"function","name":"read","description":"d","parameters":null},{"type":"web_search"}]"#),
+            "{with}"
+        );
+        let without = serde_json::to_string(&build_request_with(&request, false)).unwrap();
+        assert!(!without.contains("web_search"), "{without}");
+        assert_eq!(
+            without,
+            serde_json::to_string(&build_request(&request)).unwrap()
+        );
+        // With no function tools the array still carries the hosted one.
+        let only = serde_json::to_string(&build_request_with(&Request::default(), true)).unwrap();
+        assert!(
+            only.contains(r#""tools":[{"type":"web_search"}]"#),
+            "{only}"
+        );
+        assert_eq!(
+            serialized_request_size_with(&request, true).unwrap(),
+            with.len()
+        );
     }
 
     fn encode(request: &Request) -> String {

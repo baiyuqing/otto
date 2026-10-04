@@ -1,9 +1,11 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -126,8 +128,8 @@ func openStore(t *testing.T) (*state.Store, string) {
 	return s, p
 }
 
-func newBot(api *fakeAPI, store *state.Store) *Bot {
-	b := New(testToken, store)
+func newBot(api *fakeAPI, store *state.Store, menuChatIDs ...string) *Bot {
+	b := New(testToken, store, menuChatIDs...)
 	b.APIBase = api.srv.URL
 	b.PollTimeout = 0
 	b.backoffMin, b.backoffMax = time.Millisecond, 4*time.Millisecond
@@ -663,14 +665,40 @@ func TestCommandMenuSynced(t *testing.T) {
 	}
 }
 
+func TestCommandMenuButtonSyncedForDefaultAndPrivateChats(t *testing.T) {
+	api := botAPI(t)
+	store, _ := openStore(t)
+	r := start(newBot(api, store, "123", "-100", "bad", "0"))
+	api.waitCalls(t, "getUpdates", 1)
+	r.stop(t)
+
+	buttons := api.byMethod("setChatMenuButton")
+	want := []map[string]any{
+		{"menu_button": map[string]any{"type": "commands"}},
+		{"chat_id": float64(123), "menu_button": map[string]any{"type": "commands"}},
+	}
+	if len(buttons) != len(want) {
+		t.Fatalf("setChatMenuButton calls = %+v, want %d calls", buttons, len(want))
+	}
+	for i := range want {
+		if !reflect.DeepEqual(buttons[i].body, want[i]) {
+			t.Errorf("setChatMenuButton[%d] = %#v, want %#v", i, buttons[i].body, want[i])
+		}
+	}
+}
+
 func TestCommandMenuFailureDoesNotStopRun(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
 	var mu sync.Mutex
 	polled := false
 	api := newAPI(t, func(method string, _ map[string]any) resp {
 		switch method {
 		case "getMe":
 			return okR(map[string]any{"id": 99, "username": "OttoBot"})
-		case "setMyCommands", "deleteMyCommands":
+		case "setMyCommands", "deleteMyCommands", "setChatMenuButton":
 			return errR(400, "Bad Request", 0)
 		case "getUpdates":
 			mu.Lock()
@@ -684,8 +712,9 @@ func TestCommandMenuFailureDoesNotStopRun(t *testing.T) {
 		return okR([]any{})
 	})
 	store, _ := openStore(t)
-	r := start(newBot(api, store))
+	r := start(newBot(api, store, "123"))
 	api.waitCalls(t, "deleteMyCommands", 2)
+	api.waitCalls(t, "setChatMenuButton", 2)
 	select {
 	case m := <-r.msgs:
 		if m.Text != "hello" {
@@ -699,6 +728,10 @@ func TestCommandMenuFailureDoesNotStopRun(t *testing.T) {
 	}
 	if n := len(api.byMethod("setMyCommands")); n != 1 {
 		t.Errorf("setMyCommands called %d times, want 1 (no retry)", n)
+	}
+	if !strings.Contains(logs.String(), "telegram command menu update failed") ||
+		!strings.Contains(logs.String(), "method=setChatMenuButton") {
+		t.Errorf("menu button failure was not logged: %s", logs.String())
 	}
 }
 

@@ -88,7 +88,7 @@ func platformsFor(cfg *config.Config, store *state.Store) ([]bridge.Platform, ma
 		secretVars = append(secretVars, cfg.Agent.TokenEnv)
 	}
 	if t := cfg.Telegram; t != nil {
-		bot := telegram.New(t.Token, store)
+		bot := telegram.New(t.Token, store, t.Chats...)
 		platforms = append(platforms, bot)
 		access[bot.Name()] = bridge.Access{Chats: t.Chats, Senders: t.Senders}
 		secretVars = append(secretVars, t.TokenEnv)

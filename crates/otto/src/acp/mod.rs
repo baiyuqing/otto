@@ -1169,6 +1169,15 @@ impl Connection {
 /// Runs one wake turn when a notification is pending and nothing else holds
 /// the session. Returns true when the turn failed.
 async fn wake_turn(session: &Session, stop: &CancellationToken) -> bool {
+    // An empty check must not release the slot: that release would wake this
+    // same loop again even though no notification arrived.
+    if session
+        .controller
+        .subagent_tasks()
+        .is_none_or(|tasks| tasks.pending() == 0)
+    {
+        return false;
+    }
     let Some(token) = session.prompt.begin_wake(stop) else {
         return false;
     };
@@ -2075,6 +2084,33 @@ mod channel_tests {
         assert_eq!(session, "s1");
         assert_eq!(text, "plain user text");
         assert_eq!(channel, Some(Channel::Telegram));
+    }
+
+    #[tokio::test]
+    async fn idle_wake_checks_do_not_signal_slot_release() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
+        let session = Session {
+            controller: Arc::new(controller),
+            prompt: Arc::new(PromptSlot::default()),
+        };
+        let tasks = session.controller.subagent_tasks().expect("task registry");
+        assert_eq!(tasks.pending(), 0);
+        let mut released = session.prompt.released.subscribe();
+        let stop = CancellationToken::new();
+        for _ in 0..3 {
+            assert!(!wake_turn(&session, &stop).await);
+            assert!(
+                !released.has_changed().unwrap(),
+                "idle checks must stay asleep"
+            );
+            assert!(session.prompt.begin(&stop).is_some());
+            session.prompt.end();
+            // A real prompt completion still wakes the loop.
+            assert!(released.has_changed().unwrap());
+            released.borrow_and_update();
+        }
     }
 
     #[tokio::test]

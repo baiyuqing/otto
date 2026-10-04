@@ -13,6 +13,11 @@ Execution status and evidence: [TODO](2026-10-04-active-task-guidance-todo.md).
    every request. History compaction/reload must not remove that information.
 4. Preserve these requirements, decisions, and implementation progress in
    repository design/TODO documents rather than relying on conversation history.
+5. New requested features are enabled by default. This delivery adds no
+   default-off flag or opt-in setup: model task tools, durable capability
+   instructions, natural-message routing, and command discovery are available
+   after the ordinary installation/upgrade. Runtime state, actual permissions,
+   and compatibility can restrict an operation; an enable switch cannot hide it.
 
 The user approved these requirements in conversation. Implementation details
 below must satisfy them; record material contract changes here before coding.
@@ -44,7 +49,8 @@ tool when the agent can directly revise its current plan.
 A natural message arriving during active work is processed in a serialized,
 bounded control dialogue using the session's provider. This dialogue has its own
 in-memory transcript, the active task identity/context, and only the tools needed
-to guide the captured turn, request a queued follow-up, or read capability help.
+to guide the captured turn, request a queued follow-up, read capability help,
+or explicitly choose a read-only reply (for example, a progress question).
 It cannot run ordinary task tools concurrently or grant approvals. Explicit
 `/steer` and `/queue` bypass model interpretation. If routing makes no valid
 decision or fails, report the outcome accurately; do not silently drop input or
@@ -54,6 +60,11 @@ Control dialogue uses a 30-second bound and checks the captured turn generation
 again before effects. An old dialogue cannot steer a newer turn. Pending
 approval uses the existing approval-only dialogue for natural messages, with
 ordinary task work queued until the human decides.
+
+Steer/queue routing tools act on the original user message without model rewriting.
+Only one routing choice may take effect per message. A reply-only choice does
+not change the active task or queue. Successful tool acceptance is authoritative;
+generated prose must not override a failed or missing routing decision.
 
 The normal task model can use `task_queue` to schedule agent-originated follow-up
 work within the user's authorized objective. Limit it to the current session,
@@ -128,6 +139,19 @@ restricted approval dialogue for ordinary messages.
   ordinary prompt, and respect the returned route. Keep replies from control
   dialogue separate from the running task's streamed reply.
 
+Wire entry points: HTTP `POST /v1/sessions/{id}/tasks/steer` (`{text}` ->
+`{accepted:true}`) and `/tasks/control` (`{text,channel?}` -> nullable
+`{text,queued}`). ACP exposes `_otto/tasks/steer` and `_otto/tasks/control` with
+the same bodies plus `sessionId`, negotiated with `_meta.otto.taskControl:true`.
+Extension replies are JSON-only; they must not pollute the running prompt's
+stream. Adapters validate text size, channel enum, and session access.
+
+Local ACP's explicit `/queue` needs a small bounded FIFO around its existing
+prompt slot (16 waiting prompts); drain through the same prompt runner. Normal
+concurrent prompt refusal stays compatible, `/steer` bypasses the occupied slot,
+and session cancellation clears queued local prompts. Attached ACP uses the
+existing server FIFO rather than duplicating it.
+
 Existing persistent Inbox is insufficient for exact-turn guidance: accepted
 input can race final completion and wake a subsequent turn, or arrive before
 the initial prompt is appended. The new transient mailbox must prevent both.
@@ -158,3 +182,5 @@ ACP capability advertisement, Telegram menu, and user manual together.
 
 Run focused tests, `make check-fast`, `make connect-check`, and the full macOS
 acceptance gate. No new dependencies or generic command framework.
+Verify default configuration exposes the capabilities and natural-message
+routing without extra flags. Do not introduce a default-disabled feature gate.

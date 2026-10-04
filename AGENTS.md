@@ -33,6 +33,7 @@ Apply these requirements to every feature, fix, and refactor:
 
 ## Change rules
 
+- Ship requested features enabled by default; do not add default-off gates or require an extra enable step.
 - Use a dedicated Git worktree at `.worktree/<name>` under the primary checkout (never a sibling directory) and a development branch for every feature or bug fix; never implement directly on `main`.
 - If a design or spec is needed, get explicit approval before writing production code or tests. After approval, implement and verify the agreed scope without repeated confirmation; ask only for material scope or contract changes.
 - Feature work and bug fixes ship with tests that check the behavior the change adds or fixes; a test must fail when that behavior breaks. Writing tests before the code is not required. Run the focused tests, then the broader relevant gates. Docs-only changes are exempt.

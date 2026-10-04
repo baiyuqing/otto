@@ -16,6 +16,8 @@ Last updated: 2026-10-04. No implementation gate has passed yet.
 - [x] Identify tool-state gap when terminal-fact persistence fails after start.
 - [x] Confirm existing `agent_send` for parent-to-child guidance; reuse it.
 - [x] Record approved requirements and scope in the design document.
+- [x] Record the user's requirement: requested features enabled by default;
+  no default-off switch or extra opt-in setup in this delivery.
 
 ## Implementation
 
@@ -55,6 +57,8 @@ test/command and result here; static inspection does not count as runtime proof.
   beyond the budget, and cleanup across approval/cancellation.
 - [ ] Capability instructions and callable schemas in real requests after history
   compaction, restored session, and approval retry; disabled capabilities absent.
+- [ ] Default configuration exposes tools, persistent capability instructions,
+  natural-message routing, and command discovery without enable flags.
 - [ ] ACP local, attached server, direct TCP, and connector end-to-end coverage.
 - [ ] Exactly one terminal tool update on success, active-tool cancellation,
   approval denial, execution failure, and persistence failure.

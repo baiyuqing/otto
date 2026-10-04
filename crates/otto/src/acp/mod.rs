@@ -180,10 +180,14 @@ impl PromptSlot {
     }
 
     /// Registers an ordinary prompt to run after the wake turn that holds the
-    /// slot. `None` when the slot is held by anything else or already awaited.
+    /// slot. The caller calls this after `begin` failed under a separate lock,
+    /// so a slot that is free again (the wake turn ended in between) is also
+    /// accepted. `None` when the slot is held by anything else or already
+    /// awaited.
     fn wait_for_wake(&self, parent: &CancellationToken) -> Option<CancellationToken> {
         let mut state = self.state.lock().expect("prompt slot");
-        if !state.wake || state.waiting.is_some() {
+        let free = state.active.is_none() && !state.draining && state.followups.is_empty();
+        if !(state.wake || free) || state.waiting.is_some() {
             return None;
         }
         let token = parent.child_token();
@@ -1947,6 +1951,28 @@ mod channel_tests {
         assert_eq!(session, "s1");
         assert_eq!(text, "plain user text");
         assert_eq!(channel, Some(Channel::Telegram));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_is_admitted_when_the_wake_turn_ends_between_begin_and_wait() {
+        let slot = PromptSlot::default();
+        let parent = CancellationToken::new();
+        let wake = slot.begin_wake(&parent).expect("wake turn claims the slot");
+        assert!(
+            slot.begin(&parent).is_none(),
+            "the wake turn holds the slot"
+        );
+        // The wake turn ends before the prompt registers its wait.
+        slot.end();
+        drop(wake);
+        let token = slot
+            .wait_for_wake(&parent)
+            .expect("a slot freed after begin failed admits the prompt");
+        assert!(slot.claim_after_wake(&token).await);
+        assert!(
+            slot.begin(&parent).is_none(),
+            "the admitted prompt holds the slot"
+        );
     }
 
     #[tokio::test]

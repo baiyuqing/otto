@@ -127,11 +127,12 @@ pub fn task_steps(history: &[Message]) -> String {
     for message in history {
         for block in &message.blocks {
             if block.block_type == BlockType::ToolCall {
-                let arguments = block.arguments.as_ref().map_or("", |raw| raw.get());
+                let arguments =
+                    otto_core::wire::transcript::format_args_compact(block.arguments.as_deref());
                 out.push_str(&format!(
                     "  → {} {}\n",
                     block.tool_name,
-                    first_runes(&one_line(arguments), 80)
+                    first_runes(&one_line(&arguments), 80)
                 ));
             } else if block.block_type == BlockType::Text
                 && message.role == Role::Assistant
@@ -260,6 +261,26 @@ mod tests {
         assert_eq!(
             task_steps(&history),
             "  → read {\"path\":\"main.go\"}\n  assistant: looks fine\n"
+        );
+    }
+
+    #[test]
+    fn steps_decode_unicode_escapes_and_preserve_literal_backslashes() {
+        let history = [Message {
+            role: Role::Assistant,
+            blocks: vec![Block {
+                block_type: BlockType::ToolCall,
+                tool_name: "read".into(),
+                arguments: Some(RawValue::from_string(
+                    r#"{"path":"\u4e2d\u6587/\ud83d\ude80\u0026\u003c\u003e","literal":"\\u0026"}"#.into(),
+                ).unwrap()),
+                ..Block::default()
+            }],
+            ..Message::default()
+        }];
+        assert_eq!(
+            task_steps(&history),
+            "  → read {\"path\":\"中文/🚀&<>\",\"literal\":\"\\\\u0026\"}\n"
         );
     }
 

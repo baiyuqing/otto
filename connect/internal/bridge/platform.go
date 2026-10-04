@@ -21,6 +21,13 @@ type Message struct {
 	// Attachment is true when the message carried a photo, file or other
 	// non-text content; the adapter drops that content.
 	Attachment bool
+
+	// RequestID is set by the bridge when it admits the message; adapters
+	// leave it empty.
+	RequestID string
+	// queueFull is set by the bridge when the message was refused because a
+	// queue was full; it decides the messages_total outcome.
+	queueFull *bool
 }
 
 // Platform is one chat service. Implementations must be safe for concurrent

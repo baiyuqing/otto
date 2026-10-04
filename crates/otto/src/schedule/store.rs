@@ -306,6 +306,18 @@ impl Store {
         Self::initialize(connection)
     }
 
+    /// Makes every later call fail with [`Error`], by poisoning the connection
+    /// mutex, to test the callers' error paths.
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(self: &std::sync::Arc<Self>) {
+        let store = std::sync::Arc::clone(self);
+        let _ = std::thread::spawn(move || {
+            let _guard = store.connection.lock().unwrap();
+            panic!("poison the schedule store");
+        })
+        .join();
+    }
+
     /// A private in-memory store, for tests.
     pub fn open_in_memory() -> Result<Self> {
         Self::initialize(Connection::open_in_memory().map_err(|_| Error)?)

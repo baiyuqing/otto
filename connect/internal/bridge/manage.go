@@ -14,7 +14,9 @@ import (
 
 const manageTimeout = 30 * time.Second
 
-func managementRequestID() string {
+// newRequestID returns the id of one admitted inbound message: 32 lowercase
+// hex characters from 16 random bytes.
+func newRequestID() string {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "unavailable"
@@ -209,20 +211,23 @@ func (c *chat) config(m Message, args []string) {
 const hostOnlyMessage = "Base URL and API-key variable can only be changed on the host (web UI, TUI, or the otto config file)."
 
 func (c *chat) previewChange(m Message, client *manage.Client, change any) {
-	requestID := managementRequestID()
+	requestID := m.RequestID
+	if requestID == "" {
+		requestID = newRequestID()
+	}
 	ctx, cancel := c.manageContext()
 	defer cancel()
 	ctx = manage.WithRequestID(ctx, requestID)
 	preview, err := client.Preview(ctx, change)
 	if err != nil {
-		slog.Warn("management_failed", "request_id", requestID, "platform", m.Platform, "chat", m.ChatID, "command", "config", "error", err)
+		slog.Warn("management_failed", "request_id", requestID, "platform", m.Platform, "chat_id", m.ChatID, "command", "config", "error", err)
 		c.notify(m.MessageID, manageError(err)+" (request_id="+requestID+")")
 		return
 	}
 	c.manageMu.Lock()
 	c.change = &pendingChange{id: preview.ID, senderID: m.SenderID, expires: time.Now().Add(time.Duration(preview.ExpiresInSeconds) * time.Second)}
 	c.manageMu.Unlock()
-	slog.Info("management_previewed", "request_id", requestID, "platform", m.Platform, "chat", m.ChatID, "command", "config", "operation", preview.Operation, "profile", preview.Profile)
+	slog.Info("management_previewed", "request_id", requestID, "platform", m.Platform, "chat_id", m.ChatID, "command", "config", "operation", preview.Operation, "profile", preview.Profile)
 	c.notify(m.MessageID, fmt.Sprintf("Preview: %s. Confirm with /config confirm %s within %d seconds.", preview.Diff, preview.ID, preview.ExpiresInSeconds))
 }
 func (c *chat) confirmChange(m Message, client *manage.Client, args []string) {
@@ -237,19 +242,22 @@ func (c *chat) confirmChange(m Message, client *manage.Client, args []string) {
 		c.notify(m.MessageID, "No matching unexpired configuration preview for this chat and sender.")
 		return
 	}
-	requestID := managementRequestID()
+	requestID := m.RequestID
+	if requestID == "" {
+		requestID = newRequestID()
+	}
 	ctx, cancel := c.manageContext()
 	defer cancel()
 	ctx = manage.WithRequestID(ctx, requestID)
 	if err := client.Confirm(ctx, change.id); err != nil {
-		slog.Warn("management_failed", "request_id", requestID, "platform", m.Platform, "chat", m.ChatID, "command", "config", "error", err)
+		slog.Warn("management_failed", "request_id", requestID, "platform", m.Platform, "chat_id", m.ChatID, "command", "config", "error", err)
 		c.notify(m.MessageID, manageError(err)+" (request_id="+requestID+")")
 		return
 	}
 	c.manageMu.Lock()
 	c.change = nil
 	c.manageMu.Unlock()
-	slog.Info("management_confirmed", "request_id", requestID, "platform", m.Platform, "chat", m.ChatID, "command", "config")
+	slog.Info("management_confirmed", "request_id", requestID, "platform", m.Platform, "chat_id", m.ChatID, "command", "config")
 	c.notify(m.MessageID, "Configuration saved. Restart otto serve before using this change.")
 }
 func (c *chat) cancelChange(m Message, client *manage.Client, args []string) {

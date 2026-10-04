@@ -449,6 +449,7 @@ pub async fn run(
                 &socket,
                 PathBuf::from(&workspace_path),
                 schedule,
+                Arc::new(crate::log::Logger::stderr()),
                 stdin,
                 stdout,
                 stderr,
@@ -606,6 +607,15 @@ pub async fn run(
             Err(error) => return fail(stderr, &error.to_string()),
         };
     approvals.start();
+    // Stderr is free for serve, acp and workflow; the REPL, TUI and one-shot
+    // frontends own the terminal or already print warnings there.
+    let logger = Arc::new(
+        if options.serve || options.acp || workflow_command.is_some() {
+            crate::log::Logger::stderr()
+        } else {
+            crate::log::Logger::discard()
+        },
+    );
     let shared = Arc::new(Shared {
         approvals,
         config_path: PathBuf::from(&config_path),
@@ -630,6 +640,7 @@ pub async fn run(
         skill_checker,
         memory: Default::default(),
         reflector,
+        logger,
     });
     let mut builder = Builder::for_workspace(shared, workspace, workspace_path.clone(), mcp_config);
 
@@ -964,6 +975,8 @@ pub async fn run(
                     scope: crate::schedule::Scope::Terminal,
                     sink: Arc::new(crate::app::scheduled::NoticeSink(Arc::clone(&controller))),
                 }),
+                logger: Arc::clone(&controller.builder().logger),
+                metrics: None,
             }
             .run(cancel.child_token()),
         )),

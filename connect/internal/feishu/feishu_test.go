@@ -204,7 +204,7 @@ func TestRunDeliversAndStopsOnCancel(t *testing.T) {
 	if err := f.onReject(context.Background(), &types.RejectEvent{MessageID: "om_9", ChatID: "oc_other", SenderID: "ou_other", Reason: "group_not_allowed"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"message rejected: chat or sender not allowed", "platform=feishu", "chat=oc_other", "sender=ou_other", "reason=group_not_allowed"} {
+	for _, want := range []string{"chat_rejected", "platform=feishu", "chat_id=oc_other", "sender_id=ou_other", "reason=group_not_allowed"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("reject log %q lacks %q", logs.String(), want)
 		}

@@ -141,7 +141,7 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if id, ok := ctx.Value(requestIDKey{}).(string); ok && id != "" {
-		req.Header.Set("X-Otto-Request-Id", id)
+		req.Header.Set("X-Request-Id", id)
 	}
 	res, err := c.http.Do(req)
 	if err != nil {

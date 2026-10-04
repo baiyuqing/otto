@@ -16,6 +16,7 @@ pub mod config;
 pub mod deadline;
 pub mod failover;
 mod gourl;
+pub mod log;
 pub mod mcp;
 pub mod memory;
 pub mod provider;

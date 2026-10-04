@@ -16,6 +16,7 @@ import (
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 
 	"github.com/baiyuqing/otto/connect/internal/bridge"
+	"github.com/baiyuqing/otto/connect/internal/metrics"
 )
 
 // noChat is the group allowlist used when no chat is configured. The SDK
@@ -30,6 +31,7 @@ type Options struct {
 	Domain    string // "feishu" or "lark"
 	Chats     []string
 	Senders   []string
+	Metrics   *metrics.Metrics // nil disables counting
 }
 
 // sdk is the part of channel.Channel the adapter calls.
@@ -46,7 +48,8 @@ type sdk interface {
 
 // Platform implements bridge.Platform for one Feishu or Lark app.
 type Platform struct {
-	ch sdk
+	ch      sdk
+	metrics *metrics.Metrics
 }
 
 var _ bridge.Platform = (*Platform)(nil)
@@ -66,7 +69,7 @@ func New(o Options) (*Platform, error) {
 	if err != nil {
 		return nil, fmt.Errorf("feishu: %w", err)
 	}
-	return &Platform{ch: ch}, nil
+	return &Platform{ch: ch, metrics: o.Metrics}, nil
 }
 
 func (p *Platform) Name() string { return "feishu" }
@@ -128,7 +131,9 @@ func (p *Platform) Run(ctx context.Context, deliver func(bridge.Message)) error 
 	// error only to OnError handlers (connection failures, reconnects).
 	p.ch.OnError(func(err error) { slog.Warn("feishu connection error", "error", err) })
 	p.ch.OnReject(func(_ context.Context, e *types.RejectEvent) error {
-		logReject(e)
+		if logReject(e) {
+			p.metrics.Message("feishu", "rejected")
+		}
 		return nil
 	})
 	errc := make(chan error, 1)
@@ -158,12 +163,13 @@ func (p *Platform) Run(ctx context.Context, deliver func(bridge.Message)) error 
 // bot is not logged, as in the Telegram adapter: it is ordinary group
 // traffic, and the SDK checks the group before the mention, so its chat is
 // already allowed.
-func logReject(e *types.RejectEvent) {
+// It reports whether it logged.
+func logReject(e *types.RejectEvent) bool {
 	if e.Reason == string(types.RejectReasonNoMention) {
-		return
+		return false
 	}
-	slog.Info("message rejected: chat or sender not allowed",
-		"platform", "feishu", "chat", e.ChatID, "sender", e.SenderID, "reason", e.Reason)
+	slog.Info("chat_rejected", "platform", "feishu", "chat_id", e.ChatID, "sender_id", e.SenderID, "reason", e.Reason)
+	return true
 }
 
 // toMessage maps an SDK message. SenderID is the sender's open_id (the SDK

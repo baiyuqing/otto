@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::storage::{Connection, OptionalExtension, Transaction, params};
 use chrono::{SecondsFormat, Utc};
@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::deadline::{Control, Deadline};
+use crate::log::Logger;
 use crate::subagent::WritePolicy;
 
 const MAX_DEFINITION_BYTES: usize = 1 << 20;
@@ -1497,6 +1498,21 @@ impl Store {
             .map_err(|_| unavailable())
     }
 
+    /// Milliseconds from the run's `created_at` to now, for the run-finished
+    /// event. `None` when the row or its timestamp is unavailable.
+    fn run_age_ms(&self, run_id: &str) -> Option<u128> {
+        let connection = self.connection.lock().ok()?;
+        let created: String = connection
+            .query_row(
+                "SELECT created_at FROM workflow_runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .ok()?;
+        let created = chrono::DateTime::parse_from_rfc3339(&created).ok()?;
+        u128::try_from((Utc::now() - created.with_timezone(&Utc)).num_milliseconds()).ok()
+    }
+
     pub fn events(&self, run_id: &str, after: i64) -> Result<Vec<EventRecord>, String> {
         let connection = self.connection.lock().map_err(|_| unavailable())?;
         let mut statement = connection
@@ -1580,6 +1596,7 @@ pub struct Controller {
     runtime: RuntimeIdentity,
     semaphore: Arc<Semaphore>,
     deadlines: DeadlinePolicy,
+    logger: Arc<Logger>,
     active: Mutex<HashMap<String, ActiveRun>>,
     guard: Mutex<Option<Box<dyn Send>>>,
 }
@@ -1595,6 +1612,7 @@ impl Controller {
         runtime: RuntimeIdentity,
         max_parallel: usize,
     ) -> Arc<Self> {
+        // Tests and embedders that have no process log write no events.
         Self::new_with_deadlines(
             store,
             catalog,
@@ -1604,6 +1622,7 @@ impl Controller {
             runtime,
             max_parallel,
             DeadlinePolicy::default(),
+            Arc::new(Logger::discard()),
         )
     }
 
@@ -1617,6 +1636,7 @@ impl Controller {
         runtime: RuntimeIdentity,
         max_parallel: usize,
         deadlines: DeadlinePolicy,
+        logger: Arc<Logger>,
     ) -> Arc<Self> {
         Arc::new(Self {
             approval_service: Mutex::new(None),
@@ -1628,6 +1648,7 @@ impl Controller {
             runtime,
             semaphore: Arc::new(Semaphore::new(max_parallel.max(1))),
             deadlines,
+            logger,
             active: Mutex::new(HashMap::new()),
             guard: Mutex::new(None),
         })
@@ -1781,6 +1802,8 @@ impl Controller {
         let run = self.get(&run_id)?;
         if approved && run.status == RunStatus::Running {
             self.launch(run_id)?;
+        } else {
+            self.log_run_if_final(&run);
         }
         Ok(run)
     }
@@ -1796,8 +1819,42 @@ impl Controller {
             cancel.cancel();
             done.notified().await;
         }
+        let before = self.get(run_id)?.status;
         self.store.cancel_run(run_id)?;
-        self.get(run_id)
+        let run = self.get(run_id)?;
+        if !is_final(before) {
+            self.log_run_if_final(&run);
+        }
+        Ok(run)
+    }
+
+    /// Writes `workflow_run_finished` when `run` has a final status.
+    fn log_run_if_final(&self, run: &Run) {
+        if !is_final(run.status) {
+            return;
+        }
+        let mut fields = vec![
+            ("run_id", run.id.clone()),
+            ("workflow", run.workflow.clone()),
+            ("status", run.status.as_str().to_string()),
+        ];
+        if let Some(duration) = self.store.run_age_ms(&run.id) {
+            fields.push(("duration_ms", duration.to_string()));
+        }
+        self.logger.info("workflow_run_finished", &fields);
+    }
+
+    fn log_step_finished(&self, run: &Run, step_id: &str, status: &str, started: Instant) {
+        self.logger.info(
+            "workflow_step_finished",
+            &[
+                ("run_id", run.id.clone()),
+                ("workflow", run.workflow.clone()),
+                ("step_id", step_id.to_string()),
+                ("status", status.to_string()),
+                ("duration_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
     }
 
     /// The number of runs currently executing. Used by `cli::serve`'s
@@ -1972,6 +2029,7 @@ impl Controller {
                 };
                 let executor = Arc::clone(&self.executor);
                 let parent_cancel = cancel.clone();
+                let started = Instant::now();
                 let deadlines = self.deadlines;
                 attempts.spawn(async move {
                     let deadline = deadlines
@@ -2000,14 +2058,20 @@ impl Controller {
                         }
                     };
                     drop(permit);
-                    (attempt, result, parent_cancel.is_cancelled(), timed_out)
+                    (
+                        attempt,
+                        result,
+                        parent_cancel.is_cancelled(),
+                        timed_out,
+                        started,
+                    )
                 });
             }
 
             let mut failed = false;
             let mut timed_out = false;
             while let Some(joined) = attempts.join_next().await {
-                let (attempt, result, canceled, attempt_timed_out) =
+                let (attempt, result, canceled, attempt_timed_out, started) =
                     joined.map_err(|_| "workflow attempt task failed".to_string())?;
                 if attempt_timed_out {
                     self.store.interrupt_attempt(
@@ -2016,6 +2080,7 @@ impl Controller {
                         attempt.attempt,
                         "workflow step deadline exceeded",
                     )?;
+                    self.log_step_finished(&run, &attempt.step_id, "interrupted", started);
                     timed_out = true;
                     continue;
                 }
@@ -2025,15 +2090,19 @@ impl Controller {
                         &attempt.step_id,
                         attempt.attempt,
                     )?;
+                    self.log_step_finished(&run, &attempt.step_id, "canceled", started);
                     continue;
                 }
                 match result {
-                    Ok(result) => self.store.finish_attempt(
-                        &attempt.run_id,
-                        &attempt.step_id,
-                        attempt.attempt,
-                        Ok(&result),
-                    )?,
+                    Ok(result) => {
+                        self.store.finish_attempt(
+                            &attempt.run_id,
+                            &attempt.step_id,
+                            attempt.attempt,
+                            Ok(&result),
+                        )?;
+                        self.log_step_finished(&run, &attempt.step_id, "succeeded", started);
+                    }
                     Err(error) => {
                         self.store.finish_attempt(
                             &attempt.run_id,
@@ -2041,6 +2110,7 @@ impl Controller {
                             attempt.attempt,
                             Err(&error),
                         )?;
+                        self.log_step_finished(&run, &attempt.step_id, "failed", started);
                         cancel.cancel();
                         failed = true;
                     }
@@ -2052,10 +2122,19 @@ impl Controller {
             }
             if failed {
                 self.store.finalize_failed(run_id)?;
+                self.log_run_if_final(&self.get(run_id)?);
                 return Ok(());
             }
+            self.log_run_if_final(&self.get(run_id)?);
         }
     }
+}
+
+fn is_final(status: RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Succeeded | RunStatus::Failed | RunStatus::Canceled
+    )
 }
 
 fn attempt_prompt(run: &Run, step: &StepRecord) -> Result<String, String> {
@@ -3226,6 +3305,88 @@ needs = ["first"]
         assert_eq!(completed.steps[1].result, "second complete");
     }
 
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_finished_run_writes_one_event_per_step_and_one_for_the_run() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "first"
+agent = "worker"
+prompt = "first"
+[[steps]]
+id = "second"
+agent = "worker"
+prompt = "second"
+needs = ["first"]
+"#,
+        );
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = Controller::new_with_deadlines(
+            Arc::new(Store::open_in_memory()),
+            Catalog {
+                definitions: vec![definition],
+            },
+            Arc::new(FakeExecutor),
+            "/workspace".into(),
+            transcripts.path().into(),
+            RuntimeIdentity::default(),
+            2,
+            DeadlinePolicy::default(),
+            Arc::new(Logger::new(Box::new(CapturedLog(Arc::clone(&bytes))))),
+        );
+        let run = controller
+            .start("flow", "secret input")
+            .await
+            .expect("start");
+        controller.wait(&run.id).await.expect("wait");
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let steps: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("msg=workflow_step_finished"))
+            .collect();
+        assert_eq!(steps.len(), 2, "{text}");
+        for (line, id) in steps.iter().zip(["first", "second"]) {
+            for field in [
+                "level=INFO".to_string(),
+                format!("run_id={}", run.id),
+                "workflow=flow".to_string(),
+                format!("step_id={id}"),
+                "status=succeeded".to_string(),
+                "duration_ms=".to_string(),
+            ] {
+                assert!(line.contains(&field), "{field} missing in {line}");
+            }
+        }
+        let finished: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("msg=workflow_run_finished"))
+            .collect();
+        assert_eq!(finished.len(), 1, "{text}");
+        for field in [format!("run_id={}", run.id), "status=succeeded".to_string()] {
+            assert!(
+                finished[0].contains(&field),
+                "{field} missing in {}",
+                finished[0]
+            );
+        }
+        assert!(!text.contains("secret input"), "{text}");
+    }
+
     #[tokio::test]
     async fn controller_runs_handoff_steps_to_completion() {
         let store = Arc::new(Store::open_in_memory());
@@ -3501,6 +3662,7 @@ prompt = "work"
                 step_timeout: Some(Duration::from_secs(1)),
                 cancellation_grace: Duration::from_secs(1),
             },
+            Arc::new(Logger::discard()),
         );
         let run = controller.start("flow", "").await.expect("start");
         started.notified().await;
@@ -3560,6 +3722,7 @@ prompt = "sibling"
                 step_timeout: Some(Duration::from_secs(1)),
                 cancellation_grace: Duration::from_millis(100),
             },
+            Arc::new(Logger::discard()),
         );
         let run = controller.start("flow", "").await.expect("start");
         sibling_started.notified().await;

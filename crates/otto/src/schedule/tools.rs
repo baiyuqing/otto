@@ -32,7 +32,7 @@ const LIST_BODY_CHARS: usize = 80;
 const NO_ORIGIN: &str = "scheduled delivery is unavailable in this conversation: it has no chat, terminal or web UI origin to deliver to (scheduled runs, sub-agents and editor ACP clients cannot create items)";
 const NO_STORE: &str = "scheduled delivery is unavailable: ~/.otto/schedule.db could not be opened";
 
-const SCHEDULE_DESCRIPTION: &str = "Schedule something for the user: a fixed text message (`text`) or a prompt that runs in a new session at the due time and whose final reply is delivered (`prompt`). Use this when the user asks to be told something later or repeatedly, or asks for a check to run later; `remind` is only your own timer inside this conversation. Give exactly one of `text` / `prompt` and exactly one of `seconds` (1 to 2592000) / `at`. `at` is `HH:MM` (next occurrence) or `YYYY-MM-DD HH:MM` (at most 30 days ahead) in the host's local time zone. `repeat` (`daily` or `weekdays`) needs `at` as `HH:MM`. Items are delivered to the chat, terminal or web UI this turn came from, even after /new. A prompt run has no user: approval requests are denied. Tell the user the resolved time from the result.";
+const SCHEDULE_DESCRIPTION: &str = "Schedule something for the user: a fixed text message (`text`) or a prompt that runs in a new session at the due time and whose final reply is delivered (`prompt`). Use this when the user asks to be told something later or repeatedly, or asks for a check to run later; `remind` is only your own timer inside this conversation. Give exactly one of `text` / `prompt` and exactly one of `seconds` (1 to 2592000) / `at`. `at` is `HH:MM` (next occurrence) or `YYYY-MM-DD HH:MM` (at most 30 days ahead) in the host's local time zone. `repeat` is `once` (default), `daily` or `weekdays`; `daily` and `weekdays` need `at` as `HH:MM`. An empty string counts as an absent field. Items are delivered to the chat, terminal or web UI this turn came from, even after /new. A prompt run has no user: approval requests are denied. Tell the user the resolved time from the result.";
 const LIST_DESCRIPTION: &str = "List the scheduled items of this chat or surface: active ones, then those that finished, failed or were cancelled in the last 7 days. Use the id with schedule_cancel.";
 const CANCEL_DESCRIPTION: &str = "Cancel an active scheduled item by id, as schedule_list shows it (for example s7). A recurring item stops for good.";
 
@@ -100,7 +100,7 @@ fn schedule_definition() -> ToolDefinition {
                 "prompt": {"type": "string", "description": "Prompt to run at the due time; the reply is delivered. 1 to 2000 characters."},
                 "seconds": {"type": "integer", "description": "Delay from now, 1 to 2592000."},
                 "at": {"type": "string", "description": "HH:MM or YYYY-MM-DD HH:MM, host local time."},
-                "repeat": {"type": "string", "enum": ["daily", "weekdays"], "description": "Repeat at the HH:MM given in `at`."}
+                "repeat": {"type": "string", "enum": ["once", "daily", "weekdays"], "description": "once (default), daily or weekdays. daily and weekdays repeat at the HH:MM given in `at`."}
             }
         }),
     )
@@ -211,22 +211,19 @@ impl Tool for ScheduleTool {
     }
 }
 
+/// Some models set every property of a tool call and send an empty string for
+/// the unused ones; a blank string counts as absent.
+fn present(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
 fn build_item(
     context: &Context,
     origin: Origin,
     args: ScheduleArgs,
     now: chrono::DateTime<Utc>,
 ) -> Result<NewItem, String> {
-    let (kind, body, max) = match (args.text, args.prompt) {
-        // Some tool-call encoders emit every string property and use an empty
-        // string for the unselected variant. Ignore only that placeholder;
-        // a sole blank body still reaches the ordinary length validation.
-        (Some(text), Some(prompt)) if text.trim().is_empty() && !prompt.trim().is_empty() => {
-            (Kind::Prompt, prompt, MAX_PROMPT_CHARS)
-        }
-        (Some(text), Some(prompt)) if !text.trim().is_empty() && prompt.trim().is_empty() => {
-            (Kind::Text, text, MAX_TEXT_CHARS)
-        }
+    let (kind, body, max) = match (present(args.text), present(args.prompt)) {
         (Some(text), None) => (Kind::Text, text, MAX_TEXT_CHARS),
         (None, Some(prompt)) => (Kind::Prompt, prompt, MAX_PROMPT_CHARS),
         _ => return Err("give exactly one of text and prompt".into()),
@@ -239,14 +236,14 @@ fn build_item(
             if kind == Kind::Text { "text" } else { "prompt" }
         ));
     }
-    let repeat =
-        match args.repeat.as_deref() {
-            None => None,
-            Some(value) => Some(Repeat::parse(value).ok_or_else(|| {
-                format!("repeat must be \"daily\" or \"weekdays\", got {value:?}")
-            })?),
-        };
-    let (mut due_at, mut local_time) = match (args.seconds, args.at.as_deref()) {
+    let repeat = match present(args.repeat).as_deref() {
+        None | Some("once") => None,
+        Some(value) => Some(Repeat::parse(value).ok_or_else(|| {
+            format!("repeat must be \"once\", \"daily\" or \"weekdays\", got {value:?}")
+        })?),
+    };
+    let at = present(args.at);
+    let (mut due_at, mut local_time) = match (args.seconds, at.as_deref()) {
         (Some(seconds), None) => {
             if !(1..=MAX_SECONDS).contains(&seconds) {
                 return Err(format!("seconds must be between 1 and {MAX_SECONDS}"));
@@ -258,7 +255,10 @@ fn build_item(
     };
     if let Some(repeat) = repeat {
         let Some(time) = local_time else {
-            return Err("repeat needs `at` in HH:MM form".into());
+            return Err(
+                "repeat needs `at` in HH:MM form; use \"once\" or omit repeat for a one-time item"
+                    .into(),
+            );
         };
         // `weekdays` may skip the day `resolve_at` picked.
         due_at = next_occurrence(repeat, time, now, &Local);
@@ -411,8 +411,16 @@ mod tests {
     fn definitions_match_names() {
         let names: Vec<_> = definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names, NAMES);
-        let schedule = &definitions()[0].description;
-        assert!(schedule.contains("`remind` is only your own timer"));
+        let schedule = &definitions()[0];
+        assert!(
+            schedule
+                .description
+                .contains("`remind` is only your own timer")
+        );
+        // A caller that sets every property needs a non-repeating `repeat`.
+        let parameters: serde_json::Value =
+            serde_json::from_str(schedule.parameters.as_ref().unwrap().get()).unwrap();
+        assert_eq!(parameters["properties"]["repeat"]["enum"][0], "once");
     }
 
     #[tokio::test]
@@ -441,20 +449,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schedule_ignores_a_blank_unselected_body_field() {
+    async fn schedule_treats_blank_fields_as_absent() {
         let cases = [
             (
-                r#"{"text":"","prompt":"weather in Beijing","seconds":5}"#,
+                r#"{"at":"","prompt":"weather in Beijing","repeat":"once","seconds":120,"text":""}"#,
                 Kind::Prompt,
                 "weather in Beijing",
+                None,
             ),
             (
-                r#"{"text":"stand up","prompt":"  \t","seconds":5}"#,
+                r#"{"text":"stand up","prompt":"  ","at":"08:00","repeat":"daily"}"#,
                 Kind::Text,
                 "stand up",
+                Some(Repeat::Daily),
+            ),
+            (
+                r#"{"text":"a","seconds":5,"repeat":""}"#,
+                Kind::Text,
+                "a",
+                None,
             ),
         ];
-        for (arguments, kind, body) in cases {
+        for (arguments, kind, body, repeat) in cases {
             let context = context(Some(telegram()));
             let result = call(&context, "schedule", arguments).await;
             assert!(!result.is_error, "{arguments} => {result:?}");
@@ -467,6 +483,7 @@ mod tests {
             assert_eq!(items.len(), 1, "{arguments}");
             assert_eq!(items[0].kind, kind, "{arguments}");
             assert_eq!(items[0].body, body, "{arguments}");
+            assert_eq!(items[0].repeat, repeat, "{arguments}");
         }
     }
 
@@ -532,7 +549,15 @@ mod tests {
             ),
             (
                 r#"{"text":"  ","seconds":5}"#.into(),
-                "text must be 1 to 500",
+                "exactly one of text and prompt",
+            ),
+            (
+                r#"{"text":"","prompt":"","seconds":5}"#.into(),
+                "exactly one of text and prompt",
+            ),
+            (
+                r#"{"at":"","prompt":"x","repeat":"daily","seconds":120,"text":""}"#.into(),
+                "\"once\"",
             ),
             (long_text, "text must be 1 to 500"),
             (long_prompt, "prompt must be 1 to 2000"),

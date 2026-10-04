@@ -1262,12 +1262,13 @@ and a restart.
 | `prompt` | 1 to 2000 characters. At the due time Otto runs it as the first message of a new session in the workspace where the item was created, and delivers the final reply as `⏰ <reply>`. |
 | `seconds` | Delay from now, 1 to 2592000 (30 days). |
 | `at` | `HH:MM` (the next occurrence) or `YYYY-MM-DD HH:MM`, in the host's local time zone, at most 30 days ahead. |
-| `repeat` | `daily` or `weekdays`, at the `HH:MM` given in `at`. |
+| `repeat` | `once` (default), `daily` or `weekdays`; the latter two at the `HH:MM` given in `at`. |
 
 Exactly one of `text` and `prompt` and exactly one of `seconds` and `at` are
-required. Each origin (see below) has at most 32 active items. The result
-names the id, the first due time with its UTC offset, where the item will be
-delivered, and the current local time:
+required. An empty or blank string counts as an absent field. Each origin (see
+below) has at most 32 active items. The result names the id, the first due
+time with its UTC offset, where the item will be delivered, and the current
+local time:
 
 ```
 scheduled s7: prompt, first run 2026-10-05 08:00 +08:00 (in 14h40m), repeats daily; delivered to this Telegram chat

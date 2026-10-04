@@ -41,8 +41,8 @@ use super::{
     MAX_QUERY_BYTES, Origin, PolicyDecision, PolicyRequest, ProposeRequest, Provenance,
     RecallRequest, RecallResult, Record, RecordKey, RecordRef, RememberRequest, Result,
     RetrievalRequest, ReviewDecision, ReviewRequest, ReviewResult, Scope, SearchRequest,
-    SearchResult, StoreForgetRequest, StoreReviewRequest, TokenEstimator, Tombstone, UpsertRequest,
-    decide_default_policy, new_id,
+    SearchResult, StandingUsage, StoreForgetRequest, StoreReviewRequest, TokenEstimator, Tombstone,
+    UpsertRequest, decide_default_policy, new_id,
 };
 
 fn now_utc() -> DateTime<Utc> {
@@ -273,7 +273,7 @@ impl Service {
                 match store.get_by_key(&key) {
                     Ok(existing) => {
                         let record = compose(existing.id, existing.revision, existing.created_at);
-                        return store.upsert(&UpsertRequest {
+                        return store.upsert_within_standing_budget(&UpsertRequest {
                             record,
                             expected_revision: Some(existing.revision),
                         });
@@ -283,7 +283,7 @@ impl Service {
                 }
             }
             let record = compose(new_id()?, 0, now);
-            return store.upsert(&UpsertRequest {
+            return store.upsert_within_standing_budget(&UpsertRequest {
                 record,
                 expected_revision: None,
             });
@@ -302,10 +302,16 @@ impl Service {
             })?
         };
         let record = compose(existing.id, expected, existing.created_at);
-        store.upsert(&UpsertRequest {
+        store.upsert_within_standing_budget(&UpsertRequest {
             record,
             expected_revision: Some(expected),
         })
+    }
+
+    /// How much of the standing token budget `user_scope` uses, counted the
+    /// way recall injects the set.
+    pub fn standing_usage(&self, user_scope: &Scope) -> Result<StandingUsage> {
+        self.ready()?.standing_usage(user_scope, now_utc())
     }
 
     /// Forgetting writes a tombstone. Purging backups is refused outright:
@@ -342,7 +348,7 @@ impl Service {
         {
             store_request.result_record_id = new_id()?;
         }
-        store.review(&store_request)
+        store.review_within_standing_budget(&store_request)
     }
 
     /// The non-human write. It only ever queues a pending candidate, so a
@@ -428,6 +434,41 @@ impl Service {
             None => Ok(()),
         }
     }
+
+    /// The pending candidates in `scopes`: how many, and when the oldest was
+    /// created (`None` when there are none). Pages through every page.
+    pub fn pending_summary(&self, scopes: &[Scope]) -> Result<PendingSummary> {
+        let mut summary = PendingSummary::default();
+        let mut cursor = String::new();
+        loop {
+            let page = self.list_candidates(&CandidateListRequest {
+                scopes: scopes.to_vec(),
+                states: vec![CandidateState::Pending],
+                limit: super::MAX_PAGE_SIZE,
+                cursor,
+            })?;
+            summary.count += page.candidates.len();
+            for candidate in &page.candidates {
+                if summary
+                    .oldest
+                    .is_none_or(|oldest| candidate.created_at < oldest)
+                {
+                    summary.oldest = Some(candidate.created_at);
+                }
+            }
+            if page.next_cursor.is_empty() {
+                return Ok(summary);
+            }
+            cursor = page.next_cursor;
+        }
+    }
+}
+
+/// What [`Service::pending_summary`] reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PendingSummary {
+    pub count: usize,
+    pub oldest: Option<DateTime<Utc>>,
 }
 
 /// One session's scoped view of memory.
@@ -500,12 +541,19 @@ impl Binding {
             now: (self.now)(),
             estimate_tokens: self.estimate_tokens,
         })?;
+        let standing = result
+            .matches
+            .iter()
+            .filter(|entry| entry.standing)
+            .map(|entry| entry.record.id.clone())
+            .collect();
         Ok(RecallResult {
             records: result
                 .matches
                 .into_iter()
                 .map(|entry| entry.record)
                 .collect(),
+            standing,
             used_tokens: result.used_tokens,
         })
     }
@@ -541,7 +589,14 @@ impl core_memory::MemoryRecall for Binding {
         )
         .map_err(|error| core_memory::MemoryError(error.to_string()))?;
         Ok(core_memory::RecallResult {
-            records: result.records.into_iter().map(core_record).collect(),
+            records: result
+                .records
+                .into_iter()
+                .map(|record| {
+                    let standing = result.standing.contains(&record.id);
+                    core_record(record, standing)
+                })
+                .collect(),
             used_tokens: result.used_tokens as i64,
         })
     }
@@ -552,7 +607,7 @@ impl core_memory::MemoryRecall for Binding {
     }
 }
 
-fn core_record(record: Record) -> core_memory::Record {
+fn core_record(record: Record, standing: bool) -> core_memory::Record {
     core_memory::Record {
         id: record.id,
         scope: core_memory::Scope {
@@ -562,6 +617,7 @@ fn core_record(record: Record) -> core_memory::Record {
         kind: record.kind,
         key: record.key,
         text: record.text,
+        standing,
     }
 }
 
@@ -600,6 +656,48 @@ mod tests {
             text: text.into(),
             ..RememberRequest::default()
         }
+    }
+
+    #[test]
+    fn pending_summary_counts_pending_in_scope_and_finds_the_oldest() {
+        let (_directory, service) = service();
+        let user = user_scope();
+        let here = Scope::new(NAMESPACE_WORKSPACE, "here");
+        let elsewhere = Scope::new(NAMESPACE_WORKSPACE, "elsewhere");
+        let scopes = [user.clone(), here.clone()];
+        assert_eq!(
+            service.pending_summary(&scopes).expect("empty"),
+            PendingSummary::default()
+        );
+        let first = service
+            .propose(&model_proposal(&user, "a", "one"))
+            .expect("a")
+            .remove(0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        service
+            .propose(&model_proposal(&here, "b", "two"))
+            .expect("b");
+        service
+            .propose(&model_proposal(&elsewhere, "c", "three"))
+            .expect("c");
+        let accepted = service
+            .propose(&model_proposal(&here, "d", "four"))
+            .expect("d")
+            .remove(0);
+        service
+            .review(&ReviewRequest {
+                reference: CandidateRef {
+                    scope: here,
+                    id: accepted.id,
+                },
+                decision: ReviewDecision::Accept,
+                edited: None,
+                target_revision: None,
+            })
+            .expect("accept");
+        let summary = service.pending_summary(&scopes).expect("summary");
+        assert_eq!(summary.count, 2);
+        assert_eq!(summary.oldest, Some(first.created_at));
     }
 
     fn model_proposal(scope: &Scope, key: &str, text: &str) -> ProposeRequest {
@@ -943,6 +1041,229 @@ mod tests {
         assert_eq!(through_agent.records.len(), 1);
         assert_eq!(through_agent.records[0].id, created.id);
         assert_eq!(through_agent.records[0].scope.namespace, NAMESPACE_USER);
+    }
+
+    #[tokio::test]
+    async fn recall_marks_only_the_baseline_records_as_standing() {
+        let (_directory, service) = service();
+        let user = user_scope();
+        let workspace = Scope::new(NAMESPACE_WORKSPACE, "workspace-1");
+        let preference = service
+            .remember(&remember(&user, "tests", "run the tests before committing"))
+            .expect("create preference");
+        let fact = service
+            .remember(&RememberRequest {
+                kind: "fact".into(),
+                ..remember(&workspace, "build", "the build uses cargo")
+            })
+            .expect("create fact");
+        let binding = service
+            .bind(BindOptions {
+                scopes: vec![user, workspace.clone()],
+                default_write_scope: workspace,
+                ..BindOptions::default()
+            })
+            .expect("bind");
+
+        let result = core_memory::MemoryRecall::recall(
+            &binding,
+            &core_memory::RecallRequest {
+                query: "cargo".into(),
+                limit: 10,
+                token_budget: 1000,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("agent recall");
+        let standing = |id: &str| {
+            result
+                .records
+                .iter()
+                .find(|record| record.id == id)
+                .unwrap_or_else(|| panic!("{id} was not recalled"))
+                .standing
+        };
+        assert!(standing(&preference.id));
+        assert!(!standing(&fact.id));
+    }
+
+    fn bind_both(service: &Arc<Service>, workspace: &Scope) -> Binding {
+        service
+            .bind(BindOptions {
+                scopes: vec![user_scope(), workspace.clone()],
+                default_write_scope: workspace.clone(),
+                ..BindOptions::default()
+            })
+            .expect("bind")
+    }
+
+    async fn agent_recall(binding: &Binding, query: &str, limit: i64) -> Vec<core_memory::Record> {
+        core_memory::MemoryRecall::recall(
+            binding,
+            &core_memory::RecallRequest {
+                query: query.into(),
+                limit,
+                token_budget: 1000,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("agent recall")
+        .records
+    }
+
+    #[tokio::test]
+    async fn recall_injects_every_standing_record_outside_the_limit() {
+        let (_directory, service) = service();
+        let workspace = Scope::new(NAMESPACE_WORKSPACE, "workspace-1");
+        for index in 0..20 {
+            service
+                .remember(&remember(
+                    &user_scope(),
+                    &format!("rule-{index}"),
+                    &format!("standing rule number {index}"),
+                ))
+                .expect("standing");
+        }
+        for index in 0..15 {
+            service
+                .remember(&RememberRequest {
+                    kind: "fact".into(),
+                    ..remember(
+                        &workspace,
+                        &format!("fact-{index}"),
+                        &format!("cargo fact {index}"),
+                    )
+                })
+                .expect("fact");
+        }
+        let binding = bind_both(&service, &workspace);
+
+        let records = agent_recall(&binding, "cargo", 12).await;
+        assert_eq!(records.iter().filter(|r| r.standing).count(), 20);
+        assert_eq!(records.iter().filter(|r| !r.standing).count(), 12);
+        assert!(records[..20].iter().all(|r| r.standing), "standing leads");
+    }
+
+    fn rejection_detail(error: &Error) -> &str {
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        let detail = error.detail.as_deref().expect("detail");
+        assert!(
+            detail.contains("standing preferences are full")
+                && detail.contains("of 2000 tokens used")
+                && detail.contains("this record needs"),
+            "{detail}"
+        );
+        detail
+    }
+
+    #[test]
+    fn remember_and_accept_are_rejected_when_the_standing_set_is_full() {
+        let (_directory, service) = service();
+        let scope = user_scope();
+        let big = service
+            .remember(&remember(&scope, "big", &"x".repeat(5500)))
+            .expect("fits alone");
+
+        let error = service
+            .remember(&remember(&scope, "more", &"y".repeat(500)))
+            .expect_err("full");
+        rejection_detail(&error);
+        // Other kinds and workspace scope are not counted.
+        service
+            .remember(&RememberRequest {
+                kind: "fact".into(),
+                ..remember(&scope, "", &"z".repeat(500))
+            })
+            .expect("a fact is not standing");
+
+        let queued = service
+            .propose(&model_proposal(&scope, "more", &"y".repeat(500)))
+            .expect("propose is never blocked");
+        let review = |service: &Service| {
+            service.review(&ReviewRequest {
+                reference: CandidateRef {
+                    scope: scope.clone(),
+                    id: queued[0].id.clone(),
+                },
+                decision: ReviewDecision::Accept,
+                edited: None,
+                target_revision: None,
+            })
+        };
+        rejection_detail(&review(&service).expect_err("full"));
+        let candidate = service
+            .get_candidate(&CandidateRef {
+                scope: scope.clone(),
+                id: queued[0].id.clone(),
+            })
+            .expect("candidate");
+        assert_eq!(candidate.state, CandidateState::Pending);
+
+        service
+            .forget(&ForgetRequest {
+                reference: RecordRef {
+                    scope: scope.clone(),
+                    id: big.id,
+                },
+                expected_revision: big.revision,
+                purge_backups: false,
+                confirm_purge: false,
+            })
+            .expect("forget");
+        review(&service).expect("accepts once space is free");
+    }
+
+    #[test]
+    fn growing_a_standing_record_does_not_count_its_old_version() {
+        let (_directory, service) = service();
+        let scope = user_scope();
+        service
+            .remember(&remember(&scope, "big", &"x".repeat(5500)))
+            .expect("create");
+        service
+            .remember(&remember(&scope, "big", &"x".repeat(5700)))
+            .expect("grows within the budget");
+        let error = service
+            .remember(&remember(&scope, "big", &"x".repeat(6400)))
+            .expect_err("grows past the budget");
+        rejection_detail(&error);
+    }
+
+    #[tokio::test]
+    async fn legacy_over_budget_data_is_injected_oldest_first_and_counted_as_omitted() {
+        use crate::memory::turso::records::testsupport::{at, sample_record};
+        let (_directory, service) = service();
+        let scope = user_scope();
+        let store = service.store.as_ref().expect("store");
+        let mut costs = Vec::new();
+        // Inserted newest first, so only created_at can put "a" first.
+        for (id, second) in [("c", 3), ("b", 2), ("a", 1)] {
+            let mut record = sample_record(id, &scope, id, &id.repeat(2400));
+            record.created_at = at(second);
+            record.updated_at = at(second);
+            costs.push(crate::memory::turso::retriever::record_cost(None, &record));
+            store
+                .upsert(&UpsertRequest {
+                    record,
+                    expected_revision: None,
+                })
+                .expect("legacy write");
+        }
+        let workspace = Scope::new(NAMESPACE_WORKSPACE, "workspace-1");
+        let binding = bind_both(&service, &workspace);
+
+        let records = agent_recall(&binding, "unmatched", 12).await;
+        let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(records.iter().all(|r| r.standing));
+
+        let usage = service.standing_usage(&scope).expect("usage");
+        assert_eq!(usage.records, 3);
+        assert_eq!(usage.omitted, 1);
+        assert_eq!(usage.tokens, costs[2] + costs[1]);
+        assert_eq!(usage.budget, 2000);
     }
 
     /// Turn text is raw user input: multi-line, untrimmed and unbounded,

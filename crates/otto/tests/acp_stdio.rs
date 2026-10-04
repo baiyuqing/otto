@@ -309,6 +309,37 @@ fn client_with_pending_candidate(
 }
 
 #[test]
+fn opening_a_session_with_a_pending_candidate_sends_the_pending_notice() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (mut client, _, _) =
+        client_with_pending_candidate(home.path(), workspace.path(), "preference");
+    let (_, response) = client.call(
+        "session/new",
+        json!({"cwd": workspace.path(), "mcpServers": []}),
+    );
+    let second = response["result"]["sessionId"]
+        .as_str()
+        .expect("session id");
+    let notice = loop {
+        let frame = client.recv();
+        if frame["params"]["update"]["_meta"]["otto"]["reflectionNotice"] == true {
+            break frame;
+        }
+    };
+    assert_eq!(notice["params"]["sessionId"], second, "{notice}");
+    let text = notice["params"]["update"]["content"]["text"]
+        .as_str()
+        .expect("text");
+    assert!(
+        text.starts_with("1 memory proposal is pending review (since ")
+            && text.contains("Run /memory review"),
+        "{text}"
+    );
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
 fn memory_review_accepts_a_pending_candidate_only_on_the_clients_request() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

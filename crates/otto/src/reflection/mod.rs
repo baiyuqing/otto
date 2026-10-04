@@ -192,6 +192,7 @@ impl Report {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     Manual,
+    OnWork,
     OnCompaction,
     OnExit,
 }
@@ -201,6 +202,7 @@ impl Trigger {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Manual => "manual",
+            Self::OnWork => "on_work",
             Self::OnCompaction => "on_compaction",
             Self::OnExit => "on_exit",
         }
@@ -315,10 +317,20 @@ impl Reflector {
         if !self.config.enabled {
             return Err(Error::Disabled);
         }
-        if trigger != Trigger::Manual && self.auto() != Auto::from(trigger) {
+        let enabled = match trigger {
+            Trigger::Manual => true,
+            Trigger::OnWork => self.auto() == Auto::OnWork,
+            Trigger::OnCompaction => {
+                matches!(self.auto(), Auto::OnCompaction | Auto::OnWork)
+            }
+            Trigger::OnExit => self.auto() == Auto::OnExit,
+        };
+        if !enabled {
             return Err(Error::Disabled);
         }
-        if trigger == Trigger::OnCompaction && self.too_soon(context.session_id) {
+        if matches!(trigger, Trigger::OnWork | Trigger::OnCompaction)
+            && self.too_soon(context.session_id)
+        {
             return Ok(Report::skipped("an automatic run started recently"));
         }
         if context.session_path.is_empty() {
@@ -637,16 +649,6 @@ impl Reflector {
                 .map_err(|error| Error::Store(error.to_string()))?;
         }
         Ok(report)
-    }
-}
-
-impl From<Trigger> for Auto {
-    fn from(trigger: Trigger) -> Self {
-        match trigger {
-            Trigger::Manual => Auto::Off,
-            Trigger::OnCompaction => Auto::OnCompaction,
-            Trigger::OnExit => Auto::OnExit,
-        }
     }
 }
 
@@ -1977,6 +1979,10 @@ mod tests {
             (Auto::Off, Trigger::OnCompaction),
             (Auto::OnExit, Trigger::OnCompaction),
             (Auto::OnCompaction, Trigger::OnExit),
+            (Auto::Off, Trigger::OnWork),
+            (Auto::OnCompaction, Trigger::OnWork),
+            (Auto::OnExit, Trigger::OnWork),
+            (Auto::OnWork, Trigger::OnExit),
             (Auto::Off, Trigger::OnExit),
         ] {
             let reflector = fixture.reflector(auto_config(auto));
@@ -2084,6 +2090,30 @@ mod tests {
             .expect("runs");
         assert_eq!(report.status, Status::Ok);
         assert_eq!(fixture.provider.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn on_work_and_on_compaction_share_the_automatic_cooldown() {
+        let fixture = Fixture::new(vec![
+            Reply::Text(r#"{"memories":[]}"#.into()),
+            Reply::Text(r#"{"memories":[]}"#.into()),
+        ])
+        .await;
+        fixture.say(Role::User, "a topic worth reflecting on").await;
+        let reflector = fixture.reflector(auto_config(Auto::OnWork));
+
+        run_as(&fixture, &reflector, Trigger::OnWork)
+            .await
+            .expect("work trigger runs");
+        let report = run_as(&fixture, &reflector, Trigger::OnCompaction)
+            .await
+            .expect("compaction trigger is throttled");
+        assert!(
+            report.line().contains("started recently"),
+            "{}",
+            report.line()
+        );
+        assert_eq!(fixture.provider.calls().len(), 1);
     }
 
     #[tokio::test]

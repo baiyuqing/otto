@@ -59,12 +59,32 @@ impl Controller {
         first: Step<'_>,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
+        decide: F,
+    ) -> Result<Stop, AgentError>
+    where
+        F: FnMut(ApprovalRequest) -> Fut,
+        Fut: Future<Output = ApprovalDecision>,
+    {
+        self.run_with_channel(first, None, emit, cancel, decide)
+            .await
+    }
+
+    /// Runs one turn with trusted, transient channel context and every
+    /// approval retry. The context is passed to each provider request and is
+    /// never appended to the session.
+    pub async fn run_with_channel<F, Fut>(
+        &self,
+        first: Step<'_>,
+        channel: Option<super::Channel>,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
         mut decide: F,
     ) -> Result<Stop, AgentError>
     where
         F: FnMut(ApprovalRequest) -> Fut,
         Fut: Future<Output = ApprovalDecision>,
     {
+        let system_context = channel.map_or("", super::Channel::system_context);
         let session_id = self.info().session_id;
         let mut first = Some(first);
         let mut retry = String::new();
@@ -86,12 +106,25 @@ impl Controller {
                     emit(event);
                 };
                 match first.take() {
-                    Some(Step::Text(text)) => self.prompt(text, &mut sink, cancel).await,
+                    Some(Step::Text(text)) => {
+                        self.prompt_with_system_context(text, system_context, &mut sink, cancel)
+                            .await
+                    }
                     Some(Step::Image(text, image)) => {
-                        self.prompt_with_image(text, image, &mut sink, cancel).await
+                        self.prompt_with_image_and_system_context(
+                            text,
+                            image,
+                            system_context,
+                            &mut sink,
+                            cancel,
+                        )
+                        .await
                     }
                     Some(Step::Wake(wake)) => wake.run(&mut sink, cancel).await,
-                    None => self.prompt(&retry, &mut sink, cancel).await,
+                    None => {
+                        self.prompt_with_system_context(&retry, system_context, &mut sink, cancel)
+                            .await
+                    }
                 }
             };
             if cancel.is_cancelled() {

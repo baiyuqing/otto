@@ -56,6 +56,47 @@ func fakeAgent(t *testing.T, extra ...string) (*Agent, *recorder, string) {
 	return a, rec, dir
 }
 
+func TestSessionUpdateSuppressesLoadReplayExceptReflectionNotice(t *testing.T) {
+	rec := &recorder{}
+	p := &process{loading: map[string]bool{"s1": true}}
+	c := &client{p: p, handler: rec}
+	send := func(update acp.SessionUpdate) {
+		if err := c.SessionUpdate(context.Background(), acp.SessionNotification{
+			SessionId: acp.SessionId("s1"),
+			Update:    update,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	send(acp.UpdateAgentMessageText("history"))
+	if rec.count() != 0 {
+		t.Fatalf("ordinary load replay was delivered")
+	}
+
+	for _, noticeID := range []float64{0, 1.5} {
+		invalid := acp.UpdateAgentMessageText("invalid notice")
+		invalid.AgentMessageChunk.Meta = map[string]any{"otto": map[string]any{
+			"reflectionNotice": true,
+			"noticeId":         noticeID,
+		}}
+		send(invalid)
+		if rec.count() != 0 {
+			t.Fatalf("invalid reflection notice %v was delivered", noticeID)
+		}
+	}
+
+	notice := acp.UpdateAgentMessageText("new notice")
+	notice.AgentMessageChunk.Meta = map[string]any{"otto": map[string]any{
+		"reflectionNotice": true,
+		"noticeId":         float64(1),
+	}}
+	send(notice)
+	if rec.count() != 1 {
+		t.Fatalf("valid reflection notice count = %d, want 1", rec.count())
+	}
+}
+
 func TestRestartDelay(t *testing.T) {
 	var d time.Duration
 	var got []time.Duration

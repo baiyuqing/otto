@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -58,6 +59,7 @@ type process struct {
 	// memoryReview is set from the initialize response.
 	memoryReview     bool
 	approvalDialogue bool
+	channelContext   bool
 	// endedAt and waitErr are valid after exited is closed.
 	endedAt time.Time
 	waitErr error
@@ -221,6 +223,7 @@ func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 	p.memoryReview = advertisesMemoryReview(resp.AgentCapabilities.Meta)
 	otto, _ := resp.AgentCapabilities.Meta["otto"].(map[string]any)
 	p.approvalDialogue, _ = otto["approvalDialogue"].(bool)
+	p.channelContext, _ = otto["channelContext"].(bool)
 	return p, nil
 }
 
@@ -254,11 +257,33 @@ type client struct {
 }
 
 func (c *client) SessionUpdate(_ context.Context, n acp.SessionNotification) error {
-	if c.handler == nil || c.p.isLoading(string(n.SessionId)) {
+	if c.handler == nil {
 		return nil
+	}
+	if c.p.isLoading(string(n.SessionId)) {
+		if _, notice := ReflectionNotice(n.Update); !notice {
+			return nil
+		}
 	}
 	c.handler.Update(string(n.SessionId), n.Update)
 	return nil
+}
+
+// ReflectionNotice returns the text of a valid Otto background notice.
+func ReflectionNotice(u acp.SessionUpdate) (string, bool) {
+	chunk := u.AgentMessageChunk
+	if chunk == nil || chunk.Content.Text == nil {
+		return "", false
+	}
+	otto, ok := chunk.Meta["otto"].(map[string]any)
+	if !ok || otto["reflectionNotice"] != true {
+		return "", false
+	}
+	id, ok := otto["noticeId"].(float64)
+	if !ok || id < 1 || math.Trunc(id) != id {
+		return "", false
+	}
+	return chunk.Content.Text.Text, true
 }
 
 func (c *client) RequestPermission(ctx context.Context, r acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {

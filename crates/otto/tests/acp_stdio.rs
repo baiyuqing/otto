@@ -1112,7 +1112,15 @@ fn session_new_and_load_are_followed_by_the_command_list() {
         .iter()
         .map(|command| &command["name"])
         .collect();
-    assert_eq!(names, [&json!("compact"), &json!("context")]);
+    assert_eq!(
+        names,
+        [
+            &json!("compact"),
+            &json!("context"),
+            &json!("reflect"),
+            &json!("skill")
+        ]
+    );
     assert_eq!(
         update["availableCommands"][0]["input"]["hint"],
         "optional focus"

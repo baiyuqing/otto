@@ -282,8 +282,8 @@ The canonical Make targets are:
 
 ```bash
 make check-fast     # rustfmt --check, clippy -D warnings, focused otto-core tests, git diff --check
-make check          # full macOS gate: check-fast, build, all tests, wasm check+test, PTY test, UI test
-make build          # build the Web UI, cargo build --release, then copy ./otto
+make check          # full macOS gate: rust-fmt, rust-lint, ui, all tests, wasm test, PTY test, UI test (no release build)
+make build          # the release build: the Web UI, cargo build --release, then copy ./otto
 make install        # build and install otto, otto-connect and bundled skills
 make rust-fmt       # cargo fmt --all -- --check
 make rust-lint      # cargo clippy --workspace --all-targets -- -D warnings
@@ -297,9 +297,12 @@ make connect-build  # build the Go connector to target/otto-connect
 ```
 
 `check-fast` runs `rustfmt`, `clippy`, and the focused `otto-core` test suite;
-`check` adds the Web UI and release build, the full workspace test suite, the
-Go connector checks, the wasm32 build check, the wasm tests under Node, the PTY
-smoke test, and `make ui-test`.
+`check` runs `rust-fmt` and `rust-lint`, builds the Web UI (`make ui`, so the
+tests embed the real `ui/dist`), then runs the full workspace test suite (which
+includes the `otto-core` tests), the Go connector checks, the wasm tests under
+Node, the PTY smoke test, and `make ui-test`. It does not run `cargo build
+--release` or `rust-wasm-check`; `make build` is the release build, and
+`make check-linux` runs `rust-wasm-check`.
 
 `connect-check` needs the Go version named in `connect/go.mod`; CI installs it
 with `actions/setup-go` from that file. Its end-to-end tests drive the real
@@ -337,11 +340,12 @@ feature until a writer exists.
 `rehype-katex` plus `katex` for math, `mermaid` for fenced `mermaid` blocks
 and the usage chart, and the `otto-web` wasm package built from
 `crates/otto-web`. It needs Node 24+ and wasm-pack, and it is exercised by
-`make check` through the production build and `make ui-test`.
+`make check` through the Web UI build and `make ui-test`.
 
 ```bash
-make ui       # wasm-pack build, then npm ci && npm run build → ui/dist, embedded by cargo build
-make ui-test  # wasm-pack build, then npm ci && npm test (vitest): the SSE frame parser and the transcript reducer
+make ui-deps  # wasm-pack build, then npm ci; `ui` and `ui-test` depend on it, so it runs once per make invocation
+make ui       # ui-deps, then npm run build → ui/dist, embedded by cargo build
+make ui-test  # ui-deps, then npm test (vitest): the SSE frame parser and the transcript reducer
 ```
 
 `make build` runs `make ui` first. `ui/dist` is a build output: only `.gitkeep`

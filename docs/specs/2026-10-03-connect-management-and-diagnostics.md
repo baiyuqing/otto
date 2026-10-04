@@ -118,11 +118,9 @@ The initial command grammar is deliberately narrow:
 
 ```text
 /config use <profile>
-/config add <profile> --provider <openai-compatible|chatgpt> --model <model>
+/config add <profile> --provider chatgpt --model <model>
 /config set <profile> model <model>
 /config set <profile> thinking <low|medium|high|xhigh|max|unset>
-/config set <profile> base-url <https-url>
-/config set <profile> api-key-env <environment-variable-name>
 /config remove <profile>
 /config confirm <token>
 /config cancel
@@ -132,14 +130,15 @@ Rules:
 
 - `/config use <profile>` changes `default_profile` after confirmation. It does
   not alter any open session.
-- `/config add` requires `--provider` and `--model`; an
-  `openai-compatible` profile also requires a `base_url` before it can be
-  confirmed. It may receive `base-url` and `api-key-env` in the creation
-  command or through a future deliberately designed draft flow; it never
-  receives the secret value.
-- `/config set` changes exactly one whitelisted field. A `chatgpt` profile
-  rejects `base-url` and `api-key-env`; an `openai-compatible` profile must
-  retain a valid base URL and model.
+- `/config add` requires `--provider` and `--model`. Superseded on
+  2026-10-04: chat can no longer set `base-url` or `api-key-env`, because the
+  pair decides which environment variable of `otto serve` is sent as a bearer
+  token and to which URL (`/models` sends it immediately). `/config add`
+  therefore accepts only `--provider chatgpt`; an `openai-compatible` profile,
+  which requires a `base_url`, is created on the host.
+- `/config set` changes exactly one whitelisted field: `model` or `thinking`.
+  `base-url` and `api-key-env` are host-only (superseded on 2026-10-04, see
+  above).
 - `/config remove` refuses the last profile and handles a default-profile
   removal only through an explicit preview that names the required replacement
   default. The first implementation may reject removal of the default profile

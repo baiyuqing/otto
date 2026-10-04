@@ -40,6 +40,40 @@ use nix::sys::stat::Mode;
 use super::gopath::{base, bytes, clean, dir, has_parent_traversal, is_abs, join, path_from, rel};
 use super::root::{Root, is_symlink};
 
+/// Refuses a write to the root-relative path made of `components` when it is
+/// one of [`crate::sandbox::GIT_READ_ONLY`], with a `PermissionDenied` error
+/// naming `path`. APFS is case-insensitive by default and also treats the
+/// Kelvin sign (U+212A) as `k` and long s (U+017F) as `s`, so each component
+/// is folded with `to_uppercase().to_lowercase()`, which maps both.
+pub(crate) fn refuse_git_read_only<'a>(
+    components: impl IntoIterator<Item = &'a std::ffi::OsStr>,
+    path: &Path,
+) -> io::Result<()> {
+    let parts: Vec<String> = components
+        .into_iter()
+        .filter(|part| *part != ".")
+        .map(|part| part.to_string_lossy().to_uppercase().to_lowercase())
+        .collect();
+    for (name, subpath) in crate::sandbox::GIT_READ_ONLY {
+        let protected: Vec<&str> = name.split('/').collect();
+        let hit = if subpath {
+            parts.len() >= protected.len() && parts[..protected.len()] == protected[..]
+        } else {
+            parts == protected
+        };
+        if hit {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is read-only: git runs hooks and configuration programs outside the sandbox",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Maximum number of symbolic links followed while resolving a write target.
 const MAX_WRITE_SYMLINKS: usize = 40;
 
@@ -206,7 +240,28 @@ impl Workspace {
     /// Resolves a write target to a root-relative name without resolving the
     /// final element through ordinary filesystem I/O, so writing through a
     /// symbolic link updates the link target instead of replacing the link.
+    ///
+    /// Refuses the git paths the sandbox keeps read-only (see
+    /// [`refuse_git_read_only`]). This check runs before any directory is
+    /// created; [`super::write::write_file_atomic`] repeats it on the
+    /// components it renames into.
     pub(crate) fn write_relative(&self, path: &Path) -> io::Result<PathBuf> {
+        let relative = self.resolve_write_relative(path)?;
+        refuse_git_read_only(relative.iter(), path)?;
+        // The relative form keeps intermediate symlinks (`g/config` with
+        // `g -> .git`), so the resolved form is checked as well. When it cannot
+        // be resolved, the check at rename time still applies.
+        if let Some(resolved) = self
+            .canonical_for_write(path)
+            .ok()
+            .and_then(|canonical| rel(bytes(&self.root), bytes(&canonical)).ok())
+        {
+            refuse_git_read_only(path_from(resolved).iter(), path)?;
+        }
+        Ok(relative)
+    }
+
+    fn resolve_write_relative(&self, path: &Path) -> io::Result<PathBuf> {
         if is_abs(bytes(path)) || has_parent_traversal(bytes(path)) {
             let canonical = self.canonical_for_write(path)?;
             return Ok(path_from(rel(bytes(&self.root), bytes(&canonical))?));
@@ -489,6 +544,44 @@ mod tests {
             .write_relative(Path::new("link/../note.txt"))
             .expect_err("traversal through an escaping symlink should be rejected");
         assert!(error.to_string().contains("escapes workspace"), "{error}");
+    }
+
+    #[test]
+    fn write_relative_refuses_git_config_and_hooks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(root.path().join(".git/info")).unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::os::unix::fs::symlink(".git", root.path().join("g")).unwrap();
+        std::os::unix::fs::symlink(".git/config", root.path().join("link")).unwrap();
+        let workspace = workspace(root.path());
+        for path in [
+            ".git",
+            ".git/config",
+            ".git/config.worktree",
+            ".git/commondir",
+            ".git/hooks/pre-commit",
+            ".git/HOOKS/pre-commit",
+            ".git/hoo\u{212A}s/pre-commit",
+            ".git/hook\u{17F}/pre-commit",
+            ".GIT/config",
+            "./.git//config",
+            "g/config",
+            "g/hooks/pre-commit",
+            "link",
+        ] {
+            let error = workspace.write_relative(Path::new(path)).expect_err(path);
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{path}");
+            assert!(error.to_string().contains("read-only"), "{path}: {error}");
+        }
+        for path in [
+            ".git/info/exclude",
+            ".gitignore",
+            "src/.git_notes.txt",
+            "g/info/exclude",
+        ] {
+            workspace.write_relative(Path::new(path)).expect(path);
+        }
     }
 
     #[test]

@@ -167,6 +167,22 @@ impl Root {
         follow_final: bool,
         operation: &mut dyn FnMut(BorrowedFd<'_>, &OsStr) -> io::Result<T>,
     ) -> io::Result<T> {
+        self.walk(name, follow_final, &mut |dirfd, resolved| {
+            operation(dirfd, &resolved[resolved.len() - 1])
+        })
+    }
+
+    /// [`Self::do_in_root`], but `operation` receives every component of the
+    /// resolved path instead of the final one: no `..`, and every symbolic
+    /// link before the final component replaced by its target. The parent
+    /// directory handle was opened through exactly these names with
+    /// `O_NOFOLLOW`.
+    fn walk<T>(
+        &self,
+        name: &Path,
+        follow_final: bool,
+        operation: &mut dyn FnMut(BorrowedFd<'_>, &[OsString]) -> io::Result<T>,
+    ) -> io::Result<T> {
         let mut parts = split_path_in_root(name, &[], &[])?;
         let mut current: Option<OwnedFd> = None;
         let mut index = 0usize;
@@ -204,7 +220,7 @@ impl Root {
                 .map_or_else(|| self.fd.as_fd(), AsFd::as_fd);
             let last = index == parts.len() - 1;
             let outcome = if last {
-                operation(dirfd, &parts[index])
+                operation(dirfd, &parts[..=index])
             } else {
                 match open_dir_at(dirfd, &parts[index]) {
                     Ok(fd) => {
@@ -330,11 +346,27 @@ impl Root {
     }
 
     /// Renames `from` to `to`, both resolved inside the tree without
-    /// following a final symbolic link.
-    pub fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+    /// following a final symbolic link. `check` receives the resolved
+    /// components of `to` (see [`Self::walk`]) immediately before `renameat`
+    /// and refuses the rename by returning an error. It sees the names the
+    /// destination directory handle was opened through, so a symbolic link
+    /// swapped in after an earlier check on the path cannot bypass it.
+    pub fn rename(
+        &self,
+        from: &Path,
+        to: &Path,
+        check: &dyn Fn(&[OsString]) -> io::Result<()>,
+    ) -> io::Result<()> {
         self.do_in_root(from, false, &mut |from_fd, from_name| {
-            self.do_in_root(to, false, &mut |to_fd, to_name| {
-                renameat(from_fd, from_name, to_fd, to_name).map_err(nix_error)
+            self.walk(to, false, &mut |to_fd, resolved| {
+                check(resolved)?;
+                renameat(
+                    from_fd,
+                    from_name,
+                    to_fd,
+                    resolved[resolved.len() - 1].as_os_str(),
+                )
+                .map_err(nix_error)
             })
         })
     }
@@ -501,11 +533,42 @@ mod tests {
             .expect("idempotent");
 
         std::fs::write(dir.path().join("a/b/c/from"), "x").expect("write");
-        root.rename(Path::new("a/b/c/from"), Path::new("a/to"))
+        root.rename(Path::new("a/b/c/from"), Path::new("a/to"), &|_| Ok(()))
             .expect("rename");
         assert!(dir.path().join("a/to").exists());
         root.remove(Path::new("a/to")).expect("remove");
         assert!(!dir.path().join("a/to").exists());
+    }
+
+    #[test]
+    fn rename_check_sees_the_destination_after_symlinks_and_can_refuse() {
+        let (dir, root) = temp_root();
+        std::fs::create_dir_all(dir.path().join("real/inner")).expect("mkdir");
+        std::os::unix::fs::symlink("real", dir.path().join("link")).expect("symlink");
+        std::fs::write(dir.path().join("from"), "x").expect("write");
+
+        let seen = std::cell::RefCell::new(Vec::new());
+        let error = root
+            .rename(
+                Path::new("from"),
+                Path::new("./link/inner/../to"),
+                &|resolved| {
+                    seen.replace(resolved.to_vec());
+                    Err(io::Error::from(ErrorKind::PermissionDenied))
+                },
+            )
+            .expect_err("check refuses");
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(
+            *seen.borrow(),
+            [OsString::from("real"), OsString::from("to")]
+        );
+        assert!(dir.path().join("from").exists());
+        assert!(!dir.path().join("real/to").exists());
+
+        root.rename(Path::new("from"), Path::new("link/to"), &|_| Ok(()))
+            .expect("rename");
+        assert!(dir.path().join("real/to").exists());
     }
 
     #[test]

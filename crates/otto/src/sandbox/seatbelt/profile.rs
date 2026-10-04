@@ -678,17 +678,17 @@ fn render_write_rules(
     // probe on macOS 27.2 showed the same denies placed before it had no
     // effect). The rules are emitted whether or not the paths exist, and no
     // setting turns them off.
-    let git = |name: &str, kind| Filter {
-        kind,
-        path: join(workspace, &format!(".git{name}")),
-    };
-    let protected = [
-        git("", FilterKind::Literal),
-        git("/config", FilterKind::Literal),
-        git("/config.worktree", FilterKind::Literal),
-        git("/commondir", FilterKind::Literal),
-        git("/hooks", FilterKind::Subpath),
-    ];
+    let protected: Vec<Filter> = crate::sandbox::GIT_READ_ONLY
+        .iter()
+        .map(|(name, subpath)| Filter {
+            kind: if *subpath {
+                FilterKind::Subpath
+            } else {
+                FilterKind::Literal
+            },
+            path: join(workspace, name),
+        })
+        .collect();
     write_rule(
         &mut builder,
         "deny",

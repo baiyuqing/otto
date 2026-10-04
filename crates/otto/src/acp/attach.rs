@@ -48,6 +48,8 @@ const LOST: &str = "connection to otto serve lost";
 
 /// A `session/request_permission` request waiting for the client's answer.
 struct OpenApproval {
+    confirmation: bool,
+    revision: Option<u64>,
     approval_id: String,
     request_id: u64,
     reply: oneshot::Receiver<Value>,
@@ -419,8 +421,16 @@ impl Relay {
                 }
                 reply = answer => {
                     let open = approval.take().expect("answer exists only for an open request");
-                    let allow = reply.is_ok_and(|frame| decide(&frame) == ApprovalDecision::Allow);
-                    match self.client.decide_approval(session_id, &open.approval_id, allow).await {
+                    let frame=reply.ok();
+                    let action=frame.as_ref().and_then(|frame|frame.pointer("/result/action")).and_then(Value::as_str);
+                    if open.confirmation && !matches!(action,Some("accept"|"decline")) {continue}
+                    let allow=if open.confirmation {action==Some("accept") && frame.as_ref().and_then(|f|f.pointer("/result/content/approved")).and_then(Value::as_bool)==Some(true)}
+                        else {frame.as_ref().is_some_and(|frame|decide(frame)==ApprovalDecision::Allow)};
+                    let feedback=if open.confirmation {frame.as_ref().and_then(|f|f.pointer("/result/content/feedback")).and_then(Value::as_str).unwrap_or("")}else{""};
+                    let decision=if let Some(revision)=open.revision {
+                        self.client.shared_approval("_otto/approvals/decide",session_id,&open.approval_id,revision,if allow {"approve"}else{"reject"},feedback,0).await.map(|_|())
+                    } else {self.client.decide_approval(session_id,&open.approval_id,allow).await};
+                    match decision {
                         Err(failure @ ClientError::Unreachable(_)) => return Err(self.fail(failure)),
                         // 409 `approval_decided`: another client or the
                         // timeout decided first.
@@ -437,20 +447,22 @@ impl Relay {
                     };
                     match event.event_type.as_str() {
                         "approval_requested" => {
-                            let params = permission_params(
-                                session_id,
-                                &event.tool_call_id,
-                                &event.command,
-                                &event.read_path,
-                                &event.justification,
-                            );
-                            let (request_id, reply) =
-                                connection.send_request("session/request_permission", params);
-                            approval = Some(OpenApproval {
-                                approval_id: event.approval_id,
-                                request_id,
-                                reply,
-                            });
+                            let shared=self.client.shared_approval("_otto/approvals/get",session_id,&event.approval_id,0,"","",0).await.ok()
+                                .and_then(|value|serde_json::from_value::<crate::approval::Request>(value).ok());
+                            let caps=connection.client_capabilities.lock().expect("ACP capabilities").clone();
+                            if shared.is_some() && caps.pointer("/_meta/otto/approvals").is_some() {continue}
+                            let confirmation=shared.as_ref().is_some_and(|r|r.kind==crate::approval::Kind::Confirmation);
+                            let (method,params)=if confirmation {
+                                if caps.pointer("/clientCapabilities/elicitation/form").is_none_or(Value::is_null) {
+                                    connection.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("Approval {} is pending. This client cannot display confirmation; use Otto's approval UI.",event.approval_id)}}}}));
+                                    continue;
+                                }
+                                let request=shared.as_ref().expect("confirmation has request");
+                                ("elicitation/create",json!({"sessionId":session_id,"mode":"form","message":format!("{}\n{}\n{}",request.title,request.subject.details,request.reason),"requestedSchema":{"type":"object","properties":{"approved":{"type":"boolean"},"feedback":{"type":"string"}},"required":["approved"]}}))
+                            } else {("session/request_permission",permission_params(session_id,&event.tool_call_id,&event.command,&event.read_path,&event.justification))};
+                            let (request_id,reply)=connection.send_request(method,params);
+                            if let Some(previous)=approval.take(){withdraw(connection,previous);}
+                            approval=Some(OpenApproval {approval_id:event.approval_id,request_id,reply,confirmation,revision:shared.map(|r|r.revision)});
                         }
                         "approval_decided" => {
                             if approval

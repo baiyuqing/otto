@@ -169,6 +169,8 @@ func (a *Agent) Load(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	p.loadMu.Lock()
+	defer p.loadMu.Unlock()
 	if !p.beginLoad(id) {
 		return nil
 	}

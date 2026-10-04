@@ -514,8 +514,12 @@ async fn handle_line(text: &str, pending: &Mutex<Pending>, stdin: &Mutex<Option<
                 if let Ok(line) = serde_json::to_string(&reply) {
                     let _ = write_line(stdin, &line).await;
                 }
+            } else {
+                // Do not advertise unsupported elicitation modes or leave their
+                // callers hanging. They cannot confer tool authorization.
+                let reply = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unsupported client method; no user consent was obtained."}});
+                let _ = write_line(stdin, &reply.to_string()).await;
             }
-            // Any other server-initiated request is out of scope; ignored.
         }
     }
 }

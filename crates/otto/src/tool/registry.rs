@@ -28,6 +28,7 @@ pub struct Registry {
     ordered: Vec<Box<dyn Tool + Send + Sync>>,
     by_name: HashMap<String, usize>,
     guard: Option<Arc<dyn CallGuard>>,
+    approval: Option<(Arc<crate::approval::Service>, crate::approval::Scope)>,
 }
 
 impl Registry {
@@ -43,7 +44,17 @@ impl Registry {
             ordered: tools,
             by_name,
             guard: None,
+            approval: None,
         })
+    }
+
+    pub fn with_approval(
+        mut self,
+        service: Arc<crate::approval::Service>,
+        scope: crate::approval::Scope,
+    ) -> Self {
+        self.approval = Some((service, scope));
+        self
     }
 
     pub fn with_guard(mut self, guard: Arc<dyn CallGuard>) -> Self {
@@ -59,6 +70,158 @@ impl Registry {
 
     pub fn tools(&self) -> &[Box<dyn Tool + Send + Sync>] {
         &self.ordered
+    }
+}
+
+impl Registry {
+    pub(crate) fn approval_binding(
+        &self,
+    ) -> Option<(Arc<crate::approval::Service>, crate::approval::Scope)> {
+        self.approval.clone()
+    }
+    pub(crate) async fn execute_with_scope(
+        &self,
+        call: ToolCall<'_>,
+        control: &dyn OperationControl,
+        scope_override: Option<&crate::approval::Scope>,
+    ) -> ToolExecution {
+        if let Some(reason) = control.admission_stop_reason() {
+            return stopped_not_started(reason);
+        }
+
+        let Some(tool) = self.lookup(call.name) else {
+            return not_started(ToolResult::unknown_tool(call.name));
+        };
+
+        if let Some(guard) = &self.guard
+            && let Err(text) = guard.before()
+        {
+            return not_started(ToolResult::error(text));
+        }
+
+        let mut authorization = None;
+        if let Some((service, scope)) = &self.approval {
+            let scope = scope_override.unwrap_or(scope);
+            let spec = match tool.approval_spec(call.arguments) {
+                Ok(spec) => spec,
+                Err(result) => return not_started(result),
+            };
+            if let Some(spec) = spec {
+                let version = spec.version.clone();
+                let request = match service.create(crate::approval::Proposal {
+                    kind: crate::approval::Kind::Authorization,
+                    scope: scope.clone(),
+                    subject: crate::approval::Subject {
+                        tool_call_id: call.tool_call_id.into(),
+                        source: spec.source,
+                        id: call.operation_id.to_string(),
+                        version,
+                        details: spec.details,
+                    },
+                    title: spec.title,
+                    reason: spec.reason,
+                    persistent: spec.persistent,
+                    blocking: true,
+                    expires_at: Some(chrono::Utc::now().timestamp() + 600),
+                }) {
+                    Ok(r) => r,
+                    Err(e) => return not_started(ToolResult::error(e.to_string())),
+                };
+                let decided = match service
+                    .wait(&request.id, &request.scope, control.cancellation_token())
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return not_started(ToolResult::error(e.to_string())),
+                };
+                if decided.state != crate::approval::State::Approved {
+                    return not_started(ToolResult::error(
+                        "Operation was not approved; replan before continuing.",
+                    ));
+                }
+                if let Some(reason) = control.admission_stop_reason() {
+                    return stopped_not_started(reason);
+                }
+                if let Some(guard) = &self.guard
+                    && let Err(error) = guard.before()
+                {
+                    return not_started(ToolResult::error(error));
+                }
+                match tool.approval_spec(call.arguments) {
+                    Ok(Some(current))
+                        if current.details == request.subject.details
+                            && current.persistent == request.persistent
+                            && current.version == request.subject.version => {}
+                    _ => {
+                        return not_started(ToolResult::error(
+                            "Approval subject changed before dispatch; request approval again.",
+                        ));
+                    }
+                }
+                if let Err(e) = service.application(
+                    &request.id,
+                    &request.scope,
+                    crate::approval::ApplicationState::NotStarted,
+                    crate::approval::ApplicationState::Applying,
+                    "",
+                ) {
+                    return not_started(ToolResult::error(e.to_string()));
+                }
+                if let Err(error) = tool
+                    .apply_approval(call.arguments, control.cancellation_token(), &request)
+                    .await
+                {
+                    let _ = service.application(
+                        &request.id,
+                        &request.scope,
+                        crate::approval::ApplicationState::Applying,
+                        crate::approval::ApplicationState::Failed,
+                        "Authorization could not be applied.",
+                    );
+                    return not_started(ToolResult::error(error));
+                }
+                authorization = Some(request);
+            }
+        }
+        let result = if let Some(request) = &authorization {
+            tool.execute_approved(call, control.cancellation_token(), request)
+                .await
+        } else {
+            tool.execute_call(call, control.cancellation_token()).await
+        };
+        let mut execution = settle_tool_result(result);
+
+        if let Some(guard) = &self.guard
+            && let Err(text) = guard.after()
+        {
+            execution.result.content = format!("{text}\n\n{}", execution.result.content);
+            execution.result.is_error = true;
+            execution.outcome = outcome(OperationDisposition::Error, EffectCertainty::Unknown);
+        }
+
+        if let Some(request) = authorization
+            && let Some((service, _)) = &self.approval
+        {
+            let state = if execution.outcome.effect_certainty == EffectCertainty::Unknown {
+                crate::approval::ApplicationState::Unknown
+            } else if execution.result.is_error {
+                crate::approval::ApplicationState::Failed
+            } else {
+                crate::approval::ApplicationState::Applied
+            };
+            let _ = service.application(
+                &request.id,
+                &request.scope,
+                crate::approval::ApplicationState::Applying,
+                state,
+                if execution.result.is_error {
+                    "Operation did not complete successfully."
+                } else {
+                    ""
+                },
+            );
+        }
+        execution
     }
 }
 
@@ -129,35 +292,24 @@ impl ToolExecutor for Registry {
         self.lookup(name).is_some() && super::safety::is_replayable(name)
     }
 
+    fn batch_control(
+        &self,
+        name: &str,
+        execution: &ToolExecution,
+    ) -> otto_core::approval::BatchControl {
+        if self.approval.is_some()
+            && (name == "bash" || name.starts_with(super::mcp::NAME_PREFIX))
+            && execution.result.is_error
+            && execution.outcome.effect_certainty == EffectCertainty::NotStarted
+        {
+            return otto_core::approval::BatchControl::Replan;
+        }
+        self.lookup(name)
+            .map_or_default(|tool| tool.batch_control())
+    }
+
     async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution {
-        if let Some(reason) = control.admission_stop_reason() {
-            return stopped_not_started(reason);
-        }
-
-        let Some(tool) = self.lookup(call.name) else {
-            return not_started(ToolResult::unknown_tool(call.name));
-        };
-
-        if let Some(guard) = &self.guard
-            && let Err(text) = guard.before()
-        {
-            return not_started(ToolResult::error(text));
-        }
-
-        let result = tool
-            .execute(call.arguments, control.cancellation_token())
-            .await;
-        let mut execution = settle_tool_result(result);
-
-        if let Some(guard) = &self.guard
-            && let Err(text) = guard.after()
-        {
-            execution.result.content = format!("{text}\n\n{}", execution.result.content);
-            execution.result.is_error = true;
-            execution.outcome = outcome(OperationDisposition::Error, EffectCertainty::Unknown);
-        }
-
-        execution
+        self.execute_with_scope(call, control, None).await
     }
 }
 
@@ -229,6 +381,7 @@ mod tests {
         registry
             .execute(
                 ToolCall {
+                    tool_call_id: "",
                     operation_id: &operation_id,
                     name,
                     arguments: &raw("{}"),
@@ -251,6 +404,7 @@ mod tests {
         let execution = registry
             .execute(
                 ToolCall {
+                    tool_call_id: "",
                     operation_id: &operation_id,
                     name: "write",
                     arguments: &raw("{}"),

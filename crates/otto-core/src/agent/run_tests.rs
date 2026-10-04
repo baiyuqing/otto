@@ -3262,3 +3262,50 @@ async fn complete_text_does_not_call_the_provider_when_already_cancelled_or_boun
     assert!(agent.provider().requests().is_empty());
     assert!(closed.provider().requests().is_empty());
 }
+
+struct ApprovalBarrierExecutor(Arc<AtomicUsize>);
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl ToolExecutor for ApprovalBarrierExecutor {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        EchoExecutor::default().definitions()
+    }
+    fn batch_control(
+        &self,
+        _name: &str,
+        _execution: &crate::tool::ToolExecution,
+    ) -> crate::approval::BatchControl {
+        crate::approval::BatchControl::Replan
+    }
+    async fn execute(
+        &self,
+        call: crate::tool::ToolCall<'_>,
+        control: &dyn OperationControl,
+    ) -> crate::tool::ToolExecution {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        EchoExecutor::default().execute(call, control).await
+    }
+}
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn approval_barrier_settles_later_batch_calls_without_dispatch() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        FakeProvider::new(vec![two_tool_calls(), Turn::text("replanned")]),
+        ApprovalBarrierExecutor(calls.clone()),
+        MemorySession::new(),
+        options(),
+    );
+    let mut events = Vec::new();
+    agent
+        .run(
+            "confirm first",
+            &mut |event| events.push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(events.iter().any(|event|matches!(event,Event::ToolCallFinished{tool_call_id,outcome,..}
+        if tool_call_id=="c2" && outcome.effect_certainty==crate::model::EffectCertainty::NotStarted)));
+}

@@ -1571,10 +1571,11 @@ struct ActiveRun {
 }
 
 pub struct Controller {
-    store: Arc<Store>,
+    pub(crate) approval_service: Mutex<Option<std::sync::Weak<crate::approval::Service>>>,
+    pub(crate) store: Arc<Store>,
     catalog: Catalog,
     executor: Arc<dyn Executor>,
-    workspace: String,
+    pub(crate) workspace: String,
     transcript_root: PathBuf,
     runtime: RuntimeIdentity,
     semaphore: Arc<Semaphore>,
@@ -1618,6 +1619,7 @@ impl Controller {
         deadlines: DeadlinePolicy,
     ) -> Arc<Self> {
         Arc::new(Self {
+            approval_service: Mutex::new(None),
             store,
             catalog,
             executor,
@@ -1737,6 +1739,39 @@ impl Controller {
     }
 
     pub fn respond(self: &Arc<Self>, request_id: &str, approved: bool) -> Result<Run, String> {
+        let service = self
+            .approval_service
+            .lock()
+            .map_err(|_| "workflow runtime unavailable")?
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(service) = service {
+            let domain = self.approval_request(request_id)?;
+            let request = crate::approval::workflow::publish(&service, &self.workspace, &domain)
+                .map_err(|e| e.to_string())?;
+            service
+                .decide(
+                    &request.id,
+                    &request.scope,
+                    request.revision,
+                    approved,
+                    "",
+                    &crate::approval::Actor::local("workflow-command"),
+                )
+                .map_err(|e| e.to_string())?;
+            service
+                .apply_available(&self.workspace)
+                .map_err(|e| e.to_string())?;
+            return self.get(&domain.run_id);
+        }
+        self.respond_authorized(request_id, approved)
+    }
+
+    pub(crate) fn respond_authorized(
+        self: &Arc<Self>,
+        request_id: &str,
+        approved: bool,
+    ) -> Result<Run, String> {
         let request = self
             .store
             .request(request_id)?
@@ -1872,7 +1907,17 @@ impl Controller {
                     StepKind::Approval => {
                         let request_id =
                             random_id().map_err(|_| "generate workflow id failed".to_string())?;
-                        self.store.request_approval(&request_id, run_id, &step.id)?;
+                        let request = self.store.request_approval(&request_id, run_id, &step.id)?;
+                        if let Some(service) = self
+                            .approval_service
+                            .lock()
+                            .map_err(|_| "workflow runtime unavailable")?
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade)
+                        {
+                            crate::approval::workflow::publish(&service, &self.workspace, &request)
+                                .map_err(|e| e.to_string())?;
+                        }
                     }
                     StepKind::Agent | StepKind::Handoff => agents.push(step),
                 }

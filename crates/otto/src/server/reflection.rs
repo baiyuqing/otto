@@ -70,6 +70,7 @@ struct ReflectionWire {
     /// Memory candidates queued for review.
     candidates: Vec<String>,
     skills: Vec<SkillChange>,
+    skill_approvals: Vec<String>,
     /// Proposals dropped, by reason.
     dropped: BTreeMap<String, usize>,
     entries: usize,
@@ -86,6 +87,7 @@ impl From<&Report> for ReflectionWire {
             run_id: report.run_id.clone(),
             line: report.line(),
             candidates: report.candidates.clone(),
+            skill_approvals: report.skill_approvals.clone(),
             skills: report
                 .skills
                 .iter()
@@ -443,6 +445,7 @@ mod tests {
             status: Status::Ok,
             candidates: vec!["cand-1".into()],
             dropped: BTreeMap::from([("evidence_quote_mismatch", 2)]),
+            skill_approvals: vec![],
             skills: vec![
                 ("lint-gate".into(), Written::Created),
                 ("fmt-check".into(), Written::Revised),

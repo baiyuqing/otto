@@ -805,12 +805,7 @@ mod approval {
 
     fn script() -> (Vec<String>, Arc<AtomicUsize>) {
         (
-            vec![
-                escalated("call-1"),
-                text_reply("approval needed"),
-                escalated("call-2"),
-                text_reply("done"),
-            ],
+            vec![escalated("call-1"), text_reply("done")],
             Arc::new(AtomicUsize::new(0)),
         )
     }
@@ -841,12 +836,7 @@ mod approval {
                     .to_string(),
                 )
             };
-            replies = vec![
-                call("call-1"),
-                text_reply("approval needed"),
-                call("call-2"),
-                text_reply("done"),
-            ];
+            replies = vec![call("call-1"), text_reply("done")];
         }
         let (base_url, _requests) = serve(Script {
             replies,
@@ -966,7 +956,11 @@ mod approval {
                     .unwrap()
                     .contains("Permanently")
             );
-            assert_eq!(served.load(Ordering::SeqCst), if granted { 4 } else { 2 });
+            assert_eq!(
+                served.load(Ordering::SeqCst),
+                2,
+                "the prepared call must not require a model-generated retry"
+            );
             let config =
                 std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
             assert_eq!(config.contains("read_paths"), granted, "{config}");
@@ -981,10 +975,18 @@ mod approval {
     }
 
     #[test]
-    fn allow_once_runs_the_retry_in_the_same_prompt() {
+    fn allow_once_executes_the_prepared_call_once_in_the_same_prompt() {
         let (response, frames, served) = answered_by_relay("allow_once");
         assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
-        assert_eq!(served, 4);
+        assert_eq!(served, 2);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["params"]["update"]["sessionUpdate"] == "tool_call")
+                .count(),
+            1,
+            "approval must resume the exact original call, not dispatch a second call"
+        );
         assert!(
             serde_json::to_string(&frames)
                 .unwrap()
@@ -1073,7 +1075,7 @@ mod approval {
         frames.extend(rest);
         assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
         assert!(agent_text(&frames).ends_with("done"), "{frames:?}");
-        assert_eq!(served.load(Ordering::SeqCst), 4);
+        assert_eq!(served.load(Ordering::SeqCst), 2);
         assert_eq!(relay.close(), Some(0));
     }
 
@@ -1087,7 +1089,6 @@ mod approval {
         .to_string();
         let (home, workspace, serve, _) = start_with_replies(vec![
             tool_call_reply("call-1", "bash", &arguments),
-            text_reply("approval needed"),
             text_reply("It is waiting for approval."),
             tool_call_reply("control-call", "approval_queue", "{}"),
             text_reply("The task is queued."),
@@ -1149,8 +1150,11 @@ mod approval {
         .to_string();
         let (home, workspace, serve, _) = start_with_replies(vec![
             tool_call_reply("call-1", "bash", &arguments),
-            text_reply("approval needed"),
-            tool_call_reply("control-call", "approval_revoke", r#"{"id":"approval-1"}"#),
+            tool_call_reply(
+                "control-call",
+                "approval_revoke",
+                r#"{"id":"$EXACT_APPROVAL_ID"}"#,
+            ),
             text_reply("Withdrawn."),
             text_reply("The request was withdrawn."),
         ]);

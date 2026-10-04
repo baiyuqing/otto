@@ -60,6 +60,7 @@ type process struct {
 	// memoryReview is set from the initialize response.
 	memoryReview     bool
 	approvalDialogue bool
+	sharedApprovals  bool
 	channelContext   bool
 	taskControl      bool
 	// endedAt and waitErr are valid after exited is closed.
@@ -69,6 +70,7 @@ type process struct {
 	mu      sync.Mutex
 	open    map[string]bool
 	loading map[string]bool
+	loadMu  sync.Mutex // serialize replay and publication of loaded sessions
 }
 
 func (p *process) isDone() bool {
@@ -206,6 +208,7 @@ func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 		ProtocolVersion:    acp.ProtocolVersionNumber,
 		ClientInfo:         &acp.Implementation{Name: "otto-connect"},
 		ClientCapabilities: acp.ClientCapabilities{Meta: a.clientMeta()},
+		Meta:               map[string]any{"otto": map[string]any{"approvals": map[string]any{"version": 1}}},
 	})
 	if err == nil && resp.ProtocolVersion != acp.ProtocolVersionNumber {
 		err = fmt.Errorf("agent speaks ACP version %d, need %d", resp.ProtocolVersion, acp.ProtocolVersionNumber)
@@ -226,6 +229,7 @@ func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 	p.memoryReview = advertisesMemoryReview(resp.AgentCapabilities.Meta)
 	otto, _ := resp.AgentCapabilities.Meta["otto"].(map[string]any)
 	p.approvalDialogue, _ = otto["approvalDialogue"].(bool)
+	p.sharedApprovals = advertisesSharedApprovals(resp.AgentCapabilities.Meta)
 	p.channelContext, _ = otto["channelContext"].(bool)
 	p.taskControl, _ = otto["taskControl"].(bool)
 	return p, nil
@@ -244,6 +248,12 @@ func advertisesMemoryReview(meta map[string]any) bool {
 	otto, _ := meta["otto"].(map[string]any)
 	on, _ := otto["memoryReview"].(bool)
 	return on
+}
+
+func advertisesSharedApprovals(meta map[string]any) bool {
+	otto, _ := meta["otto"].(map[string]any)
+	approvals, _ := otto["approvals"].(map[string]any)
+	return approvals["version"] == float64(1) || approvals["version"] == 1
 }
 
 // stdinWriter writes to the process's stdin and closes writeFailed on the

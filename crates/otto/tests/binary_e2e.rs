@@ -15,7 +15,10 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{io::Write, process::Stdio};
+use std::{
+    io::{BufRead, BufReader, Write},
+    process::Stdio,
+};
 
 mod common;
 use common::{Script, serve, text_reply, tool_call_reply};
@@ -145,8 +148,6 @@ fn an_interactive_approval_runs_one_exact_command_outside_seatbelt() {
     let (base_url, _requests) = serve(Script {
         replies: vec![
             tool_call_reply("call-1", "bash", &arguments),
-            text_reply("approval needed"),
-            tool_call_reply("call-2", "bash", &arguments),
             text_reply("done"),
         ],
         served: Arc::clone(&served),
@@ -173,29 +174,54 @@ fn an_interactive_approval_runs_one_exact_command_outside_seatbelt() {
         child.env("TMPDIR", tmpdir);
     }
     let mut child = child.spawn().expect("run otto");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(b"read the fixture\n/approve approval-1\n/exit\n")
-        .expect("write prompts");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let pipe = child.stdout.take().expect("stdout");
+    let (send, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    stdin.write_all(b"read the fixture\n").unwrap();
+    let mut stdout = String::new();
+    let mut approval_id = None;
+    loop {
+        let line = match received.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(line) => line,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("REPL did not complete the approval interaction: {error}; {stdout}");
+            }
+        };
+        stdout.push_str(&line);
+        stdout.push('\n');
+        if let Some(id) = line.strip_prefix("Approve in Otto: /approve ") {
+            assert!(approval_id.is_none(), "one approval for the prepared call");
+            approval_id = Some(id.to_string());
+            writeln!(stdin, "/approve {id}").unwrap();
+        }
+        if line.contains("done") {
+            break;
+        }
+    }
+    stdin.write_all(b"/exit\n").unwrap();
+    drop(stdin);
     let output = child.wait_with_output().expect("wait for otto");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
         "exit = {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status.code()
     );
-    assert!(
-        stdout.contains("Approve in Otto: /approve approval-1"),
-        "stdout:\n{stdout}"
-    );
+    assert!(approval_id.is_some(), "stdout:\n{stdout}");
     assert!(stdout.contains("done"), "stdout:\n{stdout}");
     assert!(
         only_session_transcript(home.path()).contains("outside-seatbelt"),
         "stdout:\n{stdout}"
     );
-    assert_eq!(served.load(Ordering::SeqCst), 4, "stdout:\n{stdout}");
+    assert_eq!(served.load(Ordering::SeqCst), 2, "stdout:\n{stdout}");
 }

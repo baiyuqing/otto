@@ -309,6 +309,7 @@ pub(crate) fn test_config(
     tools: Vec<Box<dyn Tool + Send + Sync>>,
 ) -> Config {
     Config {
+        approval: None,
         provider: Arc::clone(provider) as Arc<dyn Provider + Send + Sync>,
         tools,
         redaction_values: Vec::new(),

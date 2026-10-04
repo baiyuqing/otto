@@ -318,6 +318,7 @@ pub async fn build_controller(
             cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
         },
     );
+    controller.attach_approvals(&builder.approvals)?;
     controller.set_guard(Box::new(lock));
     Ok(controller)
 }

@@ -110,7 +110,63 @@ impl Controller {
     /// Runs one turn with trusted, transient channel context and every
     /// approval retry. The context is passed to each provider request and is
     /// never appended to the session.
+    ///
+    /// A wake turn also queues its reply text for [`Controller::wake_replies_since`]
+    /// when it ends without error and was not cancelled.
     pub async fn run_with_channel<F, Fut>(
+        &self,
+        first: Step<'_>,
+        channel: Option<super::Channel>,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+        decide: F,
+    ) -> Result<Stop, AgentError>
+    where
+        F: FnMut(ApprovalRequest) -> Fut,
+        Fut: Future<Output = ApprovalDecision>,
+    {
+        if !matches!(first, Step::Wake(_)) {
+            return self
+                .run_turn_steps(first, channel, emit, cancel, decide)
+                .await;
+        }
+        let mut reply = String::new();
+        let mut after_tool = false;
+        let result = self
+            .run_turn_steps(
+                first,
+                channel,
+                &mut |event: Event| {
+                    match &event {
+                        Event::TextDelta { text } => {
+                            if after_tool && !reply.is_empty() {
+                                reply.truncate(reply.trim_end().len());
+                                reply.push_str("\n\n");
+                            }
+                            after_tool = false;
+                            reply.push_str(text);
+                        }
+                        Event::ToolCallStarted { .. } => after_tool = true,
+                        _ => {}
+                    }
+                    emit(event);
+                },
+                cancel,
+                decide,
+            )
+            .await;
+        if matches!(result, Ok(Stop::EndTurn))
+            && let Ok(runner) = self.runner()
+        {
+            let text = runner.redact_text(reply.trim());
+            if !text.is_empty() {
+                self.wake_replies.push(text);
+            }
+        }
+        result
+    }
+
+    async fn run_turn_steps<F, Fut>(
         &self,
         first: Step<'_>,
         channel: Option<super::Channel>,
@@ -774,5 +830,186 @@ mod tests {
                 .pending_command(&session_id, &request_id)
                 .is_none()
         );
+    }
+
+    /// One scripted provider call: streamed text and whether the reply ends
+    /// with a tool call.
+    struct WakeProvider {
+        script: Mutex<std::collections::VecDeque<(&'static str, bool)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for WakeProvider {
+        async fn complete(
+            &self,
+            _: &Request,
+            sink: StreamSink<'_>,
+            _: &dyn OperationControl,
+        ) -> ProviderSettlement {
+            let (text, call) = self.script.lock().unwrap().pop_front().expect("script");
+            let mut blocks = Vec::new();
+            if !text.is_empty() {
+                sink(otto_core::provider::StreamEvent::TextDelta { text: text.into() });
+                blocks.push(Block::text(text));
+            }
+            if call {
+                blocks.push(Block {
+                    block_type: BlockType::ToolCall,
+                    tool_call_id: "call-1".into(),
+                    tool_name: "echo".into(),
+                    arguments: Some(RawValue::from_string("{}".into()).unwrap()),
+                    ..Block::default()
+                });
+            }
+            let finish_reason = if call {
+                FinishReason::ToolCalls
+            } else {
+                FinishReason::Stop
+            };
+            let message = Message {
+                role: Role::Assistant,
+                blocks,
+                finish_reason: Some(finish_reason),
+                ..Message::default()
+            };
+            ProviderSettlement::succeeded(Response { message }, 1)
+        }
+    }
+
+    struct EchoTool;
+
+    #[async_trait::async_trait]
+    impl Tool for EchoTool {
+        fn definition(&self) -> otto_core::model::ToolDefinition {
+            definition("echo", "fixture", json!({"type":"object"}))
+        }
+
+        async fn execute(&self, _: &RawValue, _: &CancellationToken) -> ToolResult {
+            crate::tool::text_result("ok")
+        }
+    }
+
+    /// A controller whose provider plays `script` and whose inbox holds one
+    /// notification, so a wake turn can be claimed.
+    async fn wake_controller(
+        workspace: &std::path::Path,
+        sessions: &std::path::Path,
+        script: Vec<(&'static str, bool)>,
+    ) -> Controller {
+        let (controller, _, _) = crate::app::controller_with_approvals(workspace, sessions).await;
+        let tasks = Arc::new(Tasks::new());
+        tasks
+            .notifications()
+            .push(otto_core::agent::inbox::Notification {
+                text: "[timer] ping".to_string(),
+                ..otto_core::agent::inbox::Notification::default()
+            });
+        let runner = Runner::scripted_with_tools(
+            controller.current_session(),
+            Arc::new(WakeProvider {
+                script: Mutex::new(script.into()),
+            }),
+            tasks,
+            vec![Box::new(EchoTool)],
+        );
+        let runtime = initial_runtime(controller.builder());
+        let info = controller.builder().runtime_info(&runtime);
+        let session_id = controller.info().session_id;
+        assert!(
+            controller
+                .replace_runner_if_current(&session_id, runner, info)
+                .unwrap()
+        );
+        controller
+    }
+
+    async fn run_wake(controller: &Controller, cancel: &CancellationToken) -> Stop {
+        let wake = controller.prepare_wake().unwrap().expect("wake claimed");
+        controller
+            .run_with_channel(Step::Wake(wake), None, &mut |_| {}, cancel, |_| async {
+                ApprovalDecision::Deny
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_wake_turn_queues_its_text_with_a_blank_line_after_a_tool_call() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller = wake_controller(
+            workspace.path(),
+            sessions.path(),
+            vec![("checking  ", true), ("all done", false)],
+        )
+        .await;
+        let mut seen = Vec::new();
+        let wake = controller.prepare_wake().unwrap().expect("wake claimed");
+        controller
+            .run_with_channel(
+                Step::Wake(wake),
+                None,
+                &mut |event| seen.push(event),
+                &CancellationToken::new(),
+                |_| async { ApprovalDecision::Deny },
+            )
+            .await
+            .unwrap();
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, Event::TextDelta { text } if text == "all done")),
+            "events still reach the caller's sink"
+        );
+        assert_eq!(
+            controller.wake_replies_since(0),
+            (vec![(1, "checking\n\nall done".to_string())], 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wake_turn_without_text_queues_nothing() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller =
+            wake_controller(workspace.path(), sessions.path(), vec![("  ", false)]).await;
+        assert_eq!(
+            run_wake(&controller, &CancellationToken::new()).await,
+            Stop::EndTurn
+        );
+        assert_eq!(controller.wake_replies_since(0), (Vec::new(), 0));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_wake_turn_queues_nothing() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller =
+            wake_controller(workspace.path(), sessions.path(), vec![("partial", false)]).await;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(run_wake(&controller, &cancel).await, Stop::Cancelled);
+        assert_eq!(controller.wake_replies_since(0), (Vec::new(), 0));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_turn_queues_no_wake_reply() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller = wake_controller(
+            workspace.path(),
+            sessions.path(),
+            vec![("an answer", false)],
+        )
+        .await;
+        controller
+            .run_with_approvals(
+                Step::Text("hello"),
+                &mut |_| {},
+                &CancellationToken::new(),
+                |_| async { ApprovalDecision::Deny },
+            )
+            .await
+            .unwrap();
+        assert_eq!(controller.wake_replies_since(0), (Vec::new(), 0));
     }
 }

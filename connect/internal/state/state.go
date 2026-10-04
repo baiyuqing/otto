@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -49,6 +50,13 @@ func (s *Store) Session(chat string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.data.Sessions[chat]
+}
+
+// Sessions returns a copy of the chat to session id map.
+func (s *Store) Sessions() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.data.Sessions)
 }
 
 // SetSession records sessionID for chat; "" removes the entry.

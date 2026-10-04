@@ -481,6 +481,22 @@ impl Client {
         decode(response).await
     }
 
+    /// `GET /v1/sessions/{id}/wake-replies?after=...`.
+    pub async fn wake_replies(
+        &self,
+        session_id: &str,
+        after: u64,
+    ) -> Result<ReflectionNotices, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/wake-replies"))
+                    .query(&[("after", after)]),
+            )
+            .await?;
+        decode(response).await
+    }
+
     /// `GET /v1/sessions/{id}/context`.
     pub async fn context(&self, session_id: &str) -> Result<ContextReport, Error> {
         let response = self

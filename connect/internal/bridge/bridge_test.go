@@ -3,6 +3,8 @@ package bridge
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -466,6 +468,7 @@ func TestLoadFailureStartsNewSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newHarness(t, setup{store: store})
+	h.waitCall("load:") // the startup load fails and keeps the binding
 	h.say("hello")
 	got := h.waitSent(2)
 	if !strings.Contains(got[0], "could not be loaded") || got[1] != "echo: hello" {
@@ -474,7 +477,7 @@ func TestLoadFailureStartsNewSession(t *testing.T) {
 	if now := store.Session("fake:c1"); now == stale || now == "" {
 		t.Fatalf("stored session = %q", now)
 	}
-	if len(h.calls("load:")) != 1 || len(h.calls("new:")) != 1 {
+	if len(h.calls("load:")) != 2 || len(h.calls("new:")) != 1 {
 		t.Fatalf("calls = %q", fake.Calls(h.dir))
 	}
 }
@@ -736,5 +739,112 @@ func TestMarkdownFlagSeparatesAgentRepliesFromNotices(t *testing.T) {
 	}
 	if s := h.plat.sent[1]; s.text != "No pending request." || s.markdown {
 		t.Errorf("notice = %+v, want markdown false", s)
+	}
+}
+
+func wakeUpdate(id float64, text string) acp.SessionUpdate {
+	return acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
+		Meta:    map[string]any{"otto": map[string]any{"wakeReply": true, "replyId": id}},
+		Content: acp.TextBlock(text),
+	}}
+}
+
+func TestWakeReplyIsSentAsMarkdownToChatsBoundToTheSession(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{chats: []string{"c1", "c2", "c3"}})
+	h.say("hello")
+	h.waitSent(1)
+	sid := h.store.Session("fake:c1")
+	for chat, s := range map[string]string{"c2": sid, "c3": "other-session"} {
+		h.b.chat(h.plat, chat)
+		if err := h.store.SetSession("fake:"+chat, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.b.Update(sid, wakeUpdate(1, "**timer** fired"))
+	h.waitSent(3)
+	settle()
+	h.plat.mu.Lock()
+	defer h.plat.mu.Unlock()
+	if len(h.plat.sent) != 3 {
+		t.Fatalf("sent = %+v, want the reply plus two wake replies", h.plat.sent)
+	}
+	got := map[string]sent{}
+	for _, s := range h.plat.sent[1:] {
+		got[s.chat] = s
+	}
+	for _, chat := range []string{"c1", "c2"} {
+		if s := got[chat]; s.text != "**timer** fired" || !s.markdown || s.replyTo != "" {
+			t.Fatalf("chat %s got %+v, want Markdown text with empty replyTo", chat, s)
+		}
+	}
+}
+
+func TestWakeReplyForAnUnboundSessionSendsNothing(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("hello")
+	h.waitSent(1)
+	h.b.Update("unbound-session", wakeUpdate(1, "nobody"))
+	settle()
+	if got := h.plat.texts(); len(got) != 1 {
+		t.Fatalf("sent = %q, want only the prompt reply", got)
+	}
+}
+
+func TestWakeReplyDuringAPromptIsSentAfterItsReplyAndNotMerged(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("block")
+	h.waitCall("start:block")
+	sid := h.store.Session("fake:c1")
+	h.b.Update(sid, wakeUpdate(1, "wake text"))
+	settle()
+	if got := h.plat.texts(); len(got) != 0 {
+		t.Fatalf("wake reply arrived before the turn replied: %q", got)
+	}
+	h.say("/stop")
+	got := h.waitSent(2)
+	settle()
+	if got = h.plat.texts(); !slices.Equal(got, []string{"Stopped.", "wake text"}) {
+		t.Fatalf("sent = %q, want the turn reply, then the wake reply separately", got)
+	}
+}
+
+func TestStartupLoadsEachBoundSessionOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sessions"), []byte("s-a\ns-b\ns-c\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := newStore(t)
+	for k, v := range map[string]string{
+		"fake:c1":    "s-a",
+		"fake:c2":    "s-a",       // same session as c1
+		"fake:c3":    "s-missing", // load fails; the next ones still load
+		"fake:c4":    "s-b",
+		"other:c5":   "s-c", // platform not configured
+		"nocolonkey": "s-c",
+	} {
+		if err := store.SetSession(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := newHarness(t, setup{dir: dir, store: store})
+	h.waitFor(func() bool { return len(h.calls("load:")) >= 3 }, "startup loads")
+	settle()
+	got := h.calls("load:")
+	slices.Sort(got)
+	if want := []string{"load:s-a", "load:s-b", "load:s-missing"}; !slices.Equal(got, want) {
+		t.Fatalf("loads = %q, want %q", got, want)
+	}
+	if h.store.Session("fake:c3") != "s-missing" {
+		t.Fatal("a failed startup load removed the binding")
+	}
+	// The loaded session is open, so the first message does not load it again.
+	h.say("hi")
+	h.waitSent(1)
+	if got := h.calls("load:"); len(got) != 3 {
+		t.Fatalf("loads after first message = %q, want no extra load", got)
 	}
 }

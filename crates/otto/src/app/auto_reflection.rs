@@ -222,10 +222,28 @@ impl Controller {
         self.notices.push(line.to_owned());
     }
 
+    /// Queues a wake reply as a finished wake turn would, for server tests.
+    #[cfg(test)]
+    pub(crate) fn push_wake_reply(&self, text: &str) {
+        self.wake_replies.push(text.to_owned());
+    }
+
     /// A signal that changes whenever [`Controller::take_notices`] has
     /// something new, for frontends that wait on events.
     pub fn notices_changed(&self) -> watch::Receiver<u64> {
         self.notices.signal.subscribe()
+    }
+
+    /// The wake-turn replies queued after `after`, with ids, and the newest id
+    /// so far. Only ACP and the HTTP server read this queue; the TUI and the
+    /// REPL show a wake turn's events directly.
+    pub fn wake_replies_since(&self, after: u64) -> (Vec<(u64, String)>, u64) {
+        self.wake_replies.since(after)
+    }
+
+    /// A signal that changes whenever a wake reply is queued.
+    pub fn wake_replies_changed(&self) -> watch::Receiver<u64> {
+        self.wake_replies.signal.subscribe()
     }
 
     /// Starts a background reflection when its configured trigger is enabled.

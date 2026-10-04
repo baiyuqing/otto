@@ -1488,6 +1488,14 @@ paths:
                   type: string
                   enum: [telegram, feishu]
                   description: Transient chat channel context for this turn; it is not persisted in session history.
+                origin:
+                  type: string
+                  description: >
+                    Where the turn came from: terminal, web, or
+                    chat:<platform>:<chat id> with platform telegram or
+                    feishu. Absent means web. Scheduled items created in this
+                    turn are delivered to this origin. A chat origin whose
+                    platform differs from channel is rejected with 400.
               required: [text]
       responses:
         "200":
@@ -2084,6 +2092,97 @@ paths:
                 $ref: "#/components/schemas/Error"
         "501":
           description: Sandbox reload is not available in this process
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/schedule/claim:
+    post:
+      summary: Claim the scheduled items due for the web UI
+      description: >
+        Returns up to 10 ready items of origin web and holds them for 120 s.
+        An item that is not confirmed through the delivered route in that time
+        is returned by a later claim.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: The claimed items, possibly none
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          example: s7
+                        due_at:
+                          type: integer
+                          format: int64
+                          description: Unix milliseconds; echo it in the delivered request.
+                        text:
+                          type: string
+                      required: [id, due_at, text]
+                required: [items]
+        "503":
+          description: The schedule store is not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/schedule/{id}/delivered:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          example: s7
+    post:
+      summary: Confirm that the web UI showed a scheduled item
+      description: Answers 200 also when the occurrence was already confirmed or is no longer current.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                due_at:
+                  type: integer
+                  format: int64
+                  description: The due_at returned by the claim route, in Unix milliseconds.
+              required: [due_at]
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: due_at is missing or out of range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: The id is not of the form s<n>
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The schedule store is not available
           content:
             application/json:
               schema:

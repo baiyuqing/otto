@@ -16,6 +16,7 @@ pub mod provider;
 pub mod reflection;
 pub mod retry;
 pub mod sandbox;
+pub mod schedule;
 pub mod server;
 pub mod session;
 pub mod skill;

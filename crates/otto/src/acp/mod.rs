@@ -25,6 +25,7 @@ mod approval;
 pub mod attach;
 mod command;
 mod memory;
+mod schedule;
 pub mod tcp;
 pub mod update;
 
@@ -54,6 +55,7 @@ use crate::app::{
     ApprovalDecision, CLOSED, Channel, Controller, PROMPT_ACTIVE, SandboxControl, Step, Stop,
 };
 use crate::cli::runtime_builder::Builder;
+use crate::schedule::Origin;
 use crate::session::{MAX_LIST_SESSIONS, is_session_id, session_directory};
 
 use approval::request_permission;
@@ -132,6 +134,7 @@ const ACP_QUEUE_LIMIT: usize = 16;
 struct QueuedPrompt {
     text: String,
     channel: Option<Channel>,
+    origin: Option<Origin>,
 }
 
 #[derive(Default)]
@@ -267,12 +270,21 @@ impl PromptSlot {
             .unwrap_or_default()
     }
 
-    fn enqueue(&self, text: String, channel: Option<Channel>) -> Result<bool, &'static str> {
+    fn enqueue(
+        &self,
+        text: String,
+        channel: Option<Channel>,
+        origin: Option<Origin>,
+    ) -> Result<bool, &'static str> {
         let mut state = self.state.lock().expect("prompt slot");
         if state.queue.len() >= ACP_QUEUE_LIMIT {
             return Err("queue is full (16 pending prompts)");
         }
-        state.queue.push_back(QueuedPrompt { text, channel });
+        state.queue.push_back(QueuedPrompt {
+            text,
+            channel,
+            origin,
+        });
         let start_worker = !state.draining;
         state.draining = true;
         drop(state);
@@ -314,7 +326,13 @@ impl PromptSlot {
                 }
             };
             let reply = connection
-                .queued_prompt(&session_id, queued.text, queued.channel, &token)
+                .queued_prompt(
+                    &session_id,
+                    queued.text,
+                    queued.channel,
+                    queued.origin,
+                    &token,
+                )
                 .await;
             if let Some(notice) = queued_outcome_notice(&reply) {
                 connection.say(&session_id, &notice);
@@ -869,6 +887,7 @@ impl Connection {
         session_id: &str,
         text: String,
         channel: Option<Channel>,
+        origin: Option<Origin>,
         cancel: &CancellationToken,
     ) -> Reply {
         if let Some(command) = command::parse(&text) {
@@ -877,10 +896,14 @@ impl Connection {
         match &self.backend {
             Backend::Local(local) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
-                self.local_prompt(local, &session, session_id, text, channel, cancel)
+                self.local_prompt(local, &session, session_id, text, (channel, origin), cancel)
                     .await
             }
-            Backend::Attach(relay) => relay.prompt(self, session_id, &text, channel, cancel).await,
+            Backend::Attach(relay) => {
+                relay
+                    .prompt(self, session_id, &text, channel, origin.as_ref(), cancel)
+                    .await
+            }
         }
     }
 
@@ -891,15 +914,20 @@ impl Connection {
         session_id: &str,
         text: String,
         channel: Option<Channel>,
+        origin: Option<Origin>,
         cancel: &CancellationToken,
     ) -> Reply {
         match &self.backend {
             Backend::Local(local) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
-                self.local_prompt(local, &session, session_id, text, channel, cancel)
+                self.local_prompt(local, &session, session_id, text, (channel, origin), cancel)
                     .await
             }
-            Backend::Attach(relay) => relay.prompt(self, session_id, &text, channel, cancel).await,
+            Backend::Attach(relay) => {
+                relay
+                    .prompt(self, session_id, &text, channel, origin.as_ref(), cancel)
+                    .await
+            }
         }
     }
 
@@ -1081,7 +1109,7 @@ impl Connection {
         session: &Session,
         session_id: &str,
         text: String,
-        channel: Option<Channel>,
+        (channel, origin): (Option<Channel>, Option<Origin>),
         cancel: &CancellationToken,
     ) -> Reply {
         let outcome = session
@@ -1089,6 +1117,7 @@ impl Connection {
             .run_with_channel(
                 Step::Text(&text),
                 channel,
+                origin,
                 &mut |event| {
                     if let Some(update) = update::event_update(&update::local_wire(&event)) {
                         self.update(session_id, update);
@@ -1127,9 +1156,14 @@ async fn wake_turn(session: &Session, stop: &CancellationToken) -> bool {
     let failure = match controller.prepare_wake() {
         Ok(None) => None,
         Ok(Some(wake)) => controller
-            .run_with_channel(Step::Wake(wake), None, &mut |_| {}, &token, |_| async {
-                ApprovalDecision::Deny
-            })
+            .run_with_channel(
+                Step::Wake(wake),
+                None,
+                None,
+                &mut |_| {},
+                &token,
+                |_| async { ApprovalDecision::Deny },
+            )
             .await
             .err()
             .map(|failure| failure.to_string()),
@@ -1365,6 +1399,45 @@ fn parse_prompt(params: &Value) -> Result<(String, String, Option<Channel>), Err
     Ok((session_id, text, channel))
 }
 
+/// The chat origin of a `session/prompt`, from `_meta.otto.chat`
+/// (`<platform>:<chat id>`). A missing or invalid value, or a platform that
+/// differs from the channel's, gives no origin; stdout is not touched.
+fn parse_origin(params: &Value, channel: Option<Channel>) -> Option<Origin> {
+    let value = params
+        .get("_meta")
+        .and_then(|meta| meta.get("otto"))
+        .and_then(|otto| otto.get("chat"))?;
+    let origin = value
+        .as_str()
+        .ok_or_else(|| "_meta.otto.chat must be a string".to_string())
+        .and_then(|chat| {
+            let (platform, id) = chat
+                .split_once(':')
+                .ok_or_else(|| "_meta.otto.chat must be <platform>:<chat id>".to_string())?;
+            Origin::chat(platform, id)
+        });
+    let origin = origin.and_then(|origin| match (channel, origin.chat_platform()) {
+        (Some(channel), Some(platform)) if channel_name(channel) != platform => {
+            Err("_meta.otto.chat platform differs from _meta.otto.channel".to_string())
+        }
+        _ => Ok(origin),
+    });
+    match origin {
+        Ok(origin) => Some(origin),
+        Err(message) => {
+            eprintln!("acp: ignoring origin: {message}");
+            None
+        }
+    }
+}
+
+fn channel_name(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Telegram => "telegram",
+        Channel::Feishu => "feishu",
+    }
+}
+
 /// Advertise memory review only when the controller lives in this process.
 fn initialize_result(local: bool) -> Reply {
     let capabilities = AgentCapabilities::new()
@@ -1375,11 +1448,11 @@ fn initialize_result(local: bool) -> Reply {
     let capabilities = match local {
         true => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true}),
+            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true}),
         )])),
         false => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true}),
+            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true}),
         )])),
     };
     result(
@@ -1394,6 +1467,8 @@ fn initialize_result(local: bool) -> Reply {
 /// token every prompt token descends from.
 struct Dispatcher {
     connection: Arc<Connection>,
+    /// Set once the schedule worker of this connection has been started.
+    scheduling: bool,
     tasks: JoinSet<()>,
     stop: CancellationToken,
 }
@@ -1463,6 +1538,14 @@ impl Dispatcher {
                     Backend::Attach(relay) => relay.server.is_some(),
                 };
                 connection.reply(id, initialize_result(local));
+                if !self.scheduling {
+                    let platforms = schedule::delivery_platforms(&params);
+                    if let Some(worker) = schedule::worker(&connection, platforms) {
+                        self.scheduling = true;
+                        let stop = self.stop.clone();
+                        self.tasks.spawn(worker.run(stop));
+                    }
+                }
             }
             "session/new" => {
                 self.tasks.spawn(async move {
@@ -1619,6 +1702,7 @@ impl Dispatcher {
             Ok(parsed) => parsed,
             Err(failure) => return connection.reply(id, Err(failure)),
         };
+        let origin = parse_origin(params, channel);
         let Some(slot) = connection.slot(&session_id) else {
             return connection.reply(id, Err(unknown_session()));
         };
@@ -1648,7 +1732,7 @@ impl Dispatcher {
                 }
                 let prompt = prompt.to_string();
                 match &connection.backend {
-                    Backend::Local(_) => match slot.enqueue(prompt, channel) {
+                    Backend::Local(_) => match slot.enqueue(prompt, channel, origin) {
                         Ok(start_worker) => {
                             connection.say(
                                 &session_id,
@@ -1691,7 +1775,7 @@ impl Dispatcher {
                                 return;
                             }
                             let started = relay
-                                .start_queued_prompt(&session_id, &prompt, channel)
+                                .start_queued_prompt(&session_id, &prompt, channel, origin.as_ref())
                                 .await;
                             match started {
                                 Ok(stream) => {
@@ -1732,7 +1816,9 @@ impl Dispatcher {
                         return connection
                             .reply(id, result(PromptResponse::new(StopReason::Cancelled)));
                     }
-                    let reply = connection.prompt(&session_id, text, channel, &token).await;
+                    let reply = connection
+                        .prompt(&session_id, text, channel, origin, &token)
+                        .await;
                     // A prompt response is an admission boundary for an ACP client:
                     // release the slot before the writer can expose the response.
                     slot.end();
@@ -1746,7 +1832,9 @@ impl Dispatcher {
             );
         };
         self.tasks.spawn(async move {
-            let reply = connection.prompt(&session_id, text, channel, &token).await;
+            let reply = connection
+                .prompt(&session_id, text, channel, origin, &token)
+                .await;
             // A prompt response is an admission boundary for an ACP client:
             // release the slot before the writer can expose the response.
             slot.end();
@@ -1862,6 +1950,7 @@ async fn drive<T>(
     let read_loop = async {
         let mut dispatcher = Dispatcher {
             connection: Arc::clone(&connection),
+            scheduling: false,
             tasks: JoinSet::new(),
             stop: task_stop,
         };
@@ -2016,11 +2105,38 @@ mod channel_tests {
     }
 
     #[test]
+    fn chat_metadata_becomes_an_origin_only_when_valid_and_consistent() {
+        let chat = |value: Value, channel| {
+            parse_origin(&prompt(json!({"otto": {"chat": value}})), channel)
+        };
+        let telegram = Some(Channel::Telegram);
+        assert_eq!(
+            chat(json!("telegram:123"), None).unwrap().as_str(),
+            "chat:telegram:123"
+        );
+        assert_eq!(
+            chat(json!("feishu:oc:1"), None).unwrap().as_str(),
+            "chat:feishu:oc:1"
+        );
+        assert!(chat(json!("telegram:123"), telegram).is_some());
+        assert_eq!(chat(json!("feishu:oc_1"), telegram), None);
+        assert_eq!(chat(json!("telegram123"), None), None);
+        assert_eq!(chat(json!("slack:1"), None), None);
+        assert_eq!(chat(json!("telegram:"), None), None);
+        assert_eq!(chat(json!(5), None), None);
+        assert_eq!(parse_origin(&prompt(json!({})), None), None);
+    }
+
+    #[test]
     fn channel_context_capability_is_advertised() {
         for local in [false, true] {
             let reply = initialize_result(local).unwrap();
             assert_eq!(
                 reply["agentCapabilities"]["_meta"]["otto"]["channelContext"],
+                true
+            );
+            assert_eq!(
+                reply["agentCapabilities"]["_meta"]["otto"]["scheduleDelivery"],
                 true
             );
         }

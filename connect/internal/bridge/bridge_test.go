@@ -345,8 +345,8 @@ func TestAllowWithNothingPending(t *testing.T) {
 	if got[0] != "No pending request." || got[1] != "No pending request." {
 		t.Fatalf("sent = %q", got)
 	}
-	if len(fake.Calls(h.dir)) != 0 {
-		t.Fatalf("commands reached the agent: %q", fake.Calls(h.dir))
+	if len(agentWork(h.dir)) != 0 {
+		t.Fatalf("commands reached the agent: %q", agentWork(h.dir))
 	}
 }
 
@@ -431,7 +431,7 @@ func TestAdmissionFailsClosed(t *testing.T) {
 			if got := h.plat.texts(); len(got) != 0 {
 				t.Fatalf("rejected message got a reply: %q", got)
 			}
-			if c := fake.Calls(h.dir); len(c) != 0 {
+			if c := agentWork(h.dir); len(c) != 0 {
 				t.Fatalf("rejected message reached the agent: %q", c)
 			}
 		})
@@ -493,8 +493,8 @@ func TestAttachmentIsIgnoredWithNotice(t *testing.T) {
 		t.Fatalf("sent = %q", got)
 	}
 	settle()
-	if len(fake.Calls(h.dir)) != 0 {
-		t.Fatalf("attachment without text reached the agent: %q", fake.Calls(h.dir))
+	if len(agentWork(h.dir)) != 0 {
+		t.Fatalf("attachment without text reached the agent: %q", agentWork(h.dir))
 	}
 	m = h.msg("c1", "u1", "see this")
 	m.Attachment = true
@@ -520,7 +520,7 @@ func TestConfigProfilesIsHandledByConnectorNotAgent(t *testing.T) {
 		t.Fatalf("reply = %q", got)
 	}
 	settle()
-	if calls := fake.Calls(h.dir); len(calls) != 0 {
+	if calls := agentWork(h.dir); len(calls) != 0 {
 		t.Fatalf("management command reached agent: %q", calls)
 	}
 }

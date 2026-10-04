@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -202,8 +203,9 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 
 func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 	resp, err := p.conn.Initialize(ctx, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersionNumber,
-		ClientInfo:      &acp.Implementation{Name: "otto-connect"},
+		ProtocolVersion:    acp.ProtocolVersionNumber,
+		ClientInfo:         &acp.Implementation{Name: "otto-connect"},
+		ClientCapabilities: acp.ClientCapabilities{Meta: a.clientMeta()},
 	})
 	if err == nil && resp.ProtocolVersion != acp.ProtocolVersionNumber {
 		err = fmt.Errorf("agent speaks ACP version %d, need %d", resp.ProtocolVersion, acp.ProtocolVersionNumber)
@@ -227,6 +229,14 @@ func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 	p.channelContext, _ = otto["channelContext"].(bool)
 	p.taskControl, _ = otto["taskControl"].(bool)
 	return p, nil
+}
+
+// clientMeta returns _meta.otto.scheduleDelivery, or nil without platforms.
+func (a *Agent) clientMeta() map[string]any {
+	if len(a.platforms) == 0 {
+		return nil
+	}
+	return map[string]any{"otto": map[string]any{"scheduleDelivery": a.platforms}}
 }
 
 // advertisesMemoryReview reads _meta.otto.memoryReview.
@@ -307,6 +317,20 @@ func (c *client) RequestPermission(ctx context.Context, r acp.RequestPermissionR
 		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 	}
 	return c.handler.Permission(ctx, string(r.SessionId), r), nil
+}
+
+// ExtensionHandler is implemented by a Handler that serves agent-to-client
+// extension methods (names that start with "_").
+type ExtensionHandler interface {
+	Extension(ctx context.Context, method string, params json.RawMessage) (any, error)
+}
+
+// HandleExtensionMethod implements acp.ExtensionMethodHandler.
+func (c *client) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if h, ok := c.handler.(ExtensionHandler); ok {
+		return h.Extension(ctx, method, params)
+	}
+	return nil, acp.NewMethodNotFound(method)
 }
 
 var errNoCapability = errors.New("not supported: otto-connect advertises no fs or terminal capability")

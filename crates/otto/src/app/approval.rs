@@ -103,7 +103,7 @@ impl Controller {
         F: FnMut(ApprovalRequest) -> Fut,
         Fut: Future<Output = ApprovalDecision>,
     {
-        self.run_with_channel(first, None, emit, cancel, decide)
+        self.run_with_channel(first, None, None, emit, cancel, decide)
             .await
     }
 
@@ -117,6 +117,7 @@ impl Controller {
         &self,
         first: Step<'_>,
         channel: Option<super::Channel>,
+        origin: Option<crate::schedule::Origin>,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
         decide: F,
@@ -127,28 +128,17 @@ impl Controller {
     {
         if !matches!(first, Step::Wake(_)) {
             return self
-                .run_turn_steps(first, channel, emit, cancel, decide)
+                .run_turn_steps(first, channel, origin, emit, cancel, decide)
                 .await;
         }
-        let mut reply = String::new();
-        let mut after_tool = false;
+        let mut collector = super::scheduled::ReplyCollector::default();
         let result = self
             .run_turn_steps(
                 first,
                 channel,
+                origin,
                 &mut |event: Event| {
-                    match &event {
-                        Event::TextDelta { text } => {
-                            if after_tool && !reply.is_empty() {
-                                reply.truncate(reply.trim_end().len());
-                                reply.push_str("\n\n");
-                            }
-                            after_tool = false;
-                            reply.push_str(text);
-                        }
-                        Event::ToolCallStarted { .. } => after_tool = true,
-                        _ => {}
-                    }
+                    collector.observe(&event);
                     emit(event);
                 },
                 cancel,
@@ -158,7 +148,7 @@ impl Controller {
         if matches!(result, Ok(Stop::EndTurn))
             && let Ok(runner) = self.runner()
         {
-            let text = runner.redact_text(reply.trim());
+            let text = runner.redact_text(collector.reply().trim());
             if !text.is_empty() {
                 self.wake_replies.push(text);
             }
@@ -170,6 +160,7 @@ impl Controller {
         &self,
         first: Step<'_>,
         channel: Option<super::Channel>,
+        origin: Option<crate::schedule::Origin>,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
         mut decide: F,
@@ -185,6 +176,9 @@ impl Controller {
             Some(self.begin_operation().map_err(AgentError::Other)?)
         };
         let runner = self.runner().map_err(AgentError::Other)?;
+        if matches!(first, Step::Text(_) | Step::Image(..)) {
+            self.begin_user_turn(&runner, origin).await;
+        }
         let session_id = runner.session().header().id.clone();
         let original_task = match &first {
             Step::Text(text) | Step::Followup(text) => runner.redact_text(text),
@@ -451,6 +445,7 @@ mod tests {
         subagent::tasks::Tasks,
         tool::{Tool, definition},
     };
+    use otto_core::session::Session as _;
     use otto_core::{
         model::{Block, BlockType, FinishReason, Message, Role},
         operation::OperationControl,
@@ -661,6 +656,7 @@ mod tests {
             .run_with_channel(
                 Step::Text("run the command"),
                 None,
+                None,
                 &mut discard,
                 &CancellationToken::new(),
                 move |_| {
@@ -718,6 +714,7 @@ mod tests {
             .run_with_channel(
                 Step::Text("run the command"),
                 None,
+                None,
                 &mut discard,
                 &CancellationToken::new(),
                 |_| {
@@ -763,6 +760,7 @@ mod tests {
         let result = controller
             .run_with_channel(
                 Step::Text("run the command"),
+                None,
                 None,
                 &mut discard,
                 &CancellationToken::new(),
@@ -812,6 +810,7 @@ mod tests {
             .run_with_channel(
                 Step::Text("run the command"),
                 None,
+                None,
                 &mut discard,
                 &CancellationToken::new(),
                 move |_| {
@@ -846,7 +845,13 @@ mod tests {
             sink: StreamSink<'_>,
             _: &dyn OperationControl,
         ) -> ProviderSettlement {
-            let (text, call) = self.script.lock().unwrap().pop_front().expect("script");
+            let Some((text, call)) = self.script.lock().unwrap().pop_front() else {
+                return ProviderSettlement::failed(
+                    otto_core::provider::ProviderError::Other("script exhausted".into()),
+                    1,
+                    otto_core::model::EffectCertainty::NotStarted,
+                );
+            };
             let mut blocks = Vec::new();
             if !text.is_empty() {
                 sink(otto_core::provider::StreamEvent::TextDelta { text: text.into() });
@@ -896,7 +901,17 @@ mod tests {
         sessions: &std::path::Path,
         script: Vec<(&'static str, bool)>,
     ) -> Controller {
-        let (controller, _, _) = crate::app::controller_with_approvals(workspace, sessions).await;
+        schedule_controller(workspace, sessions, script, None).await
+    }
+
+    async fn schedule_controller(
+        workspace: &std::path::Path,
+        sessions: &std::path::Path,
+        script: Vec<(&'static str, bool)>,
+        store: Option<Arc<crate::schedule::Store>>,
+    ) -> Controller {
+        let (controller, _, _) =
+            crate::app::controller_with_approvals_and_schedule(workspace, sessions, store).await;
         let tasks = Arc::new(Tasks::new());
         tasks
             .notifications()
@@ -926,9 +941,14 @@ mod tests {
     async fn run_wake(controller: &Controller, cancel: &CancellationToken) -> Stop {
         let wake = controller.prepare_wake().unwrap().expect("wake claimed");
         controller
-            .run_with_channel(Step::Wake(wake), None, &mut |_| {}, cancel, |_| async {
-                ApprovalDecision::Deny
-            })
+            .run_with_channel(
+                Step::Wake(wake),
+                None,
+                None,
+                &mut |_| {},
+                cancel,
+                |_| async { ApprovalDecision::Deny },
+            )
             .await
             .unwrap()
     }
@@ -948,6 +968,7 @@ mod tests {
         controller
             .run_with_channel(
                 Step::Wake(wake),
+                None,
                 None,
                 &mut |event| seen.push(event),
                 &CancellationToken::new(),
@@ -1011,5 +1032,217 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(controller.wake_replies_since(0), (Vec::new(), 0));
+    }
+
+    /// Queues one more inbox notification so another wake turn can be claimed.
+    fn queue_wake(controller: &Controller) {
+        controller
+            .runner()
+            .unwrap()
+            .tasks
+            .as_ref()
+            .expect("task registry")
+            .notifications()
+            .push(otto_core::agent::inbox::Notification {
+                text: "[timer] ping".to_string(),
+                ..otto_core::agent::inbox::Notification::default()
+            });
+    }
+
+    fn origin_of(controller: &Controller) -> Option<crate::schedule::Origin> {
+        controller.runner().unwrap().schedule_origin.get()
+    }
+
+    async fn turn(controller: &Controller, text: &str, origin: Option<crate::schedule::Origin>) {
+        controller
+            .run_with_channel(
+                Step::Text(text),
+                None,
+                origin,
+                &mut |_| {},
+                &CancellationToken::new(),
+                |_| async { ApprovalDecision::Deny },
+            )
+            .await
+            .unwrap();
+    }
+
+    fn scheduled_messages(controller: &Controller) -> Vec<Message> {
+        controller
+            .current_session()
+            .messages()
+            .into_iter()
+            .filter(|message| message.context_type == "scheduled_delivery")
+            .collect()
+    }
+
+    /// A delivered, not yet appended row for `origin`, created by `session`.
+    fn delivered_row(
+        store: &crate::schedule::Store,
+        origin: crate::schedule::Origin,
+        session: &str,
+        text: &str,
+    ) -> crate::schedule::Delivery {
+        use crate::schedule::Kind;
+        let now = chrono::Utc::now();
+        let item = store
+            .create(
+                crate::schedule::NewItem {
+                    origin: origin.clone(),
+                    session_id: session.into(),
+                    workspace: "/work".into(),
+                    kind: Kind::Text,
+                    body: text.into(),
+                    repeat: None,
+                    local_time: None,
+                    due_at: now,
+                },
+                now,
+            )
+            .unwrap();
+        store
+            .claim_deliveries(
+                &crate::schedule::Scope::Any,
+                std::time::Duration::from_secs(60),
+                10,
+                now,
+            )
+            .unwrap();
+        assert!(store.delivered(item.id, item.due_at, now).unwrap());
+        store
+            .pending_writebacks(&origin, session, 10)
+            .unwrap()
+            .pop()
+            .or_else(|| {
+                store
+                    .pending_writebacks(&origin, "other-session", 10)
+                    .unwrap()
+                    .pop()
+            })
+            .expect("pending row")
+    }
+
+    #[tokio::test]
+    async fn user_turns_set_the_origin_and_wake_turns_keep_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller = wake_controller(
+            workspace.path(),
+            sessions.path(),
+            vec![("a", false), ("b", false), ("c", false), ("d", false)],
+        )
+        .await;
+        assert_eq!(origin_of(&controller), None);
+        controller
+            .prompt("hi", &mut |_| {}, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            origin_of(&controller),
+            Some(crate::schedule::Origin::terminal())
+        );
+        let chat = crate::schedule::Origin::chat("telegram", "42").unwrap();
+        turn(&controller, "hi", Some(chat.clone())).await;
+        assert_eq!(origin_of(&controller), Some(chat.clone()));
+        queue_wake(&controller);
+        run_wake(&controller, &CancellationToken::new()).await;
+        assert_eq!(origin_of(&controller), Some(chat));
+        turn(&controller, "hi", None).await;
+        assert_eq!(origin_of(&controller), None);
+    }
+
+    #[tokio::test]
+    async fn the_next_user_turn_appends_a_delivery_once_before_the_user_message() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::schedule::Store::open_in_memory().unwrap());
+        let controller = schedule_controller(
+            workspace.path(),
+            sessions.path(),
+            vec![("a", false), ("b", false), ("c", false)],
+            Some(Arc::clone(&store)),
+        )
+        .await;
+        let session_id = controller.info().session_id;
+        let terminal = crate::schedule::Origin::terminal();
+        let row = delivered_row(&store, terminal.clone(), &session_id, "drink water");
+
+        // A wake turn appends nothing.
+        run_wake(&controller, &CancellationToken::new()).await;
+        assert!(scheduled_messages(&controller).is_empty());
+
+        turn(&controller, "hello", Some(terminal.clone())).await;
+        let history = controller.current_session().messages();
+        let appended = history
+            .iter()
+            .position(|message| message.context_type == "scheduled_delivery")
+            .expect("delivery appended");
+        assert_eq!(history[appended].role, Role::Context);
+        assert_eq!(history[appended].text(), row.context_text());
+        let user = history
+            .iter()
+            .position(|message| message.role == Role::User && message.text() == "hello")
+            .expect("user message");
+        assert!(appended < user);
+        assert!(
+            store
+                .pending_writebacks(&terminal, &session_id, 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        turn(&controller, "again", Some(terminal)).await;
+        assert_eq!(scheduled_messages(&controller).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_chat_turn_appends_deliveries_created_by_another_session() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::schedule::Store::open_in_memory().unwrap());
+        let controller = schedule_controller(
+            workspace.path(),
+            sessions.path(),
+            vec![("a", false), ("b", false)],
+            Some(Arc::clone(&store)),
+        )
+        .await;
+        let chat = crate::schedule::Origin::chat("telegram", "42").unwrap();
+        let other = crate::schedule::Origin::chat("telegram", "7").unwrap();
+        delivered_row(&store, chat.clone(), "old-session", "for chat 42");
+        delivered_row(&store, other, "old-session", "for chat 7");
+
+        turn(&controller, "hello", Some(chat)).await;
+        let messages = scheduled_messages(&controller);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].text().ends_with("for chat 42"));
+
+        // A turn with no origin appends nothing.
+        turn(&controller, "again", None).await;
+        assert_eq!(scheduled_messages(&controller).len(), 1);
+    }
+
+    async fn scheduled_run(script: Vec<(&'static str, bool)>) -> crate::schedule::RunOutcome {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller = wake_controller(workspace.path(), sessions.path(), script).await;
+        crate::app::scheduled::run(&controller, "check it", &CancellationToken::new()).await
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_run_maps_the_turn_end_to_an_outcome() {
+        use crate::schedule::RunOutcome;
+        assert_eq!(
+            scheduled_run(vec![("checking ", true), ("all fine ", false)]).await,
+            RunOutcome::Reply("checking\n\nall fine".into())
+        );
+        assert!(matches!(
+            scheduled_run(Vec::new()).await,
+            RunOutcome::FailedBeforeTools(message) if message.contains("script exhausted")
+        ));
+        assert!(matches!(
+            scheduled_run(vec![("checking", true)]).await,
+            RunOutcome::Failed(message) if message.contains("script exhausted")
+        ));
     }
 }

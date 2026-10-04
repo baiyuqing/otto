@@ -21,6 +21,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod reflection;
 pub mod sandbox;
+pub mod schedule;
 pub mod skills;
 pub mod task_control;
 pub mod tasks;
@@ -254,6 +255,9 @@ pub struct Options {
     pub token: String,
     pub logger: Option<Arc<Logger>>,
     pub workflows: Option<Arc<crate::workflow::Controller>>,
+    /// The scheduled-delivery store shared by every workspace; `None` when
+    /// `~/.otto/schedule.db` could not be opened.
+    pub schedule: Option<Arc<crate::schedule::Store>>,
 }
 
 // ---- logging ----
@@ -358,6 +362,7 @@ struct QueuedTurn {
     text: String,
     image: Option<Block>,
     channel: Option<Channel>,
+    origin: Option<crate::schedule::Origin>,
 }
 
 /// The elevated command the running turn waits on. At most one per session,
@@ -516,6 +521,7 @@ pub struct Server {
     wake_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cancel: CancellationToken,
     workflows: Option<Arc<crate::workflow::Controller>>,
+    schedule: Option<Arc<crate::schedule::Store>>,
     /// Bumped whenever a `GET /v1/status` snapshot could change: a session
     /// opened or closed, a turn started or finished, a task registry update,
     /// or a granted Bash approval. See [`Server::status_snapshot`].
@@ -537,6 +543,7 @@ impl Server {
             wake_loops: Mutex::new(Vec::new()),
             cancel: CancellationToken::new(),
             workflows: options.workflows,
+            schedule: options.schedule,
             status_changed: watch::channel(0).0,
         })
     }
@@ -553,6 +560,12 @@ impl Server {
 
     pub fn logger(&self) -> &Arc<Logger> {
         &self.log
+    }
+
+    /// The scheduled-delivery store, for the ACP TCP listener's delivery
+    /// workers.
+    pub fn schedule_store(&self) -> Option<Arc<crate::schedule::Store>> {
+        self.schedule.clone()
     }
 
     /// Cancels every in-flight turn, then closes every open controller.
@@ -720,6 +733,8 @@ impl Server {
                 post(skills::disable),
             )
             .route("/v1/sandbox/reload", post(sandbox::reload))
+            .route("/v1/schedule/claim", post(schedule::claim))
+            .route("/v1/schedule/{id}/delivered", post(schedule::delivered))
             .route("/v1/tasks", get(agents::list))
             .route("/v1/tasks/{parent_session}/{task_id}", get(agents::get))
             .route("/v1/workflows", get(workflows::list).post(workflows::start))
@@ -1062,7 +1077,7 @@ impl Server {
             fields.push(("inbox_kind", kind.as_str().to_string()));
         }
         self.log.info("turn_started", &fields);
-        self.run_turn(session, &turn, Step::Wake(wake), TRIGGER_TASK, None)
+        self.run_turn(session, &turn, Step::Wake(wake), TRIGGER_TASK, None, None)
             .await;
         // Queued turns that arrived during the wake turn start now.
         self.start_next(session);
@@ -1078,6 +1093,7 @@ impl Server {
         first: Step<'_>,
         trigger: &'static str,
         channel: Option<Channel>,
+        origin: Option<crate::schedule::Origin>,
     ) {
         let cancel = turn.cancel_token();
         let result = {
@@ -1093,7 +1109,7 @@ impl Server {
             let (server, open, running, token) = (&**self, &**session, &**turn, &cancel);
             session
                 .ctrl
-                .run_with_channel(first, channel, &mut emit, &cancel, |request| {
+                .run_with_channel(first, channel, origin, &mut emit, &cancel, |request| {
                     server.wait_for_approval(open, running, token, request)
                 })
                 .await
@@ -1193,6 +1209,7 @@ impl Server {
         text: String,
         image: Option<Block>,
         channel: Option<Channel>,
+        origin: Option<crate::schedule::Origin>,
         queue: bool,
     ) -> Result<Arc<Turn>, String> {
         let (turn, running) = {
@@ -1213,18 +1230,19 @@ impl Server {
                     text,
                     image,
                     channel,
+                    origin,
                 });
                 (turn, None)
             } else {
                 let turn = Arc::new(Turn::new(id, TRIGGER_USER, cancel));
                 turn.start_running(session.ctrl.history().len());
                 state.turn = Some(Arc::clone(&turn));
-                (turn, Some((text, image, channel)))
+                (turn, Some((text, image, channel, origin)))
             }
         };
         self.bump_status();
-        if let Some((text, image, channel)) = running {
-            self.spawn_user_turn(session, Arc::clone(&turn), text, image, channel);
+        if let Some((text, image, channel, origin)) = running {
+            self.spawn_user_turn(session, Arc::clone(&turn), text, image, channel, origin);
         }
         Ok(turn)
     }
@@ -1251,7 +1269,14 @@ impl Server {
         };
         self.bump_status();
         if let Some(next) = next {
-            self.spawn_user_turn(session, next.turn, next.text, next.image, next.channel);
+            self.spawn_user_turn(
+                session,
+                next.turn,
+                next.text,
+                next.image,
+                next.channel,
+                next.origin,
+            );
         }
     }
 
@@ -1263,6 +1288,7 @@ impl Server {
         text: String,
         image: Option<Block>,
         channel: Option<Channel>,
+        origin: Option<crate::schedule::Origin>,
     ) {
         turn.push_event(WireEvent::user_message(&text, image.is_some()));
         self.metrics.turn_started();
@@ -1281,7 +1307,7 @@ impl Server {
                 None => Step::Text(&text),
             };
             server
-                .run_turn(&session, &turn, first, TRIGGER_USER, channel)
+                .run_turn(&session, &turn, first, TRIGGER_USER, channel, origin)
                 .await;
             server.start_next(&session);
             // A notification that landed too late for this turn's own drain is
@@ -1868,6 +1894,10 @@ struct StartTurnBody {
     /// Per-turn chat channel context.
     #[serde(default)]
     channel: Option<Channel>,
+    /// Where the turn came from: `terminal`, `web` or
+    /// `chat:<platform>:<chat id>`. Absent means `web`.
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1904,9 +1934,30 @@ async fn start_turn(
     {
         return bad_request("image is invalid");
     }
+    let origin = match parsed.origin.as_deref().map(crate::schedule::Origin::parse) {
+        Some(Ok(origin)) => origin,
+        Some(Err(message)) => return bad_request(&message),
+        None => crate::schedule::Origin::web(),
+    };
+    if let (Some(channel), Some(platform)) = (parsed.channel, origin.chat_platform()) {
+        let expected = match channel {
+            Channel::Telegram => "telegram",
+            Channel::Feishu => "feishu",
+        };
+        if platform != expected {
+            return bad_request("origin platform does not match channel");
+        }
+    }
     let stream = parsed.stream.unwrap_or(true);
 
-    let turn = match server.start_turn(&session, parsed.text, image, parsed.channel, parsed.queue) {
+    let turn = match server.start_turn(
+        &session,
+        parsed.text,
+        image,
+        parsed.channel,
+        Some(origin),
+        parsed.queue,
+    ) {
         Ok(turn) => turn,
         Err(error) if error == TURN_ACTIVE => {
             return turn_active("a turn is already active for this session");
@@ -2915,6 +2966,8 @@ mod tests {
         /// Gives the builder a reflector backed by this store, with the
         /// directory as its home, so `~/.otto/skills` is `<home>/.otto/skills`.
         reflection: Option<(Arc<crate::reflection::Store>, std::path::PathBuf)>,
+        /// The scheduled-delivery store behind `/v1/schedule/*`.
+        schedule: Option<Arc<crate::schedule::Store>>,
     }
 
     struct Harness {
@@ -2973,6 +3026,7 @@ mod tests {
                 std::fs::write(&builder.shared.config_path, config_text)
                     .expect("write config fixture");
             }
+            builder.shared_mut().schedule = options.schedule.clone();
             let builder = Arc::new(builder);
             let provider = ScriptedProvider::new(options.script);
             // Production always sets `Options.info.workspace` from the same
@@ -3018,6 +3072,7 @@ mod tests {
                     &log,
                 )))))),
                 workflows: options.workflows,
+                schedule: options.schedule,
             });
             let router = server.router();
             Self {
@@ -3976,6 +4031,278 @@ mod tests {
         assert!(!prompts[2].contains("Feishu (Lark)"));
         assert!(prompts[0].contains("does not grant additional tools"));
         assert!(prompts[1].contains("does not grant additional tools"));
+    }
+
+    async fn post_turn_with_origin(harness: &Harness, session: &str, extra: Value) -> Reply {
+        let mut body = serde_json::json!({"text": "hi", "stream": false});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{session}/turns"),
+                Some(&body.to_string()),
+            )
+            .await
+    }
+
+    /// Records a confirmed web or terminal delivery for `session`, which the
+    /// next user turn of that session appends when its origin matches.
+    fn confirmed_delivery(
+        store: &crate::schedule::Store,
+        origin: crate::schedule::Origin,
+        session: &str,
+    ) {
+        let now = chrono::Utc::now();
+        let item = store
+            .create(
+                crate::schedule::NewItem {
+                    origin,
+                    session_id: session.into(),
+                    workspace: "/w".into(),
+                    kind: crate::schedule::Kind::Text,
+                    body: "stretch".into(),
+                    repeat: None,
+                    local_time: None,
+                    due_at: now - chrono::TimeDelta::seconds(1),
+                },
+                now,
+            )
+            .expect("create");
+        store
+            .claim_deliveries(
+                &crate::schedule::Scope::Any,
+                Duration::from_secs(60),
+                10,
+                now,
+            )
+            .expect("claim");
+        assert!(
+            store
+                .delivered(item.id, item.due_at, now)
+                .expect("delivered")
+        );
+    }
+
+    fn pending(
+        store: &crate::schedule::Store,
+        origin: &crate::schedule::Origin,
+        session: &str,
+    ) -> usize {
+        store
+            .pending_writebacks(origin, session, 10)
+            .expect("pending")
+            .len()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_turn_origin_defaults_to_web_and_is_validated() {
+        let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
+        let harness = Harness::with(HarnessOptions {
+            schedule: Some(Arc::clone(&store)),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let web = crate::schedule::Origin::web();
+        confirmed_delivery(&store, web.clone(), &id);
+
+        let bad = post_turn_with_origin(&harness, &id, serde_json::json!({"origin": "mars"})).await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+        assert!(
+            bad.json()["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("origin")
+        );
+        let mismatch = post_turn_with_origin(
+            &harness,
+            &id,
+            serde_json::json!({"origin": "chat:feishu:c1", "channel": "telegram"}),
+        )
+        .await;
+        assert_eq!(mismatch.status, StatusCode::BAD_REQUEST);
+        assert!(harness.provider.texts().is_empty());
+        assert_eq!(pending(&store, &web, &id), 1);
+
+        // A chat turn does not take a web delivery; a turn without an origin
+        // is a web turn and does. A turn with no origin at all takes nothing.
+        let chat = post_turn_with_origin(
+            &harness,
+            &id,
+            serde_json::json!({"origin": "chat:telegram:42", "channel": "telegram"}),
+        )
+        .await;
+        assert_eq!(chat.status, StatusCode::OK, "{}", chat.body);
+        assert_eq!(pending(&store, &web, &id), 1);
+        let absent = post_turn_with_origin(&harness, &id, serde_json::json!({})).await;
+        assert_eq!(absent.status, StatusCode::OK, "{}", absent.body);
+        assert_eq!(pending(&store, &web, &id), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_queued_turn_keeps_its_own_origin() {
+        let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
+        let (gate, mut options) = gated();
+        options.schedule = Some(Arc::clone(&store));
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let chat = crate::schedule::Origin::parse("chat:feishu:c1").expect("origin");
+        confirmed_delivery(&store, chat.clone(), &id);
+
+        let first = post_turn_with_channel(&harness, &id, "first", None, false).await;
+        harness.provider.wait_started(1).await;
+        let body = r#"{"text":"second","queue":true,"origin":"chat:feishu:c1","channel":"feishu"}"#;
+        let second = harness
+            .raw("POST", &format!("/v1/sessions/{id}/turns"), Some(body), &[])
+            .await;
+        gate.cancel();
+        for response in [first, second] {
+            assert_eq!(ends_of(SseReader::new(response)).await.2, "ok");
+        }
+        assert_eq!(pending(&store, &chat, &id), 0);
+    }
+
+    fn schedule_harness() -> (Harness, Arc<crate::schedule::Store>) {
+        let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
+        let harness = Harness::with(HarnessOptions {
+            schedule: Some(Arc::clone(&store)),
+            ..HarnessOptions::default()
+        });
+        (harness, store)
+    }
+
+    fn due_text_item(
+        store: &crate::schedule::Store,
+        origin: crate::schedule::Origin,
+        body: &str,
+    ) -> crate::schedule::Item {
+        let now = chrono::Utc::now();
+        store
+            .create(
+                crate::schedule::NewItem {
+                    origin,
+                    session_id: "sess".into(),
+                    workspace: "/w".into(),
+                    kind: crate::schedule::Kind::Text,
+                    body: body.into(),
+                    repeat: None,
+                    local_time: None,
+                    due_at: now - chrono::TimeDelta::seconds(1),
+                },
+                now,
+            )
+            .expect("create")
+    }
+
+    #[tokio::test]
+    async fn claim_returns_due_web_items_once_and_delivered_confirms_them() {
+        let (harness, store) = schedule_harness();
+        let web = due_text_item(&store, crate::schedule::Origin::web(), "stretch");
+        due_text_item(&store, crate::schedule::Origin::terminal(), "terminal only");
+
+        let claim = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
+        assert_eq!(claim.status, StatusCode::OK, "{}", claim.body);
+        let items = claim.json()["items"].as_array().expect("items").clone();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], format!("s{}", web.id));
+        assert_eq!(items[0]["text"], "⏰ stretch");
+        let due_at = items[0]["due_at"].as_i64().expect("due_at");
+        assert_eq!(due_at, web.due_at.timestamp_millis());
+
+        let again = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
+        assert_eq!(again.json()["items"].as_array().unwrap().len(), 0);
+
+        let path = format!("/v1/schedule/s{}/delivered", web.id);
+        let body = serde_json::json!({"due_at": due_at}).to_string();
+        let done = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+        assert_eq!(done.json(), serde_json::json!({}));
+        let writebacks = store
+            .pending_writebacks(&crate::schedule::Origin::web(), "sess", 10)
+            .expect("writebacks");
+        assert_eq!(writebacks.len(), 1);
+        assert_eq!(writebacks[0].item_id, web.id);
+        // A repeated confirmation is still 200.
+        let repeat = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(repeat.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delivered_rejects_a_bad_id_or_body() {
+        let (harness, _store) = schedule_harness();
+        let bad_id = harness
+            .send("POST", "/v1/schedule/x7/delivered", Some(r#"{"due_at":1}"#))
+            .await;
+        assert_eq!(bad_id.status, StatusCode::NOT_FOUND);
+        let no_due = harness
+            .send("POST", "/v1/schedule/s1/delivered", Some("{}"))
+            .await;
+        assert_eq!(no_due.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn schedule_routes_answer_503_without_a_store() {
+        let harness = Harness::new();
+        let claim = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
+        assert_eq!(claim.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(claim.json()["error"]["code"], "schedule_unavailable");
+        let delivered = harness
+            .send("POST", "/v1/schedule/s1/delivered", Some(r#"{"due_at":1}"#))
+            .await;
+        assert_eq!(delivered.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn the_factory_runner_maps_load_and_create_errors_to_outcomes() {
+        use crate::schedule::RunOutcome;
+        use crate::schedule::worker::PromptRunner;
+        let cancel = CancellationToken::new();
+
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                error: Some(("/other".to_string(), "mcp config broken".to_string())),
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let runner = schedule::FactoryRunner(Arc::clone(&harness.factory) as Arc<dyn Factory>);
+        assert_eq!(
+            runner.run("/other", "go", &cancel).await,
+            RunOutcome::Failed("mcp config broken".into())
+        );
+
+        let harness = Harness::with(HarnessOptions {
+            create_error: Some("no session".to_string()),
+            ..HarnessOptions::default()
+        });
+        let startup = harness.factory.builder.workspace_path.clone();
+        let runner = schedule::FactoryRunner(Arc::clone(&harness.factory) as Arc<dyn Factory>);
+        assert_eq!(
+            runner.run(&startup, "go", &cancel).await,
+            RunOutcome::FailedBeforeTools("no session".into())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_factory_runner_runs_the_prompt_and_returns_the_reply() {
+        use crate::schedule::RunOutcome;
+        use crate::schedule::worker::PromptRunner;
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["it is sunny".to_string()],
+                ..Script::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let startup = harness.factory.builder.workspace_path.clone();
+        let runner = schedule::FactoryRunner(Arc::clone(&harness.factory) as Arc<dyn Factory>);
+        let outcome = runner
+            .run(&startup, "weather?", &CancellationToken::new())
+            .await;
+        assert_eq!(outcome, RunOutcome::Reply("it is sunny".into()));
+        assert_eq!(harness.provider.texts(), ["weather?"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7205,6 +7532,7 @@ mod tests {
             text: "x".to_string(),
             image: None,
             channel: None,
+            origin: None,
         });
 
         tasks.notifications().push(notification());
@@ -7266,6 +7594,7 @@ mod tests {
             text: "x".to_string(),
             image: None,
             channel: None,
+            origin: None,
         });
         assert!(state.busy());
     }

@@ -602,6 +602,8 @@ pub struct Runner {
     /// Adds advisory hints to memory candidates, absent when memory is off.
     /// Reflection reads it from the active runner.
     pub(crate) advisor: Option<Arc<crate::memory::advice::Advisor>>,
+    /// The origin of the current user turn, read by the schedule tools.
+    pub(crate) schedule_origin: Arc<crate::schedule::tools::TurnOrigin>,
 }
 
 /// The tool-less agent behind the session-model advice backend.
@@ -992,6 +994,7 @@ impl Runner {
             mcp: Arc::new(crate::mcp::Servers::default()),
             task_control,
             advisor: None,
+            schedule_origin: Default::default(),
         }
     }
 
@@ -1068,6 +1071,9 @@ pub struct Shared {
     /// behaviour; `build_subagents` injects it into every `Tasks` registry it
     /// builds.
     pub task_recorder: Option<Arc<crate::subagent::record::Store>>,
+    /// The scheduled-delivery store (`~/.otto/schedule.db`). `None` when it
+    /// could not be opened; the schedule tools then report it as unavailable.
+    pub schedule: Option<Arc<crate::schedule::Store>>,
     /// The automatic skill contract check (experimental). `None` when the
     /// feature is disabled or its database could not be opened; either way
     /// `build_subagents` wires no checker in and delegation is unaffected.
@@ -1615,10 +1621,19 @@ impl Builder {
         mark_build_trace(&mut trace, "runner/subagents");
 
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
+        let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
             if let Some(approvals) = &self.bash_approvals {
                 tools.extend(crate::tool::otto::controls(&session.header().id, approvals));
             }
+            tools.extend(crate::schedule::tools::tools(
+                &crate::schedule::tools::Context {
+                    store: self.schedule.clone(),
+                    origin: Arc::clone(&schedule_origin),
+                    session_id: session.header().id.clone(),
+                    workspace: self.workspace_path.clone(),
+                },
+            ));
             tools.push(Box::new(crate::tool::task_control::TaskQueue::new(
                 Arc::clone(&task_control),
                 &redaction_values,
@@ -1721,6 +1736,7 @@ impl Builder {
                 mcp: mcp_servers,
                 task_control,
                 advisor,
+                schedule_origin,
             },
             trace_entries,
         ))
@@ -2142,6 +2158,7 @@ mod tests {
             auth_credentials_loaded: false,
             usage: None,
             task_recorder: None,
+            schedule: None,
             skill_checker: None,
             memory: Default::default(),
             reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
@@ -2317,6 +2334,9 @@ mod tests {
                 "remind",
                 "remind_status",
                 "remind_cancel",
+                "schedule",
+                "schedule_list",
+                "schedule_cancel",
                 "task_queue",
                 "otto_help"
             ]
@@ -2592,7 +2612,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, task_queue, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");

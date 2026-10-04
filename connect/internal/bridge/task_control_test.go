@@ -179,7 +179,7 @@ func TestSteerAndQueueValidateTextLengthAndEmptiness(t *testing.T) {
 			t.Errorf("reply %q missing %q", got, want)
 		}
 	}
-	if calls := fake.Calls(h.dir); len(calls) != 0 {
+	if calls := agentWork(h.dir); len(calls) != 0 {
 		t.Fatalf("invalid command text reached the agent: %q", calls)
 	}
 }

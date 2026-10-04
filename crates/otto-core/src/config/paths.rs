@@ -89,6 +89,26 @@ pub(crate) fn home_from_env(env: &std::collections::HashMap<String, String>) -> 
     env.get("HOME").map(String::as_str).unwrap_or("")
 }
 
+/// Expands a leading `~/` against `env`'s home directory; a plain path is only
+/// cleaned. `what` names the setting in the error returned when `env` has no
+/// home directory.
+pub(crate) fn expand_tilde(
+    path: &str,
+    env: &std::collections::HashMap<String, String>,
+    what: &str,
+) -> Result<String, super::ConfigError> {
+    let Some(rest) = path.strip_prefix("~/") else {
+        return Ok(clean(path));
+    };
+    let home = home_from_env(env);
+    if home.is_empty() {
+        return Err(super::ConfigError::new(format!(
+            "resolve home directory for {what} \"{path}\""
+        )));
+    }
+    Ok(clean(&join(home, rest)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

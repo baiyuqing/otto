@@ -34,6 +34,7 @@ pub mod guard;
 pub mod output;
 pub mod prompt;
 pub mod review;
+pub mod runlog;
 pub mod skillwrite;
 pub mod store;
 pub mod taint;
@@ -41,7 +42,7 @@ pub mod transcript;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
@@ -123,6 +124,17 @@ pub struct Report {
     pub truncated: bool,
     /// Why the run was skipped, for a skipped run; empty otherwise.
     pub note: String,
+    /// Every proposal the model returned, with its outcome: memories first,
+    /// then skills, each in model order, then the proposals dropped by
+    /// validation.
+    pub items: Vec<runlog::Item>,
+    /// The external entries of the slice as (id, tool name or role).
+    pub external: Vec<(String, String)>,
+    /// Why skills were not requested from the model; empty when they were.
+    pub skills_note: &'static str,
+    /// The run log: `None` when no log directory is configured or the run
+    /// was skipped.
+    pub log: Option<Result<PathBuf, String>>,
 }
 
 impl Report {
@@ -140,12 +152,21 @@ impl Report {
             tainted: false,
             truncated: false,
             note: note.to_owned(),
+            items: Vec::new(),
+            external: Vec::new(),
+            skills_note: "",
+            log: None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn skipped_for_test() -> Self {
         Self::skipped("test")
+    }
+
+    /// Whether the run did not start (`too_soon`, `min_turns`).
+    pub fn is_skipped(&self) -> bool {
+        self.status == Status::Noop && !self.note.is_empty()
     }
 
     /// Whether the run did anything a user needs to hear about: it queued a
@@ -157,7 +178,7 @@ impl Report {
     /// One line for a frontend.
     pub fn line(&self) -> String {
         let dropped: usize = self.dropped.values().sum();
-        match self.status {
+        let mut line = match self.status {
             Status::Noop if !self.note.is_empty() => format!("reflection: skipped ({})", self.note),
             Status::Noop => "reflection: nothing new to reflect on".to_owned(),
             _ => {
@@ -192,7 +213,13 @@ impl Report {
                 }
                 line
             }
+        };
+        match &self.log {
+            Some(Ok(path)) => line.push_str(&format!("; log: {}", path.display())),
+            Some(Err(error)) => line.push_str(&format!("; run log not written: {error}")),
+            None => {}
         }
+        line
     }
 }
 
@@ -242,6 +269,8 @@ pub struct Reflector {
     config: ReflectionRuntime,
     store: Option<Arc<Store>>,
     minimum_interval: chrono::Duration,
+    /// Where each run writes its Markdown log; `None` writes none.
+    log_dir: Option<PathBuf>,
 }
 
 impl Reflector {
@@ -250,7 +279,19 @@ impl Reflector {
             config,
             store,
             minimum_interval: chrono::Duration::seconds(AUTO_MINIMUM_INTERVAL_SECONDS),
+            log_dir: None,
         }
+    }
+
+    /// Sets the directory the run logs are written to.
+    pub fn with_log_dir(mut self, dir: PathBuf) -> Self {
+        self.log_dir = Some(dir);
+        self
+    }
+
+    /// The directory the run logs are written to, if any.
+    pub fn log_dir(&self) -> Option<&Path> {
+        self.log_dir.as_deref()
     }
 
     /// Replaces the minimum interval between automatic runs.
@@ -393,6 +434,22 @@ impl Reflector {
             tainted: slice.tainted(),
             truncated: false,
             note: String::new(),
+            items: Vec::new(),
+            external: slice
+                .entries
+                .iter()
+                .filter(|entry| entry.external)
+                .map(|entry| {
+                    let source = if entry.tool.is_empty() {
+                        entry.role.as_str()
+                    } else {
+                        entry.tool.as_str()
+                    };
+                    (entry.id.clone(), source.to_owned())
+                })
+                .collect(),
+            skills_note: "",
+            log: None,
         };
 
         let user_turns = slice
@@ -408,7 +465,7 @@ impl Reflector {
         }
         let skills_allowed = self.skills_allowed(context, &slice, &mut report);
         if !has_user || (!self.config.memories && !skills_allowed) {
-            return self.finish(row, report);
+            return self.finish(context, row, report, "", "");
         }
 
         let existing = existing_memories(context)?;
@@ -438,14 +495,15 @@ impl Reflector {
             Ok(response) => response.text,
             Err(error) if error.is_cancelled() => {
                 row.status = Status::Canceled;
-                let _ = self.finish(row, report);
+                let _ = self.finish(context, row, report, "", "");
                 return Err(Error::Cancelled);
             }
             Err(error) => {
                 row.status = Status::Failed;
                 row.detail = "model_call".into();
-                let _ = self.finish(row, report);
-                return Err(Error::Model(error.to_string()));
+                let message = error.to_string();
+                let _ = self.finish(context, row, report, &message, "");
+                return Err(Error::Model(message));
             }
         };
 
@@ -464,12 +522,13 @@ impl Reflector {
             Err(message) => {
                 row.status = Status::Failed;
                 row.detail = "invalid_answer".into();
-                let _ = self.finish(row, report);
+                let _ = self.finish(context, row, report, &message, &answer);
                 return Err(Error::InvalidAnswer(message));
             }
         };
         report.dropped = plan.dropped.clone();
         let skill_candidates = plan.skills.clone();
+        let rejected = plan.rejected.clone();
         self.apply(context, &run_id, plan, &mut report, cancel)
             .await;
         if let Err(Error::Cancelled) = self
@@ -485,7 +544,8 @@ impl Reflector {
         {
             row.status = Status::Canceled;
             row.memories_proposed = report.candidates.len();
-            let _ = self.finish(row, report);
+            report.items.extend(rejected);
+            let _ = self.finish(context, row, report, "", "");
             return Err(Error::Cancelled);
         }
 
@@ -494,7 +554,8 @@ impl Reflector {
         row.memories_dropped = report.dropped.values().sum();
         row.skills_written = report.skills.len();
         report.status = Status::Ok;
-        self.finish(row, report)
+        report.items.extend(rejected);
+        self.finish(context, row, report, "", "")
     }
 
     /// Whether this run asks the model for skills: skills are on, there is a
@@ -506,11 +567,17 @@ impl Reflector {
         slice: &transcript::Slice,
         report: &mut Report,
     ) -> bool {
-        if !self.config.skills || context.skill_roots.is_none() || self.store.is_none() {
+        if !self.config.skills {
+            report.skills_note = "[reflection].skills is false";
+            return false;
+        }
+        if context.skill_roots.is_none() || self.store.is_none() {
+            report.skills_note = "skills are disabled ([skills].enabled) or there is no skill directory or reflection store";
             return false;
         }
         if slice.tainted() && self.config.skill_source == SkillSource::Untainted {
             report.skills_withheld = true;
+            report.skills_note = "the slice has external entries and skill_source = \"untainted\"";
             return false;
         }
         true
@@ -598,11 +665,19 @@ impl Reflector {
             .map(|entry| (entry.id.as_str(), entry))
             .collect();
         let redact = |text: &str| context.runner.redact_text(text);
-        for candidate in candidates {
+        let mut remaining = candidates.into_iter();
+        while let Some(candidate) = remaining.next() {
+            let item = skill_item(&candidate);
+            let reject = |report: &mut Report, reason: &'static str| {
+                *report.dropped.entry(reason).or_default() += 1;
+                let mut item = item.clone();
+                item.outcome = runlog::Outcome::Dropped(reason);
+                report.items.push(item);
+            };
             let checked = match guard::check(candidate, &by_id, &redact) {
                 Ok(checked) => checked,
                 Err(reason) => {
-                    *report.dropped.entry(reason).or_default() += 1;
+                    reject(report, reason);
                     continue;
                 }
             };
@@ -615,7 +690,7 @@ impl Reflector {
                 &candidate.name,
                 self.config.max_generated_skills,
             ) {
-                *report.dropped.entry(reason).or_default() += 1;
+                reject(report, reason);
                 continue;
             }
             let verdict = if self.config.skill_review {
@@ -623,12 +698,23 @@ impl Reflector {
                 match review::review(context.runner, checked.candidate(), &task_id, cancel).await {
                     Ok(review::Outcome::Allow) => guard::Verdict::Allowed,
                     Ok(review::Outcome::Reject(_)) => {
-                        *report.dropped.entry("review_rejected").or_default() += 1;
+                        reject(report, "review_rejected");
                         continue;
                     }
-                    Err(review::Failure::Cancelled) => return Err(Error::Cancelled),
+                    Err(review::Failure::Cancelled) => {
+                        // Not counted in `dropped`: a canceled run is retried.
+                        let mut current = item.clone();
+                        current.outcome = runlog::Outcome::Dropped("canceled");
+                        report.items.push(current);
+                        for candidate in remaining {
+                            let mut item = skill_item(&candidate);
+                            item.outcome = runlog::Outcome::Dropped("canceled");
+                            report.items.push(item);
+                        }
+                        return Err(Error::Cancelled);
+                    }
                     Err(review::Failure::Unavailable(_)) => {
-                        *report.dropped.entry("review_failed").or_default() += 1;
+                        reject(report, "review_failed");
                         continue;
                     }
                 }
@@ -649,15 +735,17 @@ impl Reflector {
                     &vetted,
                     self.config.skill_review,
                 ) {
-                    Ok(request) => report.skill_approvals.push(request.id),
-                    Err(_) => *report.dropped.entry("skill_approval_failed").or_default() += 1,
+                    Ok(request) => {
+                        let mut item = item.clone();
+                        item.outcome = runlog::Outcome::Approval(request.id.clone());
+                        report.items.push(item);
+                        report.skill_approvals.push(request.id);
+                    }
+                    Err(_) => reject(report, "skill_approval_failed"),
                 }
                 continue;
             }
-            *report
-                .dropped
-                .entry("skill_approval_unavailable")
-                .or_default() += 1;
+            reject(report, "skill_approval_unavailable");
         }
         Ok(())
     }
@@ -676,16 +764,24 @@ impl Reflector {
     ) {
         let seen = known_candidates(context);
         let mut requests = Vec::new();
+        // Indexes into `report.items` of the proposals sent to the store, in
+        // request order.
+        let mut sent = Vec::new();
         for proposal in plan.proposals {
             let scope = match proposal.scope {
                 ScopeChoice::User => context.user_scope.clone(),
                 ScopeChoice::Workspace => context.workspace_scope.clone(),
             };
+            let mut item = memory_item(&proposal);
             if seen.iter().any(|known| known.matches(&scope, &proposal)) {
                 *report.dropped.entry("duplicate_candidate").or_default() += 1;
+                item.outcome = runlog::Outcome::Dropped("duplicate_candidate");
+                report.items.push(item);
                 continue;
             }
             requests.push(propose_request(context, run_id, scope, &proposal));
+            sent.push(report.items.len());
+            report.items.push(item);
         }
         let results = match &context.runner.advisor {
             Some(advisor) => {
@@ -694,7 +790,12 @@ impl Reflector {
                     .await
                 {
                     Some(results) => results,
-                    None => return,
+                    None => {
+                        for index in sent {
+                            report.items[index].outcome = runlog::Outcome::Dropped("canceled");
+                        }
+                        return;
+                    }
                 }
             }
             None => requests
@@ -702,24 +803,110 @@ impl Reflector {
                 .map(|request| context.service.propose(request))
                 .collect(),
         };
-        for result in results {
+        for (index, result) in sent.into_iter().zip(results) {
             match result {
-                Ok(candidates) => report
-                    .candidates
-                    .extend(candidates.into_iter().map(|candidate| candidate.id)),
-                Err(_) => *report.dropped.entry("store_rejected").or_default() += 1,
+                Ok(candidates) => {
+                    let ids: Vec<String> = candidates
+                        .into_iter()
+                        .map(|candidate| candidate.id)
+                        .collect();
+                    report.items[index].outcome = runlog::Outcome::Queued(ids.join(", "));
+                    report.candidates.extend(ids);
+                }
+                Err(_) => {
+                    *report.dropped.entry("store_rejected").or_default() += 1;
+                    report.items[index].outcome = runlog::Outcome::Dropped("store_rejected");
+                }
             }
         }
     }
 
-    fn finish(&self, mut row: RunRow, report: Report) -> Result<Report, Error> {
+    /// Records the run row, then writes the run log when a log directory is
+    /// set. A log that cannot be written is reported on the report and does
+    /// not fail the run. `error` is the failure text and `answer` the raw
+    /// model answer of an invalid answer; both are empty otherwise.
+    fn finish(
+        &self,
+        context: &Context<'_>,
+        mut row: RunRow,
+        mut report: Report,
+        error: &str,
+        answer: &str,
+    ) -> Result<Report, Error> {
         row.finished_at = now();
         if let Some(store) = &self.store {
             store
                 .record(&row)
                 .map_err(|error| Error::Store(error.to_string()))?;
         }
+        if let Some(dir) = &self.log_dir {
+            let redact = |text: &str| context.runner.redact_text(text);
+            let content = runlog::render(
+                &runlog::Input {
+                    row: &row,
+                    session_path: context.session_path,
+                    error,
+                    answer,
+                    entries: report.entries,
+                    truncated: row.truncated,
+                    external: &report.external,
+                    skills_note: report.skills_note,
+                    items: &report.items,
+                },
+                &redact,
+            );
+            report.log = Some(runlog::write(dir, &row.started_at, &row.id, &content));
+        }
         Ok(report)
+    }
+}
+
+fn memory_item(proposal: &Proposal) -> runlog::Item {
+    let action = match proposal.action {
+        Action::Create => "create",
+        Action::Update => "update",
+        Action::Forget => "forget",
+    };
+    let title = if proposal.target_id.is_empty() {
+        format!(
+            "{action} {} {} `{}`",
+            proposal.scope.as_str(),
+            proposal.kind,
+            proposal.key
+        )
+    } else {
+        format!(
+            "{action} {} {} `{}` (target {})",
+            proposal.scope.as_str(),
+            proposal.kind,
+            proposal.key,
+            proposal.target_id
+        )
+    };
+    runlog::Item {
+        kind: runlog::Kind::Memory,
+        title,
+        text: proposal.text.clone(),
+        body: String::new(),
+        reason: proposal.reason.clone(),
+        cited: proposal.cited.clone(),
+        outcome: runlog::Outcome::Dropped(""),
+    }
+}
+
+fn skill_item(candidate: &guard::Candidate) -> runlog::Item {
+    let action = match candidate.action {
+        output::SkillAction::Create => "create",
+        output::SkillAction::Revise => "revise",
+    };
+    runlog::Item {
+        kind: runlog::Kind::Skill,
+        title: format!("{action} skill `{}`", candidate.name),
+        text: candidate.description.clone(),
+        body: candidate.body.clone(),
+        reason: candidate.reason.clone(),
+        cited: candidate.cited.clone(),
+        outcome: runlog::Outcome::Dropped(""),
     }
 }
 
@@ -2204,10 +2391,14 @@ mod tests {
         let fixture = Fixture::new(vec![Reply::Text(r#"{"memories":[]}"#.into())]).await;
         fixture.say(Role::User, "first").await;
         fixture.say(Role::User, "second").await;
-        let reflector = fixture.reflector(ReflectionRuntime {
-            min_turns: 3,
-            ..auto_config(Auto::OnExit)
-        });
+        let dir = tempfile::tempdir().expect("log dir");
+        let runs = dir.path().join("runs");
+        let reflector = fixture
+            .reflector(ReflectionRuntime {
+                min_turns: 3,
+                ..auto_config(Auto::OnExit)
+            })
+            .with_log_dir(runs.clone());
 
         let report = run_as(&fixture, &reflector, Trigger::OnExit)
             .await
@@ -2219,6 +2410,8 @@ mod tests {
             report.line()
         );
         assert!(fixture.provider.calls().is_empty());
+        assert!(report.log.is_none());
+        assert!(!runs.exists(), "a skipped run writes no log");
         let session_id = fixture.session_id();
         assert!(
             fixture.store.runs(&session_id).expect("runs").is_empty(),
@@ -2324,5 +2517,138 @@ mod tests {
             .expect("manual");
         assert_eq!(report.status, Status::Ok);
         assert_eq!(fixture.provider.calls().len(), 2);
+    }
+
+    fn only_file(dir: &Path) -> PathBuf {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .expect("log dir")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        files.remove(0)
+    }
+
+    #[tokio::test]
+    async fn a_run_log_shows_every_proposal_with_its_outcome() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new(Vec::new()).await;
+        let (user, tool) = lint_session(&fixture).await;
+        fixture
+            .tool_exchange(
+                "bash",
+                r#"{"command":"curl -s https://example.com"}"#,
+                "external page text",
+            )
+            .await;
+        let external = fixture.session.messages().last().expect("tool").id.clone();
+        let quote = serde_json::json!([{"entry": user, "quote": "always run the lint gate"}]);
+        let skill_quote = serde_json::json!([
+            {"entry": user, "quote": "always run the lint gate"},
+            {"entry": tool, "quote": "clippy found nothing"},
+        ]);
+        push(
+            &fixture,
+            Reply::Text(
+                serde_json::json!({
+                    "memories": [
+                        {"action": "create", "scope": "user", "kind": "preference",
+                         "key": "lint-first", "text": "Run the lint gate before commits",
+                         "confidence": 0.9, "reason": "stated by the user", "evidence": quote},
+                        {"action": "create", "scope": "user", "kind": "bogus-kind",
+                         "key": "other", "text": "Text of the invalid memory",
+                         "confidence": 0.9, "reason": "invalid kind", "evidence": quote},
+                    ],
+                    "skills": [{
+                        "action": "create", "name": "lint-gate",
+                        "description": "Run the lint gate",
+                        "body": "too short", "reason": "ran cleanly", "evidence": skill_quote,
+                    }],
+                })
+                .to_string(),
+            ),
+        );
+        let dir = tempfile::tempdir().expect("log dir");
+        let runs = dir.path().join("runs");
+        let reflector = fixture
+            .reflector(ReflectionRuntime {
+                skill_source: SkillSource::Any,
+                ..ReflectionRuntime::default()
+            })
+            .with_log_dir(runs.clone());
+        let report = fixture
+            .run(&reflector, &CancellationToken::new())
+            .await
+            .expect("run");
+
+        assert_eq!(report.candidates.len(), 1, "{report:?}");
+        let path = report.log.clone().expect("log").expect("written");
+        assert_eq!(path, only_file(&runs));
+        assert!(
+            report
+                .line()
+                .ends_with(&format!("; log: {}", path.display()))
+        );
+        let skill_reason = match &report.items.iter().find(|i| i.kind == runlog::Kind::Skill) {
+            Some(runlog::Item {
+                outcome: runlog::Outcome::Dropped(reason),
+                ..
+            }) => *reason,
+            other => panic!("skill was not dropped: {other:?}"),
+        };
+        let log = std::fs::read_to_string(&path).expect("read log");
+        println!("{log}");
+        assert!(log.contains(&report.run_id));
+        assert!(log.contains("Run the lint gate before commits"));
+        assert!(log.contains(&format!("queued as candidate {}", report.candidates[0])));
+        assert!(log.contains("Text of the invalid memory"));
+        assert!(log.contains("dropped: bad_kind"));
+        assert!(log.contains("too short"));
+        assert_eq!(skill_reason, "skill_body_too_short");
+        assert!(log.contains("dropped: skill_body_too_short"));
+        assert!(
+            log.contains(&format!("- `{external}` (bash)")),
+            "the external entry is listed: {log}"
+        );
+        assert!(!log.contains("external page text"));
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let mode = std::fs::metadata(&runs).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[tokio::test]
+    async fn noop_and_invalid_answer_runs_write_a_log() {
+        let dir = tempfile::tempdir().expect("log dir");
+
+        let fixture = Fixture::new(Vec::new()).await;
+        fixture.say(Role::Assistant, "nothing from the user").await;
+        let runs = dir.path().join("noop");
+        let report = fixture
+            .run(
+                &fixture.reflector(enabled()).with_log_dir(runs.clone()),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("run");
+        assert_eq!(report.status, Status::Noop);
+        assert!(report.line().contains("nothing new to reflect on; log: "));
+        let log = std::fs::read_to_string(only_file(&runs)).expect("log");
+        assert!(log.contains("status: noop"), "{log}");
+
+        let fixture = Fixture::new(vec![Reply::Text("sure, here you go".into())]).await;
+        fixture.say(Role::User, "a topic worth reflecting on").await;
+        let runs = dir.path().join("invalid");
+        let error = fixture
+            .run(
+                &fixture.reflector(enabled()).with_log_dir(runs.clone()),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("invalid");
+        assert!(matches!(error, Error::InvalidAnswer(_)));
+        let log = std::fs::read_to_string(only_file(&runs)).expect("log");
+        assert!(log.contains("sure, here you go"), "{log}");
+        assert!(log.contains("status: failed"), "{log}");
+        assert!(log.contains("invalid_answer"), "{log}");
     }
 }

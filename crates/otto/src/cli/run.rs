@@ -323,7 +323,7 @@ pub async fn run(
     };
 
     let options = match parse_flags(flag_args, stdout) {
-        Ok(Parsed::Help) => return 0,
+        Ok(Parsed::Help | Parsed::Version) => return 0,
         Ok(Parsed::Options(options)) => *options,
         Err(ParseFailure::Unsafe) => {
             let _ = stderr.write_all(b"otto: invalid command-line arguments\n");
@@ -594,10 +594,11 @@ pub async fn run(
     } else {
         None
     };
-    let reflector = Arc::new(crate::reflection::Reflector::new(
-        reflection_config,
-        reflection_store,
-    ));
+    let mut reflector = crate::reflection::Reflector::new(reflection_config, reflection_store);
+    if !home.is_empty() {
+        reflector = reflector.with_log_dir(Path::new(&home).join(".otto/reflection/runs"));
+    }
+    let reflector = Arc::new(reflector);
 
     let approvals =
         match crate::approval::Service::open(&Path::new(&home).join(".otto/approvals.db")) {

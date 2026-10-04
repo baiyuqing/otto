@@ -455,6 +455,10 @@ mod tests {
             tainted: true,
             truncated: false,
             note: String::new(),
+            items: Vec::new(),
+            external: Vec::new(),
+            skills_note: "",
+            log: None,
         };
         let value = serde_json::to_value(ReflectionWire::from(&report)).expect("json");
         assert_eq!(value["status"], "ok");

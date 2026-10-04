@@ -121,7 +121,7 @@ pub fn resolve_memory(
     };
 
     let turso_path = if !file.memory.turso.path.is_empty() {
-        file.memory.turso.path.clone()
+        paths::expand_tilde(&file.memory.turso.path, env, "memory turso path")?
     } else {
         let home = paths::home_from_env(env);
         if home.is_empty() {
@@ -198,6 +198,20 @@ busy_timeout = "10s"
         assert_eq!(runtime.backend, "turso");
         assert_eq!(runtime.turso_path, "/custom/memory.db");
         assert_eq!(runtime.turso_busy_timeout, Duration::from_secs(10));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_home_relative_turso_path_resolves_against_home_not_the_working_directory() {
+        let mut file = File::default();
+        file.memory.turso.path = "~/.otto/memory/memory-turso.db".into();
+        let mut env = HashMap::new();
+        env.insert("HOME".to_string(), "/home/u".to_string());
+        let runtime = resolve_memory(&file, &env).expect("resolve");
+        assert_eq!(runtime.turso_path, "/home/u/.otto/memory/memory-turso.db");
+
+        let err = resolve_memory(&file, &HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("memory turso path"), "{err}");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

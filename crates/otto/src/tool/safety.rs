@@ -27,6 +27,8 @@ const BASE_SAFETY: &[(&str, RetrySafety)] = &[
     ("write", RetrySafety::NonIdempotent),
     ("edit", RetrySafety::NonIdempotent),
     ("bash", RetrySafety::NonIdempotent),
+    ("web_fetch", RetrySafety::NonIdempotent),
+    ("web_search", RetrySafety::NonIdempotent),
     ("skill", RetrySafety::NonIdempotent),
     ("remember", RetrySafety::NonIdempotent),
     ("forget", RetrySafety::NonIdempotent),

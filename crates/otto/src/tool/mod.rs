@@ -33,6 +33,7 @@ pub mod safety;
 mod search;
 pub mod skill;
 pub(crate) mod task_control;
+pub mod web;
 pub mod workspace;
 pub mod write;
 

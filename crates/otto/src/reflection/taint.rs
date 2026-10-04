@@ -14,7 +14,11 @@
 
 /// The tools whose results are external regardless of arguments.
 fn external_tool(name: &str) -> bool {
-    name.starts_with("mcp__") || name == "mcp_search_tools" || name == "mcp_call_tool"
+    name.starts_with("mcp__")
+        || name == "mcp_search_tools"
+        || name == "mcp_call_tool"
+        || name == "web_fetch"
+        || name == "web_search"
 }
 
 /// The context message types that carry text from someone other than the

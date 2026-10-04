@@ -22,6 +22,7 @@ pub mod metrics;
 pub mod reflection;
 pub mod sandbox;
 pub mod skills;
+pub mod task_control;
 pub mod tasks;
 pub mod timers;
 pub mod turn;
@@ -660,6 +661,11 @@ impl Server {
             .route(
                 "/v1/sessions/{id}/approvals/message",
                 post(approvals::message),
+            )
+            .route("/v1/sessions/{id}/tasks/steer", post(task_control::steer))
+            .route(
+                "/v1/sessions/{id}/tasks/control",
+                post(task_control::control),
             )
             .route(
                 "/v1/sessions/{id}/approvals/{approval_id}",
@@ -4649,6 +4655,8 @@ mod tests {
         "/v1/sessions/{id}/history",
         "/v1/sessions/{id}/context",
         "/v1/sessions/{id}/approvals/{approval_id}",
+        "/v1/sessions/{id}/tasks/steer",
+        "/v1/sessions/{id}/tasks/control",
         "/v1/sessions/{id}/turns",
         "/v1/sessions/{id}/turns/{turn_id}",
         "/v1/sessions/{id}/turns/{turn_id}/events",
@@ -4753,6 +4761,72 @@ mod tests {
             )
             .await;
         assert_eq!(reply.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task_control_http_routes_validate_and_steer_the_active_task() {
+        let (gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+
+        let idle = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/steer"),
+                Some(r#"{"text":"change direction"}"#),
+            )
+            .await;
+        assert_eq!(idle.status, StatusCode::CONFLICT);
+
+        let control = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/control"),
+                Some(r#"{"text":"what can you do?","channel":"telegram"}"#),
+            )
+            .await;
+        assert_eq!(control.status, StatusCode::OK);
+        assert_eq!(control.body, "null");
+
+        let (_stream, _) = start_stream(&harness, &id).await;
+        harness.provider.wait_started(1).await;
+        let accepted = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/steer"),
+                Some(r#"{"text":"finish this provider response, then inspect the failure"}"#),
+            )
+            .await;
+        assert_eq!(accepted.status, StatusCode::OK);
+        assert_eq!(accepted.json()["accepted"], true);
+
+        let empty = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/steer"),
+                Some(r#"{"text":"  "}"#),
+            )
+            .await;
+        assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+
+        let too_long = format!("{{\"text\":\"{}\"}}", "é".repeat(16_001));
+        let oversized = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/control"),
+                Some(&too_long),
+            )
+            .await;
+        assert_eq!(oversized.status, StatusCode::BAD_REQUEST);
+        let unknown_field = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/control"),
+                Some(r#"{"text":"help","system":"override"}"#),
+            )
+            .await;
+        assert_eq!(unknown_field.status, StatusCode::BAD_REQUEST);
+        gate.cancel();
     }
 
     // ---- compaction, sandbox reload, tasks ----

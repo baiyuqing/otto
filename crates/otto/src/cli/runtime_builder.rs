@@ -598,6 +598,7 @@ pub struct Runner {
     /// rows; `Runner::close` (best-effort, backgrounded) and
     /// `Runner::close_mcp` (awaited, bounded) shut its clients down.
     pub(crate) mcp: Arc<crate::mcp::Servers>,
+    pub(crate) task_control: Arc<crate::app::task_control::TaskControl>,
 }
 
 impl Runner {
@@ -630,6 +631,31 @@ impl Runner {
         let mut emit = self.collecting(emit);
         let run = self.agent.run_with_system_context_control(
             user_text,
+            system_context,
+            &mut emit,
+            &control,
+        );
+        drive_with_control(run, cancel, &control).await
+    }
+
+    /// Runs one model-originated follow-up as display-only context.
+    pub async fn run_followup_with_system_context(
+        &self,
+        text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
+        let mut emit = self.collecting(emit);
+        let run = self.agent.run_followup_with_system_context_control(
+            text,
             system_context,
             &mut emit,
             &control,
@@ -802,6 +828,14 @@ impl Runner {
         &self.system_prompt
     }
 
+    pub(crate) fn task_control(&self) -> Arc<crate::app::task_control::TaskControl> {
+        Arc::clone(&self.task_control)
+    }
+
+    pub(crate) fn steering(&self) -> Arc<otto_core::agent::steering::Steering> {
+        self.task_control.steering()
+    }
+
     /// What the next provider request contains.
     pub fn context_report(&self) -> otto_core::agent::context_report::ContextReport {
         self.agent.context_report()
@@ -920,6 +954,7 @@ impl Runner {
     ) -> Self {
         let registry = Registry::new(tools).expect("test tool registry");
         let definitions = registry.definitions();
+        let task_control = Arc::new(crate::app::task_control::TaskControl::default());
         Self {
             agent: Agent::new(
                 ProviderClient::Scripted(provider),
@@ -931,6 +966,7 @@ impl Runner {
                     request_sizer: Some(Arc::new(ScriptedSizer)),
                     now: Box::new(Utc::now),
                     inbox: Arc::clone(tasks.notifications()),
+                    steering: task_control.steering(),
                     tasks: Some(Arc::clone(&tasks)
                         as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
                     ..Options::default()
@@ -948,6 +984,7 @@ impl Runner {
             skills: Catalog::default(),
             agents: crate::subagent::Catalog::default(),
             mcp: Arc::new(crate::mcp::Servers::default()),
+            task_control,
         }
     }
 
@@ -1535,10 +1572,15 @@ impl Builder {
         )?;
         mark_build_trace(&mut trace, "runner/subagents");
 
+        let task_control = Arc::new(crate::app::task_control::TaskControl::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
             if let Some(approvals) = &self.bash_approvals {
                 tools.extend(crate::tool::otto::controls(&session.header().id, approvals));
             }
+            tools.push(Box::new(crate::tool::task_control::TaskQueue::new(
+                Arc::clone(&task_control),
+                &redaction_values,
+            )));
             let mut definitions: Vec<_> = tools.iter().map(|tool| tool.definition()).collect();
             definitions.push(
                 crate::tool::otto::Help {
@@ -1617,6 +1659,7 @@ impl Builder {
                 .clone()
                 .map(|tasks| tasks as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
             inbox: subagents.inbox.unwrap_or_default(),
+            steering: task_control.steering(),
             ..Options::default()
         };
         mark_build_trace(&mut trace, "runner/registry-and-options");
@@ -1634,6 +1677,7 @@ impl Builder {
                 skills: catalogs.skills.clone(),
                 agents: catalogs.agent_catalog.clone(),
                 mcp: mcp_servers,
+                task_control,
             },
             trace_entries,
         ))
@@ -2230,6 +2274,7 @@ mod tests {
                 "remind",
                 "remind_status",
                 "remind_cancel",
+                "task_queue",
                 "otto_help"
             ]
         );
@@ -2504,8 +2549,9 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, task_queue, otto_help</available_tools>"
         ));
+        assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");
         assert!(prompt.ends_with("</otto_system_prompt>"), "{prompt}");
         assert!(prompt.contains("house rules"), "{prompt}");

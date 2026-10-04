@@ -18,6 +18,8 @@ Execution status and evidence: [TODO](2026-10-04-active-task-guidance-todo.md).
    instructions, natural-message routing, and command discovery are available
    after the ordinary installation/upgrade. Runtime state, actual permissions,
    and compatibility can restrict an operation; an enable switch cannot hide it.
+6. After implementation and required verification, create the PR automatically
+   and link it from the issue/TODO; do not ask again for PR creation approval.
 
 The user approved these requirements in conversation. Implementation details
 below must satisfy them; record material contract changes here before coding.
@@ -116,9 +118,13 @@ Structured plans/usage, session fork/resume, and pagination are deferred.
   cancels its active work and clears its pending prompts, as today. Individual
   server turn cancellation retains its existing semantics.
 - Inputs must contain non-whitespace text and at most 32,000 UTF-8 bytes.
-  Attachments are outside this command's scope. Advertise commands only when
-  supported; an older agent must not receive a steering command as an ordinary
-  model prompt.
+  Attachments are outside this command's scope. ACP/model capability information
+  describes only implemented operations. Telegram's static menu lists the
+  connector's implemented commands; an older agent reports explicit steering
+  as unsupported with upgrade guidance, without receiving it as an ordinary
+  model prompt. Natural messages fall back to the existing follow-up queue.
+  Do not add a startup capability probe or dynamic menu framework for this
+  compatibility case.
 
 ## Ownership and compatibility
 

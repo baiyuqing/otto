@@ -3,17 +3,19 @@
 
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{Script, serve, summary_reply, text_reply, tool_call_reply};
+use common::{
+    Script, assert_terminal_tool_update, serve, summary_reply, text_reply, tool_call_reply,
+};
 
 use serde_json::{Value, json};
 
@@ -52,6 +54,58 @@ fn serve_stalled() -> (String, Arc<AtomicUsize>) {
         }
     });
     (base_url, accepted)
+}
+
+fn serve_gated(replies: Vec<String>) -> (String, Arc<AtomicUsize>, Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+    let served = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&served);
+    let (release, gate) = channel::<()>();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut raw = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let head_end = loop {
+                if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break 0,
+                    Ok(read) => raw.extend_from_slice(&buffer[..read]),
+                }
+            };
+            if head_end == 0 {
+                continue;
+            }
+            let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while raw.len() - head_end < length {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => raw.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let index = counter.fetch_add(1, Ordering::SeqCst);
+            if index == 0 {
+                let _ = gate.recv_timeout(TIMEOUT);
+            }
+            let reply = replies
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| text_reply("out of script"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (base_url, served, release)
 }
 
 /// An `otto acp` child driven over its pipes.
@@ -250,6 +304,10 @@ fn initialize_advertises_the_implemented_capabilities() {
         result["agentCapabilities"]["_meta"]["otto"]["approvalDialogue"],
         true
     );
+    assert_eq!(
+        result["agentCapabilities"]["_meta"]["otto"]["taskControl"],
+        true
+    );
     assert_eq!(client.close(), Some(0));
 }
 
@@ -270,6 +328,33 @@ fn approval_message_returns_null_without_a_pending_request() {
         json!({"sessionId": session_id, "text": "hello"}),
     );
     assert_eq!(response["result"], Value::Null, "{response}");
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn task_control_extensions_return_json_without_session_updates() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    configure(home.path(), "http://127.0.0.1:1");
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+
+    let (frames, control) = client.call(
+        "_otto/tasks/control",
+        json!({"sessionId":session_id,"text":"what can you do?","channel":"telegram"}),
+    );
+    assert!(
+        frames.is_empty(),
+        "extension replies use JSON only: {frames:?}"
+    );
+    assert_eq!(control["result"], Value::Null, "{control}");
+
+    let (_, invalid) = client.call(
+        "_otto/tasks/steer",
+        json!({"sessionId":session_id,"text":"  "}),
+    );
+    assert_eq!(invalid["error"]["code"], -32602, "{invalid}");
     assert_eq!(client.close(), Some(0));
 }
 
@@ -561,6 +646,7 @@ fn prompt_streams_updates_then_list_and_load_see_the_session() {
     client.initialize();
     let session_id = client.new_session(workspace.path());
     let (frames, response) = client.call("session/prompt", prompt(&session_id, "read hello"));
+    assert_terminal_tool_update(&frames, "call-1", "completed");
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     let live = kinds(&frames);
     assert_eq!(live.first(), Some(&"tool_call"), "{frames:?}");
@@ -634,7 +720,11 @@ fn cancel_ends_a_running_prompt_with_cancelled() {
     let (base_url, accepted) = serve_stalled();
     configure(home.path(), &base_url);
     let mut client = Client::spawn(home.path(), workspace.path(), "off");
-    client.initialize();
+    let initialized = client.initialize();
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["_meta"]["otto"]["taskControl"],
+        true
+    );
     let session_id = client.new_session(workspace.path());
 
     let id = client.start("session/prompt", prompt(&session_id, "wait"));
@@ -644,11 +734,137 @@ fn cancel_ends_a_running_prompt_with_cancelled() {
     assert_eq!(busy["error"]["code"], -32603);
     assert_eq!(busy["error"]["message"], "a prompt is already running");
 
+    let (steer_frames, steered) = client.call(
+        "session/prompt",
+        prompt(&session_id, "/steer finish the provider request first"),
+    );
+    assert_eq!(steered["result"]["stopReason"], "end_turn", "{steered}");
+    assert!(steer_frames.iter().any(|frame| {
+        frame["params"]["update"]["content"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Guidance accepted"))
+    }));
+    let (_, extension) = client.call(
+        "_otto/tasks/steer",
+        json!({"sessionId":session_id,"text":"then inspect the result"}),
+    );
+    assert_eq!(extension["result"]["accepted"], true, "{extension}");
+
+    let (queued_frames, queued) = client.call(
+        "session/prompt",
+        prompt(&session_id, "/queue inspect the completed run"),
+    );
+    assert_eq!(queued["result"]["stopReason"], "end_turn", "{queued}");
+    assert!(queued_frames.iter().any(|frame| {
+        frame["params"]["update"]["content"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Follow-up accepted"))
+    }));
+
     client.send(
         json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session_id}}),
     );
     let (_, response) = client.finish(id, &mut |frame| panic!("unexpected request: {frame}"));
     assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn cancelling_an_active_tool_closes_its_display_as_failed_once() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, _) = provider_with(vec![tool_call_reply(
+        "cancel-tool",
+        "bash",
+        r#"{"command":"sleep 60"}"#,
+    )]);
+    configure(home.path(), &base_url);
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let sid = client.new_session(workspace.path());
+    let id = client.start("session/prompt", prompt(&sid, "wait for the tool"));
+    let mut frames = Vec::new();
+    loop {
+        let frame = client.recv();
+        let started = frame["params"]["update"]["sessionUpdate"] == "tool_call"
+            && frame["params"]["update"]["toolCallId"] == "cancel-tool";
+        frames.push(frame);
+        if started {
+            break;
+        }
+    }
+    client.send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}));
+    let (rest, response) = client.finish(id, &mut |frame| panic!("{frame}"));
+    frames.extend(rest);
+    assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+    assert_terminal_tool_update(&frames, "cancel-tool", "failed");
+    let terminal = updates(&frames)
+        .into_iter()
+        .find(|update| {
+            update["sessionUpdate"] == "tool_call_update" && update["toolCallId"] == "cancel-tool"
+        })
+        .unwrap();
+    assert!(
+        terminal["content"]
+            .to_string()
+            .to_lowercase()
+            .contains("cancel"),
+        "{terminal}"
+    );
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn explicit_queue_acknowledges_then_runs_followups_in_fifo_order() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, served, release) = serve_gated(vec![
+        text_reply("first answer"),
+        text_reply("queued answer one"),
+        text_reply("queued answer two"),
+    ]);
+    configure(home.path(), &base_url);
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+
+    let first_id = client.start("session/prompt", prompt(&session_id, "first task"));
+    wait_for_count(&served, 1);
+    for followup in ["follow-up one", "follow-up two"] {
+        let (frames, response) = client.call(
+            "session/prompt",
+            prompt(&session_id, &format!("/queue {followup}")),
+        );
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert!(message_text(&frames).contains("Follow-up accepted"));
+    }
+
+    release.send(()).unwrap();
+    let (frames, response) = client.finish(first_id, &mut |frame| panic!("{frame}"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_eq!(message_text(&frames), "first answer");
+    wait_for_count(&served, 3);
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut answers = Vec::new();
+    while answers.len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "queued answers did not arrive: {answers:?}"
+        );
+        let frame = client.recv();
+        if frame["method"] == "session/update"
+            && frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+        {
+            let text = frame["params"]["update"]["content"]["text"]
+                .as_str()
+                .unwrap_or_default();
+            if text.contains("queued answer") {
+                answers.push(text.to_string());
+            }
+        }
+    }
+    assert_eq!(answers, ["queued answer one", "queued answer two"]);
     assert_eq!(client.close(), Some(0));
 }
 
@@ -950,6 +1166,7 @@ mod approval {
             result.response
         );
         assert_eq!(result.permission_requests.len(), 1);
+        assert_terminal_tool_update(&result.frames, "call-1", "failed");
         assert_eq!(
             result.served, 2,
             "the retry prompt must not reach the provider"
@@ -1092,6 +1309,36 @@ fn message_text(frames: &[Value]) -> String {
         .collect()
 }
 
+fn assert_task_queue_capability(body: &str) {
+    let request: Value = serde_json::from_str(body).expect("captured model request");
+    let queue = request["tools"]
+        .as_array()
+        .expect("tool schemas")
+        .iter()
+        .find(|tool| tool["function"]["name"] == "task_queue")
+        .unwrap_or_else(|| panic!("task_queue schema missing from request: {request}"));
+    assert_eq!(
+        queue["function"]["parameters"]["required"],
+        json!(["prompt"])
+    );
+    assert_eq!(
+        queue["function"]["parameters"]["properties"]["prompt"]["maxLength"],
+        32000
+    );
+    let system = request["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "system")
+        .and_then(|message| message["content"].as_str())
+        .expect("system prompt");
+    assert!(system.contains("<task_control_policy>"), "{system}");
+    assert!(
+        system.contains("at most 16 follow-ups run in FIFO order"),
+        "{system}"
+    );
+}
+
 #[test]
 fn session_new_and_load_are_followed_by_the_command_list() {
     let home = tempfile::tempdir().unwrap();
@@ -1118,7 +1365,9 @@ fn session_new_and_load_are_followed_by_the_command_list() {
             &json!("compact"),
             &json!("context"),
             &json!("reflect"),
-            &json!("skill")
+            &json!("skill"),
+            &json!("steer"),
+            &json!("queue")
         ]
     );
     assert_eq!(
@@ -1181,7 +1430,7 @@ fn context_command_answers_with_counts_and_sends_no_provider_request() {
 }
 
 #[test]
-fn compact_command_summarizes_through_the_provider_and_other_slash_text_is_a_prompt() {
+fn task_queue_capability_survives_compaction_and_session_reload() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let (base_url, requests) = provider_with(vec![
@@ -1189,6 +1438,7 @@ fn compact_command_summarizes_through_the_provider_and_other_slash_text_is_a_pro
         text_reply("second answer"),
         summary_reply("SUMMARY-TEXT"),
         text_reply("plain answer"),
+        text_reply("answer after reload"),
     ]);
     configure(home.path(), &base_url);
     // A small recent-token budget makes the first turn summarizable; automatic
@@ -1209,6 +1459,9 @@ fn compact_command_summarizes_through_the_provider_and_other_slash_text_is_a_pro
     client.call("session/prompt", prompt(&session_id, "first question"));
     client.call("session/prompt", prompt(&session_id, "second question"));
     assert_eq!(requests.lock().unwrap().len(), 2);
+    for body in &requests.lock().unwrap()[..2] {
+        assert_task_queue_capability(body);
+    }
 
     let (frames, response) = client.call(
         "session/prompt",
@@ -1232,5 +1485,19 @@ fn compact_command_summarizes_through_the_provider_and_other_slash_text_is_a_pro
     assert_eq!(requests.lock().unwrap().len(), 4);
     assert!(requests.lock().unwrap()[3].contains("/contextual question"));
     assert_eq!(message_text(&frames), "plain answer");
+    assert_task_queue_capability(&requests.lock().unwrap()[3]);
     assert_eq!(client.close(), Some(0));
+
+    let mut loaded = Client::spawn(home.path(), workspace.path(), "off");
+    loaded.initialize();
+    let (_, response) = loaded.call(
+        "session/load",
+        json!({"cwd": workspace.path(), "sessionId": session_id, "mcpServers": []}),
+    );
+    assert!(response["result"].is_object(), "{response}");
+    let _commands = loaded.recv();
+    loaded.call("session/prompt", prompt(&session_id, "after reload"));
+    assert_eq!(requests.lock().unwrap().len(), 5);
+    assert_task_queue_capability(&requests.lock().unwrap()[4]);
+    assert_eq!(loaded.close(), Some(0));
 }

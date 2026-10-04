@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 mod common;
-use common::{Script, serve, text_reply};
+use common::{Script, serve, text_reply, tool_call_reply};
 
 /// Lets a test read serve's stdout while the server task is still writing.
 #[derive(Clone, Default)]
@@ -319,12 +319,97 @@ async fn socket_and_tcp_listeners_serve_one_server_with_the_token_on_tcp_only() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_queued_followup_runs_after_the_task_with_agent_provenance() {
+    use serde_json::Value;
+
+    let (provider, requests) = serve(Script {
+        replies: vec![
+            tool_call_reply(
+                "queue-one",
+                "task_queue",
+                r#"{"prompt":"write the final report"}"#,
+            ),
+            text_reply("Research completed."),
+            text_reply("Final report completed."),
+        ],
+        served: Arc::new(AtomicUsize::new(0)),
+    });
+    let fixture = fixture(&provider, "");
+    let cancel = CancellationToken::new();
+    let (stdout, stderr, handle) = run_serve(
+        &fixture,
+        &["--sandbox", "off", "--listen", "127.0.0.1:0"],
+        cancel.clone(),
+    )
+    .await;
+    let (base, token) = await_startup(&stdout, &stderr).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("{base}/v1/sessions"))
+        .bearer_auth(&token)
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_str(&created).unwrap();
+    let id = created["id"].as_str().unwrap();
+    let result = client
+        .post(format!("{base}/v1/sessions/{id}/turns"))
+        .bearer_auth(&token)
+        .header("content-type", "application/json")
+        .body(r#"{"text":"research this topic","stream":false}"#)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_str(&result).unwrap();
+    let text = result["text"].as_str().unwrap_or_default();
+    assert_eq!(
+        text, "Research completed.\n\nFinal report completed.",
+        "{result}"
+    );
+    {
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 3);
+        let followup: Value = serde_json::from_str(&captured[2]).unwrap();
+        let content = followup["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            content.ends_with("[Agent follow-up]\nwrite the final report"),
+            "{content}"
+        );
+    }
+
+    let history = client
+        .get(format!("{base}/v1/sessions/{id}/history"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let history: Value = serde_json::from_str(&history).unwrap();
+    let history_text = history.to_string();
+    assert!(history_text.contains("agent_followup"), "{history}");
+    cancel.cancel();
+    assert_eq!(handle.await.unwrap(), 0, "{}", stderr.text());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
 
-    let (provider, _requests) = serve(Script {
+    let (provider, requests) = serve(Script {
         replies: vec![text_reply("direct ACP reply")],
         served: Arc::new(AtomicUsize::new(0)),
     });
@@ -382,6 +467,10 @@ async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
                 reply["result"]["agentCapabilities"]["_meta"]["otto"]["memoryReview"],
                 true
             );
+            assert_eq!(
+                reply["result"]["agentCapabilities"]["_meta"]["otto"]["taskControl"],
+                true
+            );
         } else {
             sid = reply["result"]["sessionId"].as_str().unwrap().to_string();
         }
@@ -413,6 +502,54 @@ async fn acp_tcp_shares_http_sessions_and_shutdown_closes_idle_connections() {
         }
     }
     assert_eq!(text, "direct ACP reply");
+    let captured: Value = serde_json::from_str(&requests.lock().unwrap()[0]).unwrap();
+    let queue = captured["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "task_queue")
+        .expect("default task_queue tool");
+    assert_eq!(
+        queue["function"]["parameters"]["required"],
+        json!(["prompt"])
+    );
+    assert!(
+        captured["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["role"] == "system"
+                    && message["content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("task_control_policy")
+            })
+    );
+
+    // Control extensions remain available with the default configuration,
+    // and an idle session produces only a JSON reply, without a model call.
+    for (id, method) in [(4, "_otto/tasks/control"), (5, "_otto/tasks/steer")] {
+        let request = json!({"jsonrpc":"2.0", "id":id, "method":method,
+            "params":{"sessionId":sid, "text":"investigate first"}});
+        acp.get_mut()
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(10), acp.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], id, "{reply}");
+        if id == 4 {
+            assert!(reply.get("result").is_some_and(Value::is_null), "{reply}");
+        } else {
+            assert!(reply.get("error").is_some(), "{reply}");
+        }
+    }
+    assert_eq!(requests.lock().unwrap().len(), 1);
     let response = reqwest::Client::new()
         .get(format!("{base}/v1/sessions/{sid}/history"))
         .bearer_auth(&http_token)

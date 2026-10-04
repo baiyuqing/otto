@@ -60,6 +60,7 @@ type process struct {
 	memoryReview     bool
 	approvalDialogue bool
 	channelContext   bool
+	taskControl      bool
 	// endedAt and waitErr are valid after exited is closed.
 	endedAt time.Time
 	waitErr error
@@ -224,6 +225,7 @@ func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 	otto, _ := resp.AgentCapabilities.Meta["otto"].(map[string]any)
 	p.approvalDialogue, _ = otto["approvalDialogue"].(bool)
 	p.channelContext, _ = otto["channelContext"].(bool)
+	p.taskControl, _ = otto["taskControl"].(bool)
 	return p, nil
 }
 

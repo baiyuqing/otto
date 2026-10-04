@@ -1488,7 +1488,7 @@ fn initialize_result(local: bool) -> Reply {
         InitializeResponse::new(ProtocolVersion::V1)
             .agent_capabilities(capabilities)
             .auth_methods(vec![])
-            .agent_info(Implementation::new("otto", env!("CARGO_PKG_VERSION"))),
+            .agent_info(Implementation::new("otto", crate::VERSION)),
     )
 }
 

@@ -49,10 +49,7 @@ impl Tool for Help {
             )
             .expect("tool definitions serialize");
             return super::result::capped_text_result(
-                &format!(
-                    "Otto {} capabilities:\n{content}",
-                    env!("CARGO_PKG_VERSION")
-                ),
+                &format!("Otto {} capabilities:\n{content}", crate::VERSION),
                 48_000,
             );
         }
@@ -61,7 +58,7 @@ impl Tool for Help {
             return super::result::capped_text_result(
                 &format!(
                     "Otto {} user manual\n\n{}",
-                    env!("CARGO_PKG_VERSION"),
+                    crate::VERSION,
                     headings
                         .iter()
                         .map(|(_, title)| *title)
@@ -89,7 +86,7 @@ impl Tool for Help {
         super::result::capped_text_result(
             &format!(
                 "Otto {} user manual\n\n{}",
-                env!("CARGO_PKG_VERSION"),
+                crate::VERSION,
                 &MANUAL[*start..end]
             ),
             48_000,
@@ -258,15 +255,15 @@ mod tests {
             definitions: vec![definition("fixture_tool", "Only enabled here", json!({}))],
         };
         let index = run(&help, "{}").await;
-        assert!(index.content.contains(env!("CARGO_PKG_VERSION")));
+        assert!(index.content.contains(crate::VERSION));
         assert!(index.content.contains("Approvals inside a turn"));
         let section = run(&help, r#"{"topic":"Approvals inside a turn"}"#).await;
-        assert!(section.content.contains(env!("CARGO_PKG_VERSION")));
+        assert!(section.content.contains(crate::VERSION));
         assert!(section.content.contains("decision"));
         assert!(section.content.contains("deny"));
         assert!(!section.content.contains("### Web UI"));
         let capabilities = run(&help, r#"{"topic":"capabilities"}"#).await;
-        assert!(capabilities.content.contains(env!("CARGO_PKG_VERSION")));
+        assert!(capabilities.content.contains(crate::VERSION));
         assert!(capabilities.content.contains("fixture_tool"));
         assert!(!capabilities.content.contains("bash"));
         assert!(run(&help, r#"{"topic":"invented"}"#).await.is_error);

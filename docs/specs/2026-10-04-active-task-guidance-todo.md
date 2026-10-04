@@ -2,10 +2,12 @@
 
 Canonical design: [active-task guidance](2026-10-04-active-task-guidance.md).
 Issue: [#305](https://github.com/baiyuqing/otto/issues/305).
+PR: [#308](https://github.com/baiyuqing/otto/pull/308).
 Branch: `baiyuqing/active-task-guidance`.
 Worktree: primary checkout `.worktree/active-task-guidance`.
 Last updated: 2026-10-04. Implementation and full host acceptance passed after
-integrating main at `8593f0c` (#306). PR publication and CI status are pending.
+integrating main at `8593f0c` (#306). PR published automatically. GitHub CI:
+classification passed; macOS/Linux checks are running, not yet verified passed.
 
 ## Completed investigation
 
@@ -71,7 +73,7 @@ test/command and result here; static inspection does not count as runtime proof.
 - [x] `make check-fast` (passed as the first stage of the host `make check`).
 - [x] `make connect-check`.
 - [x] Full `make check` on supported macOS host.
-- [ ] PR creation, CI reporting, and issue progress links (authorized; next step).
+- [x] PR creation, CI reporting, and issue progress links.
 
 ### Verification evidence
 

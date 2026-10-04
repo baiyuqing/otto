@@ -119,6 +119,9 @@ fn tool_outcome_label(entry: &Entry) -> Option<&'static str> {
 }
 
 fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> {
+    let args = otto_core::wire::transcript::format_args_compact(
+        otto_core::wire::events::tool_args_raw(&entry.tool_args).as_deref(),
+    );
     let unknown = entry.effect_certainty == Some(EffectCertainty::Unknown);
     let dim = Style::default().add_modifier(Modifier::DIM);
     let marker_style = if unknown {
@@ -147,7 +150,7 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
     if details {
         header.push(Span::styled(format!(" ({})", entry.tool_call_id), dim));
     } else if !entry.tool_args.is_empty() {
-        header.push(Span::styled(format!(" {}", preview(&entry.tool_args)), dim));
+        header.push(Span::styled(format!(" {}", preview(&args)), dim));
     }
     let mut lines = gutter::block(&[Line::from(header)], BULLET_MARK, marker_style, width);
 
@@ -164,7 +167,7 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
 
     if details {
         if !entry.tool_args.is_empty() {
-            for line in escape_plain_text(&entry.tool_args).split('\n') {
+            for line in escape_plain_text(&args).split('\n') {
                 push_result(&mut lines, line.to_string(), false);
             }
         }
@@ -266,6 +269,22 @@ mod tests {
             tool_done: true,
             ..Entry::default()
         }
+    }
+
+    #[test]
+    fn tool_arguments_display_unicode_but_preserve_literal_escapes_and_controls() {
+        let args = r#"{"路径":"中文/\ud83d\ude80\u0026\u003c\u003e","literal":"\\u0026","control":"\u001b"}"#;
+        let entry = tool_entry("bash", args, "");
+        for details in [false, true] {
+            let text = rows(&entry_lines(&entry, details, 200)).join("\n");
+            assert!(text.contains("中文/🚀&<>"), "{text}");
+            if details {
+                assert!(text.contains(r#"\\u0026"#), "{text}");
+            }
+            assert!(!text.contains('\u{1b}'), "raw terminal escape");
+        }
+        let text = rows(&entry_lines(&entry, true, 200)).join("\n");
+        assert!(text.contains(r#"\u001b"#), "{text}");
     }
 
     #[test]

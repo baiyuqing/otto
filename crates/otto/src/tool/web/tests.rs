@@ -297,7 +297,7 @@ async fn network_deny_blocks_both_tools_before_any_request() {
     assert!(fetch.approval_spec(&raw(&args(&server, "/"))).is_err());
     let search = WebSearch {
         shared: shared(&runtime, true, &[]),
-        backend: search::Backend::with_endpoint("http://search.test/res", "k"),
+        backend: backend(&[]).with_endpoint("http://search.test/res"),
     };
     let result = run(&search, r#"{"query":"x"}"#).await;
     assert!(
@@ -395,17 +395,39 @@ const SEARCH_JSON: &str = r#"{"web":{"results":[
   {"title":"Rust <strong>book</strong>","url":"https://doc.rust-lang.org/book/","description":"Learn Rust"},
   {"title":"Crates","url":"https://crates.io/","description":"Packages"}]}}"#;
 
-fn search_tool(runtime: &Arc<Runtime>, server: &Server, key: &str) -> WebSearch {
+/// A backend chosen from `vars` the way the runner chooses it.
+fn backend(vars: &[(&str, &str)]) -> search::Backend {
+    let vars: std::collections::HashMap<String, String> = vars
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    search::Backend::from_env(&|name| vars.get(name).cloned())
+}
+
+fn search_tool_with(
+    runtime: &Arc<Runtime>,
+    server: &Server,
+    backend: search::Backend,
+) -> WebSearch {
+    let secrets = backend.secrets();
+    let backend = backend.with_endpoint(&format!(
+        "http://search.test:{}/res/v1/web/search",
+        server.addr.port()
+    ));
     WebSearch {
-        shared: shared(runtime, false, &[key]),
-        backend: search::Backend::with_endpoint(
-            &format!(
-                "http://search.test:{}/res/v1/web/search",
-                server.addr.port()
-            ),
-            key,
-        ),
+        shared: Shared {
+            runtime: Arc::clone(runtime),
+            max_output: crate::tool::testutil::MAX_OUTPUT_BYTES,
+            network_denied: false,
+            secrets,
+        },
+        backend,
     }
+}
+
+/// A Brave-backed tool whose key is `key`.
+fn search_tool(runtime: &Arc<Runtime>, server: &Server, key: &str) -> WebSearch {
+    search_tool_with(runtime, server, backend(&[("BRAVE_API_KEY", key)]))
 }
 
 async fn search_server() -> Server {
@@ -509,18 +531,114 @@ async fn search_refuses_a_credential_in_the_query_and_reports_service_errors() {
 }
 
 #[test]
-fn web_search_is_registered_only_when_a_key_is_present() {
+fn both_tools_are_always_registered_and_the_backend_comes_from_the_environment() {
     let runtime = Runtime::new(&[]);
-    let names = |key: Option<&str>| -> Vec<String> {
-        tools(&runtime, 1000, false, &[], key)
-            .iter()
-            .map(|tool| tool.definition().name)
-            .collect()
+    let names = |vars: &'static [(&'static str, &'static str)]| -> Vec<String> {
+        tools(&runtime, 1000, false, &[], &|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
+        .iter()
+        .map(|tool| tool.definition().name)
+        .collect()
     };
-    assert_eq!(names(None), vec!["web_fetch"]);
-    assert_eq!(names(Some("")), vec!["web_fetch"]);
-    assert_eq!(names(Some("  ")), vec!["web_fetch"]);
-    assert_eq!(names(Some("k1234567")), vec!["web_fetch", "web_search"]);
+    assert_eq!(names(&[]), vec!["web_fetch", "web_search"]);
+    assert_eq!(
+        names(&[("BRAVE_API_KEY", "k1234567")]),
+        vec!["web_fetch", "web_search"]
+    );
+}
+
+#[tokio::test]
+async fn google_sends_key_and_engine_as_parameters_clamps_count_and_never_returns_them() {
+    let server = serve(Arc::new(|_| {
+        response(
+            "200 OK",
+            &[("Content-Type", "application/json")],
+            br#"{"items":[{"title":"Rust","link":"https://www.rust-lang.org/","snippet":"A language"}]}"#,
+        )
+    }))
+    .await;
+    let runtime = runtime(&["search.test"]);
+    let google = backend(&[
+        ("GOOGLE_API_KEY", "gkey-1234567"),
+        ("GOOGLE_SEARCH_ENGINE_ID", "cx-987654"),
+    ]);
+    let tool = search_tool_with(&runtime, &server, google);
+    let result = run(&tool, r#"{"query":"rust","count":50}"#).await;
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        result.content.contains("(Google)") && result.content.contains("1. Rust"),
+        "{}",
+        result.content
+    );
+    assert!(!result.content.contains("gkey-1234567") && !result.content.contains("cx-987654"));
+    let request = server.requests.lock().unwrap()[0].clone();
+    assert!(
+        request.contains("key=gkey-1234567") && request.contains("cx=cx-987654"),
+        "{request}"
+    );
+    assert!(
+        request.contains("num=10"),
+        "Google returns at most 10: {request}"
+    );
+    // The engine id is as secret as the key.
+    let leak = run(&tool, r#"{"query":"cx-987654"}"#).await;
+    assert!(
+        leak.is_error && leak.content.contains("configured secret"),
+        "{}",
+        leak.content
+    );
+}
+
+#[tokio::test]
+async fn bing_needs_no_key_and_sends_no_credentials() {
+    const PAGE: &str = r#"<ol id="b_results"><li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;u=a1aHR0cHM6Ly90b2tpby5ycy90b2tpby90dXRvcmlhbC9hc3luYw&amp;ntb=1">Tokio</a></h2><div class="b_caption"><p>A runtime</p></div></li></ol>"#;
+    let server = serve(Arc::new(|_| {
+        response(
+            "200 OK",
+            &[("Content-Type", "text/html; charset=utf-8")],
+            PAGE.as_bytes(),
+        )
+    }))
+    .await;
+    let runtime = runtime(&["search.test"]);
+    let tool = search_tool_with(&runtime, &server, backend(&[]));
+    let result = run(&tool, r#"{"query":"tokio"}"#).await;
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("(Bing)"), "{}", result.content);
+    assert!(
+        result
+            .content
+            .contains("1. Tokio\n   https://tokio.rs/tokio/tutorial/async\n   A runtime"),
+        "{}",
+        result.content
+    );
+    let request = server.requests.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(request.contains("accept: text/html"), "{request}");
+    for forbidden in ["x-subscription-token", "authorization:", "cookie:"] {
+        assert!(!request.contains(forbidden), "{request}");
+    }
+}
+
+#[tokio::test]
+async fn a_bing_page_that_cannot_be_read_is_an_error_not_an_empty_answer() {
+    let server = serve(Arc::new(|_| {
+        response(
+            "200 OK",
+            &[("Content-Type", "text/html")],
+            b"<html>captcha</html>",
+        )
+    }))
+    .await;
+    let tool = search_tool_with(&runtime(&["search.test"]), &server, backend(&[]));
+    let result = run(&tool, r#"{"query":"x"}"#).await;
+    assert!(
+        result.is_error && result.content.contains("no recognizable results"),
+        "{}",
+        result.content
+    );
 }
 
 #[test]

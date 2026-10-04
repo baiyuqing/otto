@@ -265,7 +265,8 @@ Otto also has subcommands that run before the flags below are parsed:
 | `OTTO_API_KEY` | Fallback API key, used when the selected profile's `api_key_env` variable is empty. |
 | `OTTO_UI` | Frontend mode (`auto`, `tui`, `repl`); overridden by `--ui`. |
 | `OTTO_STARTUP_TRACE` | `1`, `true`, `yes`, or `on` prints a startup timing breakdown to stderr (see [troubleshooting](#a-session-takes-too-long-to-start)). |
-| `BRAVE_API_KEY` | Brave Search API key. When set, the `web_search` tool is available; see [web tools](#web-tools). |
+| `GOOGLE_API_KEY`, `GOOGLE_SEARCH_ENGINE_ID` | Google Custom Search JSON API key and search engine ID. When both are set, `web_search` uses Google; see [web tools](#web-tools). |
+| `BRAVE_API_KEY` | Brave Search API key. When set (and Google is not configured), `web_search` uses Brave. Without any key, `web_search` reads Bing's results page. |
 | `<api_key_env>` | The variable named by the selected profile's `api_key_env`. Its value wins over `OTTO_API_KEY`. |
 
 API keys are environment variables only. There is no `--api-key` flag, and keys
@@ -1355,10 +1356,24 @@ error. A page is cut at 2 MiB of download and at the output cap; the result
 header then gives the `offset` to continue from. Each call fetches the page
 again. Pages that need JavaScript return only what the server sent.
 
-`web_search` takes `query` and an optional `count` (1 to 20, default 8). It
-uses Brave Search and is available only when `BRAVE_API_KEY` is set in
-the environment; without it the tool is not offered. The key is sent only in a
-request header and is never placed in config, results or approval text.
+`web_search` takes `query` and an optional `count` (1 to 20, default 8; Google
+returns at most 10). It is always available. The backend is chosen when the
+runner is built, by the first rule that applies:
+
+1. **Google** (Custom Search JSON API) when both `GOOGLE_API_KEY` and
+   `GOOGLE_SEARCH_ENGINE_ID` are set.
+2. **Brave Search** (API) when `BRAVE_API_KEY` is set.
+3. **Bing**, with no key: Otto reads Bing's public results page.
+
+Each backend needs its own approval, since each is a different host
+(`www.googleapis.com`, `api.search.brave.com`, `www.bing.com`). A failure of the
+chosen backend, such as an exhausted quota, is reported as an error; Otto does
+not switch to another backend for that call. The Bing backend reads an HTML
+page Bing does not document as an interface, so a layout change or Bing
+blocking automated requests makes it fail with an error that says so rather
+than returning "no results"; set a Brave or Google key for a stable interface.
+Keys are sent only in the request to their own service and are never placed in
+config, results or approval text. The result header names the backend used.
 
 What the tools refuse:
 

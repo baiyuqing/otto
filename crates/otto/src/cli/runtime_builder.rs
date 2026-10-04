@@ -1463,8 +1463,8 @@ impl Builder {
         ]
     }
 
-    /// The web tools: `web_fetch`, and `web_search` when the search key is in
-    /// the environment. `secrets` are values a URL or query may not contain.
+    /// The web tools: `web_fetch` and `web_search`; the search backend is
+    /// chosen from the environment. `secrets` are values a URL or query may not contain.
     pub(crate) fn web_tools(
         &self,
         max_output: usize,
@@ -1475,9 +1475,7 @@ impl Builder {
             max_output,
             self.planned_sandbox_info().network == SandboxNetwork::Denied,
             secrets,
-            self.environment
-                .get(crate::tool::web::SEARCH_KEY_ENV)
-                .map(String::as_str),
+            &|name| self.environment.get(name).cloned(),
         )
     }
 
@@ -2474,6 +2472,7 @@ mod tests {
                 "write",
                 "edit",
                 "web_fetch",
+                "web_search",
                 "list_models",
                 "agent",
                 "agent_wait",
@@ -2627,7 +2626,7 @@ mod tests {
             .await
             .expect("runner");
         let names = tool_names(&runner);
-        assert_eq!(names.iter().position(|name| name == "bash"), Some(7));
+        assert_eq!(names.iter().position(|name| name == "bash"), Some(8));
     }
 
     #[tokio::test]
@@ -2764,7 +2763,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, web_fetch, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");

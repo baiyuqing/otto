@@ -78,7 +78,8 @@ The other modules group native responsibilities:
 - **Remote and external integrations:** `provider/`, `mcp/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `session/`, `config/`, `memory/`,
-  `reflection/`, `typesafe/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, and `workflow.rs`.
+  `reflection/`, `typesafe/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, `workflow.rs`,
+  and `schedule/` (scheduled deliveries: store, tools, worker).
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`, and
   `urlprivacy.rs`.
@@ -113,6 +114,7 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 | Web API or browser behavior | `crates/otto/src/server/` or `ui/` | `crates/otto-web/` for shared browser wire codecs |
 | ACP integrations | `crates/otto/src/acp/` | `client/` for attach mode; `connect/` for chat connector behavior |
 | Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `acp/mod.rs` wake loop | [Design](specs/2026-10-04-acp-wake-replies.md), the `wake-replies` HTTP route, `client/`, `connect/internal/bridge` |
+| Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | [Design](specs/2026-10-04-scheduled-deliveries.md), turn origin in `app/approval.rs`, the worker spawn in `cli/run.rs` and `cli/serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `connect/internal/bridge`, `ui/` |
 | Persistent memories, sessions, workflow runs, or token aggregates | The matching native state module | Its store and lifecycle tests |
 
 ## Dependency and documentation rules

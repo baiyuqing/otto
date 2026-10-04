@@ -42,6 +42,7 @@ use super::{
 use crate::app::ApprovalDecision;
 use crate::app::Channel;
 use crate::client::{Client, Error as ClientError};
+use crate::schedule::Origin;
 
 const LOST: &str = "connection to otto serve lost";
 
@@ -55,17 +56,43 @@ struct OpenApproval {
 pub(super) struct Relay {
     pub(super) client: Client,
     pub(super) server: Option<Arc<crate::server::Server>>,
+    /// The store this connection delivers scheduled items from.
+    pub(super) schedule: Option<Arc<crate::schedule::Store>>,
     /// Sessions this connection opened, with their prompt slots.
     sessions: Mutex<HashMap<String, Arc<PromptSlot>>>,
     lost: CancellationToken,
 }
 
 impl Relay {
+    /// A relay whose server is `router`, for tests of what the relay sends.
+    #[cfg(test)]
+    pub(super) fn with_router(router: axum::Router) -> Self {
+        Self {
+            client: Client::in_process(router),
+            server: None,
+            schedule: None,
+            sessions: Mutex::new(HashMap::new()),
+            lost: CancellationToken::new(),
+        }
+    }
+
+    /// A relay to no server, for tests of connection-level behavior.
+    #[cfg(test)]
+    pub(super) fn unreachable(schedule: Option<Arc<crate::schedule::Store>>) -> Self {
+        Self {
+            client: Client::new(Path::new("/nonexistent/otto.sock")).expect("client"),
+            server: None,
+            schedule,
+            sessions: Mutex::new(HashMap::new()),
+            lost: CancellationToken::new(),
+        }
+    }
+
     pub(super) fn slot(&self, id: &str) -> Option<Arc<PromptSlot>> {
         self.sessions.lock().expect("session map").get(id).cloned()
     }
 
-    fn register(&self, id: &str) {
+    pub(super) fn register(&self, id: &str) {
         self.sessions
             .lock()
             .expect("session map")
@@ -329,12 +356,13 @@ impl Relay {
         session_id: &str,
         text: &str,
         channel: Option<Channel>,
+        origin: Option<&Origin>,
         cancel: &CancellationToken,
     ) -> Reply {
         let stream = tokio::select! {
             biased;
             () = self.lost.cancelled() => return Err(error(INTERNAL_ERROR, LOST)),
-            started = self.client.start_turn_with_channel(session_id, text, None, channel) => {
+            started = self.client.start_turn_with_channel(session_id, text, None, channel, origin) => {
                 started.map_err(|failure| self.fail(failure))?
             }
         };
@@ -348,13 +376,14 @@ impl Relay {
         session_id: &str,
         text: &str,
         channel: Option<Channel>,
+        origin: Option<&Origin>,
     ) -> Result<crate::client::TurnStream, agent_client_protocol_schema::v1::Error> {
         if self.lost.is_cancelled() {
             return Err(error(INTERNAL_ERROR, LOST));
         }
         let stream = self
             .client
-            .start_turn_with_channel(session_id, text, None, channel)
+            .start_turn_with_channel(session_id, text, None, channel, origin)
             .await
             .map_err(|failure| self.fail(failure))?;
         Ok(stream)
@@ -478,6 +507,7 @@ fn turn_end_reply(event: &WireEvent) -> Reply {
 pub async fn run(
     socket: &Path,
     workspace: PathBuf,
+    schedule: Option<Arc<crate::schedule::Store>>,
     stdin: Box<dyn BufRead + Send + 'static>,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
@@ -502,6 +532,7 @@ pub async fn run(
     let relay = Relay {
         client,
         server: None,
+        schedule,
         sessions: Mutex::new(HashMap::new()),
         lost: lost.clone(),
     };
@@ -529,6 +560,7 @@ pub(super) async fn serve_in_process(
     let lost = CancellationToken::new();
     let relay = Relay {
         client: Client::in_process(server.socket_router()),
+        schedule: server.schedule_store(),
         server: Some(server),
         sessions: Mutex::new(HashMap::new()),
         lost: lost.clone(),

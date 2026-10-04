@@ -208,6 +208,18 @@ impl Controller {
         self.notices.take()
     }
 
+    /// Queues the text of a scheduled delivery as a notice and marks the
+    /// terminal bell pending.
+    pub fn push_scheduled(&self, text: &str) {
+        self.notices.push(text.to_owned());
+        self.bell.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether a scheduled delivery arrived since the last call.
+    pub fn take_bell(&self) -> bool {
+        self.bell.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The notices queued after `after` (0 for all still kept) with their ids,
     /// and the newest id so far. Does not remove them: for readers that share
     /// a controller, such as the HTTP server's clients. The REPL and the TUI

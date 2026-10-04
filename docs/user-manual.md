@@ -619,6 +619,10 @@ OTTO_UI=repl otto
   is saved in the session, so a resumed session shows it again.
 - While idle, a pending notification — a finished sub-agent, or a `remind`
   timer — starts a wake turn that delivers it and lets the model continue.
+- A due [`schedule`](#schedule) item created from a terminal is shown as a
+  system line and rings the terminal bell. When several TUIs or REPLs run on
+  the host, including `otto --attach`, one of them shows each item. The REPL
+  prints it as a line while it waits for input.
   Esc cancels it the same way as a user turn. Composer text is left in place.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
@@ -1212,6 +1216,72 @@ outstanding timers permanently: the stored timers are deleted with the
 archive, so resuming the archived session does not bring them back. Child
 agents do not get these tools.
 
+### `schedule`
+
+`schedule` is for results the user asked to receive later or repeatedly, for
+example "every day at 08:00 tell me whether it will rain in Beijing". `remind`
+stays the model's own timer inside the current conversation. Items are kept in
+`~/.otto/schedule.db`, outside any session, so they survive `/new`, `/use`,
+and a restart.
+
+| Field | Rule |
+| --- | --- |
+| `text` | A fixed message, 1 to 500 characters. Delivered as `⏰ <text>`. |
+| `prompt` | 1 to 2000 characters. At the due time Otto runs it as the first message of a new session in the workspace where the item was created, and delivers the final reply as `⏰ <reply>`. |
+| `seconds` | Delay from now, 1 to 2592000 (30 days). |
+| `at` | `HH:MM` (the next occurrence) or `YYYY-MM-DD HH:MM`, in the host's local time zone, at most 30 days ahead. |
+| `repeat` | `daily` or `weekdays`, at the `HH:MM` given in `at`. |
+
+Exactly one of `text` and `prompt` and exactly one of `seconds` and `at` are
+required. Each origin (see below) has at most 32 active items. The result
+names the id, the first due time with its UTC offset, where the item will be
+delivered, and the current local time:
+
+```
+scheduled s7: prompt, first run 2026-10-05 08:00 +08:00 (in 14h40m), repeats daily; delivered to this Telegram chat
+now: 2026-10-04 17:20 +08:00
+```
+
+`schedule_list` lists the items of the current origin: active ones, then those
+that finished, failed, or were cancelled in the last 7 days, with the error of
+a failed item. `schedule_cancel {"id": "s7"}` cancels an active item; a
+recurring item stops for good.
+
+An item belongs to the origin of the turn that created it:
+
+| Origin | Turns | Delivered by |
+| --- | --- | --- |
+| terminal | the TUI, the REPL, `otto --prompt`, `otto --attach` | one running TUI or REPL on this host, as a system line; the TUI also rings the terminal bell |
+| web | the browser UI | an open browser UI page, as a notice |
+| a chat | a Telegram or Feishu chat through `otto-connect` | that chat, through `otto-connect` (see [Messages and replies](#messages-and-replies)) |
+
+Turns from an editor ACP client, scheduled runs, sub-agents, and workflows
+have no origin; there the three tools return an error. If
+`~/.otto/schedule.db` cannot be opened at startup, Otto prints a warning and
+the tools return an error that names the file.
+
+A prompt item runs in a process that is running when it is due: a TUI or
+REPL opened on the same workspace for terminal items, `otto acp` for its
+chats, or `otto serve` for every origin and workspace. No user is present
+during the run, so approval requests are denied. The run is cancelled after
+10 minutes. Its session stays in the session list. A run that fails before any
+tool call is retried; a failure after a tool call started is delivered as
+`⏰ Scheduled prompt s7 failed: <error>` and not repeated.
+
+Delivery is at least once. A failed delivery is retried after 30 s, doubling
+up to 30 minutes between attempts. An occurrence not delivered within 24 hours
+of its due time is marked failed and shows in `schedule_list`. A text
+delivered more than 2 minutes late ends with a line such as
+`(scheduled for 2026-10-05 08:00 +08:00, delivered 2h3m late)`. A recurring
+item that missed occurrences while no process could run it runs once for the
+most recent one, if that is less than 24 hours old.
+
+At the start of the next user turn from the same origin, the delivered text is
+added to the conversation before the user message, as a context entry
+`[scheduled s7, due ...]`, so a follow-up question can refer to it. For a chat
+this is the session the chat uses at that time; for the terminal and the web
+UI it is the session that created the item.
+
 ### `list_models`
 
 With the `openai-compatible` provider, `list_models` returns the model ids the
@@ -1709,6 +1779,11 @@ composer:
   `"trust": true`, and **Cancel** adds nothing. **Enter a path** below the
   button expands a field for typing an absolute path, handled the same way.
   Other `400`/`500` errors are shown below the button.
+- While the page is open it calls `POST /v1/schedule/claim` every 15 s and
+  shows each due [`schedule`](#schedule) item created from the browser UI as
+  a notice below the top bar, with a dismiss button, then confirms it with
+  `POST /v1/schedule/{id}/delivered`. With several tabs open, each item
+  appears in one of them.
 - Below 720px wide the sidebar is hidden; the **Sessions** button in the top
   bar shows it as an overlay, and opening a session hides it again.
 - Typing `/` in the composer shows local suggestions for supported Web slash
@@ -1829,7 +1904,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
 | `POST /v1/sessions/{id}/approvals/message` | Restricted dialogue during an unapproved request: `{"text":"..."}`. Returns `null` when none waits, otherwise `{"text","queued"}`. A true `queued` asks the client to put the original message in its normal task queue. Never approves. |
 | `POST /v1/sessions/{id}/approvals/{approval_id}` | Decide an elevated Bash command a running turn waits for: `{"decision":"allow"}` or `{"decision":"deny"}`. `200 {"decision"}` for the first decision; `409 approval_decided` when it was already decided; `409 approval_failed` when the id is not waiting. See [Approvals inside a turn](#approvals-inside-a-turn). |
-| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram` or `feishu`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
@@ -1850,6 +1925,8 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/tasks/{parent_session}/{task_id}` | Return one recorded task under `task`, its child transcript as `history`, and `transcript_missing: true` (with an empty `history`) when the transcript file is absent or unreadable. `404` for an unknown task. |
 | `GET /v1/sessions/{id}/timers` | List the session's outstanding timers, soonest first: `id`, `fire_at`, and `message`. |
 | `POST /v1/sessions/{id}/timers/{timer_id}/cancel` | Cancel one outstanding timer and return it. `404` if no timer has that id. |
+| `POST /v1/schedule/claim` | Body `{}`. Claims up to 10 due [`schedule`](#schedule) items with origin `web` for 120 s and returns `{"items":[{"id":"s7","due_at":<unix ms>,"text":"..."}]}`; a claimed item is not returned again until the claim expires. `503 schedule_unavailable` when `~/.otto/schedule.db` could not be opened. |
+| `POST /v1/schedule/{id}/delivered` | Body `{"due_at":<unix ms>}` from the claim. Records the delivery and returns `{}`, also when it was already recorded. `404` for an id that is not `s<n>`, `400` for a bad body, `503` as above. |
 | `GET /v1/sessions/{id}/mcp` | List the session's MCP servers and their connection state, in configuration order. |
 | `GET/POST /v1/workflows?workspace=<path>` | List that workspace's workflow runs (default the startup workspace), or start one there with `{"name":"...","input":"..."}`. |
 | `GET /v1/workflows/{id}` | Return a run, its steps, and its approval requests. Searches every loaded workspace for the run id. |
@@ -2110,11 +2187,11 @@ is rejected.
 
 | Method | Behavior |
 | --- | --- |
-| `initialize` | Reports protocol version 1, `loadSession`, and `session/list`. `_meta.otto.channelContext` advertises structured per-turn channel metadata. Prompts accept text only; images, audio, and embedded context are not accepted. No authentication methods: credentials come from environment variables and `otto login`. |
+| `initialize` | Reports protocol version 1, `loadSession`, and `session/list`. `_meta.otto.channelContext` advertises structured per-turn channel metadata. `agentCapabilities._meta.otto.scheduleDelivery: true` advertises delivery of [`schedule`](#schedule) items; a client that lists platforms (`telegram`, `feishu`) in `clientCapabilities._meta.otto.scheduleDelivery` receives them (see below). Prompts accept text only; images, audio, and embedded context are not accepted. No authentication methods: credentials come from environment variables and `otto login`. |
 | `session/new` | Creates a session. No session file is written until the first prompt. |
 | `session/load` | Opens a session of this workspace by its 32-character id, sends the stored conversation as `session/update` notifications, then responds. The response also carries `sessionId`. |
 | `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
-| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Returns `end_turn`, or `cancelled` after `session/cancel`. |
+| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Optional `_meta.otto.chat` (`<platform>:<chat id>`) is the turn's chat origin for [`schedule`](#schedule); an invalid value, or a platform that differs from `_meta.otto.channel`, is ignored with a warning on stderr. Returns `end_turn`, or `cancelled` after `session/cancel`. |
 | `_otto/approvals/message` | Restricted pending-approval dialogue with `sessionId` and `text`; advertised by `_meta.otto.approvalDialogue`. Returns `null` or `{"text","queued"}`. Available in local and attach mode. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
 | `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}` plus an optional string `advice` (the one-line advice, omitted when there is none); `nextCursor` is `""` on the last page. |
@@ -2124,6 +2201,18 @@ is rejected.
 come from Otto's own configuration (see [MCP servers](#mcp-servers)). Otto
 does not call the client's `fs/*` or `terminal/*` methods; tools run inside
 Otto as in the other frontends.
+
+### Scheduled items are sent with `_otto/schedule/deliver`
+
+When the client lists platforms in `clientCapabilities._meta.otto.scheduleDelivery`,
+Otto sends each due item created in a chat of those platforms as the request
+`_otto/schedule/deliver` with params `{"chat": "telegram:123", "text": "..."}`
+and waits up to 60 s. A `result` with any value (`otto-connect` answers
+`{}`) marks the item delivered; an error or no answer is a failed attempt
+that Otto retries (see [`schedule`](#schedule)). `otto acp` also runs the due
+prompt items of those chats that were created in its workspace; with
+`--attach`, and on the ACP TCP listener of `otto serve`, `otto serve` runs
+them.
 
 ### `/compact` and `/context` are slash commands
 
@@ -2496,6 +2585,12 @@ a log line.
   is sent to every chat bound to that session, formatted like other replies
   and not as a reply to a message. If that chat has a prompt running, the
   wake text is sent after that prompt's reply.
+- An item created with [`schedule`](#schedule) in a chat is delivered to that
+  chat as Markdown, not as a reply to a message, also after `/new` or `/use`.
+  Otto sends the text over ACP; `otto-connect` sends it only to a chat id
+  listed in `chats` of a configured platform and keeps no copy, so Otto
+  retries a failed send. `otto-connect` connects to Otto at startup, also when
+  no chat has a session yet, and connects again after the Otto process exits.
 - The reply is sent when the turn ends, as a reply to the message that
   started it. It contains the assistant text only: reasoning and tool calls
   are not sent, and text before and after a tool call is separated by a

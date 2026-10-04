@@ -28,6 +28,7 @@ pub(crate) mod task_control;
 /// Fixed, content-free frontend notice for a successful memory proposal.
 pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
 pub mod sandbox;
+pub(crate) mod scheduled;
 pub mod tasks;
 pub mod wake;
 
@@ -193,6 +194,9 @@ pub struct Controller {
     /// Cancelled by `request_close`, which stops a background run.
     auto_cancel: CancellationToken,
     approval_control: tokio::sync::Mutex<()>,
+    /// Set by [`Controller::push_scheduled`]; the TUI rings the terminal bell
+    /// once per [`Controller::take_bell`].
+    bell: std::sync::atomic::AtomicBool,
 }
 
 /// One admitted operation. Dropping it releases admission and performs a
@@ -252,6 +256,7 @@ impl Controller {
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
+            bell: std::sync::atomic::AtomicBool::new(false),
         };
         controller.notify_memory_state();
         controller
@@ -726,19 +731,27 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        self.prompt_with_system_context(text, "", emit, cancel)
-            .await
+        self.prompt_with_system_context(
+            text,
+            "",
+            Some(crate::schedule::Origin::terminal()),
+            emit,
+            cancel,
+        )
+        .await
     }
 
     pub(crate) async fn prompt_with_system_context(
         &self,
         text: &str,
         system_context: &str,
+        origin: Option<crate::schedule::Origin>,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
+        self.begin_user_turn(&runner, origin).await;
         let task_run = runner
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))
@@ -791,6 +804,47 @@ impl Controller {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Sets the turn origin the schedule tools read and appends the scheduled
+    /// deliveries for that origin that no session has recorded yet, before the
+    /// user message. Called once per logical user turn, not for follow-ups or
+    /// wake turns.
+    pub(crate) async fn begin_user_turn(
+        &self,
+        runner: &Runner,
+        origin: Option<crate::schedule::Origin>,
+    ) {
+        runner.schedule_origin.set(origin.clone());
+        let (Some(origin), Some(store)) = (origin, self.builder.schedule.as_ref()) else {
+            return;
+        };
+        let session_id = runner.session().header().id.clone();
+        // A store or append error ends the write-back; the next user turn
+        // retries, because the row stays unmarked.
+        let Ok(deliveries) = store.pending_writebacks(&origin, &session_id, 10) else {
+            return;
+        };
+        for delivery in deliveries {
+            let appended = runner
+                .session()
+                .append(Message {
+                    role: otto_core::model::Role::Context,
+                    blocks: vec![Block::text(runner.redact_text(&delivery.context_text()))],
+                    created_at: chrono::Utc::now(),
+                    context_type: "scheduled_delivery".into(),
+                    display: true,
+                    ..Message::default()
+                })
+                .await;
+            if appended.is_err()
+                || store
+                    .mark_appended(delivery.item_id, delivery.due_at)
+                    .is_err()
+            {
+                return;
+            }
+        }
     }
 
     async fn record_skipped_followup(
@@ -855,8 +909,15 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        self.prompt_with_image_and_system_context(text, image, "", emit, cancel)
-            .await
+        self.prompt_with_image_and_system_context(
+            text,
+            image,
+            "",
+            Some(crate::schedule::Origin::terminal()),
+            emit,
+            cancel,
+        )
+        .await
     }
 
     pub(crate) async fn prompt_with_image_and_system_context(
@@ -864,11 +925,13 @@ impl Controller {
         text: &str,
         image: Block,
         system_context: &str,
+        origin: Option<crate::schedule::Origin>,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
+        self.begin_user_turn(&runner, origin).await;
         let task_run = runner
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))
@@ -1640,7 +1703,7 @@ impl Controller {
 
     // ---- replacement helpers ----
 
-    fn current_runtime(&self) -> Result<Runtime, String> {
+    pub(crate) fn current_runtime(&self) -> Result<Runtime, String> {
         let info = self
             .lock()
             .current
@@ -1741,6 +1804,7 @@ impl Controller {
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
+            bell: std::sync::atomic::AtomicBool::new(false),
         };
         controller.notify_memory_state();
         controller
@@ -1890,6 +1954,20 @@ pub(crate) async fn controller_with_approvals(
     Arc<crate::tool::bash::BashApprovals>,
     Arc<Mutex<usize>>,
 ) {
+    controller_with_approvals_and_schedule(workspace, sessions, None).await
+}
+
+/// [`controller_with_approvals`] with a scheduled-delivery store.
+#[cfg(test)]
+pub(crate) async fn controller_with_approvals_and_schedule(
+    workspace: &std::path::Path,
+    sessions: &std::path::Path,
+    schedule: Option<Arc<crate::schedule::Store>>,
+) -> (
+    Controller,
+    Arc<crate::tool::bash::BashApprovals>,
+    Arc<Mutex<usize>>,
+) {
     use crate::cli::info::SandboxNetwork;
     use crate::cli::testutil::{FakeSandbox, builder, initial_runtime, seatbelt_info};
     use crate::sandbox::direct::DirectDriver;
@@ -1910,6 +1988,7 @@ pub(crate) async fn controller_with_approvals(
     ));
     let mut builder = builder(workspace, sessions);
     builder.bash_approvals = Some(Arc::clone(&approvals));
+    builder.shared_mut().schedule = schedule;
     let runtime = initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let runner = builder

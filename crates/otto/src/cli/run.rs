@@ -443,10 +443,12 @@ pub async fn run(
             Ok(socket) => socket,
             Err(message) => return fail(stderr, &startup.redact(&message)),
         };
+        let schedule = open_schedule(&home, &mut *stderr);
         if options.acp {
             return crate::acp::attach::run(
                 &socket,
                 PathBuf::from(&workspace_path),
+                schedule,
                 stdin,
                 stdout,
                 stderr,
@@ -464,7 +466,8 @@ pub async fn run(
         } else {
             crate::tui::attach::Start::New
         };
-        return crate::tui::attach::run(&socket, &workspace_path, start, cancel, stderr).await;
+        return crate::tui::attach::run(&socket, &workspace_path, start, schedule, cancel, stderr)
+            .await;
     }
     let workspace = match leaked_workspace(Path::new(&workspace_path)) {
         Ok(workspace) => workspace,
@@ -571,6 +574,7 @@ pub async fn run(
                 None
             }
         };
+    let schedule = open_schedule(&home, &mut *stderr);
     let skill_checker = skill_checker(&config_file, &environment, &home, &mut *stderr);
     let reflection_config = match resolve_reflection(&config_file) {
         Ok(config) => config,
@@ -614,6 +618,7 @@ pub async fn run(
         auth_credentials_loaded: captured_auth.loaded,
         usage,
         task_recorder,
+        schedule,
         skill_checker,
         memory: Default::default(),
         reflector,
@@ -933,6 +938,26 @@ pub async fn run(
         None => controller,
     };
     let controller = Arc::new(controller);
+    let schedule_worker = match (&frontend, controller.builder().schedule.clone()) {
+        (Frontend::Repl | Frontend::Tui, Some(store)) => Some(tokio::spawn(
+            crate::schedule::worker::Worker {
+                store,
+                run: Some(crate::schedule::worker::RunRole {
+                    scope: crate::schedule::Scope::Terminal,
+                    workspace: Some(controller.builder().workspace_path.clone()),
+                    runner: Arc::new(crate::app::scheduled::ControllerRunner(Arc::clone(
+                        &controller,
+                    ))),
+                }),
+                deliver: Some(crate::schedule::worker::DeliverRole {
+                    scope: crate::schedule::Scope::Terminal,
+                    sink: Arc::new(crate::app::scheduled::NoticeSink(Arc::clone(&controller))),
+                }),
+            }
+            .run(cancel.child_token()),
+        )),
+        _ => None,
+    };
     let mcp_swap = background_mcp.then(|| {
         spawn_mcp_runner_swap(
             Arc::clone(&controller),
@@ -985,6 +1010,9 @@ pub async fn run(
     cancel.cancel();
     if let Some(task) = mcp_swap {
         task.abort();
+    }
+    if let Some(task) = schedule_worker {
+        let _ = task.await;
     }
     if terminate.migrating() {
         for warning in controller.migrate().await {
@@ -1326,6 +1354,24 @@ fn current_user_home() -> Option<String> {
 }
 
 /// A missing file at an implicit path is an empty one.
+/// Opens `~/.otto/schedule.db`. Without it the process runs with no schedule
+/// store and no delivery worker, after one warning.
+fn open_schedule(
+    home: &str,
+    stderr: &mut (dyn Write + Send),
+) -> Option<Arc<crate::schedule::Store>> {
+    match crate::schedule::Store::open(&Path::new(home).join(".otto/schedule.db")) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(_) => {
+            let _ = writeln!(
+                stderr,
+                "warning: schedule store unavailable, continuing without scheduled deliveries"
+            );
+            None
+        }
+    }
+}
+
 fn load_config(options: &CliOptions, home: &str) -> Result<(String, File), ()> {
     let path: PathBuf = if options.config_path.is_empty() {
         [home, ".config", "otto", "config.toml"].iter().collect()

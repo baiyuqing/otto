@@ -66,6 +66,14 @@ export interface NoticeList {
   last: number
 }
 
+/** One due scheduled delivery claimed by this page (`POST /v1/schedule/claim`). */
+export interface ScheduleItem {
+  id: string
+  /** Unix milliseconds; the occurrence key, echoed back unchanged by `scheduleDelivered`. */
+  due_at: number
+  text: string
+}
+
 export interface McpServer {
   name: string
   transport: string
@@ -332,6 +340,10 @@ export const api = {
   generatedSkills: (id: string) => json<GeneratedSkillList>(`/v1/sessions/${id}/reflection/skills`),
   revertSkill: (id: string, name: string) =>
     json<SkillRevert>(`/v1/sessions/${id}/reflection/skills/${encodeURIComponent(name)}/revert`, { method: 'POST' }),
+  // 404 means the server predates scheduled deliveries.
+  scheduleClaim: () => json<{ items: ScheduleItem[] }>('/v1/schedule/claim', { method: 'POST', body: '{}' }),
+  scheduleDelivered: (id: string, dueAt: number) =>
+    json<Record<string, never>>(`/v1/schedule/${encodeURIComponent(id)}/delivered`, { method: 'POST', body: JSON.stringify({ due_at: dueAt }) }),
   notices: (id: string, after: number) => json<NoticeList>(`/v1/sessions/${id}/notices?after=${after}`),
   listWorkflows: () => json<{ runs: WorkflowRun[] }>('/v1/workflows'),
   startWorkflow: (name: string, input: string) =>

@@ -847,6 +847,11 @@ pub async fn run(
         stderr,
     )
     .await;
+    let factory: Arc<dyn Factory> = Arc::new(ServeFactory {
+        workspaces,
+        runtime: runtime.clone(),
+        cancel: serve_cancel.clone(),
+    });
     let server = Server::new(Options {
         info: Info {
             workspace: builder.workspace_path.clone(),
@@ -857,11 +862,7 @@ pub async fn run(
             sandbox: info.sandbox.summary().to_string(),
             profiles,
         },
-        factory: Arc::new(ServeFactory {
-            workspaces,
-            runtime: runtime.clone(),
-            cancel: serve_cancel.clone(),
-        }),
+        factory: Arc::clone(&factory),
         config_path: builder.shared.config_path.clone(),
         token,
         // ponytail: `Logger` owns its sink, so the request log goes to the
@@ -869,8 +870,25 @@ pub async fn run(
         // read it.
         logger: None,
         workflows: host.workflows.clone(),
+        schedule: builder.schedule.clone(),
     });
 
+    // Runs due scheduled prompts of every origin; delivery is the web routes
+    // and the per-connection ACP workers.
+    let schedule_worker = builder.schedule.clone().map(|store| {
+        tokio::spawn(
+            crate::schedule::worker::Worker {
+                store,
+                run: Some(crate::schedule::worker::RunRole {
+                    scope: crate::schedule::Scope::Any,
+                    workspace: None,
+                    runner: Arc::new(crate::server::schedule::FactoryRunner(factory)),
+                }),
+                deliver: None,
+            }
+            .run(serve_cancel.child_token()),
+        )
+    });
     let _stdin_watch = spawn_stdin_watch(exit_on_stdin_close, serve_cancel.clone());
     let (serve_error, acp_error) = tokio::join!(
         serve_listeners(&server, tcp, socket, &serve_cancel),
@@ -896,6 +914,9 @@ pub async fn run(
     let serve_error = serve_error.or(acp_error);
     serve_cancel.cancel();
     server.cancel_token().cancel();
+    if let Some(worker) = schedule_worker {
+        let _ = worker.await;
+    }
     if terminate.migrating() {
         for warning in server.migrate().await {
             let _ = writeln!(stderr, "warning: {warning}");

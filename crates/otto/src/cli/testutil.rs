@@ -82,6 +82,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         skill_checker: None,
         memory: Default::default(),
         reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
+        logger: Arc::new(crate::log::Logger::discard()),
     });
     let mut builder = Builder::for_workspace(
         shared,
@@ -136,6 +137,7 @@ pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {
         skill_checker: None,
         memory: Default::default(),
         reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
+        logger: Arc::new(crate::log::Logger::discard()),
     })
 }
 
@@ -170,6 +172,7 @@ pub fn shared_with_sandbox_driver_override(root: &Path, driver: &str) -> Arc<Sha
         skill_checker: None,
         memory: Default::default(),
         reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
+        logger: Arc::new(crate::log::Logger::discard()),
     })
 }
 

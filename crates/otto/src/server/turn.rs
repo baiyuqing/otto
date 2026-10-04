@@ -10,8 +10,8 @@
 //! ponytail: only the latest turn per session is retained; add a ring buffer of
 //! turns if replay across turns is ever needed.
 
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use otto_core::agent::events::Event;
@@ -20,6 +20,8 @@ use otto_core::wire::events::{WireEvent, to_wire};
 use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+use crate::log::Logger;
 
 use super::metrics::{Metrics, ProviderOperationMetric};
 
@@ -44,6 +46,10 @@ struct TurnState {
     usage: Usage,
     usage_present: bool,
     tool_start: Option<Instant>,
+    provider_requests: u64,
+    provider_time: Duration,
+    tool_calls: u64,
+    tool_time: Duration,
     started_at: DateTime<Utc>,
     started_instant: Instant,
     finished_at: Option<DateTime<Utc>>,
@@ -59,6 +65,11 @@ pub struct Turn {
     pub id: String,
     /// Set once, before the turn is published; read-only afterwards.
     pub trigger: &'static str,
+    /// The session and the caller's request ID (empty when none), set before
+    /// the turn is published; they go on every log event of the turn.
+    session_id: String,
+    request_id: String,
+    log: Arc<Logger>,
     cancel: CancellationToken,
     state: Mutex<TurnState>,
     changed: watch::Sender<u64>,
@@ -69,6 +80,9 @@ impl Turn {
         Self {
             id,
             trigger,
+            session_id: String::new(),
+            request_id: String::new(),
+            log: Arc::new(Logger::discard()),
             cancel,
             state: Mutex::new(TurnState {
                 events: Vec::new(),
@@ -79,6 +93,10 @@ impl Turn {
                 usage: Usage::default(),
                 usage_present: false,
                 tool_start: None,
+                provider_requests: 0,
+                provider_time: Duration::ZERO,
+                tool_calls: 0,
+                tool_time: Duration::ZERO,
                 started_at: Utc::now(),
                 started_instant: Instant::now(),
                 finished_at: None,
@@ -87,6 +105,44 @@ impl Turn {
             }),
             changed: watch::channel(0).0,
         }
+    }
+
+    /// Names the session, the caller's request ID, and the log the turn's
+    /// events are written to. Call before the turn is shared.
+    pub fn with_log(mut self, log: Arc<Logger>, session_id: &str, request_id: &str) -> Self {
+        self.log = log;
+        self.session_id = session_id.to_string();
+        self.request_id = request_id.to_string();
+        self
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    /// `session_id`, `turn_id` and, when the turn has one, `request_id`.
+    pub fn log_ids(&self) -> Vec<(&'static str, String)> {
+        let mut fields = vec![
+            ("session_id", self.session_id.clone()),
+            ("turn_id", self.id.clone()),
+        ];
+        if !self.request_id.is_empty() {
+            fields.push(("request_id", self.request_id.clone()));
+        }
+        fields
+    }
+
+    /// The per-turn totals `turn_finished` reports.
+    pub fn log_totals(&self) -> Vec<(&'static str, String)> {
+        let state = self.lock();
+        vec![
+            ("provider_requests", state.provider_requests.to_string()),
+            ("provider_ms", state.provider_time.as_millis().to_string()),
+            ("tool_calls", state.tool_calls.to_string()),
+            ("tool_ms", state.tool_time.as_millis().to_string()),
+            ("input_tokens", state.usage.input_tokens.to_string()),
+            ("output_tokens", state.usage.output_tokens.to_string()),
+        ]
     }
 
     /// A turn waiting in its session's queue. [`Turn::start_running`] moves it
@@ -237,7 +293,18 @@ impl Turn {
                     } => {
                         // The metric is recorded and the call returns: the API
                         // call is not part of the event stream.
+                        state.provider_requests += 1;
+                        state.provider_time += *duration;
                         drop(state);
+                        let mut fields = self.log_ids();
+                        fields.extend([
+                            ("provider", provider.to_string()),
+                            ("model", model.to_string()),
+                            ("status", status.name().to_string()),
+                            ("attempts", attempts.to_string()),
+                            ("duration_ms", duration.as_millis().to_string()),
+                        ]);
+                        self.log.info("provider_request_finished", &fields);
                         metrics.provider_api_request(ProviderOperationMetric {
                             provider,
                             model,
@@ -265,7 +332,16 @@ impl Turn {
                             .unwrap_or_default();
                         let is_error = result.is_error;
                         let tool_name = tool_name.clone();
+                        state.tool_calls += 1;
+                        state.tool_time += elapsed;
                         drop(state);
+                        let mut fields = self.log_ids();
+                        fields.extend([
+                            ("tool", tool_name.clone()),
+                            ("status", if is_error { "error" } else { "ok" }.to_string()),
+                            ("duration_ms", elapsed.as_millis().to_string()),
+                        ]);
+                        self.log.info("tool_call_finished", &fields);
                         metrics.tool_call(&tool_name, is_error, elapsed);
                         if outcome.effect_certainty == otto_core::model::EffectCertainty::Unknown {
                             metrics.operation_unknown_effect(

@@ -184,12 +184,12 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 		return nil, fmt.Errorf("start agent: %w", err)
 	}
 	stdoutW.Close()
-	slog.Info("agent started", "pid", cmd.Process.Pid, "command", a.opts.Command[0])
+	slog.Info("agent_started", "pid", cmd.Process.Pid, "command", a.opts.Command[0])
 	go func() {
 		p.waitErr = cmd.Wait()
 		p.endedAt = a.opts.Now()
 		close(p.exited)
-		slog.Info("agent exited", "status", p.exitError().Status)
+		slog.Warn("agent_exited", "status", p.exitError().Status)
 	}()
 	// No SetLogger: the receive goroutine reads the logger as soon as the
 	// connection exists, and the SDK's default is slog.Default().

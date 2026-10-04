@@ -19,6 +19,7 @@ import (
 	"github.com/baiyuqing/otto/connect/internal/config"
 	"github.com/baiyuqing/otto/connect/internal/feishu"
 	"github.com/baiyuqing/otto/connect/internal/manage"
+	"github.com/baiyuqing/otto/connect/internal/metrics"
 	"github.com/baiyuqing/otto/connect/internal/state"
 	"github.com/baiyuqing/otto/connect/internal/telegram"
 )
@@ -48,7 +49,8 @@ func run() error {
 		return err
 	}
 
-	platforms, access, secretVars, err := platformsFor(cfg, store)
+	m := metrics.New()
+	platforms, access, secretVars, err := platformsFor(cfg, store, m)
 	if err != nil {
 		return err
 	}
@@ -64,8 +66,10 @@ func run() error {
 			Token:   cfg.Agent.Token,
 			Dir:     cfg.Agent.Workspace,
 			// The agent and its tools do not need the bot token or app secret.
-			Env: withoutVars(os.Environ(), secretVars...),
+			Env:     withoutVars(os.Environ(), secretVars...),
+			Metrics: m,
 		}),
+		Metrics:   m,
 		Manage:    management,
 		Platforms: platforms,
 		Access:    access,
@@ -73,14 +77,30 @@ func run() error {
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return b.Run(ctx)
+	serveMetrics(ctx, m, cfg.Metrics.Listen)
+	names := make([]string, len(platforms))
+	for i, p := range platforms {
+		names[i] = p.Name()
+	}
+	mode := "process"
+	if cfg.Agent.Address != "" {
+		mode = "address"
+	}
+	slog.Info("connector_started", "platforms", strings.Join(names, ","), "agent_mode", mode, "metrics_listen", cfg.Metrics.Listen)
+	err = b.Run(ctx)
+	reason := "signal"
+	if err != nil {
+		reason = "error"
+	}
+	slog.Info("connector_stopping", "reason", reason)
+	return err
 }
 
 // platformsFor builds the platform for every section present in cfg, the
 // admission lists by platform name, and the names of the environment
 // variables that hold their secrets. config.Load fails when no platform is
 // configured.
-func platformsFor(cfg *config.Config, store *state.Store) ([]bridge.Platform, map[string]bridge.Access, []string, error) {
+func platformsFor(cfg *config.Config, store *state.Store, m *metrics.Metrics) ([]bridge.Platform, map[string]bridge.Access, []string, error) {
 	var platforms []bridge.Platform
 	access := map[string]bridge.Access{}
 	var secretVars []string
@@ -94,7 +114,7 @@ func platformsFor(cfg *config.Config, store *state.Store) ([]bridge.Platform, ma
 		secretVars = append(secretVars, t.TokenEnv)
 	}
 	if f := cfg.Feishu; f != nil {
-		p, err := feishu.New(feishu.Options{AppID: f.AppID, AppSecret: f.AppSecret, Domain: f.Domain, Chats: f.Chats, Senders: f.Senders})
+		p, err := feishu.New(feishu.Options{AppID: f.AppID, AppSecret: f.AppSecret, Domain: f.Domain, Chats: f.Chats, Senders: f.Senders, Metrics: m})
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -115,4 +135,15 @@ func withoutVars(env []string, names ...string) []string {
 		}
 	}
 	return out
+}
+
+// serveMetrics starts the metrics endpoint. A bind failure is logged and the
+// connector runs without the endpoint.
+func serveMetrics(ctx context.Context, m *metrics.Metrics, addr string) {
+	if addr == "" {
+		return
+	}
+	if err := m.Serve(ctx, addr); err != nil {
+		slog.Warn("metrics_listen_failed", "address", addr, "error", err)
+	}
 }

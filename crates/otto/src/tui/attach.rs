@@ -318,6 +318,9 @@ pub(crate) async fn run(
                     scope: Scope::Terminal,
                     sink: Arc::new(ChannelSink(deliver_tx.clone())),
                 }),
+                // The terminal screen is owned by the TUI.
+                logger: Arc::new(crate::log::Logger::discard()),
+                metrics: None,
             }
             .run(worker_cancel.clone()),
         )

@@ -18,6 +18,15 @@ type Config struct {
 	Agent    Agent
 	Telegram *Telegram // nil when the [telegram] section is absent
 	Feishu   *Feishu   // nil when the [feishu] section is absent
+	Metrics  Metrics
+}
+
+// DefaultMetricsListen is the [metrics].listen default.
+const DefaultMetricsListen = "127.0.0.1:9465"
+
+// Metrics is the [metrics] table.
+type Metrics struct {
+	Listen string // loopback host:port; "" turns the endpoint off
 }
 
 // Agent is the ACP agent the connector starts.
@@ -73,6 +82,9 @@ type file struct {
 		Chats        []string `toml:"chats"`
 		Senders      []string `toml:"senders"`
 	} `toml:"feishu"`
+	Metrics struct {
+		Listen *string `toml:"listen"`
+	} `toml:"metrics"`
 }
 
 // Load reads and validates path. Unknown keys, a relative workspace, an
@@ -131,7 +143,20 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: [agent].workspace must be an absolute path, got %q", ws)
 	}
 
-	cfg := &Config{Agent: Agent{Command: cmd, Workspace: filepath.Clean(ws), Address: f.Agent.Address, TokenEnv: f.Agent.TokenEnv, Token: token}}
+	listen := DefaultMetricsListen
+	if f.Metrics.Listen != nil {
+		listen = *f.Metrics.Listen
+	}
+	if listen != "" {
+		host, port, err := net.SplitHostPort(listen)
+		ip := net.ParseIP(host)
+		p, perr := strconv.Atoi(port)
+		if err != nil || (host != "localhost" && (ip == nil || !ip.IsLoopback())) || perr != nil || p < 0 || p > 65535 {
+			return nil, errors.New("config: [metrics].listen must be a loopback host:port (127.0.0.1, ::1 or localhost) or empty")
+		}
+	}
+
+	cfg := &Config{Metrics: Metrics{Listen: listen}, Agent: Agent{Command: cmd, Workspace: filepath.Clean(ws), Address: f.Agent.Address, TokenEnv: f.Agent.TokenEnv, Token: token}}
 	if t := f.Telegram; t != nil {
 		if t.TokenEnv == "" {
 			return nil, errors.New("config: [telegram].token_env is required")

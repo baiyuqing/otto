@@ -314,12 +314,20 @@ impl Client {
         text: &str,
         image: Option<&Block>,
     ) -> Result<TurnStream, Error> {
-        self.start_turn_with_channel(session_id, text, image, None, Some(&Origin::terminal()))
-            .await
+        self.start_turn_with_channel(
+            session_id,
+            text,
+            image,
+            None,
+            Some(&Origin::terminal()),
+            None,
+        )
+        .await
     }
 
     /// Starts a queued turn with optional per-turn chat channel metadata and
     /// origin. Without an origin the server records the turn as `web`.
+    /// `request_id` is sent as `X-Request-Id` for log correlation.
     pub async fn start_turn_with_channel(
         &self,
         session_id: &str,
@@ -327,6 +335,7 @@ impl Client {
         image: Option<&Block>,
         channel: Option<Channel>,
         origin: Option<&Origin>,
+        request_id: Option<&str>,
     ) -> Result<TurnStream, Error> {
         let mut body = json!({ "text": text, "queue": true });
         if let Some(channel) = channel {
@@ -338,9 +347,11 @@ impl Client {
         if let Some(image) = image {
             body["image"] = json!({ "data": image.data, "mime_type": image.mime_type });
         }
-        let response = self
-            .send(self.post(&format!("{BASE}/v1/sessions/{session_id}/turns"), &body))
-            .await?;
+        let mut request = self.post(&format!("{BASE}/v1/sessions/{session_id}/turns"), &body);
+        if let Some(request_id) = request_id {
+            request = request.header("x-request-id", request_id);
+        }
+        let response = self.send(request).await?;
         let turn_id = response
             .headers()
             .get(TURN_ID_HEADER)
@@ -1040,6 +1051,7 @@ mod tests {
                 None,
                 Some(Channel::Feishu),
                 Some(&Origin::chat("feishu", "oc_1").unwrap()),
+                None,
             )
             .await
             .unwrap();
@@ -1068,6 +1080,39 @@ mod tests {
                 "origin": "chat:feishu:oc_1"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn start_turn_sends_the_request_id_header_only_when_given() {
+        let dir = tempfile::tempdir().expect("dir");
+        let socket = dir.path().join("serve.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let log = Arc::clone(&seen);
+        let app = Router::new().fallback(move |headers: axum::http::HeaderMap| {
+            let log = Arc::clone(&log);
+            async move {
+                log.lock().unwrap().push(
+                    headers
+                        .get("x-request-id")
+                        .map(|value| value.to_str().unwrap().to_string()),
+                );
+                sse(
+                    "t1",
+                    "id: 0\nevent: turn_end\ndata: {\"type\":\"turn_end\"}\n\n",
+                )
+            }
+        });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = Client::new(&socket).expect("client");
+        client
+            .start_turn_with_channel("s1", "a", None, None, None, Some("req-1"))
+            .await
+            .unwrap();
+        client.start_turn("s1", "b", None).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![Some("req-1".to_string()), None]);
     }
 
     #[tokio::test]

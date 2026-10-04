@@ -54,6 +54,8 @@ use crate::app::{self, ApprovalDecision, ApprovalRequest, Channel, Controller, S
 use crate::cli::info::SandboxInfo;
 #[cfg(test)]
 use crate::cli::info::{SandboxMode, SandboxNetwork, SandboxReason};
+pub use crate::log::Logger;
+pub(crate) use crate::log::request_id;
 use metrics::{Metrics, SessionContext};
 use otto_core::wire::events::WireEvent;
 use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
@@ -261,76 +263,6 @@ pub struct Options {
     /// The scheduled-delivery store shared by every workspace; `None` when
     /// `~/.otto/schedule.db` could not be opened.
     pub schedule: Option<Arc<crate::schedule::Store>>,
-}
-
-// ---- logging ----
-
-/// ponytail: no logging crate is pinned and the server writes a handful of
-/// fixed lines, so a small formatter beats adding `tracing` plus a subscriber.
-/// Swap for `tracing` if any other crate needs structured logs.
-pub struct Logger {
-    sink: Mutex<Box<dyn std::io::Write + Send>>,
-}
-
-impl std::fmt::Debug for Logger {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Logger")
-    }
-}
-
-impl Logger {
-    pub fn stderr() -> Self {
-        Self::new(Box::new(std::io::stderr()))
-    }
-
-    pub fn new(sink: Box<dyn std::io::Write + Send>) -> Self {
-        Self {
-            sink: Mutex::new(sink),
-        }
-    }
-
-    pub fn info(&self, message: &str, fields: &[(&str, String)]) {
-        self.write("INFO", message, fields);
-    }
-
-    pub fn error(&self, message: &str, fields: &[(&str, String)]) {
-        self.write("ERROR", message, fields);
-    }
-
-    fn write(&self, level: &str, message: &str, fields: &[(&str, String)]) {
-        let mut line = format!(
-            "time={} level={level} msg={}",
-            chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
-            quote(message)
-        );
-        for (key, value) in fields {
-            line.push(' ');
-            line.push_str(key);
-            line.push('=');
-            line.push_str(&quote(value));
-        }
-        line.push('\n');
-        let mut sink = self
-            .sink
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let _ = sink.write_all(line.as_bytes());
-        let _ = sink.flush();
-    }
-}
-
-/// The log quoting rule: quote an empty value, and any value carrying a space,
-/// a quote, an equals sign, a backslash, or a control character.
-fn quote(value: &str) -> String {
-    let unsafe_byte = value.is_empty()
-        || value
-            .chars()
-            .any(|c| c <= ' ' || c == '"' || c == '=' || c == '\\' || c == '\u{7f}');
-    if unsafe_byte {
-        serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
-    } else {
-        value.to_string()
-    }
 }
 
 // ---- registry ----
@@ -1065,8 +997,13 @@ impl Server {
                     Ok(None) => None,
                     Ok(Some(wake)) => match new_id() {
                         Ok(id) => {
-                            let turn =
-                                Arc::new(Turn::new(id, TRIGGER_TASK, self.cancel.child_token()));
+                            let turn = Arc::new(
+                                Turn::new(id, TRIGGER_TASK, self.cancel.child_token()).with_log(
+                                    Arc::clone(&self.log),
+                                    &session.ctrl.info().session_id,
+                                    "",
+                                ),
+                            );
                             turn.start_running(session.ctrl.history().len());
                             state.turn = Some(Arc::clone(&turn));
                             Some(Ok((turn, wake)))
@@ -1091,10 +1028,8 @@ impl Server {
         self.bump_status();
 
         self.metrics.turn_started();
-        let mut fields = vec![
-            ("turn_id", turn.id.clone()),
-            ("trigger", TRIGGER_TASK.to_string()),
-        ];
+        let mut fields = turn.log_ids();
+        fields.push(("trigger", TRIGGER_TASK.to_string()));
         if let Some(kind) = session.ctrl.subagent_tasks().and_then(|tasks| {
             tasks
                 .notifications()
@@ -1153,24 +1088,18 @@ impl Server {
         let summary = turn.summary();
         self.metrics.turn_finished(&summary.status, turn.elapsed());
         if let Some(message) = error.filter(|_| !canceled) {
-            self.log.error(
-                "turn_error",
-                &[
-                    ("turn_id", turn.id.clone()),
-                    ("trigger", trigger.to_string()),
-                    ("error", message),
-                ],
-            );
+            let mut fields = turn.log_ids();
+            fields.extend([("trigger", trigger.to_string()), ("error", message)]);
+            self.log.error("turn_error", &fields);
         }
-        self.log.info(
-            "turn_finished",
-            &[
-                ("turn_id", turn.id.clone()),
-                ("trigger", trigger.to_string()),
-                ("status", summary.status.clone()),
-                ("duration_ms", turn.elapsed().as_millis().to_string()),
-            ],
-        );
+        let mut fields = turn.log_ids();
+        fields.extend([
+            ("trigger", trigger.to_string()),
+            ("status", summary.status.clone()),
+            ("duration_ms", turn.elapsed().as_millis().to_string()),
+        ]);
+        fields.extend(turn.log_totals());
+        self.log.info("turn_finished", &fields);
     }
 
     /// Publishes the waiting approval, then waits for the decision route, the
@@ -1255,9 +1184,9 @@ impl Server {
         session: &Arc<OpenSession>,
         text: String,
         image: Option<Block>,
-        channel: Option<Channel>,
-        origin: Option<crate::schedule::Origin>,
+        (channel, origin): (Option<Channel>, Option<crate::schedule::Origin>),
         queue: bool,
+        request_id: &str,
     ) -> Result<Arc<Turn>, String> {
         let (turn, running) = {
             let mut state = session.lock();
@@ -1270,8 +1199,14 @@ impl Server {
             }
             let id = new_id()?;
             let cancel = self.cancel.child_token();
+            let session_id = session.ctrl.info().session_id;
+            let log = Arc::clone(&self.log);
             if busy {
-                let turn = Arc::new(Turn::queued(id, TRIGGER_USER, cancel));
+                let turn = Arc::new(Turn::queued(id, TRIGGER_USER, cancel).with_log(
+                    log,
+                    &session_id,
+                    request_id,
+                ));
                 state.queue.push_back(QueuedTurn {
                     turn: Arc::clone(&turn),
                     text,
@@ -1281,7 +1216,11 @@ impl Server {
                 });
                 (turn, None)
             } else {
-                let turn = Arc::new(Turn::new(id, TRIGGER_USER, cancel));
+                let turn = Arc::new(Turn::new(id, TRIGGER_USER, cancel).with_log(
+                    log,
+                    &session_id,
+                    request_id,
+                ));
                 turn.start_running(session.ctrl.history().len());
                 state.turn = Some(Arc::clone(&turn));
                 (turn, Some((text, image, channel, origin)))
@@ -1339,13 +1278,9 @@ impl Server {
     ) {
         turn.push_event(WireEvent::user_message(&text, image.is_some()));
         self.metrics.turn_started();
-        self.log.info(
-            "turn_started",
-            &[
-                ("turn_id", turn.id.clone()),
-                ("trigger", TRIGGER_USER.to_string()),
-            ],
-        );
+        let mut fields = turn.log_ids();
+        fields.push(("trigger", TRIGGER_USER.to_string()));
+        self.log.info("turn_started", &fields);
         let server = Arc::clone(self);
         let session = Arc::clone(session);
         tokio::spawn(async move {
@@ -1453,16 +1388,6 @@ fn route_label(method: &Method, matched: Option<&str>) -> String {
         Some("/assets/{*path}") => "GET /assets/".to_string(),
         Some(path) => format!("{method} {path}"),
     }
-}
-
-/// Reduces a client-supplied `X-Request-ID` to at most 64 printable ASCII
-/// bytes, per the design's trust-and-safety rule.
-pub(crate) fn request_id(raw: &[u8]) -> String {
-    raw.iter()
-        .take(64)
-        .filter(|byte| (0x20..0x7f).contains(*byte))
-        .map(|&byte| byte as char)
-        .collect()
 }
 
 // ---- error and JSON helpers ----
@@ -1955,14 +1880,25 @@ struct StartTurnImage {
     mime_type: String,
 }
 
+/// The client-supplied `X-Request-Id` header, sanitized; empty when absent
+/// (the middleware's generated fallback is not read here).
+fn client_request_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .map(|value| request_id(value.as_bytes()))
+        .unwrap_or_default()
+}
+
 async fn start_turn(
     State(server): State<Arc<Server>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
+    let request_id = client_request_id(&headers);
     // Unlike create and rename, the body is decoded unconditionally here, so an
     // empty body is a 400.
     let parsed: StartTurnBody = match serde_json::from_slice(&body) {
@@ -2001,9 +1937,9 @@ async fn start_turn(
         &session,
         parsed.text,
         image,
-        parsed.channel,
-        Some(origin),
+        (parsed.channel, Some(origin)),
         parsed.queue,
+        &request_id,
     ) {
         Ok(turn) => turn,
         Err(error) if error == TURN_ACTIVE => {
@@ -8090,5 +8026,113 @@ mod tests {
         let summary = harness.wait_turn_done(&id, &turn_id).await;
         assert_eq!(summary["trigger"], turn::TRIGGER_TASK);
         assert_eq!(summary["status"], "ok");
+    }
+
+    // ---- observability: request ID and step events ----
+
+    fn log_lines(harness: &Harness, event: &str) -> Vec<String> {
+        let needle = format!("msg={event} ");
+        harness
+            .logged()
+            .lines()
+            .filter(|line| line.contains(&needle))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_turn_logs_its_request_id_on_every_event() {
+        let harness = approval_harness();
+        let id = harness.create().await;
+        let body = serde_json::json!({"text": "run it", "queue": false}).to_string();
+        let response = harness
+            .raw(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(&body),
+                &[("x-request-id", b"req-abc")],
+            )
+            .await;
+        let turn_id = turn_header(&response);
+        let mut reader = SseReader::new(response);
+        let requested = frame_named(&mut reader, "approval_requested").await;
+        let approval = requested["approval_id"].as_str().expect("id").to_string();
+        decide(&harness, &id, &approval, "allow").await;
+        ends_of(reader).await;
+        harness.wait_turn_done(&id, &turn_id).await;
+
+        let ids = format!("session_id={id} turn_id={turn_id} request_id=req-abc");
+        for event in [
+            "turn_started",
+            "provider_request_finished",
+            "tool_call_finished",
+            "turn_finished",
+        ] {
+            let lines = log_lines(&harness, event);
+            assert!(!lines.is_empty(), "no {event}:\n{}", harness.logged());
+            assert!(
+                lines.iter().all(|line| line.contains(&ids)),
+                "{event}: {lines:?}"
+            );
+        }
+        let finished = log_lines(&harness, "turn_finished").remove(0);
+        for field in [
+            "provider_requests=4 ",
+            "provider_ms=",
+            "tool_calls=",
+            "tool_ms=",
+            "input_tokens=",
+            "output_tokens=",
+        ] {
+            assert!(finished.contains(field), "{field}: {finished}");
+        }
+        let provider = log_lines(&harness, "provider_request_finished").remove(0);
+        for field in [
+            "provider=",
+            "model=",
+            "status=",
+            "attempts=",
+            "duration_ms=",
+        ] {
+            assert!(provider.contains(field), "{field}: {provider}");
+        }
+        let tool = log_lines(&harness, "tool_call_finished").remove(0);
+        assert!(tool.contains("tool=bash"), "{tool}");
+        assert!(tool.contains("status=ok") || tool.contains("status=error"));
+        assert!(
+            log_lines(&harness, "http_request").iter().any(|line| line
+                .contains("route=\"POST /v1/sessions/{id}/turns\"")
+                && line.contains("request_id=req-abc")),
+            "{}",
+            harness.logged()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_turn_without_the_header_logs_no_request_id_field() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["ok".to_string()],
+                ..Script::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(r#"{"text":"hi","stream":false}"#),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        for event in ["turn_started", "provider_request_finished", "turn_finished"] {
+            let lines = log_lines(&harness, event);
+            assert!(!lines.is_empty(), "no {event}");
+            for line in lines {
+                assert!(line.contains(&format!("session_id={id} ")), "{line}");
+                assert!(!line.contains("request_id="), "{line}");
+            }
+        }
     }
 }

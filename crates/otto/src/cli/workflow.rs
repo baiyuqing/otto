@@ -317,6 +317,7 @@ pub async fn build_controller(
             step_timeout: runtime.resilience.deadlines.workflow_step_timeout,
             cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
         },
+        Arc::clone(&builder.logger),
     );
     controller.attach_approvals(&builder.approvals)?;
     controller.set_guard(Box::new(lock));

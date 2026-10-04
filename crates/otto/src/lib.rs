@@ -23,6 +23,7 @@ pub mod storage;
 pub mod subagent;
 pub mod tool;
 pub mod tui;
+pub mod typesafe;
 pub mod urlprivacy;
 pub mod usage;
 pub mod workflow;

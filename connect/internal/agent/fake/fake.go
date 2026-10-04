@@ -345,8 +345,12 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 		}
 		out := []map[string]string{}
 		for _, l := range lines {
-			f := strings.SplitN(l, "\t", 3)
-			out = append(out, map[string]string{"id": f[0], "action": "create", "kind": f[1], "key": "k", "text": f[2], "reason": "because", "origin": "model"})
+			f := strings.SplitN(l, "\t", 4)
+			c := map[string]string{"id": f[0], "action": "create", "kind": f[1], "key": "k", "text": f[2], "reason": "because", "origin": "model"}
+			if len(f) > 3 {
+				c["advice"] = f[3] // optional fourth seed column
+			}
+			out = append(out, c)
 		}
 		return map[string]any{"candidates": out, "nextCursor": next}, nil
 	case "_otto/memory/review":

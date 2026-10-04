@@ -4,6 +4,7 @@
 //! startup path is reachable from integration tests without spawning a process.
 
 pub mod acp;
+pub mod advice;
 pub mod boundary;
 /// The phase-4c seam is gone: `otto::app` is the real controller and every
 /// `cli::controller::…` path keeps resolving to it.

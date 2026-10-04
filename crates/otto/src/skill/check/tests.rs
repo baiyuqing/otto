@@ -191,9 +191,11 @@ async fn client_sends_bearer_auth_and_all_four_questions() {
         http_response(200, &clean_answers_body())
     })
     .await;
-    let client = TypeSafeClient::new(server.base_url.clone(), "secret-key");
+    let client = Client::new(server.base_url.clone(), "secret-key");
 
-    let answers = client.check("SKILL.md text").await.expect("check succeeds");
+    let answers = check(&client, "SKILL.md text")
+        .await
+        .expect("check succeeds");
 
     assert_eq!(answers.model, "jev-1.13.0");
     assert_eq!(answers.answers.len(), 4);
@@ -240,10 +242,9 @@ async fn client_retries_429_then_succeeds_and_writes_one_row() {
         }
     })
     .await;
-    let client =
-        TypeSafeClient::new(server.base_url.clone(), "key").with_backoff(vec![Duration::ZERO]);
+    let client = Client::new(server.base_url.clone(), "key").with_backoff(vec![Duration::ZERO]);
 
-    let answers = client.check("state").await.expect("retry then succeed");
+    let answers = check(&client, "state").await.expect("retry then succeed");
 
     assert_eq!(answers.answers.len(), 4);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -258,9 +259,9 @@ async fn client_401_is_not_retried() {
         http_response(401, "unauthorized")
     })
     .await;
-    let client = TypeSafeClient::new(server.base_url.clone(), "key").with_backoff(vec![]);
+    let client = Client::new(server.base_url.clone(), "key").with_backoff(vec![]);
 
-    let error = client.check("state").await.expect_err("401 is an error");
+    let error = check(&client, "state").await.expect_err("401 is an error");
 
     assert_eq!(error, CheckError::Status(401));
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
@@ -279,9 +280,9 @@ async fn client_missing_answer_is_invalid_response() {
         http_response(200, &body)
     })
     .await;
-    let client = TypeSafeClient::new(server.base_url.clone(), "key");
+    let client = Client::new(server.base_url.clone(), "key");
 
-    let error = client.check("state").await.expect_err("missing answers");
+    let error = check(&client, "state").await.expect_err("missing answers");
 
     assert_eq!(error, CheckError::InvalidResponse);
 }

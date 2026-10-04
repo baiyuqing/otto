@@ -480,18 +480,7 @@ impl Store {
     /// Records pending candidates. Every candidate lands as `pending`: a
     /// proposal never becomes a record without a human review.
     pub fn propose(&self, candidates: &[Candidate]) -> Result<Vec<Candidate>> {
-        preflight_batch_shape(candidates)?;
-        validate_proposal_batch(candidates)?;
-        let mut seen = std::collections::BTreeSet::new();
-        for candidate in candidates {
-            if !candidate.proposed.source.observation_id.is_empty() {
-                return Err(invalid_request("candidate observation"));
-            }
-            if !seen.insert(candidate.id.clone()) {
-                return Err(Error::new(ErrorKind::Conflict));
-            }
-            guard_candidate(self.guard(), candidate)?;
-        }
+        self.check_proposals(candidates)?;
         let batch: Vec<Candidate> = candidates.to_vec();
         let stored = batch.clone();
         self.with_write(move |connection| {
@@ -524,6 +513,24 @@ impl Store {
             Ok(((), generation))
         })?;
         Ok(batch)
+    }
+
+    /// Runs every check [`Store::propose`] runs before it writes: batch shape,
+    /// proposal validation, duplicate ids, and the content guard.
+    pub fn check_proposals(&self, candidates: &[Candidate]) -> Result<()> {
+        preflight_batch_shape(candidates)?;
+        validate_proposal_batch(candidates)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for candidate in candidates {
+            if !candidate.proposed.source.observation_id.is_empty() {
+                return Err(invalid_request("candidate observation"));
+            }
+            if !seen.insert(candidate.id.clone()) {
+                return Err(Error::new(ErrorKind::Conflict));
+            }
+            guard_candidate(self.guard(), candidate)?;
+        }
+        Ok(())
     }
 
     pub fn get_candidate(&self, reference: &CandidateRef) -> Result<Candidate> {

@@ -65,7 +65,7 @@ pub(super) struct PendingParams {
 
 fn candidate_json(candidate: &Candidate) -> Value {
     let proposed = &candidate.proposed;
-    json!({
+    let mut value = json!({
         "id": candidate.id,
         "action": candidate.action.as_str(),
         "kind": proposed.kind,
@@ -74,7 +74,11 @@ fn candidate_json(candidate: &Candidate) -> Value {
         "reason": candidate.reason,
         "origin": proposed.source.origin.map_or("unknown", |origin| origin.as_str()),
         "scope": {"namespace": proposed.scope.namespace, "id": proposed.scope.id},
-    })
+    });
+    if let Some(line) = crate::memory::advice::advice_line(proposed) {
+        value["advice"] = Value::String(line);
+    }
+    value
 }
 
 pub(super) fn pending(controller: &Controller, params: &PendingParams) -> Reply {
@@ -126,4 +130,40 @@ pub(super) fn review(controller: &Controller, params: &ReviewParams) -> Reply {
         "record": result.record.map(|record| json!({"id": record.id, "revision": record.revision})),
         "forgotten": result.tombstone.map(|tombstone| tombstone.id),
     }))
+}
+
+#[cfg(test)]
+mod advice_tests {
+    use super::*;
+    use crate::memory::advice::testing::{LINE, candidate};
+
+    fn service() -> (tempfile::TempDir, crate::memory::Service) {
+        let (directory, store) = crate::memory::turso::testsupport::open_temp();
+        (
+            directory,
+            crate::memory::Service::new(store, crate::memory::decide_default_policy),
+        )
+    }
+
+    #[test]
+    fn candidate_json_carries_the_rendered_advice_line_as_a_string() {
+        let (_directory, service) = service();
+        let scope = crate::memory::Scope::new(crate::memory::NAMESPACE_USER, "user-1");
+
+        let value = candidate_json(&candidate(&service, scope, true));
+
+        assert_eq!(value["advice"], Value::String(LINE.to_owned()));
+        assert_eq!(value["key"], "editor");
+    }
+
+    #[test]
+    fn candidate_json_omits_advice_when_there_is_none() {
+        let (_directory, service) = service();
+        let scope = crate::memory::Scope::new(crate::memory::NAMESPACE_USER, "user-1");
+
+        let value = candidate_json(&candidate(&service, scope, false));
+
+        assert!(value.get("advice").is_none(), "{value}");
+        assert_eq!(value.as_object().expect("object").len(), 8);
+    }
 }

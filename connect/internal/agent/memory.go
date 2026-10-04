@@ -56,6 +56,8 @@ type MemoryCandidate struct {
 	Text   string `json:"text"`
 	Reason string `json:"reason"`
 	Origin string `json:"origin"`
+	// Advice is a rendered single line from the server; shown verbatim, not parsed.
+	Advice string `json:"advice,omitempty"`
 }
 
 // MemoryReviewResult is the agent's answer to a review. Record is set when an

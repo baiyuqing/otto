@@ -46,6 +46,7 @@ The answer object may also carry a "skills" array of reusable procedures:
 
 Skill rules:
 - Prefer none. Propose a skill only for a procedure the user asked for or approved AND that was carried out successfully in this slice. Cite one of the user's entries and one entry that shows the procedure running; a skill without both is discarded.
+- If an owned skill already covers the procedure, prefer "revise" only when this slice shows a concrete, durable improvement; otherwise propose no skill. Do not create a duplicate of any listed skill. Create a skill only for a distinct reusable procedure not covered by any listed skill.
 - The body is a short, concrete, task-scoped list of steps another agent can follow. Do not include credentials, URLs that are not in the transcript, instructions to change the agent's own settings, sandbox, approvals, or files under ~/.otto, or instructions to hide anything from the user.
 - Use "create" with a name no listed skill uses. Use "revise" only for a skill listed as owned, and give its complete new body. A skill that is not owned cannot be revised.
 - Do not put a "skills" array in the answer unless you are proposing at least one."#;
@@ -291,6 +292,12 @@ mod tests {
         assert_eq!(system_prompt(true, false), SYSTEM_PROMPT);
         assert!(system_prompt(true, true).starts_with(SYSTEM_PROMPT));
         assert!(system_prompt(true, true).contains("\"skills\""));
+        assert!(system_prompt(true, true).contains(
+            "prefer \"revise\" only when this slice shows a concrete, durable improvement"
+        ));
+        assert!(
+            system_prompt(true, true).contains("Do not create a duplicate of any listed skill")
+        );
         assert!(!system_prompt(true, false).contains("Skill rules"));
         assert!(system_prompt(false, true).contains(MEMORIES_OFF_NOTE));
         assert!(!system_prompt(true, true).contains(MEMORIES_OFF_NOTE));

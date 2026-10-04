@@ -190,6 +190,8 @@ var Commands = []Command{
 	{"stop", "Cancel the running turn and clear the queue", false},
 	{"compact", "Compact the session context: /compact [focus]", true},
 	{"context", "Show what the next request sends, with token counts", true},
+	{"reflect", "Review this session: /reflect [focus]", true},
+	{"skill", "List generated skills or undo one: /skill generated | /skill revert <name>", true},
 	{"sessions", "List the newest sessions", false},
 	{"use", "Switch to a session: /use <id>", false},
 	{"memory", "List or review pending memory candidates", false},
@@ -302,7 +304,7 @@ func (c *chat) approvalDialogue(sid string, generation uint64, approvalCtx conte
 		c.mu.Unlock()
 
 		ctx, stop := context.WithTimeout(approvalCtx, 35*time.Second)
-		reply, err := c.b.opts.Agent.ApprovalMessage(ctx, sid, chatPrompt(m))
+		reply, err := c.b.opts.Agent.ApprovalMessageWithChannel(ctx, sid, m.Text, m.Platform, chatPrompt(m))
 		queue, response := false, ""
 		if errors.Is(err, agent.ErrApprovalUnsupported) {
 			queue = true
@@ -361,6 +363,20 @@ func (b *Bridge) sessionLock(id string) *sync.Mutex {
 
 // Update implements agent.Handler. It only takes a mutex.
 func (b *Bridge) Update(sid string, u acp.SessionUpdate) {
+	if text, ok := agent.ReflectionNotice(u); ok {
+		b.mu.Lock()
+		chats := make([]*chat, 0, len(b.chats))
+		for _, c := range b.chats {
+			chats = append(chats, c)
+		}
+		b.mu.Unlock()
+		for _, c := range chats {
+			if b.opts.Store.Session(c.key) == sid {
+				c.sendReflectionNotice(sid, text)
+			}
+		}
+		return
+	}
 	b.mu.Lock()
 	c := b.bySession[sid]
 	b.mu.Unlock()
@@ -394,8 +410,9 @@ type chat struct {
 	approvalRunning    bool
 	approvalCancel     context.CancelFunc
 	approvalGeneration uint64
-	running            bool // a worker goroutine owns the queue
-	using              bool // a /use is loading a session
+	running            bool          // a worker goroutine owns the queue
+	turnDone           chan struct{} // closes after this turn's chat reply is sent
+	using              bool          // a /use is loading a session
 	sid                string
 	stopped            bool // /stop arrived during the current turn
 	perm               *permission
@@ -501,6 +518,19 @@ func (c *chat) work() {
 
 // turn runs one message through the agent and sends the reply.
 func (c *chat) turn(m Message) {
+	turnDone := make(chan struct{})
+	c.mu.Lock()
+	c.turnDone = turnDone
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.turnDone == turnDone {
+			c.turnDone = nil
+		}
+		c.mu.Unlock()
+		close(turnDone)
+	}()
+
 	ctx := c.b.workCtx
 	typingDone := make(chan struct{})
 	defer close(typingDone)
@@ -533,7 +563,7 @@ func (c *chat) turn(m Message) {
 		c.b.bySession[sid] = c
 		c.b.mu.Unlock()
 
-		stop, err = c.b.opts.Agent.Prompt(ctx, sid, chatPrompt(m))
+		stop, err = c.b.opts.Agent.PromptWithChannel(ctx, sid, m.Text, m.Platform, chatPrompt(m))
 
 		c.b.mu.Lock()
 		delete(c.b.bySession, sid)
@@ -587,14 +617,31 @@ func (c *chat) turn(m Message) {
 	}
 }
 
+func (c *chat) sendReflectionNotice(sessionID, text string) {
+	c.mu.Lock()
+	turnDone := c.turnDone
+	c.mu.Unlock()
+	go func() {
+		if turnDone != nil {
+			select {
+			case <-turnDone:
+			case <-c.b.workCtx.Done():
+				return
+			}
+		}
+		if c.b.opts.Store.Session(c.key) == sessionID {
+			c.send(c.b.workCtx, "", text)
+		}
+	}()
+}
+
 // memoryHint follows a turn that proposed a memory change. Only a person can
 // decide it, through the connector's commands, not by writing to the model.
 const memoryHint = "Memory changes are proposals. Send /memory to review them."
 
-// chatPrompt adds the current transport to each turn, including resumed and
-// shared sessions. It is ordinary ACP text, not a system instruction override.
-// An agent command is sent as typed: `otto acp` matches only a prompt that is
-// the whole command.
+// chatPrompt is the legacy fallback for agents that do not advertise
+// _meta.otto.channelContext. Current Otto receives this platform as structured
+// per-turn metadata instead. Agent commands are sent as typed.
 func chatPrompt(m Message) string {
 	if f := strings.Fields(m.Text); len(f) > 0 && slices.ContainsFunc(Commands, func(c Command) bool {
 		return c.Agent && "/"+c.Name == f[0]
@@ -992,6 +1039,9 @@ const memoryUsage = "Usage: /memory | /memory accept <id> | /memory reject <id>"
 // pending candidates, or accepts or rejects one. It never goes through the
 // model, and it does not wait for a running turn.
 func (c *chat) cmdMemory(m Message, args []string) {
+	if len(args) == 1 && args[0] == "review" {
+		args = nil
+	}
 	go func() {
 		c.memoryMu.Lock()
 		defer c.memoryMu.Unlock()

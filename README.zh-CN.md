@@ -2,18 +2,19 @@
   <img src="docs/logo.svg?v=2" alt="Otto 标志" width="320">
 </p>
 
-# Otto — 终端里的本地优先 Agent
+# Otto — 本地优先的通用个人 AI Agent
 
 [English](README.md) · [用户手册（英文）](docs/user-manual.md)
 
-**Otto 是一个使用 Rust 编写、优先使用本地存储的 Agent。**
-给它一项任务，它会循环调用模型、按需使用工具，并在需要时压缩上下文。
-支持通过 API key 连接 OpenAI-compatible 接口，或通过 `otto login`
-登录使用 ChatGPT provider。模型请求会发送给所选服务；运行时、会话历史和记忆存储位于本地。
+**Otto 是一个使用 Rust 编写的通用个人 AI Agent，帮助你研究、写作、规划、编程和处理日常任务。**
+它按需调用当前会话可用的工具，并受对应权限约束。可在终端和浏览器中使用，
+也可通过 `otto-connect` 从 Telegram 或飞书使用；连接 `otto serve` 时，这些聊天还能共享服务端会话。
+支持通过 API key 连接 OpenAI-compatible 接口，或通过 `otto login` 登录使用 ChatGPT provider。
+模型请求会发送给所选服务；“本地优先”指运行时、会话历史和默认记忆存储位于本地，并不表示模型在本地运行。
 
-- **在终端里工作：** 全屏 TUI、面向管道的 REPL，以及用于脚本的非交互模式。
-- **限定访问范围：** 文件工具限制在工作区内，Shell 命令默认通过 macOS Seatbelt 沙箱执行。
-- **不必一直盯着：** 持久化会话、本地记忆、可复用 Skills、有边界的子代理、定时器；`otto serve` 还可选把飞书消息送进会话 inbox。
+- **多种入口：** 终端中的全屏 TUI、REPL 和脚本模式，浏览器 Web UI，以及通过 `otto-connect` 接入的 Telegram、飞书。
+- **持续协作：** 持久化会话、需人工审核的记忆候选、可复用 Skills、按需或自动反思、有边界的子代理、定时器和可恢复的持久化 workflow。
+- **限定访问范围：** 文件工具限制在工作区内；macOS 默认通过 Seatbelt 沙箱执行 Shell 命令。
 
 ## 从源码安装
 
@@ -30,8 +31,8 @@ make install
 otto --help
 ```
 
-`make install` 会先刷新并嵌入 Web UI，构建 release 二进制，然后安装到
-`~/.local/bin/otto`，并将随附 skills 安装到 `~/.otto/skills/`。请确认
+`make install` 会先刷新并嵌入 Web UI，构建 Otto 和 `otto-connect`，将两者安装到
+`~/.local/bin/`，并将随附 skills 安装到 `~/.otto/skills/`。请确认
 `~/.local/bin` 已在 `PATH` 中。若直接运行 `cargo build` 且此前未执行
 `make ui`，二进制中只会嵌入一行占位文本。
 
@@ -95,9 +96,10 @@ API key 从配置中的 `api_key_env` 指定变量读取，回退变量为 `OTTO
 进入交互界面后，可以依次输入这些任务示例：
 
 ```text
-这个工作区里有什么，我接下来该做什么？
+帮我安排今天的计划，并写一份简短的邀请。
+阅读这个工作区，说明项目的组织方式。
 五分钟后提醒我跟进。
-记住我们决定先做 inbox 这条路径。
+记住我喜欢简洁的进度更新。
 ```
 
 配置默认 profile 后，也可以运行一次任务并退出，或继续最近的会话：
@@ -115,14 +117,14 @@ Web UI 可点击 **Image** 或粘贴截图。所选模型和 OpenAI-compatible �
 ## 更多用法
 
 - [会话与归档](docs/user-manual.md#sessions)
-- [本地记忆](docs/user-manual.md#memory)
+- [本地记忆与反思](docs/user-manual.md#memory)：反思会生成供你审核的记忆候选，也可按证据和安全检查写入可撤销的 Skills。
 - [Skills](docs/user-manual.md#skills)
 - [子代理](README.md#delegate-work-to-sub-agents)
 - [本地服务：otto serve](docs/user-manual.md#agent-server)
 - [ACP agent：otto acp](docs/user-manual.md#acp-agent-server)
-- [聊天连接器 otto-connect](docs/user-manual.md#chat-connector)：`connect/` 中独立的 Go 程序，运行 `otto acp` 并接入 Telegram 和飞书，每个聊天对应一个会话
+- [聊天连接器 otto-connect](docs/user-manual.md#chat-connector)：`connect/` 中独立的 Go 程序，运行 `otto acp` 并接入 Telegram 和飞书；可连接 `otto serve`，与 Web UI 和附加终端共享会话。
 - [MCP 服务](docs/user-manual.md#mcp-servers)：连接 stdio 或 HTTP 的 MCP 服务，在同一轮循环中调用它们的工具
-- [持久化 workflow](docs/user-manual.md#durable-workflows)：TOML 描述的 DAG，支持顺序/并发的 agent 与 handoff 步骤、持久化审批、重启恢复、CLI 控制和 Web UI 查看
+- [定时提醒](docs/user-manual.md#remind) · [持久化 workflow](docs/user-manual.md#durable-workflows)：TOML 描述的 DAG，支持顺序/并发的 agent 与 handoff 步骤、持久化审批、重启恢复、CLI 控制和 Web UI 查看
 - [用量历史](docs/user-manual.md#observability)：Web UI 分析页展示本地 token 趋势和缓存命中率，不保存提示词或工具内容
 - [命令参考](docs/user-manual.md#command-line-reference)与[问题排查](docs/user-manual.md#troubleshooting)
 
@@ -137,7 +139,7 @@ provider 仅支持 `openai-compatible` 和 `chatgpt`。
 Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏。
 会话文件可能包含工作区文件、提示词、图片和工具结果，应按敏感数据处理。
 
-不支持插件、自动发现项目配置、嵌套子代理，以及自动记忆提取。
+记忆候选需要人工审核；反思生成的 Skills 会经过证据与安全检查后写入，并可用 `/skill revert` 撤销。当前不支持插件、自动发现项目配置或嵌套子代理。
 其他限制见[英文 README](README.md#safety-and-limitations)，完整访问规则见
 [工具与安全](docs/user-manual.md#tools-and-safety)。
 

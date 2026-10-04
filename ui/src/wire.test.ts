@@ -30,6 +30,16 @@ describe('reduce', () => {
     ])
   })
 
+  it('decodes escaped tool characters in live, history and phase displays', () => {
+    const args = String.raw`{"command":"echo \u4e2d\u6587\ud83d\ude80 \u0026\u003c\u003e","literal":"\\u0026"}`
+    const event = `{"type":"tool_call_started","tool_call_id":"c1","tool_name":"bash","tool_args":${args}}`
+    const history = `[{"role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"c1","tool_name":"bash","arguments":${args}}]}]`
+    const live = reduce([], event)
+    expect(live).toEqual(fromHistory(history))
+    expect(live[0]).toMatchObject({ kind: 'tool', args: '{\n  "command": "echo 中文🚀 &<>",\n  "literal": "\\\\u0026"\n}' })
+    expect(phase(event)).toContain('echo 中文🚀 &<>')
+  })
+
   it('records an unmatched tool_call_finished as its own item', () => {
     const items = apply(['{"type":"tool_call_finished","tool_call_id":"c9","tool_name":"read","result":{"content":"x","is_error":true}}'])
     expect(items).toEqual([{ kind: 'tool', id: 'c9', name: 'read', args: '', result: 'x', isError: true }])

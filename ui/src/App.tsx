@@ -16,6 +16,7 @@ import { AgentsView } from './AgentsView'
 import { generatedSkillsText, mcpServerLine, sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, NOTICE_POLL_MS, idleFollow } from './follow'
 import { useStatus } from './status'
+import { ScheduledNotices } from './ScheduledNotices'
 import logo from '../logo.svg'
 
 setToken(loadToken())
@@ -689,6 +690,7 @@ export function App() {
           </button>
         </div>
       )}
+      <ScheduledNotices />
       <main className="workspace-shell">
         {view === 'usage' ? (
           <UsageView onError={fail} />

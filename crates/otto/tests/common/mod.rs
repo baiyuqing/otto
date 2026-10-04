@@ -14,6 +14,30 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// A displayed ACP tool call must close exactly once, including on failure.
+pub fn assert_terminal_tool_update(frames: &[serde_json::Value], id: &str, status: &str) {
+    let updates: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame["method"] == "session/update")
+        .map(|frame| &frame["params"]["update"])
+        .filter(|update| update["toolCallId"] == id)
+        .collect();
+    assert_eq!(
+        updates
+            .iter()
+            .filter(|update| update["sessionUpdate"] == "tool_call")
+            .count(),
+        1,
+        "{updates:?}"
+    );
+    let terminal: Vec<_> = updates
+        .iter()
+        .filter(|update| update["sessionUpdate"] == "tool_call_update")
+        .collect();
+    assert_eq!(terminal.len(), 1, "{updates:?}");
+    assert_eq!(terminal[0]["status"], status, "{updates:?}");
+}
+
 /// One scripted SSE reply per model turn.
 pub struct Script {
     pub replies: Vec<String>,

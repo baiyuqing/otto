@@ -20,11 +20,44 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/connect/internal/agent"
+	"github.com/baiyuqing/otto/connect/internal/state"
 )
 
 // lastUserText returns the text of the last user message of a chat
 // completions request body.
 func lastUserText(body []byte) string {
+	texts := userTexts(body)
+	if len(texts) == 0 {
+		return ""
+	}
+	return texts[len(texts)-1]
+}
+
+func userTexts(body []byte) []string {
+	var req struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return nil
+	}
+	var out []string
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		m := req.Messages[i]
+		if m.Role != "user" {
+			continue
+		}
+		if text := messageText(m.Content); text != "" {
+			out = append(out, text)
+		}
+	}
+	slices.Reverse(out)
+	return out
+}
+
+func systemText(body []byte) string {
 	var req struct {
 		Messages []struct {
 			Role    string          `json:"role"`
@@ -34,25 +67,28 @@ func lastUserText(body []byte) string {
 	if json.Unmarshal(body, &req) != nil {
 		return ""
 	}
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		m := req.Messages[i]
-		if m.Role != "user" {
-			continue
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			return messageText(m.Content)
 		}
-		var s string
-		if json.Unmarshal(m.Content, &s) == nil {
-			return s
+	}
+	return ""
+}
+
+func messageText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) == nil {
+		var out []string
+		for _, p := range parts {
+			out = append(out, p.Text)
 		}
-		var parts []struct {
-			Text string `json:"text"`
-		}
-		if json.Unmarshal(m.Content, &parts) == nil {
-			var out []string
-			for _, p := range parts {
-				out = append(out, p.Text)
-			}
-			return strings.Join(out, "\n")
-		}
+		return strings.Join(out, "\n")
 	}
 	return ""
 }
@@ -486,73 +522,99 @@ func startOttoServer(t *testing.T, bin, home, workspace string, extra ...string)
 
 func TestEndToEndChatRoleAndChannel(t *testing.T) {
 	bin := ottoBin(t)
-	for _, attach := range []bool{false, true} {
-		t.Run(fmt.Sprintf("attach=%t", attach), func(t *testing.T) {
+	for _, mode := range []string{"local", "attach", "tcp"} {
+		t.Run(mode, func(t *testing.T) {
 			provider := newFakeProvider(t, nil)
 			home := ottoHome(t, provider.URL)
 			workspace, err := filepath.EvalSymlinks(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
-			command := []string{bin, "acp", "--sandbox", "off"}
-			if attach {
+			options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}
+			if mode == "attach" {
 				sock, _ := startOttoServer(t, bin, home, workspace)
-				command = []string{bin, "acp", "--attach", "--socket", sock}
+				options = &agent.Options{Command: []string{bin, "acp", "--attach", "--socket", sock}, Dir: workspace, Env: ottoEnv(home)}
 			}
-			var sid string
-			for _, platform := range []string{"telegram", "feishu"} {
-				h := newHarness(t, setup{platform: platform, agent: &agent.Options{
-					Command: command, Dir: workspace, Env: ottoEnv(home),
-				}})
+			if mode == "tcp" {
+				_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
+				options = tcpAgentOptions(t, diagnostics, workspace)
+			}
+			store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sid := ""
+			for _, turn := range []struct {
+				platform string
+				text     string
+				guidance string
+			}{
+				{"telegram", "help me plan my day", "The user is communicating through Telegram chat"},
+				{"feishu", "write a short invitation", "The user is communicating through Feishu (Lark) chat"},
+			} {
+				h := newHarness(t, setup{platform: turn.platform, agent: &agent.Options{
+					Command: options.Command, Address: options.Address, Token: options.Token, Dir: options.Dir, Env: options.Env,
+				}, store: store})
 				// Reuse the Telegram session from Feishu to check that the current
 				// transport is supplied even when the session already has history.
 				if sid != "" {
-					if err := h.store.SetSession(platform+":c1", sid); err != nil {
+					if err := h.store.SetSession(turn.platform+":c1", sid); err != nil {
 						t.Fatal(err)
 					}
 				}
-				for i, text := range []string{"help me plan my day", "write a short invitation"} {
-					if i == 1 {
-						h.agent.Kill()
-					}
-					h.say(text)
-					h.waitSent(i + 1)
-					provider.mu.Lock()
-					body := provider.bodies[len(provider.bodies)-1]
-					provider.mu.Unlock()
-					user := lastUserText([]byte(body))
-					channel := "Telegram"
-					if platform == "feishu" {
-						channel = "Feishu (Lark)"
-					}
-					for _, want := range []string{
-						"Current channel: " + channel,
-						"cannot see the local terminal",
-						"does not grant additional tools or permissions",
-					} {
-						if !strings.Contains(user, want) {
-							t.Fatalf("user prompt missing %q: %q", want, user)
-						}
-					}
-					if !strings.HasSuffix(user, "[/otto-connect channel context]\n\n"+text) {
-						t.Fatalf("user text was altered: %q", user)
-					}
-					if !strings.Contains(body, "You are Otto, a general-purpose personal agent.") ||
-						!strings.Contains(body, "For questions and discussion, answer directly.") {
-						t.Fatalf("provider did not receive general agent instructions: %s", body)
-					}
-					gotID := h.store.Session(platform + ":c1")
-					if sid != "" && gotID != sid {
-						t.Fatalf("session changed: %q != %q", gotID, sid)
-					}
-					sid = gotID
+				h.say(turn.text)
+				if got := h.waitSent(1); got[0] != "echo: "+turn.text {
+					t.Fatalf("reply = %q", got)
 				}
+				body := lastProviderBody(provider)
+				if got := lastUserText([]byte(body)); got != turn.text {
+					t.Fatalf("user text = %q, want %q", got, turn.text)
+				}
+				system := systemText([]byte(body))
+				for _, want := range []string{
+					"You are Otto, a general-purpose personal agent.",
+					"For questions and discussion, answer directly.",
+					turn.guidance,
+					"does not grant additional tools or permissions",
+				} {
+					if !strings.Contains(system, want) {
+						t.Fatalf("system prompt missing %q: %s", want, system)
+					}
+				}
+				gotID := h.store.Session(turn.platform + ":c1")
+				if sid != "" && gotID != sid {
+					t.Fatalf("session changed: %q != %q", gotID, sid)
+				}
+				sid = gotID
 				if err := h.shutdown(); err != nil {
 					t.Fatal(err)
 				}
 			}
+			plain := agent.New(*options)
+			defer plain.Close()
+			if err := plain.Load(context.Background(), sid); err != nil {
+				t.Fatal(err)
+			}
+			const plainText = "non-chat follow-up"
+			if _, err := plain.Prompt(context.Background(), sid, plainText); err != nil {
+				t.Fatal(err)
+			}
+			body := lastProviderBody(provider)
+			if got := userTexts([]byte(body)); !slices.Equal(got, []string{"help me plan my day", "write a short invitation", plainText}) {
+				t.Fatalf("persisted user texts = %q", got)
+			}
+			system := systemText([]byte(body))
+			if strings.Contains(system, "Telegram chat") || strings.Contains(system, "Feishu (Lark) chat") {
+				t.Fatalf("non-chat turn retained channel context: %s", system)
+			}
 		})
 	}
+}
+
+func lastProviderBody(provider *fakeProvider) string {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	return provider.bodies[len(provider.bodies)-1]
 }
 
 // TCP drives serve directly: no ACP child, persistent shared sessions and a
@@ -658,5 +720,96 @@ func TestEndToEndModelInitiatedApproval(t *testing.T) {
 				return false
 			}, "plan continuation")
 		})
+	}
+}
+
+func TestEndToEndReflectionCommands(t *testing.T) {
+	bin := ottoBin(t)
+	for _, mode := range []string{"local", "attach", "tcp"} {
+		t.Run(mode, func(t *testing.T) {
+			provider := newScriptedFakeProvider(t, nil, func(body []byte, _ int) string {
+				if strings.Contains(string(body), "You are a reflection assistant") {
+					return chatTextReply(`{"memories":[],"skills":[]}`)
+				}
+				return ""
+			})
+			home := ottoHome(t, provider.URL)
+			workspace, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := &agent.Options{Command: []string{bin, "acp", "--sandbox", "off"}, Dir: workspace, Env: ottoEnv(home)}
+			if mode == "attach" {
+				sock, _ := startOttoServer(t, bin, home, workspace)
+				options.Command = []string{bin, "acp", "--attach", "--socket", sock}
+			}
+			if mode == "tcp" {
+				_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
+				options = tcpAgentOptions(t, diagnostics, workspace)
+			}
+			h := newHarness(t, setup{platform: "telegram", agent: options})
+			h.say("do useful work")
+			h.waitSent(1)
+			for i, command := range []string{"/skill", "/skill generated", "/reflect"} {
+				h.say(command)
+				got := h.waitSent(i + 2)[i+1]
+				want := []string{"Usage: /skill generated", "No skills generated", "reflection:"}[i]
+				if !strings.Contains(got, want) {
+					t.Fatalf("%s: reply = %q, want %q", command, got, want)
+				}
+			}
+			provider.mu.Lock()
+			bodies := slices.Clone(provider.bodies)
+			provider.mu.Unlock()
+			if len(bodies) != 2 || !strings.Contains(bodies[1], "You are a reflection assistant") {
+				t.Fatalf("commands did not use the reflection pipeline: %v", bodies)
+			}
+			if err := h.shutdown(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestEndToEndCompletedWorkAutomaticallyReflects(t *testing.T) {
+	bin := ottoBin(t)
+	provider := newScriptedFakeProvider(t, nil, func(body []byte, request int) string {
+		if strings.Contains(string(body), "You are a reflection assistant") {
+			return chatTextReply(`{"memories":[],"skills":[]}`)
+		}
+		if request < 10 {
+			return chatToolCallReply(fmt.Sprintf("read-%d", request), "read", `{"path":"notes.txt"}`)
+		}
+		return chatTextReply("work complete")
+	})
+	home := ottoHome(t, provider.URL)
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "notes.txt"), []byte("verified local procedure\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
+	h := newHarness(t, setup{platform: "telegram", agent: tcpAgentOptions(t, diagnostics, workspace)})
+	h.say("complete a complex local task")
+	if got := h.waitSent(1)[0]; got != "work complete" {
+		t.Fatalf("task reply = %q", got)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		provider.mu.Lock()
+		bodies := slices.Clone(provider.bodies)
+		provider.mu.Unlock()
+		if len(bodies) == 12 && strings.Contains(bodies[11], "You are a reflection assistant") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("successful work did not automatically reflect: %d requests", len(bodies))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := h.shutdown(); err != nil {
+		t.Fatal(err)
 	}
 }

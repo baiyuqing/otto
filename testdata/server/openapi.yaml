@@ -1461,6 +1461,10 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 32000
+                channel:
+                  type: string
+                  enum: [telegram, feishu]
+                  description: Transient channel context for this dialogue request.
       responses:
         "200":
           description: Null if none waits, otherwise a dialogue reply; queued asks the client to queue the original message
@@ -1482,6 +1486,95 @@ paths:
           description: Unknown session
         "409":
           description: Restricted dialogue unavailable or failed
+  /v1/sessions/{id}/tasks/steer:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Guide the active task at its next safe provider boundary
+      description: >
+        Accepts guidance only for the active task in this session. Acceptance
+        does not interrupt a provider request or tool call and does not grant
+        permission. Guidance is transient and discarded when the task ends.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                  maxLength: 32000
+                  description: Non-whitespace text, limited to 32000 UTF-8 bytes.
+      responses:
+        "200":
+          description: Guidance accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted:
+                    type: boolean
+                    enum: [true]
+        "400":
+          description: Invalid JSON or text
+        "404":
+          description: Unknown session
+        "409":
+          description: No active task accepts guidance
+  /v1/sessions/{id}/tasks/control:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Route natural input during an active task
+      description: >
+        Uses a bounded restricted dialogue to choose guidance or a follow-up.
+        Returns null when the input should be handled as an ordinary prompt.
+        It cannot run task tools or grant approvals.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                  maxLength: 32000
+                  description: Non-whitespace text, limited to 32000 UTF-8 bytes.
+                channel:
+                  type: string
+                  enum: [telegram, feishu]
+                  description: Transient channel context for this dialogue request.
+      responses:
+        "200":
+          description: Null when unhandled, otherwise the control dialogue reply and route
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: "null"
+                  - type: object
+                    required: [text, queued]
+                    properties:
+                      text:
+                        type: string
+                      queued:
+                        type: boolean
+        "400":
+          description: Invalid JSON or text
+        "404":
+          description: Unknown session
+        "409":
+          description: Control dialogue unavailable or failed
   /v1/sessions/{id}/approvals/{approval_id}:
     parameters:
       - $ref: "#/components/parameters/sessionID"
@@ -1560,6 +1653,18 @@ paths:
                     of at most 16 turns instead of answering 409 turn_active.
                     A queued turn has status queued and no events until it
                     starts.
+                channel:
+                  type: string
+                  enum: [telegram, feishu]
+                  description: Transient chat channel context for this turn; it is not persisted in session history.
+                origin:
+                  type: string
+                  description: >
+                    Where the turn came from: terminal, web, or
+                    chat:<platform>:<chat id> with platform telegram or
+                    feishu. Absent means web. Scheduled items created in this
+                    turn are delivered to this origin. A chat origin whose
+                    platform differs from channel is rejected with 400.
               required: [text]
       responses:
         "200":
@@ -1930,6 +2035,15 @@ paths:
                 focus:
                   type: string
                   description: Optional guidance for what to look for
+                request_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                  pattern: "^[A-Za-z0-9_-]+$"
+                  description: >
+                    Optional client request id. A matching
+                    POST /v1/sessions/{id}/reflect/cancel cancels only this
+                    manual reflection request.
       responses:
         "200":
           description: >
@@ -1962,6 +2076,45 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/reflect/cancel:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Cancel a manual reflection request
+      description: >
+        Cancels the active manual reflection only when its request_id matches
+        the body. If the matching reflection has not registered yet, the id is
+        remembered briefly so that later request does not continue. It never
+        cancels a turn, compaction, automatic reflection, or another manual
+        reflection with a different or missing request_id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id]
+              properties:
+                request_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+                  pattern: "^[A-Za-z0-9_-]+$"
+      responses:
+        "202":
+          description: The cancel request was accepted for this request_id
+        "400":
+          description: Invalid JSON body or missing request_id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}/notices:
     parameters:
       - $ref: "#/components/parameters/sessionID"
@@ -1975,6 +2128,36 @@ paths:
       description: >
         Notices are read by id and not removed, so every client sees each one.
         At most the 20 newest are kept.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoticeList"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/wake-replies:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: after
+        in: query
+        required: false
+        schema: { type: integer, minimum: 0 }
+        description: Return only replies with a larger id
+    get:
+      summary: Texts the model wrote in wake turns of this session
+      description: >
+        A wake turn is the turn otto starts when a timer or sub-agent
+        notification is due and no prompt is running. The assistant text it
+        streamed is queued here when the turn ends without error and was not
+        cancelled. Replies
+        are read by id and not removed. At most the 20 newest are kept. The
+        body has the shape of `GET /v1/sessions/{id}/notices`.
       responses:
         "200":
           description: OK
@@ -2078,6 +2261,97 @@ paths:
                 $ref: "#/components/schemas/Error"
         "501":
           description: Sandbox reload is not available in this process
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/schedule/claim:
+    post:
+      summary: Claim the scheduled items due for the web UI
+      description: >
+        Returns up to 10 ready items of origin web and holds them for 120 s.
+        An item that is not confirmed through the delivered route in that time
+        is returned by a later claim.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: The claimed items, possibly none
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          example: s7
+                        due_at:
+                          type: integer
+                          format: int64
+                          description: Unix milliseconds; echo it in the delivered request.
+                        text:
+                          type: string
+                      required: [id, due_at, text]
+                required: [items]
+        "503":
+          description: The schedule store is not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/schedule/{id}/delivered:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          example: s7
+    post:
+      summary: Confirm that the web UI showed a scheduled item
+      description: Answers 200 also when the occurrence was already confirmed or is no longer current.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                due_at:
+                  type: integer
+                  format: int64
+                  description: The due_at returned by the claim route, in Unix milliseconds.
+              required: [due_at]
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: due_at is missing or out of range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: The id is not of the form s<n>
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The schedule store is not available
           content:
             application/json:
               schema:

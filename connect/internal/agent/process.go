@@ -3,10 +3,12 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -59,6 +61,8 @@ type process struct {
 	memoryReview     bool
 	approvalDialogue bool
 	sharedApprovals  bool
+	channelContext   bool
+	taskControl      bool
 	// endedAt and waitErr are valid after exited is closed.
 	endedAt time.Time
 	waitErr error
@@ -201,9 +205,10 @@ func (a *Agent) start(ctx context.Context) (*process, error) {
 
 func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 	resp, err := p.conn.Initialize(ctx, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersionNumber,
-		ClientInfo:      &acp.Implementation{Name: "otto-connect"},
-		Meta:            map[string]any{"otto": map[string]any{"approvals": map[string]any{"version": 1}}},
+		ProtocolVersion:    acp.ProtocolVersionNumber,
+		ClientInfo:         &acp.Implementation{Name: "otto-connect"},
+		ClientCapabilities: acp.ClientCapabilities{Meta: a.clientMeta()},
+		Meta:               map[string]any{"otto": map[string]any{"approvals": map[string]any{"version": 1}}},
 	})
 	if err == nil && resp.ProtocolVersion != acp.ProtocolVersionNumber {
 		err = fmt.Errorf("agent speaks ACP version %d, need %d", resp.ProtocolVersion, acp.ProtocolVersionNumber)
@@ -225,7 +230,17 @@ func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 	otto, _ := resp.AgentCapabilities.Meta["otto"].(map[string]any)
 	p.approvalDialogue, _ = otto["approvalDialogue"].(bool)
 	p.sharedApprovals = advertisesSharedApprovals(resp.AgentCapabilities.Meta)
+	p.channelContext, _ = otto["channelContext"].(bool)
+	p.taskControl, _ = otto["taskControl"].(bool)
 	return p, nil
+}
+
+// clientMeta returns _meta.otto.scheduleDelivery, or nil without platforms.
+func (a *Agent) clientMeta() map[string]any {
+	if len(a.platforms) == 0 {
+		return nil
+	}
+	return map[string]any{"otto": map[string]any{"scheduleDelivery": a.platforms}}
 }
 
 // advertisesMemoryReview reads _meta.otto.memoryReview.
@@ -264,11 +279,47 @@ type client struct {
 }
 
 func (c *client) SessionUpdate(_ context.Context, n acp.SessionNotification) error {
-	if c.handler == nil || c.p.isLoading(string(n.SessionId)) {
+	if c.handler == nil {
 		return nil
+	}
+	if c.p.isLoading(string(n.SessionId)) {
+		_, notice := ReflectionNotice(n.Update)
+		_, wake := WakeReply(n.Update)
+		if !notice && !wake {
+			return nil
+		}
 	}
 	c.handler.Update(string(n.SessionId), n.Update)
 	return nil
+}
+
+// ReflectionNotice returns the text of a valid Otto background notice.
+func ReflectionNotice(u acp.SessionUpdate) (string, bool) {
+	return ottoChunk(u, "reflectionNotice", "noticeId")
+}
+
+// WakeReply returns the Markdown text of a valid Otto wake-turn reply, which
+// Otto sends outside any prompt.
+func WakeReply(u acp.SessionUpdate) (string, bool) {
+	return ottoChunk(u, "wakeReply", "replyId")
+}
+
+// ottoChunk returns the text of an agent message chunk whose _meta.otto has
+// flag == true and an integer idKey >= 1.
+func ottoChunk(u acp.SessionUpdate, flag, idKey string) (string, bool) {
+	chunk := u.AgentMessageChunk
+	if chunk == nil || chunk.Content.Text == nil {
+		return "", false
+	}
+	otto, ok := chunk.Meta["otto"].(map[string]any)
+	if !ok || otto[flag] != true {
+		return "", false
+	}
+	id, ok := otto[idKey].(float64)
+	if !ok || id < 1 || math.Trunc(id) != id {
+		return "", false
+	}
+	return chunk.Content.Text.Text, true
 }
 
 func (c *client) RequestPermission(ctx context.Context, r acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
@@ -276,6 +327,20 @@ func (c *client) RequestPermission(ctx context.Context, r acp.RequestPermissionR
 		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 	}
 	return c.handler.Permission(ctx, string(r.SessionId), r), nil
+}
+
+// ExtensionHandler is implemented by a Handler that serves agent-to-client
+// extension methods (names that start with "_").
+type ExtensionHandler interface {
+	Extension(ctx context.Context, method string, params json.RawMessage) (any, error)
+}
+
+// HandleExtensionMethod implements acp.ExtensionMethodHandler.
+func (c *client) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if h, ok := c.handler.(ExtensionHandler); ok {
+		return h.Extension(ctx, method, params)
+	}
+	return nil, acp.NewMethodNotFound(method)
 }
 
 var errNoCapability = errors.New("not supported: otto-connect advertises no fs or terminal capability")

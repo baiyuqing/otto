@@ -17,6 +17,7 @@ use super::records::{
     MutationSnapshot, bump_generation, forget_accepted_record, in_read_transaction,
     insert_accepted_record, read_generation, read_mutation_snapshot, update_accepted_record,
 };
+use super::standing::check_standing_budget;
 use super::{Store, map_storage_error};
 use crate::memory::guard::{guard_candidate, guard_record};
 use crate::memory::json::{encode_float, encode_string, encode_string_map, encode_string_slice};
@@ -479,18 +480,7 @@ impl Store {
     /// Records pending candidates. Every candidate lands as `pending`: a
     /// proposal never becomes a record without a human review.
     pub fn propose(&self, candidates: &[Candidate]) -> Result<Vec<Candidate>> {
-        preflight_batch_shape(candidates)?;
-        validate_proposal_batch(candidates)?;
-        let mut seen = std::collections::BTreeSet::new();
-        for candidate in candidates {
-            if !candidate.proposed.source.observation_id.is_empty() {
-                return Err(invalid_request("candidate observation"));
-            }
-            if !seen.insert(candidate.id.clone()) {
-                return Err(Error::new(ErrorKind::Conflict));
-            }
-            guard_candidate(self.guard(), candidate)?;
-        }
+        self.check_proposals(candidates)?;
         let batch: Vec<Candidate> = candidates.to_vec();
         let stored = batch.clone();
         self.with_write(move |connection| {
@@ -523,6 +513,24 @@ impl Store {
             Ok(((), generation))
         })?;
         Ok(batch)
+    }
+
+    /// Runs every check [`Store::propose`] runs before it writes: batch shape,
+    /// proposal validation, duplicate ids, and the content guard.
+    pub fn check_proposals(&self, candidates: &[Candidate]) -> Result<()> {
+        preflight_batch_shape(candidates)?;
+        validate_proposal_batch(candidates)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for candidate in candidates {
+            if !candidate.proposed.source.observation_id.is_empty() {
+                return Err(invalid_request("candidate observation"));
+            }
+            if !seen.insert(candidate.id.clone()) {
+                return Err(Error::new(ErrorKind::Conflict));
+            }
+            guard_candidate(self.guard(), candidate)?;
+        }
+        Ok(())
     }
 
     pub fn get_candidate(&self, reference: &CandidateRef) -> Result<Candidate> {
@@ -588,6 +596,24 @@ impl Store {
     /// Applies a human decision to one pending candidate, writing the record it
     /// authorizes and the decision itself in a single transaction.
     pub fn review(&self, request: &StoreReviewRequest) -> Result<ReviewResult> {
+        self.review_inner(request, false)
+    }
+
+    /// [`Store::review`] that also rejects an accept whose record would push
+    /// the standing set over its token budget. The check runs inside the write
+    /// transaction and a rejection leaves the candidate pending.
+    pub fn review_within_standing_budget(
+        &self,
+        request: &StoreReviewRequest,
+    ) -> Result<ReviewResult> {
+        self.review_inner(request, true)
+    }
+
+    fn review_inner(
+        &self,
+        request: &StoreReviewRequest,
+        enforce_standing: bool,
+    ) -> Result<ReviewResult> {
         validate_candidate_ref(&request.reference)?;
         let guarded =
             self.with_read(|connection| read_candidate_snapshot(connection, &request.reference))?;
@@ -742,6 +768,9 @@ impl Store {
                         }
                     }
                 }
+            }
+            if enforce_standing && let Some(record) = &record_to_write {
+                check_standing_budget(connection, record)?;
             }
             match (&record_to_write, &tombstone_to_write) {
                 (Some(record), _) if action == CandidateAction::Create => {

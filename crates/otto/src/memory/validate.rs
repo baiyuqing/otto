@@ -596,6 +596,20 @@ pub fn validate_search_request(request: &SearchRequest) -> Result<()> {
     validate_now(request.now, request.include_expired)
 }
 
+/// A user-scope preference or instruction is recalled as a standing record
+/// only when it has a key, so a create without one is rejected.
+fn require_standing_key(scope: &Scope, kind: &str, key: &str) -> Result<()> {
+    if scope.namespace == NAMESPACE_USER
+        && key.is_empty()
+        && matches!(kind, "preference" | "instruction")
+    {
+        return Err(invalid_request(
+            "a user-scope preference or instruction needs a key",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_transient_content(
     scope: &Scope,
@@ -655,6 +669,7 @@ pub fn validate_remember_request(request: &RememberRequest) -> Result<()> {
             if !request.id.is_empty() {
                 return Err(invalid_request("create ID"));
             }
+            require_standing_key(&request.scope, &request.kind, &request.key)?;
         }
         Some(expected) => {
             let identified = !request.id.is_empty() || !request.key.is_empty();
@@ -713,6 +728,7 @@ pub fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
             if !request.target_id.is_empty() || request.base_revision != 0 {
                 return Err(invalid_request("create proposal target"));
             }
+            require_standing_key(&request.scope, &request.kind, &request.key)?;
         }
         CandidateAction::Update => {
             if !valid_opaque_id(&request.target_id, MAX_ID_BYTES)
@@ -1043,6 +1059,7 @@ mod tests {
         let request = RememberRequest {
             scope: Scope::new(NAMESPACE_USER, "install"),
             kind: "preference".into(),
+            key: "editor".into(),
             text: "prefers tabs".into(),
             ..RememberRequest::default()
         };
@@ -1079,6 +1096,7 @@ mod tests {
             action: CandidateAction::Create,
             scope: Scope::new(NAMESPACE_USER, "install"),
             kind: "preference".into(),
+            key: "editor".into(),
             text: "prefers tabs".into(),
             source: Provenance {
                 origin: Some(Origin::Model),
@@ -1095,6 +1113,42 @@ mod tests {
                 .as_deref(),
             Some("proposal source origin or decision")
         );
+    }
+
+    #[test]
+    fn a_user_scope_preference_or_instruction_create_needs_a_key() {
+        let rule = Some("a user-scope preference or instruction needs a key");
+        let propose = |namespace: &str, kind: &str| ProposeRequest {
+            action: CandidateAction::Create,
+            scope: Scope::new(namespace, "install"),
+            kind: kind.into(),
+            text: "prefers tabs".into(),
+            source: Provenance {
+                origin: Some(Origin::Model),
+                ..Provenance::default()
+            },
+            ..ProposeRequest::default()
+        };
+        let remember = |namespace: &str, kind: &str| RememberRequest {
+            scope: Scope::new(namespace, "install"),
+            kind: kind.into(),
+            text: "prefers tabs".into(),
+            ..RememberRequest::default()
+        };
+        for kind in ["preference", "instruction"] {
+            let error = validate_propose_request(&propose(NAMESPACE_USER, kind)).expect_err(kind);
+            assert_eq!(error.kind, ErrorKind::InvalidRequest);
+            assert_eq!(error.detail.as_deref(), rule);
+            let error = validate_remember_request(&remember(NAMESPACE_USER, kind)).expect_err(kind);
+            assert_eq!(error.kind, ErrorKind::InvalidRequest);
+            assert_eq!(error.detail.as_deref(), rule);
+        }
+        validate_propose_request(&propose(NAMESPACE_USER, "fact")).expect("user fact");
+        validate_remember_request(&remember(NAMESPACE_USER, "fact")).expect("user fact");
+        validate_propose_request(&propose(NAMESPACE_WORKSPACE, "preference"))
+            .expect("workspace preference");
+        validate_remember_request(&remember(NAMESPACE_WORKSPACE, "preference"))
+            .expect("workspace preference");
     }
 
     #[test]

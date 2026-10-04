@@ -147,6 +147,8 @@ pub(crate) struct MemoryReviewRow {
     pub key: String,
     pub text: String,
     pub reason: String,
+    /// The advisory hint line, when a model gave one. Display only.
+    pub advice: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -772,6 +774,7 @@ impl App {
                         .candidates
                         .into_iter()
                         .map(|candidate| MemoryReviewRow {
+                            advice: crate::memory::advice::advice_line(&candidate.proposed),
                             id: candidate.id,
                             action: candidate.action.as_str().to_string(),
                             kind: candidate.proposed.kind,
@@ -3824,6 +3827,7 @@ mod tests {
         assert_eq!(dialog.rows[0].key, "editor");
         assert_eq!(dialog.rows[0].text, "private candidate body");
         assert_eq!(dialog.rows[0].reason, "private reason");
+        assert_eq!(dialog.rows[0].advice, None);
 
         let action = app.handle_key(
             KeyEvent::from(KeyCode::Char('a')),
@@ -3832,6 +3836,30 @@ mod tests {
         );
         assert!(
             matches!(action, Some(Action::MemoryReview { id, accept: true }) if id == candidate.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_review_row_carries_the_advice_line() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let (service, user_scope, _) = controller.memory_manager().expect("memory");
+        crate::memory::advice::testing::candidate(&service, user_scope, true);
+        let mut app = App::new(&Backend::Local(&controller));
+
+        app.open_memory_review(&controller);
+
+        let dialog = app.memory_review.as_ref().expect("dialog");
+        assert_eq!(
+            dialog.rows[0].advice.as_deref(),
+            Some(crate::memory::advice::testing::LINE)
         );
     }
 

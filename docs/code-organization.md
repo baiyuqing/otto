@@ -79,7 +79,8 @@ The other modules group native responsibilities:
 - **Remote and external integrations:** `provider/`, `mcp/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
-  `reflection/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, and `workflow.rs`.
+  `reflection/`, `typesafe/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, `workflow.rs`,
+  and `schedule/` (scheduled deliveries: store, tools, worker).
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`, and
   `urlprivacy.rs`.
@@ -108,9 +109,14 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 | Provider HTTP behavior | `crates/otto/src/provider/` | The matching wire module in `otto-core` |
 | Shared approvals and model-initiated consent | `approval/`, `otto-core/src/approval.rs`, `tool/approval.rs` | Domain adapters, TUI, HTTP, ACP and chat connector |
 | Agent self-help and pending approval dialogue | `tool/otto.rs`, `app/approval_control.rs` | `cli/runtime_builder.rs`, ACP, HTTP, chat and TUI input paths |
+| Active-task guidance and model follow-ups | `otto-core/src/agent/steering.rs`, `app/task_control.rs`, `tool/task_control.rs` | [Design and TODO](specs/2026-10-04-active-task-guidance.md), runtime tool/prompt wiring, HTTP/ACP and connector routing |
+| Per-turn chat channel context | `app/channel.rs`, then ACP prompt parsing | Core per-run system context, HTTP turn queue, `client/`, and `connect/` |
+| Reflection commands and background notices | `app/auto_reflection.rs`, `reflection/` | HTTP reflection routes, ACP commands, and chat updates |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
 | Web API or browser behavior | `crates/otto/src/server/` or `ui/` | `crates/otto-web/` for shared browser wire codecs |
 | ACP integrations | `crates/otto/src/acp/` | `client/` for attach mode; `connect/` for chat connector behavior |
+| Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `acp/mod.rs` wake loop | [Design](specs/2026-10-04-acp-wake-replies.md), the `wake-replies` HTTP route, `client/`, `connect/internal/bridge` |
+| Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | [Design](specs/2026-10-04-scheduled-deliveries.md), turn origin in `app/approval.rs`, the worker spawn in `cli/run.rs` and `cli/serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `connect/internal/bridge`, `ui/` |
 | Persistent memories, sessions, workflow runs, or token aggregates | The matching native state module | Its store and lifecycle tests |
 
 ## Dependency and documentation rules

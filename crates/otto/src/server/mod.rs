@@ -6,8 +6,8 @@
 //! `docs/specs/2026-09-03-agent-server-design.md`.
 //!
 //! Concurrency: `sessions` is a plain `Mutex<HashMap>` held only for map
-//! operations. Each [`OpenSession`] has its own `Mutex` for the turn and
-//! compaction slots.
+//! operations. Each [`OpenSession`] has its own `Mutex` for the turn,
+//! compaction, and reflection slots.
 
 pub mod agents;
 pub mod approvals;
@@ -21,7 +21,9 @@ pub mod mcp;
 pub mod metrics;
 pub mod reflection;
 pub mod sandbox;
+pub mod schedule;
 pub mod skills;
+pub mod task_control;
 pub mod tasks;
 pub mod timers;
 pub mod turn;
@@ -48,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{self, ApprovalDecision, ApprovalRequest, Controller, Step, Stop};
+use crate::app::{self, ApprovalDecision, ApprovalRequest, Channel, Controller, Step, Stop};
 use crate::cli::info::SandboxInfo;
 #[cfg(test)]
 use crate::cli::info::{SandboxMode, SandboxNetwork, SandboxReason};
@@ -60,6 +62,7 @@ use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
 /// `not_found` instead of 500.
 pub const SESSION_NOT_FOUND: &str = "session not found";
 const IMAGE_TURN_BODY_MAX_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 4096;
+const REMEMBERED_REFLECTION_CANCELS: usize = 16;
 
 /// The embedded API description. Served verbatim at `GET /v1/openapi.yaml`,
 /// read from the shared fixture at the repository root so the server and the
@@ -255,6 +258,9 @@ pub struct Options {
     pub token: String,
     pub logger: Option<Arc<Logger>>,
     pub workflows: Option<Arc<crate::workflow::Controller>>,
+    /// The scheduled-delivery store shared by every workspace; `None` when
+    /// `~/.otto/schedule.db` could not be opened.
+    pub schedule: Option<Arc<crate::schedule::Store>>,
 }
 
 // ---- logging ----
@@ -358,6 +364,8 @@ struct QueuedTurn {
     turn: Arc<Turn>,
     text: String,
     image: Option<Block>,
+    channel: Option<Channel>,
+    origin: Option<crate::schedule::Origin>,
 }
 
 /// The elevated command the running turn waits on. At most one per session,
@@ -365,6 +373,11 @@ struct QueuedTurn {
 struct WaitingApproval {
     id: String,
     decide: tokio::sync::oneshot::Sender<ApprovalDecision>,
+}
+
+struct ActiveReflection {
+    request_id: Option<String>,
+    cancel: CancellationToken,
 }
 
 #[derive(Default)]
@@ -375,6 +388,12 @@ struct SessionState {
     /// `handle_compact` both check it under the same lock, so a turn and a
     /// compaction are never admitted together.
     compacting: Option<CancellationToken>,
+    /// Non-`None` while `POST .../reflect` runs.
+    reflecting: Option<ActiveReflection>,
+    /// Reflection request ids cancelled before their matching reflect request
+    /// registered. Bounded to the most recent 16 ids; request ids are expected
+    /// to be unique per client operation.
+    canceled_reflections: VecDeque<String>,
     /// Turns waiting for the running turn or compaction, oldest first. Every
     /// reader of this field holds the session lock, so the queue, `turn` and
     /// `compacting` change together.
@@ -392,7 +411,26 @@ impl SessionState {
     /// the next queued turn starts when the current one ends, and nothing may
     /// start in between.
     pub(crate) fn busy(&self) -> bool {
-        self.turn_running() || !self.queue.is_empty() || self.compacting.is_some()
+        self.turn_running()
+            || !self.queue.is_empty()
+            || self.compacting.is_some()
+            || self.reflecting.is_some()
+    }
+
+    fn reflection_cancelled(&self, request_id: &str) -> bool {
+        self.canceled_reflections
+            .iter()
+            .any(|known| known == request_id)
+    }
+
+    fn remember_reflection_cancel(&mut self, request_id: &str) {
+        if self.reflection_cancelled(request_id) {
+            return;
+        }
+        if self.canceled_reflections.len() == REMEMBERED_REFLECTION_CANCELS {
+            self.canceled_reflections.pop_front();
+        }
+        self.canceled_reflections.push_back(request_id.to_string());
     }
 
     fn remember_decided(&mut self, id: &str) {
@@ -457,6 +495,9 @@ impl OpenSession {
         if let Some(cancel) = state.compacting.as_ref() {
             cancel.cancel();
         }
+        if let Some(active) = state.reflecting.as_ref() {
+            active.cancel.cancel();
+        }
     }
 }
 
@@ -483,6 +524,7 @@ pub struct Server {
     wake_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cancel: CancellationToken,
     workflows: Option<Arc<crate::workflow::Controller>>,
+    schedule: Option<Arc<crate::schedule::Store>>,
     /// Bumped whenever a `GET /v1/status` snapshot could change: a session
     /// opened or closed, a turn started or finished, a task registry update,
     /// or a granted Bash approval. See [`Server::status_snapshot`].
@@ -517,6 +559,7 @@ impl Server {
             wake_loops: Mutex::new(Vec::new()),
             cancel: CancellationToken::new(),
             workflows: options.workflows,
+            schedule: options.schedule,
             status_changed: watch::channel(0).0,
         })
     }
@@ -533,6 +576,12 @@ impl Server {
 
     pub fn logger(&self) -> &Arc<Logger> {
         &self.log
+    }
+
+    /// The scheduled-delivery store, for the ACP TCP listener's delivery
+    /// workers.
+    pub fn schedule_store(&self) -> Option<Arc<crate::schedule::Store>> {
+        self.schedule.clone()
     }
 
     /// Cancels every in-flight turn, then closes every open controller.
@@ -654,6 +703,11 @@ impl Server {
                 "/v1/sessions/{id}/approvals/message",
                 post(approvals::message),
             )
+            .route("/v1/sessions/{id}/tasks/steer", post(task_control::steer))
+            .route(
+                "/v1/sessions/{id}/tasks/control",
+                post(task_control::control),
+            )
             .route(
                 "/v1/sessions/{id}/approvals/{approval_id}",
                 post(approvals::decide),
@@ -670,7 +724,12 @@ impl Server {
             )
             .route("/v1/sessions/{id}/compact", post(compact::handle))
             .route("/v1/sessions/{id}/reflect", post(reflection::reflect))
+            .route("/v1/sessions/{id}/reflect/cancel", post(reflection::cancel))
             .route("/v1/sessions/{id}/notices", get(reflection::notices))
+            .route(
+                "/v1/sessions/{id}/wake-replies",
+                get(reflection::wake_replies),
+            )
             .route(
                 "/v1/sessions/{id}/reflection/skills",
                 get(reflection::list_skills),
@@ -702,6 +761,8 @@ impl Server {
                 post(skills::disable),
             )
             .route("/v1/sandbox/reload", post(sandbox::reload))
+            .route("/v1/schedule/claim", post(schedule::claim))
+            .route("/v1/schedule/{id}/delivered", post(schedule::delivered))
             .route("/v1/tasks", get(agents::list))
             .route("/v1/tasks/{parent_session}/{task_id}", get(agents::get))
             .route("/v1/workflows", get(workflows::list).post(workflows::start))
@@ -1044,7 +1105,7 @@ impl Server {
             fields.push(("inbox_kind", kind.as_str().to_string()));
         }
         self.log.info("turn_started", &fields);
-        self.run_turn(session, &turn, Step::Wake(wake), TRIGGER_TASK)
+        self.run_turn(session, &turn, Step::Wake(wake), TRIGGER_TASK, None, None)
             .await;
         // Queued turns that arrived during the wake turn start now.
         self.start_next(session);
@@ -1059,6 +1120,8 @@ impl Server {
         turn: &Arc<Turn>,
         first: Step<'_>,
         trigger: &'static str,
+        channel: Option<Channel>,
+        origin: Option<crate::schedule::Origin>,
     ) {
         let cancel = turn.cancel_token();
         let result = {
@@ -1074,7 +1137,7 @@ impl Server {
             let (server, open, running, token) = (&**self, &**session, &**turn, &cancel);
             session
                 .ctrl
-                .run_with_approvals(first, &mut emit, &cancel, |request| {
+                .run_with_channel(first, channel, origin, &mut emit, &cancel, |request| {
                     server.wait_for_approval(open, running, token, request)
                 })
                 .await
@@ -1192,6 +1255,8 @@ impl Server {
         session: &Arc<OpenSession>,
         text: String,
         image: Option<Block>,
+        channel: Option<Channel>,
+        origin: Option<crate::schedule::Origin>,
         queue: bool,
     ) -> Result<Arc<Turn>, String> {
         let (turn, running) = {
@@ -1211,18 +1276,20 @@ impl Server {
                     turn: Arc::clone(&turn),
                     text,
                     image,
+                    channel,
+                    origin,
                 });
                 (turn, None)
             } else {
                 let turn = Arc::new(Turn::new(id, TRIGGER_USER, cancel));
                 turn.start_running(session.ctrl.history().len());
                 state.turn = Some(Arc::clone(&turn));
-                (turn, Some((text, image)))
+                (turn, Some((text, image, channel, origin)))
             }
         };
         self.bump_status();
-        if let Some((text, image)) = running {
-            self.spawn_user_turn(session, Arc::clone(&turn), text, image);
+        if let Some((text, image, channel, origin)) = running {
+            self.spawn_user_turn(session, Arc::clone(&turn), text, image, channel, origin);
         }
         Ok(turn)
     }
@@ -1233,7 +1300,7 @@ impl Server {
     fn start_next(self: &Arc<Self>, session: &Arc<OpenSession>) {
         let next = {
             let mut state = session.lock();
-            if state.turn_running() || state.compacting.is_some() {
+            if state.turn_running() || state.compacting.is_some() || state.reflecting.is_some() {
                 return;
             }
             if self.cancel.is_cancelled() || session.closed.is_cancelled() {
@@ -1249,7 +1316,14 @@ impl Server {
         };
         self.bump_status();
         if let Some(next) = next {
-            self.spawn_user_turn(session, next.turn, next.text, next.image);
+            self.spawn_user_turn(
+                session,
+                next.turn,
+                next.text,
+                next.image,
+                next.channel,
+                next.origin,
+            );
         }
     }
 
@@ -1260,6 +1334,8 @@ impl Server {
         turn: Arc<Turn>,
         text: String,
         image: Option<Block>,
+        channel: Option<Channel>,
+        origin: Option<crate::schedule::Origin>,
     ) {
         turn.push_event(WireEvent::user_message(&text, image.is_some()));
         self.metrics.turn_started();
@@ -1277,7 +1353,9 @@ impl Server {
                 Some(image) => Step::Image(&text, image),
                 None => Step::Text(&text),
             };
-            server.run_turn(&session, &turn, first, TRIGGER_USER).await;
+            server
+                .run_turn(&session, &turn, first, TRIGGER_USER, channel, origin)
+                .await;
             server.start_next(&session);
             // A notification that landed too late for this turn's own drain is
             // caught by the wake loop's end-of-turn check.
@@ -1860,6 +1938,13 @@ struct StartTurnBody {
     /// Queue behind a running turn instead of answering 409 `turn_active`.
     #[serde(default)]
     queue: bool,
+    /// Per-turn chat channel context.
+    #[serde(default)]
+    channel: Option<Channel>,
+    /// Where the turn came from: `terminal`, `web` or
+    /// `chat:<platform>:<chat id>`. Absent means `web`.
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1896,9 +1981,30 @@ async fn start_turn(
     {
         return bad_request("image is invalid");
     }
+    let origin = match parsed.origin.as_deref().map(crate::schedule::Origin::parse) {
+        Some(Ok(origin)) => origin,
+        Some(Err(message)) => return bad_request(&message),
+        None => crate::schedule::Origin::web(),
+    };
+    if let (Some(channel), Some(platform)) = (parsed.channel, origin.chat_platform()) {
+        let expected = match channel {
+            Channel::Telegram => "telegram",
+            Channel::Feishu => "feishu",
+        };
+        if platform != expected {
+            return bad_request("origin platform does not match channel");
+        }
+    }
     let stream = parsed.stream.unwrap_or(true);
 
-    let turn = match server.start_turn(&session, parsed.text, image, parsed.queue) {
+    let turn = match server.start_turn(
+        &session,
+        parsed.text,
+        image,
+        parsed.channel,
+        Some(origin),
+        parsed.queue,
+    ) {
         Ok(turn) => turn,
         Err(error) if error == TURN_ACTIVE => {
             return turn_active("a turn is already active for this session");
@@ -2288,6 +2394,8 @@ mod tests {
         roles: Mutex<Vec<Role>>,
         /// The last user message of each call, in call order.
         texts: Mutex<Vec<String>>,
+        /// System prompt of each call, in call order.
+        system_prompts: Mutex<Vec<String>>,
     }
 
     impl ScriptedProvider {
@@ -2297,6 +2405,7 @@ mod tests {
                 started: watch::channel(0).0,
                 roles: Mutex::new(Vec::new()),
                 texts: Mutex::new(Vec::new()),
+                system_prompts: Mutex::new(Vec::new()),
             })
         }
 
@@ -2309,6 +2418,13 @@ mod tests {
 
         fn roles(&self) -> Vec<Role> {
             self.roles
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone()
+        }
+
+        fn system_prompts(&self) -> Vec<String> {
+            self.system_prompts
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .clone()
@@ -2355,6 +2471,10 @@ mod tests {
                         .map(Message::text)
                         .unwrap_or_default(),
                 );
+            self.system_prompts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(request.system_prompt.clone());
             let after_tool_result = request
                 .messages
                 .last()
@@ -2896,6 +3016,8 @@ mod tests {
         /// Gives the builder a reflector backed by this store, with the
         /// directory as its home, so `~/.otto/skills` is `<home>/.otto/skills`.
         reflection: Option<(Arc<crate::reflection::Store>, std::path::PathBuf)>,
+        /// The scheduled-delivery store behind `/v1/schedule/*`.
+        schedule: Option<Arc<crate::schedule::Store>>,
     }
 
     struct Harness {
@@ -2954,6 +3076,7 @@ mod tests {
                 std::fs::write(&builder.shared.config_path, config_text)
                     .expect("write config fixture");
             }
+            builder.shared_mut().schedule = options.schedule.clone();
             let builder = Arc::new(builder);
             let provider = ScriptedProvider::new(options.script);
             // Production always sets `Options.info.workspace` from the same
@@ -2999,6 +3122,7 @@ mod tests {
                     &log,
                 )))))),
                 workflows: options.workflows,
+                schedule: options.schedule,
             });
             let router = server.router();
             Self {
@@ -3898,6 +4022,7 @@ mod tests {
             Some("{}"),
             Some(r#"{"text":""}"#),
             Some(r#"{"text":"   "}"#),
+            Some(r#"{"text":"hi","channel":"slack"}"#),
         ] {
             let reply = harness
                 .send("POST", &format!("/v1/sessions/{id}/turns"), body)
@@ -3930,6 +4055,304 @@ mod tests {
         assert_eq!(reply.status, StatusCode::CONFLICT);
         assert_eq!(reply.json()["error"]["code"], "turn_active");
         gate.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn channel_context_is_transient_and_queued_turns_keep_their_own_channel() {
+        let (gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let first = post_turn_with_channel(&harness, &id, "first", Some("telegram"), false).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        harness.provider.wait_started(1).await;
+        let second = post_turn_with_channel(&harness, &id, "second", Some("feishu"), true).await;
+        let third = post_turn_with_channel(&harness, &id, "third", None, true).await;
+        gate.cancel();
+        for response in [first, second, third] {
+            assert_eq!(ends_of(SseReader::new(response)).await.2, "ok");
+        }
+
+        assert_eq!(harness.provider.texts(), ["first", "second", "third"]);
+        let prompts = harness.provider.system_prompts();
+        assert_eq!(prompts.len(), 3);
+        assert!(prompts[0].contains("Telegram"));
+        assert!(prompts[1].contains("Feishu (Lark)"));
+        assert!(!prompts[2].contains("Telegram"));
+        assert!(!prompts[2].contains("Feishu (Lark)"));
+        assert!(prompts[0].contains("does not grant additional tools"));
+        assert!(prompts[1].contains("does not grant additional tools"));
+    }
+
+    async fn post_turn_with_origin(harness: &Harness, session: &str, extra: Value) -> Reply {
+        let mut body = serde_json::json!({"text": "hi", "stream": false});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{session}/turns"),
+                Some(&body.to_string()),
+            )
+            .await
+    }
+
+    /// Records a confirmed web or terminal delivery for `session`, which the
+    /// next user turn of that session appends when its origin matches.
+    fn confirmed_delivery(
+        store: &crate::schedule::Store,
+        origin: crate::schedule::Origin,
+        session: &str,
+    ) {
+        let now = chrono::Utc::now();
+        let item = store
+            .create(
+                crate::schedule::NewItem {
+                    origin,
+                    session_id: session.into(),
+                    workspace: "/w".into(),
+                    kind: crate::schedule::Kind::Text,
+                    body: "stretch".into(),
+                    repeat: None,
+                    local_time: None,
+                    due_at: now - chrono::TimeDelta::seconds(1),
+                },
+                now,
+            )
+            .expect("create");
+        store
+            .claim_deliveries(
+                &crate::schedule::Scope::Any,
+                Duration::from_secs(60),
+                10,
+                now,
+            )
+            .expect("claim");
+        assert!(
+            store
+                .delivered(item.id, item.due_at, now)
+                .expect("delivered")
+        );
+    }
+
+    fn pending(
+        store: &crate::schedule::Store,
+        origin: &crate::schedule::Origin,
+        session: &str,
+    ) -> usize {
+        store
+            .pending_writebacks(origin, session, 10)
+            .expect("pending")
+            .len()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_turn_origin_defaults_to_web_and_is_validated() {
+        let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
+        let harness = Harness::with(HarnessOptions {
+            schedule: Some(Arc::clone(&store)),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let web = crate::schedule::Origin::web();
+        confirmed_delivery(&store, web.clone(), &id);
+
+        let bad = post_turn_with_origin(&harness, &id, serde_json::json!({"origin": "mars"})).await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+        assert!(
+            bad.json()["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("origin")
+        );
+        let mismatch = post_turn_with_origin(
+            &harness,
+            &id,
+            serde_json::json!({"origin": "chat:feishu:c1", "channel": "telegram"}),
+        )
+        .await;
+        assert_eq!(mismatch.status, StatusCode::BAD_REQUEST);
+        assert!(harness.provider.texts().is_empty());
+        assert_eq!(pending(&store, &web, &id), 1);
+
+        // A chat turn does not take a web delivery; a turn without an origin
+        // is a web turn and does. A turn with no origin at all takes nothing.
+        let chat = post_turn_with_origin(
+            &harness,
+            &id,
+            serde_json::json!({"origin": "chat:telegram:42", "channel": "telegram"}),
+        )
+        .await;
+        assert_eq!(chat.status, StatusCode::OK, "{}", chat.body);
+        assert_eq!(pending(&store, &web, &id), 1);
+        let absent = post_turn_with_origin(&harness, &id, serde_json::json!({})).await;
+        assert_eq!(absent.status, StatusCode::OK, "{}", absent.body);
+        assert_eq!(pending(&store, &web, &id), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_queued_turn_keeps_its_own_origin() {
+        let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
+        let (gate, mut options) = gated();
+        options.schedule = Some(Arc::clone(&store));
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let chat = crate::schedule::Origin::parse("chat:feishu:c1").expect("origin");
+        confirmed_delivery(&store, chat.clone(), &id);
+
+        let first = post_turn_with_channel(&harness, &id, "first", None, false).await;
+        harness.provider.wait_started(1).await;
+        let body = r#"{"text":"second","queue":true,"origin":"chat:feishu:c1","channel":"feishu"}"#;
+        let second = harness
+            .raw("POST", &format!("/v1/sessions/{id}/turns"), Some(body), &[])
+            .await;
+        gate.cancel();
+        for response in [first, second] {
+            assert_eq!(ends_of(SseReader::new(response)).await.2, "ok");
+        }
+        assert_eq!(pending(&store, &chat, &id), 0);
+    }
+
+    fn schedule_harness() -> (Harness, Arc<crate::schedule::Store>) {
+        let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
+        let harness = Harness::with(HarnessOptions {
+            schedule: Some(Arc::clone(&store)),
+            ..HarnessOptions::default()
+        });
+        (harness, store)
+    }
+
+    fn due_text_item(
+        store: &crate::schedule::Store,
+        origin: crate::schedule::Origin,
+        body: &str,
+    ) -> crate::schedule::Item {
+        let now = chrono::Utc::now();
+        store
+            .create(
+                crate::schedule::NewItem {
+                    origin,
+                    session_id: "sess".into(),
+                    workspace: "/w".into(),
+                    kind: crate::schedule::Kind::Text,
+                    body: body.into(),
+                    repeat: None,
+                    local_time: None,
+                    due_at: now - chrono::TimeDelta::seconds(1),
+                },
+                now,
+            )
+            .expect("create")
+    }
+
+    #[tokio::test]
+    async fn claim_returns_due_web_items_once_and_delivered_confirms_them() {
+        let (harness, store) = schedule_harness();
+        let web = due_text_item(&store, crate::schedule::Origin::web(), "stretch");
+        due_text_item(&store, crate::schedule::Origin::terminal(), "terminal only");
+
+        let claim = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
+        assert_eq!(claim.status, StatusCode::OK, "{}", claim.body);
+        let items = claim.json()["items"].as_array().expect("items").clone();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], format!("s{}", web.id));
+        assert_eq!(items[0]["text"], "⏰ stretch");
+        let due_at = items[0]["due_at"].as_i64().expect("due_at");
+        assert_eq!(due_at, web.due_at.timestamp_millis());
+
+        let again = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
+        assert_eq!(again.json()["items"].as_array().unwrap().len(), 0);
+
+        let path = format!("/v1/schedule/s{}/delivered", web.id);
+        let body = serde_json::json!({"due_at": due_at}).to_string();
+        let done = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+        assert_eq!(done.json(), serde_json::json!({}));
+        let writebacks = store
+            .pending_writebacks(&crate::schedule::Origin::web(), "sess", 10)
+            .expect("writebacks");
+        assert_eq!(writebacks.len(), 1);
+        assert_eq!(writebacks[0].item_id, web.id);
+        // A repeated confirmation is still 200.
+        let repeat = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(repeat.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delivered_rejects_a_bad_id_or_body() {
+        let (harness, _store) = schedule_harness();
+        let bad_id = harness
+            .send("POST", "/v1/schedule/x7/delivered", Some(r#"{"due_at":1}"#))
+            .await;
+        assert_eq!(bad_id.status, StatusCode::NOT_FOUND);
+        let no_due = harness
+            .send("POST", "/v1/schedule/s1/delivered", Some("{}"))
+            .await;
+        assert_eq!(no_due.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn schedule_routes_answer_503_without_a_store() {
+        let harness = Harness::new();
+        let claim = harness.send("POST", "/v1/schedule/claim", Some("{}")).await;
+        assert_eq!(claim.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(claim.json()["error"]["code"], "schedule_unavailable");
+        let delivered = harness
+            .send("POST", "/v1/schedule/s1/delivered", Some(r#"{"due_at":1}"#))
+            .await;
+        assert_eq!(delivered.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn the_factory_runner_maps_load_and_create_errors_to_outcomes() {
+        use crate::schedule::RunOutcome;
+        use crate::schedule::worker::PromptRunner;
+        let cancel = CancellationToken::new();
+
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                error: Some(("/other".to_string(), "mcp config broken".to_string())),
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let runner = schedule::FactoryRunner(Arc::clone(&harness.factory) as Arc<dyn Factory>);
+        assert_eq!(
+            runner.run("/other", "go", &cancel).await,
+            RunOutcome::Failed("mcp config broken".into())
+        );
+
+        let harness = Harness::with(HarnessOptions {
+            create_error: Some("no session".to_string()),
+            ..HarnessOptions::default()
+        });
+        let startup = harness.factory.builder.workspace_path.clone();
+        let runner = schedule::FactoryRunner(Arc::clone(&harness.factory) as Arc<dyn Factory>);
+        assert_eq!(
+            runner.run(&startup, "go", &cancel).await,
+            RunOutcome::FailedBeforeTools("no session".into())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_factory_runner_runs_the_prompt_and_returns_the_reply() {
+        use crate::schedule::RunOutcome;
+        use crate::schedule::worker::PromptRunner;
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["it is sunny".to_string()],
+                ..Script::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let startup = harness.factory.builder.workspace_path.clone();
+        let runner = schedule::FactoryRunner(Arc::clone(&harness.factory) as Arc<dyn Factory>);
+        let outcome = runner
+            .run(&startup, "weather?", &CancellationToken::new())
+            .await;
+        assert_eq!(outcome, RunOutcome::Reply("it is sunny".into()));
+        assert_eq!(harness.provider.texts(), ["weather?"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4613,13 +5036,17 @@ mod tests {
         "/v1/sessions/{id}/history",
         "/v1/sessions/{id}/context",
         "/v1/sessions/{id}/approvals/{approval_id}",
+        "/v1/sessions/{id}/tasks/steer",
+        "/v1/sessions/{id}/tasks/control",
         "/v1/sessions/{id}/turns",
         "/v1/sessions/{id}/turns/{turn_id}",
         "/v1/sessions/{id}/turns/{turn_id}/events",
         "/v1/sessions/{id}/turns/{turn_id}/cancel",
         "/v1/sessions/{id}/compact",
         "/v1/sessions/{id}/reflect",
+        "/v1/sessions/{id}/reflect/cancel",
         "/v1/sessions/{id}/notices",
+        "/v1/sessions/{id}/wake-replies",
         "/v1/sessions/{id}/reflection/skills",
         "/v1/sessions/{id}/reflection/skills/{name}/revert",
         "/v1/sessions/{id}/tasks",
@@ -4661,6 +5088,7 @@ mod tests {
             let want = format!("\n  {path}:");
             assert!(document.contains(&want), "openapi.yaml is missing {path}");
         }
+        assert!(document.matches("enum: [telegram, feishu]").count() >= 2);
     }
 
     #[tokio::test]
@@ -4715,6 +5143,72 @@ mod tests {
             )
             .await;
         assert_eq!(reply.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task_control_http_routes_validate_and_steer_the_active_task() {
+        let (gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+
+        let idle = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/steer"),
+                Some(r#"{"text":"change direction"}"#),
+            )
+            .await;
+        assert_eq!(idle.status, StatusCode::CONFLICT);
+
+        let control = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/control"),
+                Some(r#"{"text":"what can you do?","channel":"telegram"}"#),
+            )
+            .await;
+        assert_eq!(control.status, StatusCode::OK);
+        assert_eq!(control.body, "null");
+
+        let (_stream, _) = start_stream(&harness, &id).await;
+        harness.provider.wait_started(1).await;
+        let accepted = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/steer"),
+                Some(r#"{"text":"finish this provider response, then inspect the failure"}"#),
+            )
+            .await;
+        assert_eq!(accepted.status, StatusCode::OK);
+        assert_eq!(accepted.json()["accepted"], true);
+
+        let empty = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/steer"),
+                Some(r#"{"text":"  "}"#),
+            )
+            .await;
+        assert_eq!(empty.status, StatusCode::BAD_REQUEST);
+
+        let too_long = format!("{{\"text\":\"{}\"}}", "é".repeat(16_001));
+        let oversized = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/control"),
+                Some(&too_long),
+            )
+            .await;
+        assert_eq!(oversized.status, StatusCode::BAD_REQUEST);
+        let unknown_field = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/control"),
+                Some(r#"{"text":"help","system":"override"}"#),
+            )
+            .await;
+        assert_eq!(unknown_field.status, StatusCode::BAD_REQUEST);
+        gate.cancel();
     }
 
     // ---- compaction, sandbox reload, tasks ----
@@ -4792,6 +5286,135 @@ mod tests {
             .send("POST", &format!("/v1/sessions/{id}/compact"), None)
             .await;
         assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    }
+
+    #[tokio::test]
+    async fn canceling_reflection_before_it_registers_cancels_that_request_id_only() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let cancel = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/reflect/cancel"),
+                Some(r#"{"request_id":"reflect-1"}"#),
+            )
+            .await;
+        assert_eq!(cancel.status, StatusCode::ACCEPTED, "{}", cancel.body);
+
+        let canceled = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/reflect"),
+                Some(r#"{"request_id":"reflect-1"}"#),
+            )
+            .await;
+        assert_eq!(canceled.status, StatusCode::OK, "{}", canceled.body);
+        assert!(canceled.body.is_empty());
+
+        let other = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/reflect"),
+                Some(r#"{"request_id":"reflect-2"}"#),
+            )
+            .await;
+        assert_eq!(other.status, StatusCode::CONFLICT, "{}", other.body);
+        assert_eq!(other.json()["error"]["code"], "reflection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn invalid_reflection_request_ids_are_rejected_without_binding() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let invalid = "a".repeat(65);
+        let cancel = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/reflect/cancel"),
+                Some(&format!(r#"{{"request_id":"{invalid}"}}"#)),
+            )
+            .await;
+        assert_eq!(cancel.status, StatusCode::BAD_REQUEST, "{}", cancel.body);
+
+        let valid = "a".repeat(64);
+        let reflect = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/reflect"),
+                Some(&format!(r#"{{"request_id":"{valid}"}}"#)),
+            )
+            .await;
+        assert_eq!(reflect.status, StatusCode::CONFLICT, "{}", reflect.body);
+        assert_eq!(reflect.json()["error"]["code"], "reflection_unavailable");
+
+        let control = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/reflect"),
+                Some(r#"{"request_id":"bad!"}"#),
+            )
+            .await;
+        assert_eq!(control.status, StatusCode::BAD_REQUEST, "{}", control.body);
+    }
+
+    #[tokio::test]
+    async fn canceling_reflection_matches_only_the_active_request_id() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let active = CancellationToken::new();
+        let other = CancellationToken::new();
+        let session = harness.server.lookup(&id).expect("session");
+        session.lock().reflecting = Some(ActiveReflection {
+            request_id: Some("active".to_string()),
+            cancel: active.clone(),
+        });
+
+        let stale = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/reflect/cancel"),
+                Some(r#"{"request_id":"stale"}"#),
+            )
+            .await;
+        assert_eq!(stale.status, StatusCode::ACCEPTED, "{}", stale.body);
+        assert!(!active.is_cancelled());
+
+        session.lock().reflecting = Some(ActiveReflection {
+            request_id: Some("other".to_string()),
+            cancel: other.clone(),
+        });
+        let matching = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/reflect/cancel"),
+                Some(r#"{"request_id":"other"}"#),
+            )
+            .await;
+        assert_eq!(matching.status, StatusCode::ACCEPTED, "{}", matching.body);
+        assert!(other.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn stale_reflection_cancel_does_not_cancel_later_compaction() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let compaction = CancellationToken::new();
+        let session = harness.server.lookup(&id).expect("session");
+        {
+            let mut state = session.lock();
+            state.remember_reflection_cancel("done");
+            state.compacting = Some(compaction.clone());
+        }
+
+        let stale = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/reflect/cancel"),
+                Some(r#"{"request_id":"done"}"#),
+            )
+            .await;
+        assert_eq!(stale.status, StatusCode::ACCEPTED, "{}", stale.body);
+        assert!(!compaction.is_cancelled());
     }
 
     /// A reflection store, a home directory, and the skill roots under it.
@@ -5006,6 +5629,36 @@ mod tests {
         assert_eq!(reply.json(), serde_json::json!({"notices": [], "last": 2}));
         let reply = harness
             .send("GET", "/v1/sessions/missing/notices", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn wake_replies_are_listed_after_the_cursor_and_unknown_sessions_are_404() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let path = format!("/v1/sessions/{id}/wake-replies");
+        let session = harness.server.lookup(&id).expect("session");
+        session.ctrl.push_notice("reflection: not a wake reply");
+        session.ctrl.push_wake_reply("first");
+        session.ctrl.push_wake_reply("second");
+
+        let reply = harness.send("GET", &path, None).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(
+            reply.json(),
+            serde_json::json!({
+                "notices": [{"id": 1, "text": "first"}, {"id": 2, "text": "second"}],
+                "last": 2,
+            })
+        );
+        let reply = harness.send("GET", &format!("{path}?after=1"), None).await;
+        assert_eq!(
+            reply.json()["notices"],
+            serde_json::json!([{"id": 2, "text": "second"}])
+        );
+        let reply = harness
+            .send("GET", "/v1/sessions/missing/wake-replies", None)
             .await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND);
     }
@@ -6750,6 +7403,27 @@ mod tests {
             .await
     }
 
+    async fn post_turn_with_channel(
+        harness: &Harness,
+        session: &str,
+        text: &str,
+        channel: Option<&str>,
+        queue: bool,
+    ) -> Response {
+        let mut body = serde_json::json!({"text": text, "queue": queue});
+        if let Some(channel) = channel {
+            body["channel"] = serde_json::Value::String(channel.to_string());
+        }
+        harness
+            .raw(
+                "POST",
+                &format!("/v1/sessions/{session}/turns"),
+                Some(&body.to_string()),
+                &[],
+            )
+            .await
+    }
+
     fn turn_header(response: &Response) -> String {
         response
             .headers()
@@ -6907,6 +7581,8 @@ mod tests {
             )),
             text: "x".to_string(),
             image: None,
+            channel: None,
+            origin: None,
         });
 
         tasks.notifications().push(notification());
@@ -6967,6 +7643,8 @@ mod tests {
             turn,
             text: "x".to_string(),
             image: None,
+            channel: None,
+            origin: None,
         });
         assert!(state.busy());
     }
@@ -7183,7 +7861,12 @@ mod tests {
     async fn a_turn_waits_for_an_approval_then_retries_in_the_same_turn() {
         let harness = approval_harness();
         let id = harness.create().await;
-        let (mut reader, turn_id, approval) = waiting_turn(&harness, &id).await;
+        let response =
+            post_turn_with_channel(&harness, &id, "run it", Some("telegram"), false).await;
+        let turn_id = turn_header(&response);
+        let mut reader = SseReader::new(response);
+        let requested = frame_named(&mut reader, "approval_requested").await;
+        let approval = requested["approval_id"].as_str().expect("id").to_string();
 
         let waiting = harness
             .send("GET", &format!("/v1/sessions/{id}/turns/{turn_id}"), None)
@@ -7211,6 +7894,10 @@ mod tests {
             .await
             .json();
         assert_eq!(session["turn"]["id"], turn_id.as_str());
+        let prompts = harness.provider.system_prompts();
+        // Each scripted run makes a tool request and a completion request.
+        assert_eq!(prompts.len(), 4);
+        assert!(prompts.iter().all(|prompt| prompt.contains("Telegram")));
 
         let again = decide(&harness, &id, &approval, "allow").await;
         assert_eq!(again.status, StatusCode::CONFLICT);

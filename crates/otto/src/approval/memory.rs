@@ -26,7 +26,7 @@ impl Domain for Adapter {
             .memory
             .get_candidate(&reference)
             .map_err(|_| Error::Unavailable)?;
-        Ok(format!(
+        let mut details = format!(
             "{} {}/{}\n\n{}\n\nReason: {}\nBase revision: {}",
             candidate.action.as_str(),
             candidate.proposed.kind,
@@ -34,7 +34,12 @@ impl Domain for Adapter {
             candidate.proposed.text,
             candidate.reason,
             candidate.base_revision
-        ))
+        );
+        if let Some(advice) = crate::memory::advice::advice_line(&candidate.proposed) {
+            details.push_str("\n\n");
+            details.push_str(&advice);
+        }
+        Ok(details)
     }
     fn apply(&self, request: &Request) -> Result<()> {
         let reference = self.reference(request)?;
@@ -186,6 +191,37 @@ pub fn attach(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unified_review_preserves_advice_without_turning_it_into_a_decision() {
+        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let user = store.identity().unwrap().user_scope;
+        let memory = Arc::new(crate::memory::Service::new(
+            store,
+            crate::memory::decide_default_policy,
+        ));
+        let service = Arc::new(Service::in_memory().unwrap());
+        attach(&service, &memory, vec![user.clone()], "/w").unwrap();
+        let candidate = crate::memory::advice::testing::candidate(&memory, user.clone(), true);
+        let requests = service.snapshot("/w", Some("session")).unwrap().requests;
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .subject
+                .details
+                .contains(crate::memory::advice::testing::LINE)
+        );
+        assert_eq!(requests[0].state, State::Pending);
+        assert_eq!(
+            memory
+                .get_candidate(&CandidateRef {
+                    scope: user,
+                    id: candidate.id
+                })
+                .unwrap()
+                .state,
+            CandidateState::Pending
+        );
+    }
     #[test]
     fn one_memory_request_is_shared_across_authorized_workspaces_without_copying_text() {
         let (_dir, store) = crate::memory::turso::testsupport::open_temp();

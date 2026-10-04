@@ -22,7 +22,7 @@ use std::future::Future;
 use std::io::Write;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crossterm::event::KeyEvent;
@@ -40,6 +40,8 @@ use super::{TerminalInput, TuiEvent, agents_view, render, selection, spawn_key_r
 use crate::app::Info;
 use crate::cli::repl::Error as ReplError;
 use crate::client::{Client, Error, StatusRow, StatusStream, TurnStream};
+use crate::schedule::worker::{DeliverRole, Sink, Worker};
+use crate::schedule::{Origin, Scope};
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 /// Bound on one request. A long call (`/compact`) runs as a future in the
@@ -268,6 +270,7 @@ pub(crate) async fn run(
     socket: &Path,
     workspace: &str,
     start: Start,
+    schedule: Option<Arc<crate::schedule::Store>>,
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),
 ) -> i32 {
@@ -302,7 +305,39 @@ pub(crate) async fn run(
         return 1;
     }
     let mut keys = spawn_key_reader();
-    let result = run_loop(&mut terminal, &remote, status, cancel, &mut keys).await;
+    // `deliver_tx` stays alive in this function so a missing worker leaves the
+    // receiver pending instead of closed.
+    let (deliver_tx, mut deliveries) = mpsc::channel(8);
+    let worker_cancel = cancel.child_token();
+    let worker = schedule.map(|store| {
+        tokio::spawn(
+            Worker {
+                store,
+                run: None,
+                deliver: Some(DeliverRole {
+                    scope: Scope::Terminal,
+                    sink: Arc::new(ChannelSink(deliver_tx.clone())),
+                }),
+            }
+            .run(worker_cancel.clone()),
+        )
+    });
+    let result = run_loop(
+        &mut terminal,
+        &remote,
+        status,
+        cancel,
+        &mut keys,
+        &mut deliveries,
+    )
+    .await;
+    // Sends after the loop has exited fail, so those items stay undelivered.
+    drop(deliveries);
+    worker_cancel.cancel();
+    if let Some(worker) = worker {
+        let _ = worker.await;
+    }
+    drop(deliver_tx);
     let _ = input.restore(std::io::stdout());
     let _ = ratatui::try_restore();
     match result {
@@ -361,6 +396,20 @@ struct Followed {
     error_rendered: bool,
 }
 
+/// Hands scheduled deliveries to the attach loop. `Err` once the loop has
+/// exited, so the item is retried by another process.
+struct ChannelSink(mpsc::Sender<String>);
+
+#[async_trait::async_trait]
+impl Sink for ChannelSink {
+    async fn deliver(&self, _origin: &Origin, text: &str) -> Result<(), String> {
+        self.0
+            .send(text.to_string())
+            .await
+            .map_err(|_| "the terminal UI has exited".to_string())
+    }
+}
+
 type CompactCall<'a> =
     Pin<Box<dyn Future<Output = Result<Option<WireCompaction>, Error>> + Send + 'a>>;
 
@@ -395,6 +444,7 @@ enum Ev {
     Frame(Result<Option<WireEvent>, Error>),
     Status(Result<Option<Vec<StatusRow>>, Error>),
     Compact(Result<Option<WireCompaction>, Error>),
+    Scheduled(Option<String>),
     Retry,
     AgentsTick,
     ApprovalsTick,
@@ -407,6 +457,7 @@ async fn run_loop<B: TerminalBackend>(
     status: StatusStream,
     cancel: &CancellationToken,
     keys: &mut mpsc::Receiver<TuiEvent>,
+    deliveries: &mut mpsc::Receiver<String>,
 ) -> Result<(), ReplError> {
     let app = App::new(&Backend::Attach(remote));
     let mut ui = Ui {
@@ -465,6 +516,7 @@ async fn run_loop<B: TerminalBackend>(
                 result = frame => Ev::Frame(result),
                 result = snapshot => Ev::Status(result),
                 result = compaction => Ev::Compact(result),
+                text = deliveries.recv() => Ev::Scheduled(text),
                 () = reconnect => Ev::Retry,
                 _ = agents.tick() => Ev::AgentsTick,
                 _ = approvals.tick(), if connected => Ev::ApprovalsTick,
@@ -477,6 +529,14 @@ async fn run_loop<B: TerminalBackend>(
             Ev::Frame(result) => ui.on_frame(result).await,
             Ev::Status(result) => ui.on_status(result).await,
             Ev::Compact(result) => ui.on_compact(result).await,
+            Ev::Scheduled(text) => {
+                if let Some(text) = text {
+                    ui.app.push_system(text);
+                    // The terminal backend writes to stdout.
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(b"\x07").and_then(|()| stdout.flush());
+                }
+            }
             Ev::Retry => ui.reconnect().await,
             Ev::AgentsTick => {
                 if let Some(view) = &mut ui.app.agents {
@@ -908,6 +968,18 @@ impl<'a> Ui<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_channel_sink_forwards_text_and_fails_when_the_ui_is_gone() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let sink = ChannelSink(tx);
+        sink.deliver(&Origin::terminal(), "⏰ stretch")
+            .await
+            .unwrap();
+        assert_eq!(rx.recv().await.as_deref(), Some("⏰ stretch"));
+        drop(rx);
+        assert!(sink.deliver(&Origin::terminal(), "x").await.is_err());
+    }
 
     fn row(turn: Option<&str>, turn_id: Option<&str>) -> StatusRow {
         StatusRow {

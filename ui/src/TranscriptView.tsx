@@ -52,7 +52,7 @@ export function TranscriptView(props: { items: Item[]; queuedInput?: string; act
 
 type CodeProps = ComponentPropsWithoutRef<'code'> & { inline?: boolean }
 
-function MarkdownView({ text }: { text: string }) {
+export function MarkdownView({ text }: { text: string }) {
   return (
     <Markdown
       remarkPlugins={[remarkGfm, remarkMath]}

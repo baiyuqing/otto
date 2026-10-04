@@ -35,8 +35,10 @@ use reqwest::header::CONTENT_TYPE;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::app::Channel;
 use crate::cli::info::{SandboxMode, SandboxNetwork};
 use crate::mcp::sse::SseParser;
+use crate::schedule::Origin;
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 const BASE: &str = "http://otto";
@@ -92,6 +94,39 @@ pub struct SessionRow {
     pub modified: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ReflectionResult {
+    pub line: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GeneratedSkill {
+    pub name: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub reason: String,
+    pub updated_at: String,
+    pub owned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GeneratedSkillList {
+    pub enabled: bool,
+    pub skills: Vec<GeneratedSkill>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReflectionNotice {
+    pub id: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReflectionNotices {
+    pub notices: Vec<ReflectionNotice>,
+    pub last: u64,
+}
+
 pub struct Client {
     http: reqwest::Client,
     router: Option<axum::Router>,
@@ -143,10 +178,62 @@ impl Client {
         session_id: &str,
         text: &str,
     ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
+        self.approval_message_with_channel(session_id, text, None)
+            .await
+    }
+
+    pub async fn approval_message_with_channel(
+        &self,
+        session_id: &str,
+        text: &str,
+        channel: Option<Channel>,
+    ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
+        let mut body = json!({"text": text});
+        if let Some(channel) = channel {
+            body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
+        }
         let response = self
             .send(self.post(
                 &format!("{BASE}/v1/sessions/{session_id}/approvals/message"),
-                &json!({"text":text}),
+                &body,
+            ))
+            .await?;
+        serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
+            .map_err(unreachable_error)
+    }
+
+    /// `POST /v1/sessions/{id}/tasks/steer`. Accepts guidance only for the
+    /// active task in this session.
+    pub async fn steer(&self, session_id: &str, text: &str) -> Result<bool, Error> {
+        #[derive(Deserialize)]
+        struct Accepted {
+            accepted: bool,
+        }
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/tasks/steer"),
+                &json!({"text": text}),
+            ))
+            .await?;
+        Ok(decode::<Accepted>(response).await?.accepted)
+    }
+
+    /// `POST /v1/sessions/{id}/tasks/control`. `None` means the caller should
+    /// route the message as an ordinary prompt.
+    pub async fn control_message_with_channel(
+        &self,
+        session_id: &str,
+        text: &str,
+        channel: Option<Channel>,
+    ) -> Result<Option<crate::app::approval_control::ControlReply>, Error> {
+        let mut body = json!({"text": text});
+        if let Some(channel) = channel {
+            body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
+        }
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/tasks/control"),
+                &body,
             ))
             .await?;
         serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
@@ -218,15 +305,36 @@ impl Client {
         decode(self.send(request).await?).await
     }
 
-    /// `POST /v1/sessions/{id}/turns` with `queue: true`. `image` is an
-    /// image block; its data and MIME type go in the `image` field.
+    /// `POST /v1/sessions/{id}/turns` with `queue: true` and origin
+    /// `terminal`, for the attach TUI. `image` is an image block; its data
+    /// and MIME type go in the `image` field.
     pub async fn start_turn(
         &self,
         session_id: &str,
         text: &str,
         image: Option<&Block>,
     ) -> Result<TurnStream, Error> {
+        self.start_turn_with_channel(session_id, text, image, None, Some(&Origin::terminal()))
+            .await
+    }
+
+    /// Starts a queued turn with optional per-turn chat channel metadata and
+    /// origin. Without an origin the server records the turn as `web`.
+    pub async fn start_turn_with_channel(
+        &self,
+        session_id: &str,
+        text: &str,
+        image: Option<&Block>,
+        channel: Option<Channel>,
+        origin: Option<&Origin>,
+    ) -> Result<TurnStream, Error> {
         let mut body = json!({ "text": text, "queue": true });
+        if let Some(channel) = channel {
+            body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
+        }
+        if let Some(origin) = origin {
+            body["origin"] = json!(origin.as_str());
+        }
         if let Some(image) = image {
             body["image"] = json!({ "data": image.data, "mime_type": image.mime_type });
         }
@@ -313,6 +421,109 @@ impl Client {
         serde_json::from_slice(&body)
             .map(Some)
             .map_err(|error| unreachable_error(format!("decode response: {error}")))
+    }
+
+    /// `POST /v1/sessions/{id}/reflect`. The request id binds a later cancel
+    /// to this reflection only.
+    pub async fn reflect(
+        &self,
+        session_id: &str,
+        focus: &str,
+        request_id: &str,
+    ) -> Result<Option<ReflectionResult>, Error> {
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/reflect"),
+                &json!({ "focus": focus, "request_id": request_id }),
+            ))
+            .await?;
+        let body = response.bytes().await.map_err(unreachable_error)?;
+        if body.iter().all(u8::is_ascii_whitespace) {
+            return Ok(None);
+        }
+        serde_json::from_slice(&body)
+            .map(Some)
+            .map_err(|error| unreachable_error(format!("decode response: {error}")))
+    }
+
+    /// Cancels only the reflection with this request id. A missing or stale
+    /// id has no effect on another operation in the session.
+    pub async fn cancel_reflection(&self, session_id: &str, request_id: &str) -> Result<(), Error> {
+        self.send(self.post(
+            &format!("{BASE}/v1/sessions/{session_id}/reflect/cancel"),
+            &json!({ "request_id": request_id }),
+        ))
+        .await
+        .map(drop)
+    }
+
+    /// `GET /v1/sessions/{id}/reflection/skills`.
+    pub async fn generated_skills(&self, session_id: &str) -> Result<GeneratedSkillList, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/reflection/skills")),
+            )
+            .await?;
+        decode(response).await
+    }
+
+    /// `POST /v1/sessions/{id}/reflection/skills/{name}/revert`.
+    pub async fn revert_generated_skill(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Result<String, Error> {
+        let mut url = reqwest::Url::parse(BASE).expect("static Otto base URL");
+        url.path_segments_mut()
+            .expect("base URL supports path segments")
+            .extend([
+                "v1",
+                "sessions",
+                session_id,
+                "reflection",
+                "skills",
+                name,
+                "revert",
+            ]);
+        let response = self.send(self.post(url.as_str(), &json!({}))).await?;
+        #[derive(Deserialize)]
+        struct Reverted {
+            result: String,
+        }
+        Ok(decode::<Reverted>(response).await?.result)
+    }
+
+    /// `GET /v1/sessions/{id}/notices?after=...`.
+    pub async fn reflection_notices(
+        &self,
+        session_id: &str,
+        after: u64,
+    ) -> Result<ReflectionNotices, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/notices"))
+                    .query(&[("after", after)]),
+            )
+            .await?;
+        decode(response).await
+    }
+
+    /// `GET /v1/sessions/{id}/wake-replies?after=...`.
+    pub async fn wake_replies(
+        &self,
+        session_id: &str,
+        after: u64,
+    ) -> Result<ReflectionNotices, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/wake-replies"))
+                    .query(&[("after", after)]),
+            )
+            .await?;
+        decode(response).await
     }
 
     /// `GET /v1/sessions/{id}/context`.
@@ -822,6 +1033,16 @@ mod tests {
         let stream = client.start_turn("s1", "look", Some(&image)).await.unwrap();
         assert_eq!(stream.turn_id, "t1");
         client.start_turn("s1", "plain", None).await.unwrap();
+        client
+            .start_turn_with_channel(
+                "s1",
+                "chat text",
+                None,
+                Some(Channel::Feishu),
+                Some(&Origin::chat("feishu", "oc_1").unwrap()),
+            )
+            .await
+            .unwrap();
         assert_eq!(
             request(&seen, 0),
             (
@@ -829,13 +1050,23 @@ mod tests {
                 json!({
                     "text": "look",
                     "queue": true,
+                    "origin": "terminal",
                     "image": { "data": "QUJD", "mime_type": "image/png" }
                 })
             )
         );
         assert_eq!(
             request(&seen, 1).1,
-            json!({ "text": "plain", "queue": true })
+            json!({ "text": "plain", "queue": true, "origin": "terminal" })
+        );
+        assert_eq!(
+            request(&seen, 2).1,
+            json!({
+                "text": "chat text",
+                "queue": true,
+                "channel": "feishu",
+                "origin": "chat:feishu:oc_1"
+            })
         );
     }
 
@@ -968,6 +1199,92 @@ mod tests {
             )
         );
         assert_eq!(client.compact("cut", "").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn reflection_client_calls_use_the_existing_routes_and_empty_cancel_reply() {
+        let (client, seen, _dir) = stub(|_, path| match path.split('?').next().unwrap_or(path) {
+            "/v1/sessions/s1/reflect" => json_body(
+                StatusCode::OK,
+                r#"{"line":"reflection: 1 candidate queued"}"#,
+            ),
+            "/v1/sessions/s1/reflect/cancel" => json_body(StatusCode::ACCEPTED, ""),
+            "/v1/sessions/s1/reflection/skills" => json_body(
+                StatusCode::OK,
+                r#"{"enabled":true,"skills":[{"name":"lint","run_id":"r1","session_id":"s1","reason":"reason","created_at":"now","updated_at":"now","owned":true}]}"#,
+            ),
+            "/v1/sessions/s1/notices" => json_body(
+                StatusCode::OK,
+                r#"{"notices":[{"id":3,"text":"reflection: done"}],"last":3}"#,
+            ),
+            _ => json_body(StatusCode::OK, r#"{"name":"lint","result":"removed"}"#),
+        });
+        assert_eq!(
+            client
+                .reflect("s1", "focus", "acp-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .line,
+            "reflection: 1 candidate queued"
+        );
+        client.cancel_reflection("s1", "acp-1").await.unwrap();
+        let skills = client.generated_skills("s1").await.unwrap();
+        assert_eq!(skills.skills[0].name, "lint");
+        assert_eq!(
+            client.revert_generated_skill("s1", "lint").await.unwrap(),
+            "removed"
+        );
+        let notices = client.reflection_notices("s1", 2).await.unwrap();
+        assert_eq!(notices.notices[0].id, 3);
+        assert_eq!(notices.last, 3);
+        assert_eq!(
+            request(&seen, 0).1,
+            json!({"focus":"focus", "request_id":"acp-1"})
+        );
+        assert_eq!(request(&seen, 1).1, json!({"request_id":"acp-1"}));
+        assert_eq!(request(&seen, 4).0, "GET /v1/sessions/s1/notices?after=2");
+    }
+
+    #[tokio::test]
+    async fn task_control_client_uses_session_routes_and_transient_channel() {
+        let (client, seen, _dir) = stub(|_, path| match path {
+            "/v1/sessions/s1/tasks/steer" => json_body(StatusCode::OK, r#"{"accepted":true}"#),
+            "/v1/sessions/s1/tasks/control" => json_body(
+                StatusCode::OK,
+                r#"{"text":"I can guide the task","queued":false}"#,
+            ),
+            _ => json_body(StatusCode::NOT_FOUND, ""),
+        });
+
+        assert!(client.steer("s1", "inspect the result").await.unwrap());
+        let reply = client
+            .control_message_with_channel("s1", "what can you do?", Some(Channel::Telegram))
+            .await
+            .unwrap()
+            .expect("routed reply");
+        assert_eq!(reply.text, "I can guide the task");
+        assert!(!reply.queued);
+        assert_eq!(
+            request(&seen, 0),
+            (
+                "POST /v1/sessions/s1/tasks/steer".into(),
+                json!({"text":"inspect the result"})
+            )
+        );
+        assert_eq!(
+            request(&seen, 1),
+            (
+                "POST /v1/sessions/s1/tasks/control".into(),
+                json!({"text":"what can you do?","channel":"telegram"})
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn reflection_treats_an_empty_cancelled_response_as_none() {
+        let (client, _, _dir) = stub(|_, _| json_body(StatusCode::OK, "  "));
+        assert!(client.reflect("s1", "", "acp-2").await.unwrap().is_none());
     }
 
     #[tokio::test]

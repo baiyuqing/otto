@@ -745,6 +745,9 @@ fn render_pending_candidates(candidates: &[crate::memory::Candidate]) -> String 
             first_runes(&one_line(&proposed.text), 120),
             first_runes(&one_line(&candidate.reason), 120),
         );
+        if let Some(line) = crate::memory::advice::advice_line(proposed) {
+            let _ = write!(out, "\n  {line}");
+        }
     }
     out
 }
@@ -920,6 +923,46 @@ mod tests {
     use std::path::Path;
     use tokio_util::sync::CancellationToken;
 
+    fn standalone_service() -> (tempfile::TempDir, crate::memory::Service) {
+        let (directory, store) = crate::memory::turso::testsupport::open_temp();
+        (
+            directory,
+            crate::memory::Service::new(store, crate::memory::decide_default_policy),
+        )
+    }
+
+    #[test]
+    fn pending_candidates_show_the_advice_line_under_the_candidate() {
+        let (_directory, service) = standalone_service();
+        let scope = crate::memory::Scope::new(crate::memory::NAMESPACE_USER, "user-1");
+        let advised = crate::memory::advice::testing::candidate(&service, scope.clone(), true);
+
+        let text = render_pending_candidates(std::slice::from_ref(&advised));
+
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(
+            lines[1].starts_with(&format!("id={}", advised.id)),
+            "{text}"
+        );
+        assert_eq!(
+            lines[2],
+            format!("  {}", crate::memory::advice::testing::LINE)
+        );
+    }
+
+    #[test]
+    fn pending_candidates_without_advice_render_exactly_one_line_each() {
+        let (_directory, service) = standalone_service();
+        let scope = crate::memory::Scope::new(crate::memory::NAMESPACE_USER, "user-1");
+        let plain = crate::memory::advice::testing::candidate(&service, scope, false);
+
+        let text = render_pending_candidates(std::slice::from_ref(&plain));
+
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(!text.contains("Advice"), "{text}");
+    }
+
     #[derive(Clone, Default)]
     struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -963,6 +1006,7 @@ mod tests {
             user_scope,
             recall_limit: 8,
             recall_token_budget: 1000,
+            advice_audit: None,
         };
         builder.workspace_scope =
             super::super::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())

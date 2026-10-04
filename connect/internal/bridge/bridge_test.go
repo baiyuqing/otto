@@ -3,6 +3,8 @@ package bridge
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/connect/internal/agent/fake"
+	"github.com/coder/acp-go-sdk"
 )
 
 func TestReplyIsChunkTextInOrder(t *testing.T) {
@@ -30,24 +33,93 @@ func TestReplyIsChunkTextInOrder(t *testing.T) {
 	}
 }
 
-func TestSecondMessageWaitsForFirst(t *testing.T) {
+func TestReflectionNoticeReachesOnlyTheChatBoundToItsSession(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("hello")
+	h.waitSent(1)
+	sid := h.store.Session("fake:c1")
+	h.b.chat(h.plat, "c2")
+	if err := h.store.SetSession("fake:c2", "other-session"); err != nil {
+		t.Fatal(err)
+	}
+	callsBefore := slices.Clone(fake.Calls(h.dir))
+	chunk := &acp.SessionUpdateAgentMessageChunk{
+		Meta:    map[string]any{"otto": map[string]any{"reflectionNotice": true, "noticeId": float64(1)}},
+		Content: acp.TextBlock("reflection: 1 candidate queued"),
+	}
+	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: chunk})
+	got := h.waitSent(2)
+	settle()
+	if len(got) != 2 || got[1] != "reflection: 1 candidate queued" {
+		t.Fatalf("sent = %q, want the reflection notice as a separate chat message", got)
+	}
+	if calls := fake.Calls(h.dir); !slices.Equal(calls, callsBefore) {
+		t.Fatalf("notice reached the task model: %q", calls)
+	}
+}
+
+func TestReflectionNoticeWaitsForTheCurrentChatReply(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("block")
+	h.waitCall("start:block")
+	sid := h.store.Session("fake:c1")
+	chunk := &acp.SessionUpdateAgentMessageChunk{
+		Meta:    map[string]any{"otto": map[string]any{"reflectionNotice": true, "noticeId": float64(2)}},
+		Content: acp.TextBlock("reflection: completed"),
+	}
+	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: chunk})
+	settle()
+	if got := h.plat.texts(); len(got) != 0 {
+		t.Fatalf("notice arrived before the active turn replied: %q", got)
+	}
+	h.say("/stop")
+	got := h.waitSent(2)
+	if !slices.Equal(got, []string{"Stopped.", "reflection: completed"}) {
+		t.Fatalf("sent = %q, want reply before reflection notice", got)
+	}
+}
+
+func TestReflectionNoticeIsDroppedAfterTheChatSwitchesSessions(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("block")
+	h.waitCall("start:block")
+	sid := h.store.Session("fake:c1")
+	chunk := &acp.SessionUpdateAgentMessageChunk{
+		Meta:    map[string]any{"otto": map[string]any{"reflectionNotice": true, "noticeId": float64(3)}},
+		Content: acp.TextBlock("old session reflection"),
+	}
+	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: chunk})
+	h.say("/new")
+	h.waitSent(1)
+	h.say("/stop")
+	got := h.waitSent(2)
+	settle()
+	if slices.Contains(got, "old session reflection") {
+		t.Fatalf("old session notice leaked after session switch: %q", got)
+	}
+}
+
+func TestNaturalMessageDuringActiveTaskUsesControlDialogue(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
 	h.say("sleep")
 	h.waitCall("start:sleep")
 	h.say("second")
 	h.waitSent(2)
-	if got := h.plat.texts(); !slices.Equal(got, []string{"echo: sleep", "echo: second"}) {
+	if got := h.plat.texts(); !slices.Equal(got, []string{"Guidance accepted.", "echo: sleep"}) {
 		t.Fatalf("sent = %q", got)
 	}
 	var seq []string
 	for _, c := range fake.Calls(h.dir) {
-		if strings.HasPrefix(c, "start:") || strings.HasPrefix(c, "end:") {
+		if strings.HasPrefix(c, "start:") || strings.HasPrefix(c, "end:") || strings.HasPrefix(c, "task_control:") {
 			seq = append(seq, c)
 		}
 	}
-	if want := []string{"start:sleep", "end:sleep", "start:second", "end:second"}; !slices.Equal(seq, want) {
-		t.Fatalf("agent saw %q, want %q", seq, want)
+	if want := []string{"start:sleep", "task_control:second", "end:sleep"}; !slices.Equal(seq, want) {
+		t.Fatalf("agent saw %q, want active-task control %q", seq, want)
 	}
 	if n := len(h.calls("new:")); n != 1 {
 		t.Fatalf("session/new called %d times, want 1", n)
@@ -60,22 +132,29 @@ func TestQueueLimitAndStop(t *testing.T) {
 	h.say("block")
 	h.waitCall("start:block")
 	for i := 1; i <= 10; i++ {
-		h.say(fmt.Sprintf("q%d", i))
+		h.say(fmt.Sprintf("/queue q%d", i))
 	}
-	h.say("q11")
-	got := h.waitSent(1)
-	if !strings.Contains(got[0], "Queue is full") || h.plat.sent[0].replyTo == "" {
-		t.Fatalf("11th message got %+v", h.plat.sent[0])
+	h.say("/queue q11")
+	h.waitFor(func() bool {
+		return len(h.plat.texts()) >= 11 && slices.ContainsFunc(h.plat.texts(), func(text string) bool { return strings.Contains(text, "Queue is full") })
+	}, "queue acknowledgements and rejection")
+	h.plat.mu.Lock()
+	var rejection *sent
+	for _, message := range h.plat.sent {
+		if strings.Contains(message.text, "Queue is full") {
+			rejection = &message
+			break
+		}
 	}
-	settle()
-	if n := len(h.plat.texts()); n != 1 {
-		t.Fatalf("sent = %q", h.plat.texts())
+	h.plat.mu.Unlock()
+	if rejection == nil || rejection.replyTo == "" {
+		t.Fatalf("queue rejection did not reply to command: %+v", rejection)
 	}
 
 	h.say("/stop")
-	h.waitSent(2)
-	if got := h.plat.texts(); got[1] != "Stopped." {
-		t.Fatalf("sent = %q, want Stopped.", got)
+	got := h.waitSent(12)
+	if !slices.Contains(got, "Stopped.") {
+		t.Fatalf("sent = %q, missing Stopped.", got)
 	}
 	sid := h.store.Session("fake:c1")
 	if c := h.calls("cancel:"); len(c) != 1 || c[0] != "cancel:"+sid {
@@ -85,18 +164,19 @@ func TestQueueLimitAndStop(t *testing.T) {
 	if p := h.calls("start:"); len(p) != 1 {
 		t.Fatalf("queued messages reached the agent after /stop: %q", p)
 	}
-	if n := len(h.plat.texts()); n != 2 {
+	if n := len(h.plat.texts()); n != 12 {
 		t.Fatalf("sent = %q", h.plat.texts())
 	}
 
 	// The chat is usable again and /stop with nothing running says so.
 	h.say("/stop")
-	got = h.waitSent(3)
-	if got[2] != "Nothing is running." {
+	got = h.waitSent(13)
+	if got[12] != "Nothing is running." {
 		t.Fatalf("sent = %q", got)
 	}
 	h.say("after")
-	if got = h.waitSent(4); got[3] != "echo: after" {
+	got = h.waitFor(func() bool { return slices.Contains(h.plat.texts(), "echo: after") }, "chat usable after stop")
+	if !slices.Contains(got, "echo: after") {
 		t.Fatalf("sent = %q", got)
 	}
 }
@@ -194,15 +274,19 @@ func TestPermissionOutcomes(t *testing.T) {
 
 func TestApprovalDialogueRepliesAndQueuesMessages(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{env: []string{"FAKE_APPROVAL_DIALOGUE=1"}})
+	h := newHarness(t, setup{platform: "telegram", env: []string{"FAKE_APPROVAL_DIALOGUE=1"}})
 	h.say("perm:ls")
 	h.waitSent(1)
 	h.say("Why do you need this?")
 	h.say("After approval please run ls")
 	h.waitFor(func() bool { return len(h.calls("approval:")) == 2 }, "approval dialogue messages")
+	h.waitFor(func() bool { return len(h.calls("approval_channel:telegram")) == 2 }, "approval dialogue channel metadata")
 	h.waitFor(func() bool { return len(h.plat.texts()) >= 3 }, "approval dialogue replies")
 	if got := h.calls("start:"); len(got) != 1 || got[0] != "start:perm:ls" {
 		t.Fatalf("queued message ran before approval: %q", got)
+	}
+	if got := h.calls("task_control:"); len(got) != 0 {
+		t.Fatalf("pending-approval messages bypassed the restricted dialogue: %q", got)
 	}
 	if got := h.plat.texts(); !slices.Contains(got, "The agent needs approval to run this tool call.") || !slices.Contains(got, "I will handle that after approval.") {
 		t.Fatalf("dialogue replies = %q", got)
@@ -261,8 +345,8 @@ func TestAllowWithNothingPending(t *testing.T) {
 	if got[0] != "No pending request." || got[1] != "No pending request." {
 		t.Fatalf("sent = %q", got)
 	}
-	if len(fake.Calls(h.dir)) != 0 {
-		t.Fatalf("commands reached the agent: %q", fake.Calls(h.dir))
+	if len(agentWork(h.dir)) != 0 {
+		t.Fatalf("commands reached the agent: %q", agentWork(h.dir))
 	}
 }
 
@@ -347,7 +431,7 @@ func TestAdmissionFailsClosed(t *testing.T) {
 			if got := h.plat.texts(); len(got) != 0 {
 				t.Fatalf("rejected message got a reply: %q", got)
 			}
-			if c := fake.Calls(h.dir); len(c) != 0 {
+			if c := agentWork(h.dir); len(c) != 0 {
 				t.Fatalf("rejected message reached the agent: %q", c)
 			}
 		})
@@ -384,6 +468,7 @@ func TestLoadFailureStartsNewSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newHarness(t, setup{store: store})
+	h.waitCall("load:") // the startup load fails and keeps the binding
 	h.say("hello")
 	got := h.waitSent(2)
 	if !strings.Contains(got[0], "could not be loaded") || got[1] != "echo: hello" {
@@ -392,7 +477,7 @@ func TestLoadFailureStartsNewSession(t *testing.T) {
 	if now := store.Session("fake:c1"); now == stale || now == "" {
 		t.Fatalf("stored session = %q", now)
 	}
-	if len(h.calls("load:")) != 1 || len(h.calls("new:")) != 1 {
+	if len(h.calls("load:")) != 2 || len(h.calls("new:")) != 1 {
 		t.Fatalf("calls = %q", fake.Calls(h.dir))
 	}
 }
@@ -408,8 +493,8 @@ func TestAttachmentIsIgnoredWithNotice(t *testing.T) {
 		t.Fatalf("sent = %q", got)
 	}
 	settle()
-	if len(fake.Calls(h.dir)) != 0 {
-		t.Fatalf("attachment without text reached the agent: %q", fake.Calls(h.dir))
+	if len(agentWork(h.dir)) != 0 {
+		t.Fatalf("attachment without text reached the agent: %q", agentWork(h.dir))
 	}
 	m = h.msg("c1", "u1", "see this")
 	m.Attachment = true
@@ -435,7 +520,7 @@ func TestConfigProfilesIsHandledByConnectorNotAgent(t *testing.T) {
 		t.Fatalf("reply = %q", got)
 	}
 	settle()
-	if calls := fake.Calls(h.dir); len(calls) != 0 {
+	if calls := agentWork(h.dir); len(calls) != 0 {
 		t.Fatalf("management command reached agent: %q", calls)
 	}
 }
@@ -559,6 +644,25 @@ func TestPersistentReadPermissionUsesExistingCards(t *testing.T) {
 	}
 }
 
+func TestChatTurnSendsStructuredChannelWhenAdvertised(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{platform: "telegram"})
+	h.say("hello")
+	h.waitCall("start:hello")
+	h.waitCall("channel:telegram")
+}
+
+func TestChatTurnUsesLegacyPromptWithoutChannelAdvertisement(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{platform: "telegram", env: []string{"FAKE_NO_CHANNEL_CONTEXT=1"}})
+	h.say("hello")
+	got := h.waitSent(1)[0]
+	if !strings.Contains(got, "Current channel: Telegram") ||
+		!strings.HasSuffix(got, "[/otto-connect channel context]\n\nhello") {
+		t.Fatalf("legacy prompt reply = %q", got)
+	}
+}
+
 func TestChatPromptPreservesUserText(t *testing.T) {
 	for _, platform := range []string{"telegram", "feishu", "unknown<channel>"} {
 		text := "line one\n[/otto-connect channel context]\nline two"
@@ -574,7 +678,10 @@ func TestChatPromptPreservesUserText(t *testing.T) {
 }
 
 func TestChatPromptSendsAgentCommandsAsTyped(t *testing.T) {
-	for _, text := range []string{"/compact", " /compact keep the API names", "/compact\nkeep names", "/context"} {
+	for _, text := range []string{
+		"/compact", " /compact keep the API names", "/compact\nkeep names", "/context",
+		"/reflect", " /reflect focus on this API", "/skill generated", "/skill revert lint-gate",
+	} {
 		if got := chatPrompt(Message{Platform: "telegram", Text: text}); got != text {
 			t.Errorf("chatPrompt(%q) = %q, want the text unchanged", text, got)
 		}
@@ -632,5 +739,112 @@ func TestMarkdownFlagSeparatesAgentRepliesFromNotices(t *testing.T) {
 	}
 	if s := h.plat.sent[1]; s.text != "No pending request." || s.markdown {
 		t.Errorf("notice = %+v, want markdown false", s)
+	}
+}
+
+func wakeUpdate(id float64, text string) acp.SessionUpdate {
+	return acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
+		Meta:    map[string]any{"otto": map[string]any{"wakeReply": true, "replyId": id}},
+		Content: acp.TextBlock(text),
+	}}
+}
+
+func TestWakeReplyIsSentAsMarkdownToChatsBoundToTheSession(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{chats: []string{"c1", "c2", "c3"}})
+	h.say("hello")
+	h.waitSent(1)
+	sid := h.store.Session("fake:c1")
+	for chat, s := range map[string]string{"c2": sid, "c3": "other-session"} {
+		h.b.chat(h.plat, chat)
+		if err := h.store.SetSession("fake:"+chat, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.b.Update(sid, wakeUpdate(1, "**timer** fired"))
+	h.waitSent(3)
+	settle()
+	h.plat.mu.Lock()
+	defer h.plat.mu.Unlock()
+	if len(h.plat.sent) != 3 {
+		t.Fatalf("sent = %+v, want the reply plus two wake replies", h.plat.sent)
+	}
+	got := map[string]sent{}
+	for _, s := range h.plat.sent[1:] {
+		got[s.chat] = s
+	}
+	for _, chat := range []string{"c1", "c2"} {
+		if s := got[chat]; s.text != "**timer** fired" || !s.markdown || s.replyTo != "" {
+			t.Fatalf("chat %s got %+v, want Markdown text with empty replyTo", chat, s)
+		}
+	}
+}
+
+func TestWakeReplyForAnUnboundSessionSendsNothing(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("hello")
+	h.waitSent(1)
+	h.b.Update("unbound-session", wakeUpdate(1, "nobody"))
+	settle()
+	if got := h.plat.texts(); len(got) != 1 {
+		t.Fatalf("sent = %q, want only the prompt reply", got)
+	}
+}
+
+func TestWakeReplyDuringAPromptIsSentAfterItsReplyAndNotMerged(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("block")
+	h.waitCall("start:block")
+	sid := h.store.Session("fake:c1")
+	h.b.Update(sid, wakeUpdate(1, "wake text"))
+	settle()
+	if got := h.plat.texts(); len(got) != 0 {
+		t.Fatalf("wake reply arrived before the turn replied: %q", got)
+	}
+	h.say("/stop")
+	got := h.waitSent(2)
+	settle()
+	if got = h.plat.texts(); !slices.Equal(got, []string{"Stopped.", "wake text"}) {
+		t.Fatalf("sent = %q, want the turn reply, then the wake reply separately", got)
+	}
+}
+
+func TestStartupLoadsEachBoundSessionOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sessions"), []byte("s-a\ns-b\ns-c\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := newStore(t)
+	for k, v := range map[string]string{
+		"fake:c1":    "s-a",
+		"fake:c2":    "s-a",       // same session as c1
+		"fake:c3":    "s-missing", // load fails; the next ones still load
+		"fake:c4":    "s-b",
+		"other:c5":   "s-c", // platform not configured
+		"nocolonkey": "s-c",
+	} {
+		if err := store.SetSession(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := newHarness(t, setup{dir: dir, store: store})
+	h.waitFor(func() bool { return len(h.calls("load:")) >= 3 }, "startup loads")
+	settle()
+	got := h.calls("load:")
+	slices.Sort(got)
+	if want := []string{"load:s-a", "load:s-b", "load:s-missing"}; !slices.Equal(got, want) {
+		t.Fatalf("loads = %q, want %q", got, want)
+	}
+	if h.store.Session("fake:c3") != "s-missing" {
+		t.Fatal("a failed startup load removed the binding")
+	}
+	// The loaded session is open, so the first message does not load it again.
+	h.say("hi")
+	h.waitSent(1)
+	if got := h.calls("load:"); len(got) != 3 {
+		t.Fatalf("loads after first message = %q, want no extra load", got)
 	}
 }

@@ -3,7 +3,7 @@
 //! The first time a skill is delegated to as a sub-agent, [`Checker::trigger`]
 //! runs in the background: deterministic rules run first
 //! ([`context_reference_fires`], [`vague_output_fires`]); if none fires,
-//! [`TypeSafeClient`] asks four questions about the skill's `SKILL.md`. Every
+//! [`typesafe::Client`] asks four questions about the skill's `SKILL.md`. Every
 //! result is appended to a local Turso database and never overwritten. Verdicts
 //! ([`hint_for`]) are computed from the stored answers when displayed, not
 //! stored, so a threshold change is visible immediately.
@@ -24,20 +24,7 @@ use sha2::{Digest, Sha256};
 
 use crate::skill::frontmatter;
 use crate::tool::root::Root;
-
-/// TypeSafe request timeout.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Default backoff before each of up to 3 retries on 429/529.
-const DEFAULT_BACKOFF: [Duration; 3] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(4),
-];
-const MODEL: &str = "jev-latest";
-const TYPESAFE_URL_SUFFIX: &str = "/v1/systemone";
-/// The production TypeSafe endpoint's base URL, passed to [`Checker::open`]
-/// at the composition root; never read from here.
-pub const TYPESAFE_BASE_URL: &str = "https://api.typesafe.ai";
+use crate::typesafe::{self, AnswerMap, Client, Error as CheckError, Reply, WireQuestion};
 
 // ---------------------------------------------------------------------------
 // Stage 1: deterministic rules
@@ -258,32 +245,6 @@ fn questions_sha256() -> String {
 // TypeSafe wire types and client
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
-struct WireQuestion<'a> {
-    r#type: &'a str,
-    instructions: &'a str,
-    criteria: serde_json::Value,
-}
-
-#[derive(Debug, Serialize)]
-struct RequestBody<'a> {
-    state: &'a str,
-    model: &'a str,
-    questions: serde_json::Map<String, serde_json::Value>,
-}
-
-/// The response `answers` object, kept exactly as returned (map keyed by
-/// question id; each value carries `type` plus type-specific fields such as
-/// `noul`, `choice` or `score`). This is also the shape persisted in the
-/// store's `result` column.
-type AnswerMap = serde_json::Map<String, serde_json::Value>;
-
-#[derive(Debug, Deserialize)]
-struct ResponseBody {
-    model: String,
-    answers: AnswerMap,
-}
-
 /// A validated TypeSafe answer set: every question in [`QUESTIONS`] is
 /// present with a value of the right JSON type.
 #[derive(Debug, Clone, PartialEq)]
@@ -292,29 +253,7 @@ struct Answers {
     answers: AnswerMap,
 }
 
-/// Why a check produced no row. Never carries the API key or the request
-/// body.
-#[derive(Debug, Clone, PartialEq)]
-enum CheckError {
-    Status(u16),
-    Timeout,
-    Transport,
-    InvalidResponse,
-}
-
-impl CheckError {
-    /// The text `/skills` shows as `not checked yet (last attempt: <reason>)`.
-    fn reason(&self) -> String {
-        match self {
-            Self::Status(code) => code.to_string(),
-            Self::Timeout => "timeout".to_string(),
-            Self::Transport => "transport error".to_string(),
-            Self::InvalidResponse => "invalid response".to_string(),
-        }
-    }
-}
-
-fn validate_answers(body: ResponseBody) -> Result<Answers, CheckError> {
+fn validate_answers(body: Reply) -> Result<Answers, CheckError> {
     for question in &QUESTIONS {
         let Some(answer) = body.answers.get(question.id) else {
             return Err(CheckError::InvalidResponse);
@@ -345,85 +284,26 @@ fn validate_answers(body: ResponseBody) -> Result<Answers, CheckError> {
     })
 }
 
-/// A TypeSafe HTTP client. `base_url` and `api_key` are injected; nothing
-/// here reads the environment.
-struct TypeSafeClient {
-    http: reqwest::Client,
-    base_url: String,
-    api_key: String,
-    backoff: Vec<Duration>,
-}
-
-impl TypeSafeClient {
-    fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            base_url: base_url.into(),
-            api_key: api_key.into(),
-            backoff: DEFAULT_BACKOFF.to_vec(),
-        }
-    }
-
-    /// Replaces the retry backoff so tests do not wait seconds for a 429.
-    #[cfg(test)]
-    fn with_backoff(mut self, backoff: Vec<Duration>) -> Self {
-        self.backoff = backoff;
-        self
-    }
-
-    async fn check(&self, state: &str) -> Result<Answers, CheckError> {
-        let request = RequestBody {
-            state,
-            model: MODEL,
-            questions: QUESTIONS
-                .iter()
-                .map(|question| {
-                    let wire = WireQuestion {
-                        r#type: question.kind,
-                        instructions: question.instructions,
-                        criteria: question.criteria.to_json(),
-                    };
-                    (
-                        question.id.to_string(),
-                        serde_json::to_value(wire).expect("WireQuestion serializes"),
-                    )
-                })
-                .collect(),
-        };
-        let payload = serde_json::to_vec(&request).map_err(|_| CheckError::InvalidResponse)?;
-        let url = format!("{}{TYPESAFE_URL_SUFFIX}", self.base_url);
-
-        let mut attempt = 0usize;
-        loop {
-            let sent = self
-                .http
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .timeout(REQUEST_TIMEOUT)
-                .body(payload.clone())
-                .send()
-                .await;
-            let response = match sent {
-                Ok(response) => response,
-                Err(error) if error.is_timeout() => return Err(CheckError::Timeout),
-                Err(_) => return Err(CheckError::Transport),
+/// Asks [`QUESTIONS`] about `state` through `client`.
+async fn check(client: &Client, state: &str) -> Result<Answers, CheckError> {
+    let questions = QUESTIONS
+        .iter()
+        .map(|question| {
+            let wire = WireQuestion {
+                r#type: question.kind,
+                instructions: question.instructions,
+                criteria: question.criteria.to_json(),
             };
-            let status = response.status().as_u16();
-            if status == 200 {
-                let bytes = response.bytes().await.map_err(|_| CheckError::Transport)?;
-                let parsed: ResponseBody =
-                    serde_json::from_slice(&bytes).map_err(|_| CheckError::InvalidResponse)?;
-                return validate_answers(parsed);
-            }
-            if (status == 429 || status == 529) && attempt < self.backoff.len() {
-                tokio::time::sleep(self.backoff[attempt]).await;
-                attempt += 1;
-                continue;
-            }
-            return Err(CheckError::Status(status));
-        }
-    }
+            (
+                question.id.to_string(),
+                serde_json::to_value(wire).expect("WireQuestion serializes"),
+            )
+        })
+        .collect();
+    let reply = client
+        .post(&typesafe::request_body(state, &questions))
+        .await?;
+    validate_answers(reply)
 }
 
 // ---------------------------------------------------------------------------
@@ -727,7 +607,7 @@ fn read_skill_md(skill_directory: &Path) -> Option<Vec<u8>> {
 /// skill-derived definitions.
 pub struct Checker {
     store: Store,
-    client: TypeSafeClient,
+    client: Client,
     in_flight: Mutex<HashSet<String>>,
     failures: Mutex<HashMap<String, String>>,
 }
@@ -741,7 +621,7 @@ impl Checker {
     pub fn open(db_path: &Path, base_url: &str, api_key: &str) -> Result<Self, String> {
         Ok(Self {
             store: Store::open(db_path).map_err(|error| error.to_string())?,
-            client: TypeSafeClient::new(base_url, api_key),
+            client: Client::new(base_url, api_key),
             in_flight: Mutex::new(HashSet::new()),
             failures: Mutex::new(HashMap::new()),
         })
@@ -753,7 +633,7 @@ impl Checker {
     pub(crate) fn open_in_memory(base_url: &str, api_key: &str) -> Self {
         Self {
             store: Store::open_in_memory().expect("in-memory store"),
-            client: TypeSafeClient::new(base_url, api_key).with_backoff(vec![
+            client: Client::new(base_url, api_key).with_backoff(vec![
                 Duration::ZERO,
                 Duration::ZERO,
                 Duration::ZERO,
@@ -864,7 +744,7 @@ impl Checker {
         }
 
         let state = String::from_utf8_lossy(bytes).into_owned();
-        match self.client.check(&state).await {
+        match check(&self.client, &state).await {
             Ok(answers) => {
                 let result = ResultJson::Answers {
                     answers: answers.answers,

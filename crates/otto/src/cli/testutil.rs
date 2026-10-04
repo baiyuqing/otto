@@ -78,6 +78,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         auth_credentials_loaded: false,
         usage: None,
         task_recorder: None,
+        schedule: None,
         skill_checker: None,
         memory: Default::default(),
         reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
@@ -131,6 +132,7 @@ pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {
         auth_credentials_loaded: false,
         usage: None,
         task_recorder: None,
+        schedule: None,
         skill_checker: None,
         memory: Default::default(),
         reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
@@ -164,6 +166,7 @@ pub fn shared_with_sandbox_driver_override(root: &Path, driver: &str) -> Arc<Sha
         auth_credentials_loaded: false,
         usage: None,
         task_recorder: None,
+        schedule: None,
         skill_checker: None,
         memory: Default::default(),
         reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
@@ -219,6 +222,7 @@ pub async fn controller_with_memory(
         user_scope,
         recall_limit: 8,
         recall_token_budget: 1000,
+        advice_audit: None,
     };
     builder.workspace_scope =
         super::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
@@ -231,6 +235,47 @@ pub async fn controller_with_memory(
         .expect("runner");
     let info = builder.runtime_info(&runtime);
     Controller::new(builder, true, session, runner, info)
+}
+
+/// Writes three user-scope records of about 600 tokens each straight into the
+/// store at `store_path`, past the 2000-token standing budget, as data written
+/// before the budget existed would be.
+pub fn seed_over_budget_standing(store_path: &Path) {
+    use crate::memory::turso::{Options, Store};
+    let runtime = MemoryRuntime {
+        enabled: true,
+        backend: "turso".into(),
+        turso_path: store_path.to_string_lossy().into_owned(),
+        ..MemoryRuntime::default()
+    };
+    let (service, user_scope, _) =
+        super::wiring::open_memory_service(&runtime, &[], &mut Vec::new()).expect("open");
+    service.close().expect("close");
+    let store = Store::open(store_path, Options::default()).expect("open store");
+    for id in ["a", "b", "c"] {
+        let now = chrono::Utc::now();
+        store
+            .upsert(&crate::memory::UpsertRequest {
+                record: crate::memory::Record {
+                    id: id.into(),
+                    scope: user_scope.clone(),
+                    kind: "preference".into(),
+                    key: id.into(),
+                    text: id.repeat(2400),
+                    source: crate::memory::Provenance {
+                        origin: Some(crate::memory::Origin::Human),
+                        ..crate::memory::Provenance::default()
+                    },
+                    confidence: 0.5,
+                    created_at: now,
+                    updated_at: now,
+                    ..crate::memory::Record::default()
+                },
+                expected_revision: None,
+            })
+            .expect("legacy write");
+    }
+    store.close().expect("close store");
 }
 
 pub fn write_skill(root: &Path, name: &str, description: &str, body: &str) {

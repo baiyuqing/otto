@@ -3,12 +3,15 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -59,6 +62,7 @@ type Bridge struct {
 	bySession map[string]*chat // chats with a running prompt, by session id
 	closing   bool
 	sessLocks map[string]*sync.Mutex // one per session id; guarded by mu
+	loadMu    sync.Mutex             // serializes session/load calls
 }
 
 // New returns a Bridge and registers it as the agent's handler.
@@ -90,6 +94,11 @@ func New(opts Options) *Bridge {
 		b.platforms[p.Name()] = p
 	}
 	opts.Agent.SetHandler(b)
+	names := make([]string, 0, len(opts.Platforms))
+	for _, p := range opts.Platforms {
+		names = append(names, p.Name())
+	}
+	opts.Agent.SetPlatforms(names)
 	return b
 }
 
@@ -106,6 +115,13 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 	platCtx, stopPlatforms := context.WithCancel(ctx)
 	defer stopPlatforms()
+	// The connection stays open so the agent can deliver scheduled messages
+	// even when no chat is bound.
+	b.wg.Add(1)
+	go func() {
+		defer b.wg.Done()
+		b.opts.Agent.Keep(b.workCtx, b.loadBoundSessions)
+	}()
 	errc := make(chan error, len(b.opts.Platforms))
 	for _, p := range b.opts.Platforms {
 		go func() {
@@ -152,6 +168,44 @@ func (b *Bridge) Run(ctx context.Context) error {
 	return first
 }
 
+// load opens session id in the agent process. Agent.Load returns nil for a
+// session that is already open but does not wait for a load of the same id in
+// flight, so loads are serialized here: the startup loader and a chat worker
+// must not send session/load twice for one session. A slow load delays loads
+// of other sessions; a per-session lock removes that if it matters.
+func (b *Bridge) load(ctx context.Context, id string) error {
+	b.loadMu.Lock()
+	defer b.loadMu.Unlock()
+	return b.opts.Agent.Load(ctx, id)
+}
+
+// loadBoundSessions loads each distinct session bound to a chat of a
+// configured platform, one at a time. This restores the session's persisted
+// timers in a restarted agent process and makes the agent follow the session,
+// so wake replies reach the chat. A failed load is logged and does not remove
+// the binding.
+func (b *Bridge) loadBoundSessions() {
+	sessions := b.opts.Store.Sessions()
+	keys := slices.Sorted(maps.Keys(sessions))
+	loaded := map[string]bool{}
+	for _, key := range keys {
+		name, id, ok := strings.Cut(key, ":")
+		p := b.platforms[name]
+		if !ok || p == nil {
+			continue
+		}
+		b.chat(p, id)
+		sid := sessions[key]
+		if loaded[sid] {
+			continue
+		}
+		loaded[sid] = true
+		if err := b.load(b.workCtx, sid); err != nil && b.workCtx.Err() == nil {
+			slog.Warn("loading bound session at startup failed", "chat", key, "session", sid, "error", err)
+		}
+	}
+}
+
 // shutdown sends session/cancel for every running prompt and stops the chat
 // workers, which then return without replying.
 func (b *Bridge) shutdown() {
@@ -168,6 +222,33 @@ func (b *Bridge) shutdown() {
 		cancel()
 	}
 	b.stopWork()
+}
+
+// Extension implements agent.ExtensionHandler. _otto/schedule/deliver sends
+// text to a chat that is in its platform's chats allowlist. The connector
+// keeps no state for it; the agent retries failed deliveries.
+func (b *Bridge) Extension(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if method != "_otto/schedule/deliver" {
+		return nil, acp.NewMethodNotFound(method)
+	}
+	var req struct {
+		Chat string `json:"chat"`
+		Text string `json:"text"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(params))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || req.Chat == "" || req.Text == "" {
+		return nil, errors.New("chat and text are required")
+	}
+	name, id, _ := strings.Cut(req.Chat, ":")
+	p := b.platforms[name]
+	if p == nil || id == "" || !slices.Contains(b.opts.Access[name].Chats, id) {
+		return nil, errors.New("chat is not an allowed chat of a configured platform")
+	}
+	if err := p.Send(ctx, id, "", req.Text, true); err != nil {
+		return nil, err
+	}
+	return map[string]any{}, nil
 }
 
 func (b *Bridge) admitted(m Message) bool {
@@ -189,8 +270,12 @@ type Command struct {
 var Commands = []Command{
 	{"new", "Start a new session on the next message", false},
 	{"stop", "Cancel the running turn and clear the queue", false},
+	{"steer", "Guide the active task: /steer <guidance>", false},
+	{"queue", "Run a separate follow-up: /queue <prompt>", false},
 	{"compact", "Compact the session context: /compact [focus]", true},
 	{"context", "Show what the next request sends, with token counts", true},
+	{"reflect", "Review this session: /reflect [focus]", true},
+	{"skill", "List generated skills or undo one: /skill generated | /skill revert <name>", true},
 	{"sessions", "List the newest sessions", false},
 	{"use", "Switch to a session: /use <id>", false},
 	{"memory", "List or review pending memory candidates", false},
@@ -249,6 +334,14 @@ func (b *Bridge) deliver(m Message) {
 		c.cmdSessions(m)
 		return
 	}
+	if arg, ok := commandArg(text, "steer"); ok {
+		c.cmdSteer(m, arg)
+		return
+	}
+	if arg, ok := commandArg(text, "queue"); ok {
+		c.cmdQueue(m, arg)
+		return
+	}
 	if arg, ok := strings.CutPrefix(text, "/use"); ok && (arg == "" || arg[0] == ' ' || arg[0] == '\t') {
 		c.cmdUse(m, strings.TrimSpace(arg))
 		return
@@ -267,25 +360,57 @@ func (b *Bridge) deliver(m Message) {
 	c.mu.Lock()
 	pending, sid := c.perm != nil || c.approvalRunning || c.sharedBlocking, c.sid
 	if pending {
-		if len(c.queue)+len(c.approvalMessages) >= c.b.opts.QueueLimit {
+		if len(m.Text) > 32_000 {
 			c.mu.Unlock()
-			c.notify(m.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not queued.", c.b.opts.QueueLimit))
+			c.notify(m.MessageID, "Message is too long; limit is 32000 bytes.")
 			return
 		}
-		c.approvalMessages = append(c.approvalMessages, m)
-		if !c.approvalRunning {
-			c.approvalRunning = true
-			c.approvalGeneration++
-			approvalCtx, cancel := context.WithCancel(c.b.workCtx)
-			c.approvalCancel = cancel
-			go c.approvalDialogue(sid, c.approvalGeneration, approvalCtx)
+		accepted := c.enqueueApprovalMessageLocked(sid, m)
+		c.mu.Unlock()
+		if !accepted {
+			c.notify(m.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not queued.", c.b.opts.QueueLimit))
 		}
-	}
-	c.mu.Unlock()
-	if pending {
 		return
 	}
+	activeControl := c.taskSID != "" && (c.taskActive || c.taskClosing)
+	if activeControl {
+		if len(m.Text) > 32_000 {
+			c.mu.Unlock()
+			c.notify(m.MessageID, "Message is too long; limit is 32000 bytes.")
+			return
+		}
+		accepted := c.enqueueTaskControlLocked(controlItem{message: m})
+		c.mu.Unlock()
+		if !accepted {
+			c.notify(m.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not routed to the active task.", c.b.opts.QueueLimit))
+		}
+		return
+	}
+	c.mu.Unlock()
 	c.enqueue(m)
+}
+
+func commandArg(text, name string) (string, bool) {
+	arg, ok := strings.CutPrefix(text, "/"+name)
+	if !ok || (arg != "" && arg[0] != ' ' && arg[0] != '\t') {
+		return "", false
+	}
+	return strings.TrimSpace(arg), true
+}
+
+func (c *chat) enqueueApprovalMessageLocked(sid string, m Message) bool {
+	if len(c.queue)+len(c.approvalMessages) >= c.b.opts.QueueLimit {
+		return false
+	}
+	c.approvalMessages = append(c.approvalMessages, m)
+	if !c.approvalRunning {
+		c.approvalRunning = true
+		c.approvalGeneration++
+		approvalCtx, cancel := context.WithCancel(c.b.workCtx)
+		c.approvalCancel = cancel
+		go c.approvalDialogue(sid, c.approvalGeneration, approvalCtx)
+	}
+	return true
 }
 
 // approvalDialogue sends messages received while a permission is pending in
@@ -310,7 +435,7 @@ func (c *chat) approvalDialogue(sid string, generation uint64, approvalCtx conte
 		c.mu.Unlock()
 
 		ctx, stop := context.WithTimeout(approvalCtx, 35*time.Second)
-		reply, err := c.b.opts.Agent.ApprovalMessage(ctx, sid, chatPrompt(m))
+		reply, err := c.b.opts.Agent.ApprovalMessageWithChannel(ctx, sid, m.Text, m.Platform, chatPrompt(m))
 		queue, response := false, ""
 		if errors.Is(err, agent.ErrApprovalUnsupported) {
 			queue = true
@@ -369,6 +494,26 @@ func (b *Bridge) sessionLock(id string) *sync.Mutex {
 
 // Update implements agent.Handler. It only takes a mutex.
 func (b *Bridge) Update(sid string, u acp.SessionUpdate) {
+	text, markdown := "", false
+	ok := false
+	if text, ok = agent.ReflectionNotice(u); !ok {
+		text, ok = agent.WakeReply(u)
+		markdown = ok
+	}
+	if ok {
+		b.mu.Lock()
+		chats := make([]*chat, 0, len(b.chats))
+		for _, c := range b.chats {
+			chats = append(chats, c)
+		}
+		b.mu.Unlock()
+		for _, c := range chats {
+			if b.opts.Store.Session(c.key) == sid {
+				c.sendBackground(sid, text, markdown)
+			}
+		}
+		return
+	}
 	b.mu.Lock()
 	c := b.bySession[sid]
 	b.mu.Unlock()
@@ -406,10 +551,20 @@ type chat struct {
 	approvalRunning    bool
 	approvalCancel     context.CancelFunc
 	approvalGeneration uint64
-	running            bool // a worker goroutine owns the queue
-	using              bool // a /use is loading a session
+	running            bool          // a worker goroutine owns the queue
+	turnDone           chan struct{} // closes after this turn's chat reply is sent
+	using              bool          // a /use is loading a session
 	sid                string
 	stopped            bool // /stop arrived during the current turn
+	taskGeneration     uint64
+	taskSID            string
+	taskActive         bool
+	taskClosing        bool
+	taskControlCtx     context.Context
+	taskControlCancel  context.CancelFunc
+	taskControls       []controlItem
+	taskControlRunning bool
+	taskControlDone    chan struct{}
 	perm               *permission
 	reply              strings.Builder
 	brk                bool // a tool call followed text; the next text starts a paragraph
@@ -425,6 +580,12 @@ type pendingChange struct {
 	id       string
 	senderID string
 	expires  time.Time
+}
+
+type controlItem struct {
+	message Message
+	steer   bool
+	text    string
 }
 
 type permission struct {
@@ -459,25 +620,25 @@ func (c *chat) notify(replyTo, text string) {
 	go c.send(c.b.workCtx, replyTo, text)
 }
 
-func (c *chat) enqueue(m Message) {
+func (c *chat) enqueue(m Message) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.enqueueLocked(m)
+	return c.enqueueLocked(m)
 }
 
 // enqueueLocked admits a message while c.mu is held.
-func (c *chat) enqueueLocked(m Message) {
+func (c *chat) enqueueLocked(m Message) bool {
 	if c.using {
 		c.notify(m.MessageID, "A session switch is in progress; the message was not queued.")
-		return
+		return false
 	}
 	if len(c.queue) >= c.b.opts.QueueLimit {
 		c.notify(m.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not queued.", c.b.opts.QueueLimit))
-		return
+		return false
 	}
 	c.queue = append(c.queue, m)
 	if c.running {
-		return
+		return true
 	}
 	c.b.mu.Lock()
 	closing := c.b.closing
@@ -487,10 +648,176 @@ func (c *chat) enqueueLocked(m Message) {
 	c.b.mu.Unlock()
 	if closing {
 		c.queue = nil
-		return
+		c.notify(m.MessageID, "Connector is shutting down; the message was not queued.")
+		return false
 	}
 	c.running = true
 	go c.work()
+	return true
+}
+
+func (c *chat) enqueueTaskControlLocked(item controlItem) bool {
+	if c.taskSID == "" || (!c.taskActive && !c.taskClosing) || c.taskControlCtx == nil ||
+		len(c.queue)+len(c.taskControls) >= c.b.opts.QueueLimit {
+		return false
+	}
+	c.taskControls = append(c.taskControls, item)
+	if c.taskControlRunning {
+		return true
+	}
+	done := make(chan struct{})
+	c.b.mu.Lock()
+	closing := c.b.closing
+	if !closing {
+		c.b.wg.Add(1)
+	}
+	c.b.mu.Unlock()
+	if closing {
+		c.taskControls = nil
+		c.notify(item.message.MessageID, "Connector is shutting down; control input was not routed.")
+		return false
+	}
+	c.taskControlRunning = true
+	c.taskControlDone = done
+	sid, generation, ctx := c.taskSID, c.taskGeneration, c.taskControlCtx
+	go func() {
+		defer c.b.wg.Done()
+		c.taskControlDialogue(sid, generation, ctx, done)
+	}()
+	return true
+}
+
+func (c *chat) taskControlDialogue(sid string, generation uint64, taskCtx context.Context, done chan struct{}) {
+	for {
+		c.mu.Lock()
+		if generation != c.taskGeneration || taskCtx.Err() != nil {
+			c.taskControls = nil
+			c.finishTaskControlWorkerLocked(done)
+			c.mu.Unlock()
+			return
+		}
+		if len(c.taskControls) == 0 {
+			c.finishTaskControlWorkerLocked(done)
+			c.mu.Unlock()
+			return
+		}
+		item := c.taskControls[0]
+		c.taskControls = c.taskControls[1:]
+		c.mu.Unlock()
+
+		ctx, stop := context.WithTimeout(taskCtx, 35*time.Second)
+		var reply *agent.ControlReply
+		var err error
+		if item.steer {
+			err = c.b.opts.Agent.Steer(ctx, sid, item.text)
+		} else {
+			reply, err = c.b.opts.Agent.ControlMessageWithChannel(ctx, sid, item.message.Text, item.message.Platform)
+		}
+		stop()
+
+		response, markdown := "", false
+		c.mu.Lock()
+		if generation != c.taskGeneration {
+			c.finishTaskControlWorkerLocked(done)
+			c.mu.Unlock()
+			return
+		}
+		if !item.steer && err != nil && (c.perm != nil || c.approvalRunning) {
+			accepted := c.enqueueApprovalMessageLocked(c.sid, item.message)
+			c.mu.Unlock()
+			if !accepted {
+				c.notify(item.message.MessageID, fmt.Sprintf("Queue is full (%d messages); the message was not queued.", c.b.opts.QueueLimit))
+			}
+			continue
+		}
+		if item.steer {
+			switch {
+			case err == nil:
+				response = "Guidance accepted; it will be used at the next safe task boundary."
+			case errors.Is(err, agent.ErrTaskControlUnsupported):
+				response = "This agent does not support /steer; guidance was not sent. Update and restart Otto to enable active-task guidance."
+			case errors.Is(err, agent.ErrSteerRejected):
+				response = "The active task rejected this guidance."
+			default:
+				response = "Could not confirm guidance acceptance: " + err.Error()
+			}
+		} else {
+			switch {
+			case errors.Is(err, agent.ErrTaskControlUnsupported):
+				if c.enqueueLocked(item.message) {
+					response = "This agent does not support active-task guidance; your message was queued as a follow-up. Update and restart Otto for in-place guidance."
+				}
+			case err != nil:
+				response = "Could not confirm how this message was routed. It was not queued by the connector; check task status before resending, or use /queue <prompt> for a separate follow-up."
+			case reply == nil:
+				if c.enqueueLocked(item.message) {
+					response = "The active task had already finished; your message was queued as a follow-up."
+				}
+			case reply.Queued:
+				if c.enqueueLocked(item.message) {
+					response = reply.Text
+					if response == "" {
+						response = "Your message was queued as a follow-up."
+					}
+					markdown = true
+				}
+			default:
+				if strings.TrimSpace(reply.Text) == "" {
+					response = "Could not confirm how this message was routed. It was not queued by the connector; check task status before resending, or use /queue <prompt> for a separate follow-up."
+				} else {
+					response = reply.Text
+					markdown = true
+				}
+			}
+		}
+		c.mu.Unlock()
+		if response != "" {
+			if markdown {
+				c.sendReply(c.b.workCtx, item.message.MessageID, response)
+			} else {
+				c.send(c.b.workCtx, item.message.MessageID, response)
+			}
+		}
+	}
+}
+
+func (c *chat) finishTaskControlWorkerLocked(done chan struct{}) {
+	if c.taskControlDone == done {
+		c.taskControlDone = nil
+		c.taskControlRunning = false
+	}
+	close(done)
+}
+
+func (c *chat) finishTaskControl(generation uint64) {
+	for {
+		c.mu.Lock()
+		if generation != c.taskGeneration {
+			done := c.taskControlDone
+			c.mu.Unlock()
+			if done != nil {
+				<-done
+			}
+			return
+		}
+		c.taskActive = false
+		c.taskClosing = true
+		done := c.taskControlDone
+		if done == nil {
+			if c.taskControlCancel != nil {
+				c.taskControlCancel()
+			}
+			c.taskControlCancel = nil
+			c.taskControlCtx = nil
+			c.taskSID = ""
+			c.taskClosing = false
+			c.taskGeneration++
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Unlock()
+		<-done
+	}
 }
 
 func (c *chat) work() {
@@ -513,15 +840,29 @@ func (c *chat) work() {
 
 // turn runs one message through the agent and sends the reply.
 func (c *chat) turn(m Message) {
+	turnDone := make(chan struct{})
+	c.mu.Lock()
+	c.turnDone = turnDone
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.turnDone == turnDone {
+			c.turnDone = nil
+		}
+		c.mu.Unlock()
+		close(turnDone)
+	}()
+
 	ctx := c.b.workCtx
 	typingDone := make(chan struct{})
 	defer close(typingDone)
 	go c.typing(ctx, typingDone)
 
 	var (
-		sid  string
-		stop acp.StopReason
-		err  error
+		sid        string
+		stop       acp.StopReason
+		err        error
+		generation uint64
 	)
 	for attempt := 0; attempt < 2; attempt++ {
 		if sid, err = c.session(ctx, m.MessageID); err != nil {
@@ -537,6 +878,12 @@ func (c *chat) turn(m Message) {
 			return
 		}
 		c.sid = sid
+		c.taskGeneration++
+		generation = c.taskGeneration
+		c.taskSID = sid
+		c.taskActive = true
+		c.taskClosing = false
+		c.taskControlCtx, c.taskControlCancel = context.WithCancel(ctx)
 		c.reply.Reset()
 		c.brk = false
 		c.proposed = false
@@ -546,11 +893,12 @@ func (c *chat) turn(m Message) {
 		c.b.mu.Unlock()
 
 		c.startApprovalWatch(sid)
-		stop, err = c.b.opts.Agent.Prompt(ctx, sid, chatPrompt(m))
+		stop, err = c.b.opts.Agent.PromptWithChannel(ctx, sid, m.Text, m.Platform, m.Platform+":"+m.ChatID, chatPrompt(m))
 
 		c.b.mu.Lock()
 		delete(c.b.bySession, sid)
 		c.b.mu.Unlock()
+		c.finishTaskControl(generation)
 		lock.Unlock()
 		if !errors.Is(err, agent.ErrNotOpen) {
 			break
@@ -600,14 +948,34 @@ func (c *chat) turn(m Message) {
 	}
 }
 
+// sendBackground sends a reflection notice (plain text) or a wake reply
+// (Markdown) after the chat's current turn has replied, and only while the
+// chat is still bound to sessionID.
+func (c *chat) sendBackground(sessionID, text string, markdown bool) {
+	c.mu.Lock()
+	turnDone := c.turnDone
+	c.mu.Unlock()
+	go func() {
+		if turnDone != nil {
+			select {
+			case <-turnDone:
+			case <-c.b.workCtx.Done():
+				return
+			}
+		}
+		if c.b.opts.Store.Session(c.key) == sessionID {
+			c.post(c.b.workCtx, "", text, markdown)
+		}
+	}()
+}
+
 // memoryHint follows a turn that proposed a memory change. Only a person can
 // decide it, through the connector's commands, not by writing to the model.
 const memoryHint = "Memory changes are proposals. Send /memory to review them."
 
-// chatPrompt adds the current transport to each turn, including resumed and
-// shared sessions. It is ordinary ACP text, not a system instruction override.
-// An agent command is sent as typed: `otto acp` matches only a prompt that is
-// the whole command.
+// chatPrompt is the legacy fallback for agents that do not advertise
+// _meta.otto.channelContext. Current Otto receives this platform as structured
+// per-turn metadata instead. Agent commands are sent as typed.
 func chatPrompt(m Message) string {
 	if f := strings.Fields(m.Text); len(f) > 0 && slices.ContainsFunc(Commands, func(c Command) bool {
 		return c.Agent && "/"+c.Name == f[0]
@@ -635,7 +1003,7 @@ func chatPrompt(m Message) string {
 // notice.
 func (c *chat) session(ctx context.Context, replyTo string) (string, error) {
 	if id := c.b.opts.Store.Session(c.key); id != "" {
-		err := c.b.opts.Agent.Load(ctx, id)
+		err := c.b.load(ctx, id)
 		if err == nil {
 			return id, nil
 		}
@@ -713,6 +1081,15 @@ func (c *chat) cmdStop(m Message) {
 	}
 	c.queue = nil
 	c.stopped = true
+	c.taskActive = false
+	c.taskClosing = false
+	c.taskGeneration++
+	c.taskControls = nil
+	if c.taskControlCancel != nil {
+		c.taskControlCancel()
+	}
+	c.taskControlCancel = nil
+	c.taskControlCtx = nil
 	c.approvalMessages = nil
 	c.approvalGeneration++
 	if c.approvalCancel != nil {
@@ -739,6 +1116,47 @@ func (c *chat) cmdStop(m Message) {
 		}()
 	} else if !wasRunning {
 		c.notify(m.MessageID, "Stopped.")
+	}
+}
+
+func (c *chat) cmdSteer(m Message, guidance string) {
+	if guidance == "" {
+		c.notify(m.MessageID, "Usage: /steer <guidance>")
+		return
+	}
+	if len(guidance) > 32_000 {
+		c.notify(m.MessageID, "Guidance is too long; limit is 32000 bytes.")
+		return
+	}
+	m.Text = guidance
+	c.mu.Lock()
+	if c.perm != nil || c.approvalRunning || !c.taskActive || c.sid == "" {
+		c.mu.Unlock()
+		c.notify(m.MessageID, "/steer only works during an active task without a pending approval.")
+		return
+	}
+	accepted := c.enqueueTaskControlLocked(controlItem{message: m, steer: true, text: guidance})
+	c.mu.Unlock()
+	if !accepted {
+		c.notify(m.MessageID, fmt.Sprintf("Active-task control queue is full (%d messages); guidance was not accepted.", c.b.opts.QueueLimit))
+	}
+}
+
+func (c *chat) cmdQueue(m Message, prompt string) {
+	if prompt == "" {
+		c.notify(m.MessageID, "Usage: /queue <prompt>")
+		return
+	}
+	if len(prompt) > 32_000 {
+		c.notify(m.MessageID, "Prompt is too long; limit is 32000 bytes.")
+		return
+	}
+	if m.Attachment {
+		c.notify(m.MessageID, "Attachments are not supported and were ignored.")
+	}
+	m.Text = prompt
+	if c.enqueue(m) {
+		c.notify(m.MessageID, "Accepted as a separate prompt; its answer will be sent separately.")
 	}
 }
 
@@ -984,7 +1402,7 @@ func (c *chat) cmdUse(m Message, arg string) {
 			reply(fmt.Sprintf("No listed session starts with %q.", arg))
 			return
 		}
-		if err := c.b.opts.Agent.Load(ctx, id); err != nil {
+		if err := c.b.load(ctx, id); err != nil {
 			reply("Error: could not load session " + id + ": " + err.Error())
 			return
 		}
@@ -1005,6 +1423,9 @@ const memoryUsage = "Usage: /memory | /memory accept <id> | /memory reject <id>"
 // pending candidates, or accepts or rejects one. It never goes through the
 // model, and it does not wait for a running turn.
 func (c *chat) cmdMemory(m Message, args []string) {
+	if len(args) == 1 && args[0] == "review" {
+		args = nil
+	}
 	go func() {
 		c.memoryMu.Lock()
 		defer c.memoryMu.Unlock()
@@ -1020,7 +1441,7 @@ func (c *chat) cmdMemory(m Message, args []string) {
 		}
 		ctx, stop := context.WithTimeout(c.b.workCtx, 2*time.Minute)
 		defer stop()
-		if err := c.b.opts.Agent.Load(ctx, sid); err != nil {
+		if err := c.b.load(ctx, sid); err != nil {
 			reply("Error: could not load session " + sid + ": " + err.Error())
 			return
 		}
@@ -1095,6 +1516,9 @@ func renderPending(page agent.MemoryPage) string {
 			text = string(r[:candidateText]) + "…"
 		}
 		fmt.Fprintf(&sb, "\n%s  %s %s/%s  %s  (%s)", cand.ID[:min(len(cand.ID), shortID)], cand.Action, cand.Kind, cand.Key, text, cand.Origin)
+		if cand.Advice != "" {
+			fmt.Fprintf(&sb, "\n    %s", cand.Advice)
+		}
 	}
 	if page.NextCursor != "" {
 		sb.WriteString("\nMore are pending; decide some, then send /memory again.")

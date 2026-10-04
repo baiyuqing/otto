@@ -599,13 +599,34 @@ pub struct Runner {
     /// rows; `Runner::close` (best-effort, backgrounded) and
     /// `Runner::close_mcp` (awaited, bounded) shut its clients down.
     pub(crate) mcp: Arc<crate::mcp::Servers>,
+    pub(crate) task_control: Arc<crate::app::task_control::TaskControl>,
+    /// Adds advisory hints to memory candidates, absent when memory is off.
+    /// Reflection reads it from the active runner.
+    pub(crate) advisor: Option<Arc<crate::memory::advice::Advisor>>,
+    /// The origin of the current user turn, read by the schedule tools.
+    pub(crate) schedule_origin: Arc<crate::schedule::tools::TurnOrigin>,
 }
+
+/// The tool-less agent behind the session-model advice backend.
+pub type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
 
 impl Runner {
     /// Runs one turn.
     pub async fn run(
         &self,
         user_text: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        self.run_with_system_context(user_text, "", emit, cancel)
+            .await
+    }
+
+    /// Runs one turn with ephemeral system context that is not persisted.
+    pub async fn run_with_system_context(
+        &self,
+        user_text: &str,
+        system_context: &str,
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
@@ -621,9 +642,42 @@ impl Runner {
             let _ = events.send(event);
         };
         let mut collecting = self.collecting(&mut send);
-        let run = self
-            .agent
-            .run_with_control(user_text, &mut collecting, &control);
+        let run = self.agent.run_with_system_context_control(
+            user_text,
+            system_context,
+            &mut collecting,
+            &control,
+        );
+        self.monitor_approvals(drive_with_control(run, cancel, &control), received, emit)
+            .await
+    }
+
+    /// Runs one model-originated follow-up as display-only context.
+    pub async fn run_followup_with_system_context(
+        &self,
+        text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
+        let (events, received) = tokio::sync::mpsc::unbounded_channel();
+        let mut send = |event| {
+            let _ = events.send(event);
+        };
+        let mut collecting = self.collecting(&mut send);
+        let run = self.agent.run_followup_with_system_context_control(
+            text,
+            system_context,
+            &mut collecting,
+            &control,
+        );
         self.monitor_approvals(drive_with_control(run, cancel, &control), received, emit)
             .await
     }
@@ -635,6 +689,18 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        self.run_with_image_system_context(user_text, image, "", emit, cancel)
+            .await
+    }
+
+    pub async fn run_with_image_system_context(
+        &self,
+        user_text: &str,
+        image: Block,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
         let control = Control::new(
             self.turn_timeout
                 .map_or_else(Deadline::unlimited, Deadline::after),
@@ -647,9 +713,13 @@ impl Runner {
             let _ = events.send(event);
         };
         let mut collecting = self.collecting(&mut send);
-        let run =
-            self.agent
-                .run_with_image_control(user_text, Some(image), &mut collecting, &control);
+        let run = self.agent.run_with_image_system_context_control(
+            user_text,
+            Some(image),
+            system_context,
+            &mut collecting,
+            &control,
+        );
         self.monitor_approvals(drive_with_control(run, cancel, &control), received, emit)
             .await
     }
@@ -813,6 +883,14 @@ impl Runner {
         &self.system_prompt
     }
 
+    pub(crate) fn task_control(&self) -> Arc<crate::app::task_control::TaskControl> {
+        Arc::clone(&self.task_control)
+    }
+
+    pub(crate) fn steering(&self) -> Arc<otto_core::agent::steering::Steering> {
+        self.task_control.steering()
+    }
+
     /// What the next provider request contains.
     pub fn context_report(&self) -> otto_core::agent::context_report::ContextReport {
         self.agent.context_report()
@@ -931,6 +1009,7 @@ impl Runner {
     ) -> Self {
         let registry = Registry::new(tools).expect("test tool registry");
         let definitions = registry.definitions();
+        let task_control = Arc::new(crate::app::task_control::TaskControl::default());
         Self {
             agent: Agent::new(
                 ProviderClient::Scripted(provider),
@@ -942,6 +1021,7 @@ impl Runner {
                     request_sizer: Some(Arc::new(ScriptedSizer)),
                     now: Box::new(Utc::now),
                     inbox: Arc::clone(tasks.notifications()),
+                    steering: task_control.steering(),
                     tasks: Some(Arc::clone(&tasks)
                         as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
                     ..Options::default()
@@ -960,7 +1040,17 @@ impl Runner {
             skills: Catalog::default(),
             agents: crate::subagent::Catalog::default(),
             mcp: Arc::new(crate::mcp::Servers::default()),
+            task_control,
+            advisor: None,
+            schedule_origin: Default::default(),
         }
+    }
+
+    /// Gives a [`Self::scripted`] runner an advisor.
+    #[cfg(test)]
+    pub fn with_advisor(mut self, advisor: Arc<crate::memory::advice::Advisor>) -> Self {
+        self.advisor = Some(advisor);
+        self
     }
 
     /// Replaces the MCP servers a [`Self::scripted`] runner was built with.
@@ -1030,6 +1120,9 @@ pub struct Shared {
     /// behaviour; `build_subagents` injects it into every `Tasks` registry it
     /// builds.
     pub task_recorder: Option<Arc<crate::subagent::record::Store>>,
+    /// The scheduled-delivery store (`~/.otto/schedule.db`). `None` when it
+    /// could not be opened; the schedule tools then report it as unavailable.
+    pub schedule: Option<Arc<crate::schedule::Store>>,
     /// The automatic skill contract check (experimental). `None` when the
     /// feature is disabled or its database could not be opened; either way
     /// `build_subagents` wires no checker in and delegation is unaffected.
@@ -1432,6 +1525,30 @@ impl Builder {
             .await
     }
 
+    /// The provider client for `runtime`; `Unavailable` when the redaction
+    /// boundary is closed.
+    fn provider_client(&self, runtime: &Runtime) -> Result<ProviderClient, BuildError> {
+        Ok(if !self.boundary_allows_dynamic(Some(runtime)) {
+            ProviderClient::Unavailable
+        } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
+            ProviderClient::ChatGpt {
+                client: Arc::new(super::login::chatgpt_client(
+                    &self.auth_path,
+                    &self.auth_credentials,
+                    self.auth_credentials_loaded,
+                )?),
+                timeout: runtime.resilience.deadlines.provider_timeout,
+                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
+            }
+        } else {
+            ProviderClient::Compat {
+                client: Arc::new(Client::new(&runtime.base_url, &runtime.api_key)),
+                timeout: runtime.resilience.deadlines.provider_timeout,
+                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
+            }
+        })
+    }
+
     async fn build_runner_inner(
         &self,
         session: &SharedSession,
@@ -1484,7 +1601,9 @@ impl Builder {
             }
             tools.push(Box::new(tool));
         }
-        if self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
+        let redactor = self.boundary_redactor(Some(runtime));
+        let client = self.provider_client(runtime)?;
+        let advisor = if self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
             crate::approval::memory::attach(
                 &self.approvals,
                 &self.memory.service,
@@ -1499,8 +1618,30 @@ impl Builder {
                 &self.workspace_path,
             )
             .map_err(|e| e.to_string())?;
-            tools.extend(self.memory_tools(max_output));
-        }
+            let advice_agent = Agent::with_redactor(
+                client.clone(),
+                Registry::new(Vec::new()).map_err(|error| format!("advice registry: {error}"))?,
+                SharedSession::memory(session.header()),
+                Options {
+                    model: runtime.model.clone(),
+                    provider_name: runtime.provider.clone(),
+                    thinking: runtime.thinking.clone(),
+                    now: Box::new(Utc::now),
+                    new_operation_id: Box::new(new_operation_id),
+                    ..Options::default()
+                },
+                self.boundary_redactor(Some(runtime)),
+            );
+            let advisor = self.advisor(
+                advice_agent,
+                &runtime.model,
+                self.usage_collector(session, runtime),
+            );
+            tools.extend(self.memory_tools(max_output, advisor.clone()));
+            advisor
+        } else {
+            None
+        };
         mark_build_trace(&mut trace, "runner/setup");
         let catalogs = self.build_catalogs(&mut tools, max_output, warnings)?;
         mark_build_trace(&mut trace, "runner/catalogs");
@@ -1517,26 +1658,6 @@ impl Builder {
         tools.extend(mcp_tools);
         mark_build_trace(&mut trace, "runner/mcp");
 
-        let redactor = self.boundary_redactor(Some(runtime));
-        let client = if !self.boundary_allows_dynamic(Some(runtime)) {
-            ProviderClient::Unavailable
-        } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
-            ProviderClient::ChatGpt {
-                client: Arc::new(super::login::chatgpt_client(
-                    &self.auth_path,
-                    &self.auth_credentials,
-                    self.auth_credentials_loaded,
-                )?),
-                timeout: runtime.resilience.deadlines.provider_timeout,
-                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
-            }
-        } else {
-            ProviderClient::Compat {
-                client: Arc::new(Client::new(&runtime.base_url, &runtime.api_key)),
-                timeout: runtime.resilience.deadlines.provider_timeout,
-                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
-            }
-        };
         if let ProviderClient::Compat { client, .. } = &client {
             tools.push(Box::new(models::ListModelsTool::new(
                 Arc::clone(client),
@@ -1582,6 +1703,8 @@ impl Builder {
         )?;
         mark_build_trace(&mut trace, "runner/subagents");
 
+        let task_control = Arc::new(crate::app::task_control::TaskControl::default());
+        let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
             tools.push(Box::new(crate::tool::approval::RequestApproval {
                 service: self.approvals.clone(),
@@ -1606,6 +1729,18 @@ impl Builder {
                     legacy: self.bash_approvals.clone(),
                 }));
             }
+            tools.extend(crate::schedule::tools::tools(
+                &crate::schedule::tools::Context {
+                    store: self.schedule.clone(),
+                    origin: Arc::clone(&schedule_origin),
+                    session_id: session.header().id.clone(),
+                    workspace: self.workspace_path.clone(),
+                },
+            ));
+            tools.push(Box::new(crate::tool::task_control::TaskQueue::new(
+                Arc::clone(&task_control),
+                &redaction_values,
+            )));
             let mut definitions: Vec<_> = tools.iter().map(|tool| tool.definition()).collect();
             definitions.push(
                 crate::tool::otto::Help {
@@ -1693,6 +1828,7 @@ impl Builder {
                 .clone()
                 .map(|tasks| tasks as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
             inbox: subagents.inbox.unwrap_or_default(),
+            steering: task_control.steering(),
             ..Options::default()
         };
         mark_build_trace(&mut trace, "runner/registry-and-options");
@@ -1719,6 +1855,9 @@ impl Builder {
                 skills: catalogs.skills.clone(),
                 agents: catalogs.agent_catalog.clone(),
                 mcp: mcp_servers,
+                task_control,
+                advisor,
+                schedule_origin,
             },
             trace_entries,
         ))
@@ -2141,6 +2280,7 @@ mod tests {
             auth_credentials_loaded: false,
             usage: None,
             task_recorder: None,
+            schedule: None,
             skill_checker: None,
             memory: Default::default(),
             reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
@@ -2319,6 +2459,10 @@ mod tests {
                 "request_approval",
                 "approval_pending",
                 "approval_revoke",
+                "schedule",
+                "schedule_list",
+                "schedule_cancel",
+                "task_queue",
                 "otto_help"
             ]
         );
@@ -2594,8 +2738,9 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
         ));
+        assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");
         assert!(prompt.ends_with("</otto_system_prompt>"), "{prompt}");
         assert!(prompt.contains("house rules"), "{prompt}");

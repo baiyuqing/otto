@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +56,47 @@ func fakeAgent(t *testing.T, extra ...string) (*Agent, *recorder, string) {
 	a.SetHandler(rec)
 	t.Cleanup(func() { a.Close() })
 	return a, rec, dir
+}
+
+func TestSessionUpdateSuppressesLoadReplayExceptReflectionNotice(t *testing.T) {
+	rec := &recorder{}
+	p := &process{loading: map[string]bool{"s1": true}}
+	c := &client{p: p, handler: rec}
+	send := func(update acp.SessionUpdate) {
+		if err := c.SessionUpdate(context.Background(), acp.SessionNotification{
+			SessionId: acp.SessionId("s1"),
+			Update:    update,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	send(acp.UpdateAgentMessageText("history"))
+	if rec.count() != 0 {
+		t.Fatalf("ordinary load replay was delivered")
+	}
+
+	for _, noticeID := range []float64{0, 1.5} {
+		invalid := acp.UpdateAgentMessageText("invalid notice")
+		invalid.AgentMessageChunk.Meta = map[string]any{"otto": map[string]any{
+			"reflectionNotice": true,
+			"noticeId":         noticeID,
+		}}
+		send(invalid)
+		if rec.count() != 0 {
+			t.Fatalf("invalid reflection notice %v was delivered", noticeID)
+		}
+	}
+
+	notice := acp.UpdateAgentMessageText("new notice")
+	notice.AgentMessageChunk.Meta = map[string]any{"otto": map[string]any{
+		"reflectionNotice": true,
+		"noticeId":         float64(1),
+	}}
+	send(notice)
+	if rec.count() != 1 {
+		t.Fatalf("valid reflection notice count = %d, want 1", rec.count())
+	}
 }
 
 func TestRestartDelay(t *testing.T) {
@@ -249,6 +291,105 @@ func TestApprovalMessageRequiresCapabilityAndReturnsNullOutsideApproval(t *testi
 	})
 }
 
+func TestTaskControlRequiresCapabilityAndTargetsOnlyActiveTurns(t *testing.T) {
+	t.Run("unsupported", func(t *testing.T) {
+		a, _, _ := fakeAgent(t, "FAKE_NO_TASK_CONTROL=1")
+		id, err := a.New(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.ControlMessageWithChannel(context.Background(), id, "guide", "telegram"); !errors.Is(err, ErrTaskControlUnsupported) {
+			t.Fatalf("ControlMessageWithChannel error = %v, want unsupported", err)
+		}
+		if err := a.Steer(context.Background(), id, "guide"); !errors.Is(err, ErrTaskControlUnsupported) {
+			t.Fatalf("Steer error = %v, want unsupported", err)
+		}
+	})
+
+	t.Run("advertised capability with old server methods", func(t *testing.T) {
+		a, _, dir := fakeAgent(t, "FAKE_NO_TASK_CONTROL_METHODS=1")
+		id, err := a.New(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.ControlMessageWithChannel(context.Background(), id, "guide", "telegram"); !errors.Is(err, ErrTaskControlUnsupported) {
+			t.Fatalf("method-not-found control error = %v, want unsupported", err)
+		}
+		if err := a.Steer(context.Background(), id, "guide"); !errors.Is(err, ErrTaskControlUnsupported) {
+			t.Fatalf("method-not-found steer error = %v, want unsupported", err)
+		}
+		for _, call := range fake.Calls(dir) {
+			if strings.HasPrefix(call, "start:") {
+				t.Fatalf("unsupported extension was retried as an ordinary prompt: %q", call)
+			}
+		}
+	})
+
+	t.Run("active and idle", func(t *testing.T) {
+		a, _, dir := fakeAgent(t)
+		ctx := context.Background()
+		id, err := a.New(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reply, err := a.ControlMessageWithChannel(ctx, id, "guide", "telegram"); err != nil || reply != nil {
+			t.Fatalf("idle control = (%+v, %v), want (nil, nil)", reply, err)
+		}
+		if err := a.Steer(ctx, id, "guide"); err == nil {
+			t.Fatal("idle Steer succeeded")
+		}
+
+		promptDone := make(chan error, 1)
+		go func() {
+			_, err := a.Prompt(ctx, id, "block")
+			promptDone <- err
+		}()
+		waitForCall(t, dir, "start:block")
+
+		reply, err := a.ControlMessageWithChannel(ctx, id, "guide", "telegram")
+		if err != nil || reply == nil || reply.Queued || reply.Text != "Guidance accepted." {
+			t.Fatalf("ControlMessageWithChannel = (%+v, %v)", reply, err)
+		}
+		queued, err := a.ControlMessageWithChannel(ctx, id, "follow-up: next", "feishu")
+		if err != nil || queued == nil || !queued.Queued {
+			t.Fatalf("queued control = (%+v, %v)", queued, err)
+		}
+		if err := a.Steer(ctx, id, "focus on the failing test"); err != nil {
+			t.Fatal(err)
+		}
+		calls := fake.Calls(dir)
+		for _, want := range []string{
+			"task_control:guide",
+			"task_control_channel:telegram",
+			"task_control:follow-up: next",
+			"task_control_channel:feishu",
+			"steer:focus on the failing test",
+		} {
+			if !slices.Contains(calls, want) {
+				t.Errorf("fake call %q missing from %q", want, calls)
+			}
+		}
+		if err := a.Cancel(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-promptDone; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func waitForCall(t *testing.T, dir, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if slices.Contains(fake.Calls(dir), want) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %q in %q", want, fake.Calls(dir))
+}
+
 func TestLoadUnknownSessionIsNotExitError(t *testing.T) {
 	a, _, _ := fakeAgent(t)
 	err := a.Load(context.Background(), strings.Repeat("a", 32))
@@ -309,5 +450,46 @@ func TestWriteAfterStdinClosedIsExitError(t *testing.T) {
 	var ee *ExitError
 	if !errors.As(err, &ee) || ee.Status != "exit status 5" || strings.Join(ee.Stderr, "|") != "gone" {
 		t.Fatalf("err = %v, want *ExitError with exit status 5 and stderr gone", err)
+	}
+}
+
+func wakeChunk(meta map[string]any, content acp.ContentBlock) acp.SessionUpdate {
+	return acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{Meta: meta, Content: content}}
+}
+
+func TestWakeReplyShape(t *testing.T) {
+	otto := func(m map[string]any) map[string]any { return map[string]any{"otto": m} }
+	valid := otto(map[string]any{"wakeReply": true, "replyId": float64(1)})
+	if text, ok := WakeReply(wakeChunk(valid, acp.TextBlock("**hi**"))); !ok || text != "**hi**" {
+		t.Fatalf("valid wake reply = %q, %v", text, ok)
+	}
+	for name, u := range map[string]acp.SessionUpdate{
+		"missing flag":    wakeChunk(otto(map[string]any{"replyId": float64(1)}), acp.TextBlock("x")),
+		"false flag":      wakeChunk(otto(map[string]any{"wakeReply": false, "replyId": float64(1)}), acp.TextBlock("x")),
+		"missing id":      wakeChunk(otto(map[string]any{"wakeReply": true}), acp.TextBlock("x")),
+		"string id":       wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": "1"}), acp.TextBlock("x")),
+		"zero id":         wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": float64(0)}), acp.TextBlock("x")),
+		"fractional id":   wakeChunk(otto(map[string]any{"wakeReply": true, "replyId": 1.5}), acp.TextBlock("x")),
+		"non-text":        wakeChunk(valid, acp.ImageBlock("", "image/png")),
+		"reflection only": wakeChunk(otto(map[string]any{"reflectionNotice": true, "noticeId": float64(1)}), acp.TextBlock("x")),
+		"no meta":         acp.UpdateAgentMessageText("x"),
+	} {
+		if _, ok := WakeReply(u); ok {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+func TestSessionUpdateDeliversWakeReplyDuringLoad(t *testing.T) {
+	rec := &recorder{}
+	c := &client{p: &process{loading: map[string]bool{"s1": true}}, handler: rec}
+	u := wakeChunk(map[string]any{"otto": map[string]any{"wakeReply": true, "replyId": float64(1)}}, acp.TextBlock("timer"))
+	if err := c.SessionUpdate(context.Background(), acp.SessionNotification{SessionId: "s1", Update: u}); err != nil {
+		t.Fatal(err)
+	}
+	u.AgentMessageChunk.Meta = map[string]any{"otto": map[string]any{"wakeReply": true, "replyId": float64(0)}}
+	_ = c.SessionUpdate(context.Background(), acp.SessionNotification{SessionId: "s1", Update: u})
+	if rec.count() != 1 {
+		t.Fatalf("delivered %d updates, want only the valid wake reply", rec.count())
 	}
 }

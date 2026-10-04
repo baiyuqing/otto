@@ -10,6 +10,7 @@ pub mod query;
 pub mod records;
 pub mod retriever;
 pub mod schema;
+pub mod standing;
 
 use std::sync::Mutex;
 use std::time::Duration;

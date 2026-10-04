@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{Script, serve, summary_reply, text_reply, tool_call_reply};
+use common::{
+    Script, assert_terminal_tool_update, serve, summary_reply, text_reply, tool_call_reply,
+};
 
 use serde_json::{Value, json};
 
@@ -468,6 +470,50 @@ fn fixture(replies: Vec<String>) -> (tempfile::TempDir, tempfile::TempDir, Strin
 }
 
 #[test]
+fn cancelling_an_attached_active_tool_closes_its_display_as_failed_once() {
+    let (home, workspace, base_url) = fixture(vec![tool_call_reply(
+        "cancel-tool",
+        "bash",
+        r#"{"command":"sleep 60"}"#,
+    )]);
+    configure(home.path(), &base_url, None);
+    let server = Serve::start(home.path(), workspace.path(), "off");
+    let mut client = Client::attach(home.path(), workspace.path(), Some(&server.socket));
+    client.initialize();
+    let sid = client.new_session(workspace.path());
+    let id = client.start("session/prompt", prompt(&sid, "wait for the tool"));
+    let mut frames = Vec::new();
+    loop {
+        let frame = client.recv();
+        let started = frame["params"]["update"]["sessionUpdate"] == "tool_call"
+            && frame["params"]["update"]["toolCallId"] == "cancel-tool";
+        frames.push(frame);
+        if started {
+            break;
+        }
+    }
+    client.send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}));
+    let (rest, response) = client.finish(id, &mut |frame| panic!("{frame}"));
+    frames.extend(rest);
+    assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+    assert_terminal_tool_update(&frames, "cancel-tool", "failed");
+    let terminal = updates(&frames)
+        .into_iter()
+        .find(|update| {
+            update["sessionUpdate"] == "tool_call_update" && update["toolCallId"] == "cancel-tool"
+        })
+        .unwrap();
+    assert!(
+        terminal["content"]
+            .to_string()
+            .to_lowercase()
+            .contains("cancel"),
+        "{terminal}"
+    );
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
 fn a_relayed_prompt_sends_the_same_updates_as_local_acp() {
     // Local `otto acp`.
     let (home, workspace, base_url) = fixture(read_script());
@@ -493,6 +539,10 @@ fn a_relayed_prompt_sends_the_same_updates_as_local_acp() {
         init["result"]["agentCapabilities"]["_meta"]["otto"]["approvalDialogue"], true,
         "the relay advertises approval dialogue: {init}"
     );
+    assert_eq!(
+        init["result"]["agentCapabilities"]["_meta"]["otto"]["taskControl"], true,
+        "the relay advertises task control: {init}"
+    );
     let session_id = relay.new_session(workspace.path());
     let (_, memory) = relay.call("_otto/memory/pending", json!({"sessionId": session_id}));
     assert_eq!(memory["error"]["code"], -32601, "{memory}");
@@ -501,6 +551,11 @@ fn a_relayed_prompt_sends_the_same_updates_as_local_acp() {
         json!({"sessionId": session_id, "text": "hello"}),
     );
     assert_eq!(approval["result"], Value::Null, "{approval}");
+    let (_, control) = relay.call(
+        "_otto/tasks/control",
+        json!({"sessionId":session_id,"text":"what can you do?","channel":"feishu"}),
+    );
+    assert_eq!(control["result"], Value::Null, "{control}");
     let (relay_frames, response) = relay.call("session/prompt", prompt(&session_id, "read hello"));
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
 
@@ -625,7 +680,11 @@ fn session_cancel_ends_a_running_prompt_and_a_queued_one() {
     configure(home.path(), &base_url, None);
     let serve = Serve::start(home.path(), workspace.path(), "off");
     let mut first = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
-    first.initialize();
+    let initialized = first.initialize();
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["_meta"]["otto"]["taskControl"],
+        true
+    );
     let session_id = first.new_session(workspace.path());
     let mut second = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
     second.initialize();
@@ -637,12 +696,40 @@ fn session_cancel_ends_a_running_prompt_and_a_queued_one() {
     let (_, busy) = first.call("session/prompt", prompt(&session_id, "again"));
     assert_eq!(busy["error"]["message"], "a prompt is already running");
 
-    // The queued prompt is cancelled while the first still runs.
-    let second_id = second.start("session/prompt", prompt(&session_id, "queued"));
-    std::thread::sleep(Duration::from_millis(300));
+    let (steer_frames, steered) = first.call(
+        "session/prompt",
+        prompt(&session_id, "/steer finish the provider request first"),
+    );
+    assert_eq!(steered["result"]["stopReason"], "end_turn", "{steered}");
+    assert!(agent_text(&steer_frames).contains("Guidance accepted"));
+    let (_, extension) = first.call(
+        "_otto/tasks/steer",
+        json!({"sessionId":session_id,"text":"then inspect the result"}),
+    );
+    assert_eq!(extension["result"]["accepted"], true, "{extension}");
+
+    // `/queue` acknowledges separately and the server FIFO owns its turn.
+    let second_id = second.start(
+        "session/prompt",
+        prompt(&session_id, "/queue inspect the current task"),
+    );
+    let (_, accepted_queue) = second.finish(second_id, &mut |frame| panic!("{frame}"));
+    assert_eq!(
+        accepted_queue["result"]["stopReason"], "end_turn",
+        "{accepted_queue}"
+    );
     second.cancel(&session_id);
-    let (_, response) = second.finish(second_id, &mut |frame| panic!("{frame}"));
-    assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+    let canceled_notice = loop {
+        let frame = second.recv();
+        if frame["method"] == "session/update"
+            && frame["params"]["update"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Queued follow-up canceled"))
+        {
+            break frame;
+        }
+    };
+    assert!(canceled_notice["params"]["sessionId"] == session_id);
 
     first.cancel(&session_id);
     let (_, response) = first.finish(first_id, &mut |frame| panic!("{frame}"));
@@ -913,6 +1000,7 @@ mod approval {
         let (response, frames, served) = answered_by_relay("reject_once");
         assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
         assert_eq!(served, 2, "the retry prompt must not reach the provider");
+        assert_terminal_tool_update(&frames, "call-1", "failed");
         assert!(
             !serde_json::to_string(&frames)
                 .unwrap()
@@ -1163,9 +1251,21 @@ fn a_relay_advertises_commands_and_runs_context_and_compact_on_serve() {
     );
     assert_eq!(update["availableCommands"][0]["name"], "compact");
     assert_eq!(update["availableCommands"][1]["name"], "context");
+    assert_eq!(update["availableCommands"][2]["name"], "reflect");
+    assert_eq!(update["availableCommands"][3]["name"], "skill");
+    assert_eq!(update["availableCommands"][4]["name"], "steer");
+    assert_eq!(update["availableCommands"][5]["name"], "queue");
 
-    relay.call("session/prompt", prompt(&session_id, "MARKER-USER-1"));
-    relay.call("session/prompt", prompt(&session_id, "MARKER-USER-2"));
+    let (_, first_response) = relay.call("session/prompt", prompt(&session_id, "MARKER-USER-1"));
+    assert_eq!(
+        first_response["result"]["stopReason"], "end_turn",
+        "{first_response}"
+    );
+    let (_, second_response) = relay.call("session/prompt", prompt(&session_id, "MARKER-USER-2"));
+    assert_eq!(
+        second_response["result"]["stopReason"], "end_turn",
+        "{second_response}"
+    );
     assert_eq!(requests.lock().unwrap().len(), 2);
     let first: Value = serde_json::from_str(&requests.lock().unwrap()[0]).unwrap();
     let system = first["messages"][0]["content"]
@@ -1203,5 +1303,81 @@ fn a_relay_advertises_commands_and_runs_context_and_compact_on_serve() {
     assert_eq!(requests.lock().unwrap().len(), 4);
     assert!(requests.lock().unwrap()[3].contains("/contextual x"));
     assert_eq!(agent_text(&frames), "plain answer");
+    assert_eq!(relay.close(), Some(0));
+}
+
+#[test]
+fn cancelling_attached_reflection_releases_server_admission() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, _) = provider_with(vec![text_reply("finished work")]);
+    configure(home.path(), &base_url, None);
+    let session_id = {
+        let serve = Serve::start(home.path(), workspace.path(), "off");
+        let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+        relay.initialize();
+        let session_id = relay.new_session(workspace.path());
+        relay.call("session/prompt", prompt(&session_id, "do useful work"));
+        assert_eq!(relay.close(), Some(0));
+        session_id
+    };
+    let (stalled_url, received) = serve_stalled();
+    configure(home.path(), &stalled_url, None);
+    let serve = Serve::start(home.path(), workspace.path(), "off");
+    let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+    relay.initialize();
+    let (_, loaded) = relay.call(
+        "session/load",
+        json!({
+            "sessionId": session_id, "cwd": workspace.path(), "mcpServers": []
+        }),
+    );
+    assert!(loaded["result"].is_object(), "{loaded}");
+    let request = relay.start("session/prompt", prompt(&session_id, "/reflect"));
+    wait_for_count(&received, 1);
+    relay.send(
+        json!({"jsonrpc":"2.0", "method":"session/cancel", "params":{"sessionId":session_id}}),
+    );
+    let (_, done) = relay.finish(request, &mut |frame| panic!("unexpected request: {frame}"));
+    assert_eq!(done["result"]["stopReason"], "cancelled", "{done}");
+    // A cancelled ACP response alone is insufficient: the server must have
+    // stopped the reflection and released its admission before responding.
+    let mut socket = UnixStream::connect(&serve.socket).unwrap();
+    socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let body = r#"{"text":"next task","queue":false}"#;
+    write!(socket, "POST /v1/sessions/{session_id}/turns HTTP/1.1\r\nHost: otto\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    let mut status = String::new();
+    BufReader::new(socket).read_line(&mut status).unwrap();
+    assert!(
+        status.starts_with("HTTP/1.1 200 "),
+        "server still busy after reflection cancel: {status}"
+    );
+    assert_eq!(relay.close(), Some(0));
+}
+
+#[test]
+fn a_relay_receives_the_reply_of_a_wake_turn_started_by_serve() {
+    let (home, workspace, base_url) = fixture(vec![
+        tool_call_reply("c1", "remind", r#"{"seconds":1,"message":"ping"}"#),
+        text_reply("timer set"),
+        text_reply("the timer fired"),
+    ]);
+    configure(home.path(), &base_url, None);
+    let serve = Serve::start(home.path(), workspace.path(), "off");
+    let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+    relay.initialize();
+    let session_id = relay.new_session(workspace.path());
+    let (_, response) = relay.call("session/prompt", prompt(&session_id, "remind me"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+
+    // The relay polls serve once a second; the update arrives outside any prompt.
+    let text = loop {
+        let frame = relay.recv();
+        let update = &frame["params"]["update"];
+        if update["_meta"]["otto"]["wakeReply"] == true {
+            break update["content"]["text"].as_str().unwrap().to_string();
+        }
+    };
+    assert_eq!(text, "the timer fired");
     assert_eq!(relay.close(), Some(0));
 }

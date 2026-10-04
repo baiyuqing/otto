@@ -22,10 +22,13 @@
 pub mod approval;
 pub mod approval_control;
 pub mod auto_reflection;
+pub mod channel;
+pub(crate) mod task_control;
 
 /// Fixed, content-free frontend notice for a successful memory proposal.
 pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
 pub mod sandbox;
+pub(crate) mod scheduled;
 pub mod tasks;
 pub mod wake;
 
@@ -46,6 +49,7 @@ use crate::cli::runtime_builder::{Builder, Runner, RuntimeInfo, SharedSession};
 use crate::cli::sandbox_setup::{self, SandboxChange};
 use crate::session::{self as sessionfs, ArchiveResult, MAX_LIST_SESSIONS};
 use crate::tool::remind::Reminders;
+pub use channel::Channel;
 
 pub use approval::{ApprovalDecision, ApprovalRequest, Step, Stop};
 pub use sandbox::SandboxControl;
@@ -183,11 +187,16 @@ pub struct Controller {
     close_signal: Condvar,
     /// Lines from background reflection for a frontend to show.
     notices: Arc<auto_reflection::Notices>,
+    /// Model-written texts of finished wake turns, for ACP clients.
+    wake_replies: auto_reflection::Notices,
     /// Whether a background reflection run is in flight; one at a time.
     auto_running: Arc<std::sync::atomic::AtomicBool>,
     /// Cancelled by `request_close`, which stops a background run.
     auto_cancel: CancellationToken,
     approval_control: tokio::sync::Mutex<()>,
+    /// Set by [`Controller::push_scheduled`]; the TUI rings the terminal bell
+    /// once per [`Controller::take_bell`].
+    bell: std::sync::atomic::AtomicBool,
 }
 
 /// One admitted operation. Dropping it releases admission and performs a
@@ -233,7 +242,7 @@ impl Controller {
         runner: Runner,
         info: RuntimeInfo,
     ) -> Self {
-        Self {
+        let controller = Self {
             builder,
             dynamic_content,
             sandbox: None,
@@ -243,9 +252,57 @@ impl Controller {
             }),
             close_signal: Condvar::new(),
             notices: Arc::new(auto_reflection::Notices::new()),
+            wake_replies: auto_reflection::Notices::new(),
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
+            bell: std::sync::atomic::AtomicBool::new(false),
+        };
+        controller.notify_memory_state();
+        controller
+    }
+
+    /// Queues the notices about memory that needs the user's attention:
+    /// pending candidates in the current user and workspace scopes, and
+    /// standing preferences that recall does not inject because the standing
+    /// set is over its budget. Called once per session open: on construction
+    /// and when `commit` installs a replacement session.
+    fn notify_memory_state(&self) {
+        let memory = &self.builder.memory;
+        if !memory.usable {
+            return;
+        }
+        let scopes = [
+            memory.user_scope.clone(),
+            self.builder.workspace_scope.clone(),
+        ];
+        if let Ok(summary) = memory.service.pending_summary(&scopes)
+            && let Some(oldest) = summary.oldest
+        {
+            let line = match summary.count {
+                1 => format!(
+                    "1 memory proposal is pending review (since {}). Run /memory review to accept or reject it.",
+                    oldest.format("%Y-%m-%d")
+                ),
+                count => format!(
+                    "{count} memory proposals are pending review (oldest since {}). Run /memory review to accept or reject them.",
+                    oldest.format("%Y-%m-%d")
+                ),
+            };
+            self.notices.push(line);
+        }
+        if let Ok(usage) = memory.service.standing_usage(&memory.user_scope)
+            && usage.omitted > 0
+        {
+            let budget = usage.budget;
+            self.notices.push(match usage.omitted {
+                1 => format!(
+                    "1 standing preference is not recalled because the standing set is over its {budget}-token budget. Forget one with /memory forget <id>; list them with /memory list --scope user."
+                ),
+                omitted => format!(
+                    "{omitted} standing preferences are not recalled because the standing set is over its {budget}-token budget. Forget some with /memory forget <id>; list them with /memory list --scope user."
+                ),
+            });
         }
     }
 
@@ -290,6 +347,20 @@ impl Controller {
             controller: self,
             generation: state.generation,
         })
+    }
+
+    pub(crate) fn begin_runner_operation(&self, runner: &Runner) -> Result<Admission<'_>, String> {
+        let admission = self.begin_operation()?;
+        let current = self.lock();
+        let is_current = current
+            .current
+            .as_ref()
+            .is_some_and(|current| std::ptr::eq(current.runner.as_ref(), runner));
+        drop(current);
+        if !is_current {
+            return Err("the active session changed before the task resumed".into());
+        }
+        Ok(admission)
     }
 
     fn release(&self, generation: u64) {
@@ -780,17 +851,174 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        self.prompt_with_system_context(
+            text,
+            "",
+            Some(crate::schedule::Origin::terminal()),
+            emit,
+            cancel,
+        )
+        .await
+    }
+
+    pub(crate) async fn prompt_with_system_context(
+        &self,
+        text: &str,
+        system_context: &str,
+        origin: Option<crate::schedule::Origin>,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        let compacted = std::sync::atomic::AtomicBool::new(false);
+        self.begin_user_turn(&runner, origin).await;
+        let task_run = runner
+            .task_control()
+            .begin(&runner.session().header().id, &runner.redact_text(text))
+            .map_err(AgentError::Other)?;
+        self.run_prompt_step(&runner, text, system_context, &mut *emit, cancel)
+            .await?;
+        self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
+            .await
+    }
+
+    /// One prompt step inside an already-admitted logical turn. Approval
+    /// retries call this without opening a second follow-up scope.
+    pub(crate) async fn run_prompt_step(
+        &self,
+        runner: &Runner,
+        text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        let observation = auto_reflection::RunObservation::default();
         let result = runner
-            .run(
+            .run_with_system_context(
                 text,
-                &mut auto_reflection::observing(emit, &compacted),
+                system_context,
+                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
                 cancel,
             )
             .await;
-        self.after_operation(&compacted);
+        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
+        result
+    }
+
+    async fn run_followups_held(
+        &self,
+        runner: &Runner,
+        task_run: &task_control::Run,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        while let Some(text) = task_run.next_followup() {
+            if self.pending_approval().is_some() {
+                task_run.clear_followups();
+                self.record_skipped_followup(runner, emit).await?;
+                return Ok(());
+            }
+            task_run.set_current_task(&text);
+            self.run_followup_step(runner, &text, system_context, &mut *emit, cancel)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Sets the turn origin the schedule tools read and appends the scheduled
+    /// deliveries for that origin that no session has recorded yet, before the
+    /// user message. Called once per logical user turn, not for follow-ups or
+    /// wake turns.
+    pub(crate) async fn begin_user_turn(
+        &self,
+        runner: &Runner,
+        origin: Option<crate::schedule::Origin>,
+    ) {
+        runner.schedule_origin.set(origin.clone());
+        let (Some(origin), Some(store)) = (origin, self.builder.schedule.as_ref()) else {
+            return;
+        };
+        let session_id = runner.session().header().id.clone();
+        // A store or append error ends the write-back; the next user turn
+        // retries, because the row stays unmarked.
+        let Ok(deliveries) = store.pending_writebacks(&origin, &session_id, 10) else {
+            return;
+        };
+        for delivery in deliveries {
+            let appended = runner
+                .session()
+                .append(Message {
+                    role: otto_core::model::Role::Context,
+                    blocks: vec![Block::text(runner.redact_text(&delivery.context_text()))],
+                    created_at: chrono::Utc::now(),
+                    context_type: "scheduled_delivery".into(),
+                    display: true,
+                    ..Message::default()
+                })
+                .await;
+            if appended.is_err()
+                || store
+                    .mark_appended(delivery.item_id, delivery.due_at)
+                    .is_err()
+            {
+                return;
+            }
+        }
+    }
+
+    async fn record_skipped_followup(
+        &self,
+        runner: &Runner,
+        emit: EventSink<'_>,
+    ) -> Result<(), AgentError> {
+        let text = "An agent-scheduled follow-up was not run because this terminal turn ended while approval is pending. Retry it after resolving the approval.";
+        runner
+            .session()
+            .append(Message {
+                role: otto_core::model::Role::Context,
+                blocks: vec![Block::text(text)],
+                created_at: chrono::Utc::now(),
+                context_type: "agent_followup".into(),
+                display: true,
+                ..Message::default()
+            })
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        emit(otto_core::agent::Event::Notification {
+            kind: Some(NotificationKind::TaskReport),
+            task_id: "agent_followup".into(),
+            text: text.into(),
+            usage: Usage::default(),
+            present: false,
+        });
+        Ok(())
+    }
+
+    async fn run_followup_step(
+        &self,
+        runner: &Runner,
+        text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        emit(otto_core::agent::Event::TextDelta {
+            text: "\n\n".into(),
+        });
+        let observation = auto_reflection::RunObservation::default();
+        let result = runner
+            .run_followup_with_system_context(
+                text,
+                system_context,
+                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
+                cancel,
+            )
+            .await;
+        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
         result
     }
 
@@ -801,19 +1029,47 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        self.prompt_with_image_and_system_context(
+            text,
+            image,
+            "",
+            Some(crate::schedule::Origin::terminal()),
+            emit,
+            cancel,
+        )
+        .await
+    }
+
+    pub(crate) async fn prompt_with_image_and_system_context(
+        &self,
+        text: &str,
+        image: Block,
+        system_context: &str,
+        origin: Option<crate::schedule::Origin>,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        let compacted = std::sync::atomic::AtomicBool::new(false);
+        self.begin_user_turn(&runner, origin).await;
+        let task_run = runner
+            .task_control()
+            .begin(&runner.session().header().id, &runner.redact_text(text))
+            .map_err(AgentError::Other)?;
+        let observation = auto_reflection::RunObservation::default();
         let result = runner
-            .run_with_image(
+            .run_with_image_system_context(
                 text,
                 image,
-                &mut auto_reflection::observing(emit, &compacted),
+                system_context,
+                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
                 cancel,
             )
             .await;
-        self.after_operation(&compacted);
-        result
+        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
+        result?;
+        self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
+            .await
     }
 
     pub async fn compact(
@@ -840,7 +1096,18 @@ impl Controller {
     /// the transcript.
     pub(crate) fn after_operation(&self, compacted: &std::sync::atomic::AtomicBool) {
         if compacted.load(std::sync::atomic::Ordering::SeqCst) {
-            self.start_auto_reflection();
+            self.start_auto_reflection(crate::reflection::Trigger::OnCompaction);
+        }
+    }
+
+    /// Runs compaction reflection as before, then considers a task-end run
+    /// only for a successful completed prompt with enough successful tools.
+    fn after_prompt(&self, observation: &auto_reflection::RunObservation, completed: bool) {
+        if observation.compacted() {
+            self.start_auto_reflection(crate::reflection::Trigger::OnCompaction);
+        }
+        if observation.eligible_work(completed) {
+            self.start_auto_reflection(crate::reflection::Trigger::OnWork);
         }
     }
 
@@ -1230,6 +1497,62 @@ impl Controller {
         tasks::task_view(state.current.as_ref()?.runner.as_ref())
     }
 
+    /// Accepts guidance for the exact active run, at its next safe provider
+    /// boundary. The acceptance is transient and never wakes a later run.
+    pub fn steer(&self, text: &str) -> Result<(), String> {
+        let text = task_control::checked_text(text)?;
+        if self.pending_approval().is_some() {
+            return Err("the task is waiting for approval; guidance is not accepted yet".into());
+        }
+        let runner = self.runner()?;
+        let ticket = runner
+            .steering()
+            .ticket()
+            .ok_or_else(|| "there is no active task accepting guidance".to_string())?;
+        let session_id = runner.session().header().id.clone();
+        runner.task_control().steer(&session_id, ticket, text)
+    }
+
+    /// Routes natural input during an active turn through a restricted control
+    /// dialogue. `None` means the caller should handle it as a normal prompt.
+    pub async fn control_message_with_channel(
+        &self,
+        text: &str,
+        channel: Option<Channel>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<approval_control::ControlReply>, String> {
+        if let Some(reply) = self
+            .approval_message_with_channel(text, channel, cancel)
+            .await?
+        {
+            return Ok(Some(reply));
+        }
+        let runner = self.runner()?;
+        let Some(ticket) = runner.steering().ticket() else {
+            return Ok(None);
+        };
+        let _serial = tokio::select! {
+            guard = self.approval_control.lock() => guard,
+            () = cancel.cancelled() => return Err("context canceled".into()),
+            () = self.auto_cancel.cancelled() => return Err(CLOSED.into()),
+        };
+        if self.pending_approval().is_some() {
+            drop(_serial);
+            return self
+                .approval_message_with_channel(text, channel, cancel)
+                .await;
+        }
+        let is_current = self
+            .lock()
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.runner, &runner));
+        if !is_current || runner.steering().ticket() != Some(ticket) {
+            return Ok(None);
+        }
+        task_control::control_message(self, &runner, text, channel, ticket, cancel).await
+    }
+
     /// The current runner's timer registry, or `None` when the timer tools
     /// are not registered or the controller is closed. `/timers` lists it and
     /// [`Self::archive_current_session`] clears it.
@@ -1335,6 +1658,14 @@ impl Controller {
     /// Only `read_paths` and `network` are offered: an `allow_env` change
     /// cannot be reloaded into a running process at all.
     pub async fn amend_sandbox(&self, change: SandboxChange) -> Result<SandboxInfo, String> {
+        let _admission = self.begin_operation()?;
+        self.amend_sandbox_with_admission(change).await
+    }
+
+    async fn amend_sandbox_with_admission(
+        &self,
+        change: SandboxChange,
+    ) -> Result<SandboxInfo, String> {
         let control = {
             let state = self.lock();
             if state.closed {
@@ -1343,9 +1674,6 @@ impl Controller {
             let Some(control) = self.sandbox.clone() else {
                 return Err(SANDBOX_RELOAD_UNAVAILABLE.to_string());
             };
-            if state.busy {
-                return Err(PROMPT_ACTIVE.to_string());
-            }
             control
         };
         let path = self.builder.config_path.clone();
@@ -1363,14 +1691,10 @@ impl Controller {
         }
     }
 
-    /// The current session id, once no turn is running.
-    fn idle_session_id(&self) -> Result<String, String> {
+    fn admitted_session_id(&self) -> Result<String, String> {
         let state = self.lock();
         if state.closed {
             return Err(CLOSED.to_string());
-        }
-        if state.busy {
-            return Err(PROMPT_ACTIVE.to_string());
         }
         Ok(state
             .current
@@ -1397,44 +1721,63 @@ impl Controller {
 
     /// Applies an approved sandbox read grant or approves one elevated command.
     pub async fn approve_tool(&self, id: &str) -> Result<String, String> {
-        let session_id = self.idle_session_id()?;
+        let _admission = self.begin_operation()?;
+        let session_id = self.admitted_session_id()?;
+        self.approve_tool_for_session(&session_id, id).await
+    }
+
+    pub(crate) async fn approve_tool_for_session(
+        &self,
+        session_id: &str,
+        id: &str,
+    ) -> Result<String, String> {
         let approvals = self.bash_approvals()?;
         let _decision = approvals.decision.lock().await;
         let path = approvals
-            .pending_read_path(&session_id, id)
+            .pending_read_path(session_id, id)
             .ok_or_else(|| "approval request not found".to_string())?;
         if path.is_empty() {
-            return self.approve_bash(id);
+            return self.approve_bash_for_session(session_id, id);
         }
         // A symlink must still resolve to the path the user reviewed.
         if self.resolve_sandbox_read_path(&path)? != path {
             return Err("sandbox read path changed; request approval again".to_string());
         }
-        self.amend_sandbox(SandboxChange::AllowReadPath(path))
+        self.amend_sandbox_with_admission(SandboxChange::AllowReadPath(path))
             .await?;
-        approvals.approve(&session_id, id).map_err(str::to_string)?;
+        approvals.approve(session_id, id).map_err(str::to_string)?;
         Ok(format!(
             "The user approved {id} for persistent sandbox read access. Retry the same Bash call inside the sandbox now."
         ))
     }
 
     pub fn deny_tool(&self, id: &str) -> Result<(), String> {
-        let session_id = self.idle_session_id()?;
-        self.bash_approvals()?.discard(&session_id, id);
+        let _admission = self.begin_operation()?;
+        let session_id = self.admitted_session_id()?;
+        self.deny_tool_for_session(&session_id, id)
+    }
+
+    pub(crate) fn deny_tool_for_session(&self, session_id: &str, id: &str) -> Result<(), String> {
+        self.bash_approvals()?.discard(session_id, id);
         Ok(())
     }
 
     /// Grants one pending elevated Bash command for the current session.
     pub fn approve_bash(&self, id: &str) -> Result<String, String> {
-        let session_id = self.idle_session_id()?;
+        let _admission = self.begin_operation()?;
+        let session_id = self.admitted_session_id()?;
+        self.approve_bash_for_session(&session_id, id)
+    }
+
+    fn approve_bash_for_session(&self, session_id: &str, id: &str) -> Result<String, String> {
         let approvals = self.bash_approvals()?;
         if approvals
-            .pending_read_path(&session_id, id)
+            .pending_read_path(session_id, id)
             .is_some_and(|path| !path.is_empty())
         {
             return Err("this request requires sandbox read approval".to_string());
         }
-        approvals.approve(&session_id, id).map_err(str::to_string)?;
+        approvals.approve(session_id, id).map_err(str::to_string)?;
         Ok(format!(
             "The user approved {id} for one exact command. Retry the same elevated Bash command now."
         ))
@@ -1444,26 +1787,35 @@ impl Controller {
     /// pending command once. Nothing is written when the command is not a
     /// single program invocation.
     pub async fn approve_bash_always(&self, id: &str) -> Result<String, String> {
-        let session_id = self.idle_session_id()?;
+        let _admission = self.begin_operation()?;
+        let session_id = self.admitted_session_id()?;
+        self.approve_bash_always_for_session(&session_id, id).await
+    }
+
+    async fn approve_bash_always_for_session(
+        &self,
+        session_id: &str,
+        id: &str,
+    ) -> Result<String, String> {
         let approvals = self.bash_approvals()?;
         if approvals
-            .pending_read_path(&session_id, id)
+            .pending_read_path(session_id, id)
             .is_some_and(|path| !path.is_empty())
         {
-            return self.approve_tool(id).await;
+            return self.approve_tool_for_session(session_id, id).await;
         }
         let _decision = approvals.decision.lock().await;
         let command = approvals
-            .pending_command(&session_id, id)
+            .pending_command(session_id, id)
             .ok_or_else(|| "approval request not found".to_string())?;
         let entry =
             otto_core::config::sandbox::excluded_command_entry(&command).ok_or_else(|| {
                 "the command is not a single program invocation; use /approve <id> instead"
                     .to_string()
             })?;
-        self.amend_sandbox(SandboxChange::ExcludeCommand(entry.clone()))
+        self.amend_sandbox_with_admission(SandboxChange::ExcludeCommand(entry.clone()))
             .await?;
-        approvals.approve(&session_id, id).map_err(str::to_string)?;
+        approvals.approve(session_id, id).map_err(str::to_string)?;
         Ok(format!(
             "The user approved {id} and excluded '{entry}' from the sandbox. Retry the same Bash command now."
         ))
@@ -1471,7 +1823,7 @@ impl Controller {
 
     // ---- replacement helpers ----
 
-    fn current_runtime(&self) -> Result<Runtime, String> {
+    pub(crate) fn current_runtime(&self) -> Result<Runtime, String> {
         let info = self
             .lock()
             .current
@@ -1529,6 +1881,7 @@ impl Controller {
         if deferred {
             return Err(CLOSED.to_string());
         }
+        self.notify_memory_state();
         match close_error {
             Some(error) => Err(self.builder.redact_error(&error, None)),
             None => Ok(path),
@@ -1557,7 +1910,7 @@ impl Controller {
     }
 
     fn from_current(builder: Arc<Builder>, current: Current) -> Self {
-        Self {
+        let controller = Self {
             builder,
             dynamic_content: true,
             sandbox: None,
@@ -1567,10 +1920,14 @@ impl Controller {
             }),
             close_signal: Condvar::new(),
             notices: Arc::new(auto_reflection::Notices::new()),
+            wake_replies: auto_reflection::Notices::new(),
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
-        }
+            bell: std::sync::atomic::AtomicBool::new(false),
+        };
+        controller.notify_memory_state();
+        controller
     }
 }
 
@@ -1717,6 +2074,20 @@ pub(crate) async fn controller_with_approvals(
     Arc<crate::tool::bash::BashApprovals>,
     Arc<Mutex<usize>>,
 ) {
+    controller_with_approvals_and_schedule(workspace, sessions, None).await
+}
+
+/// [`controller_with_approvals`] with a scheduled-delivery store.
+#[cfg(test)]
+pub(crate) async fn controller_with_approvals_and_schedule(
+    workspace: &std::path::Path,
+    sessions: &std::path::Path,
+    schedule: Option<Arc<crate::schedule::Store>>,
+) -> (
+    Controller,
+    Arc<crate::tool::bash::BashApprovals>,
+    Arc<Mutex<usize>>,
+) {
     use crate::cli::info::SandboxNetwork;
     use crate::cli::testutil::{FakeSandbox, builder, initial_runtime, seatbelt_info};
     use crate::sandbox::direct::DirectDriver;
@@ -1737,6 +2108,7 @@ pub(crate) async fn controller_with_approvals(
     ));
     let mut builder = builder(workspace, sessions);
     builder.bash_approvals = Some(Arc::clone(&approvals));
+    builder.shared_mut().schedule = schedule;
     let runtime = initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let runner = builder
@@ -1848,6 +2220,52 @@ mod tests {
         assert!(!config.contains("excluded_commands"));
         assert!(!approvals.take(&session, "cat fixture"));
         assert!(approvals.take_read_path(&session, "cat fixture", &path));
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_followup_is_discarded_with_a_persisted_notice_when_approval_waits() {
+        use otto_core::session::Session;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let (controller, approvals, _) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let runner = controller.runner().expect("runner");
+        let session_id = runner.session().header().id.clone();
+        let _approval = approvals.request(&session_id, "git push");
+        let task_run = runner
+            .task_control()
+            .begin(&session_id, "initial task")
+            .expect("logical task");
+        runner
+            .task_control()
+            .queue_followup("inspect the pushed branch")
+            .expect("followup");
+        let mut events = Vec::new();
+        controller
+            .run_followups_held(
+                &runner,
+                &task_run,
+                "",
+                &mut |event| events.push(event),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("record skip");
+
+        let notice = runner
+            .session()
+            .messages()
+            .into_iter()
+            .find(|message| message.context_type == "agent_followup")
+            .expect("persisted source-labelled notice");
+        assert_eq!(notice.role, otto_core::model::Role::Context);
+        assert!(notice.display);
+        assert!(notice.text().contains("approval is pending"));
+        assert!(
+            matches!(events.as_slice(), [otto_core::agent::Event::Notification { text, .. }] if text == &notice.text())
+        );
+        assert!(task_run.next_followup().is_none());
     }
 
     #[tokio::test]
@@ -2919,5 +3337,84 @@ mod tests {
         );
         wake.cancel();
         controller.begin_operation().expect("admit");
+    }
+
+    fn propose_pending(controller: &Controller, key: &str) {
+        let memory = controller.memory_wiring();
+        memory
+            .service
+            .propose(&crate::memory::ProposeRequest {
+                scope: controller.workspace_memory_scope().clone(),
+                kind: "preference".into(),
+                key: key.into(),
+                text: key.into(),
+                reason: "said so".into(),
+                confidence: 0.5,
+                source: crate::memory::Provenance {
+                    origin: Some(crate::memory::Origin::Model),
+                    ..crate::memory::Provenance::default()
+                },
+                ..crate::memory::ProposeRequest::default()
+            })
+            .expect("propose");
+    }
+
+    #[tokio::test]
+    async fn each_session_open_queues_one_pending_memory_notice() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = crate::cli::testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        assert!(controller.take_notices().is_empty(), "nothing is pending");
+        controller.new_session().await.expect("new session");
+        assert!(controller.take_notices().is_empty(), "nothing is pending");
+
+        propose_pending(&controller, "a");
+        assert!(
+            controller.take_notices().is_empty(),
+            "a proposal is not a session open"
+        );
+        propose_pending(&controller, "b");
+        controller.new_session().await.expect("new session");
+        let today = chrono::Utc::now().format("%Y-%m-%d");
+        assert_eq!(
+            controller.take_notices(),
+            vec![format!(
+                "2 memory proposals are pending review (oldest since {today}). Run /memory review to accept or reject them."
+            )]
+        );
+        assert!(controller.take_notices().is_empty(), "queued once");
+
+        controller.close().expect("close");
+        let reopened = crate::cli::testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        assert_eq!(reopened.take_notices().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_open_queues_the_over_budget_standing_notice() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let path = store.path().join("m.db");
+        crate::cli::testutil::seed_over_budget_standing(&path);
+        let controller =
+            crate::cli::testutil::controller_with_memory(workspace.path(), sessions.path(), &path)
+                .await;
+        assert_eq!(
+            controller.take_notices(),
+            vec![
+                "1 standing preference is not recalled because the standing set is over its 2000-token budget. Forget one with /memory forget <id>; list them with /memory list --scope user."
+            ]
+        );
     }
 }

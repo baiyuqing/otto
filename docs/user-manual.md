@@ -620,6 +620,10 @@ OTTO_UI=repl otto
   is saved in the session, so a resumed session shows it again.
 - While idle, a pending notification — a finished sub-agent, or a `remind`
   timer — starts a wake turn that delivers it and lets the model continue.
+- A due [`schedule`](#schedule) item created from a terminal is shown as a
+  system line and rings the terminal bell. When several TUIs or REPLs run on
+  the host, including `otto --attach`, one of them shows each item. The REPL
+  prints it as a line while it waits for input.
   Esc cancels it the same way as a user turn. Composer text is left in place.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
@@ -963,7 +967,8 @@ Notes:
   `remind` timer, a `[feishu]` message) are written to
   `<session-id>.inbox.json` beside the session file, mode `0600`, and removed
   from it once delivered to the model. Reopening the session restores them,
-  and the REPL, the TUI, and `otto serve` start a wake turn to deliver them.
+  and the REPL, the TUI, `otto serve`, and `otto acp` start a wake turn to
+  deliver them.
   A turn started by user input delivers pending notifications before the
   user's message. Delivery is at least once: a notification appended to the session just
   before Otto exits can be delivered again after the session is reopened.
@@ -1011,7 +1016,7 @@ lease in `<session-id>.lease/` beside the session file.
   once and was interrupted again gets the error result instead. Otto then queues one notification to the model that names
   the stopped host and pid, the calls without results (marked "may have run"
   or "not executed"), and each sub-agent task that had not finished, and starts
-  a wake turn in the REPL, the TUI, and `otto serve`. With `--prompt`, the
+  a wake turn in the REPL, the TUI, `otto serve`, and `otto acp`. With `--prompt`, the
   notification is delivered before the prompt. Each listed task is recorded as
   `interrupted`; a task that cannot be recorded is reported as a warning on
   standard error. No notification is queued when there is nothing to report
@@ -1219,7 +1224,9 @@ initial workspace.
 it assigned, such as `scheduled r1 in 10s: check the build`. When the delay
 elapses, Otto delivers a `[timer]` notification and the idle wake loop
 starts a turn, the same way a finished sub-agent does. At most eight timers
-can be outstanding. Each delay is 1 to 3600 seconds.
+can be outstanding. Each delay is 1 to 3600 seconds. In a chat through
+`otto-connect`, the text the model writes in that turn is sent to the chat
+(see [Messages and replies](#messages-and-replies)).
 
 `remind_status` lists the outstanding timers of the current session, one per
 line, sorted by fire time: the id, the remaining time (`due` once the fire
@@ -1240,6 +1247,72 @@ timers live only in the current process. Archiving a session cancels its
 outstanding timers permanently: the stored timers are deleted with the
 archive, so resuming the archived session does not bring them back. Child
 agents do not get these tools.
+
+### `schedule`
+
+`schedule` is for results the user asked to receive later or repeatedly, for
+example "every day at 08:00 tell me whether it will rain in Beijing". `remind`
+stays the model's own timer inside the current conversation. Items are kept in
+`~/.otto/schedule.db`, outside any session, so they survive `/new`, `/use`,
+and a restart.
+
+| Field | Rule |
+| --- | --- |
+| `text` | A fixed message, 1 to 500 characters. Delivered as `⏰ <text>`. |
+| `prompt` | 1 to 2000 characters. At the due time Otto runs it as the first message of a new session in the workspace where the item was created, and delivers the final reply as `⏰ <reply>`. |
+| `seconds` | Delay from now, 1 to 2592000 (30 days). |
+| `at` | `HH:MM` (the next occurrence) or `YYYY-MM-DD HH:MM`, in the host's local time zone, at most 30 days ahead. |
+| `repeat` | `daily` or `weekdays`, at the `HH:MM` given in `at`. |
+
+Exactly one of `text` and `prompt` and exactly one of `seconds` and `at` are
+required. Each origin (see below) has at most 32 active items. The result
+names the id, the first due time with its UTC offset, where the item will be
+delivered, and the current local time:
+
+```
+scheduled s7: prompt, first run 2026-10-05 08:00 +08:00 (in 14h40m), repeats daily; delivered to this Telegram chat
+now: 2026-10-04 17:20 +08:00
+```
+
+`schedule_list` lists the items of the current origin: active ones, then those
+that finished, failed, or were cancelled in the last 7 days, with the error of
+a failed item. `schedule_cancel {"id": "s7"}` cancels an active item; a
+recurring item stops for good.
+
+An item belongs to the origin of the turn that created it:
+
+| Origin | Turns | Delivered by |
+| --- | --- | --- |
+| terminal | the TUI, the REPL, `otto --prompt`, `otto --attach` | one running TUI or REPL on this host, as a system line; the TUI also rings the terminal bell |
+| web | the browser UI | an open browser UI page, as a notice |
+| a chat | a Telegram or Feishu chat through `otto-connect` | that chat, through `otto-connect` (see [Messages and replies](#messages-and-replies)) |
+
+Turns from an editor ACP client, scheduled runs, sub-agents, and workflows
+have no origin; there the three tools return an error. If
+`~/.otto/schedule.db` cannot be opened at startup, Otto prints a warning and
+the tools return an error that names the file.
+
+A prompt item runs in a process that is running when it is due: a TUI or
+REPL opened on the same workspace for terminal items, `otto acp` for its
+chats, or `otto serve` for every origin and workspace. No user is present
+during the run, so approval requests are denied. The run is cancelled after
+10 minutes. Its session stays in the session list. A run that fails before any
+tool call is retried; a failure after a tool call started is delivered as
+`⏰ Scheduled prompt s7 failed: <error>` and not repeated.
+
+Delivery is at least once. A failed delivery is retried after 30 s, doubling
+up to 30 minutes between attempts. An occurrence not delivered within 24 hours
+of its due time is marked failed and shows in `schedule_list`. A text
+delivered more than 2 minutes late ends with a line such as
+`(scheduled for 2026-10-05 08:00 +08:00, delivered 2h3m late)`. A recurring
+item that missed occurrences while no process could run it runs once for the
+most recent one, if that is less than 24 hours old.
+
+At the start of the next user turn from the same origin, the delivered text is
+added to the conversation before the user message, as a context entry
+`[scheduled s7, due ...]`, so a follow-up question can refer to it. For a chat
+this is the session the chat uses at that time; for the terminal and the web
+UI it is the session that created the item.
 
 ### `list_models`
 
@@ -1623,6 +1696,47 @@ hide the approval panel without deciding and type your message. Telegram and
 Feishu support this with Otto; other ACP agents keep the ordinary queue.
 Explicit Deny/No, `/deny` in chat and `/stop` continue to work.
 
+### Active-task guidance and model follow-ups
+
+In Telegram and Feishu, speak naturally while Otto is working: “investigate
+first, do not change files yet” can guide the active task; “after this, write a
+report” can become a separate follow-up; a progress question can get a read-only
+answer. This is enabled by default. A short, isolated model dialogue chooses
+the action using the original task and recent progress. It has only routing and
+help tools, cannot execute task tools or grant approval, and has a 30-second
+limit. Ambiguous input can produce a clarification without changing the task.
+
+Guidance is delivered unchanged at the next safe provider boundary, after the
+current provider request and any already-requested tool batch finish. Acceptance
+does not mean an in-flight tool was interrupted or its effects undone. Pending
+guidance belongs to that exact run and is discarded on failure/cancellation;
+it cannot leak into the next task. While approval waits, the existing
+approval-only dialogue continues to apply.
+
+The main task model can call `task_queue` with a nonblank `prompt` of at most
+32,000 UTF-8 bytes to schedule a separate follow-up within your objective. It
+uses FIFO order with at most 16 accepted follow-ups per logical task, including
+follow-ups scheduled by other follow-ups. These are labelled as agent-originated
+context and cannot create user authority. ACP/server keep them behind approval;
+denial, cancellation, or failure clears remaining model follow-ups. Direct
+terminal prompts that end awaiting approval clear remaining follow-ups with a
+visible, stored notice; resubmit them after resolving approval. Pending queues
+are in memory and are not recovered after a process restart.
+
+Tool schemas and the applicable operation policy accompany each task request
+outside the mutable transcript. Compaction and session reload preserve this
+capability information; `otto_help` describes the installed version and actual
+tools. Parent-to-child guidance continues to use `agent_send`.
+
+For deterministic chat control, use `/steer <guidance>` or `/queue <prompt>`.
+Both accept nonblank text of at most 32,000 UTF-8 bytes. `/steer` refuses idle or
+approval-waiting tasks; `/queue` starts immediately when idle and otherwise
+waits in the existing chat queue, including during approval. Queued prompts get
+their own answer. `/stop` clears pending chat input and cancels active work.
+An old agent queues natural messages using the previous behavior and reports
+explicit steering as unsupported; upgrade and restart both Otto and its
+connector to use natural routing.
+
 ### Approvals inside a turn
 
 When a prepared tool call in a serve turn waits for approval, the turn does not end. Its stream emits `approval_requested` with
@@ -1698,6 +1812,11 @@ composer:
   `"trust": true`, and **Cancel** adds nothing. **Enter a path** below the
   button expands a field for typing an absolute path, handled the same way.
   Other `400`/`500` errors are shown below the button.
+- While the page is open it calls `POST /v1/schedule/claim` every 15 s and
+  shows each due [`schedule`](#schedule) item created from the browser UI as
+  a notice below the top bar, with a dismiss button, then confirms it with
+  `POST /v1/schedule/{id}/delivered`. With several tabs open, each item
+  appears in one of them.
 - Below 720px wide the sidebar is hidden; the **Sessions** button in the top
   bar shows it as an overlay, and opening a session hides it again.
 - Typing `/` in the composer shows local suggestions for supported Web slash
@@ -1818,15 +1937,19 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
 | `POST /v1/sessions/{id}/approvals/message` | Restricted dialogue during an unapproved request: `{"text":"..."}`. Returns `null` when none waits, otherwise `{"text","queued"}`. A true `queued` asks the client to put the original message in its normal task queue. Never approves. |
 | `POST /v1/sessions/{id}/approvals/{approval_id}` | Decide an elevated Bash command a running turn waits for: `{"decision":"allow"}` or `{"decision":"deny"}`. `200 {"decision"}` for the first decision; `409 approval_decided` when it was already decided; `409 approval_failed` when the id is not waiting. See [Approvals inside a turn](#approvals-inside-a-turn). |
-| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram` or `feishu`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
 | `POST /v1/sessions/{id}/reflect` | Run one reflection now, optionally with `{"focus":"..."}`, and return what it did (`status`, `candidates`, `skills`, `dropped`, and the one-line summary). Memory proposals are queued as pending candidates; skills that pass every check are written to `~/.otto/skills`. `409 turn_active` while a turn runs or is queued, or a compaction or reflection runs; `409 reflection_unavailable` when reflection is disabled, the session has no file, memory is unavailable, or the redaction boundary is closed; `409 reflection_failed` when the model call or its answer failed (nothing is marked covered). |
+| `POST /v1/sessions/{id}/reflect/cancel` | With `{"request_id":"..."}`, cancel only the matching manual reflection and return `202`. Supply the same optional ID on `POST .../reflect`: 1–64 ASCII letters, digits, underscores, or hyphens, with a fresh ID for each operation. The session retains the 16 most recent cancelled IDs to handle cancellation arriving before registration. This cannot cancel a turn, compaction, automatic reflection, or a manual reflection with another or no ID. |
 | `GET /v1/sessions/{id}/reflection/skills` | List the skills reflection wrote and not reverted, with the run, session, time, reason, and `owned` (false once the file was edited by hand). `enabled:false` when reflection is turned off. |
 | `POST /v1/sessions/{id}/reflection/skills/{name}/revert` | Restore the previous version of a skill reflection wrote, or remove it if reflection created it (`result` is `restored` or `removed`). `404` when reflection did not write it; `409 skill_not_owned` when it was edited by hand; `409 skills_unavailable` when `[skills]` is disabled. These act on the user's `~/.otto/skills`, not on the session, and are as exposed as the skill enable and disable routes: any holder of the token or socket may call them. |
 | `GET /v1/sessions/{id}/notices` | The lines background reflection queued for this session, `{"notices":[{"id":1,"text":"..."}],"last":1}`; pass `?after=<last>` to read only newer ones. They are not removed by reading, so every client sees each one, and only the 20 newest are kept. |
+| `GET /v1/sessions/{id}/wake-replies` | The assistant text of this session's finished wake turns, in the shape and with the rules of `.../notices`. `otto acp --attach` reads it to send wake replies to its ACP client. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn runs or is queued, or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
+| `POST /v1/sessions/{id}/tasks/steer` | Accept `{"text":"..."}` as guidance for the active run and return `{"accepted":true}`. Nonblank text, at most 32,000 UTF-8 bytes; `409 task_steer_failed` when idle, awaiting approval, or no longer accepting guidance. |
+| `POST /v1/sessions/{id}/tasks/control` | Interpret `{"text":"...","channel":"telegram"}` (`channel` optional, `telegram` or `feishu`) using the restricted control dialogue. Returns null if no active dialogue applies, otherwise `{"text","queued"}`. `queued:true` means the caller must submit the original message as a queued turn; this route does not itself admit a follow-up. `409 task_control_failed` reports routing failure. |
 | `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
@@ -1835,6 +1958,8 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/tasks/{parent_session}/{task_id}` | Return one recorded task under `task`, its child transcript as `history`, and `transcript_missing: true` (with an empty `history`) when the transcript file is absent or unreadable. `404` for an unknown task. |
 | `GET /v1/sessions/{id}/timers` | List the session's outstanding timers, soonest first: `id`, `fire_at`, and `message`. |
 | `POST /v1/sessions/{id}/timers/{timer_id}/cancel` | Cancel one outstanding timer and return it. `404` if no timer has that id. |
+| `POST /v1/schedule/claim` | Body `{}`. Claims up to 10 due [`schedule`](#schedule) items with origin `web` for 120 s and returns `{"items":[{"id":"s7","due_at":<unix ms>,"text":"..."}]}`; a claimed item is not returned again until the claim expires. `503 schedule_unavailable` when `~/.otto/schedule.db` could not be opened. |
+| `POST /v1/schedule/{id}/delivered` | Body `{"due_at":<unix ms>}` from the claim. Records the delivery and returns `{}`, also when it was already recorded. `404` for an id that is not `s<n>`, `400` for a bad body, `503` as above. |
 | `GET /v1/sessions/{id}/mcp` | List the session's MCP servers and their connection state, in configuration order. |
 | `GET/POST /v1/workflows?workspace=<path>` | List that workspace's workflow runs (default the startup workspace), or start one there with `{"name":"...","input":"..."}`. |
 | `GET /v1/workflows/{id}` | Return a run, its steps, and its approval requests. Searches every loaded workspace for the run id. |
@@ -2095,14 +2220,14 @@ is rejected.
 
 | Method | Behavior |
 | --- | --- |
-| `initialize` | Reports protocol version 1, `loadSession`, and `session/list`. Prompts accept text only; images, audio, and embedded context are not accepted. No authentication methods: credentials come from environment variables and `otto login`. |
+| `initialize` | Reports protocol version 1, `loadSession`, and `session/list`. `_meta.otto.channelContext` advertises structured per-turn channel metadata. `agentCapabilities._meta.otto.scheduleDelivery: true` advertises delivery of [`schedule`](#schedule) items; a client that lists platforms (`telegram`, `feishu`) in `clientCapabilities._meta.otto.scheduleDelivery` receives them (see below). Prompts accept text only; images, audio, and embedded context are not accepted. No authentication methods: credentials come from environment variables and `otto login`. |
 | `session/new` | Creates a session. No session file is written until the first prompt. |
 | `session/load` | Opens a session of this workspace by its 32-character id, sends the stored conversation as `session/update` notifications, then responds. The response also carries `sessionId`. |
 | `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
-| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Returns `end_turn`, or `cancelled` after `session/cancel`. |
+| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Optional `_meta.otto.chat` (`<platform>:<chat id>`) is the turn's chat origin for [`schedule`](#schedule); an invalid value, or a platform that differs from `_meta.otto.channel`, is ignored with a warning on stderr. Returns `end_turn`, or `cancelled` after `session/cancel`. |
 | `_otto/approvals/message` | Restricted pending-approval dialogue with `sessionId` and `text`; advertised by `_meta.otto.approvalDialogue`. Returns `null` or `{"text","queued"}`. Available in local and attach mode. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
-| `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}`; `nextCursor` is `""` on the last page. |
+| `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}` plus an optional string `advice` (the one-line advice, omitted when there is none); `nextCursor` is `""` on the last page. |
 | `_otto/memory/review` | Extension. Params `{sessionId, candidateId, decision}` with `decision` `accept` or `reject`; decides one candidate as a human review and returns `{decision, candidateId, record, forgotten}`. Errors: `-32010` memory is not available in the session, `-32011` the candidate was already decided or changed, `-32002` unknown session or candidate, `-32602` bad parameters or cursor. `otto acp` advertises both with `agentCapabilities._meta.otto.memoryReview`; `otto acp --attach` does not serve them. |
 
 `mcpServers` in `session/new` and `session/load` must be empty: MCP servers
@@ -2110,20 +2235,48 @@ come from Otto's own configuration (see [MCP servers](#mcp-servers)). Otto
 does not call the client's `fs/*` or `terminal/*` methods; tools run inside
 Otto as in the other frontends.
 
+### Scheduled items are sent with `_otto/schedule/deliver`
+
+When the client lists platforms in `clientCapabilities._meta.otto.scheduleDelivery`,
+Otto sends each due item created in a chat of those platforms as the request
+`_otto/schedule/deliver` with params `{"chat": "telegram:123", "text": "..."}`
+and waits up to 60 s. A `result` with any value (`otto-connect` answers
+`{}`) marks the item delivered; an error or no answer is a failed attempt
+that Otto retries (see [`schedule`](#schedule)). `otto acp` also runs the due
+prompt items of those chats that were created in its workspace; with
+`--attach`, and on the ACP TCP listener of `otto serve`, `otto serve` runs
+them.
+
 ### `/compact` and `/context` are slash commands
 
 After `session/new` and `session/load` has replied, Otto sends a
-`session/update` of type `available_commands_update` listing two commands:
-`compact`, with an unstructured input hint `optional focus`, and `context`.
-A `session/prompt` whose trimmed text is exactly `/context`, exactly
-`/compact`, or `/compact` followed by whitespace and a focus text is run by
-Otto itself and is not sent to the model; any other text, such as `/compactx`
-or a sentence that contains `/context`, is a normal prompt. `otto acp
---attach` does the same, running the command on `otto serve`
-(`POST .../compact`, `GET .../context`). Each command answers with one
+`session/update` of type `available_commands_update` listing `compact`,
+`context`, `reflect`, `skill`, `steer`, and `queue`.
+A `session/prompt` containing `/context`, `/compact [focus]`,
+`/reflect [focus]`, `/skill generated`, or `/skill revert <name>` is run by
+Otto itself and is not sent to the task model. Command names must match
+whole words; `/compactx` or a sentence that contains `/context` is a normal
+prompt. `otto acp --attach` does the same, running the command on
+`otto serve` through its existing HTTP APIs. Each command answers with one
 `agent_message_chunk` and the stop reason `end_turn`; `session/cancel` during
-`/compact` answers `cancelled`. Like a turn, a command is rejected while the
-session runs a prompt.
+`/compact` or `/reflect` answers `cancelled`. Attached reflection cancellation
+uses an exact request ID and cannot cancel a later operation. Existing
+context/compaction/reflection/skill commands are rejected while the session runs
+a prompt. `/steer <guidance>` bypasses the occupied prompt slot and accepts
+guidance for that run. `/queue <prompt>` acknowledges acceptance immediately,
+then streams the independent answer as later session updates; local ACP keeps
+at most 16 waiting prompts and attached ACP uses the server queue. Cancellation
+clears local queued prompts and cancels this connection's attached follow-ups.
+
+ACP advertises `_meta.otto.taskControl:true`. `_otto/tasks/steer` and
+`_otto/tasks/control` use the HTTP bodies above plus `sessionId`; replies are
+JSON-only, separate from the running prompt's updates.
+
+`/reflect [focus]` reports memory proposals and skill writes from the existing
+[reflection](#reflection) pipeline. `/skill generated` lists generated skills;
+`/skill revert <name>` restores the previous version or removes a generated
+skill, and refuses a skill edited by hand. These commands are also available
+through the chat connector.
 
 - `/compact [focus]` summarizes earlier messages as in the other frontends
   and replies `Compacted the session context: <n> tokens before, about <m>
@@ -2154,10 +2307,21 @@ cancelled request, or `session/cancel` ends the prompt; the approval stays
 pending as when a TUI user does not enter `/approve`. There is no "always"
 option over ACP.
 
-### Background results arrive with the next prompt
+### Background results start a wake turn
 
-`otto acp` does not start turns on its own. A finished sub-agent, a timer,
-or another inbox item reaches the model before the next prompt's text.
+When a session is open and no prompt runs, a pending notification (a fired
+`remind` timer, a finished sub-agent, or another inbox item) starts a wake
+turn, as in the REPL. Otto checks when the session is opened with
+`session/new` or `session/load`, when a sub-agent task changes, and when a
+prompt ends. The wake turn sends no `session/update` while it runs, and an
+elevated `bash` request in it is denied. A `session/prompt` sent during a wake
+turn waits for it to end and then runs; `session/cancel` cancels both.
+
+If the wake turn writes assistant text, Otto sends it after the turn as one
+`agent_message_chunk` outside any prompt, with
+`_meta: {"otto": {"wakeReply": true, "replyId": N}}`. `replyId` starts at 1
+for each session and increases by one. A wake turn that writes no text sends
+nothing.
 
 ### Shutdown
 
@@ -2197,7 +2361,14 @@ with status `1`.
 | `session/cancel` | Cancels the prompt's turn, queued or running. |
 
 - Only turns started by this process are forwarded; turns from other
-  clients of the same session are not sent as `session/update`.
+  clients of the same session are not sent as `session/update`. The
+  exception is a wake turn that `otto serve` runs for the session: its text
+  is sent as one tagged update, as in
+  [`otto acp`](#background-results-start-a-wake-turn). The relay reads
+  `GET /v1/sessions/{id}/wake-replies` once a second, starting after the
+  newest reply that existed when the session was opened, so earlier replies
+  are not sent again. Over [ACP TCP](#direct-acp-tcp-connection), `otto serve`
+  sends the same update without polling.
 - A turn that ends with an error answers the prompt with a JSON-RPC error
   carrying the redacted message.
 - An elevated `bash` command sends `session/request_permission` while the
@@ -2221,7 +2392,8 @@ See [Chat connector](#chat-connector).
 - `session/resume`, `session/close`, `session/delete`, session modes and
   config options, and client-supplied MCP servers.
 - Image, audio, and embedded-resource prompt content.
-- Slash commands other than `/compact` and `/context`, such as `/approve` or
+- Slash commands other than `/compact`, `/context`, `/reflect`, `/steer`, `/queue`, and the
+  supported `/skill` operations, such as `/approve` or
   `/sandbox`: text from the client reaches the model as a user message.
 
 ## Chat connector
@@ -2234,12 +2406,14 @@ Telegram and Feishu can be enabled in the same process.
 
 Otto is a general-purpose personal agent for research, writing, planning,
 coding, and practical tasks, using the tools and permissions available in
-the session. The connector includes the current channel with each message,
-including after a session is resumed or shared, so Otto can adapt replies
-for chat without assuming you can see its local terminal. This context is
-ordinary prompt text; it does not change tool availability or permissions.
-`/compact` and `/context` are sent without it, because Otto runs them only
-when the prompt is the whole command.
+the session. The connector sends the current channel separately from the
+user's text, including after a session is resumed or shared. Otto adds fixed
+Telegram or Feishu guidance to that turn's system context, so it can adapt
+replies without assuming you can see its local terminal. This context does
+not change tool availability or permissions and does not carry over to a
+later turn from another frontend. With an older ACP agent that does not
+advertise this capability, the connector retains the previous text-prefix
+behavior for channel hints.
 
 ### Building and running
 
@@ -2335,7 +2509,9 @@ workspace = "/Users/me/work"            # the same workspace the serve clients u
   credentials; the serve process needs them.
 - A chat's message and a web UI message on the same session wait in serve's
   turn queue and run one after the other. The chat gets the reply of its own
-  turns only; turns started in the web UI are not sent to the chat.
+  turns only; turns started in the web UI are not sent to the chat. A wake
+  turn that serve runs for the session, such as a fired `remind` timer, is
+  sent to the chat while the connector has the session open.
 - Use `/sessions` and `/use` (see [Commands](#commands)) to bind a chat to a
   session that was started in another client.
 
@@ -2418,19 +2594,36 @@ a log line.
   connector itself (command output, errors, permission requests) stay plain
   text. If Telegram rejects a formatted part with status 400, that part is
   resent as plain text. Feishu renders the Markdown itself and is unchanged.
-- Each chat has one Otto session. The first message creates it; after a
-  restart of `otto-connect` or of the agent, the next message loads it.
+- Each chat has one Otto session. The first message creates it. At startup
+  `otto-connect` loads the session of each chat of a configured platform,
+  once per session, so timers armed before a restart fire again; a session
+  that fails to load is logged as a warning and the chat keeps it. After a
+  restart of the agent, the next message loads it.
   The replayed history of a loaded session is not sent to the chat.
 - If the session cannot be loaded (for example, without `--attach`, it is
   open in the TUI or in `otto serve`), the chat gets "The previous session
   could not be loaded; started a new one." and the message runs in a new
   session.
-- One prompt runs per chat at a time; further messages wait in a queue of at
-  most 10. A message beyond that gets "Queue is full (10 messages); the
+- One task prompt runs per chat at a time. Further natural text is interpreted
+  as guidance, a separate follow-up, or a read-only question (see
+  [Active-task guidance and model follow-ups](#active-task-guidance-and-model-follow-ups)).
+  Waiting input uses a bounded queue of at most 10. A message beyond that gets "Queue is full (10 messages); the
   message was not queued." Chats on different sessions run concurrently.
   Chats bound to the same session (with `/use`) take turns: one prompt runs
   on a session at a time, and when three or more chats wait for the same
   session, the order in which they run is not guaranteed.
+- The text of a wake turn (a fired `remind` timer, a finished sub-agent, or
+  another notification that Otto handles while no prompt runs; see
+  [Background results start a wake turn](#background-results-start-a-wake-turn))
+  is sent to every chat bound to that session, formatted like other replies
+  and not as a reply to a message. If that chat has a prompt running, the
+  wake text is sent after that prompt's reply.
+- An item created with [`schedule`](#schedule) in a chat is delivered to that
+  chat as Markdown, not as a reply to a message, also after `/new` or `/use`.
+  Otto sends the text over ACP; `otto-connect` sends it only to a chat id
+  listed in `chats` of a configured platform and keeps no copy, so Otto
+  retries a failed send. `otto-connect` connects to Otto at startup, also when
+  no chat has a session yet, and connects again after the Otto process exits.
 - The reply is sent when the turn ends, as a reply to the message that
   started it. It contains the assistant text only: reasoning and tool calls
   are not sent, and text before and after a tool call is separated by a
@@ -2459,31 +2652,39 @@ a log line.
 
 A message whose whole text is one of these commands (for `/use`, the
 command and its argument) is handled by `otto-connect` and not sent to Otto,
-except `/compact` and `/context`, which are sent to Otto as typed, without
-the channel context.
+except `/compact`, `/context`, `/reflect`, and `/skill`, which are sent to
+Otto as typed for agent-side command handling.
 Any other text, including other words starting with `/`, is a prompt.
 
 | Command | Effect |
 | --- | --- |
 | `/new` | The chat's next message starts a new session. The old session stays in Otto's session store. |
 | `/stop` | Cancels the running turn (reply "Stopped.") and clears the chat's queue. With nothing running: "Nothing is running." |
+| `/steer <guidance>` | Delivers guidance directly to the active task at its next safe boundary. Refuses idle tasks and pending approval; does not interrupt an in-flight tool. |
+| `/queue <prompt>` | Queues an independent prompt without model routing. Starts immediately when idle, otherwise waits behind the task and any approval; acknowledges actual admission. |
 | `/compact [focus]` | Sent to Otto as a prompt; `otto acp` runs it as `/compact` (see [`/compact` and `/context` are slash commands](#compact-and-context-are-slash-commands)) and replies with the token counts before and after. Like any prompt it waits in the chat's queue behind a running turn. |
 | `/context` | Sent to Otto as a prompt; `otto acp` replies with the token counts of the next request, part by part. It waits in the chat's queue like any prompt. |
+| `/reflect [focus]` | Runs the existing reflection over the uncovered part of this session and reports the result. Memory proposals require `/memory` review; generated skills pass the existing evidence and safety checks. |
+| `/skill generated` | Lists skills written by reflection. Generated skills become active in new sessions. |
+| `/skill revert <name>` | Restores the previous version or removes a skill created by reflection. Refuses a skill edited by hand. |
 | `/allow` | Answers the pending permission request with Allow once. |
 | `/deny` | Answers the pending permission request with Deny. |
 | `/sessions` | Lists the 10 newest sessions of the workspace, one per line: `*` for the chat's session or a space, the first 8 characters of the id, the last change as `YYYY-MM-DD HH:MM` (`-` when unknown), and the title (`(untitled)` when empty). With none: "No sessions." |
 | `/use <id>` | Binds the chat to a session and loads it. `<id>` is a full session id, or a prefix of at least 4 characters of a session that `session/list` returns (the newest 20). Reply: "Using session `<id>`: `<title>`". |
-| `/memory` | Lists the chat session's pending memory candidates, one per line: the first 8 characters of the id, the action, `kind/key`, the text (200 characters at most), and the origin. With none: "No pending memory candidates." |
+| `/memory` (or `/memory review`) | Lists the chat session's pending memory candidates, one per line: the first 8 characters of the id, the action, `kind/key`, the text (200 characters at most), and the origin. With none: "No pending memory candidates." |
 | `/memory accept <id>` | Accepts one pending candidate, which writes the record. `<id>` is a full candidate id or a unique prefix of at least 4 characters. |
 | `/memory reject <id>` | Rejects one pending candidate; no record is written. |
 
 At startup `otto-connect` sets the Telegram bot's command menu to these
-commands, including `/compact` and `/context`, and to `/models` and `/config` (see
+commands, including `/compact`, `/context`, `/reflect`, `/skill`, `/steer`, and `/queue`, and to `/models` and `/config` (see
 [Provider-profile management](#provider-profile-management)): `setMyCommands`
 for the default scope, then `deleteMyCommands` for the `all_private_chats` and
 `all_group_chats` scopes, whose lists Telegram would show instead. Lists set
 for a single chat, for chat administrators, or for a specific language are not
-changed. A failed call is logged and the connector continues.
+changed. It also uses `setChatMenuButton` to select the commands menu for the
+bot default and every configured private chat; group IDs are skipped because
+this API applies to private chats. This replaces any custom Web App menu button
+for those private chats. A failed call is logged and the connector continues.
 
 `/use` replies with one of these when it does not switch:
 
@@ -2792,7 +2993,7 @@ rebuilds the search index. Set `[memory.turso].path` to the destination after
 success. Otto does not automatically migrate a legacy FTS5 memory database.
 
 The same command supports `usage.db`, `tasks.db`, `reflection.db`,
-`skill-checks.db`, and workspace workflow databases. Their ordinary tables
+`skill-checks.db`, `memory-advice.db`, and workspace workflow databases. Their ordinary tables
 can also be opened directly by Turso when compatible; use offline migration
 when making a separate copy. For stores with fixed paths, keep the old file
 as a backup and move the migrated file into place while Otto is stopped.
@@ -2810,14 +3011,33 @@ and request count. It opens the database read-only.
 
 What's wired:
 
-- Recall before each turn into a request-local, untrusted context block that is
-  never written to Pi session JSONL, compaction summaries, or logs.
+- Recall before each turn into a request-local context block that is never
+  written to Pi session JSONL, compaction summaries, or logs, so compaction
+  does not remove it. The block has two parts:
+  - Standing preferences: every active user-scope `preference` or
+    `instruction` record that has a key, oldest first, under a header that
+    tells the model you approved each one and to follow them unless the
+    current request says otherwise. They are recalled on every turn whatever
+    the message says, and do not count against `max_results` or
+    `recall_tokens`. See [Standing preferences](#standing-preferences).
+  - Other records that match the message text, under a header that marks them
+    untrusted reference material, limited by `max_results` and
+    `recall_tokens`.
 - Agent tools: `memory_search`, `remember`, `forget`.
 - Human commands in both frontends: `/memory list`, `/memory show`, `/memory search`, `/memory forget`,
   `/memory review`, `/memory review <id> accept|reject`, and `/remember`.
 - `/reflect [focus]` in the TUI, the REPL, and the Web UI: reflection, described below.
 - Standalone CLI: `otto memory status`, `otto memory list`, `otto memory show <id>`, and
   `otto memory forget <id>`.
+
+`memory_search` accepts `query` for text search (empty lists recent records), or
+`id` for an exact record lookup within the current session's user and workspace
+scopes. Before proposing a deletion by ID, the agent can use
+`memory_search({"id":"<record-id>"})` to read the current scope and revision,
+then call `forget`. Search results stored in session history retain only IDs;
+the full record is available to the model during the search turn. In Telegram
+and Feishu, the user reviews the resulting deletion proposal with the memory
+card or `/memory accept <candidate-id>`.
 
 `/memory list` and `otto memory list` page active records in stable update-time order. They
 show the current user and workspace scopes by default; use `--scope user` or `--scope workspace`
@@ -2830,7 +3050,84 @@ Model-originated writes always land as pending candidates for human review.
 scope, action, kind, key, text, reason, confidence, origin), and `/memory review <id> accept`
 or `/memory review <id> reject` decides one. Accepting creates the active record (or applies the
 update or forget); rejecting leaves memory unchanged.
+
+#### Advice on candidates
+
+Before a candidate from `remember` or from `/reflect` is queued, Otto asks a
+model three questions: whether it applies to all workspaces or only this one,
+whether it duplicates or conflicts with a standing user-scope record, and
+whether it is durable or a one-off request. The answers are stored with the
+candidate and shown as one line in `/memory review`, in the TUI review
+dialog, and as the `advice` field of `_otto/memory/pending` (so the chat
+connector shows it too), for example:
+
+```text
+Advice (session model gpt-x): all workspaces · duplicates plan-first · one-off request
+Advice (auxiliary model jev-latest): all workspaces 91% · new 84% · durable 77%
+```
+
+When the advised scope differs from the candidate's, the scope part ends with
+` (proposed: workspace)` or ` (proposed: user)`. Advice is a hint only: it
+never accepts, rejects or changes a candidate. By default the question goes to the
+session's own provider, model and thinking setting (token usage is recorded under
+the task id `memory-advice`); when `TYPESAFE_API_KEY` is set and non-empty it
+goes to the `jev-latest` model at `https://api.typesafe.ai`, which also gives
+percentages. `jev-latest` is an auxiliary model used only for this advice and
+for skill checks: it does not run turns or tools, and it is not a provider or
+a model you can configure. The request holds the candidate's kind, key, scope, text and
+reason, and the keys and texts of the user-scope standing records. A candidate
+that the memory service refuses is never sent. Each request has a 20 s limit; on
+a timeout, an error or an unusable answer the candidate is queued without
+advice. Each exchange is appended to `~/.otto/memory-advice.db`, table
+`memory_advice`, with the columns `created_at`, `model`, `auxiliary`,
+`candidate_id`, `scope`, `request` (the body or prompt as sent, never the API
+key), `response`, `outcome` (`ok`, `timeout`, `error` or `invalid`), `error`
+and `latency_ms`. A failed write there does not stop the candidate from being
+queued and is not reported.
 Human `/remember` and `/memory forget` apply immediately.
+
+When a session opens (start, `/new`, or resume) and the current user and
+workspace scopes hold pending candidates, Otto shows one line, for example
+"2 memory proposals are pending review (oldest since 2026-10-01). Run /memory
+review to accept or reject them." The REPL and the TUI print it before the
+first prompt, and a local `otto acp` session sends it as a notice for that
+session. `GET /v1/sessions/{id}/notices` returns it, but the Web UI and ACP
+connections through `otto serve` (`otto acp --attach` and ACP TCP) start at the
+current notice cursor and do not show it; the chat connector shows pending
+candidates after each turn instead. `otto memory status`
+prints `pending: N` for the same scopes. A candidate stays pending until you
+decide it; it does not expire.
+
+### Standing preferences
+
+A working habit that should apply in every workspace, such as "explain the plan
+before executing a task", belongs in the standing set: user scope, kind
+`preference` or `instruction`, and a key. Standing records are recalled on every
+turn, so they apply even when the message never mentions them. Ways to add one:
+
+- `/remember --scope user --kind preference --key plan-first Explain the plan before executing a task.`
+  writes it immediately.
+- The model's `remember` tool takes `scope: "user"` for a habit that applies in
+  every workspace (the default is the workspace), and reflection proposes
+  `scope: user` for the same kind of habit. Both queue a pending candidate that
+  applies only after you accept it.
+
+A user-scope `preference` or `instruction` without a key is rejected, because
+only keyed records are standing.
+
+The standing set holds at most 2,000 estimated tokens. A `/remember`, or an
+accept in `/memory review`, that would push it past that fails with an error
+that states the tokens used and needed; a rejected accept leaves the candidate
+pending. Forget an existing standing record with `/memory forget <id>`, then
+accept again.
+
+`otto memory status` prints the standing usage, for example `standing: 5
+records, 840/2000 tokens`. Records written before this limit existed can exceed
+it. Recall then injects records oldest first and stops at the first one that
+does not fit, the status line appends
+`, N not injected (over budget)`, and each session open shows one line with the
+number of standing preferences that are not recalled. `/context` shows the
+memory text sent with the previous turn, including the standing records.
 
 ### Reflection
 
@@ -2919,7 +3216,7 @@ slice that held external content never produces skills.
 ```toml
 [reflection]
 enabled = true            # default true; false disables all reflection and does not open reflection.db
-auto = "on_compaction"    # "on_compaction" (default) | "on_exit" | "off"
+auto = "on_work"          # "on_work" (default) | "on_compaction" | "on_exit" | "off"
 min_turns = 4             # 1..1000; on_exit skips a session with fewer user messages
 memories = true           # default true; false stops memory proposals
 skills = true             # default true; false never asks for or writes skills
@@ -2935,19 +3232,19 @@ With `memories = false` and `skills = false`, reflection makes no model call.
 
 #### Automatic reflection
 
-Reflection also starts by itself, as `[reflection].auto` selects. **It is on by default**
-(`on_compaction`): upgrading adds one model call per automatic run in long sessions, and a run
-may write skills (see above). Set `auto = "off"` to keep only `/reflect`, `skills = false` to
-stop skill writing, or `enabled = false` to turn reflection off entirely.
+Reflection starts automatically as `[reflection].auto` selects. It is on by default
+(`on_work`) and may propose memories or write vetted skills. Set `auto = "off"` to keep
+only `/reflect`, `skills = false` to stop skill writing, or `enabled = false` to turn
+reflection off entirely.
 
-- `on_compaction` (default): after a compaction completes, whether it started automatically or
-  with `/compact`, a run starts in the background over everything no earlier run covered.
-  It does not wait for or interrupt the turn, and at most one runs at a time. A session that
-  never compacts never reflects on its own. When the run queued a candidate or wrote a skill,
-  one line says so, printed before the next prompt (REPL) or added to the transcript (TUI
-  and Web UI). A run that found nothing says nothing; a failed one shows its error once.
-  `otto acp` runs it but has nowhere to show the line, so use `/memory review` and
-  `/skill generated` to see the result.
+- `on_work` (default): after a completed agent turn with at least ten distinct successful
+  tool operations, reflect in the background over the uncovered session entries. Failed
+  tools do not count, and an errored, cancelled, or approval-pending turn does not qualify.
+  Separately resumed approval continuations have their own counts. This mode also retains
+  the successful-compaction trigger below.
+- `on_compaction`: reflect only after a successful compaction, whether automatic or started
+  with `/compact`. A session that never compacts never reflects automatically in this mode.
+  An existing explicit `auto = "on_compaction"` setting retains that behavior.
 - `on_exit`: when a terminal frontend (the TUI, the REPL, or `--prompt`) ends normally,
   reflection runs once over what no earlier run covered, if the session has at least
   `min_turns` user messages. **This delays exit** by as long as the run takes, up to 60
@@ -2956,16 +3253,23 @@ stop skill writing, or `enabled = false` to turn reflection off entirely.
   `/reflect` can still cover it.
 - `off`: only `/reflect`.
 
-Limits that apply to automatic runs only: at least ten minutes between two automatic runs of
-the same session (counted from when the earlier one started, and a failed run counts, so
-nothing retries); and every other check above still applies. `/reflect` is never held back by
-these limits.
+Background runs never delay the task response and are single-flight. `on_work` and
+`on_compaction` share a ten-minute cooldown per session, counted from the previous run's
+start; a failed run counts too. All existing evidence, source-isolation, and skill-review
+checks still apply. `/reflect` is not held back by this cooldown.
+
+A run that proposed a memory or wrote a skill queues one result line; a run that found
+nothing stays quiet, and a failed run reports its error once. The REPL, TUI, and Web UI
+show these lines. ACP sends new notices as tagged agent message chunks, and the chat
+connector sends them after the active task reply. A connection through `otto serve`
+starts at the current notice cursor without replaying older notices; a local
+`otto acp` session also sends the lines queued when the session opened. Use `/memory` and `/skill generated` in
+chat to inspect pending proposals and generated skills.
 
 Not yet implemented:
 
 - `Binding.Observe` is not wired; reflection reads the session file instead.
 - The Web UI and the HTTP API cannot review memory candidates; use `/memory review` in a terminal.
-- `otto acp` does not show reflection notices.
 - Reflection never changes a skill you wrote, and it cannot create skills with scripts or
   supporting files.
 - No backup/restore/verify commands.

@@ -16,6 +16,7 @@ use super::codec::{
 };
 use super::cursor::{decode_record_cursor, encode_record_cursor, fingerprint_list};
 use super::query::{Statement, build_list_query, record_projection, tombstone_projection};
+use super::standing::check_standing_budget;
 use super::{Store, map_storage_error};
 use crate::memory::guard::guard_record;
 use crate::memory::validate::{
@@ -639,18 +640,29 @@ impl Store {
     }
 
     pub fn upsert(&self, request: &UpsertRequest) -> Result<Record> {
+        self.upsert_inner(request, false)
+    }
+
+    /// [`Store::upsert`] that also rejects a record that would push the
+    /// standing set over its token budget, checked inside the write
+    /// transaction.
+    pub fn upsert_within_standing_budget(&self, request: &UpsertRequest) -> Result<Record> {
+        self.upsert_inner(request, true)
+    }
+
+    fn upsert_inner(&self, request: &UpsertRequest, enforce_standing: bool) -> Result<Record> {
         // The encoded JSON must spell an empty collection `[]`/`{}`; Rust's
         // collections are already non-null, so there is nothing to normalize.
         let request = request.clone();
         validate_upsert_request(&request)?;
         guard_record(self.guard(), &request.record)?;
         match request.expected_revision {
-            None => self.create_record(request.record),
-            Some(expected) => self.update_record(request.record, expected),
+            None => self.create_record(request.record, enforce_standing),
+            Some(expected) => self.update_record(request.record, expected, enforce_standing),
         }
     }
 
-    fn create_record(&self, input: Record) -> Result<Record> {
+    fn create_record(&self, input: Record, enforce_standing: bool) -> Result<Record> {
         let mut desired = input;
         desired.revision = 1;
         let encoded = encode_record(&desired)?;
@@ -674,6 +686,9 @@ impl Store {
                 Err(error) => return Err(map_storage_error(error)),
             }
             require_fts_row_count(connection, &stored.id, 0)?;
+            if enforce_standing {
+                check_standing_budget(connection, &stored)?;
+            }
             connection
                 .execute(
                     "INSERT INTO memory_records(\
@@ -712,7 +727,12 @@ confidence,revision,created_at,updated_at,expires_at,state,forgotten_at\
         Ok(desired)
     }
 
-    fn update_record(&self, input: Record, expected: u64) -> Result<Record> {
+    fn update_record(
+        &self,
+        input: Record,
+        expected: u64,
+        enforce_standing: bool,
+    ) -> Result<Record> {
         let reference = RecordRef {
             scope: input.scope.clone(),
             id: input.id.clone(),
@@ -751,6 +771,9 @@ confidence,revision,created_at,updated_at,expires_at,state,forgotten_at\
                         return Err(conflict_record(&stored.id, expected, current.revision));
                     }
                 }
+            }
+            if enforce_standing {
+                check_standing_budget(connection, &stored)?;
             }
             let changed = connection
                 .execute(

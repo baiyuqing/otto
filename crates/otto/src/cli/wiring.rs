@@ -73,6 +73,8 @@ pub struct MemoryWiring {
     pub user_scope: Scope,
     pub recall_limit: i64,
     pub recall_token_budget: i64,
+    /// The append-only advice audit log, absent when it could not be opened.
+    pub advice_audit: Option<Arc<crate::memory::advice::audit::Store>>,
 }
 
 impl Default for MemoryWiring {
@@ -83,6 +85,7 @@ impl Default for MemoryWiring {
             user_scope: Scope::default(),
             recall_limit: 0,
             recall_token_budget: 0,
+            advice_audit: None,
         }
     }
 }
@@ -336,7 +339,11 @@ enum McpConnectResult {
 
 impl Builder {
     /// The memory tools, in the order they are registered.
-    pub fn memory_tools(&self, max_output: usize) -> Vec<Box<dyn Tool + Send + Sync>> {
+    pub fn memory_tools(
+        &self,
+        max_output: usize,
+        advisor: Option<Arc<crate::memory::advice::Advisor>>,
+    ) -> Vec<Box<dyn Tool + Send + Sync>> {
         let scopes = vec![self.memory.user_scope.clone(), self.workspace_scope.clone()];
         vec![
             Box::new(MemorySearchTool::new(
@@ -344,12 +351,51 @@ impl Builder {
                 scopes.clone(),
                 max_output,
             )),
-            Box::new(RememberTool::new(
-                Arc::clone(&self.memory.service),
-                self.workspace_scope.clone(),
-            )),
+            Box::new(
+                RememberTool::new(
+                    Arc::clone(&self.memory.service),
+                    self.memory.user_scope.clone(),
+                    self.workspace_scope.clone(),
+                )
+                .with_advisor(advisor),
+            ),
             Box::new(ForgetTool::new(Arc::clone(&self.memory.service), scopes)),
         ]
+    }
+
+    /// The advisor that adds review hints to memory candidates: the auxiliary
+    /// Jev model when `TYPESAFE_API_KEY` is non-empty, otherwise the session
+    /// model through `agent`, a tool-less agent over the runner's provider.
+    /// `None` when memory is unusable.
+    pub fn advisor(
+        &self,
+        agent: super::runtime_builder::AdviceAgent,
+        model: &str,
+        usage: Option<crate::usage::Collector>,
+    ) -> Option<Arc<crate::memory::advice::Advisor>> {
+        if !self.memory.usable {
+            return None;
+        }
+        let key = self
+            .environment
+            .get("TYPESAFE_API_KEY")
+            .map_or("", String::as_str);
+        let backend: Box<dyn crate::memory::advice::Backend> = if key.is_empty() {
+            Box::new(super::advice::SessionBackend::new(
+                agent,
+                model.to_owned(),
+                usage,
+            ))
+        } else {
+            Box::new(crate::memory::advice::jev::Jev::new(
+                crate::typesafe::BASE_URL,
+                key,
+            ))
+        };
+        Some(Arc::new(crate::memory::advice::Advisor::new(
+            backend,
+            self.memory.advice_audit.clone(),
+        )))
     }
 
     /// Whether memory tools belong in this build. The boundary half of the
@@ -983,7 +1029,7 @@ impl Builder {
         if !self.memory.usable {
             return Vec::new();
         }
-        self.memory_tools(max_output)
+        self.memory_tools(max_output, None)
             .iter()
             .map(|tool| tool.definition())
             .collect()
@@ -1636,6 +1682,7 @@ mod tests {
             .remember(&RememberRequest {
                 scope,
                 kind: "preference".into(),
+                key: "credentials".into(),
                 text: "the api key is sk-configured-secret".into(),
                 ..RememberRequest::default()
             })

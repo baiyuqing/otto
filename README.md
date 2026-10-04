@@ -2,24 +2,29 @@
   <img src="docs/logo.svg?v=2" alt="Otto logo" width="320">
 </p>
 
-# Otto — a local-first agent for your terminal
+# Otto — a local-first personal AI agent
 
 [简体中文](README.zh-CN.md) · [User manual](docs/user-manual.md)
 
-**Otto is a local-first agent for your terminal, built in Rust.**
-Give it a task; it runs a loop of model completions, tool calls, and — when
-needed — context compaction. Connect through an OpenAI-compatible API endpoint
-or sign in with `otto login` for the ChatGPT provider. Model requests go to the
-selected provider; local-first refers to the runtime, session history, and
-memory storage.
+**Otto helps with research, writing, planning, coding, and practical tasks.**
+Work with it from your terminal, a browser, Telegram, or Feishu. It uses the
+tools and permissions available in each session, keeps context across tasks,
+and can turn useful experience into reviewed memory proposals and reusable skills.
 
-- **Work in your terminal.** A full-screen TUI for interactive work, a REPL for pipes,
-  and headless mode for scripts.
-- **Keep access bounded.** Workspace-confined file tools and macOS Seatbelt
-  sandboxing for shell commands by default.
-- **Keep going without you typing.** Persistent sessions, local memory, reusable
-  skills, bounded sub-agents, timers, and `otto-connect` for Telegram and
-  Feishu chats, including direct ACP TCP access to `otto serve`.
+The runtime is built in Rust with a WebAssembly-safe core. Connect through an
+OpenAI-compatible API endpoint or sign in with `otto login` for the ChatGPT
+provider. Model requests go to the selected provider; local-first refers to
+the runtime, session history, and default memory storage.
+
+- **Choose where you work.** Terminal TUI, REPL, headless scripts, browser UI,
+  and Telegram/Feishu through `otto-connect`. Connect to `otto serve` to share
+  sessions across the terminal, browser, and chats.
+- **Keep useful context.** Persistent sessions, memory that requires human
+  review, reusable skills, and selective reflection after completed work.
+- **Carry work forward.** Workspace tools and MCP integrations, bounded
+  sub-agents, timers, and durable workflows with approvals and restart recovery.
+- **Control access.** Workspace-confined file tools, macOS Seatbelt shell
+  sandboxing by default, and explicit permission requests for additional access.
 
 ## Install from source
 
@@ -107,9 +112,10 @@ Start Otto in the workspace you want it to use:
 Example prompts to enter in the interactive session:
 
 ```text
-What is in this workspace, and what should I do next?
+Help me plan my day and draft a short invitation.
+Read this workspace and explain how the project is organized.
 Remind me in five minutes to follow up.
-Remember that we decided to ship the inbox path first.
+Remember that I prefer concise progress updates.
 ```
 
 After configuring a default profile, you can also run one prompt and exit:
@@ -129,13 +135,16 @@ The selected model and OpenAI-compatible endpoint must support image input.
 
 ## More workflows
 
-- [Local memory](docs/user-manual.md#memory): search, remember, review, and forget, plus [reflection](docs/user-manual.md#reflection), which proposes memories from a session for your review and can write vetted skills you can undo with `/skill revert`. It runs on `/reflect` and, by default, in the background after a compaction; `auto = "off"` turns that off.
+- [Local memory](docs/user-manual.md#memory): search, remember, review, and forget, plus [reflection](docs/user-manual.md#reflection), which proposes memories from a session for your review and can write vetted skills you can undo with `/skill revert`. It runs on `/reflect` and, by default, after a completed turn with at least 10 successful tool operations or a compaction; `auto = "off"` turns that off.
 - [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files.
 - [MCP servers](docs/user-manual.md#mcp-servers): connect stdio or HTTP Model
   Context Protocol servers and use their tools from the same turn loop.
 - [Timers](docs/user-manual.md#remind): the model schedules a later wake with
   `remind`; `/timers` lists this session's outstanding timers and
   `/timers cancel <id>` stops one.
+- [Scheduled deliveries](docs/user-manual.md#schedule): `schedule` sends a
+  message or the reply of a prompt run at a later time, once or daily, to the
+  chat, terminal or browser UI that asked for it.
 - [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
   socket or a loopback TCP port, with an embedded browser UI.
   [`otto --attach`](docs/user-manual.md#the-tui-attached-to-otto-serve) runs

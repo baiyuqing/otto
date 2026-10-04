@@ -352,6 +352,12 @@ async fn run_app<B: Backend>(
             }
             redraw(terminal, &mut app, controller)?;
         }
+        if controller.take_bell() {
+            // The terminal backend writes to stdout.
+            use std::io::Write as _;
+            let mut stdout = io::stdout();
+            let _ = stdout.write_all(b"\x07").and_then(|()| stdout.flush());
+        }
         match controller.subagent_tasks() {
             Some(tasks) => {
                 if updates

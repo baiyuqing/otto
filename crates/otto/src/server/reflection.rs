@@ -23,7 +23,9 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use super::{Server, bad_request, error_response, json_response, not_found, turn_active};
+use super::{
+    ActiveReflection, Server, bad_request, error_response, json_response, not_found, turn_active,
+};
 use crate::app;
 use crate::reflection::skillwrite::{RevertError, Reverted, Written, still_owned};
 use crate::reflection::{Error, Report};
@@ -32,6 +34,22 @@ use crate::reflection::{Error, Report};
 struct ReflectBody {
     #[serde(default)]
     focus: String,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CancelBody {
+    request_id: String,
+}
+
+fn validated_request_id(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
+    .then(|| value.to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -113,21 +131,39 @@ pub async fn reflect(
         }
     };
 
+    let request_id = match parsed.request_id.as_deref() {
+        Some(value) => match validated_request_id(value) {
+            Some(request_id) => Some(request_id),
+            None => return bad_request("invalid request_id"),
+        },
+        None => None,
+    };
+
     let cancel = {
         let mut state = session.lock();
+        if request_id
+            .as_deref()
+            .is_some_and(|request_id| state.reflection_cancelled(request_id))
+        {
+            return Response::new(axum::body::Body::empty());
+        }
         if state.busy() {
             return turn_active("a turn is already active for this session");
         }
         let cancel = server.cancel_token().child_token();
-        state.compacting = Some(cancel.clone());
+        state.reflecting = Some(ActiveReflection {
+            request_id: request_id.clone(),
+            cancel: cancel.clone(),
+        });
         cancel
     };
 
-    // Only shutdown or closing the session cancels; axum gives a handler no
-    // client-disconnect signal (see `compact`).
+    // Only the matching cancel endpoint, shutdown, or closing the session
+    // cancels; axum gives a handler no client-disconnect signal (see
+    // `compact`).
     let result = session.ctrl.reflect(&parsed.focus, &cancel).await;
     cancel.cancel();
-    session.lock().compacting = None;
+    session.lock().reflecting = None;
     server.start_next(&session);
     server.bump_status();
 
@@ -167,6 +203,43 @@ pub async fn reflect(
             error_response(StatusCode::CONFLICT, "reflection_failed", &message)
         }
     }
+}
+
+/// `POST /v1/sessions/{id}/reflect/cancel`.
+pub async fn cancel(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let parsed: CancelBody = if body.iter().all(u8::is_ascii_whitespace) {
+        return bad_request("missing request_id");
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(parsed) => parsed,
+            Err(_) => return bad_request("invalid JSON body"),
+        }
+    };
+    let Some(request_id) = validated_request_id(&parsed.request_id) else {
+        return bad_request("invalid request_id");
+    };
+
+    {
+        let mut state = session.lock();
+        state.remember_reflection_cancel(&request_id);
+        if let Some(active) = state.reflecting.as_ref()
+            && active.request_id.as_deref() == Some(request_id.as_str())
+        {
+            active.cancel.cancel();
+        }
+    }
+
+    Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .body(axum::body::Body::empty())
+        .expect("static response")
 }
 
 #[derive(Debug, Serialize)]
@@ -322,10 +395,32 @@ pub async fn notices(
     Path(id): Path<String>,
     Query(query): Query<NoticesQuery>,
 ) -> Response {
-    let Some(session) = server.lookup(&id) else {
+    notice_page(&server, &id, query.after, app::Controller::notices_since)
+}
+
+/// `GET /v1/sessions/{id}/wake-replies`: the model-written texts of wake
+/// turns, in the notices page shape.
+pub async fn wake_replies(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    Query(query): Query<NoticesQuery>,
+) -> Response {
+    notice_page(
+        &server,
+        &id,
+        query.after,
+        app::Controller::wake_replies_since,
+    )
+}
+
+/// A controller's notices or wake replies after a cursor, and the newest id.
+type Since = fn(&app::Controller, u64) -> (Vec<(u64, String)>, u64);
+
+fn notice_page(server: &Server, id: &str, after: u64, since: Since) -> Response {
+    let Some(session) = server.lookup(id) else {
         return not_found("session not found");
     };
-    let (lines, last) = session.ctrl.notices_since(query.after);
+    let (lines, last) = since(&session.ctrl, after);
     json_response(
         StatusCode::OK,
         &NoticeList {

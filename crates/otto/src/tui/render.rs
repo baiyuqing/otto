@@ -614,12 +614,15 @@ fn draw_memory_review(frame: &mut Frame, area: Rect, dialog: &MemoryReviewDialog
         .iter()
         .map(|row| {
             ListItem::new(format!(
-                "{} {}/{}\n{}\nReason: {}\n{}",
+                "{} {}/{}\n{}\nReason: {}\n{}{}",
                 row.action,
                 row.kind,
                 row.key,
                 row.text,
                 row.reason,
+                row.advice
+                    .as_ref()
+                    .map_or_else(String::new, |line| format!("{line}\n")),
                 "a accept · r reject · ↑/↓ select · Esc close"
             ))
         })
@@ -1069,6 +1072,37 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn the_memory_review_modal_shows_the_advice_line_only_when_there_is_one() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        let row = |advice: Option<&str>| crate::tui::app::MemoryReviewRow {
+            id: "c1".into(),
+            action: "create".into(),
+            kind: "preference".into(),
+            key: "editor".into(),
+            text: "prefers vim".into(),
+            reason: "said so".into(),
+            advice: advice.map(str::to_owned),
+        };
+        app.memory_review = Some(crate::tui::app::MemoryReviewDialog {
+            rows: vec![row(Some("Advice (session model gpt-test): new"))],
+            selected: 0,
+        });
+        let with = screen_rows(&app, 120, 40).join("\n");
+        assert!(
+            with.contains("Advice (session model gpt-test): new"),
+            "{with}"
+        );
+
+        app.memory_review = Some(crate::tui::app::MemoryReviewDialog {
+            rows: vec![row(None)],
+            selected: 0,
+        });
+        let without = screen_rows(&app, 120, 40).join("\n");
+        assert!(without.contains("Reason: said so"), "{without}");
+        assert!(!without.contains("Advice"), "{without}");
     }
 
     #[tokio::test]

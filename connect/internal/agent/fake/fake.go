@@ -61,8 +61,14 @@ const envDir = "OTTO_CONNECT_FAKE_AGENT"
 
 // Env returns the environment that makes the test binary run as the agent
 // with state in dir. extra entries (KEY=value) are appended.
+//
+// Under -race the fake agent is a race-instrumented binary, and the race
+// runtime sleeps atexit_sleep_ms (default 1 s) before every exit; the
+// harness waits for that exit on every shutdown, so the sleep is turned off.
+// Any GORACE options the caller set are kept.
 func Env(dir string, extra ...string) []string {
-	return append(append(os.Environ(), envDir+"="+dir), extra...)
+	gorace := strings.TrimSpace(os.Getenv("GORACE") + " atexit_sleep_ms=0")
+	return append(append(os.Environ(), envDir+"="+dir, "GORACE="+gorace), extra...)
 }
 
 // Calls returns the lines of <dir>/calls.

@@ -1205,6 +1205,11 @@ canonical workspace, even when `--sandbox off` is selected:
   non-breaking spaces as ASCII, and it rewrites only the part of `old_text`
   that `new_text` changes.
 
+`write` and `edit` refuse the workspace's read-only git paths listed in
+[Git metadata is read-only in the Seatbelt sandbox](#git-metadata-is-read-only-in-the-seatbelt-sandbox),
+also with `--sandbox off`, and also when the path is reached through a symbolic
+link or with different letter case.
+
 Recursive `grep` and `find` skip `.git` and discovered symlinks but include
 other dotfiles. They also skip what the workspace's `.gitignore` files exclude,
 so a search is not spent on build output or vendored dependencies; pass
@@ -1428,6 +1433,12 @@ paths are read-only, whether or not they exist, and no setting turns this off:
 - `<workspace>/.git/config.worktree`
 - `<workspace>/.git/commondir`
 - `<workspace>/.git/hooks` and everything below it
+
+The `write` and `edit` tools run outside the sandbox and refuse the same
+paths, with or without `--sandbox off`. The comparison ignores letter case
+the way APFS does (including U+212A KELVIN SIGN for `k` and U+017F LATIN SMALL
+LETTER LONG S for `s`) and applies after symbolic links are resolved, both
+before the write starts and again at the final rename.
 
 The rule applies to the workspace root only. Repositories below it (nested
 clones, submodules, and linked worktrees inside the workspace) are not covered.

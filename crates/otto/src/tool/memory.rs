@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::result::{capped_text_result, decode_strict_json};
 use super::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
+use crate::memory::advice::Advisor;
 use crate::memory::{
     CandidateAction, Origin, ProposeRequest, Provenance, Scope, SearchRequest, Service,
 };
@@ -136,6 +137,7 @@ pub struct RememberTool {
     service: Arc<Service>,
     user_scope: Scope,
     workspace_scope: Scope,
+    advisor: Option<Arc<Advisor>>,
 }
 
 impl RememberTool {
@@ -144,7 +146,14 @@ impl RememberTool {
             service,
             user_scope,
             workspace_scope,
+            advisor: None,
         }
+    }
+
+    /// Adds advisory review hints to the candidates this tool queues.
+    pub fn with_advisor(mut self, advisor: Option<Arc<Advisor>>) -> Self {
+        self.advisor = advisor;
+        self
     }
 }
 
@@ -223,7 +232,7 @@ impl Tool for RememberTool {
         } else {
             CandidateAction::Update
         };
-        proposal_result(self.service.propose(&ProposeRequest {
+        let request = ProposeRequest {
             action,
             scope,
             kind: args.kind,
@@ -239,7 +248,18 @@ impl Tool for RememberTool {
                 ..Provenance::default()
             },
             ..ProposeRequest::default()
-        }))
+        };
+        let Some(advisor) = &self.advisor else {
+            return proposal_result(self.service.propose(&request));
+        };
+        match advisor
+            .propose(&self.service, &self.user_scope, vec![request], cancel)
+            .await
+            .and_then(|mut results| results.pop())
+        {
+            Some(result) => proposal_result(result),
+            None => error_result(CONTEXT_CANCELED),
+        }
     }
 }
 
@@ -631,5 +651,104 @@ mod tests {
             result.content,
             "scope is not one of the scopes this session is bound to"
         );
+    }
+
+    use crate::memory::advice::{self, Advisor, Answer, Backend, Exchange, Question};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Answers every question the same way and counts its calls.
+    struct Counting(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Backend for Counting {
+        fn model(&self) -> String {
+            "gpt-test".into()
+        }
+
+        fn auxiliary(&self) -> bool {
+            false
+        }
+
+        async fn ask(&self, _state: &str, _questions: &[Question], _limit: Duration) -> Exchange {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let answer = |choice: &str| Answer {
+                choice: choice.to_owned(),
+                probability: None,
+            };
+            Exchange {
+                request: "request".into(),
+                response: None,
+                result: Ok(HashMap::from([
+                    ("scope".to_owned(), answer("all_workspaces")),
+                    ("durable".to_owned(), answer("yes")),
+                ])),
+            }
+        }
+    }
+
+    fn advised_tool(service: &Arc<Service>) -> (RememberTool, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let advisor = Advisor::new(Box::new(Counting(Arc::clone(&calls))), None);
+        (
+            remember_tool(service).with_advisor(Some(Arc::new(advisor))),
+            calls,
+        )
+    }
+
+    #[tokio::test]
+    async fn remember_with_an_advisor_queues_the_candidate_with_an_advice_line() {
+        let (_directory, service) = service();
+        let (tool, calls) = advised_tool(&service);
+
+        let result = run(&tool, r#"{"kind":"preference","text":"likes dark mode"}"#).await;
+        assert!(!result.is_error, "{result:?}");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let candidate = service
+            .get_candidate(&CandidateRef {
+                scope: workspace_scope(),
+                id: candidate_id(&result.content),
+            })
+            .expect("the candidate is stored");
+        assert_eq!(candidate.state, CandidateState::Pending);
+        assert_eq!(candidate.proposed.scope, workspace_scope());
+        assert_eq!(
+            advice::advice_line(&candidate.proposed).as_deref(),
+            Some(
+                "Advice (session model gpt-test): all workspaces (proposed: workspace) · new · durable"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn remember_with_an_advisor_asks_no_model_for_a_proposal_the_service_refuses() {
+        let (_directory, service) = service();
+        let (tool, calls) = advised_tool(&service);
+
+        let result = run(&tool, r#"{"kind":"preference","text":""}"#).await;
+
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn remember_with_an_advisor_returns_context_canceled_when_canceled_during_advice() {
+        let (_directory, service) = service();
+        let (tool, _) = advised_tool(&service);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = tool
+            .execute(
+                &RawValue::from_string(r#"{"kind":"preference","text":"likes dark mode"}"#.into())
+                    .expect("raw"),
+                &cancel,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, CONTEXT_CANCELED);
     }
 }

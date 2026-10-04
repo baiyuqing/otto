@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/baiyuqing/otto/connect/internal/agent"
 )
 
 func memoryClick(h *harness, chat, sender, token, text string) {
@@ -132,5 +134,44 @@ func TestMemoryCardConflictClosesAndShutdownReleasesCards(t *testing.T) {
 	defer h.plat.mu.Unlock()
 	if len(h.plat.statuses) != 2 || !strings.Contains(h.plat.statuses[1], "connector stopped") {
 		t.Fatal(h.plat.statuses)
+	}
+}
+
+const testAdvice = "Advice (auxiliary model jev-latest): all workspaces 91% · new 84% · durable 77%"
+
+func TestMemoryCardTextAdvice(t *testing.T) {
+	t.Parallel()
+	cand := agent.MemoryCandidate{ID: candA, Action: "create", Kind: "fact", Key: "k", Text: "t", Reason: "r", Origin: "model"}
+	base := "Memory review: create fact/k\n\nt\n\nReason: r\nOrigin: model\n\n/memory accept " + candA + " or /memory reject " + candA
+	if got := memoryCardText(cand); got != base {
+		t.Fatalf("without advice = %q", got)
+	}
+	cand.Advice = testAdvice
+	want := strings.Replace(base, "Origin: model\n", "Origin: model\n"+testAdvice+"\n", 1)
+	if got := memoryCardText(cand); got != want {
+		t.Fatalf("with advice = %q, want %q", got, want)
+	}
+}
+
+func TestRenderPendingAdvice(t *testing.T) {
+	t.Parallel()
+	page := agent.MemoryPage{Candidates: []agent.MemoryCandidate{{ID: candA, Action: "create", Kind: "fact", Key: "k", Text: "t", Origin: "model"}}}
+	base := "1 pending memory candidates (reply /memory accept <id> or /memory reject <id>):\naaaa1111  create fact/k  t  (model)"
+	if got := renderPending(page); got != base {
+		t.Fatalf("without advice = %q", got)
+	}
+	page.Candidates[0].Advice = testAdvice
+	if got, want := renderPending(page), base+"\n    "+testAdvice; got != want {
+		t.Fatalf("with advice = %q, want %q", got, want)
+	}
+}
+
+func TestMemoryAdviceFromAgent(t *testing.T) {
+	h := newHarness(t, setup{})
+	seedMemory(t, h.dir, candA+"\tfact\tone\t"+testAdvice)
+	h.say("hi")
+	waitCards(h, 1)
+	if got := h.waitSent(2)[1]; !strings.Contains(got, "\n"+testAdvice+"\n") {
+		t.Fatalf("card = %q", got)
 	}
 }

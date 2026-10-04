@@ -314,6 +314,11 @@ impl Service {
         self.ready()?.standing_usage(user_scope, now_utc())
     }
 
+    /// The standing records of `user_scope`, oldest first.
+    pub fn standing_records(&self, user_scope: &Scope) -> Result<Vec<Record>> {
+        self.ready()?.standing_records(user_scope, now_utc())
+    }
+
     /// Forgetting writes a tombstone. Purging backups is refused outright:
     /// this port has no backups to purge.
     pub fn forget(&self, request: &ForgetRequest) -> Result<ForgetResult> {
@@ -356,6 +361,26 @@ impl Service {
     /// silently empty batch.
     pub fn propose(&self, request: &ProposeRequest) -> Result<Vec<Candidate>> {
         let store = self.ready()?;
+        let candidate = self.checked_candidate(request)?;
+        let candidates = store.propose(std::slice::from_ref(&candidate))?;
+        if !candidates.is_empty() {
+            self.review_available
+                .send_modify(|generation| *generation += 1);
+        }
+        Ok(candidates)
+    }
+
+    /// Runs the validation, policy and content-guard checks [`Service::propose`]
+    /// runs, and writes nothing. A caller that spends something before
+    /// proposing (a model call) uses it to stop early on a request that would
+    /// be refused.
+    pub fn check_proposal(&self, request: &ProposeRequest) -> Result<()> {
+        let store = self.ready()?;
+        let candidate = self.checked_candidate(request)?;
+        store.check_proposals(std::slice::from_ref(&candidate))
+    }
+
+    fn checked_candidate(&self, request: &ProposeRequest) -> Result<Candidate> {
         validate_propose_request(request)?;
         let decision = (self.policy)(&PolicyRequest {
             origin: request.source.origin,
@@ -373,7 +398,7 @@ impl Service {
                 format!("policy decision {:?}", decision.as_str()),
             ));
         }
-        let candidate = Candidate {
+        Ok(Candidate {
             id: new_id()?,
             proposed: Record {
                 scope: request.scope.clone(),
@@ -397,13 +422,7 @@ impl Service {
             decision_source: None,
             result_record_id: String::new(),
             result_revision: 0,
-        };
-        let candidates = store.propose(std::slice::from_ref(&candidate))?;
-        if !candidates.is_empty() {
-            self.review_available
-                .send_modify(|generation| *generation += 1);
-        }
-        Ok(candidates)
+        })
     }
 
     /// Opens one scoped view for a session. The scopes are fixed for the life

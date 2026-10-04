@@ -162,7 +162,7 @@ pub fn run(
     }
 
     match subcommand.as_str() {
-        "status" => status(&memory_config, &secret_values, stdout, stderr),
+        "status" => status(&memory_config, &secret_values, &flags.cwd, stdout, stderr),
         "list" => list(ListInput {
             config: &memory_config,
             secret_values: &secret_values,
@@ -203,11 +203,12 @@ pub fn run(
 fn status(
     config: &MemoryRuntime,
     secret_values: &[String],
+    cwd: &str,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
 ) -> i32 {
     let mut warning = Vec::new();
-    let Ok((service, _, usable)) =
+    let Ok((service, user_scope, usable)) =
         super::wiring::open_memory_service(config, secret_values, &mut warning)
     else {
         return fail(stderr, BACKEND_UNAVAILABLE);
@@ -221,6 +222,42 @@ fn status(
         redactor.redact_string(&config.turso_path)
     );
     let _ = writeln!(stdout, "usable: {usable}");
+    if usable {
+        // The scopes `/memory review` lists: the user and the current workspace.
+        let standing = service.standing_usage(&user_scope);
+        let pending = super::sandbox_runtime::canonical_directory(Path::new(cwd))
+            .ok()
+            .and_then(|workspace| {
+                super::wiring::workspace_memory_scope(config, &workspace.to_string_lossy()).ok()
+            })
+            .and_then(|workspace_scope| {
+                service.pending_summary(&[user_scope, workspace_scope]).ok()
+            });
+        match pending {
+            Some(summary) => {
+                let _ = writeln!(stdout, "pending: {}", summary.count);
+            }
+            None => {
+                let _ = writeln!(stdout, "pending: unavailable");
+            }
+        }
+        match standing {
+            Ok(usage) => {
+                let _ = write!(
+                    stdout,
+                    "standing: {} records, {}/{} tokens",
+                    usage.records, usage.tokens, usage.budget
+                );
+                if usage.omitted > 0 {
+                    let _ = write!(stdout, ", {} not injected (over budget)", usage.omitted);
+                }
+                let _ = writeln!(stdout);
+            }
+            Err(_) => {
+                let _ = writeln!(stdout, "standing: unavailable");
+            }
+        }
+    }
     if !String::from_utf8_lossy(&warning).trim().is_empty() {
         let _ = writeln!(stdout, "{STORE_UNAVAILABLE_WARNING}");
     }
@@ -494,6 +531,84 @@ mod tests {
             String::from_utf8_lossy(&stdout).into_owned(),
             String::from_utf8_lossy(&stderr).into_owned(),
         )
+    }
+
+    #[test]
+    fn status_reports_pending_candidates_in_the_current_scopes() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let store = tempfile::tempdir().expect("store");
+        let db_path = store
+            .path()
+            .join("memory.db")
+            .to_string_lossy()
+            .into_owned();
+        let config = memory_config(home.path(), &db_path);
+        let cwd = workspace.path().to_string_lossy().into_owned();
+        let status = || memory(&["status", "--config", &config, "--cwd", &cwd], home.path()).1;
+        assert!(status().contains("pending: 0\n"), "{}", status());
+
+        let runtime = MemoryRuntime {
+            enabled: true,
+            backend: "turso".into(),
+            turso_path: db_path,
+            ..MemoryRuntime::default()
+        };
+        let (service, user, _) =
+            super::super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+                .expect("open");
+        let current = super::super::wiring::workspace_memory_scope(
+            &runtime,
+            &workspace.path().to_string_lossy(),
+        )
+        .expect("scope");
+        for (scope, key) in [(user, "a"), (current, "b")] {
+            service
+                .propose(&crate::memory::ProposeRequest {
+                    scope,
+                    kind: "preference".into(),
+                    key: key.into(),
+                    text: key.into(),
+                    reason: "said so".into(),
+                    confidence: 0.5,
+                    source: crate::memory::Provenance {
+                        origin: Some(crate::memory::Origin::Model),
+                        ..crate::memory::Provenance::default()
+                    },
+                    ..crate::memory::ProposeRequest::default()
+                })
+                .expect("propose");
+        }
+        service.close().expect("close");
+        assert!(status().contains("pending: 2\n"), "{}", status());
+    }
+
+    #[test]
+    fn status_reports_standing_usage_and_over_budget_records() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let store = tempfile::tempdir().expect("store");
+        let db_path = store.path().join("memory.db");
+        let config = memory_config(home.path(), &db_path.to_string_lossy());
+        let cwd = workspace.path().to_string_lossy().into_owned();
+        let status = || memory(&["status", "--config", &config, "--cwd", &cwd], home.path()).1;
+        let empty = status();
+        assert!(
+            empty.contains("standing: 0 records, 0/2000 tokens\n"),
+            "{empty}"
+        );
+
+        crate::cli::testutil::seed_over_budget_standing(&db_path);
+        let over = status();
+        let line = over
+            .lines()
+            .find(|line| line.starts_with("standing:"))
+            .expect("standing line");
+        assert!(
+            line.starts_with("standing: 3 records, ")
+                && line.ends_with("/2000 tokens, 1 not injected (over budget)"),
+            "{line}"
+        );
     }
 
     #[test]
@@ -832,6 +947,7 @@ mod tests {
         let code = status(
             &runtime,
             std::slice::from_ref(&secret),
+            ".",
             &mut stdout,
             &mut stderr,
         );

@@ -33,7 +33,8 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers
   - `provider`: native HTTP transports for the two provider implementations
   - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
-  - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the Turso/FTS store and retriever
+  - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the Turso/FTS store and retriever. `memory::advice` holds the advisory review hints: a `Backend` trait (`Advisor` runs it for a batch of candidates), the `session` prompt/parser, the `jev` backend, and the append-only audit store `~/.otto/memory-advice.db` (`PRAGMA user_version` 1). `Advisor::propose` calls `Service::check_proposal` first and queues the candidate without advice on timeout (20 s), error or invalid answer; the session-model backend (`cli::advice`) is built in `cli::wiring`, and `TYPESAFE_API_KEY` selects the Jev backend. Advice is stored as `advice.*` candidate metadata and rendered only by `memory::advice::advice_line`
+  - `typesafe`: the HTTP client of the TypeSafe auxiliary model (`jev-latest`), shared by `skill::check` and `memory::advice::jev`
   - `reflection`: the `/reflect` use case: it reads the part of a session no earlier run covered (from the session file, so compacted entries stay reachable), classifies entries as local or external (`taint`), builds one tool-less request (`prompt`), parses and validates the answer (`output`), verifies quoted evidence in code (`evidence`), and queues survivors as memory candidates through `Service::propose` with `Origin::Extractor`. `store` keeps run rows, per-session watermarks, and skill ownership in `~/.otto/reflection.db`. Skills pass `guard` (structure and the rule table), `review` (a fail-closed second-model call), and only then `skillwrite`, the only file that mutates skill files; it accepts only a `guard::Vetted`, which only `guard::approve` builds. `crates/otto/tests/reflection_boundary.rs` fails if this module ever writes, forgets, or reviews a memory record directly, if a file other than `skillwrite.rs` mutates the filesystem, or if `Vetted` is built outside `guard.rs`. A new scan rule goes in the `RULES` table in `guard.rs` with a positive and a negative test case
   - `usage`: native collection of parent, sub-agent, and compaction token events; append-only Turso storage; and total/daily aggregate queries consumed by the server
   - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
@@ -53,14 +54,35 @@ module, session persistence append-only, and `bash` delegated through
 `crates/otto`'s `sandbox` module; only explicit sandbox `off` may use direct
 execution, and it still starts in the selected workspace.
 
+Chat channel metadata belongs to the native `app::Channel` contract. ACP
+accepts `_meta.otto.channel`, and HTTP turns carry the same optional enum
+through queue admission to execution. Render only fixed guidance for supported
+channels; never accept client-authored system instructions. The core agent's
+per-run system context applies to every ordinary provider request, including
+tool rounds and overflow retries, without mutating the configured prompt or
+session history. Approval retries retain the current channel; later turns
+without metadata have no channel context.
+
 Keep `crates/otto`'s `memory` module behind its neutral contracts. The agent
 loop, tools, and frontends must never reach a store directly: use the
 `Service`'s bound accessors or the `Controller` memory facade. Per-turn recall
 and explicit management (`memory_search`/`remember`/`forget` tools,
 `/memory`/`/remember` in the REPL, and `otto memory status|forget`) are wired
-end to end via `[memory]` TOML config. Model- and human-originated writes
-always land as pending candidates requiring review. `reflection` proposes candidates
-on `/reflect` and, by default, in the background after a compaction
+end to end via `[memory]` TOML config. Model-originated writes always land as
+pending candidates requiring review; human `/remember` and `/memory forget`
+apply immediately. Recall renders two groups (`otto-core`'s
+`render_memory_context`): the standing set (active user-scope
+`preference`/`instruction` records with a key, flagged by the retriever's
+baseline query) under `STANDING_CONTEXT_PREAMBLE`, then the query matches under
+the untrusted `MEMORY_CONTEXT_PREAMBLE`. The standing set has its own token
+budget, `MAX_STANDING_TOKENS`; `Service::remember` and an accept in
+`Service::review` reject a write that would exceed it, and validation rejects a
+keyless user-scope `preference`/`instruction` create. On each session open
+`Controller::notify_memory_state` queues one notice for pending candidates and
+one for standing records left out over the budget.
+`reflection` proposes candidates
+on `/reflect` and, by default, in the background after a completed turn with
+at least ten distinct successful tool operations or a compaction
 (`app::auto_reflection`); `Binding.Observe` and durability (backup/restore/verify) remain unwired. `/memory review` lists pending
 candidates and `/memory review <id> accept|reject` decides one through
 `Service::review` (human authority, like `/memory forget`). The TUI dispatches `/memory` and `/remember` to the same

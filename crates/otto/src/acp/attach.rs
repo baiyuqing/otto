@@ -40,6 +40,7 @@ use super::{
     unknown_session, update,
 };
 use crate::app::ApprovalDecision;
+use crate::app::Channel;
 use crate::client::{Client, Error as ClientError};
 
 const LOST: &str = "connection to otto serve lost";
@@ -74,7 +75,7 @@ impl Relay {
 
     /// The JSON-RPC error for a failed call. A connection failure also marks
     /// serve lost.
-    fn fail(&self, failure: ClientError) -> agent_client_protocol_schema::v1::Error {
+    pub(super) fn fail(&self, failure: ClientError) -> agent_client_protocol_schema::v1::Error {
         match failure {
             ClientError::Unreachable(_) => {
                 self.lost.cancel();
@@ -86,6 +87,18 @@ impl Relay {
                 error(INTERNAL_ERROR, format!("otto serve answered HTTP {status}"))
             }
             ClientError::Http { message, .. } => error(INTERNAL_ERROR, message),
+        }
+    }
+
+    pub(super) fn task_control_error(
+        &self,
+        failure: ClientError,
+    ) -> agent_client_protocol_schema::v1::Error {
+        match &failure {
+            ClientError::Http {
+                status: 404, code, ..
+            } if code.is_empty() => super::task_control_error(failure),
+            _ => self.fail(failure),
         }
     }
 
@@ -168,6 +181,31 @@ impl Relay {
         cancel: &CancellationToken,
     ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
         use super::command::{Command, compaction_text, context_text};
+        let command = match command {
+            Command::Reflect { focus } => {
+                return self.reflect_command(session_id, focus, cancel).await;
+            }
+            Command::Skill { args } => return self.skill_command(session_id, args).await,
+            Command::Steer { guidance } => {
+                let accepted = self
+                    .client
+                    .steer(session_id, guidance)
+                    .await
+                    .map_err(|failure| self.task_control_error(failure))?;
+                return Ok(Some(if accepted {
+                    "Guidance accepted for the active task; it will be delivered at the next safe boundary."
+                        .to_string()
+                } else {
+                    "The active task did not accept guidance.".to_string()
+                }));
+            }
+            Command::Queue { .. } => {
+                return Ok(Some(
+                    "Nested /queue is not supported; submit a top-level /queue prompt".to_string(),
+                ));
+            }
+            command => command,
+        };
         let call = async {
             match command {
                 Command::Context => self
@@ -180,6 +218,10 @@ impl Relay {
                     .compact(session_id, focus)
                     .await
                     .map(|done| done.map(|done| compaction_text(&done))),
+                Command::Reflect { .. }
+                | Command::Skill { .. }
+                | Command::Steer { .. }
+                | Command::Queue { .. } => unreachable!(),
             }
         };
         tokio::select! {
@@ -190,21 +232,142 @@ impl Relay {
         }
     }
 
+    async fn reflect_command(
+        &self,
+        session_id: &str,
+        focus: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
+        let request_id = crate::memory::new_id().map_err(|failure| {
+            error(
+                INTERNAL_ERROR,
+                format!("cannot create reflection request ID: {failure}"),
+            )
+        })?;
+        let mut reflect = Box::pin(self.client.reflect(session_id, focus, &request_id));
+        tokio::select! {
+            biased;
+            () = self.lost.cancelled() => Err(error(INTERNAL_ERROR, LOST)),
+            result = &mut reflect => result
+                .map(|report| report.map(|report| report.line))
+                .map_err(|failure| self.fail(failure)),
+            () = cancel.cancelled() => {
+                self.client
+                    .cancel_reflection(session_id, &request_id)
+                    .await
+                    .map_err(|failure| self.fail(failure))?;
+                reflect.await
+                    .map(|report| report.map(|report| report.line))
+                    .map_err(|failure| self.fail(failure))
+            }
+        }
+    }
+
+    async fn skill_command(
+        &self,
+        session_id: &str,
+        args: &str,
+    ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
+        match args.split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["generated"] => {
+                let list = self
+                    .client
+                    .generated_skills(session_id)
+                    .await
+                    .map_err(|failure| self.fail(failure))?;
+                let text = if !list.enabled {
+                    "skill generated: reflection is disabled".to_string()
+                } else if list.skills.is_empty() {
+                    "No skills generated by reflection.".to_string()
+                } else {
+                    let mut text = "Skills generated by reflection:".to_string();
+                    for skill in list.skills {
+                        let ownership = if skill.owned {
+                            ""
+                        } else {
+                            " [edited or missing: reflection no longer owns it]"
+                        };
+                        text.push_str(&format!(
+                            "\n- {}{ownership}: run {} (session {}) on {}: {}",
+                            skill.name,
+                            skill.run_id,
+                            skill.session_id,
+                            skill.updated_at,
+                            skill.reason
+                        ));
+                    }
+                    text
+                };
+                Ok(Some(text))
+            }
+            ["revert", name] => {
+                let result = self
+                    .client
+                    .revert_generated_skill(session_id, name)
+                    .await
+                    .map_err(|failure| self.fail(failure))?;
+                Ok(Some(match result.as_str() {
+                    "restored" => format!(
+                        "Reverted skill {name} to its previous version; the change applies to new sessions"
+                    ),
+                    "removed" => format!(
+                        "Removed skill {name}, which reflection created; the change applies to new sessions"
+                    ),
+                    _ => format!("skill revert: unexpected result {result}"),
+                }))
+            }
+            _ => Ok(Some(
+                "Usage: /skill generated | /skill revert <name>".to_string(),
+            )),
+        }
+    }
+
     /// Runs one prompt as a queued turn on serve, to its stop reason.
     pub(super) async fn prompt(
         &self,
         connection: &Connection,
         session_id: &str,
         text: &str,
+        channel: Option<Channel>,
         cancel: &CancellationToken,
     ) -> Reply {
-        let mut stream = tokio::select! {
+        let stream = tokio::select! {
             biased;
             () = self.lost.cancelled() => return Err(error(INTERNAL_ERROR, LOST)),
-            started = self.client.start_turn(session_id, text, None) => {
+            started = self.client.start_turn_with_channel(session_id, text, None, channel) => {
                 started.map_err(|failure| self.fail(failure))?
             }
         };
+        self.stream_turn(connection, session_id, stream, cancel)
+            .await
+    }
+
+    /// Starts one separately admitted ACP `/queue` follow-up on serve.
+    pub(super) async fn start_queued_prompt(
+        &self,
+        session_id: &str,
+        text: &str,
+        channel: Option<Channel>,
+    ) -> Result<crate::client::TurnStream, agent_client_protocol_schema::v1::Error> {
+        if self.lost.is_cancelled() {
+            return Err(error(INTERNAL_ERROR, LOST));
+        }
+        let stream = self
+            .client
+            .start_turn_with_channel(session_id, text, None, channel)
+            .await
+            .map_err(|failure| self.fail(failure))?;
+        Ok(stream)
+    }
+
+    /// Forwards one already-started server turn as ACP session updates.
+    pub(super) async fn stream_turn(
+        &self,
+        connection: &Connection,
+        session_id: &str,
+        mut stream: crate::client::TurnStream,
+        cancel: &CancellationToken,
+    ) -> Reply {
         let mut cancel_sent = false;
         let mut approval: Option<OpenApproval> = None;
         loop {

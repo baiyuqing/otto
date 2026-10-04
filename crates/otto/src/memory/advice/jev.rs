@@ -1,0 +1,136 @@
+//! The auxiliary Jev model as an advice [`Backend`].
+//!
+//! Used when `TYPESAFE_API_KEY` is set. A choice question is a TypeSafe
+//! `choice` question whose answer carries `confidence`; a yes/no question is a
+//! `noul` question whose number is the probability of yes, so a `noul` below
+//! 0.5 answers `no` with probability `1 - noul`.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use serde_json::{Map, Value, json};
+
+use super::{Answer, Backend, Exchange, Failure, Kind, NO, Question, YES};
+use crate::typesafe::{self, Client, Error, WireQuestion};
+
+pub struct Jev {
+    client: Client,
+}
+
+impl Jev {
+    pub fn new(base_url: &str, api_key: &str) -> Self {
+        Self {
+            client: Client::new(base_url, api_key),
+        }
+    }
+}
+
+fn wire(questions: &[Question]) -> Map<String, Value> {
+    questions
+        .iter()
+        .map(|question| {
+            let (kind, criteria) = match &question.kind {
+                Kind::Choice(options) => (
+                    "choice",
+                    options
+                        .iter()
+                        .map(|(id, meaning)| (id.clone(), Value::from(meaning.as_str())))
+                        .collect(),
+                ),
+                Kind::YesNo { yes, no } => ("noul", json!({"true": yes, "false": no})),
+            };
+            let wire = WireQuestion {
+                r#type: kind,
+                instructions: &question.instructions,
+                criteria,
+            };
+            (
+                question.id.to_owned(),
+                serde_json::to_value(wire).expect("WireQuestion serializes"),
+            )
+        })
+        .collect()
+}
+
+fn probability(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .filter(|probability| (0.0..=1.0).contains(probability))
+}
+
+fn decode(
+    answers: &typesafe::AnswerMap,
+    questions: &[Question],
+) -> Result<HashMap<String, Answer>, Failure> {
+    let invalid = |reason: &str| Failure::Invalid(reason.to_owned());
+    let mut decoded = HashMap::new();
+    for question in questions {
+        let answer = answers
+            .get(question.id)
+            .ok_or_else(|| invalid("an answer is missing"))?;
+        let kind = answer.get("type").and_then(Value::as_str);
+        let decoded_answer = match (&question.kind, kind) {
+            (Kind::Choice(options), Some("choice")) => {
+                let choice = answer
+                    .get("choice")
+                    .and_then(Value::as_str)
+                    .filter(|choice| options.iter().any(|(id, _)| id == choice))
+                    .ok_or_else(|| invalid("a choice is not one of the options"))?;
+                Answer {
+                    choice: choice.to_owned(),
+                    probability: answer.get("confidence").and_then(probability),
+                }
+            }
+            (Kind::YesNo { .. }, Some("noul")) => {
+                let yes = answer
+                    .get("noul")
+                    .and_then(probability)
+                    .ok_or_else(|| invalid("a noul answer is not a probability"))?;
+                if yes >= 0.5 {
+                    Answer {
+                        choice: YES.to_owned(),
+                        probability: Some(yes),
+                    }
+                } else {
+                    Answer {
+                        choice: NO.to_owned(),
+                        probability: Some(1.0 - yes),
+                    }
+                }
+            }
+            _ => return Err(invalid("an answer has the wrong type")),
+        };
+        decoded.insert(question.id.to_owned(), decoded_answer);
+    }
+    Ok(decoded)
+}
+
+#[async_trait::async_trait]
+impl Backend for Jev {
+    fn model(&self) -> String {
+        typesafe::MODEL.to_owned()
+    }
+
+    fn auxiliary(&self) -> bool {
+        true
+    }
+
+    async fn ask(&self, state: &str, questions: &[Question], limit: Duration) -> Exchange {
+        let payload = typesafe::request_body(state, &wire(questions));
+        let sent = tokio::time::timeout(limit, self.client.post(&payload)).await;
+        let (response, result) = match sent {
+            Err(_) => (None, Err(Failure::Timeout)),
+            Ok(Err(Error::Timeout)) => (None, Err(Failure::Timeout)),
+            Ok(Err(error)) => (None, Err(Failure::Error(error.reason()))),
+            Ok(Ok(reply)) => {
+                let result = decode(&reply.answers, questions);
+                (Some(reply.raw), result)
+            }
+        };
+        Exchange {
+            request: payload,
+            response,
+            result,
+        }
+    }
+}

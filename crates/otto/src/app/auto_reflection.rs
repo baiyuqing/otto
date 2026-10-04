@@ -1,10 +1,11 @@
 //! Automatic reflection: runs that start without a `/reflect`.
 //!
-//! `on_compaction` (the default) starts a background run after a compaction
-//! completes; `on_exit` runs once as a terminal frontend closes. Both go
-//! through [`crate::reflection::Reflector`], so they share every check a
-//! manual run has, plus the limits that only apply here: one run at a time,
-//! a minimum interval per session, `min_turns` for `on_exit`, and no retry.
+//! `on_work` (the default) starts a background run after a successful
+//! compaction or a completed prompt that used ten distinct successful tools;
+//! `on_compaction` keeps only the first trigger, and `on_exit` runs once as a
+//! terminal frontend closes. All go through [`crate::reflection::Reflector`],
+//! so they share every check a manual run has, plus one run at a time, a
+//! minimum interval per session, `min_turns` for `on_exit`, and no retry.
 //!
 //! Ownership: a background run owns clones of everything it reads (the runner,
 //! the session path, the memory service, the skill roots), so it does not
@@ -19,12 +20,13 @@
 //!
 //! Errors: a failed run queues one notice; nothing retries it.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use otto_core::agent::Event;
 use otto_core::config::Auto;
+use otto_core::model::{EffectCertainty, OperationDisposition, OperationId};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +35,8 @@ use crate::reflection::{self, Error, Report, Trigger};
 
 /// The most notices kept; the oldest is dropped past it.
 const MAXIMUM_NOTICES: usize = 20;
+/// A task-end reflection is only useful after substantial tool use.
+const MINIMUM_SUCCESSFUL_TOOLS: usize = 10;
 
 /// How long `on_exit` may delay a terminal frontend's exit.
 pub const EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -61,7 +65,7 @@ impl Notices {
         }
     }
 
-    fn push(&self, line: String) {
+    pub(super) fn push(&self, line: String) {
         {
             let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
             if queue.lines.len() >= MAXIMUM_NOTICES {
@@ -110,8 +114,67 @@ impl Drop for Running {
     }
 }
 
-/// Wraps `emit` so the controller learns whether a compaction completed
-/// during the operation.
+#[derive(Default)]
+pub(super) struct RunObservation {
+    state: Mutex<RunState>,
+}
+
+#[derive(Default)]
+struct RunState {
+    compacted: bool,
+    finished: bool,
+    approval_required: bool,
+    successful_operations: HashSet<OperationId>,
+}
+
+impl RunObservation {
+    fn observe(&self, event: &Event) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        match event {
+            Event::AgentFinished => state.finished = true,
+            Event::CompactionCompleted { compaction }
+                if !compaction.noop && !compaction.checkpoint_id.is_empty() =>
+            {
+                state.compacted = true;
+            }
+            Event::ToolCallFinished {
+                operation_id,
+                tool_name,
+                result,
+                outcome,
+                ..
+            } => {
+                if crate::tool::bash::parse_approval_request(tool_name, result).is_some() {
+                    state.approval_required = true;
+                }
+                if !result.is_error
+                    && outcome.disposition == OperationDisposition::Succeeded
+                    && outcome.effect_certainty == EffectCertainty::Completed
+                {
+                    state.successful_operations.insert(operation_id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn compacted(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .compacted
+    }
+
+    pub(super) fn eligible_work(&self, completed: bool) -> bool {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        completed
+            && state.finished
+            && !state.approval_required
+            && state.successful_operations.len() >= MINIMUM_SUCCESSFUL_TOOLS
+    }
+}
+
+/// Wraps `emit` so the controller learns whether a compaction completed.
 pub(super) fn observing<'a>(
     emit: otto_core::agent::EventSink<'a>,
     compacted: &'a AtomicBool,
@@ -123,6 +186,18 @@ pub(super) fn observing<'a>(
         {
             compacted.store(true, Ordering::SeqCst);
         }
+        emit(event);
+    }
+}
+
+/// Records task completion, approvals, successful operations, and compaction
+/// for one provider run. Operation IDs deduplicate retries of the same tool.
+pub(super) fn observing_prompt<'a>(
+    emit: otto_core::agent::EventSink<'a>,
+    observation: &'a RunObservation,
+) -> impl FnMut(Event) + Send + use<'a> {
+    move |event| {
+        observation.observe(&event);
         emit(event);
     }
 }
@@ -153,12 +228,18 @@ impl Controller {
         self.notices.signal.subscribe()
     }
 
-    /// Starts a background reflection run when `[reflection].auto` is
-    /// `on_compaction` and nothing else is running. Never blocks and never
-    /// fails the operation that triggered it.
-    pub(super) fn start_auto_reflection(&self) {
+    /// Starts a background reflection when its configured trigger is enabled.
+    /// Never blocks or fails the operation that triggered it.
+    pub(super) fn start_auto_reflection(&self, trigger: Trigger) {
         let reflector = Arc::clone(&self.builder.reflector);
-        if reflector.auto() != Auto::OnCompaction || !self.dynamic_content {
+        let enabled = match trigger {
+            Trigger::OnCompaction => {
+                matches!(reflector.auto(), Auto::OnCompaction | Auto::OnWork)
+            }
+            Trigger::OnWork => reflector.auto() == Auto::OnWork,
+            Trigger::Manual | Trigger::OnExit => false,
+        };
+        if !enabled || !self.dynamic_content {
             return;
         }
         let Some(session) = self.current_session_opt() else {
@@ -196,9 +277,7 @@ impl Controller {
                 workspace_scope: &workspace_scope,
                 skill_roots: skill_roots.as_ref(),
             };
-            let result = reflector
-                .run(&context, Trigger::OnCompaction, "", &cancel)
-                .await;
+            let result = reflector.run(&context, trigger, "", &cancel).await;
             if let Some(line) = notice_for(result) {
                 notices.push(line);
             }
@@ -344,6 +423,102 @@ mod tests {
         assert_eq!(seen, 3, "every event still reaches the frontend");
     }
 
+    fn finished_tool(
+        id: &str,
+        attempt: u32,
+        outcome: OperationOutcome,
+        result: ToolResult,
+    ) -> Event {
+        Event::ToolCallFinished {
+            operation_id: OperationId::new(id).expect("operation id"),
+            attempt,
+            tool_name: "read".into(),
+            tool_call_id: format!("call-{id}-{attempt}"),
+            result,
+            outcome,
+        }
+    }
+
+    fn successful_tool(id: &str, attempt: u32) -> Event {
+        finished_tool(
+            id,
+            attempt,
+            OperationOutcome {
+                disposition: OperationDisposition::Succeeded,
+                effect_certainty: EffectCertainty::Completed,
+                stop_reason: None,
+            },
+            ToolResult::default(),
+        )
+    }
+
+    #[test]
+    fn task_end_requires_ten_distinct_successes_and_a_finished_run() {
+        let observation = RunObservation::default();
+        for index in 0..9 {
+            observation.observe(&successful_tool(&format!("op_{index}"), 1));
+        }
+        // A successful retry of an already counted logical operation is still
+        // one operation; failed and canceled calls never count.
+        observation.observe(&successful_tool("op_0", 2));
+        observation.observe(&finished_tool(
+            "op_error",
+            1,
+            OperationOutcome {
+                disposition: OperationDisposition::Error,
+                effect_certainty: EffectCertainty::KnownNoEffect,
+                stop_reason: None,
+            },
+            ToolResult::error("no"),
+        ));
+        observation.observe(&finished_tool(
+            "op_cancelled",
+            1,
+            OperationOutcome {
+                disposition: OperationDisposition::Cancelled,
+                effect_certainty: EffectCertainty::NotStarted,
+                stop_reason: Some(otto_core::model::OperationStopReason::UserCancellation),
+            },
+            ToolResult::error("cancelled"),
+        ));
+        assert!(!observation.eligible_work(true));
+
+        observation.observe(&successful_tool("op_9", 1));
+        assert!(!observation.eligible_work(true), "the run has not finished");
+        observation.observe(&Event::AgentFinished);
+        assert!(observation.eligible_work(true));
+        assert!(
+            !observation.eligible_work(false),
+            "errors/cancellation suppress"
+        );
+    }
+
+    #[test]
+    fn approval_required_suppresses_task_end_reflection() {
+        let observation = RunObservation::default();
+        for index in 0..10 {
+            observation.observe(&successful_tool(&format!("op_{index}"), 1));
+        }
+        observation.observe(&Event::AgentFinished);
+        observation.observe(&Event::ToolCallFinished {
+            operation_id: OperationId::new("op_approval").expect("operation id"),
+            attempt: 1,
+            tool_name: "bash".into(),
+            tool_call_id: "call-approval".into(),
+            result: ToolResult {
+                content: "approval required.\nApprove in Otto: /approve approval-1\nCommand: \"git push\"\nJustification: \"push\"".into(),
+                is_error: true,
+                ..ToolResult::default()
+            },
+            outcome: OperationOutcome {
+                disposition: OperationDisposition::Error,
+                effect_certainty: EffectCertainty::NotStarted,
+                stop_reason: None,
+            },
+        });
+        assert!(!observation.eligible_work(true));
+    }
+
     #[test]
     fn only_runs_that_changed_something_or_failed_are_announced() {
         let skipped = Report::skipped_for_test();
@@ -359,10 +534,14 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use otto_core::agent::summary::SUMMARIZATION_SYSTEM_PROMPT;
-    use otto_core::model::{FinishReason, Message, Role};
+    use otto_core::model::{
+        EffectCertainty, FinishReason, Message, OperationDisposition, OperationId,
+        OperationOutcome, Role,
+    };
     use otto_core::operation::OperationControl;
     use otto_core::provider::{Provider, ProviderSettlement, Request, Response, StreamSink};
     use otto_core::session::Session;
+    use otto_core::tool::ToolResult;
 
     use crate::cli::runtime_builder::Runner;
     use crate::cli::testutil::{builder, initial_runtime};
@@ -450,6 +629,7 @@ mod tests {
             user_scope: user_scope.clone(),
             recall_limit: 8,
             recall_token_budget: 1000,
+            advice_audit: None,
         };
         builder.workspace_scope =
             workspace_memory_scope(&runtime_config, &workspace.path().to_string_lossy())
@@ -552,26 +732,70 @@ mod tests {
             .len()
     }
 
-    #[tokio::test]
-    async fn a_compaction_starts_one_background_reflection_and_queues_a_notice() {
-        let rig = rig(Auto::OnCompaction, 6).await;
-        compact(&rig).await;
-        assert_eq!(
-            rig.provider.compactions.load(Ordering::SeqCst),
-            1,
-            "the compaction ran"
-        );
+    fn successful_work() -> RunObservation {
+        let observation = RunObservation::default();
+        for index in 0..MINIMUM_SUCCESSFUL_TOOLS {
+            observation.observe(&successful_tool(&format!("work_{index}"), 1));
+        }
+        observation.observe(&Event::AgentFinished);
+        observation
+    }
 
+    #[tokio::test]
+    async fn on_work_reflects_only_after_qualified_work_and_also_keeps_compaction_trigger() {
+        let rig = rig(Auto::OnWork, 6).await;
+        let observation = successful_work();
+        rig.controller.after_prompt(&observation, true);
         let line = first_notice(&rig).await;
         assert!(line.contains("1 candidate(s) queued for review"), "{line}");
         assert_eq!(rig.provider.reflections.load(Ordering::SeqCst), 1);
         assert_eq!(pending(&rig), 1);
 
-        // A second compaction inside the interval starts nothing.
+        // The task-end and compaction triggers share one automatic cooldown.
         compact(&rig).await;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert_eq!(rig.provider.reflections.load(Ordering::SeqCst), 1);
         assert!(rig.controller.take_notices().is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_on_work_auto_mode_runs_the_task_end_trigger() {
+        for auto in [Auto::Off, Auto::OnExit, Auto::OnCompaction] {
+            let rig = rig(auto, 6).await;
+            let observation = successful_work();
+            rig.controller.after_prompt(&observation, true);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(
+                rig.provider.reflections.load(Ordering::SeqCst),
+                0,
+                "{auto:?} must not run task-end reflection"
+            );
+            assert!(rig.controller.take_notices().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_modes_start_one_background_reflection_and_queue_a_notice() {
+        for auto in [Auto::OnCompaction, Auto::OnWork] {
+            let rig = rig(auto, 6).await;
+            compact(&rig).await;
+            assert_eq!(
+                rig.provider.compactions.load(Ordering::SeqCst),
+                1,
+                "{auto:?}: the compaction ran"
+            );
+
+            let line = first_notice(&rig).await;
+            assert!(line.contains("1 candidate(s) queued for review"), "{line}");
+            assert_eq!(rig.provider.reflections.load(Ordering::SeqCst), 1);
+            assert_eq!(pending(&rig), 1);
+
+            // A second compaction inside the interval starts nothing.
+            compact(&rig).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(rig.provider.reflections.load(Ordering::SeqCst), 1);
+            assert!(rig.controller.take_notices().is_empty());
+        }
     }
 
     #[tokio::test]

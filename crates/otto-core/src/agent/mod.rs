@@ -34,6 +34,7 @@ pub mod memory;
 pub mod oneshot;
 pub mod overflow;
 pub mod redactor;
+pub mod steering;
 pub mod summary;
 pub mod summary_details;
 pub mod summary_validate;
@@ -52,7 +53,8 @@ pub use events::{
 
 use crate::model::{
     Block, BlockType, ContextMetadata, EffectCertainty, Message, OperationDisposition, OperationId,
-    OperationOutcome, OperationStopReason, Role, ToolDefinition, ToolResultMetadata, zero_time,
+    OperationOutcome, OperationStopReason, Role, ToolDefinition, ToolResultMetadata, Usage,
+    zero_time,
 };
 use crate::operation::OperationControl;
 use crate::provider::{
@@ -109,6 +111,8 @@ pub struct Options {
     /// Notifications waiting to be delivered as context messages. Shared with
     /// whoever pushes into it, which is why it is behind an `Arc`.
     pub inbox: Arc<Inbox>,
+    /// Turn-bound guidance accepted by a frontend while a run is active.
+    pub steering: Arc<steering::Steering>,
     /// The subagent task registry, closed by [`Agent::close`].
     pub tasks: Option<Arc<dyn TaskRegistry + Send + Sync>>,
 }
@@ -137,6 +141,7 @@ impl Default for Options {
             memory_recall_limit: DEFAULT_RECALL_LIMIT,
             memory_recall_token_budget: DEFAULT_RECALL_TOKEN_BUDGET,
             inbox: Arc::new(Inbox::default()),
+            steering: Arc::new(steering::Steering::default()),
             tasks: None,
         }
     }
@@ -204,7 +209,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     /// last turn's recall is listed as its own section.
     pub fn context_report(&self) -> context_report::ContextReport {
         let (request, estimated_total) =
-            self.build_normal_provider_request(&RunDispatchState::default());
+            self.build_normal_provider_request(&RunDispatchState::default(), "");
         let memory = self
             .last_memory_context
             .lock()
@@ -247,6 +252,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         &self.provider
     }
 
+    /// The transient mailbox frontends use to steer this agent's active run.
+    pub fn steering(&self) -> &Arc<steering::Steering> {
+        &self.options.steering
+    }
+
     /// The task registry, if one was configured.
     pub fn tasks(&self) -> Option<&Arc<dyn TaskRegistry + Send + Sync>> {
         self.options.tasks.as_ref()
@@ -282,7 +292,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        self.run_with_control(user_text, emit, cancel).await
+        self.run_with_system_context(user_text, "", emit, cancel)
+            .await
+    }
+
+    /// Runs one turn with ephemeral system context appended to the configured
+    /// system prompt for this run's ordinary provider requests only.
+    pub async fn run_with_system_context(
+        &self,
+        user_text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        self.run_with_system_context_control(user_text, system_context, emit, cancel)
+            .await
     }
 
     /// Runs one turn under operation-wide cancellation and deadline control.
@@ -292,7 +316,20 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
     ) -> Result<(), AgentError> {
-        self.run_with_image_control(user_text, None, emit, control)
+        self.run_with_system_context_control(user_text, "", emit, control)
+            .await
+    }
+
+    /// Runs one turn with ephemeral system context under operation-wide
+    /// cancellation and deadline control.
+    pub async fn run_with_system_context_control(
+        &self,
+        user_text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
+        self.run_with_image_system_context_control(user_text, None, system_context, emit, control)
             .await
     }
 
@@ -303,7 +340,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        self.run_with_image_control(user_text, image, emit, cancel)
+        self.run_with_image_system_context_control(user_text, image, "", emit, cancel)
+            .await
+    }
+
+    pub async fn run_with_image_system_context(
+        &self,
+        user_text: &str,
+        image: Option<Block>,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        self.run_with_image_system_context_control(user_text, image, system_context, emit, cancel)
             .await
     }
 
@@ -315,6 +364,58 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
     ) -> Result<(), AgentError> {
+        self.run_with_image_system_context_control(user_text, image, "", emit, control)
+            .await
+    }
+
+    pub async fn run_with_image_system_context_control(
+        &self,
+        user_text: &str,
+        image: Option<Block>,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
+        self.run_with_image_system_context_control_kind(
+            user_text,
+            image,
+            system_context,
+            emit,
+            control,
+            false,
+        )
+        .await
+    }
+
+    /// Runs one agent-originated follow-up, recording its request as context
+    /// rather than as a user message.
+    pub async fn run_followup_with_system_context_control(
+        &self,
+        text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
+        self.run_with_image_system_context_control_kind(
+            text,
+            None,
+            system_context,
+            emit,
+            control,
+            true,
+        )
+        .await
+    }
+
+    async fn run_with_image_system_context_control_kind(
+        &self,
+        user_text: &str,
+        image: Option<Block>,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+        followup: bool,
+    ) -> Result<(), AgentError> {
         if !self.redactor.allows_dynamic_content() {
             return self.run_with_incomplete_redactions(emit, control);
         }
@@ -322,6 +423,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         if text.is_empty() && image.is_none() && self.options.inbox.is_empty() {
             return Err(self.fail(emit, AgentError::EmptyUserText));
         }
+        let steering = self.options.steering.begin();
         emit(Event::AgentStarted);
         if let Some(error) = stopped_provider_error(control) {
             let operation_id = match (self.options.new_operation_id)() {
@@ -354,6 +456,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         // to what is already in the transcript, not the other way around.
         // Calls a session takeover left without a result come first: nothing
         // may be appended between an assistant message and its tool results.
+        let system_context = self.redactor.redact_string(system_context);
         let mut state = RunDispatchState::default();
         self.replay_pending_calls(emit, &mut state, control).await?;
 
@@ -363,14 +466,25 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
         if !text.is_empty() || image.is_some() {
             let redacted = self.redactor.redact_string(user_text);
+            let persisted_text = if followup {
+                format!("[Agent follow-up]\n{redacted}")
+            } else {
+                redacted.clone()
+            };
             let mut blocks = Vec::new();
             if !text.is_empty() {
-                blocks.push(Block::text(redacted.clone()));
+                blocks.push(Block::text(persisted_text));
             }
             blocks.extend(image);
             let user = Message {
                 id: (self.options.new_id)(),
-                role: Role::User,
+                role: if followup { Role::Context } else { Role::User },
+                context_type: if followup {
+                    "agent_followup".into()
+                } else {
+                    String::new()
+                },
+                display: followup,
                 created_at: (self.options.now)(),
                 blocks,
                 ..Message::default()
@@ -408,10 +522,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = state.memory_context.clone();
         }
+        if let Err(error) = self.deliver_steering(&steering, emit).await {
+            return Err(self.fail(emit, error));
+        }
 
         loop {
             let response = match self
-                .dispatch_normal_provider_step(emit, &mut state, control)
+                .dispatch_normal_provider_step(emit, &mut state, &system_context, control)
                 .await
             {
                 Ok(response) => response,
@@ -462,10 +579,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
 
             if !had_tool_call {
+                if let Some(error) = stopped_provider_error(control) {
+                    return Err(self.fail(emit, AgentError::Provider(error)));
+                }
                 if self.options.inbox.queued().iter().any(|entry| {
                     entry.notification.kind == Some(inbox::NotificationKind::UserMessage)
                 }) {
                     if let Err(error) = self.deliver_notifications(emit).await {
+                        return Err(self.fail(emit, error));
+                    }
+                    continue;
+                }
+                if let Some(messages) = steering.take_or_close() {
+                    if let Err(error) = self.append_steering(messages, emit).await {
                         return Err(self.fail(emit, error));
                     }
                     continue;
@@ -475,6 +601,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
             if let Some(error) = stopped_provider_error(control) {
                 return Err(self.fail(emit, AgentError::Provider(error)));
+            }
+            if let Err(error) = self.deliver_steering(&steering, emit).await {
+                return Err(self.fail(emit, error));
             }
             if let Err(error) = self.deliver_notifications(emit).await {
                 return Err(self.fail(emit, error));
@@ -568,6 +697,20 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             execution.outcome.clone(),
         );
         if let Err(source) = self.session.append_operation_fact(terminal) {
+            emit(Event::ToolCallFinished {
+                operation_id,
+                attempt,
+                tool_name: block.tool_name.clone(),
+                tool_call_id: block.tool_call_id.clone(),
+                result: ToolResult::error(
+                    "tool outcome unknown: could not persist terminal status",
+                ),
+                outcome: OperationOutcome {
+                    disposition: OperationDisposition::Error,
+                    effect_certainty: EffectCertainty::Unknown,
+                    stop_reason: None,
+                },
+            });
             return Err(self.fail(
                 emit,
                 AgentError::Persist {
@@ -719,6 +862,46 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         Ok(())
     }
 
+    async fn deliver_steering(
+        &self,
+        steering: &steering::Run,
+        emit: EventSink<'_>,
+    ) -> Result<(), AgentError> {
+        self.append_steering(steering.drain(), emit).await
+    }
+
+    async fn append_steering(
+        &self,
+        messages: Vec<String>,
+        emit: EventSink<'_>,
+    ) -> Result<(), AgentError> {
+        for text in messages {
+            let text = self.redactor.redact_string(&text);
+            let message = Message {
+                id: (self.options.new_id)(),
+                role: Role::User,
+                created_at: (self.options.now)(),
+                blocks: vec![Block::text(text.clone())],
+                ..Message::default()
+            };
+            self.session
+                .append(message)
+                .await
+                .map_err(|source| AgentError::Persist {
+                    kind: "steering message".into(),
+                    source,
+                })?;
+            emit(Event::Notification {
+                kind: Some(inbox::NotificationKind::UserMessage),
+                task_id: String::new(),
+                text,
+                usage: Usage::default(),
+                present: false,
+            });
+        }
+        Ok(())
+    }
+
     /// One provider step, with the two automatic compaction paths around it:
     /// proactive compaction when the estimate crosses the soft trigger, and
     /// one retry after the provider reports a context overflow.
@@ -726,6 +909,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         &self,
         emit: EventSink<'_>,
         state: &mut RunDispatchState,
+        system_context: &str,
         control: &dyn OperationControl,
     ) -> Result<Response, AgentError> {
         if let Some(error) = stopped_provider_error(control) {
@@ -746,7 +930,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             self.emit_provider_api_call(emit, operation_id, std::time::Duration::ZERO, &settlement);
             return Err(AgentError::Provider(error));
         }
-        let (mut request, mut estimate) = self.build_normal_provider_request(state);
+        let (mut request, mut estimate) = self.build_normal_provider_request(state, system_context);
         let triggers = automatic_compaction_triggers(&self.options.compaction);
 
         if let Some((soft_trigger, hard_trigger)) = triggers
@@ -791,7 +975,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         if let Some(error) = stopped_provider_error(control) {
                             return Err(AgentError::Provider(error));
                         }
-                        (request, estimate) = self.build_normal_provider_request(state);
+                        (request, estimate) =
+                            self.build_normal_provider_request(state, system_context);
                         if estimate > hard_trigger {
                             return Err(automatic_dispatch_error(
                                 AUTOMATIC_COMPACTION_STILL_TOO_LARGE_MESSAGE,
@@ -851,7 +1036,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(AgentError::Provider(error));
         }
 
-        let (retry_request, retry_estimate) = self.build_normal_provider_request(state);
+        let (retry_request, retry_estimate) =
+            self.build_normal_provider_request(state, system_context);
         if let Some((_, hard_trigger)) = automatic_compaction_triggers(&self.options.compaction)
             && retry_estimate > hard_trigger
         {
@@ -877,7 +1063,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     ///
     /// The messages are clones, so the overlay substitution and the memory
     /// message never reach the session.
-    fn build_normal_provider_request(&self, state: &RunDispatchState) -> (Request, i64) {
+    fn build_normal_provider_request(
+        &self,
+        state: &RunDispatchState,
+        system_context: &str,
+    ) -> (Request, i64) {
         let mut messages = self.session.model_messages();
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
         if !state.memory_context.is_empty() {
@@ -896,7 +1086,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
         let request = Request {
             model: self.options.model.clone(),
-            system_prompt: self.options.system_prompt.clone(),
+            system_prompt: append_system_context(&self.options.system_prompt, system_context),
             thinking: self.options.thinking.clone(),
             messages,
             tools: self.tools.definitions(),
@@ -1151,6 +1341,16 @@ fn boundary_unchanged(
     // same check.
     let serialized = serde_json::to_string(definitions).unwrap_or_default();
     redactor.redact_string(&serialized) == serialized
+}
+
+fn append_system_context(system_prompt: &str, system_context: &str) -> String {
+    if system_context.is_empty() {
+        system_prompt.to_owned()
+    } else if system_prompt.is_empty() {
+        system_context.to_owned()
+    } else {
+        format!("{system_prompt}\n\n{system_context}")
+    }
 }
 
 fn quote_go(value: &str) -> String {

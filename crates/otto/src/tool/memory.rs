@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::result::{capped_text_result, decode_strict_json};
 use super::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
+use crate::memory::advice::Advisor;
 use crate::memory::{
     CandidateAction, ErrorKind, Origin, ProposeRequest, Provenance, RecordRef, Scope,
     SearchRequest, Service,
@@ -157,15 +158,25 @@ impl Tool for MemorySearchTool {
 /// Proposes a record for human review.
 pub struct RememberTool {
     service: Arc<Service>,
-    default_scope: Scope,
+    user_scope: Scope,
+    workspace_scope: Scope,
+    advisor: Option<Arc<Advisor>>,
 }
 
 impl RememberTool {
-    pub fn new(service: Arc<Service>, default_scope: Scope) -> Self {
+    pub fn new(service: Arc<Service>, user_scope: Scope, workspace_scope: Scope) -> Self {
         Self {
             service,
-            default_scope,
+            user_scope,
+            workspace_scope,
+            advisor: None,
         }
+    }
+
+    /// Adds advisory review hints to the candidates this tool queues.
+    pub fn with_advisor(mut self, advisor: Option<Arc<Advisor>>) -> Self {
+        self.advisor = advisor;
+        self
     }
 }
 
@@ -178,6 +189,8 @@ struct RememberArgs {
     key: String,
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    scope: String,
     #[serde(default)]
     labels: Vec<String>,
     #[serde(default)]
@@ -202,6 +215,7 @@ pub fn remember_definition() -> ToolDefinition {
                 "kind": {"type": "string", "description": "Record category, e.g. preference, instruction, fact"},
                 "key": {"type": "string", "description": "Stable key for updating this record later"},
                 "text": {"type": "string", "description": "Text to remember"},
+                "scope": {"type": "string", "enum": ["user", "workspace"], "description": "user applies in every workspace and is for how the user wants the agent to work (working habits, communication preferences); workspace (default) is for this project only. For an update, use the scope of the target record as returned by memory_search. A user-scope preference or instruction needs a key"},
                 "labels": {"type": "array", "items": {"type": "string"}},
                 "confidence": {"type": "number", "description": "Confidence from 0 to 1"},
                 "reason": {"type": "string", "description": "Why this should be remembered"},
@@ -227,14 +241,23 @@ impl Tool for RememberTool {
         if cancel.is_cancelled() {
             return error_result(CONTEXT_CANCELED);
         }
+        let scope = match args.scope.as_str() {
+            "" | "workspace" => self.workspace_scope.clone(),
+            "user" => self.user_scope.clone(),
+            other => {
+                return error_result(format!(
+                    "invalid scope {other:?}: use \"user\" or \"workspace\""
+                ));
+            }
+        };
         let action = if args.target_id.is_empty() {
             CandidateAction::Create
         } else {
             CandidateAction::Update
         };
-        proposal_result(self.service.propose(&ProposeRequest {
+        let request = ProposeRequest {
             action,
-            scope: self.default_scope.clone(),
+            scope,
             kind: args.kind,
             key: args.key,
             text: args.text,
@@ -248,7 +271,18 @@ impl Tool for RememberTool {
                 ..Provenance::default()
             },
             ..ProposeRequest::default()
-        }))
+        };
+        let Some(advisor) = &self.advisor else {
+            return proposal_result(self.service.propose(&request));
+        };
+        match advisor
+            .propose(&self.service, &self.user_scope, vec![request], cancel)
+            .await
+            .and_then(|mut results| results.pop())
+        {
+            Some(result) => proposal_result(result),
+            None => error_result(CONTEXT_CANCELED),
+        }
     }
 }
 
@@ -361,8 +395,8 @@ mod tests {
     use super::*;
     use crate::memory::turso::testsupport::open_temp;
     use crate::memory::{
-        CandidateRef, CandidateState, NAMESPACE_USER, RememberRequest, ReviewDecision,
-        ReviewRequest, decide_default_policy,
+        CandidateRef, CandidateState, NAMESPACE_USER, NAMESPACE_WORKSPACE, RememberRequest,
+        ReviewDecision, ReviewRequest, decide_default_policy,
     };
     use crate::tool::testutil::{MAX_OUTPUT_BYTES, run};
 
@@ -376,6 +410,14 @@ mod tests {
 
     fn scope() -> Scope {
         Scope::new(NAMESPACE_USER, "user-1")
+    }
+
+    fn workspace_scope() -> Scope {
+        Scope::new(NAMESPACE_WORKSPACE, "ws-1")
+    }
+
+    fn remember_tool(service: &Arc<Service>) -> RememberTool {
+        RememberTool::new(Arc::clone(service), scope(), workspace_scope())
     }
 
     fn remember_record(service: &Service, key: &str, text: &str) -> String {
@@ -577,7 +619,7 @@ mod tests {
     #[tokio::test]
     async fn remember_queues_a_create_candidate_for_human_review() {
         let (_directory, service) = service();
-        let tool = RememberTool::new(Arc::clone(&service), scope());
+        let tool = remember_tool(&service);
 
         let result = run(&tool, r#"{"kind":"preference","text":"likes dark mode"}"#).await;
         assert!(!result.is_error, "{result:?}");
@@ -590,13 +632,13 @@ mod tests {
 
         let candidate = service
             .get_candidate(&CandidateRef {
-                scope: scope(),
+                scope: workspace_scope(),
                 id: candidate_id(&result.content),
             })
             .expect("the candidate is stored");
         assert_eq!(candidate.action, CandidateAction::Create);
         assert_eq!(candidate.state, CandidateState::Pending);
-        assert_eq!(candidate.proposed.scope, scope());
+        assert_eq!(candidate.proposed.scope, workspace_scope());
         assert_eq!(candidate.proposed.text, "likes dark mode");
         assert_eq!(candidate.proposed.source.origin, Some(Origin::Model));
     }
@@ -605,10 +647,10 @@ mod tests {
     async fn remember_queues_an_update_candidate_when_a_target_id_is_given() {
         let (_directory, service) = service();
         let target = remember_record(&service, "editor", "prefers vim");
-        let tool = RememberTool::new(Arc::clone(&service), scope());
+        let tool = remember_tool(&service);
 
         let arguments = format!(
-            r#"{{"kind":"preference","text":"prefers neovim","target_id":"{target}","base_revision":1}}"#
+            r#"{{"kind":"preference","scope":"user","text":"prefers neovim","target_id":"{target}","base_revision":1}}"#
         );
         let result = run(&tool, &arguments).await;
         assert!(!result.is_error, "{result:?}");
@@ -625,9 +667,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remember_scope_selects_the_user_or_workspace_scope() {
+        let (_directory, service) = service();
+        let tool = remember_tool(&service);
+
+        let user = run(
+            &tool,
+            r#"{"kind":"preference","key":"tests","text":"run tests first","scope":"user"}"#,
+        )
+        .await;
+        assert!(!user.is_error, "{user:?}");
+        let candidate = service
+            .get_candidate(&CandidateRef {
+                scope: scope(),
+                id: candidate_id(&user.content),
+            })
+            .expect("the candidate is in the user scope");
+        assert_eq!(candidate.proposed.scope, scope());
+
+        let omitted = run(&tool, r#"{"kind":"fact","text":"uses cargo"}"#).await;
+        assert!(!omitted.is_error, "{omitted:?}");
+        let candidate = service
+            .get_candidate(&CandidateRef {
+                scope: workspace_scope(),
+                id: candidate_id(&omitted.content),
+            })
+            .expect("the candidate is in the workspace scope");
+        assert_eq!(candidate.proposed.scope, workspace_scope());
+    }
+
+    #[tokio::test]
+    async fn remember_rejects_an_unknown_scope_and_queues_nothing() {
+        let (_directory, service) = service();
+        let tool = remember_tool(&service);
+
+        let result = run(&tool, r#"{"kind":"fact","text":"x","scope":"bogus"}"#).await;
+        assert!(result.is_error, "{result:?}");
+        assert!(result.content.contains("bogus"), "{result:?}");
+        let listed = service
+            .search(&SearchRequest {
+                scopes: vec![scope(), workspace_scope()],
+                include_candidates: true,
+                limit: 10,
+                token_budget: 1000,
+                now: Utc::now(),
+                ..SearchRequest::default()
+            })
+            .expect("search");
+        assert!(listed.candidates.is_empty(), "{listed:?}");
+    }
+
+    #[tokio::test]
+    async fn remember_surfaces_the_key_rule_for_a_user_preference() {
+        let (_directory, service) = service();
+        let tool = remember_tool(&service);
+
+        let result = run(
+            &tool,
+            r#"{"kind":"preference","text":"run tests first","scope":"user"}"#,
+        )
+        .await;
+        assert!(result.is_error, "{result:?}");
+        assert!(result.content.contains("needs a key"), "{result:?}");
+    }
+
+    #[tokio::test]
     async fn remember_requires_a_kind_and_a_text() {
         let (_directory, service) = service();
-        let tool = RememberTool::new(service, scope());
+        let tool = remember_tool(&service);
 
         let result = run(&tool, r#"{"kind":"preference"}"#).await;
         assert!(result.is_error, "{result:?}");
@@ -684,5 +791,104 @@ mod tests {
             result.content,
             "scope is not one of the scopes this session is bound to"
         );
+    }
+
+    use crate::memory::advice::{self, Advisor, Answer, Backend, Exchange, Question};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Answers every question the same way and counts its calls.
+    struct Counting(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Backend for Counting {
+        fn model(&self) -> String {
+            "gpt-test".into()
+        }
+
+        fn auxiliary(&self) -> bool {
+            false
+        }
+
+        async fn ask(&self, _state: &str, _questions: &[Question], _limit: Duration) -> Exchange {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let answer = |choice: &str| Answer {
+                choice: choice.to_owned(),
+                probability: None,
+            };
+            Exchange {
+                request: "request".into(),
+                response: None,
+                result: Ok(HashMap::from([
+                    ("scope".to_owned(), answer("all_workspaces")),
+                    ("durable".to_owned(), answer("yes")),
+                ])),
+            }
+        }
+    }
+
+    fn advised_tool(service: &Arc<Service>) -> (RememberTool, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let advisor = Advisor::new(Box::new(Counting(Arc::clone(&calls))), None);
+        (
+            remember_tool(service).with_advisor(Some(Arc::new(advisor))),
+            calls,
+        )
+    }
+
+    #[tokio::test]
+    async fn remember_with_an_advisor_queues_the_candidate_with_an_advice_line() {
+        let (_directory, service) = service();
+        let (tool, calls) = advised_tool(&service);
+
+        let result = run(&tool, r#"{"kind":"preference","text":"likes dark mode"}"#).await;
+        assert!(!result.is_error, "{result:?}");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let candidate = service
+            .get_candidate(&CandidateRef {
+                scope: workspace_scope(),
+                id: candidate_id(&result.content),
+            })
+            .expect("the candidate is stored");
+        assert_eq!(candidate.state, CandidateState::Pending);
+        assert_eq!(candidate.proposed.scope, workspace_scope());
+        assert_eq!(
+            advice::advice_line(&candidate.proposed).as_deref(),
+            Some(
+                "Advice (session model gpt-test): all workspaces (proposed: workspace) · new · durable"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn remember_with_an_advisor_asks_no_model_for_a_proposal_the_service_refuses() {
+        let (_directory, service) = service();
+        let (tool, calls) = advised_tool(&service);
+
+        let result = run(&tool, r#"{"kind":"preference","text":""}"#).await;
+
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn remember_with_an_advisor_returns_context_canceled_when_canceled_during_advice() {
+        let (_directory, service) = service();
+        let (tool, _) = advised_tool(&service);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = tool
+            .execute(
+                &RawValue::from_string(r#"{"kind":"preference","text":"likes dark mode"}"#.into())
+                    .expect("raw"),
+                &cancel,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, CONTEXT_CANCELED);
     }
 }

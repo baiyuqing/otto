@@ -1163,6 +1163,9 @@ pub struct Builder {
     /// or the configured stable id (`workspace_memory_scope`). The service
     /// itself and the user scope are process-wide and live on `Shared`.
     pub workspace_scope: crate::memory::Scope,
+    /// Host grants and the HTTP client of the `web_fetch` and `web_search`
+    /// tools, shared by every runner built for this workspace.
+    pub web: Arc<crate::tool::web::Runtime>,
     /// The resolved `[mcp]` configuration. `connect_mcp` reads this at
     /// `build_runner` time; the servers themselves are not connected until
     /// then.
@@ -1199,8 +1202,10 @@ impl Builder {
     ) -> Builder {
         let sandbox_secrets = shared.sandbox_secrets_baseline.clone();
         let sandbox_secrets_complete = shared.sandbox_secrets_baseline_complete;
+        let web = crate::tool::web::Runtime::new(&shared.config.web.allow_hosts);
         Builder {
             shared,
+            web,
             workspace,
             workspace_path,
             command_executor: None,
@@ -1330,6 +1335,7 @@ impl Builder {
         let mut definitions: Vec<ToolDefinition> = self
             .builtin_file_tools(max_output)
             .iter()
+            .chain(self.web_tools(max_output, &[]).iter())
             .map(|tool| tool.definition())
             .collect();
         definitions.extend(self.boundary_memory_definitions(max_output));
@@ -1457,6 +1463,24 @@ impl Builder {
         ]
     }
 
+    /// The web tools: `web_fetch`, and `web_search` when the search key is in
+    /// the environment. `secrets` are values a URL or query may not contain.
+    pub(crate) fn web_tools(
+        &self,
+        max_output: usize,
+        secrets: &[String],
+    ) -> Vec<Box<dyn Tool + Send + Sync>> {
+        crate::tool::web::tools(
+            &self.web,
+            max_output,
+            self.planned_sandbox_info().network == SandboxNetwork::Denied,
+            secrets,
+            self.environment
+                .get(crate::tool::web::SEARCH_KEY_ENV)
+                .map(String::as_str),
+        )
+    }
+
     /// Composes one runnable agent.
     ///
     /// This convenience entry point preserves the command/server behavior of
@@ -1574,6 +1598,7 @@ impl Builder {
                 .attach_approvals(&self.approvals, &self.workspace_path, roots)?;
         }
         let mut tools = self.builtin_file_tools(max_output);
+        tools.extend(self.web_tools(max_output, &redaction_values));
         if self.bash_configured() {
             let executor = self
                 .command_executor
@@ -2448,6 +2473,7 @@ mod tests {
                 "ls",
                 "write",
                 "edit",
+                "web_fetch",
                 "list_models",
                 "agent",
                 "agent_wait",

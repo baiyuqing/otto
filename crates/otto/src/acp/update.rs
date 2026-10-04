@@ -20,7 +20,8 @@ pub fn tool_kind(tool_name: &str) -> ToolKind {
         "bash" => ToolKind::Execute,
         "read" => ToolKind::Read,
         "write" | "edit" => ToolKind::Edit,
-        "ls" | "find" | "grep" | "memory_search" => ToolKind::Search,
+        "ls" | "find" | "grep" | "memory_search" | "web_search" => ToolKind::Search,
+        "web_fetch" => ToolKind::Fetch,
         _ => ToolKind::Other,
     }
 }
@@ -32,6 +33,8 @@ pub fn tool_title(tool_name: &str, raw_input: &Value) -> String {
         "bash" => "command",
         "read" | "write" | "edit" | "ls" => "path",
         "find" | "grep" => "pattern",
+        "web_fetch" => "url",
+        "web_search" => "query",
         _ => return tool_name.to_string(),
     };
     match raw_input.get(key).and_then(Value::as_str) {
@@ -224,7 +227,14 @@ mod tests {
                 "search",
                 "memory_search",
             ),
-            ("web_fetch", r#"{"url":"u"}"#, "other", "web_fetch"),
+            (
+                "web_fetch",
+                r#"{"url":"https://example.com/a"}"#,
+                "fetch",
+                "https://example.com/a",
+            ),
+            ("web_search", r#"{"query":"rust"}"#, "search", "rust"),
+            ("mystery_tool", r#"{"url":"u"}"#, "other", "mystery_tool"),
         ];
         for (name, arguments, kind, title) in cases {
             let update = to_json(&event_update(&local_wire(&started(name, arguments))).unwrap());

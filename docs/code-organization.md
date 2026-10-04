@@ -112,6 +112,7 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 | Active-task guidance and model follow-ups | `otto-core/src/agent/steering.rs`, `app/task_control.rs`, `tool/task_control.rs` | [Design and TODO](specs/2026-10-04-active-task-guidance.md), runtime tool/prompt wiring, HTTP/ACP and connector routing |
 | Per-turn chat channel context | `app/channel.rs`, then ACP prompt parsing | Core per-run system context, HTTP turn queue, `client/`, and `connect/` |
 | Reflection commands and background notices | `app/auto_reflection.rs`, `reflection/` | HTTP reflection routes, ACP commands, and chat updates |
+| Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | [Design](specs/2026-10-04-web-fetch.md), `cli/runtime_builder.rs` (`web_tools`), `reflection/taint.rs` |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
 | Web API or browser behavior | `crates/otto/src/server/` or `ui/` | `crates/otto-web/` for shared browser wire codecs |
 | ACP integrations | `crates/otto/src/acp/` | `client/` for attach mode; `connect/` for chat connector behavior |

@@ -265,6 +265,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `OTTO_API_KEY` | Fallback API key, used when the selected profile's `api_key_env` variable is empty. |
 | `OTTO_UI` | Frontend mode (`auto`, `tui`, `repl`); overridden by `--ui`. |
 | `OTTO_STARTUP_TRACE` | `1`, `true`, `yes`, or `on` prints a startup timing breakdown to stderr (see [troubleshooting](#a-session-takes-too-long-to-start)). |
+| `OTTO_SEARCH_API_KEY` | Brave Search API key. When set, the `web_search` tool is available; see [web tools](#web-tools). |
 | `<api_key_env>` | The variable named by the selected profile's `api_key_env`. Its value wins over `OTTO_API_KEY`. |
 
 API keys are environment variables only. There is no `--api-key` flag, and keys
@@ -1339,6 +1340,59 @@ added to the conversation before the user message, as a context entry
 `[scheduled s7, due ...]`, so a follow-up question can refer to it. For a chat
 this is the session the chat uses at that time; for the terminal and the web
 UI it is the session that created the item.
+
+### Web tools
+
+`web_fetch` reads one web page and returns its text; `web_search` returns a
+ranked list of titles, URLs and snippets. Both run inside the Otto process, not
+in the `bash` sandbox, so they work on Linux and without `bash`.
+
+`web_fetch` takes `url` and optional `offset` and `limit` (characters). It
+sends an HTTP GET with no cookies or credentials. HTML becomes Markdown with
+scripts, styles and navigation removed, and links made absolute; JSON and other
+text types are returned as text; images, PDFs and other binary types are an
+error. A page is cut at 2 MiB of download and at the output cap; the result
+header then gives the `offset` to continue from. Each call fetches the page
+again. Pages that need JavaScript return only what the server sent.
+
+`web_search` takes `query` and an optional `count` (1 to 20, default 8). It
+uses Brave Search and is available only when `OTTO_SEARCH_API_KEY` is set in
+the environment; without it the tool is not offered. The key is sent only in a
+request header and is never placed in config, results or approval text.
+
+What the tools refuse:
+
+- Only `http` and `https` URLs without embedded credentials. Loopback,
+  private, link-local (including `169.254.169.254`), carrier-grade NAT,
+  multicast and other non-public addresses are blocked, both for literal IPs
+  and for names that resolve to them, and Otto ignores proxy environment
+  variables for these requests.
+- Everything when `[sandbox].network = "deny"`. A `/sandbox network allow`
+  takes effect when the runner is rebuilt by the reload.
+- URLs and queries that contain a configured secret or text shaped like a
+  credential (API keys, tokens, private keys). This is a best-effort check.
+- Redirects to a different host, and from `https` to `http`. The result names
+  the target; the model has to ask for it with a new call, which is approved
+  on its own. Redirects within the same host are followed, up to five.
+
+Approval is per host. The first call to a host that is not already allowed
+raises an approval request showing the host and the full URL; approving it lets
+later calls reach that host until Otto restarts. To allow hosts permanently,
+list them in the config file:
+
+```toml
+[web]
+allow_hosts = ["docs.rs", "doc.rust-lang.org"]
+```
+
+Entries are bare host names and match exactly (no wildcards or subdomains).
+Sub-agents and scheduled runs use the same approvals; requests from a sub-agent
+are decided by you, not by the parent agent.
+
+Web content is untrusted. Results begin with a notice saying so, and
+`/reflect` never shows `web_fetch` or `web_search` results to the reflection
+model or cites them as evidence. A page can still try to steer the model;
+review approval requests for unfamiliar hosts.
 
 ### `list_models`
 

@@ -50,6 +50,10 @@ futures-util = { version = "=0.3.34", default-features = false }
 # otto-core only parses TOML (config loading is resolution-only there); the
 # native crate adds "display" for Save's serialization.
 toml = { version = "=1.1.6", default-features = false, features = ["parse", "serde", "std"] }
+# Native-only HTML to Markdown conversion for the `web_fetch` tool.
+htmd = "=0.5.5"
+# Native-only legacy charset decoding (GBK, Shift_JIS, windows-1252) for fetched pages.
+encoding_rs = "=0.8.35"
 # WHATWG URL parsing for base_url validation, mirroring net/url's checks.
 url = "=2.5.8"
 # HTTP routing for `otto serve`. hyper and tower arrive transitively at the

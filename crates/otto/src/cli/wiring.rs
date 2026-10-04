@@ -655,6 +655,7 @@ impl Builder {
         skills: &skill::Catalog,
     ) -> Result<Vec<Box<dyn Tool + Send + Sync>>, BuildError> {
         let mut tools = self.builtin_file_tools(max_output);
+        tools.extend(self.web_tools(max_output, redaction_values));
         if self.bash_configured() {
             let executor = self
                 .command_executor

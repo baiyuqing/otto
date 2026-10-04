@@ -67,8 +67,19 @@ loop, tools, and frontends must never reach a store directly: use the
 `Service`'s bound accessors or the `Controller` memory facade. Per-turn recall
 and explicit management (`memory_search`/`remember`/`forget` tools,
 `/memory`/`/remember` in the REPL, and `otto memory status|forget`) are wired
-end to end via `[memory]` TOML config. Model- and human-originated writes
-always land as pending candidates requiring review. `reflection` proposes candidates
+end to end via `[memory]` TOML config. Model-originated writes always land as
+pending candidates requiring review; human `/remember` and `/memory forget`
+apply immediately. Recall renders two groups (`otto-core`'s
+`render_memory_context`): the standing set (active user-scope
+`preference`/`instruction` records with a key, flagged by the retriever's
+baseline query) under `STANDING_CONTEXT_PREAMBLE`, then the query matches under
+the untrusted `MEMORY_CONTEXT_PREAMBLE`. The standing set has its own token
+budget, `MAX_STANDING_TOKENS`; `Service::remember` and an accept in
+`Service::review` reject a write that would exceed it, and validation rejects a
+keyless user-scope `preference`/`instruction` create. On each session open
+`Controller::notify_memory_state` queues one notice for pending candidates and
+one for standing records left out over the budget.
+`reflection` proposes candidates
 on `/reflect` and, by default, in the background after a completed turn with
 at least ten distinct successful tool operations or a compaction
 (`app::auto_reflection`); `Binding.Observe` and durability (backup/restore/verify) remain unwired. `/memory review` lists pending

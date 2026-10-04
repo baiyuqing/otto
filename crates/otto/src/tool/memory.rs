@@ -134,14 +134,16 @@ impl Tool for MemorySearchTool {
 /// Proposes a record for human review.
 pub struct RememberTool {
     service: Arc<Service>,
-    default_scope: Scope,
+    user_scope: Scope,
+    workspace_scope: Scope,
 }
 
 impl RememberTool {
-    pub fn new(service: Arc<Service>, default_scope: Scope) -> Self {
+    pub fn new(service: Arc<Service>, user_scope: Scope, workspace_scope: Scope) -> Self {
         Self {
             service,
-            default_scope,
+            user_scope,
+            workspace_scope,
         }
     }
 }
@@ -155,6 +157,8 @@ struct RememberArgs {
     key: String,
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    scope: String,
     #[serde(default)]
     labels: Vec<String>,
     #[serde(default)]
@@ -179,6 +183,7 @@ pub fn remember_definition() -> ToolDefinition {
                 "kind": {"type": "string", "description": "Record category, e.g. preference, instruction, fact"},
                 "key": {"type": "string", "description": "Stable key for updating this record later"},
                 "text": {"type": "string", "description": "Text to remember"},
+                "scope": {"type": "string", "enum": ["user", "workspace"], "description": "user applies in every workspace and is for how the user wants the agent to work (working habits, communication preferences); workspace (default) is for this project only. For an update, use the scope of the target record as returned by memory_search. A user-scope preference or instruction needs a key"},
                 "labels": {"type": "array", "items": {"type": "string"}},
                 "confidence": {"type": "number", "description": "Confidence from 0 to 1"},
                 "reason": {"type": "string", "description": "Why this should be remembered"},
@@ -204,6 +209,15 @@ impl Tool for RememberTool {
         if cancel.is_cancelled() {
             return error_result(CONTEXT_CANCELED);
         }
+        let scope = match args.scope.as_str() {
+            "" | "workspace" => self.workspace_scope.clone(),
+            "user" => self.user_scope.clone(),
+            other => {
+                return error_result(format!(
+                    "invalid scope {other:?}: use \"user\" or \"workspace\""
+                ));
+            }
+        };
         let action = if args.target_id.is_empty() {
             CandidateAction::Create
         } else {
@@ -211,7 +225,7 @@ impl Tool for RememberTool {
         };
         proposal_result(self.service.propose(&ProposeRequest {
             action,
-            scope: self.default_scope.clone(),
+            scope,
             kind: args.kind,
             key: args.key,
             text: args.text,
@@ -338,7 +352,8 @@ mod tests {
     use super::*;
     use crate::memory::turso::testsupport::open_temp;
     use crate::memory::{
-        CandidateRef, CandidateState, NAMESPACE_USER, RememberRequest, decide_default_policy,
+        CandidateRef, CandidateState, NAMESPACE_USER, NAMESPACE_WORKSPACE, RememberRequest,
+        decide_default_policy,
     };
     use crate::tool::testutil::{MAX_OUTPUT_BYTES, run};
 
@@ -352,6 +367,14 @@ mod tests {
 
     fn scope() -> Scope {
         Scope::new(NAMESPACE_USER, "user-1")
+    }
+
+    fn workspace_scope() -> Scope {
+        Scope::new(NAMESPACE_WORKSPACE, "ws-1")
+    }
+
+    fn remember_tool(service: &Arc<Service>) -> RememberTool {
+        RememberTool::new(Arc::clone(service), scope(), workspace_scope())
     }
 
     fn remember_record(service: &Service, key: &str, text: &str) -> String {
@@ -436,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn remember_queues_a_create_candidate_for_human_review() {
         let (_directory, service) = service();
-        let tool = RememberTool::new(Arc::clone(&service), scope());
+        let tool = remember_tool(&service);
 
         let result = run(&tool, r#"{"kind":"preference","text":"likes dark mode"}"#).await;
         assert!(!result.is_error, "{result:?}");
@@ -449,13 +472,13 @@ mod tests {
 
         let candidate = service
             .get_candidate(&CandidateRef {
-                scope: scope(),
+                scope: workspace_scope(),
                 id: candidate_id(&result.content),
             })
             .expect("the candidate is stored");
         assert_eq!(candidate.action, CandidateAction::Create);
         assert_eq!(candidate.state, CandidateState::Pending);
-        assert_eq!(candidate.proposed.scope, scope());
+        assert_eq!(candidate.proposed.scope, workspace_scope());
         assert_eq!(candidate.proposed.text, "likes dark mode");
         assert_eq!(candidate.proposed.source.origin, Some(Origin::Model));
     }
@@ -464,10 +487,10 @@ mod tests {
     async fn remember_queues_an_update_candidate_when_a_target_id_is_given() {
         let (_directory, service) = service();
         let target = remember_record(&service, "editor", "prefers vim");
-        let tool = RememberTool::new(Arc::clone(&service), scope());
+        let tool = remember_tool(&service);
 
         let arguments = format!(
-            r#"{{"kind":"preference","text":"prefers neovim","target_id":"{target}","base_revision":1}}"#
+            r#"{{"kind":"preference","scope":"user","text":"prefers neovim","target_id":"{target}","base_revision":1}}"#
         );
         let result = run(&tool, &arguments).await;
         assert!(!result.is_error, "{result:?}");
@@ -484,9 +507,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remember_scope_selects_the_user_or_workspace_scope() {
+        let (_directory, service) = service();
+        let tool = remember_tool(&service);
+
+        let user = run(
+            &tool,
+            r#"{"kind":"preference","key":"tests","text":"run tests first","scope":"user"}"#,
+        )
+        .await;
+        assert!(!user.is_error, "{user:?}");
+        let candidate = service
+            .get_candidate(&CandidateRef {
+                scope: scope(),
+                id: candidate_id(&user.content),
+            })
+            .expect("the candidate is in the user scope");
+        assert_eq!(candidate.proposed.scope, scope());
+
+        let omitted = run(&tool, r#"{"kind":"fact","text":"uses cargo"}"#).await;
+        assert!(!omitted.is_error, "{omitted:?}");
+        let candidate = service
+            .get_candidate(&CandidateRef {
+                scope: workspace_scope(),
+                id: candidate_id(&omitted.content),
+            })
+            .expect("the candidate is in the workspace scope");
+        assert_eq!(candidate.proposed.scope, workspace_scope());
+    }
+
+    #[tokio::test]
+    async fn remember_rejects_an_unknown_scope_and_queues_nothing() {
+        let (_directory, service) = service();
+        let tool = remember_tool(&service);
+
+        let result = run(&tool, r#"{"kind":"fact","text":"x","scope":"bogus"}"#).await;
+        assert!(result.is_error, "{result:?}");
+        assert!(result.content.contains("bogus"), "{result:?}");
+        let listed = service
+            .search(&SearchRequest {
+                scopes: vec![scope(), workspace_scope()],
+                include_candidates: true,
+                limit: 10,
+                token_budget: 1000,
+                now: Utc::now(),
+                ..SearchRequest::default()
+            })
+            .expect("search");
+        assert!(listed.candidates.is_empty(), "{listed:?}");
+    }
+
+    #[tokio::test]
+    async fn remember_surfaces_the_key_rule_for_a_user_preference() {
+        let (_directory, service) = service();
+        let tool = remember_tool(&service);
+
+        let result = run(
+            &tool,
+            r#"{"kind":"preference","text":"run tests first","scope":"user"}"#,
+        )
+        .await;
+        assert!(result.is_error, "{result:?}");
+        assert!(result.content.contains("needs a key"), "{result:?}");
+    }
+
+    #[tokio::test]
     async fn remember_requires_a_kind_and_a_text() {
         let (_directory, service) = service();
-        let tool = RememberTool::new(service, scope());
+        let tool = remember_tool(&service);
 
         let result = run(&tool, r#"{"kind":"preference"}"#).await;
         assert!(result.is_error, "{result:?}");

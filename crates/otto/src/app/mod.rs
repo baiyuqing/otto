@@ -235,7 +235,7 @@ impl Controller {
         runner: Runner,
         info: RuntimeInfo,
     ) -> Self {
-        Self {
+        let controller = Self {
             builder,
             dynamic_content,
             sandbox: None,
@@ -248,6 +248,52 @@ impl Controller {
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
+        };
+        controller.notify_memory_state();
+        controller
+    }
+
+    /// Queues the notices about memory that needs the user's attention:
+    /// pending candidates in the current user and workspace scopes, and
+    /// standing preferences that recall does not inject because the standing
+    /// set is over its budget. Called once per session open: on construction
+    /// and when `commit` installs a replacement session.
+    fn notify_memory_state(&self) {
+        let memory = &self.builder.memory;
+        if !memory.usable {
+            return;
+        }
+        let scopes = [
+            memory.user_scope.clone(),
+            self.builder.workspace_scope.clone(),
+        ];
+        if let Ok(summary) = memory.service.pending_summary(&scopes)
+            && let Some(oldest) = summary.oldest
+        {
+            let line = match summary.count {
+                1 => format!(
+                    "1 memory proposal is pending review (since {}). Run /memory review to accept or reject it.",
+                    oldest.format("%Y-%m-%d")
+                ),
+                count => format!(
+                    "{count} memory proposals are pending review (oldest since {}). Run /memory review to accept or reject them.",
+                    oldest.format("%Y-%m-%d")
+                ),
+            };
+            self.notices.push(line);
+        }
+        if let Ok(usage) = memory.service.standing_usage(&memory.user_scope)
+            && usage.omitted > 0
+        {
+            let budget = usage.budget;
+            self.notices.push(match usage.omitted {
+                1 => format!(
+                    "1 standing preference is not recalled because the standing set is over its {budget}-token budget. Forget one with /memory forget <id>; list them with /memory list --scope user."
+                ),
+                omitted => format!(
+                    "{omitted} standing preferences are not recalled because the standing set is over its {budget}-token budget. Forget some with /memory forget <id>; list them with /memory list --scope user."
+                ),
+            });
         }
     }
 
@@ -1447,6 +1493,7 @@ impl Controller {
         if deferred {
             return Err(CLOSED.to_string());
         }
+        self.notify_memory_state();
         match close_error {
             Some(error) => Err(self.builder.redact_error(&error, None)),
             None => Ok(path),
@@ -1475,7 +1522,7 @@ impl Controller {
     }
 
     fn from_current(builder: Arc<Builder>, current: Current) -> Self {
-        Self {
+        let controller = Self {
             builder,
             dynamic_content: true,
             sandbox: None,
@@ -1488,7 +1535,9 @@ impl Controller {
             auto_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
-        }
+        };
+        controller.notify_memory_state();
+        controller
     }
 }
 
@@ -2837,5 +2886,84 @@ mod tests {
         );
         wake.cancel();
         controller.begin_operation().expect("admit");
+    }
+
+    fn propose_pending(controller: &Controller, key: &str) {
+        let memory = controller.memory_wiring();
+        memory
+            .service
+            .propose(&crate::memory::ProposeRequest {
+                scope: controller.workspace_memory_scope().clone(),
+                kind: "preference".into(),
+                key: key.into(),
+                text: key.into(),
+                reason: "said so".into(),
+                confidence: 0.5,
+                source: crate::memory::Provenance {
+                    origin: Some(crate::memory::Origin::Model),
+                    ..crate::memory::Provenance::default()
+                },
+                ..crate::memory::ProposeRequest::default()
+            })
+            .expect("propose");
+    }
+
+    #[tokio::test]
+    async fn each_session_open_queues_one_pending_memory_notice() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = crate::cli::testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        assert!(controller.take_notices().is_empty(), "nothing is pending");
+        controller.new_session().await.expect("new session");
+        assert!(controller.take_notices().is_empty(), "nothing is pending");
+
+        propose_pending(&controller, "a");
+        assert!(
+            controller.take_notices().is_empty(),
+            "a proposal is not a session open"
+        );
+        propose_pending(&controller, "b");
+        controller.new_session().await.expect("new session");
+        let today = chrono::Utc::now().format("%Y-%m-%d");
+        assert_eq!(
+            controller.take_notices(),
+            vec![format!(
+                "2 memory proposals are pending review (oldest since {today}). Run /memory review to accept or reject them."
+            )]
+        );
+        assert!(controller.take_notices().is_empty(), "queued once");
+
+        controller.close().expect("close");
+        let reopened = crate::cli::testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        assert_eq!(reopened.take_notices().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_open_queues_the_over_budget_standing_notice() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let path = store.path().join("m.db");
+        crate::cli::testutil::seed_over_budget_standing(&path);
+        let controller =
+            crate::cli::testutil::controller_with_memory(workspace.path(), sessions.path(), &path)
+                .await;
+        assert_eq!(
+            controller.take_notices(),
+            vec![
+                "1 standing preference is not recalled because the standing set is over its 2000-token budget. Forget one with /memory forget <id>; list them with /memory list --scope user."
+            ]
+        );
     }
 }

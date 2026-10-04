@@ -663,6 +663,7 @@ fn one_record() -> Vec<Record> {
         kind: "preference".into(),
         key: "editor".into(),
         text: "prefers vim".into(),
+        standing: false,
     }]
 }
 

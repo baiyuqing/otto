@@ -2794,8 +2794,18 @@ and request count. It opens the database read-only.
 
 What's wired:
 
-- Recall before each turn into a request-local, untrusted context block that is
-  never written to Pi session JSONL, compaction summaries, or logs.
+- Recall before each turn into a request-local context block that is never
+  written to Pi session JSONL, compaction summaries, or logs, so compaction
+  does not remove it. The block has two parts:
+  - Standing preferences: every active user-scope `preference` or
+    `instruction` record that has a key, oldest first, under a header that
+    tells the model you approved each one and to follow them unless the
+    current request says otherwise. They are recalled on every turn whatever
+    the message says, and do not count against `max_results` or
+    `recall_tokens`. See [Standing preferences](#standing-preferences).
+  - Other records that match the message text, under a header that marks them
+    untrusted reference material, limited by `max_results` and
+    `recall_tokens`.
 - Agent tools: `memory_search`, `remember`, `forget`.
 - Human commands in both frontends: `/memory list`, `/memory show`, `/memory search`, `/memory forget`,
   `/memory review`, `/memory review <id> accept|reject`, and `/remember`.
@@ -2815,6 +2825,49 @@ scope, action, kind, key, text, reason, confidence, origin), and `/memory review
 or `/memory review <id> reject` decides one. Accepting creates the active record (or applies the
 update or forget); rejecting leaves memory unchanged.
 Human `/remember` and `/memory forget` apply immediately.
+
+When a session opens (start, `/new`, or resume) and the current user and
+workspace scopes hold pending candidates, Otto shows one line, for example
+"2 memory proposals are pending review (oldest since 2026-10-01). Run /memory
+review to accept or reject them." The REPL and the TUI print it before the
+first prompt, and a local `otto acp` session sends it as a notice for that
+session. `GET /v1/sessions/{id}/notices` returns it, but the Web UI and ACP
+connections through `otto serve` (`otto acp --attach` and ACP TCP) start at the
+current notice cursor and do not show it; the chat connector shows pending
+candidates after each turn instead. `otto memory status`
+prints `pending: N` for the same scopes. A candidate stays pending until you
+decide it; it does not expire.
+
+### Standing preferences
+
+A working habit that should apply in every workspace, such as "explain the plan
+before executing a task", belongs in the standing set: user scope, kind
+`preference` or `instruction`, and a key. Standing records are recalled on every
+turn, so they apply even when the message never mentions them. Ways to add one:
+
+- `/remember --scope user --kind preference --key plan-first Explain the plan before executing a task.`
+  writes it immediately.
+- The model's `remember` tool takes `scope: "user"` for a habit that applies in
+  every workspace (the default is the workspace), and reflection proposes
+  `scope: user` for the same kind of habit. Both queue a pending candidate that
+  applies only after you accept it.
+
+A user-scope `preference` or `instruction` without a key is rejected, because
+only keyed records are standing.
+
+The standing set holds at most 2,000 estimated tokens. A `/remember`, or an
+accept in `/memory review`, that would push it past that fails with an error
+that states the tokens used and needed; a rejected accept leaves the candidate
+pending. Forget an existing standing record with `/memory forget <id>`, then
+accept again.
+
+`otto memory status` prints the standing usage, for example `standing: 5
+records, 840/2000 tokens`. Records written before this limit existed can exceed
+it. Recall then injects records oldest first and stops at the first one that
+does not fit, the status line appends
+`, N not injected (over budget)`, and each session open shows one line with the
+number of standing preferences that are not recalled. `/context` shows the
+memory text sent with the previous turn, including the standing records.
 
 ### Reflection
 
@@ -2948,8 +3001,9 @@ checks still apply. `/reflect` is not held back by this cooldown.
 A run that proposed a memory or wrote a skill queues one result line; a run that found
 nothing stays quiet, and a failed run reports its error once. The REPL, TUI, and Web UI
 show these lines. ACP sends new notices as tagged agent message chunks, and the chat
-connector sends them after the active task reply. A connection starts at the current
-notice cursor without replaying older notices. Use `/memory` and `/skill generated` in
+connector sends them after the active task reply. A connection through `otto serve`
+starts at the current notice cursor without replaying older notices; a local
+`otto acp` session also sends the lines queued when the session opened. Use `/memory` and `/skill generated` in
 chat to inspect pending proposals and generated skills.
 
 Not yet implemented:

@@ -29,7 +29,15 @@ pub const MAX_PROVENANCE_MESSAGE_IDS: usize = 32;
 pub const MAX_QUERY_BYTES: usize = 8 * 1024;
 pub const MAX_FTS_TERMS: usize = 64;
 pub const MAX_FTS_TERM_BYTES: usize = 256;
-pub const MAX_BASELINE_RECORDS: usize = 16;
+/// The token budget of the standing set: active, unexpired, user-scope
+/// `preference` and `instruction` records with a key. Recall injects the whole
+/// set outside the per-turn limit and budget, and a write that would push the
+/// set over this budget is rejected. Not configurable.
+pub const MAX_STANDING_TOKENS: usize = 2000;
+/// A row cap on the recall query for the standing set. Every record costs at
+/// least one token, so only legacy data written past [`MAX_STANDING_TOKENS`]
+/// can reach it, and [`StandingUsage::omitted`] counts what it cuts.
+pub const STANDING_ROW_GUARD: usize = 128;
 pub const MAX_RETRIEVAL_CANDIDATES: usize = 256;
 pub const MAX_CANDIDATE_SCAN: usize = 500;
 pub const MAX_REQUEST_SCOPES: usize = 16;
@@ -511,10 +519,26 @@ pub struct RetrievalRequest {
     pub estimate_tokens: Option<TokenEstimator>,
 }
 
+/// How much of the standing token budget one user scope uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StandingUsage {
+    /// Records in the standing set.
+    pub records: usize,
+    /// Tokens of the records recall injects, oldest first.
+    pub tokens: usize,
+    pub budget: usize,
+    /// Records in the set that recall does not inject because they do not fit
+    /// in `budget`. Non-zero only for data written before the budget existed.
+    pub omitted: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct RetrievalMatch {
     pub record: Record,
     pub rank: usize,
+    /// True when the record is in the standing set, including a workspace
+    /// record that replaced its user-scope twin by key.
+    pub standing: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -666,6 +690,8 @@ pub struct RecallRequest {
 #[derive(Debug, Clone, Default)]
 pub struct RecallResult {
     pub records: Vec<Record>,
+    /// IDs of the entries in `records` the store selected from its standing set.
+    pub standing: std::collections::BTreeSet<String>,
     pub used_tokens: usize,
 }
 

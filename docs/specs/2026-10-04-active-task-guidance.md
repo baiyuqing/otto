@@ -75,6 +75,16 @@ Store delivered model follow-ups as `Role::Context` with `agent_followup` source
 not manufactured user requests. Do not add a self-steering tool to the ordinary
 task model; it can revise its plan directly or guide children with `agent_send`.
 
+ACP/server hold the logical follow-up scope across their existing approval
+callbacks. Direct terminal prompt calls return to the frontend when approval is
+needed and have no continuous approval callback. They must not run follow-ups
+ahead of approval: if such a call ends awaiting approval, clear its remaining
+model follow-ups with a persisted, visible notice that they were not run and
+must be resubmitted after approval. Preserve the existing terminal approval
+flow; continuous terminal follow-up resumption is outside this first chat/ACP
+delivery. State this boundary in the tool contract rather than hiding it behind
+a configuration switch. Denial also clears remaining model follow-ups.
+
 ## Scope
 
 Add `/steer <guidance>` and `/queue <prompt>` to ACP and Telegram/Feishu,

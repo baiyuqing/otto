@@ -38,7 +38,7 @@ Last updated: 2026-10-04. No implementation gate has passed yet.
 - [ ] **In progress — protocol owner:** ACP local/attach/TCP operations and
   capability negotiation; optional
   `/steer` and `/queue` commands with bounded local follow-up admission.
-- [ ] **In progress — connector owner:** immediate natural-message routing and
+- [x] **Connector implemented and focused-tested:** immediate natural-message routing and
   explicit commands; reply
   isolation, queue limits, session generation, and old-agent fallback.
 - [ ] Telegram shortcut entries, user manual, and relevant navigation docs.
@@ -55,6 +55,8 @@ test/command and result here; static inspection does not count as runtime proof.
   behavior, stale control dialogue, and no approval bypass.
 - [ ] Model-originated follow-up provenance, execution order, no automatic loop
   beyond the budget, and cleanup across approval/cancellation.
+- [ ] Direct terminal prompt pending-approval boundary: no early execution or
+  silent follow-up loss; persisted visible notice and accurate tool contract.
 - [ ] Capability instructions and callable schemas in real requests after history
   compaction, restored session, and approval retry; disabled capabilities absent.
 - [ ] Default configuration exposes tools, persistent capability instructions,
@@ -77,9 +79,15 @@ test/command and result here; static inspection does not count as runtime proof.
 - Core owner: `cargo check -p otto-core --target wasm32-unknown-unknown` passed.
 - Core owner: formatting of its three modified files passed. Whole-workspace
   formatting and the full gates are pending while other files are being edited.
+- Connector owner: `go test ./internal/agent` and focused bridge routing tests
+  passed (guidance/follow-up, unsupported capability, error/null responses,
+  queue bounds, late control reply after stop, approval preservation). Full
+  Go race and actual Otto/connector end-to-end gates are pending.
 
 ## Deferred
 
 Structured ACP plans/usage, fork/resume/pagination, durable queued-task recovery,
 and changes to ordinary TUI input semantics are outside this first delivery.
 Existing task notifications/reminders retain their persistent Inbox behavior.
+Continuous follow-up resumption across direct CLI/TUI approval prompts is also
+deferred; those callers must report and clear follow-ups that cannot run yet.

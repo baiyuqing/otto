@@ -786,6 +786,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_config_is_refused_through_a_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        std::fs::write(root.path().join(".git/config"), "old\n").unwrap();
+        std::os::unix::fs::symlink(".git/config", root.path().join("link")).unwrap();
+        let workspace = workspace(root.path());
+        let tool = EditTool::new(&workspace);
+
+        for path in [".git/config", ".GIT/config", "link"] {
+            let result = run(
+                &tool,
+                &format!(r#"{{"path":"{path}","old_text":"old","new_text":"new"}}"#),
+            )
+            .await;
+            assert!(
+                result.is_error && result.content.contains("read-only"),
+                "{path}: {result:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".git/config")).unwrap(),
+            "old\n"
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_fields_and_missing_arguments_are_rejected() {
         let (root, _) = sample("same\n");
         let workspace = workspace(root.path());

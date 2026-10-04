@@ -495,23 +495,43 @@ impl Tool for McpCallTool {
         )
     }
 
+    fn approval_spec(
+        &self,
+        arguments: &RawValue,
+    ) -> Result<Option<super::ApprovalSpec>, ToolResult> {
+        let (tool, raw) = self.resolve(arguments)?;
+        tool.approval_spec(&raw)
+    }
+
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
-        let args: CallArgs = match serde_json::from_str(arguments.get()) {
-            Ok(args) => args,
-            Err(error) => {
-                return error_result(format!("mcp_call_tool: invalid arguments: {error}"))
-                    .not_started();
-            }
-        };
+        match self.resolve(arguments) {
+            Ok((tool, raw)) => tool.execute(&raw, cancel).await,
+            Err(result) => result,
+        }
+    }
+}
+
+impl McpCallTool {
+    /// Resolves the selected catalog entry into the concrete [`McpTool`] and its
+    /// inner arguments. Approval and execution both go through this, so the
+    /// call that is approved is the call that runs.
+    fn resolve(&self, arguments: &RawValue) -> Result<(McpTool, Box<RawValue>), ToolResult> {
+        let args: CallArgs = serde_json::from_str(arguments.get()).map_err(|error| {
+            error_result(format!("mcp_call_tool: invalid arguments: {error}")).not_started()
+        })?;
         let Some(entry) = self.catalog.get(&args.tool) else {
-            return error_result(format!("mcp_call_tool: unknown MCP tool {:?}", args.tool))
-                .not_started();
+            return Err(
+                error_result(format!("mcp_call_tool: unknown MCP tool {:?}", args.tool))
+                    .not_started(),
+            );
         };
         let call_args = args
             .arguments
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         if !call_args.is_object() {
-            return error_result("mcp_call_tool: arguments must be a JSON object").not_started();
+            return Err(
+                error_result("mcp_call_tool: arguments must be a JSON object").not_started(),
+            );
         }
         let tool = McpTool::new(
             Arc::clone(&entry.server),
@@ -522,9 +542,10 @@ impl Tool for McpCallTool {
             entry.bearer.clone(),
         );
         let raw = RawValue::from_string(call_args.to_string()).expect("JSON value is valid");
-        tool.execute(&raw, cancel).await
+        Ok((tool, raw))
     }
 }
+
 /// Skips, with one warning each, a tool whose prefixed name would exceed
 /// [`MAX_TOOL_NAME_BYTES`], and both tools of a same-name collision after
 /// sanitizing.
@@ -716,6 +737,50 @@ mod tests {
             !result.content.contains("notion-fetch"),
             "{}",
             result.content
+        );
+    }
+
+    #[test]
+    fn router_call_requires_approval_for_the_inner_tool() {
+        let server = FakeServer::new("notion", ok(text_outcome("page contents")));
+        let mut entry = catalog_entry(server.clone() as Arc<dyn ToolServer>, info("notion-fetch"));
+        entry.secrets = vec!["sk-secret-value".to_owned()];
+        let tools = router_tools(vec![entry], 1024);
+        let call = tools
+            .iter()
+            .find(|tool| tool.definition().name == "mcp_call_tool")
+            .expect("call tool");
+        let raw = |text: &str| RawValue::from_string(text.to_owned()).unwrap();
+
+        let spec = call
+            .approval_spec(&raw(
+                r#"{"tool":"mcp__notion__notion-fetch","arguments":{"id":"page-1"}}"#,
+            ))
+            .unwrap()
+            .expect("router call needs approval");
+        assert_eq!(spec.source, "mcp");
+        assert_eq!(spec.title, "Authorize mcp__notion__notion-fetch?");
+        assert_eq!(spec.version, crate::approval::digest(r#"{"id":"page-1"}"#));
+        assert!(
+            server.seen.lock().unwrap().is_none(),
+            "approval must not call the tool"
+        );
+
+        let unknown = call
+            .approval_spec(&raw(r#"{"tool":"mcp__notion__nope"}"#))
+            .err()
+            .expect("unknown tool");
+        assert!(unknown.content.contains("unknown MCP tool"), "{unknown:?}");
+
+        let leaking = call
+            .approval_spec(&raw(
+                r#"{"tool":"mcp__notion__notion-fetch","arguments":{"id":"sk-secret-value"}}"#,
+            ))
+            .err()
+            .expect("credential in arguments");
+        assert!(
+            leaking.content.contains("expose credentials"),
+            "{leaking:?}"
         );
     }
 

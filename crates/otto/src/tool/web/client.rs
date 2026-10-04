@@ -38,7 +38,10 @@ pub(super) struct Page {
 pub(super) enum Response {
     Page(Page),
     /// The server redirected to a different host. Nothing was requested from it.
-    CrossHostRedirect { to: Url, status: u16 },
+    CrossHostRedirect {
+        to: Url,
+        status: u16,
+    },
 }
 
 /// The shared client. The `reqwest` client is built on first use, because
@@ -297,14 +300,19 @@ mod tests {
         .await;
         let client = client();
         let cancel = CancellationToken::new();
-        let first = client.get(url(&server, "/"), "text/plain", &[], &cancel).await;
+        let first = client
+            .get(url(&server, "/"), "text/plain", &[], &cancel)
+            .await;
         let Ok(Response::Page(page)) = first else {
             panic!("{first:?}")
         };
         assert_eq!(page.status, 200);
         assert_eq!(page.body, b"hello");
         assert_eq!(page.content_type, "text/plain");
-        client.get(url(&server, "/"), "text/plain", &[], &cancel).await.unwrap();
+        client
+            .get(url(&server, "/"), "text/plain", &[], &cancel)
+            .await
+            .unwrap();
         let requests = server.requests.lock().unwrap();
         let second = requests[1].to_ascii_lowercase();
         assert!(second.starts_with("get / http/1.1"), "{second}");
@@ -329,8 +337,7 @@ mod tests {
         .await;
         let client = client();
         let cancel = CancellationToken::new();
-        let Ok(Response::Page(page)) =
-            client.get(url(&server, "/a"), "*/*", &[], &cancel).await
+        let Ok(Response::Page(page)) = client.get(url(&server, "/a"), "*/*", &[], &cancel).await
         else {
             panic!("expected a page")
         };
@@ -346,7 +353,11 @@ mod tests {
     #[tokio::test]
     async fn a_cross_host_redirect_is_reported_and_not_followed() {
         let server = serve(Arc::new(|_| {
-            response("301 Moved", &[("Location", "https://other.example/x?q=1")], b"")
+            response(
+                "301 Moved",
+                &[("Location", "https://other.example/x?q=1")],
+                b"",
+            )
         }))
         .await;
         let client = client();
@@ -386,15 +397,27 @@ mod tests {
         let u = |text: &str| Url::parse(text).unwrap();
         let origin = Some("secure.example".to_string());
         assert!(matches!(
-            redirect_step(&u("https://secure.example/a"), &u("https://secure.example/b"), &origin),
+            redirect_step(
+                &u("https://secure.example/a"),
+                &u("https://secure.example/b"),
+                &origin
+            ),
             Ok(Step::Follow)
         ));
         assert!(matches!(
-            redirect_step(&u("http://secure.example/a"), &u("https://secure.example/b"), &origin),
+            redirect_step(
+                &u("http://secure.example/a"),
+                &u("https://secure.example/b"),
+                &origin
+            ),
             Ok(Step::Follow)
         ));
         assert!(matches!(
-            redirect_step(&u("https://secure.example/a"), &u("https://other.example/b"), &origin),
+            redirect_step(
+                &u("https://secure.example/a"),
+                &u("https://other.example/b"),
+                &origin
+            ),
             Ok(Step::CrossHost)
         ));
         let error = redirect_step(
@@ -404,7 +427,10 @@ mod tests {
         )
         .err()
         .expect("downgrade is refused");
-        assert!(error.contains("https to http") && !error.contains("token"), "{error}");
+        assert!(
+            error.contains("https to http") && !error.contains("token"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

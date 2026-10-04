@@ -2627,7 +2627,7 @@ mod tests {
             .await
             .expect("runner");
         let names = tool_names(&runner);
-        assert_eq!(names.iter().position(|name| name == "bash"), Some(6));
+        assert_eq!(names.iter().position(|name| name == "bash"), Some(7));
     }
 
     #[tokio::test]
@@ -2764,7 +2764,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, web_fetch, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");

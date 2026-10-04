@@ -30,9 +30,15 @@ pub(super) fn classify(content_type: &str) -> Kind {
     match essence.as_str() {
         "" => Kind::Text,
         "text/html" | "application/xhtml+xml" => Kind::Html,
-        "application/json" | "application/xml" | "application/javascript"
-        | "application/x-ndjson" | "application/yaml" | "application/x-yaml"
-        | "application/toml" | "application/rss+xml" | "application/atom+xml" => Kind::Text,
+        "application/json"
+        | "application/xml"
+        | "application/javascript"
+        | "application/x-ndjson"
+        | "application/yaml"
+        | "application/x-yaml"
+        | "application/toml"
+        | "application/rss+xml"
+        | "application/atom+xml" => Kind::Text,
         other if other.starts_with("text/") => Kind::Text,
         other if other.ends_with("+json") || other.ends_with("+xml") => Kind::Text,
         _ => Kind::Unsupported,
@@ -211,7 +217,12 @@ mod tests {
         assert_eq!(classify("application/json"), Kind::Text);
         assert_eq!(classify("application/ld+json"), Kind::Text);
         assert_eq!(classify(""), Kind::Text);
-        for binary in ["image/png", "application/pdf", "application/octet-stream", "application/zip"] {
+        for binary in [
+            "image/png",
+            "application/pdf",
+            "application/octet-stream",
+            "application/zip",
+        ] {
             assert_eq!(classify(binary), Kind::Unsupported, "{binary}");
         }
     }
@@ -239,7 +250,10 @@ mod tests {
         assert!(!text.contains("noise"), "{text}");
         let article = "<body><p>outside</p><article><p>inside</p></article></body>";
         let text = html_to_markdown(article);
-        assert!(text.contains("inside") && !text.contains("outside"), "{text}");
+        assert!(
+            text.contains("inside") && !text.contains("outside"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -325,7 +325,13 @@ impl Tool for WebFetch {
             ));
         }
         let accept = "text/html, text/markdown, text/plain, application/json;q=0.9, */*;q=0.1";
-        let page = match self.shared.runtime.client.get(url.clone(), accept, &[], cancel).await {
+        let page = match self
+            .shared
+            .runtime
+            .client
+            .get(url.clone(), accept, &[], cancel)
+            .await
+        {
             Ok(Response::Page(page)) => page,
             Ok(Response::CrossHostRedirect { to, status }) => {
                 return error_result(format!(
@@ -375,7 +381,10 @@ impl Tool for WebFetch {
         };
 
         let max_bytes = self.shared.max_output.saturating_sub(HEADER_BUDGET).max(1);
-        let max_chars = args.limit.filter(|limit| *limit > 0).unwrap_or(DEFAULT_PAGE_CHARS);
+        let max_chars = args
+            .limit
+            .filter(|limit| *limit > 0)
+            .unwrap_or(DEFAULT_PAGE_CHARS);
         let (body, next, total) =
             extract::window(&text, args.offset.unwrap_or(0), max_chars, max_bytes);
 
@@ -383,7 +392,11 @@ impl Tool for WebFetch {
             "URL: {}\nStatus: {} · {} · {} characters",
             client::redacted(&page.final_url),
             page.status,
-            if page.content_type.is_empty() { "unknown type" } else { &page.content_type },
+            if page.content_type.is_empty() {
+                "unknown type"
+            } else {
+                &page.content_type
+            },
             total
         );
         if let Some(next) = next {
@@ -393,7 +406,8 @@ impl Tool for WebFetch {
             header.push_str(" · the page exceeded the download limit and was cut");
         }
         if html && scripts && total < SPARSE_CHARS {
-            header.push_str("\nNote: little text was found; the page may be rendered by JavaScript.");
+            header
+                .push_str("\nNote: little text was found; the page may be rendered by JavaScript.");
         }
         text_result(format!("{header}\n{UNTRUSTED}\n\n{body}"))
     }
@@ -451,7 +465,11 @@ impl WebSearch {
             )));
         }
         self.shared.preflight(SEARCH_NAME, &query)?;
-        let count = args.count.filter(|c| *c > 0).unwrap_or(DEFAULT_RESULTS).min(MAX_RESULTS);
+        let count = args
+            .count
+            .filter(|c| *c > 0)
+            .unwrap_or(DEFAULT_RESULTS)
+            .min(MAX_RESULTS);
         Ok((query, count))
     }
 }
@@ -521,7 +539,10 @@ impl Tool for WebSearch {
             Err(error) => return error_result(format!("web_search: {error}")),
         };
         if page.status >= 400 {
-            return error_result(format!("web_search: the search service returned HTTP {}", page.status));
+            return error_result(format!(
+                "web_search: the search service returned HTTP {}",
+                page.status
+            ));
         }
         match search::parse_hits(&page.body) {
             Ok(hits) => text_result(format!(

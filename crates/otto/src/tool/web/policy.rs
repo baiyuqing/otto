@@ -138,7 +138,10 @@ fn public_v6(ip: Ipv6Addr) -> bool {
 /// A resolution function: host name and port to socket addresses. A trait
 /// object so tests can substitute a deterministic answer for DNS.
 pub(super) type Lookup = Arc<
-    dyn Fn(String, u16) -> std::pin::Pin<
+    dyn Fn(
+            String,
+            u16,
+        ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>,
         > + Send
         + Sync,
@@ -304,7 +307,10 @@ mod tests {
             ("https://user@example.com/", "credentials"),
             ("http://127.0.0.1/", "not a public address"),
             ("http://[::1]/", "not a public address"),
-            ("http://169.254.169.254/latest/meta-data", "not a public address"),
+            (
+                "http://169.254.169.254/latest/meta-data",
+                "not a public address",
+            ),
             ("http://[::ffff:10.0.0.1]/", "not a public address"),
             ("http://2130706433/", "not a public address"),
             ("http://0x7f.1/", "not a public address"),
@@ -356,7 +362,10 @@ mod tests {
                 .resolve_public("internal.example", 80)
                 .await
                 .expect_err("private answers are refused");
-            assert!(error.to_string().contains("not a public address"), "{error}");
+            assert!(
+                error.to_string().contains("not a public address"),
+                "{error}"
+            );
         }
     }
 
@@ -368,7 +377,11 @@ mod tests {
         let lookup: Lookup = Arc::new(move |_host, port| {
             let call = counter.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
-                let answer = if call == 0 { "93.184.216.34" } else { "127.0.0.1" };
+                let answer = if call == 0 {
+                    "93.184.216.34"
+                } else {
+                    "127.0.0.1"
+                };
                 Ok(vec![SocketAddr::new(ip(answer), port)])
             })
         });
@@ -380,6 +393,11 @@ mod tests {
     #[tokio::test]
     async fn resolver_rejects_an_empty_answer() {
         let resolver = PublicResolver::with_lookup(fixed(&[]));
-        assert!(resolver.resolve_public("nothing.example", 80).await.is_err());
+        assert!(
+            resolver
+                .resolve_public("nothing.example", 80)
+                .await
+                .is_err()
+        );
     }
 }

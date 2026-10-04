@@ -162,9 +162,15 @@ mod tests {
         let pairs: Vec<_> = url.query_pairs().into_owned().collect();
         assert_eq!(
             pairs,
-            vec![("q".into(), "rust & go?".into()), ("count".into(), "5".into())]
+            vec![
+                ("q".into(), "rust & go?".into()),
+                ("count".into(), "5".into())
+            ]
         );
-        assert!(!url.as_str().contains("k="), "the key is a header, not a parameter");
+        assert!(
+            !url.as_str().contains("k="),
+            "the key is a header, not a parameter"
+        );
     }
 
     #[test]
@@ -191,7 +197,10 @@ mod tests {
             ]
         );
         let text = format_hits("rust", &hits);
-        assert!(text.contains("1. The Rust Book\n   https://doc.rust-lang.org/book/"), "{text}");
+        assert!(
+            text.contains("1. The Rust Book\n   https://doc.rust-lang.org/book/"),
+            "{text}"
+        );
         assert!(text.contains("2. No snippet"), "{text}");
     }
 

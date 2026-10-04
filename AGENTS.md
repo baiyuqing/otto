@@ -33,6 +33,8 @@ Apply these requirements to every feature, fix, and refactor:
 
 ## Change rules
 
+- Ship requested features enabled by default; do not add default-off gates or require an extra enable step.
+- After implementation and required verification, open a PR without asking for confirmation again.
 - Use a dedicated Git worktree at `.worktree/<name>` under the primary checkout (never a sibling directory) and a development branch for every feature or bug fix; never implement directly on `main`.
 - If a design or spec is needed, get explicit approval before writing production code or tests. After approval, implement and verify the agreed scope without repeated confirmation; ask only for material scope or contract changes.
 - Track multi-step work in a plan file at `.worktree/<name>.plan.md`, next to its worktree. The path is ignored by Git, so the file is never committed. Record the problem, each decision the user confirmed with its date, the done and open items, the known limitations, and any follow-up work that was agreed. Update the file whenever an item is finished or a decision is made, so the state survives a lost or compacted conversation.

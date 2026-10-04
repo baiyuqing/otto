@@ -23,6 +23,7 @@ pub mod approval;
 pub mod approval_control;
 pub mod auto_reflection;
 pub mod channel;
+pub(crate) mod task_control;
 
 /// Fixed, content-free frontend notice for a successful memory proposal.
 pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
@@ -338,6 +339,20 @@ impl Controller {
             controller: self,
             generation: state.generation,
         })
+    }
+
+    pub(crate) fn begin_runner_operation(&self, runner: &Runner) -> Result<Admission<'_>, String> {
+        let admission = self.begin_operation()?;
+        let current = self.lock();
+        let is_current = current
+            .current
+            .as_ref()
+            .is_some_and(|current| std::ptr::eq(current.runner.as_ref(), runner));
+        drop(current);
+        if !is_current {
+            return Err("the active session changed before the task resumed".into());
+        }
+        Ok(admission)
     }
 
     fn release(&self, generation: u64) {
@@ -721,12 +736,108 @@ impl Controller {
     ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
+        let task_run = runner
+            .task_control()
+            .begin(&runner.session().header().id, &runner.redact_text(text))
+            .map_err(AgentError::Other)?;
+        self.run_prompt_step(&runner, text, system_context, &mut *emit, cancel)
+            .await?;
+        self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
+            .await
+    }
+
+    /// One prompt step inside an already-admitted logical turn. Approval
+    /// retries call this without opening a second follow-up scope.
+    pub(crate) async fn run_prompt_step(
+        &self,
+        runner: &Runner,
+        text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
         let observation = auto_reflection::RunObservation::default();
         let result = runner
             .run_with_system_context(
                 text,
                 system_context,
-                &mut auto_reflection::observing_prompt(emit, &observation),
+                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
+                cancel,
+            )
+            .await;
+        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
+        result
+    }
+
+    async fn run_followups_held(
+        &self,
+        runner: &Runner,
+        task_run: &task_control::Run,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        while let Some(text) = task_run.next_followup() {
+            if self.pending_approval().is_some() {
+                task_run.clear_followups();
+                self.record_skipped_followup(runner, emit).await?;
+                return Ok(());
+            }
+            task_run.set_current_task(&text);
+            self.run_followup_step(runner, &text, system_context, &mut *emit, cancel)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn record_skipped_followup(
+        &self,
+        runner: &Runner,
+        emit: EventSink<'_>,
+    ) -> Result<(), AgentError> {
+        let text = "An agent-scheduled follow-up was not run because this terminal turn ended while approval is pending. Retry it after resolving the approval.";
+        runner
+            .session()
+            .append(Message {
+                role: otto_core::model::Role::Context,
+                blocks: vec![Block::text(text)],
+                created_at: chrono::Utc::now(),
+                context_type: "agent_followup".into(),
+                display: true,
+                ..Message::default()
+            })
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        emit(otto_core::agent::Event::Notification {
+            kind: Some(NotificationKind::TaskReport),
+            task_id: "agent_followup".into(),
+            text: text.into(),
+            usage: Usage::default(),
+            present: false,
+        });
+        Ok(())
+    }
+
+    async fn run_followup_step(
+        &self,
+        runner: &Runner,
+        text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        emit(otto_core::agent::Event::TextDelta {
+            text: "\n\n".into(),
+        });
+        let observation = auto_reflection::RunObservation::default();
+        let result = runner
+            .run_followup_with_system_context(
+                text,
+                system_context,
+                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
                 cancel,
             )
             .await;
@@ -755,18 +866,24 @@ impl Controller {
     ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
+        let task_run = runner
+            .task_control()
+            .begin(&runner.session().header().id, &runner.redact_text(text))
+            .map_err(AgentError::Other)?;
         let observation = auto_reflection::RunObservation::default();
         let result = runner
             .run_with_image_system_context(
                 text,
                 image,
                 system_context,
-                &mut auto_reflection::observing_prompt(emit, &observation),
+                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
                 cancel,
             )
             .await;
         self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
-        result
+        result?;
+        self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
+            .await
     }
 
     pub async fn compact(
@@ -1194,6 +1311,62 @@ impl Controller {
         tasks::task_view(state.current.as_ref()?.runner.as_ref())
     }
 
+    /// Accepts guidance for the exact active run, at its next safe provider
+    /// boundary. The acceptance is transient and never wakes a later run.
+    pub fn steer(&self, text: &str) -> Result<(), String> {
+        let text = task_control::checked_text(text)?;
+        if self.pending_approval().is_some() {
+            return Err("the task is waiting for approval; guidance is not accepted yet".into());
+        }
+        let runner = self.runner()?;
+        let ticket = runner
+            .steering()
+            .ticket()
+            .ok_or_else(|| "there is no active task accepting guidance".to_string())?;
+        let session_id = runner.session().header().id.clone();
+        runner.task_control().steer(&session_id, ticket, text)
+    }
+
+    /// Routes natural input during an active turn through a restricted control
+    /// dialogue. `None` means the caller should handle it as a normal prompt.
+    pub async fn control_message_with_channel(
+        &self,
+        text: &str,
+        channel: Option<Channel>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<approval_control::ControlReply>, String> {
+        if let Some(reply) = self
+            .approval_message_with_channel(text, channel, cancel)
+            .await?
+        {
+            return Ok(Some(reply));
+        }
+        let runner = self.runner()?;
+        let Some(ticket) = runner.steering().ticket() else {
+            return Ok(None);
+        };
+        let _serial = tokio::select! {
+            guard = self.approval_control.lock() => guard,
+            () = cancel.cancelled() => return Err("context canceled".into()),
+            () = self.auto_cancel.cancelled() => return Err(CLOSED.into()),
+        };
+        if self.pending_approval().is_some() {
+            drop(_serial);
+            return self
+                .approval_message_with_channel(text, channel, cancel)
+                .await;
+        }
+        let is_current = self
+            .lock()
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.runner, &runner));
+        if !is_current || runner.steering().ticket() != Some(ticket) {
+            return Ok(None);
+        }
+        task_control::control_message(self, &runner, text, channel, ticket, cancel).await
+    }
+
     /// The current runner's timer registry, or `None` when the timer tools
     /// are not registered or the controller is closed. `/timers` lists it and
     /// [`Self::archive_current_session`] clears it.
@@ -1299,6 +1472,14 @@ impl Controller {
     /// Only `read_paths` and `network` are offered: an `allow_env` change
     /// cannot be reloaded into a running process at all.
     pub async fn amend_sandbox(&self, change: SandboxChange) -> Result<SandboxInfo, String> {
+        let _admission = self.begin_operation()?;
+        self.amend_sandbox_with_admission(change).await
+    }
+
+    async fn amend_sandbox_with_admission(
+        &self,
+        change: SandboxChange,
+    ) -> Result<SandboxInfo, String> {
         let control = {
             let state = self.lock();
             if state.closed {
@@ -1307,9 +1488,6 @@ impl Controller {
             let Some(control) = self.sandbox.clone() else {
                 return Err(SANDBOX_RELOAD_UNAVAILABLE.to_string());
             };
-            if state.busy {
-                return Err(PROMPT_ACTIVE.to_string());
-            }
             control
         };
         let path = self.builder.config_path.clone();
@@ -1327,14 +1505,10 @@ impl Controller {
         }
     }
 
-    /// The current session id, once no turn is running.
-    fn idle_session_id(&self) -> Result<String, String> {
+    fn admitted_session_id(&self) -> Result<String, String> {
         let state = self.lock();
         if state.closed {
             return Err(CLOSED.to_string());
-        }
-        if state.busy {
-            return Err(PROMPT_ACTIVE.to_string());
         }
         Ok(state
             .current
@@ -1361,44 +1535,63 @@ impl Controller {
 
     /// Applies an approved sandbox read grant or approves one elevated command.
     pub async fn approve_tool(&self, id: &str) -> Result<String, String> {
-        let session_id = self.idle_session_id()?;
+        let _admission = self.begin_operation()?;
+        let session_id = self.admitted_session_id()?;
+        self.approve_tool_for_session(&session_id, id).await
+    }
+
+    pub(crate) async fn approve_tool_for_session(
+        &self,
+        session_id: &str,
+        id: &str,
+    ) -> Result<String, String> {
         let approvals = self.bash_approvals()?;
         let _decision = approvals.decision.lock().await;
         let path = approvals
-            .pending_read_path(&session_id, id)
+            .pending_read_path(session_id, id)
             .ok_or_else(|| "approval request not found".to_string())?;
         if path.is_empty() {
-            return self.approve_bash(id);
+            return self.approve_bash_for_session(session_id, id);
         }
         // A symlink must still resolve to the path the user reviewed.
         if self.resolve_sandbox_read_path(&path)? != path {
             return Err("sandbox read path changed; request approval again".to_string());
         }
-        self.amend_sandbox(SandboxChange::AllowReadPath(path))
+        self.amend_sandbox_with_admission(SandboxChange::AllowReadPath(path))
             .await?;
-        approvals.approve(&session_id, id).map_err(str::to_string)?;
+        approvals.approve(session_id, id).map_err(str::to_string)?;
         Ok(format!(
             "The user approved {id} for persistent sandbox read access. Retry the same Bash call inside the sandbox now."
         ))
     }
 
     pub fn deny_tool(&self, id: &str) -> Result<(), String> {
-        let session_id = self.idle_session_id()?;
-        self.bash_approvals()?.discard(&session_id, id);
+        let _admission = self.begin_operation()?;
+        let session_id = self.admitted_session_id()?;
+        self.deny_tool_for_session(&session_id, id)
+    }
+
+    pub(crate) fn deny_tool_for_session(&self, session_id: &str, id: &str) -> Result<(), String> {
+        self.bash_approvals()?.discard(session_id, id);
         Ok(())
     }
 
     /// Grants one pending elevated Bash command for the current session.
     pub fn approve_bash(&self, id: &str) -> Result<String, String> {
-        let session_id = self.idle_session_id()?;
+        let _admission = self.begin_operation()?;
+        let session_id = self.admitted_session_id()?;
+        self.approve_bash_for_session(&session_id, id)
+    }
+
+    fn approve_bash_for_session(&self, session_id: &str, id: &str) -> Result<String, String> {
         let approvals = self.bash_approvals()?;
         if approvals
-            .pending_read_path(&session_id, id)
+            .pending_read_path(session_id, id)
             .is_some_and(|path| !path.is_empty())
         {
             return Err("this request requires sandbox read approval".to_string());
         }
-        approvals.approve(&session_id, id).map_err(str::to_string)?;
+        approvals.approve(session_id, id).map_err(str::to_string)?;
         Ok(format!(
             "The user approved {id} for one exact command. Retry the same elevated Bash command now."
         ))
@@ -1408,26 +1601,35 @@ impl Controller {
     /// pending command once. Nothing is written when the command is not a
     /// single program invocation.
     pub async fn approve_bash_always(&self, id: &str) -> Result<String, String> {
-        let session_id = self.idle_session_id()?;
+        let _admission = self.begin_operation()?;
+        let session_id = self.admitted_session_id()?;
+        self.approve_bash_always_for_session(&session_id, id).await
+    }
+
+    async fn approve_bash_always_for_session(
+        &self,
+        session_id: &str,
+        id: &str,
+    ) -> Result<String, String> {
         let approvals = self.bash_approvals()?;
         if approvals
-            .pending_read_path(&session_id, id)
+            .pending_read_path(session_id, id)
             .is_some_and(|path| !path.is_empty())
         {
-            return self.approve_tool(id).await;
+            return self.approve_tool_for_session(session_id, id).await;
         }
         let _decision = approvals.decision.lock().await;
         let command = approvals
-            .pending_command(&session_id, id)
+            .pending_command(session_id, id)
             .ok_or_else(|| "approval request not found".to_string())?;
         let entry =
             otto_core::config::sandbox::excluded_command_entry(&command).ok_or_else(|| {
                 "the command is not a single program invocation; use /approve <id> instead"
                     .to_string()
             })?;
-        self.amend_sandbox(SandboxChange::ExcludeCommand(entry.clone()))
+        self.amend_sandbox_with_admission(SandboxChange::ExcludeCommand(entry.clone()))
             .await?;
-        approvals.approve(&session_id, id).map_err(str::to_string)?;
+        approvals.approve(session_id, id).map_err(str::to_string)?;
         Ok(format!(
             "The user approved {id} and excluded '{entry}' from the sandbox. Retry the same Bash command now."
         ))
@@ -1815,6 +2017,52 @@ mod tests {
         assert!(!config.contains("excluded_commands"));
         assert!(!approvals.take(&session, "cat fixture"));
         assert!(approvals.take_read_path(&session, "cat fixture", &path));
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_followup_is_discarded_with_a_persisted_notice_when_approval_waits() {
+        use otto_core::session::Session;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let (controller, approvals, _) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let runner = controller.runner().expect("runner");
+        let session_id = runner.session().header().id.clone();
+        let _approval = approvals.request(&session_id, "git push");
+        let task_run = runner
+            .task_control()
+            .begin(&session_id, "initial task")
+            .expect("logical task");
+        runner
+            .task_control()
+            .queue_followup("inspect the pushed branch")
+            .expect("followup");
+        let mut events = Vec::new();
+        controller
+            .run_followups_held(
+                &runner,
+                &task_run,
+                "",
+                &mut |event| events.push(event),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("record skip");
+
+        let notice = runner
+            .session()
+            .messages()
+            .into_iter()
+            .find(|message| message.context_type == "agent_followup")
+            .expect("persisted source-labelled notice");
+        assert_eq!(notice.role, otto_core::model::Role::Context);
+        assert!(notice.display);
+        assert!(notice.text().contains("approval is pending"));
+        assert!(
+            matches!(events.as_slice(), [otto_core::agent::Event::Notification { text, .. }] if text == &notice.text())
+        );
+        assert!(task_run.next_followup().is_none());
     }
 
     #[tokio::test]

@@ -15,9 +15,9 @@
 //!
 //! Concurrency: the read loop handles `initialize` and `session/cancel`
 //! inline and runs every other method as a task, so a long prompt never
-//! blocks reads. A session accepts one prompt at a time; its cancellation
-//! token is installed by the read loop before the prompt task starts, so a
-//! `session/cancel` sent right after `session/prompt` always reaches it.
+//! blocks reads. Ordinary prompts accept one at a time. `/steer` bypasses the
+//! prompt slot, and explicit `/queue` uses a separate bounded FIFO; cancellation
+//! clears pending queue entries and cancels active work.
 //!
 //! Errors: see the table in `docs/specs/2026-10-02-acp-agent-server.md`.
 
@@ -46,7 +46,7 @@ use otto_core::model::Message;
 use otto_core::wire::events::to_wire_compaction;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -62,6 +62,7 @@ const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
 const RESOURCE_NOT_FOUND: i32 = -32002;
+const TASK_CONTROL_UNSUPPORTED: &str = "task control is unavailable on the attached otto serve; upgrade and restart the server to enable it";
 /// `_otto/memory/*`: memory is disabled or not usable in the session.
 const MEMORY_UNAVAILABLE: i32 = -32010;
 /// `_otto/memory/review`: the candidate was already decided or changed.
@@ -93,38 +94,208 @@ fn unknown_session() -> Error {
     error(RESOURCE_NOT_FOUND, "unknown sessionId")
 }
 
+fn task_control_error(failure: crate::client::Error) -> Error {
+    match &failure {
+        crate::client::Error::Http {
+            status: 404, code, ..
+        } if code.is_empty() => error(METHOD_NOT_FOUND, TASK_CONTROL_UNSUPPORTED),
+        _ => error(INTERNAL_ERROR, failure.to_string()),
+    }
+}
+
 fn result<T: serde::Serialize>(value: T) -> Reply {
     Ok(serde_json::to_value(value).expect("ACP result serializes"))
 }
 
-/// The token of a session's running prompt.
+fn queued_outcome_notice(reply: &Reply) -> Option<String> {
+    match reply {
+        Ok(value) if value["stopReason"] == "cancelled" => Some(
+            "Queued follow-up canceled. Any effects completed before cancellation remain."
+                .to_string(),
+        ),
+        Err(failure) => {
+            let message = serde_json::to_value(failure)
+                .ok()
+                .and_then(|value| value["message"].as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown error".to_string());
+            Some(format!("Queued follow-up failed: {message}"))
+        }
+        _ => None,
+    }
+}
+
+/// Session-local prompt admission, explicit queue, and attached-turn handles.
+const ACP_QUEUE_LIMIT: usize = 16;
+
+struct QueuedPrompt {
+    text: String,
+    channel: Option<Channel>,
+}
+
 #[derive(Default)]
-struct PromptSlot(Mutex<Option<CancellationToken>>);
+struct PromptState {
+    active: Option<CancellationToken>,
+    queue: std::collections::VecDeque<QueuedPrompt>,
+    draining: bool,
+    followups: HashMap<u64, CancellationToken>,
+    next_followup: u64,
+    next_followup_admission: u64,
+}
+
+#[derive(Default)]
+struct PromptSlot {
+    state: Mutex<PromptState>,
+    changed: Notify,
+    followup_changed: Notify,
+}
 
 impl PromptSlot {
-    /// Installs the token of a new prompt; `None` while one is running.
+    /// Installs a normal prompt only when no prompt or explicit queue is active.
     fn begin(&self, parent: &CancellationToken) -> Option<CancellationToken> {
-        let mut slot = self.0.lock().expect("prompt slot");
-        if slot.is_some() {
+        let mut state = self.state.lock().expect("prompt slot");
+        if state.active.is_some() || state.draining || !state.followups.is_empty() {
             return None;
         }
         let token = parent.child_token();
-        *slot = Some(token.clone());
+        state.active = Some(token.clone());
         Some(token)
     }
 
     fn end(&self) {
-        *self.0.lock().expect("prompt slot") = None;
+        self.state.lock().expect("prompt slot").active = None;
+        self.changed.notify_one();
     }
 
-    fn cancel(&self) {
-        if let Some(token) = self.0.lock().expect("prompt slot").as_ref() {
+    fn cancel(&self) -> usize {
+        let mut state = self.state.lock().expect("prompt slot");
+        let dropped = state.queue.len();
+        state.queue.clear();
+        if let Some(token) = state.active.as_ref() {
             token.cancel();
         }
+        for token in state.followups.values() {
+            token.cancel();
+        }
+        self.changed.notify_one();
+        dropped
+    }
+
+    fn active_cancel(&self) -> CancellationToken {
+        self.state
+            .lock()
+            .expect("prompt slot")
+            .active
+            .clone()
+            .unwrap_or_default()
+    }
+
+    fn enqueue(&self, text: String, channel: Option<Channel>) -> Result<bool, &'static str> {
+        let mut state = self.state.lock().expect("prompt slot");
+        if state.queue.len() >= ACP_QUEUE_LIMIT {
+            return Err("queue is full (16 pending prompts)");
+        }
+        state.queue.push_back(QueuedPrompt { text, channel });
+        let start_worker = !state.draining;
+        state.draining = true;
+        drop(state);
+        self.changed.notify_one();
+        Ok(start_worker)
+    }
+
+    async fn drain_queue(self: Arc<Self>, connection: Arc<Connection>, session_id: String) {
+        let stop = connection.task_stop.child_token();
+        loop {
+            let changed = self.changed.notified();
+            let next = {
+                let mut state = self.state.lock().expect("prompt slot");
+                if stop.is_cancelled() {
+                    state.queue.clear();
+                    state.draining = false;
+                    return;
+                }
+                if state.active.is_some() {
+                    None
+                } else if let Some(queued) = state.queue.pop_front() {
+                    let token = stop.child_token();
+                    state.active = Some(token.clone());
+                    Some((queued, token))
+                } else {
+                    state.draining = false;
+                    return;
+                }
+            };
+            let Some((queued, token)) = next else {
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => continue,
+                    () = changed => continue,
+                }
+            };
+            let reply = connection
+                .queued_prompt(&session_id, queued.text, queued.channel, &token)
+                .await;
+            if let Some(notice) = queued_outcome_notice(&reply) {
+                connection.say(&session_id, &notice);
+            }
+            self.end();
+        }
+    }
+
+    fn begin_followup(
+        &self,
+        parent: &CancellationToken,
+    ) -> Result<(u64, CancellationToken), &'static str> {
+        let mut state = self.state.lock().expect("prompt slot");
+        let limit = ACP_QUEUE_LIMIT + if state.active.is_none() { 1 } else { 0 };
+        if state.followups.len() >= limit {
+            return Err("queue is full (16 pending prompts)");
+        }
+        state.next_followup = state.next_followup.wrapping_add(1);
+        if state.next_followup == 1 {
+            state.next_followup_admission = 1;
+        }
+        let id = state.next_followup;
+        let token = parent.child_token();
+        state.followups.insert(id, token.clone());
+        Ok((id, token))
+    }
+
+    async fn wait_followup_admission(&self, id: u64) {
+        loop {
+            let mut changed = Box::pin(self.followup_changed.notified());
+            changed.as_mut().enable();
+            if self
+                .state
+                .lock()
+                .expect("prompt slot")
+                .next_followup_admission
+                == id
+            {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn finish_followup_admission(&self, id: u64) {
+        let mut state = self.state.lock().expect("prompt slot");
+        if state.next_followup_admission == id {
+            state.next_followup_admission = state.next_followup_admission.wrapping_add(1);
+        }
+        drop(state);
+        self.followup_changed.notify_waiters();
+    }
+
+    fn end_followup(&self, id: u64) {
+        self.state
+            .lock()
+            .expect("prompt slot")
+            .followups
+            .remove(&id);
     }
 }
 
-/// One loaded session: its controller and the token of the running prompt.
+/// One loaded session: its controller and ACP task/queue state.
 struct Session {
     controller: Arc<Controller>,
     prompt: Arc<PromptSlot>,
@@ -152,6 +323,7 @@ struct Connection {
     /// Requests sent to the client, by id, waiting for their response frame.
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     next_request_id: AtomicU64,
+    task_stop: CancellationToken,
     notice_stop: CancellationToken,
     watching_notices: Mutex<HashSet<String>>,
     notice_ready: Mutex<HashMap<String, oneshot::Sender<()>>>,
@@ -458,8 +630,8 @@ impl Connection {
         );
     }
 
-    /// Runs one prompt to its stop reason. Local slash commands run here and
-    /// never reach the task model.
+    /// Runs one normal prompt to its stop reason. Local slash commands run
+    /// here and never reach the task model.
     async fn prompt(
         &self,
         session_id: &str,
@@ -478,6 +650,84 @@ impl Connection {
             }
             Backend::Attach(relay) => relay.prompt(self, session_id, &text, channel, cancel).await,
         }
+    }
+
+    /// Runs a queued prompt as normal user text; slash commands inside its
+    /// payload are not recursively interpreted as ACP control commands.
+    async fn queued_prompt(
+        &self,
+        session_id: &str,
+        text: String,
+        channel: Option<Channel>,
+        cancel: &CancellationToken,
+    ) -> Reply {
+        match &self.backend {
+            Backend::Local(local) => {
+                let session = local.session(session_id).ok_or_else(unknown_session)?;
+                self.local_prompt(local, &session, session_id, text, channel, cancel)
+                    .await
+            }
+            Backend::Attach(relay) => relay.prompt(self, session_id, &text, channel, cancel).await,
+        }
+    }
+
+    async fn steer_prompt(&self, session_id: &str, guidance: &str) -> Reply {
+        let accepted = match &self.backend {
+            Backend::Local(local) => match local.session(session_id) {
+                Some(session) => session
+                    .controller
+                    .steer(guidance)
+                    .map_err(|message| error(INTERNAL_ERROR, message)),
+                None => return Err(unknown_session()),
+            },
+            Backend::Attach(relay) => relay
+                .client
+                .steer(session_id, guidance)
+                .await
+                .map_err(|failure| relay.task_control_error(failure))
+                .and_then(|accepted| {
+                    accepted.then_some(()).ok_or_else(|| {
+                        error(INTERNAL_ERROR, "the active task did not accept guidance")
+                    })
+                }),
+        };
+        match accepted {
+            Ok(()) => {
+                self.say(
+                    session_id,
+                    "Guidance accepted for the active task; it will be delivered at the next safe boundary.",
+                );
+                result(PromptResponse::new(StopReason::EndTurn))
+            }
+            Err(failure) => Err(failure),
+        }
+    }
+
+    async fn control_message(
+        &self,
+        session_id: &str,
+        text: &str,
+        channel: Option<Channel>,
+    ) -> Reply {
+        let reply = match &self.backend {
+            Backend::Local(local) => match local.session(session_id) {
+                Some(session) => {
+                    let cancel = session.prompt.active_cancel();
+                    session
+                        .controller
+                        .control_message_with_channel(text, channel, &cancel)
+                        .await
+                        .map_err(|message| error(INTERNAL_ERROR, message))?
+                }
+                None => return Err(unknown_session()),
+            },
+            Backend::Attach(relay) => relay
+                .client
+                .control_message_with_channel(session_id, text, channel)
+                .await
+                .map_err(|failure| relay.task_control_error(failure))?,
+        };
+        result(reply)
     }
 
     async fn run_command(
@@ -562,6 +812,21 @@ impl Connection {
                         self.say(session_id, &text);
                         end_turn()
                     }
+                    command::Command::Steer { guidance } => {
+                        match session.controller.steer(guidance) {
+                            Ok(()) => {
+                                self.say(
+                                    session_id,
+                                    "Guidance accepted for the active task; it will be delivered at the next safe boundary.",
+                                );
+                                end_turn()
+                            }
+                            Err(message) => Err(error(INTERNAL_ERROR, message)),
+                        }
+                    }
+                    command::Command::Queue { .. } => Err(invalid_params(
+                        "nested /queue is not supported; submit a top-level /queue prompt",
+                    )),
                 }
             }
             (Backend::Attach(relay), command) => {
@@ -834,11 +1099,11 @@ fn initialize_result(local: bool) -> Reply {
     let capabilities = match local {
         true => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true}),
+            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true}),
         )])),
         false => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"approvalDialogue":true, "channelContext": true}),
+            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true}),
         )])),
     };
     result(
@@ -890,7 +1155,13 @@ impl Dispatcher {
                     .and_then(|params| params.get("sessionId"))
                     .and_then(Value::as_str);
                 if let Some(slot) = session_id.and_then(|id| self.connection.slot(id)) {
-                    slot.cancel();
+                    let dropped = slot.cancel();
+                    if dropped > 0 {
+                        self.connection.say(
+                            session_id.expect("slot requires session id"),
+                            &format!("Canceled {dropped} queued follow-up prompt(s)."),
+                        );
+                    }
                 }
             }
             (Some(_), None) => {}
@@ -940,6 +1211,69 @@ impl Dispatcher {
                 });
             }
             "session/prompt" => self.start_prompt(id, &params),
+            "_otto/tasks/steer" => {
+                self.tasks.spawn(async move {
+                    #[derive(Deserialize)]
+                    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                    struct Input {
+                        session_id: String,
+                        text: String,
+                    }
+                    let reply = match serde_json::from_value::<Input>(params) {
+                        Err(failure) => Err(invalid_params(failure.to_string())),
+                        Ok(input) if input.text.trim().is_empty() => Err(invalid_params(
+                            "text must contain non-whitespace characters",
+                        )),
+                        Ok(input) if input.text.len() > 32_000 => {
+                            Err(invalid_params("text must be at most 32000 UTF-8 bytes"))
+                        }
+                        Ok(input) => match &connection.backend {
+                            Backend::Local(local) => match local.session(&input.session_id) {
+                                None => Err(unknown_session()),
+                                Some(session) => session
+                                    .controller
+                                    .steer(&input.text)
+                                    .map(|()| json!({"accepted": true}))
+                                    .map_err(|failure| error(INTERNAL_ERROR, failure)),
+                            },
+                            Backend::Attach(relay) => relay
+                                .client
+                                .steer(&input.session_id, &input.text)
+                                .await
+                                .map(|accepted| json!({"accepted": accepted}))
+                                .map_err(|failure| relay.task_control_error(failure)),
+                        },
+                    };
+                    connection.reply(id, reply);
+                });
+            }
+            "_otto/tasks/control" => {
+                self.tasks.spawn(async move {
+                    #[derive(Deserialize)]
+                    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                    struct Input {
+                        session_id: String,
+                        text: String,
+                        #[serde(default)]
+                        channel: Option<Channel>,
+                    }
+                    let reply = match serde_json::from_value::<Input>(params) {
+                        Err(failure) => Err(invalid_params(failure.to_string())),
+                        Ok(input) if input.text.trim().is_empty() => Err(invalid_params(
+                            "text must contain non-whitespace characters",
+                        )),
+                        Ok(input) if input.text.len() > 32_000 => {
+                            Err(invalid_params("text must be at most 32000 UTF-8 bytes"))
+                        }
+                        Ok(input) => {
+                            connection
+                                .control_message(&input.session_id, &input.text, input.channel)
+                                .await
+                        }
+                    };
+                    connection.reply(id, reply);
+                });
+            }
             "_otto/approvals/message" => {
                 self.tasks.spawn(async move {
                     #[derive(Deserialize)]
@@ -956,13 +1290,7 @@ impl Dispatcher {
                             Backend::Local(local) => match local.session(&input.session_id) {
                                 None => Err(unknown_session()),
                                 Some(session) => {
-                                    let cancel = session
-                                        .prompt
-                                        .0
-                                        .lock()
-                                        .expect("prompt slot")
-                                        .clone()
-                                        .unwrap_or_default();
+                                    let cancel = session.prompt.active_cancel();
                                     match session
                                         .controller
                                         .approval_message_with_channel(
@@ -1018,6 +1346,108 @@ impl Dispatcher {
         let Some(slot) = connection.slot(&session_id) else {
             return connection.reply(id, Err(unknown_session()));
         };
+        match command::parse(&text) {
+            Some(command::Command::Steer { guidance }) => {
+                let guidance = guidance.to_string();
+                self.tasks.spawn(async move {
+                    let reply = connection.steer_prompt(&session_id, &guidance).await;
+                    connection.reply(id, reply);
+                });
+                return;
+            }
+            Some(command::Command::Queue { prompt }) => {
+                if prompt.trim().is_empty() {
+                    return connection.reply(
+                        id,
+                        Err(invalid_params("/queue requires a non-empty prompt")),
+                    );
+                }
+                if prompt.len() > 32_000 {
+                    return connection.reply(
+                        id,
+                        Err(invalid_params(
+                            "/queue prompt must be at most 32000 UTF-8 bytes",
+                        )),
+                    );
+                }
+                let prompt = prompt.to_string();
+                match &connection.backend {
+                    Backend::Local(_) => match slot.enqueue(prompt, channel) {
+                        Ok(start_worker) => {
+                            connection.say(
+                                &session_id,
+                                "Follow-up accepted; its answer will arrive as a later session update.",
+                            );
+                            connection.reply(id, result(PromptResponse::new(StopReason::EndTurn)));
+                            if start_worker {
+                                let worker_slot = Arc::clone(&slot);
+                                let worker_connection = Arc::clone(&connection);
+                                let worker_session = session_id.clone();
+                                self.tasks.spawn(async move {
+                                    worker_slot
+                                        .drain_queue(worker_connection, worker_session)
+                                        .await;
+                                });
+                            }
+                        }
+                        Err(message) => connection.reply(id, Err(error(INTERNAL_ERROR, message))),
+                    },
+                    Backend::Attach(_) => {
+                        let Ok((followup_id, token)) = slot.begin_followup(&self.stop) else {
+                            return connection.reply(
+                                id,
+                                Err(error(INTERNAL_ERROR, "queue is full (16 pending prompts)")),
+                            );
+                        };
+                        self.tasks.spawn(async move {
+                            let Backend::Attach(relay) = &connection.backend else {
+                                unreachable!("backend remains attach for this request")
+                            };
+                            slot.wait_followup_admission(followup_id).await;
+                            if token.is_cancelled() {
+                                slot.finish_followup_admission(followup_id);
+                                connection.say(&session_id, "Queued follow-up canceled before it started.");
+                                connection.reply(
+                                    id,
+                                    result(PromptResponse::new(StopReason::EndTurn)),
+                                );
+                                slot.end_followup(followup_id);
+                                return;
+                            }
+                            let started = relay
+                                .start_queued_prompt(&session_id, &prompt, channel)
+                                .await;
+                            match started {
+                                Ok(stream) => {
+                                    connection.say(
+                                        &session_id,
+                                        "Follow-up accepted; its answer will arrive as a later session update.",
+                                    );
+                                    connection.reply(
+                                        id,
+                                        result(PromptResponse::new(StopReason::EndTurn)),
+                                    );
+                                    slot.finish_followup_admission(followup_id);
+                                    let reply = relay
+                                        .stream_turn(&connection, &session_id, stream, &token)
+                                        .await;
+                                    if let Some(notice) = queued_outcome_notice(&reply) {
+                                        connection.say(&session_id, &notice);
+                                    }
+                                }
+                                Err(failure) => {
+                                    connection.reply(id, Err(failure));
+                                    slot.finish_followup_admission(followup_id);
+                                }
+                            }
+                            slot.end_followup(followup_id);
+                        });
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
         let Some(token) = slot.begin(&self.stop) else {
             return connection.reply(
                 id,
@@ -1026,8 +1456,8 @@ impl Dispatcher {
         };
         self.tasks.spawn(async move {
             let reply = connection.prompt(&session_id, text, channel, &token).await;
-            slot.end();
             connection.reply(id, reply);
+            slot.end();
         });
     }
 }
@@ -1122,12 +1552,14 @@ async fn drive<T>(
 ) -> T {
     let (out, frames) = mpsc::unbounded_channel();
     let notice_stop = CancellationToken::new();
+    let task_stop = CancellationToken::new();
     let connection = Arc::new(Connection {
         workspace,
         backend,
         out,
         pending: Mutex::new(HashMap::new()),
         next_request_id: AtomicU64::new(1),
+        task_stop: task_stop.clone(),
         notice_ready: Mutex::new(HashMap::new()),
         notice_stop: notice_stop.clone(),
         watching_notices: Mutex::new(HashSet::new()),
@@ -1137,7 +1569,7 @@ async fn drive<T>(
         let mut dispatcher = Dispatcher {
             connection: Arc::clone(&connection),
             tasks: JoinSet::new(),
-            stop: CancellationToken::new(),
+            stop: task_stop,
         };
         loop {
             tokio::select! {
@@ -1172,6 +1604,32 @@ async fn drive<T>(
 mod channel_tests {
     use super::*;
 
+    #[test]
+    fn task_control_errors_distinguish_old_serve_from_missing_session() {
+        let unsupported = task_control_error(crate::client::Error::Http {
+            status: 404,
+            code: String::new(),
+            message: String::new(),
+        });
+        let unsupported = serde_json::to_value(unsupported).unwrap();
+        assert_eq!(unsupported["code"], METHOD_NOT_FOUND);
+        assert!(
+            unsupported["message"]
+                .as_str()
+                .unwrap()
+                .contains("upgrade and restart")
+        );
+
+        let missing = task_control_error(crate::client::Error::Http {
+            status: 404,
+            code: "not_found".into(),
+            message: "session not found".into(),
+        });
+        let missing = serde_json::to_value(missing).unwrap();
+        assert_eq!(missing["code"], INTERNAL_ERROR);
+        assert_eq!(missing["message"], "HTTP 404 not_found: session not found");
+    }
+
     fn prompt(meta: Value) -> Value {
         json!({
             "sessionId": "s1",
@@ -1189,6 +1647,32 @@ mod channel_tests {
         assert_eq!(session, "s1");
         assert_eq!(text, "plain user text");
         assert_eq!(channel, Some(Channel::Telegram));
+    }
+
+    #[tokio::test]
+    async fn attached_followup_admission_is_fifo_and_cancellation_keeps_its_turn() {
+        let slot = Arc::new(PromptSlot::default());
+        let parent = CancellationToken::new();
+        let (first, first_token) = slot.begin_followup(&parent).unwrap();
+        let (second, canceled) = slot.begin_followup(&parent).unwrap();
+        let waiting_slot = Arc::clone(&slot);
+        let waiting = tokio::spawn(async move {
+            waiting_slot.wait_followup_admission(second).await;
+            second
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "second admission must wait for first"
+        );
+
+        assert_eq!(slot.cancel(), 0);
+        assert!(first_token.is_cancelled());
+        assert!(canceled.is_cancelled());
+        slot.finish_followup_admission(first);
+        assert_eq!(waiting.await.unwrap(), second);
+        assert!(canceled.is_cancelled());
+        slot.finish_followup_admission(second);
     }
 
     #[test]

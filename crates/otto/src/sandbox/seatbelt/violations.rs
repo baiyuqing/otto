@@ -1,7 +1,9 @@
 //! Collects the sandbox's denial events for one driver from `log stream`.
 //!
-//! Ownership: a [`Monitor`] owns one `/usr/bin/log stream` child and a reader
-//! task. [`Monitor::close`] kills the child; dropping the monitor does too.
+//! Ownership: a [`Monitor`] owns one `/bin/sh` child that runs
+//! `/usr/bin/log stream`, and a reader task. [`Monitor::close`], dropping the
+//! monitor, and the exit of the otto process for any reason close the shell's
+//! stdin; the shell then kills `log`.
 //!
 //! Concurrency: the reader task is the only writer of the bounded buffer;
 //! readers lock it briefly. Entries carry their receive time, and callers
@@ -24,7 +26,12 @@ use tokio::process::{Child, Command};
 use crate::sandbox::Denial;
 use crate::sandbox::seatbelt::state::LEAF_PREFIX;
 
-const LOG_PATH: &str = "/usr/bin/log";
+/// Starts `log` in the background and waits on stdin. Otto holds the write end
+/// of the stdin pipe and never writes to it. When otto closes it (`close`,
+/// drop, or any process exit, because the kernel closes the descriptor), `read`
+/// returns and the shell kills `log`. `log` writes only when an event matches,
+/// so without this it would never get SIGPIPE and would outlive otto.
+const LOG_SCRIPT: &str = r#"/usr/bin/log "$@" & read _; kill $!"#;
 /// Entries kept; the oldest are dropped first.
 const MAX_ENTRIES: usize = 256;
 /// Unique denials reported per command; the rest are counted.
@@ -47,13 +54,24 @@ impl Monitor {
         if !valid_tag(tag) {
             return None;
         }
-        let mut child = Command::new(LOG_PATH)
-            .args(["stream", "--style", "ndjson", "--predicate"])
+        // Own process group, so a terminal SIGINT to otto's group does not
+        // kill the shell while `log` keeps running. No `kill_on_drop`: tokio
+        // would SIGKILL the shell before closing its stdin and orphan `log`.
+        let mut child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                LOG_SCRIPT,
+                "sh",
+                "stream",
+                "--style",
+                "ndjson",
+                "--predicate",
+            ])
             .arg(format!("eventMessage CONTAINS \"{tag}\""))
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
+            .process_group(0)
             .spawn()
             .ok()?;
         let stdout = child.stdout.take()?;
@@ -95,12 +113,16 @@ impl Monitor {
             .collect()
     }
 
+    /// Closes the shell's stdin so it kills `log`. Killing the shell itself
+    /// would orphan `log`.
     pub(crate) fn close(&self) {
-        let _ = self
-            .child
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .start_kill();
+        drop(
+            self.child
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .stdin
+                .take(),
+        );
     }
 }
 
@@ -152,6 +174,108 @@ mod tests {
     use super::*;
 
     const TAG: &str = "otto-sandbox-0123456789abcdef0123456789abcdef";
+
+    #[cfg(target_os = "macos")]
+    const ORPHAN_TEST_TAG: &str = "OTTO_LOG_STREAM_ORPHAN_TEST_TAG";
+
+    #[cfg(target_os = "macos")]
+    fn unique_tag() -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!("{LEAF_PREFIX}{:x}{nanos:x}", std::process::id())
+    }
+
+    /// Whether a process whose command line contains `tag` exists.
+    #[cfg(target_os = "macos")]
+    fn tagged_processes_exist(tag: &str) -> bool {
+        std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", tag])
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// Polls `condition` for up to 5 s.
+    #[cfg(target_os = "macos")]
+    async fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
+        for _ in 0..100 {
+            if condition() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        condition()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn log_stream_exits_when_the_owning_process_is_killed() {
+        if let Some(tag) = std::env::var_os(ORPHAN_TEST_TAG) {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let _guard = runtime.enter();
+            let _monitor = Monitor::start(&tag.to_string_lossy());
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let tag = unique_tag();
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "sandbox::seatbelt::violations::tests::log_stream_exits_when_the_owning_process_is_killed",
+                "--nocapture",
+            ])
+            .env(ORPHAN_TEST_TAG, &tag)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child");
+        if !rt.block_on(wait_for(|| tagged_processes_exist(&tag))) {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("skipping: log stream did not start (log refuses to run in a sandbox)");
+            return;
+        }
+        child.kill().expect("kill child");
+        child.wait().expect("wait child");
+        let gone = rt.block_on(wait_for(|| !tagged_processes_exist(&tag)));
+        if !gone {
+            let remaining = std::process::Command::new("/usr/bin/pgrep")
+                .args(["-fl", &tag])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let _ = std::process::Command::new("/usr/bin/pkill")
+                .args(["-f", &tag])
+                .status();
+            panic!("processes remain after the owner was killed:\n{remaining}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn closing_the_monitor_ends_log_stream() {
+        let tag = unique_tag();
+        let monitor = Monitor::start(&tag).expect("spawn shell");
+        if !wait_for(|| tagged_processes_exist(&tag)).await {
+            eprintln!("skipping: log stream did not start (log refuses to run in a sandbox)");
+            return;
+        }
+        monitor.close();
+        assert!(
+            wait_for(|| !monitor.running()).await,
+            "reader still running"
+        );
+        assert!(
+            wait_for(|| !tagged_processes_exist(&tag)).await,
+            "log stream survived close"
+        );
+    }
 
     fn event(message: &str) -> String {
         serde_json::json!({ "eventMessage": message }).to_string()

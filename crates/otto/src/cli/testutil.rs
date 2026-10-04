@@ -216,6 +216,7 @@ pub async fn controller_with_memory(
         user_scope,
         recall_limit: 8,
         recall_token_budget: 1000,
+        advice_audit: None,
     };
     builder.workspace_scope =
         super::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())

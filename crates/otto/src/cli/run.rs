@@ -187,11 +187,7 @@ fn skill_checker(
         return None;
     }
     let db_path = Path::new(home).join(".otto/skill-checks.db");
-    match crate::skill::check::Checker::open(
-        &db_path,
-        crate::skill::check::TYPESAFE_BASE_URL,
-        api_key,
-    ) {
+    match crate::skill::check::Checker::open(&db_path, crate::typesafe::BASE_URL, api_key) {
         Ok(checker) => Some(Arc::new(checker)),
         Err(message) => {
             let _ = writeln!(
@@ -736,6 +732,19 @@ pub async fn run(
         let shared = builder.shared_mut();
         shared.memory.recall_limit = memory_config.max_results;
         shared.memory.recall_token_budget = memory_config.recall_tokens;
+        if shared.memory.usable {
+            match crate::memory::advice::audit::Store::open(
+                &Path::new(&home).join(".otto/memory-advice.db"),
+            ) {
+                Ok(store) => shared.memory.advice_audit = Some(Arc::new(store)),
+                Err(_) => {
+                    let _ = writeln!(
+                        stderr,
+                        "warning: memory advice audit log unavailable, continuing without it"
+                    );
+                }
+            }
+        }
     }
     let memory_service = Arc::clone(&builder.memory.service);
     if cancel.is_cancelled() {

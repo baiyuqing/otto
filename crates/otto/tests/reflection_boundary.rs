@@ -44,8 +44,10 @@ const FORBIDDEN: &[(&str, &str)] = &[
 ];
 
 /// Filesystem mutations, allowed only in `skillwrite.rs` (skill files and
-/// history). The stores create their own database files through Turso and
-/// `create_dir_all`/`set_permissions`, which are not in this list.
+/// history), except that `runlog.rs` may create each run's log with
+/// `OpenOptions` (`create_new`, so it never overwrites). The stores create
+/// their own database files through Turso and `create_dir_all`/
+/// `set_permissions`, which are not in this list.
 const FILESYSTEM_WRITES: &[&str] = &[
     "fs::write(",
     "fs::rename(",
@@ -57,6 +59,7 @@ const FILESYSTEM_WRITES: &[&str] = &[
     "File::create(",
 ];
 const SKILL_WRITER: &str = "skillwrite.rs";
+const RUN_LOG: &str = "runlog.rs";
 const VETTING: &str = "guard.rs";
 
 /// Allowed uses, as `file:token`.
@@ -143,7 +146,7 @@ fn only_skillwrite_mutates_the_filesystem() {
                 continue;
             }
             for token in FILESYSTEM_WRITES {
-                if line.contains(token) {
+                if line.contains(token) && !(file == RUN_LOG && *token == "OpenOptions") {
                     offenders.push(format!("{file}: `{token}`: {}", line.trim()));
                 }
             }
@@ -151,8 +154,9 @@ fn only_skillwrite_mutates_the_filesystem() {
     }
     assert!(
         offenders.is_empty(),
-        "only reflection/{SKILL_WRITER} may write, rename, or delete files; route skill writes \
-         through it:\n{}",
+        "only reflection/{SKILL_WRITER} may write, rename, or delete files, and only \
+         reflection/{RUN_LOG} may create a run log with OpenOptions; route skill writes \
+         through {SKILL_WRITER}:\n{}",
         offenders.join("\n")
     );
 }

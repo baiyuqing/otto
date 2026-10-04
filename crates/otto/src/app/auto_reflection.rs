@@ -21,6 +21,7 @@
 //! Errors: a failed run queues one notice; nothing retries it.
 
 use std::collections::{HashSet, VecDeque};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -297,6 +298,7 @@ impl Controller {
         let notices = Arc::clone(&self.notices);
         let cancel = self.auto_cancel.child_token();
         let approvals = self.builder.approvals.clone();
+        notices.push(format!("reflection: running ({})", trigger.as_str()));
         tokio::spawn(async move {
             let _running = running;
             let context = reflection::Context {
@@ -310,7 +312,7 @@ impl Controller {
                 skill_roots: skill_roots.as_ref(),
             };
             let result = reflector.run(&context, trigger, "", &cancel).await;
-            if let Some(line) = notice_for(result) {
+            if let Some(line) = notice_for(result, reflector.log_dir()) {
                 notices.push(line);
             }
         });
@@ -324,7 +326,10 @@ impl Controller {
         if self.builder.reflector.auto() != Auto::OnExit {
             return None;
         }
-        notice_for(self.reflect_as(Trigger::OnExit, "", cancel).await)
+        notice_for(
+            self.reflect_as(Trigger::OnExit, "", cancel).await,
+            self.builder.reflector.log_dir(),
+        )
     }
 
     /// Whether `reflect_on_exit` would do anything, so a frontend can avoid
@@ -369,13 +374,22 @@ impl Controller {
     }
 }
 
-/// The line an automatic run is worth: what it changed, or why it failed.
-/// Nothing for a run that found nothing, was skipped, or was cancelled.
-fn notice_for(result: Result<Report, Error>) -> Option<String> {
+/// The line an automatic run produces: the report line of every completed
+/// run (it names the run log when one was written), or the failure text with
+/// the log directory. Nothing for a skipped run, a canceled run, or a run
+/// that reflection is disabled for.
+fn notice_for(result: Result<Report, Error>, log_dir: Option<&Path>) -> Option<String> {
     match result {
-        Ok(report) if report.changed_something() => Some(report.line()),
-        Ok(_) | Err(Error::Cancelled | Error::Disabled | Error::NoSession) => None,
-        Err(error) => Some(format!("reflection: {error}")),
+        Ok(report) if report.is_skipped() => None,
+        Ok(report) => Some(report.line()),
+        Err(Error::Cancelled | Error::Disabled | Error::NoSession) => None,
+        Err(error) => {
+            let mut line = format!("reflection: {error}");
+            if let Some(dir) = log_dir {
+                line.push_str(&format!("; run logs: {}", dir.display()));
+            }
+            Some(line)
+        }
     }
 }
 
@@ -553,13 +567,28 @@ mod tests {
     }
 
     #[test]
-    fn only_runs_that_changed_something_or_failed_are_announced() {
+    fn every_completed_run_and_every_failure_is_announced() {
+        let dir = Path::new("/logs");
         let skipped = Report::skipped_for_test();
-        assert_eq!(notice_for(Ok(skipped)), None);
-        assert_eq!(notice_for(Err(Error::Cancelled)), None);
-        assert_eq!(notice_for(Err(Error::Disabled)), None);
-        let failure = notice_for(Err(Error::Model("boom".into()))).expect("a failure is shown");
-        assert!(failure.starts_with("reflection: "), "{failure}");
+        assert_eq!(notice_for(Ok(skipped.clone()), Some(dir)), None);
+        assert_eq!(notice_for(Err(Error::Cancelled), Some(dir)), None);
+        assert_eq!(notice_for(Err(Error::Disabled), Some(dir)), None);
+        let mut noop = skipped;
+        noop.note.clear();
+        noop.log = Some(Ok("/logs/run.md".into()));
+        let line = notice_for(Ok(noop), Some(dir)).expect("a noop run is announced");
+        assert_eq!(
+            line,
+            "reflection: nothing new to reflect on; log: /logs/run.md"
+        );
+        let failure =
+            notice_for(Err(Error::Model("boom".into())), Some(dir)).expect("a failure is shown");
+        assert_eq!(
+            failure,
+            "reflection: reflection model call failed: boom; run logs: /logs"
+        );
+        let failure = notice_for(Err(Error::Model("boom".into())), None).expect("shown");
+        assert!(!failure.contains("run logs"), "{failure}");
     }
 
     // -- end to end: a compaction starts a background run ---------------------
@@ -739,7 +768,10 @@ mod tests {
         let mut changes = rig.controller.notices_changed();
         for _ in 0..200 {
             let notices = rig.controller.take_notices();
-            if let Some(line) = notices.into_iter().next() {
+            if let Some(line) = notices
+                .into_iter()
+                .find(|line| !line.starts_with("reflection: running"))
+            {
                 return line;
             }
             let _ =

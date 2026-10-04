@@ -594,10 +594,11 @@ pub async fn run(
     } else {
         None
     };
-    let reflector = Arc::new(crate::reflection::Reflector::new(
-        reflection_config,
-        reflection_store,
-    ));
+    let mut reflector = crate::reflection::Reflector::new(reflection_config, reflection_store);
+    if !home.is_empty() {
+        reflector = reflector.with_log_dir(Path::new(&home).join(".otto/reflection/runs"));
+    }
+    let reflector = Arc::new(reflector);
 
     let approvals =
         match crate::approval::Service::open(&Path::new(&home).join(".otto/approvals.db")) {

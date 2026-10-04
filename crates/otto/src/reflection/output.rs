@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use super::evidence::{self, Item};
 use super::guard::Candidate as SkillCandidate;
+use super::runlog::{self, Outcome};
 use super::transcript::Entry;
 
 pub const KINDS: &[&str] = &["preference", "fact", "convention"];
@@ -94,6 +95,46 @@ struct RawMemory {
     evidence: Vec<Item>,
 }
 
+impl RawSkill {
+    /// The proposal as written, for the run log.
+    fn item(&self) -> runlog::Item {
+        runlog::Item {
+            kind: runlog::Kind::Skill,
+            title: format!("{} skill `{}`", self.action.trim(), self.name.trim()),
+            text: self.description.trim().to_owned(),
+            body: self.body.trim().to_owned(),
+            reason: self.reason.trim().to_owned(),
+            cited: self.evidence.iter().map(|i| i.entry.clone()).collect(),
+            outcome: Outcome::Dropped(""),
+        }
+    }
+}
+
+impl RawMemory {
+    /// The proposal as written, for the run log.
+    fn item(&self) -> runlog::Item {
+        let target = if self.target_id.is_empty() {
+            format!("`{}`", self.key.trim())
+        } else {
+            format!("`{}` (target {})", self.key.trim(), self.target_id.trim())
+        };
+        runlog::Item {
+            kind: runlog::Kind::Memory,
+            title: format!(
+                "{} {} {} {target}",
+                self.action.trim(),
+                self.scope.trim(),
+                self.kind.trim()
+            ),
+            text: self.text.trim().to_owned(),
+            body: String::new(),
+            reason: self.reason.trim().to_owned(),
+            cited: self.evidence.iter().map(|i| i.entry.clone()).collect(),
+            outcome: Outcome::Dropped(""),
+        }
+    }
+}
+
 /// A memory record the model was shown, so it can update or forget it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Existing {
@@ -129,6 +170,9 @@ pub struct Plan {
     pub skills: Vec<SkillCandidate>,
     /// Dropped proposals by reason.
     pub dropped: BTreeMap<&'static str, usize>,
+    /// The content of every dropped proposal, for the run log. Holds one
+    /// entry per count in `dropped`.
+    pub rejected: Vec<runlog::Item>,
 }
 
 impl Plan {
@@ -136,8 +180,10 @@ impl Plan {
         self.dropped.values().sum()
     }
 
-    fn drop(&mut self, reason: &'static str) {
+    fn reject(&mut self, reason: &'static str, mut item: runlog::Item) {
         *self.dropped.entry(reason).or_default() += 1;
+        item.outcome = Outcome::Dropped(reason);
+        self.rejected.push(item);
     }
 }
 
@@ -169,26 +215,28 @@ pub fn plan(
     let mut plan = Plan::default();
     for raw in output.memories {
         if plan.proposals.len() >= maximum {
-            plan.drop("over_limit");
+            plan.reject("over_limit", raw.item());
             continue;
         }
+        let item = raw.item();
         match validate(raw, &by_id, &known, &mut taken) {
             Ok(proposal) => plan.proposals.push(proposal),
-            Err(reason) => plan.drop(reason),
+            Err(reason) => plan.reject(reason, item),
         }
     }
     for raw in output.skills {
+        let item = raw.item();
         let Some(maximum_skills) = maximum_skills else {
-            plan.drop("skill_not_requested");
+            plan.reject("skill_not_requested", item);
             continue;
         };
         if plan.skills.len() >= maximum_skills {
-            plan.drop("skill_over_limit");
+            plan.reject("skill_over_limit", item);
             continue;
         }
         match validate_skill(raw, &by_id) {
             Ok(candidate) => plan.skills.push(candidate),
-            Err(reason) => plan.drop(reason),
+            Err(reason) => plan.reject(reason, item),
         }
     }
     Ok(plan)
@@ -412,6 +460,20 @@ mod tests {
         assert_eq!(plan.proposals.len(), 1);
         assert_eq!(plan.proposals[0].cited, vec!["a0000001".to_owned()]);
         assert_eq!(plan.dropped_total(), 0);
+    }
+
+    #[test]
+    fn a_dropped_proposal_keeps_its_content_and_reason() {
+        let plan = plan(&memory(""), &entries(), &existing(), 8).expect("plan");
+        assert_eq!(plan.rejected.len(), 1);
+        let item = &plan.rejected[0];
+        assert_eq!(item.kind, runlog::Kind::Memory);
+        assert_eq!(item.title, "create user preference `language`");
+        assert_eq!(item.text, "Answer in Chinese");
+        assert_eq!(item.reason, "user said so");
+        assert_eq!(item.cited, vec!["a0000001".to_owned()]);
+        assert_eq!(item.outcome, Outcome::Dropped("already_exists"));
+        assert_eq!(plan.rejected.len(), plan.dropped_total());
     }
 
     #[test]

@@ -1783,9 +1783,9 @@ impl Controller {
         ))
     }
 
-    /// Excludes the pending command's program from the sandbox, then grants the
-    /// pending command once. Nothing is written when the command is not a
-    /// single program invocation.
+    /// Excludes the exact pending command from the sandbox, then grants the
+    /// pending command once. Nothing is written when
+    /// `excluded_command_entry` refuses the command.
     pub async fn approve_bash_always(&self, id: &str) -> Result<String, String> {
         let _admission = self.begin_operation()?;
         let session_id = self.admitted_session_id()?;
@@ -1808,10 +1808,11 @@ impl Controller {
         let command = approvals
             .pending_command(session_id, id)
             .ok_or_else(|| "approval request not found".to_string())?;
-        let entry =
-            otto_core::config::sandbox::excluded_command_entry(&command).ok_or_else(|| {
-                "the command is not a single program invocation; use /approve <id> instead"
-                    .to_string()
+        let entry = otto_core::config::sandbox::excluded_command_entry(&command)
+            .map_err(|reason| {
+                format!(
+                    "cannot exclude this command from the sandbox: {reason}; use /approve <id> instead for one run, or /sandbox exclude '<program> *' to exclude a program deliberately"
+                )
             })?;
         self.amend_sandbox_with_admission(SandboxChange::ExcludeCommand(entry.clone()))
             .await?;
@@ -2323,7 +2324,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approve_always_excludes_the_program_reloads_and_grants_the_request() {
+    async fn approve_always_excludes_the_exact_command_reloads_and_grants_the_request() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let (controller, approvals, calls) =
@@ -2336,32 +2337,41 @@ mod tests {
         assert_eq!(
             message,
             format!(
-                "The user approved {id} and excluded 'lark-cli *' from the sandbox. Retry the same Bash command now."
+                "The user approved {id} and excluded 'lark-cli auth status' from the sandbox. Retry the same Bash command now."
             )
         );
         assert_eq!(*calls.lock().expect("calls"), 1);
         let written = std::fs::read_to_string(controller.config_path()).expect("read config");
         assert!(
-            written.contains("excluded_commands = ['lark-cli *']"),
+            written.contains("excluded_commands = ['lark-cli auth status']"),
             "{written}"
         );
     }
 
     #[tokio::test]
-    async fn approve_always_refuses_commands_that_are_not_one_program_invocation() {
+    async fn approve_always_refuses_commands_the_model_could_steer() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let (controller, approvals, calls) =
             controller_with_approvals(workspace.path(), sessions.path()).await;
         let session_id = controller.info().session_id;
 
-        for command in ["git push; rm -rf x", "bash -c 'lark-cli x'", "sudo ls"] {
+        for command in [
+            "git push; rm -rf x",
+            "bash -c 'lark-cli x'",
+            "sudo ls",
+            "make test",
+            "./build.sh",
+        ] {
             let id = approvals.request(&session_id, command);
             let error = controller
                 .approve_bash_always(&id)
                 .await
                 .expect_err(command);
-            assert!(error.contains("use /approve <id> instead"), "{error}");
+            assert!(
+                error.contains("cannot exclude") && error.contains("use /approve <id> instead"),
+                "{error}"
+            );
         }
 
         assert_eq!(*calls.lock().expect("calls"), 0);

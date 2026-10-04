@@ -147,28 +147,100 @@ pub fn is_simple_command(command: &str) -> bool {
     !single && !double && !escaped
 }
 
-/// The entry `/approve <id> always` adds for `command`: its first word
-/// followed by ` *`. `None` when the command is not simple, its first word
-/// has a quote, a backslash or `=` (an environment assignment), or the first
-/// word is one of [`COMMAND_RUNNERS`], because the entry would then not
-/// describe one program.
-pub fn excluded_command_entry(command: &str) -> Option<String> {
+/// The entry `/approve <id> always` adds for `command`: the trimmed command
+/// itself, which [`excluded_command_matches`] then matches only when a later
+/// command is exactly equal.
+///
+/// Returns the reason for refusal when an exact entry would still let the model
+/// choose what runs outside the sandbox: the command is not simple; it
+/// contains `*` (an exact entry may not, and a trailing ` *` would read as a
+/// wildcard entry); its first word is not a bare program name looked up on `PATH`
+/// (a path such as `./build.sh` or `/abs/dir/tool` can name a file in the
+/// workspace or in the sandbox's private home and temporary directories, which
+/// the model can write); or the program is one of [`COMMAND_RUNNERS`] or
+/// [`WORKSPACE_EXECUTORS`].
+pub fn excluded_command_entry(command: &str) -> Result<String, &'static str> {
     let command = command.trim();
     if !is_simple_command(command) {
-        return None;
+        return Err("the command chains, redirects or substitutes another command");
     }
-    let program = command.split([' ', '\t']).next()?;
-    if program.is_empty()
-        || program.contains(['\'', '"', '\\', '=', '*'])
-        || COMMAND_RUNNERS.contains(&program.rsplit('/').next().unwrap_or(program))
-    {
-        return None;
+    if command.contains('*') {
+        return Err("the command contains '*'");
     }
-    Some(format!("{program} *"))
+    let program = command.split([' ', '\t']).next().unwrap_or_default();
+    if program.is_empty() || program.contains(['\'', '"', '\\', '=', '/', '~']) {
+        return Err("the first word is not a bare program name looked up on PATH");
+    }
+    if COMMAND_RUNNERS.contains(&program) {
+        return Err("the program runs another command given as an argument");
+    }
+    if WORKSPACE_EXECUTORS.contains(&program) {
+        return Err("the program runs files from the working directory, which the model can edit");
+    }
+    Ok(command.to_string())
 }
 
-/// Programs that run another command given as an argument. `bash *` or
-/// `env *` would take every command out of the sandbox, so
+/// Programs that run files from the working directory (build files, package
+/// scripts, project configuration, or a script named by an argument). The
+/// model can edit workspace files inside the sandbox, so an exact entry for
+/// `make test` would still run whatever the model last wrote to `Makefile`.
+/// [`excluded_command_entry`] refuses them; a user can still write an entry in
+/// the configuration file.
+const WORKSPACE_EXECUTORS: &[&str] = &[
+    "make",
+    "gmake",
+    "cargo",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "bun",
+    "deno",
+    "go",
+    "just",
+    "pytest",
+    "tox",
+    "nox",
+    "rake",
+    "bundle",
+    "gradle",
+    "gradlew",
+    "mvn",
+    "cmake",
+    "ninja",
+    "bazel",
+    "swift",
+    "xcodebuild",
+    "composer",
+    "dotnet",
+    "uv",
+    "poetry",
+    "pip",
+    "pip3",
+    "pre-commit",
+    "docker",
+    "docker-compose",
+    "php",
+    "lua",
+    "Rscript",
+    "awk",
+    "gawk",
+    "tsx",
+    "ts-node",
+    "ant",
+    "sbt",
+    "mix",
+    "tsc",
+    "mocha",
+    "jest",
+    "vitest",
+    "gem",
+    "pipx",
+    "node-gyp",
+];
+
+/// Programs that run another command given as an argument. `bash` or
+/// `env` entries would take every command out of the sandbox, so
 /// [`excluded_command_entry`] does not derive an entry from them; a user can
 /// still write one in the configuration file.
 const COMMAND_RUNNERS: &[&str] = &[
@@ -424,28 +496,50 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn approve_always_derives_one_program_entry() {
+    fn approve_always_derives_the_exact_command_entry() {
         assert_eq!(
             excluded_command_entry("  lark-cli auth status").as_deref(),
-            Some("lark-cli *")
+            Ok("lark-cli auth status")
         );
-        assert_eq!(
-            excluded_command_entry("/opt/bin/tool --flag").as_deref(),
-            Some("/opt/bin/tool *")
-        );
-        for command in [
-            "lark-cli auth && rm x",
-            "FOO=1 lark-cli auth",
-            "'lark-cli' auth",
-            "bash -c 'lark-cli auth'",
-            "/usr/bin/env lark-cli",
-            "sudo lark-cli",
-            "python3 script.py",
-            "git status",
-            "/usr/bin/git log",
-            "",
+
+        let entry = excluded_command_entry("find . -name x").expect("entry");
+        let raw = SandboxConfig {
+            excluded_commands: vec![entry.clone()],
+            ..SandboxConfig::default()
+        };
+        assert!(resolve_sandbox(&raw, None).is_ok(), "{entry}");
+        let entries = [entry];
+        assert!(excluded_command_matches(&entries, "find . -name x"));
+        assert!(!excluded_command_matches(
+            &entries,
+            "find . -exec sh -c id \\;"
+        ));
+        assert!(!excluded_command_matches(&entries, "find . -name x y"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn approve_always_refuses_commands_the_model_could_steer() {
+        for (command, reason) in [
+            ("lark-cli auth && rm x", "chains"),
+            ("", "bare program name"),
+            ("find . -name '*.rs'", "'*'"),
+            ("lark-cli *", "'*'"),
+            ("FOO=1 tool", "bare program name"),
+            ("'tool' x", "bare program name"),
+            ("./build.sh", "bare program name"),
+            ("bin/tool x", "bare program name"),
+            ("~/bin/tool", "bare program name"),
+            ("/ws/bin/tool", "bare program name"),
+            ("/usr/bin/env tool", "bare program name"),
+            ("sh -c x", "another command"),
+            ("git status", "another command"),
+            ("make test", "working directory"),
+            ("cargo test", "working directory"),
+            ("awk 1 f", "working directory"),
         ] {
-            assert_eq!(excluded_command_entry(command), None, "{command:?}");
+            let error = excluded_command_entry(command).expect_err(command);
+            assert!(error.contains(reason), "{command:?}: {error}");
         }
     }
 

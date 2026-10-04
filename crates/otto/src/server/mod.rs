@@ -8040,6 +8040,20 @@ mod tests {
             .collect()
     }
 
+    /// [`log_lines`] once at least one line is there. A turn is marked done
+    /// before `turn_finished` is written, so a test that has seen the turn
+    /// end can still be ahead of that line.
+    async fn wait_log_lines(harness: &Harness, event: &str) -> Vec<String> {
+        for _ in 0..600 {
+            let lines = log_lines(harness, event);
+            if !lines.is_empty() {
+                return lines;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        Vec::new()
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_turn_logs_its_request_id_on_every_event() {
         let harness = approval_harness();
@@ -8068,7 +8082,7 @@ mod tests {
             "tool_call_finished",
             "turn_finished",
         ] {
-            let lines = log_lines(&harness, event);
+            let lines = wait_log_lines(&harness, event).await;
             assert!(!lines.is_empty(), "no {event}:\n{}", harness.logged());
             assert!(
                 lines.iter().all(|line| line.contains(&ids)),
@@ -8127,7 +8141,7 @@ mod tests {
             .await;
         assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
         for event in ["turn_started", "provider_request_finished", "turn_finished"] {
-            let lines = log_lines(&harness, event);
+            let lines = wait_log_lines(&harness, event).await;
             assert!(!lines.is_empty(), "no {event}");
             for line in lines {
                 assert!(line.contains(&format!("session_id={id} ")), "{line}");

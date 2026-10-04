@@ -724,6 +724,101 @@ async fn memory_context_keeps_existing_history_as_the_request_prefix() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn per_run_system_context_is_sent_for_one_turn_only() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![
+            Turn::tool_call("c1", r#"{"value":1}"#),
+            Turn::text("first done"),
+            Turn::text("second done"),
+        ]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    let cancel = CancellationToken::new();
+    agent
+        .run_with_system_context("first", "transient reflection notes", &mut |_| {}, &cancel)
+        .await
+        .expect("first run");
+    agent
+        .run("second", &mut |_| {}, &cancel)
+        .await
+        .expect("second run");
+
+    let requests = agent.provider().normal_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].system_prompt,
+        "be brief\n\ntransient reflection notes"
+    );
+    assert_eq!(
+        requests[1].system_prompt,
+        "be brief\n\ntransient reflection notes"
+    );
+    assert_eq!(requests[2].system_prompt, "be brief");
+    for message in agent.session().messages() {
+        assert!(
+            !message.text().contains("transient reflection notes"),
+            "per-run system context was persisted"
+        );
+    }
+    let report = agent.context_report();
+    let prompt = report
+        .sections
+        .iter()
+        .find(|section| section.kind == SectionKind::SystemPrompt)
+        .expect("system prompt section");
+    assert_eq!(prompt.items[0].text, "be brief");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn per_run_system_context_is_sent_on_overflow_retry() {
+    let provider = FakeProvider::new(vec![
+        Turn::overflow(),
+        Turn::summary(&structured_summary()),
+        Turn::text("done"),
+    ]);
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        seeded_session().await,
+        Options {
+            compaction: CompactionSettings {
+                auto: true,
+                ..CompactionSettings::default()
+            },
+            ..options()
+        },
+    );
+    agent
+        .run_with_system_context(
+            "hello",
+            "retry-only transient context",
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+    let normal_requests = agent.provider().normal_requests();
+    assert_eq!(normal_requests.len(), 2);
+    assert!(
+        normal_requests
+            .iter()
+            .all(|request| request.system_prompt == "be brief\n\nretry-only transient context")
+    );
+    let summary_requests = agent.provider().summary_requests();
+    assert_eq!(summary_requests.len(), 1);
+    assert!(
+        !summary_requests[0]
+            .system_prompt
+            .contains("retry-only transient context")
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn recall_runs_once_across_the_tool_loop() {
     let memory = Arc::new(FakeMemory::with_records(one_record()));
     let provider = FakeProvider::new(vec![

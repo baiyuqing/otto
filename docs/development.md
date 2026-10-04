@@ -53,6 +53,15 @@ module, session persistence append-only, and `bash` delegated through
 `crates/otto`'s `sandbox` module; only explicit sandbox `off` may use direct
 execution, and it still starts in the selected workspace.
 
+Chat channel metadata belongs to the native `app::Channel` contract. ACP
+accepts `_meta.otto.channel`, and HTTP turns carry the same optional enum
+through queue admission to execution. Render only fixed guidance for supported
+channels; never accept client-authored system instructions. The core agent's
+per-run system context applies to every ordinary provider request, including
+tool rounds and overflow retries, without mutating the configured prompt or
+session history. Approval retries retain the current channel; later turns
+without metadata have no channel context.
+
 Keep `crates/otto`'s `memory` module behind its neutral contracts. The agent
 loop, tools, and frontends must never reach a store directly: use the
 `Service`'s bound accessors or the `Controller` memory facade. Per-turn recall
@@ -60,7 +69,8 @@ and explicit management (`memory_search`/`remember`/`forget` tools,
 `/memory`/`/remember` in the REPL, and `otto memory status|forget`) are wired
 end to end via `[memory]` TOML config. Model- and human-originated writes
 always land as pending candidates requiring review. `reflection` proposes candidates
-on `/reflect` and, by default, in the background after a compaction
+on `/reflect` and, by default, in the background after a completed turn with
+at least ten distinct successful tool operations or a compaction
 (`app::auto_reflection`); `Binding.Observe` and durability (backup/restore/verify) remain unwired. `/memory review` lists pending
 candidates and `/memory review <id> accept|reject` decides one through
 `Service::review` (human authority, like `/memory forget`). The TUI dispatches `/memory` and `/remember` to the same

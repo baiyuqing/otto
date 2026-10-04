@@ -10,7 +10,7 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
 use super::{Server, bad_request, error_response, json_response, not_found};
-use crate::app::ApprovalDecision;
+use crate::app::{ApprovalDecision, Channel};
 
 #[derive(Deserialize)]
 struct DecisionBody {
@@ -82,6 +82,8 @@ pub async fn message(
     #[serde(deny_unknown_fields)]
     struct Input {
         text: String,
+        #[serde(default)]
+        channel: Option<Channel>,
     }
     let input: Input = match serde_json::from_slice(&body) {
         Ok(input) => input,
@@ -95,7 +97,11 @@ pub async fn message(
         .turn
         .as_ref()
         .map_or_else(|| session.closed.clone(), |turn| turn.cancel_token());
-    match session.ctrl.approval_message(&input.text, &cancel).await {
+    match session
+        .ctrl
+        .approval_message_with_channel(&input.text, input.channel, &cancel)
+        .await
+    {
         Ok(reply) => json_response(StatusCode::OK, &reply),
         Err(message) => error_response(StatusCode::CONFLICT, "approval_failed", &message),
     }

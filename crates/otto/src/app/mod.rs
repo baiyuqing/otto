@@ -22,6 +22,7 @@
 pub mod approval;
 pub mod approval_control;
 pub mod auto_reflection;
+pub mod channel;
 
 /// Fixed, content-free frontend notice for a successful memory proposal.
 pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
@@ -46,6 +47,7 @@ use crate::cli::runtime_builder::{Builder, Runner, RuntimeInfo, SharedSession};
 use crate::cli::sandbox_setup::{self, SandboxChange};
 use crate::session::{self as sessionfs, ArchiveResult, MAX_LIST_SESSIONS};
 use crate::tool::remind::Reminders;
+pub use channel::Channel;
 
 pub use approval::{ApprovalDecision, ApprovalRequest, Step, Stop};
 pub use sandbox::SandboxControl;
@@ -660,17 +662,29 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        self.prompt_with_system_context(text, "", emit, cancel)
+            .await
+    }
+
+    pub(crate) async fn prompt_with_system_context(
+        &self,
+        text: &str,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        let compacted = std::sync::atomic::AtomicBool::new(false);
+        let observation = auto_reflection::RunObservation::default();
         let result = runner
-            .run(
+            .run_with_system_context(
                 text,
-                &mut auto_reflection::observing(emit, &compacted),
+                system_context,
+                &mut auto_reflection::observing_prompt(emit, &observation),
                 cancel,
             )
             .await;
-        self.after_operation(&compacted);
+        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
         result
     }
 
@@ -681,18 +695,31 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        self.prompt_with_image_and_system_context(text, image, "", emit, cancel)
+            .await
+    }
+
+    pub(crate) async fn prompt_with_image_and_system_context(
+        &self,
+        text: &str,
+        image: Block,
+        system_context: &str,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        let compacted = std::sync::atomic::AtomicBool::new(false);
+        let observation = auto_reflection::RunObservation::default();
         let result = runner
-            .run_with_image(
+            .run_with_image_system_context(
                 text,
                 image,
-                &mut auto_reflection::observing(emit, &compacted),
+                system_context,
+                &mut auto_reflection::observing_prompt(emit, &observation),
                 cancel,
             )
             .await;
-        self.after_operation(&compacted);
+        self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
         result
     }
 
@@ -720,7 +747,18 @@ impl Controller {
     /// the transcript.
     pub(crate) fn after_operation(&self, compacted: &std::sync::atomic::AtomicBool) {
         if compacted.load(std::sync::atomic::Ordering::SeqCst) {
-            self.start_auto_reflection();
+            self.start_auto_reflection(crate::reflection::Trigger::OnCompaction);
+        }
+    }
+
+    /// Runs compaction reflection as before, then considers a task-end run
+    /// only for a successful completed prompt with enough successful tools.
+    fn after_prompt(&self, observation: &auto_reflection::RunObservation, completed: bool) {
+        if observation.compacted() {
+            self.start_auto_reflection(crate::reflection::Trigger::OnCompaction);
+        }
+        if observation.eligible_work(completed) {
+            self.start_auto_reflection(crate::reflection::Trigger::OnWork);
         }
     }
 

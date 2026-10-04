@@ -1790,6 +1790,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
 | `POST /v1/sessions/{id}/reflect` | Run one reflection now, optionally with `{"focus":"..."}`, and return what it did (`status`, `candidates`, `skills`, `dropped`, and the one-line summary). Memory proposals are queued as pending candidates; skills that pass every check are written to `~/.otto/skills`. `409 turn_active` while a turn runs or is queued, or a compaction or reflection runs; `409 reflection_unavailable` when reflection is disabled, the session has no file, memory is unavailable, or the redaction boundary is closed; `409 reflection_failed` when the model call or its answer failed (nothing is marked covered). |
+| `POST /v1/sessions/{id}/reflect/cancel` | With `{"request_id":"..."}`, cancel only the matching manual reflection and return `202`. Supply the same optional ID on `POST .../reflect`: 1–64 ASCII letters, digits, underscores, or hyphens, with a fresh ID for each operation. The session retains the 16 most recent cancelled IDs to handle cancellation arriving before registration. This cannot cancel a turn, compaction, automatic reflection, or a manual reflection with another or no ID. |
 | `GET /v1/sessions/{id}/reflection/skills` | List the skills reflection wrote and not reverted, with the run, session, time, reason, and `owned` (false once the file was edited by hand). `enabled:false` when reflection is turned off. |
 | `POST /v1/sessions/{id}/reflection/skills/{name}/revert` | Restore the previous version of a skill reflection wrote, or remove it if reflection created it (`result` is `restored` or `removed`). `404` when reflection did not write it; `409 skill_not_owned` when it was edited by hand; `409 skills_unavailable` when `[skills]` is disabled. These act on the user's `~/.otto/skills`, not on the session, and are as exposed as the skill enable and disable routes: any holder of the token or socket may call them. |
 | `GET /v1/sessions/{id}/notices` | The lines background reflection queued for this session, `{"notices":[{"id":1,"text":"..."}],"last":1}`; pass `?after=<last>` to read only newer ones. They are not removed by reading, so every client sees each one, and only the 20 newest are kept. |
@@ -2062,11 +2063,11 @@ is rejected.
 
 | Method | Behavior |
 | --- | --- |
-| `initialize` | Reports protocol version 1, `loadSession`, and `session/list`. Prompts accept text only; images, audio, and embedded context are not accepted. No authentication methods: credentials come from environment variables and `otto login`. |
+| `initialize` | Reports protocol version 1, `loadSession`, and `session/list`. `_meta.otto.channelContext` advertises structured per-turn channel metadata. Prompts accept text only; images, audio, and embedded context are not accepted. No authentication methods: credentials come from environment variables and `otto login`. |
 | `session/new` | Creates a session. No session file is written until the first prompt. |
 | `session/load` | Opens a session of this workspace by its 32-character id, sends the stored conversation as `session/update` notifications, then responds. The response also carries `sessionId`. |
 | `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
-| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Returns `end_turn`, or `cancelled` after `session/cancel`. |
+| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Returns `end_turn`, or `cancelled` after `session/cancel`. |
 | `_otto/approvals/message` | Restricted pending-approval dialogue with `sessionId` and `text`; advertised by `_meta.otto.approvalDialogue`. Returns `null` or `{"text","queued"}`. Available in local and attach mode. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
 | `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}`; `nextCursor` is `""` on the last page. |
@@ -2080,17 +2081,24 @@ Otto as in the other frontends.
 ### `/compact` and `/context` are slash commands
 
 After `session/new` and `session/load` has replied, Otto sends a
-`session/update` of type `available_commands_update` listing two commands:
-`compact`, with an unstructured input hint `optional focus`, and `context`.
-A `session/prompt` whose trimmed text is exactly `/context`, exactly
-`/compact`, or `/compact` followed by whitespace and a focus text is run by
-Otto itself and is not sent to the model; any other text, such as `/compactx`
-or a sentence that contains `/context`, is a normal prompt. `otto acp
---attach` does the same, running the command on `otto serve`
-(`POST .../compact`, `GET .../context`). Each command answers with one
+`session/update` of type `available_commands_update` listing `compact`,
+`context`, `reflect`, and `skill`.
+A `session/prompt` containing `/context`, `/compact [focus]`,
+`/reflect [focus]`, `/skill generated`, or `/skill revert <name>` is run by
+Otto itself and is not sent to the task model. Command names must match
+whole words; `/compactx` or a sentence that contains `/context` is a normal
+prompt. `otto acp --attach` does the same, running the command on
+`otto serve` through its existing HTTP APIs. Each command answers with one
 `agent_message_chunk` and the stop reason `end_turn`; `session/cancel` during
-`/compact` answers `cancelled`. Like a turn, a command is rejected while the
+`/compact` or `/reflect` answers `cancelled`. Attached reflection cancellation
+uses an exact request ID and cannot cancel a later operation. Like a turn, a command is rejected while the
 session runs a prompt.
+
+`/reflect [focus]` reports memory proposals and skill writes from the existing
+[reflection](#reflection) pipeline. `/skill generated` lists generated skills;
+`/skill revert <name>` restores the previous version or removes a generated
+skill, and refuses a skill edited by hand. These commands are also available
+through the chat connector.
 
 - `/compact [focus]` summarizes earlier messages as in the other frontends
   and replies `Compacted the session context: <n> tokens before, about <m>
@@ -2188,7 +2196,8 @@ See [Chat connector](#chat-connector).
 - `session/resume`, `session/close`, `session/delete`, session modes and
   config options, and client-supplied MCP servers.
 - Image, audio, and embedded-resource prompt content.
-- Slash commands other than `/compact` and `/context`, such as `/approve` or
+- Slash commands other than `/compact`, `/context`, `/reflect`, and the
+  supported `/skill` operations, such as `/approve` or
   `/sandbox`: text from the client reaches the model as a user message.
 
 ## Chat connector
@@ -2201,12 +2210,14 @@ Telegram and Feishu can be enabled in the same process.
 
 Otto is a general-purpose personal agent for research, writing, planning,
 coding, and practical tasks, using the tools and permissions available in
-the session. The connector includes the current channel with each message,
-including after a session is resumed or shared, so Otto can adapt replies
-for chat without assuming you can see its local terminal. This context is
-ordinary prompt text; it does not change tool availability or permissions.
-`/compact` and `/context` are sent without it, because Otto runs them only
-when the prompt is the whole command.
+the session. The connector sends the current channel separately from the
+user's text, including after a session is resumed or shared. Otto adds fixed
+Telegram or Feishu guidance to that turn's system context, so it can adapt
+replies without assuming you can see its local terminal. This context does
+not change tool availability or permissions and does not carry over to a
+later turn from another frontend. With an older ACP agent that does not
+advertise this capability, the connector retains the previous text-prefix
+behavior for channel hints.
 
 ### Building and running
 
@@ -2426,8 +2437,8 @@ a log line.
 
 A message whose whole text is one of these commands (for `/use`, the
 command and its argument) is handled by `otto-connect` and not sent to Otto,
-except `/compact` and `/context`, which are sent to Otto as typed, without
-the channel context.
+except `/compact`, `/context`, `/reflect`, and `/skill`, which are sent to
+Otto as typed for agent-side command handling.
 Any other text, including other words starting with `/`, is a prompt.
 
 | Command | Effect |
@@ -2436,16 +2447,19 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/stop` | Cancels the running turn (reply "Stopped.") and clears the chat's queue. With nothing running: "Nothing is running." |
 | `/compact [focus]` | Sent to Otto as a prompt; `otto acp` runs it as `/compact` (see [`/compact` and `/context` are slash commands](#compact-and-context-are-slash-commands)) and replies with the token counts before and after. Like any prompt it waits in the chat's queue behind a running turn. |
 | `/context` | Sent to Otto as a prompt; `otto acp` replies with the token counts of the next request, part by part. It waits in the chat's queue like any prompt. |
+| `/reflect [focus]` | Runs the existing reflection over the uncovered part of this session and reports the result. Memory proposals require `/memory` review; generated skills pass the existing evidence and safety checks. |
+| `/skill generated` | Lists skills written by reflection. Generated skills become active in new sessions. |
+| `/skill revert <name>` | Restores the previous version or removes a skill created by reflection. Refuses a skill edited by hand. |
 | `/allow` | Answers the pending permission request with Allow once. |
 | `/deny` | Answers the pending permission request with Deny. |
 | `/sessions` | Lists the 10 newest sessions of the workspace, one per line: `*` for the chat's session or a space, the first 8 characters of the id, the last change as `YYYY-MM-DD HH:MM` (`-` when unknown), and the title (`(untitled)` when empty). With none: "No sessions." |
 | `/use <id>` | Binds the chat to a session and loads it. `<id>` is a full session id, or a prefix of at least 4 characters of a session that `session/list` returns (the newest 20). Reply: "Using session `<id>`: `<title>`". |
-| `/memory` | Lists the chat session's pending memory candidates, one per line: the first 8 characters of the id, the action, `kind/key`, the text (200 characters at most), and the origin. With none: "No pending memory candidates." |
+| `/memory` (or `/memory review`) | Lists the chat session's pending memory candidates, one per line: the first 8 characters of the id, the action, `kind/key`, the text (200 characters at most), and the origin. With none: "No pending memory candidates." |
 | `/memory accept <id>` | Accepts one pending candidate, which writes the record. `<id>` is a full candidate id or a unique prefix of at least 4 characters. |
 | `/memory reject <id>` | Rejects one pending candidate; no record is written. |
 
 At startup `otto-connect` sets the Telegram bot's command menu to these
-commands, including `/compact` and `/context`, and to `/models` and `/config` (see
+commands, including `/compact`, `/context`, `/reflect`, and `/skill`, and to `/models` and `/config` (see
 [Provider-profile management](#provider-profile-management)): `setMyCommands`
 for the default scope, then `deleteMyCommands` for the `all_private_chats` and
 `all_group_chats` scopes, whose lists Telegram would show instead. Lists set
@@ -2886,7 +2900,7 @@ slice that held external content never produces skills.
 ```toml
 [reflection]
 enabled = true            # default true; false disables all reflection and does not open reflection.db
-auto = "on_compaction"    # "on_compaction" (default) | "on_exit" | "off"
+auto = "on_work"          # "on_work" (default) | "on_compaction" | "on_exit" | "off"
 min_turns = 4             # 1..1000; on_exit skips a session with fewer user messages
 memories = true           # default true; false stops memory proposals
 skills = true             # default true; false never asks for or writes skills
@@ -2902,19 +2916,19 @@ With `memories = false` and `skills = false`, reflection makes no model call.
 
 #### Automatic reflection
 
-Reflection also starts by itself, as `[reflection].auto` selects. **It is on by default**
-(`on_compaction`): upgrading adds one model call per automatic run in long sessions, and a run
-may write skills (see above). Set `auto = "off"` to keep only `/reflect`, `skills = false` to
-stop skill writing, or `enabled = false` to turn reflection off entirely.
+Reflection starts automatically as `[reflection].auto` selects. It is on by default
+(`on_work`) and may propose memories or write vetted skills. Set `auto = "off"` to keep
+only `/reflect`, `skills = false` to stop skill writing, or `enabled = false` to turn
+reflection off entirely.
 
-- `on_compaction` (default): after a compaction completes, whether it started automatically or
-  with `/compact`, a run starts in the background over everything no earlier run covered.
-  It does not wait for or interrupt the turn, and at most one runs at a time. A session that
-  never compacts never reflects on its own. When the run queued a candidate or wrote a skill,
-  one line says so, printed before the next prompt (REPL) or added to the transcript (TUI
-  and Web UI). A run that found nothing says nothing; a failed one shows its error once.
-  `otto acp` runs it but has nowhere to show the line, so use `/memory review` and
-  `/skill generated` to see the result.
+- `on_work` (default): after a completed agent turn with at least ten distinct successful
+  tool operations, reflect in the background over the uncovered session entries. Failed
+  tools do not count, and an errored, cancelled, or approval-pending turn does not qualify.
+  Separately resumed approval continuations have their own counts. This mode also retains
+  the successful-compaction trigger below.
+- `on_compaction`: reflect only after a successful compaction, whether automatic or started
+  with `/compact`. A session that never compacts never reflects automatically in this mode.
+  An existing explicit `auto = "on_compaction"` setting retains that behavior.
 - `on_exit`: when a terminal frontend (the TUI, the REPL, or `--prompt`) ends normally,
   reflection runs once over what no earlier run covered, if the session has at least
   `min_turns` user messages. **This delays exit** by as long as the run takes, up to 60
@@ -2923,16 +2937,22 @@ stop skill writing, or `enabled = false` to turn reflection off entirely.
   `/reflect` can still cover it.
 - `off`: only `/reflect`.
 
-Limits that apply to automatic runs only: at least ten minutes between two automatic runs of
-the same session (counted from when the earlier one started, and a failed run counts, so
-nothing retries); and every other check above still applies. `/reflect` is never held back by
-these limits.
+Background runs never delay the task response and are single-flight. `on_work` and
+`on_compaction` share a ten-minute cooldown per session, counted from the previous run's
+start; a failed run counts too. All existing evidence, source-isolation, and skill-review
+checks still apply. `/reflect` is not held back by this cooldown.
+
+A run that proposed a memory or wrote a skill queues one result line; a run that found
+nothing stays quiet, and a failed run reports its error once. The REPL, TUI, and Web UI
+show these lines. ACP sends new notices as tagged agent message chunks, and the chat
+connector sends them after the active task reply. A connection starts at the current
+notice cursor without replaying older notices. Use `/memory` and `/skill generated` in
+chat to inspect pending proposals and generated skills.
 
 Not yet implemented:
 
 - `Binding.Observe` is not wired; reflection reads the session file instead.
 - The Web UI and the HTTP API cannot review memory candidates; use `/memory review` in a terminal.
-- `otto acp` does not show reflection notices.
 - Reflection never changes a skill you wrote, and it cannot create skills with scripts or
   supporting files.
 - No backup/restore/verify commands.

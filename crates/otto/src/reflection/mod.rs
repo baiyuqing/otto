@@ -61,7 +61,7 @@ pub use store::{Status, Store};
 use transcript::EntryRole;
 
 /// The largest accepted model answer, in bytes.
-const MAXIMUM_ANSWER_BYTES: usize = 64 * 1024;
+const MAXIMUM_ANSWER_BYTES: usize = 256 * 1024;
 /// The metadata key carrying the reflection run id on a candidate.
 pub const RUN_METADATA_KEY: &str = "reflection_run";
 /// How many existing records and candidates one run reads per scope.
@@ -602,11 +602,17 @@ impl Reflector {
                 } else {
                     None
                 };
+                let scripts = if owned {
+                    skillwrite::scripts(roots, &skill.name).unwrap_or_default()
+                } else {
+                    Default::default()
+                };
                 prompt::SkillInfo {
                     name: skill.name.clone(),
                     description: skill.description.clone(),
                     owned,
                     body,
+                    scripts,
                 }
             })
             .collect()
@@ -618,8 +624,7 @@ impl Reflector {
         let Some(row) = self.generated_skill(name) else {
             return false;
         };
-        std::fs::read_to_string(roots.write_root.join(name).join("SKILL.md"))
-            .is_ok_and(|text| skillwrite::hash(&text) == row.hash)
+        skillwrite::still_owned(roots, &row)
     }
 
     pub fn attach_approvals(
@@ -692,6 +697,13 @@ impl Reflector {
             ) {
                 reject(report, reason);
                 continue;
+            }
+            if let Err(reason) = skillwrite::validate_python(&candidate.scripts) {
+                reject(report, reason);
+                continue;
+            }
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
             }
             let verdict = if self.config.skill_review {
                 let task_id = format!("reflection:{run_id}:review");
@@ -903,7 +915,7 @@ fn skill_item(candidate: &guard::Candidate) -> runlog::Item {
         kind: runlog::Kind::Skill,
         title: format!("{action} skill `{}`", candidate.name),
         text: candidate.description.clone(),
-        body: candidate.body.clone(),
+        body: guard::content(&candidate.body, &candidate.scripts),
         reason: candidate.reason.clone(),
         cited: candidate.cited.clone(),
         outcome: runlog::Outcome::Dropped(""),
@@ -1955,6 +1967,65 @@ mod tests {
             assert_eq!(skill_file_text(&fixture, "lint-gate"), None);
             assert_eq!(fixture.store.generated_count().expect("count"), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn python_scripts_reach_review_approval_storage_and_run_logs() {
+        let fixture = Fixture::new(Vec::new()).await;
+        let (user, tool) = lint_session(&fixture).await;
+        let mut answer: serde_json::Value = serde_json::from_str(&skill_answer(
+            "create", "lint-gate",
+            "Run `python3 <skill-location>/scripts/lint.py` in the workspace to check Rust formatting.",
+            &user, &tool,
+        )).expect("answer");
+        let source = "import subprocess\nsubprocess.run(['cargo', 'fmt', '--all', '--', '--check'], check=True)\n";
+        answer["skills"][0]["scripts"] = serde_json::json!({"scripts/lint.py": source});
+        push(&fixture, Reply::Text(answer.to_string()));
+        push(&fixture, Reply::Text("ALLOW".into()));
+        let report = fixture
+            .run(&fixture.reflector(enabled()), &CancellationToken::new())
+            .await
+            .expect("run");
+        assert_eq!(report.skills.len(), 1);
+        assert_eq!(
+            skillwrite::scripts(&fixture.roots, "lint-gate").expect("sources")["scripts/lint.py"],
+            source
+        );
+        assert!(request_text(&fixture.provider.calls()[1]).contains("scripts/lint.py"));
+        assert!(report.items.iter().any(|item| item.body.contains(source)));
+        let reflector = fixture.reflector(enabled());
+        assert!(reflector.owns(&fixture.roots, "lint-gate"));
+        std::fs::write(
+            fixture.roots.write_root.join("lint-gate/scripts/lint.py"),
+            "print('edited')",
+        )
+        .expect("edit");
+        assert!(!reflector.owns(&fixture.roots, "lint-gate"));
+    }
+
+    #[tokio::test]
+    async fn invalid_python_is_dropped_before_review_or_approval() {
+        let fixture = Fixture::new(Vec::new()).await;
+        let (user, tool) = lint_session(&fixture).await;
+        let mut answer: serde_json::Value = serde_json::from_str(&skill_answer(
+            "create",
+            "lint-gate",
+            SKILL_BODY,
+            &user,
+            &tool,
+        ))
+        .expect("answer");
+        answer["skills"][0]["scripts"] = serde_json::json!({"scripts/lint.py": "def lint(:\n"});
+        push(&fixture, Reply::Text(answer.to_string()));
+        let report = fixture
+            .run(&fixture.reflector(enabled()), &CancellationToken::new())
+            .await
+            .expect("run");
+        assert_eq!(report.dropped.get("skill_python_invalid"), Some(&1));
+        assert!(report.skill_approvals.is_empty());
+        assert!(report.skills.is_empty());
+        assert_eq!(fixture.provider.calls().len(), 1);
+        assert!(!fixture.roots.write_root.exists());
     }
 
     #[tokio::test]

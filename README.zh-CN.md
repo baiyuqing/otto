@@ -118,7 +118,7 @@ Web UI 可点击 **Image** 或粘贴截图。所选模型和 OpenAI-compatible �
 
 - [会话与归档](docs/user-manual.md#sessions)
 - [本地记忆与反思](docs/user-manual.md#memory)：反思会生成供你审核的记忆候选，也可按证据和安全检查写入可撤销的 Skills。
-- [Skills](docs/user-manual.md#skills)
+- [Skills](docs/user-manual.md#skills)：反思可将成功执行过的流程沉淀成 `SKILL.md` 和 Python 脚本，经语法检查与审批后发布；`/skill revert` 可一起回滚说明和代码。
 - [子代理](README.md#delegate-work-to-sub-agents)
 - [本地服务：otto serve](docs/user-manual.md#agent-server)
 - [ACP agent：otto acp](docs/user-manual.md#acp-agent-server)

@@ -2009,6 +2009,7 @@ mod tests {
             name: name.into(),
             description: "Run the lint gate before committing".into(),
             body: body.into(),
+            scripts: Default::default(),
             reason: "the user asked for it and it ran cleanly".into(),
             cited: Vec::new(),
         };

@@ -743,7 +743,17 @@ impl Runner {
             .map_or(0, |s| s.cursor);
         loop {
             tokio::select! {
-                result=&mut future=>{while let Ok(event)=events.try_recv(){emit(event);}return result},
+                result=&mut future=>{
+                    while let Ok(event)=events.try_recv(){emit(event);}
+                    if let Some((service,scope))=&self.approvals {
+                        loop {
+                            let Ok(changes)=service.events(&scope.workspace,Some(&scope.session_id),cursor) else {break};
+                            if changes.is_empty() {break;}
+                            for change in changes {cursor=change.sequence;emit(otto_core::agent::Event::ApprovalChanged{request:Box::new(change.request)});}
+                        }
+                    }
+                    return result
+                },
                 Some(event)=events.recv()=>emit(event),
                 _=tick.tick(),if self.approvals.is_some()=>{
                     while let Ok(event)=events.try_recv(){emit(event);}

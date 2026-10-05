@@ -30,7 +30,7 @@ pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/init     create a repository AGENTS.md guide\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/reflect [focus] queue memory candidates from this session for review (/memory review)\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/sandbox allow <path> let sandboxed commands read a path\n/sandbox network allow|deny set sandboxed network access\n/sandbox exclude <entry> run matching commands outside the sandbox\n/approve <id> allow one exact elevated Bash command\n/approve <id> always run this exact command outside the sandbox from now on\n/memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skill [name] show skills or one skill; /skill set <name> enabled|disabled change a skill state\n/skill generated list skills reflection wrote; /skill revert <name> undo one\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/agents   list the latest 50 recorded sub-agent tasks, any session\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
+const HELP: &str = "/auto [on|off] show or set session approval mode\n/help     show commands\n/init     create a repository AGENTS.md guide\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/reflect [focus] queue memory candidates from this session for review (/memory review)\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/sandbox allow <path> let sandboxed commands read a path\n/sandbox network allow|deny set sandboxed network access\n/sandbox exclude <entry> run matching commands outside the sandbox\n/approve <id> allow one exact elevated Bash command\n/approve <id> always run this exact command outside the sandbox from now on\n/memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skill [name] show skills or one skill; /skill set <name> enabled|disabled change a skill state\n/skill generated list skills reflection wrote; /skill revert <name> undo one\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/agents   list the latest 50 recorded sub-agent tasks, any session\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
 
 /// Why the loop stopped.
 #[derive(Debug)]
@@ -406,6 +406,11 @@ impl<'a> Repl<'a> {
                         }
                     };
                     let trimmed = input.trim();
+                    if let Some(args) = trimmed.strip_prefix("/auto").filter(|args|args.is_empty() || args.starts_with(char::is_whitespace)) {
+                        let line = self.controller.auto_mode_command(args).unwrap_or_else(|e|e);
+                        let _ = writeln!(self.stdout,"{line}");
+                        continue;
+                    }
                     if trimmed == "/exit" || trimmed == "/stop" {
                         turn.cancel();
                         if trimmed == "/exit" { queue.push_front(input); }
@@ -578,6 +583,16 @@ impl<'a> Repl<'a> {
                 }
                 "thinking" => {
                     self.thinking(args).await?;
+                    Some(false)
+                }
+                "auto" => {
+                    let line = self.controller.auto_mode_command(args).map_err(|message| {
+                        Error::Command {
+                            command: "/auto".into(),
+                            message,
+                        }
+                    })?;
+                    let _ = writeln!(self.stdout, "{line}");
                     Some(false)
                 }
                 "sandbox" => self.sandbox(args).await?.then_some(false),
@@ -1029,6 +1044,17 @@ impl<'a> Repl<'a> {
 fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -> bool {
     match event {
         Event::ApprovalChanged { request } => {
+            if request
+                .decision
+                .as_ref()
+                .is_some_and(|d| d.transport == "auto-mode")
+            {
+                let _ = writeln!(
+                    stdout,
+                    "[AUTO] Approval {} automatically approved; application {:?}",
+                    request.id, request.application
+                );
+            }
             let _ = writeln!(
                 stdout,
                 "\n[approval] {} ({}) {:?}\n{}",
@@ -1384,6 +1410,9 @@ mod tests {
         let sessions = tempfile::tempdir().unwrap();
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let service = controller.approval_service();
+        service
+            .set_auto_mode(&controller.approval_scope(), false)
+            .unwrap();
         let request = service
             .create(crate::approval::Proposal {
                 kind: crate::approval::Kind::Confirmation,

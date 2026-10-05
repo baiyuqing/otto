@@ -309,6 +309,7 @@ fn redraw<B: Backend>(
     app: &mut App,
     controller: &Controller,
 ) -> Result<(), ReplError> {
+    app.info.auto_mode = controller.info().auto_mode;
     app.refresh_tasks(&app::Backend::Local(controller));
     terminal
         .draw(|frame| render::draw(frame, app))
@@ -605,6 +606,13 @@ async fn run_app<B: Backend>(
                         }
                         Err(message) => app.push_system(format!("/archive: {message}")),
                     }
+                }
+                Action::AutoMode(args) => {
+                    match controller.auto_mode_command(&args) {
+                        Ok(line) => app.push_system(line),
+                        Err(message) => app.push_system(format!("/auto: {message}")),
+                    }
+                    app.info = controller.info();
                 }
                 Action::SandboxReload => match controller.reload_sandbox().await {
                     Ok(info) => app.push_system(format!("Sandbox: {}", info.summary())),

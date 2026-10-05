@@ -273,6 +273,7 @@ type Command struct {
 // dispatch in deliver and cmdManage, and with the commands `otto acp`
 // advertises; TestMenuCommandsAreHandled checks it.
 var Commands = []Command{
+	{"auto", "Session approval mode: /auto [on|off]", false},
 	{"new", "Start a new session on the next message", false},
 	{"stop", "Cancel the running turn and clear the queue", false},
 	{"steer", "Guide the active task: /steer <guidance>", false},
@@ -325,6 +326,10 @@ func (b *Bridge) deliver(m Message) {
 		return
 	}
 	text := strings.TrimSpace(m.Text)
+	if arg, ok := commandArg(text, "auto"); ok {
+		c.cmdAuto(m, arg)
+		return
+	}
 	if c.cmdManage(m, text) {
 		return
 	}

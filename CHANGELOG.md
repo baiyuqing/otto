@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Default session approvals to AUTO, with persistent `/auto on|off` controls,
+  mode status, recorded request/decision notifications, and a session mode API.
+  Telegram and Feishu support the controls; Telegram includes menu shortcuts
+  and session-bound mode buttons.
+
 - Replace the original Go runtime with Rust and a WebAssembly-safe shared core.
   Source builds use the pinned Rust toolchain and Make targets; the browser UI
   also needs Node and WASM tools. The earlier Go implementation is preserved

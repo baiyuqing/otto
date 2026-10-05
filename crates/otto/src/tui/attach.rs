@@ -763,6 +763,7 @@ impl<'a> Ui<'a> {
         let Some(row) = row else { return };
         if self.last_row.as_ref() != Some(&row) {
             self.last_row = Some(row.clone());
+            self.refresh_info().await;
             self.refresh_tasks().await;
         }
         let followed = self.followed.as_ref().map(|f| f.stream.turn_id.as_str());
@@ -900,6 +901,21 @@ impl<'a> Ui<'a> {
                 self.switch(Some(&remote.workspace), None, "/new").await;
             }
             Action::Resume(id) => self.switch(None, Some(&id), "/resume").await,
+            Action::AutoMode(args) => {
+                match crate::app::parse_auto_mode(&args) {
+                    Ok(automatic) => {
+                        match within(remote.client.approval_mode(&session, automatic)).await {
+                            Ok(automatic) => self.app.push_system(format!(
+                                "Approval mode: {}",
+                                if automatic { "AUTO" } else { "MANUAL" }
+                            )),
+                            Err(error) => self.report("/auto", error),
+                        }
+                    }
+                    Err(message) => self.app.push_system(message),
+                }
+                self.refresh_info().await;
+            }
             Action::SandboxReload => match within(remote.client.reload_sandbox()).await {
                 Ok(summary) => {
                     self.app.push_system(format!("Sandbox: {summary}"));

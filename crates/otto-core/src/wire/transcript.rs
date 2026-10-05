@@ -569,6 +569,40 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
             next.push(Item::Error { text });
             next
         }
+        "approval_changed" => {
+            let Some(request) = &event.approval else {
+                return items.to_vec();
+            };
+            let automatic = request
+                .decision
+                .as_ref()
+                .is_some_and(|d| d.transport == "auto-mode");
+            let text = if request.state == crate::approval::State::Pending {
+                format!(
+                    "Approval requested: {} ({})\n{}\nReason: {}",
+                    request.title, request.id, request.subject.details, request.reason
+                )
+            } else if automatic {
+                format!(
+                    "Approval {}: automatically approved · application {:?}{}",
+                    request.id,
+                    request.application,
+                    if request.application_error.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n{}", request.application_error)
+                    }
+                )
+            } else {
+                format!(
+                    "Approval {}: {:?} · application {:?}",
+                    request.id, request.state, request.application
+                )
+            };
+            let mut next = items.to_vec();
+            next.push(Item::Notice { text });
+            next
+        }
         "approval_requested" => {
             let mut text = format!(
                 "Approval {} requested for: {}",

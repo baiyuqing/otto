@@ -93,6 +93,7 @@ pub struct Info {
     pub context_input_tokens_present: bool,
     pub context_input_tokens_pending: bool,
     pub sandbox: SandboxInfo,
+    pub auto_mode: bool,
 }
 
 /// What a completed session replacement reports.
@@ -100,6 +101,15 @@ pub struct Info {
 pub struct ResumeResult {
     pub session_path: String,
     pub warnings: Vec<String>,
+}
+
+pub fn parse_auto_mode(args: &str) -> Result<Option<bool>, String> {
+    match args.trim() {
+        "" => Ok(None),
+        "on" => Ok(Some(true)),
+        "off" => Ok(Some(false)),
+        _ => Err("usage: /auto [on|off]".into()),
+    }
 }
 
 fn validate_thinking_arg(thinking: &str) -> Result<(), String> {
@@ -504,6 +514,16 @@ impl Controller {
         };
         let header = current.session.header();
         let snapshot = current.session.snapshot();
+        let auto_mode = self
+            .builder
+            .approvals
+            .auto_mode(&crate::approval::Scope {
+                workspace: header.workspace.clone(),
+                session_id: header.id.clone(),
+                task_id: String::new(),
+                run_id: String::new(),
+            })
+            .unwrap_or(false);
         Info {
             session_id: header.id,
             session_name: current.session.name(),
@@ -520,6 +540,7 @@ impl Controller {
             context_input_tokens_present: snapshot.context_input_tokens_present,
             context_input_tokens_pending: snapshot.context_input_tokens_pending,
             sandbox,
+            auto_mode,
         }
     }
 
@@ -721,6 +742,23 @@ impl Controller {
         self.request_close();
         drop(admission);
         warnings
+    }
+
+    pub fn auto_mode_command(&self, args: &str) -> Result<String, String> {
+        let automatic = parse_auto_mode(args)?;
+        if let Some(automatic) = automatic {
+            self.approval_service()
+                .set_auto_mode(&self.approval_scope(), automatic)
+                .map_err(|e| e.to_string())?;
+        }
+        let automatic = self
+            .approval_service()
+            .auto_mode(&self.approval_scope())
+            .map_err(|e| e.to_string())?;
+        Ok(format!(
+            "Approval mode: {}",
+            if automatic { "AUTO" } else { "MANUAL" }
+        ))
     }
 
     pub fn approval_service(&self) -> &Arc<crate::approval::Service> {
@@ -2135,6 +2173,33 @@ mod tests {
     };
     use crate::runtime::info::SandboxNetwork;
     use crate::runtime::sandbox_config::SandboxChange;
+
+    #[tokio::test]
+    async fn session_mode_commands_keep_new_sessions_independent_and_resume_preferences() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller = controller(workspace.path(), sessions.path()).await;
+        controller
+            .current_session()
+            .append(user("persist this session"))
+            .await
+            .unwrap();
+        let first = controller.info();
+        assert!(first.auto_mode);
+        assert_eq!(
+            controller.auto_mode_command("off").unwrap(),
+            "Approval mode: MANUAL"
+        );
+        assert!(!controller.info().auto_mode);
+        assert!(controller.auto_mode_command("invalid").is_err());
+        controller.new_session().await.unwrap();
+        assert!(controller.info().auto_mode);
+        controller
+            .resume_session(&first.session_path)
+            .await
+            .unwrap();
+        assert!(!controller.info().auto_mode);
+    }
 
     #[tokio::test]
     async fn info_reports_the_current_session_and_the_resolved_profile() {

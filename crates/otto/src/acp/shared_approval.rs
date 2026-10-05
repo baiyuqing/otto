@@ -176,3 +176,50 @@ impl Connection {
         }
     }
 }
+
+impl Connection {
+    pub(super) async fn approval_mode(&self, method: &str, params: Value) -> Reply {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Input {
+            session_id: String,
+            automatic: Option<bool>,
+        }
+        let input: Input = serde_json::from_value(params)
+            .map_err(|_| invalid_params("invalid approval mode request"))?;
+        let automatic = if method.ends_with("/set") {
+            Some(
+                input
+                    .automatic
+                    .ok_or_else(|| invalid_params("automatic boolean is required"))?,
+            )
+        } else {
+            if input.automatic.is_some() {
+                return Err(invalid_params("get takes only sessionId"));
+            }
+            None
+        };
+        let mode = match &self.backend {
+            Backend::Local(local) => {
+                let session = local
+                    .session(&input.session_id)
+                    .ok_or_else(unknown_session)?;
+                let ctrl = &session.controller;
+                if let Some(automatic) = automatic {
+                    ctrl.approval_service()
+                        .set_auto_mode(&ctrl.approval_scope(), automatic)
+                        .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?;
+                }
+                ctrl.approval_service()
+                    .auto_mode(&ctrl.approval_scope())
+                    .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?
+            }
+            Backend::Attach(relay) => relay
+                .client
+                .approval_mode(&input.session_id, automatic)
+                .await
+                .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?,
+        };
+        result(json!({"automatic":mode}))
+    }
+}

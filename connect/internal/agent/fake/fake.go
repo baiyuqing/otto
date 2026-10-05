@@ -440,6 +440,26 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 		lines = strings.Split(s, "\n")
 	}
 	switch method {
+	case "_otto/approval_mode/get", "_otto/approval_mode/set":
+		var input struct {
+			SessionID string `json:"sessionId"`
+			Automatic *bool  `json:"automatic"`
+		}
+		if err := json.Unmarshal(params, &input); err != nil || input.SessionID == "" {
+			return nil, errors.New("invalid session mode")
+		}
+		path := a.dir + "/mode-" + input.SessionID
+		if method == "_otto/approval_mode/set" {
+			if input.Automatic == nil {
+				return nil, errors.New("automatic required")
+			}
+			if err := os.WriteFile(path, []byte(strconv.FormatBool(*input.Automatic)), 0600); err != nil {
+				return nil, err
+			}
+			a.log("auto:%s:%t", input.SessionID, *input.Automatic)
+		}
+		value, err := os.ReadFile(path)
+		return map[string]bool{"automatic": err != nil || string(value) == "true"}, nil
 	case "_otto/memory/pending":
 		if os.Getenv("FAKE_MEMORY_UNAVAILABLE") != "" {
 			return nil, &acp.RequestError{Code: -32010, Message: "memory is not available in this session"}

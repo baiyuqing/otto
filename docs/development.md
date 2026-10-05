@@ -531,7 +531,10 @@ human/application states. `otto::approval` stores them in `approvals.db`; the
 same decision authority is injected into the parent and child native registries,
 HTTP, ACP and terminal surfaces. Models discover `request_approval` in actual
 runner definitions and system guidance, and choose when conversational consent
-is needed. Models can query/withdraw but cannot decide an approval.
+is needed. Models can query/withdraw but cannot decide an approval. Session-owned requests
+default to automatic decisions under the persisted AUTO policy; user-only
+`/auto off` selects manual review. Creation and decision remain distinct
+journal events. See [session automatic approval](specs/2026-10-05-session-auto-mode.md).
 
 Authorization is prepared before tool dispatch, bound to the logical operation,
 exact arguments and relevant domain version. Decisions/events commit together.

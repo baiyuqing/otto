@@ -1,0 +1,61 @@
+package bridge
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// ModePlatform presents session-bound shortcuts. The bridge still admits the
+// sender and checks the binding when a shortcut is used.
+type ModePlatform interface {
+	SendApprovalMode(context.Context, string, string, bool) error
+}
+
+func (c *chat) cmdAuto(m Message, arg string) {
+	var automatic *bool
+	switch arg {
+	case "":
+	case "on", "off":
+		value := arg == "on"
+		automatic = &value
+	default:
+		c.notify(m.MessageID, "Usage: /auto [on|off]")
+		return
+	}
+	go func() {
+		ctx, stop := context.WithTimeout(c.b.workCtx, 30*time.Second)
+		defer stop()
+		sid := c.b.opts.Store.Session(c.key)
+		if m.ModeSession != "" && m.ModeSession != sid {
+			c.send(ctx, m.MessageID, "This mode shortcut belongs to another session. Send /auto for current controls.")
+			return
+		}
+		var err error
+		if sid == "" {
+			sid, err = c.session(ctx, m)
+		} else {
+			err = c.b.load(ctx, sid)
+		}
+		if err != nil {
+			c.send(ctx, m.MessageID, "Could not load the session: "+err.Error())
+			return
+		}
+		c.startApprovalWatch(sid)
+		mode, err := c.b.opts.Agent.ApprovalMode(ctx, sid, automatic)
+		if err != nil {
+			c.send(ctx, m.MessageID, "Could not configure approval mode: "+err.Error())
+			return
+		}
+		if platform, ok := c.p.(ModePlatform); ok {
+			if err := platform.SendApprovalMode(ctx, c.id, sid, mode); err == nil {
+				return
+			}
+		}
+		name := "MANUAL"
+		if mode {
+			name = "AUTO"
+		}
+		c.send(ctx, m.MessageID, fmt.Sprintf("Approval mode: %s\nSession: %s\n/auto on · /auto off", name, sid))
+	}()
+}

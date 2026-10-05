@@ -81,6 +81,10 @@ enum Recovery {
 }
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS approval_modes (
+ workspace TEXT NOT NULL, session_id TEXT NOT NULL, automatic INTEGER NOT NULL CHECK(automatic IN (0,1)),
+ PRIMARY KEY(workspace,session_id)
+) STRICT;
 CREATE TABLE IF NOT EXISTS approvals (
  id TEXT PRIMARY KEY, subject_key TEXT NOT NULL UNIQUE,
  workspace TEXT NOT NULL, session_id TEXT NOT NULL,
@@ -430,6 +434,73 @@ impl Service {
         self.changes.send_modify(|v| *v = v.wrapping_add(1));
     }
 
+    /// A missing preference means AUTO for a session; workspace-only requests
+    /// and independent tasks still require manual approval.
+    pub fn auto_mode(&self, scope: &Scope) -> Result<bool> {
+        let connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
+        Self::mode(&connection, scope)
+    }
+
+    fn mode(connection: &Connection, scope: &Scope) -> Result<bool> {
+        if scope.session_id.is_empty() || !scope.task_id.is_empty() {
+            return Ok(false);
+        }
+        connection
+            .query_row(
+                "SELECT automatic FROM approval_modes WHERE workspace=?1 AND session_id=?2",
+                params![scope.workspace, scope.session_id],
+                |row| row.get::<i64>(0),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(1) != 0)
+            .map_err(|_| Error::Unavailable)
+    }
+
+    pub fn set_auto_mode(&self, scope: &Scope, automatic: bool) -> Result<()> {
+        if scope.workspace.is_empty() || scope.session_id.is_empty() || !scope.task_id.is_empty() {
+            return Err(Error::Invalid("approval mode requires a session"));
+        }
+        let connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
+        connection.execute(
+            "INSERT INTO approval_modes VALUES (?1,?2,?3) ON CONFLICT(workspace,session_id) DO UPDATE SET automatic=excluded.automatic",
+            params![scope.workspace, scope.session_id, i64::from(automatic)],
+        ).map_err(|_| Error::Unavailable)?;
+        drop(connection);
+        self.changed();
+        if automatic {
+            for request in self
+                .snapshot(&scope.workspace, Some(&scope.session_id))?
+                .requests
+            {
+                // Visibility alone must not give this session authority over a
+                // workspace request or a different session's shared candidate.
+                if request.scope.workspace == scope.workspace
+                    && request.scope.session_id == scope.session_id
+                    && request.scope.task_id.is_empty()
+                {
+                    self.auto_approve(&request.id, &request.scope)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn auto_approve(&self, id: &str, scope: &Scope) -> Result<Request> {
+        self.mutate_with_connection(id, scope, |request, connection| {
+            if request.state != State::Pending || !Self::mode(connection, scope)? {
+                return Ok(false);
+            }
+            Self::record_decision(
+                request,
+                request.revision,
+                true,
+                "Automatically approved in AUTO mode.",
+                &Actor::local("auto-mode"),
+                false,
+            )
+        })
+    }
+
     pub fn create(&self, proposal: Proposal) -> Result<Request> {
         let now = Utc::now().timestamp();
         let mut bytes = [0; 16];
@@ -550,7 +621,7 @@ impl Service {
         tx.commit().map_err(|_| Error::Unavailable)?;
         drop(connection);
         self.changed();
-        Ok(request)
+        self.auto_approve(&request.id, &request.scope)
     }
     pub fn get(&self, id: &str, workspace: &str, session: Option<&str>) -> Result<Request> {
         let connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
@@ -812,6 +883,14 @@ impl Service {
         scope: &Scope,
         update: impl FnOnce(&mut Request) -> Result<bool>,
     ) -> Result<Request> {
+        self.mutate_with_connection(id, scope, |request, _| update(request))
+    }
+    fn mutate_with_connection(
+        &self,
+        id: &str,
+        scope: &Scope,
+        update: impl FnOnce(&mut Request, &Connection) -> Result<bool>,
+    ) -> Result<Request> {
         let mut connection = self.connection.lock().map_err(|_| Error::Unavailable)?;
         let tx = connection.transaction().map_err(|_| Error::Unavailable)?;
         let body = tx
@@ -827,7 +906,7 @@ impl Service {
         }
         let previous_application = request.application;
         let previous_state = request.state;
-        if update(&mut request)? {
+        if update(&mut request, &tx)? {
             if request.application != previous_application {
                 if request.application == ApplicationState::Applying {
                     let (pid, started) = crate::subagent::record::current_process();
@@ -875,7 +954,14 @@ impl Service {
         let mut changes = self.changes();
         let mut poll = tokio::time::interval(Duration::from_millis(200));
         loop {
-            let request = self.get(id, &scope.workspace, Some(&scope.session_id))?;
+            if cancel.is_cancelled() {
+                let request = self.get(id, &scope.workspace, Some(&scope.session_id))?;
+                if request.state == State::Pending {
+                    return self.withdraw(id, scope, request.revision);
+                }
+                return Ok(request);
+            }
+            let request = self.auto_approve(id, scope)?;
             if request.state != State::Pending {
                 return Ok(request);
             }
@@ -929,6 +1015,63 @@ pub fn digest(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_mode_is_default_scoped_persistent_and_records_both_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("approvals.db");
+        let service = Service::open(&path).unwrap();
+        let scope = proposal().scope;
+        assert!(service.auto_mode(&scope).unwrap());
+        let request = service.create(proposal()).unwrap();
+        assert_eq!(request.state, State::Approved);
+        assert_eq!(request.decision.as_ref().unwrap().transport, "auto-mode");
+        let events = service.events("/w", Some("s"), 0).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].request.state, State::Pending);
+        assert_eq!(events[1].request.state, State::Approved);
+        service.set_auto_mode(&scope, false).unwrap();
+        let mut manual = proposal();
+        manual.subject.id = "manual".into();
+        let manual = service.create(manual).unwrap();
+        assert_eq!(manual.state, State::Pending);
+        let mut other = proposal();
+        other.scope.session_id = "other".into();
+        assert_eq!(service.create(other).unwrap().state, State::Approved);
+        let mut child = proposal();
+        child.scope.task_id = "child".into();
+        assert_eq!(service.create(child).unwrap().state, State::Pending);
+        let mut workspace = proposal();
+        workspace.scope.session_id.clear();
+        assert_eq!(service.create(workspace).unwrap().state, State::Pending);
+        drop(service);
+        let service = Service::open(&path).unwrap();
+        assert!(!service.auto_mode(&scope).unwrap());
+        service.set_auto_mode(&scope, true).unwrap();
+        assert_eq!(
+            service.get(&manual.id, "/w", Some("s")).unwrap().state,
+            State::Approved
+        );
+        assert_eq!(service.snapshot("/w", Some("s")).unwrap().requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_over_enabling_auto_for_a_waiter() {
+        let service = Service::in_memory().unwrap();
+        let scope = proposal().scope;
+        service.set_auto_mode(&scope, false).unwrap();
+        let request = service.create(proposal()).unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = service.wait(&request.id, &scope, &cancel).await.unwrap();
+        assert_eq!(result.state, State::Withdrawn);
+        service.set_auto_mode(&scope, true).unwrap();
+        assert_eq!(
+            service.get(&request.id, "/w", Some("s")).unwrap().state,
+            State::Withdrawn
+        );
+    }
+
     fn proposal() -> Proposal {
         Proposal {
             kind: Kind::Confirmation,
@@ -969,6 +1112,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let service = Service::open(&path).unwrap();
+        service
+            .set_auto_mode(&self::proposal().scope, false)
+            .unwrap();
         let r = service.create(proposal()).unwrap();
         assert_eq!(service.create(proposal()).unwrap().id, r.id);
         let snapshot = service.snapshot("/w", Some("s")).unwrap();
@@ -1012,6 +1158,9 @@ mod tests {
     #[tokio::test]
     async fn cancelled_wait_withdraws_without_approval() {
         let service = Service::in_memory().unwrap();
+        service
+            .set_auto_mode(&self::proposal().scope, false)
+            .unwrap();
         let r = service.create(proposal()).unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -1038,6 +1187,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let service = Service::open(&path).unwrap();
+        service
+            .set_auto_mode(&self::proposal().scope, false)
+            .unwrap();
         let mut proposal = proposal();
         proposal.kind = Kind::Authorization;
         proposal.subject.source = "native-review".into();
@@ -1059,6 +1211,9 @@ mod tests {
             DROP TABLE newer_claims; PRAGMA user_version=1;").unwrap();
         drop(connection);
         let service = Service::open(&path).unwrap();
+        service
+            .set_auto_mode(&self::proposal().scope, false)
+            .unwrap();
         service
             .register_domain("/w", "native-review", Arc::new(NoReplay))
             .unwrap();
@@ -1083,6 +1238,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let one = Service::open(&path).unwrap();
+        one.set_auto_mode(&self::proposal().scope, false).unwrap();
         let other = Service::open(&path).unwrap();
         let mut proposal = proposal();
         proposal.kind = Kind::Authorization;
@@ -1127,6 +1283,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let one = Service::open(&path).unwrap();
+        one.set_auto_mode(&self::proposal().scope, false).unwrap();
         let two = Service::open(&path).unwrap();
         let r = one.create(proposal()).unwrap();
         one.decide(&r.id, &r.scope, 1, true, "", &Actor::local("one"))
@@ -1141,6 +1298,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let one = Service::open(&path).unwrap();
+        one.set_auto_mode(&self::proposal().scope, false).unwrap();
         let two = Service::open(&path).unwrap();
         let mut p = proposal();
         p.kind = Kind::Authorization;

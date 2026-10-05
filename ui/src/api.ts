@@ -216,6 +216,7 @@ export interface WorkspaceDiff {
 // open session in this process. `turn` is null when the session has had no
 // turn since it was opened.
 export interface SessionStatus {
+  auto_mode?: boolean
   id: string
   workspace: string
   turn: 'running' | 'ok' | 'error' | 'canceled' | null
@@ -345,6 +346,7 @@ export const api = {
   listMcp: (id: string) => json<{ servers: McpServer[] }>(`/v1/sessions/${id}/mcp`),
   getTask: (id: string, taskId: string) => json<TaskDetail>(`/v1/sessions/${id}/tasks/${taskId}`),
   cancelTask: (id: string, taskId: string) => request(`/v1/sessions/${id}/tasks/${taskId}/cancel`, { method: 'POST' }),
+  approvalMode: (id: string, automatic?: boolean) => json<{ automatic: boolean }>(`/v1/sessions/${id}/approval-mode`, automatic === undefined ? undefined : { method: 'PUT', body: JSON.stringify({ automatic }) }),
   reloadSandbox: () => json<Session['sandbox']>('/v1/sandbox/reload', { method: 'POST' }),
   // decideApproval answers an approval the running turn is waiting on. The
   // retry of the approved command runs inside that turn on the server.

@@ -186,6 +186,15 @@ pub fn workspace_memory_scope(
         .get(canonical_path)
         .map(String::as_str)
         .unwrap_or_default();
+    let identity =
+        crate::workspace::read(Path::new(canonical_path)).map_err(|error| error.to_string())?;
+    if let Some(identity) = identity {
+        if !stable.is_empty() && stable != identity.memory_scope {
+            return Err("workspace identity conflicts with memory.workspace_ids".into());
+        }
+        return new_workspace_scope(canonical_path, &identity.memory_scope)
+            .map_err(|error| error.to_string());
+    }
     new_workspace_scope(canonical_path, stable).map_err(|error| error.to_string())
 }
 
@@ -2542,5 +2551,70 @@ mod catalog_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod workspace_identity_tests {
+    use super::*;
+    use crate::memory::turso::records::testsupport::sample_record;
+    use crate::memory::turso::testsupport::open_temp;
+    use crate::memory::{RecordKey, UpsertRequest};
+
+    #[test]
+    fn legacy_memory_remains_reachable_after_a_move_and_is_separate_after_fork() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("workspace");
+        std::fs::create_dir(&original).unwrap();
+        let original = std::fs::canonicalize(original).unwrap();
+        let config = MemoryRuntime::default();
+        let scope = workspace_memory_scope(&config, original.to_str().unwrap()).unwrap();
+        let (_store_dir, store) = open_temp();
+        let record = store
+            .upsert(&UpsertRequest {
+                record: sample_record("legacy-memory", &scope, "style", "concise"),
+                expected_revision: None,
+            })
+            .unwrap();
+        crate::workspace::initialize(&original, "").unwrap();
+        let moved = dir.path().join("moved");
+        std::fs::rename(&original, &moved).unwrap();
+        crate::workspace::initialize(&moved, "").unwrap();
+        let moved_scope = workspace_memory_scope(&config, moved.to_str().unwrap()).unwrap();
+        assert_eq!(moved_scope, scope);
+        assert_eq!(
+            store
+                .get_by_key(&RecordKey {
+                    scope: moved_scope,
+                    kind: "preference".into(),
+                    key: "style".into()
+                })
+                .unwrap(),
+            record
+        );
+        crate::cli::runtime_builder::validate_session_workspace(
+            original.to_str().unwrap(),
+            moved.to_str().unwrap(),
+        )
+        .unwrap();
+        crate::workspace::fork(&moved).unwrap();
+        let fork_scope = workspace_memory_scope(&config, moved.to_str().unwrap()).unwrap();
+        assert_ne!(fork_scope, scope);
+        assert!(
+            store
+                .get_by_key(&RecordKey {
+                    scope: fork_scope,
+                    kind: "preference".into(),
+                    key: "style".into()
+                })
+                .is_err()
+        );
+        assert!(
+            crate::cli::runtime_builder::validate_session_workspace(
+                original.to_str().unwrap(),
+                moved.to_str().unwrap()
+            )
+            .is_err()
+        );
     }
 }

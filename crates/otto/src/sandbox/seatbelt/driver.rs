@@ -1485,6 +1485,9 @@ mod tests {
         let Some(fixture) = fixture_with(true).await else {
             return;
         };
+        crate::workspace::initialize(&fixture.workspace, "").expect("workspace identity");
+        let marker = fixture.workspace.join(crate::workspace::MARKER);
+        let marker_before = std::fs::read(&marker).expect("read workspace identity");
         let config = fixture.workspace.join(".git/config");
         let before = std::fs::read(&config).expect("read .git/config");
         for script in [
@@ -1494,16 +1497,24 @@ mod tests {
             "touch .git/commondir",
             "mv .git g2",
             "ln .git/config hl",
+            "echo bad > .otto/workspace.json",
+            "mv .otto moved-state",
+            "ln .otto/workspace.json identity-link",
         ] {
             let (ok, _) = run_script(&fixture, script).await;
             assert!(!ok, "the sandbox allowed: {script}");
         }
         assert_eq!(std::fs::read(&config).expect("re-read"), before);
         assert!(fixture.workspace.join(".git").is_dir(), ".git was moved");
+        assert_eq!(
+            std::fs::read(&marker).expect("re-read identity"),
+            marker_before
+        );
         for script in [
             "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m t",
             "git checkout -q -b topic",
             "echo ok > regular-file",
+            "echo ok > .otto/regular-file",
         ] {
             let (ok, _) = run_script(&fixture, script).await;
             assert!(ok, "the sandbox refused: {script}");

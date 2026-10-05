@@ -15,6 +15,8 @@ for invariants and implementation constraints.
 | `ui/` | TypeScript browser frontend | `package.json` and `src/` |
 | `connect/` | Independent Go Telegram and Feishu connector that communicates with Otto through ACP | `connect/README.md` and `connect/internal/` |
 | `desktop/` | Independent macOS Tauri shell around `otto serve` | `desktop/README.md` |
+| `crates/otto/src/fsops.rs` | Shared pinned filesystem descriptors and atomic operations | Native session and workspace callers |
+| `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
 | `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow | `Makefile`, `.github/workflows/checks.yml` |

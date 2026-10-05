@@ -1163,8 +1163,8 @@ pub struct Builder {
     pub sandbox_info: SandboxInfo,
     pub sandbox_secrets: Vec<String>,
     pub sandbox_secrets_complete: bool,
-    /// This workspace's memory scope: a SHA-256 digest of its canonical path,
-    /// or the configured stable id (`workspace_memory_scope`). The service
+    /// This workspace's memory scope: its identity marker's adopted scope,
+    /// or the legacy path/configured id (`workspace_memory_scope`). The service
     /// itself and the user scope are process-wide and live on `Shared`.
     pub workspace_scope: crate::memory::Scope,
     /// Host grants and the HTTP client of the `web_fetch` and `web_search`
@@ -2122,8 +2122,16 @@ fn config_for_session_runtime(file: &File, stored_profile: &str, explicit_profil
     copy
 }
 
-/// A session may only be resumed from the directory it was created in.
+/// A session may be resumed in its original directory or a recorded workspace move.
 pub fn validate_session_workspace(session_workspace: &str, workspace: &str) -> Result<(), String> {
+    if crate::workspace::read(Path::new(workspace))
+        .map_err(|error| error.to_string())?
+        .is_some()
+        && crate::workspace::owns_session(workspace, session_workspace)
+            .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
     let header_workspace = canonical_directory(Path::new(session_workspace))
         .map_err(|error| format!("resolve session workspace: {error}"))?;
     if header_workspace.as_os_str() != workspace {

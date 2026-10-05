@@ -130,6 +130,9 @@ Use `/help` for interactive commands. Sessions support continuing, resuming, and
 archiving. See [sessions](docs/user-manual.md#sessions) and
 [headless mode](docs/user-manual.md#headless-mode).
 
+Workspace identities persist across restarts and directory moves. See
+[workspace identity](docs/user-manual.md#workspace-identity) for copying and forking.
+
 In the TUI, `/image <path>` attaches one PNG, JPEG, or WebP image to the next
 prompt. In the Web UI, choose **Image** or paste a screenshot before sending.
 The selected model and OpenAI-compatible endpoint must support image input.

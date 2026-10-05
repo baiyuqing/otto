@@ -54,6 +54,18 @@ pub(crate) fn refuse_git_read_only<'a>(
         .filter(|part| *part != ".")
         .map(|part| part.to_string_lossy().to_uppercase().to_lowercase())
         .collect();
+    if crate::workspace::READ_ONLY_PATHS
+        .iter()
+        .any(|(name, _)| parts.iter().map(String::as_str).eq(name.split('/')))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is read-only: workspace identity is managed by Otto",
+                path.display()
+            ),
+        ));
+    }
     for (name, subpath) in crate::sandbox::GIT_READ_ONLY {
         let protected: Vec<&str> = name.split('/').collect();
         let hit = if subpath {
@@ -665,5 +677,27 @@ mod tests {
             workspace.existing_relative(Path::new("")).unwrap(),
             PathBuf::from(".")
         );
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_identity_and_parent_are_read_only_including_symlink_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::workspace::initialize(dir.path(), "").unwrap();
+        std::os::unix::fs::symlink(".otto/workspace.json", dir.path().join("identity-alias"))
+            .unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        for name in [
+            ".otto",
+            ".otto/workspace.json",
+            ".OTTO/WORKSPACE.JSON",
+            "identity-alias",
+        ] {
+            assert!(workspace.write_relative(Path::new(name)).is_err(), "{name}");
+        }
     }
 }

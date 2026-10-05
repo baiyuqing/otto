@@ -41,10 +41,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - Make MCP tools lazy by default and discover them through the router. Router
   calls require approval. ([#187](https://github.com/baiyuqing/otto/pull/187),
   [#324](https://github.com/baiyuqing/otto/pull/324))
-- Local web access requires approval per host unless the host is listed in
-  `[web].allow_hosts`. Network deny disables web access. With `chatgpt` and no
-  Google or Brave credentials, search uses ChatGPT's hosted tool, which does
-  not use Otto's host approvals. See [web tools](docs/user-manual.md#web-tools).
+- Public `web_fetch` and `web_search` access runs without per-host approval.
+  Private-address and credential checks remain, and network deny disables
+  web access. Legacy `[web].allow_hosts` entries are accepted but ignored.
+  With `chatgpt` and no Google or Brave credentials, search uses ChatGPT's
+  hosted tool, which does not use the local destination checks. See
+  [web tools](docs/user-manual.md#web-tools).
   ([#328](https://github.com/baiyuqing/otto/pull/328))
 
 ### Features

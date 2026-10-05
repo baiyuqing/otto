@@ -147,7 +147,6 @@ impl Sink for AcpSink {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::collections::HashSet;
     use std::io::Write;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
@@ -174,7 +173,7 @@ mod tests {
             client_capabilities: Mutex::new(Value::Null),
             task_stop: CancellationToken::new(),
             notice_stop: CancellationToken::new(),
-            watching_notices: Mutex::new(HashSet::new()),
+            watching_notices: Mutex::new(HashMap::new()),
             notice_ready: Mutex::new(HashMap::new()),
             wake_loops: Mutex::new(HashMap::new()),
         });

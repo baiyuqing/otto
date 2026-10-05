@@ -218,6 +218,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Keep resumed sessions in the requested workspace, resolve new-session and
+  workflow runtimes from that workspace's configuration, and wire its own
+  sandbox control and persistent read approvals. Rebind ACP notifications
+  when a session is loaded again after being reopened.
+
 - Make zsh here-documents (`cat > file <<EOF`) work in the Seatbelt sandbox.
   The sandbox now sets `TMPPREFIX` to its private temporary directory, so zsh
   no longer tries to write the denied `/tmp/zsh*` and leave an empty target file.
@@ -289,6 +294,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [#325](https://github.com/baiyuqing/otto/pull/325))
 
 ### Security
+
+- Recheck chat admission when restoring connector bindings and delivering
+  background replies, so removed chats no longer receive session notices.
 
 - Confine file tools to the workspace, validate canonical paths and symlinks,
   protect session resume identities, and bound file reads, edits, prompt files,

@@ -1897,6 +1897,15 @@ the request asks for it, and otherwise returns `409` (see
 [Turn queue](#turn-queue)). It listens on a Unix domain socket (the default),
 a loopback TCP port, or both.
 
+Clients authenticated by the server token or Unix-socket permissions share
+one user's authority over the server; there is no per-client session ACL.
+Different sessions have separate histories, turn queues and event streams.
+Clients loading the same session intentionally share its conversation and
+approval state. A resume request naming a workspace must match the session's
+workspace, including when the session is already open, or it returns `404`.
+New sessions use the selected workspace's resolved profile/model settings
+and sandbox; a loaded workspace has its own sandbox reload and read grants.
+
 ```bash
 otto serve [--socket PATH] [--listen HOST:PORT [--open]]
 ```
@@ -2732,7 +2741,9 @@ with status `1`.
   `GET /v1/sessions/{id}/wake-replies` once a second, starting after the
   newest reply that existed when the session was opened, so earlier replies
   are not sent again. Over [ACP TCP](#direct-acp-tcp-connection), `otto serve`
-  sends the same update without polling.
+  sends the same update without polling. Loading the session again replaces
+  its notification subscription, including after another client closes and
+  reopens that session.
 - A turn that ends with an error answers the prompt with a JSON-RPC error
   carrying the redacted message.
 - An elevated `bash` command sends `session/request_permission` while the
@@ -2981,6 +2992,8 @@ a log line.
   [Active-task guidance and model follow-ups](#active-task-guidance-and-model-follow-ups)).
   Waiting input uses a bounded queue of at most 10. A message beyond that gets "Queue is full (10 messages); the
   message was not queued." Chats on different sessions run concurrently.
+  Persisted chat bindings outside the current chats/senders allowlists are not
+  restored, and background replies recheck admission before sending.
   Chats bound to the same session (with `/use`) take turns: one prompt runs
   on a session at a time, and when three or more chats wait for the same
   session, the order in which they run is not guaranteed.

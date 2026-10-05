@@ -73,9 +73,20 @@ connect-check: ## Go chat connector: gofmt, vet, race tests; builds target/debug
 connect-build: ## build the chat connector to target/otto-connect
 	cd $(CONNECT_DIR) && go build -o ../target/otto-connect ./cmd/otto-connect
 
-check-fast: rust-fmt rust-lint ## quick feedback: formatting, lint, focused core tests
-	cargo test -p otto-core
-	@git diff --check
+# check-fast is the local gate. All worktrees of this repository share one lock
+# file in the common git directory, so check-fast in several worktrees runs one
+# at a time instead of each compiling on every core. lockf is the macOS tool,
+# flock the Linux one; both release the lock when the process exits.
+CHECK_LOCK = $(shell git rev-parse --path-format=absolute --git-common-dir)/otto-check-fast.lock
+ifeq ($(shell uname -s),Darwin)
+CHECK_LOCKED = lockf -k "$(CHECK_LOCK)"
+else
+CHECK_LOCKED = flock "$(CHECK_LOCK)"
+endif
+
+check-fast: ## local gate: only the checks for paths changed since origin/main, one worktree at a time
+	@echo "check-fast: taking $(CHECK_LOCK); waits while another worktree's check-fast holds it"
+	@$(CHECK_LOCKED) node scripts/check-changed.mjs
 
 check: rust-fmt rust-lint check-tests ## full macOS acceptance: format, lint, web UI build, all Rust tests (PTY tests included), host integration and web UI tests (no release build; see `build`)
 

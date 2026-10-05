@@ -338,7 +338,7 @@ Go implementation (tagged `go-final`) was replaced.
 
 ```bash
 make build
-make check-fast  # rustfmt, clippy, focused otto-core tests
+make check-fast  # local gate: checks for the paths changed since origin/main
 make check       # full macOS acceptance: all tests, wasm, PTY, and web UI
                  # (needs wasm-pack 0.15 and Node 24+)
 ```

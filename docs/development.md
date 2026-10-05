@@ -45,7 +45,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI (`ui/dist`, written by `make ui`)
   - `tui`: the terminal frontend on the alternate screen, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle. `App` reaches either the local `Controller` or, through `app::Backend::Attach`, `tui::attach::Remote`; `tui::attach` is `otto --attach`, the loop that sends turns to `otto serve` through `client`, follows the session's turns from the `/v1/status` stream, and reconnects after a lost connection. Both modes apply turn events as wire frames (`App::apply_event`)
 - `crates/otto-web`: the wasm cdylib the browser UI loads; exports `otto-core`'s wire codecs to JavaScript through `wasm-bindgen`
-- `ui/`: the TypeScript browser frontend; a client of `crates/otto`'s HTTP API and `crates/otto-web`'s wasm exports only, with no Rust code of its own and no part in `make check-fast`
+- `ui/`: the TypeScript browser frontend; a client of `crates/otto`'s HTTP API and `crates/otto-web`'s wasm exports only, with no Rust code of its own; `make check-fast` runs its build and tests only when a path under `ui/` or `crates/otto-web/` changed
 - `connect/`: `otto-connect`, the Go chat connector (module `github.com/baiyuqing/otto/connect`). It is an ACP client that starts an ACP agent (by default `otto acp`) as a child process and links no otto code; its contract with otto is ACP v1 on stdio or authenticated loopback TCP (`[agent].address`). `internal/agent` owns the child process or TCP connection and the ACP handshake, `internal/bridge` the chat-to-session map, queues, commands, replies, permission requests and admission, `internal/telegram` the Bot API adapter (including Markdown rendering to entities), `internal/feishu` the Feishu/Lark adapter over `channel-sdk-go`, `internal/config` `connect.toml`, and `internal/state` the state file. Design: [chat connector](specs/2026-10-02-otto-connect.md)
 
 Keep provider-specific wire structs inside the two provider implementation
@@ -346,7 +346,7 @@ changes a dependency version.
 The canonical Make targets are:
 
 ```bash
-make check-fast     # rustfmt --check, clippy -D warnings, focused otto-core tests, git diff --check
+make check-fast     # the local gate: only the checks for paths changed since origin/main, one worktree at a time
 make check          # full macOS gate: rust-fmt, rust-lint, ui, all tests (PTY tests included), wasm test, UI test (no release build)
 make check-tests    # `check` without rust-fmt and rust-lint (CI's macOS acceptance job)
 make build          # the release build: the Web UI, cargo build --release, then copy ./otto
@@ -362,7 +362,7 @@ make connect-check  # Go connector: gofmt -l, go vet, go test -race (builds targ
 make connect-build  # build the Go connector to target/otto-connect
 ```
 
-`check-fast` runs `rustfmt`, `clippy`, and the focused `otto-core` test suite;
+`check-fast` is described under [Local verification](#local-verification).
 `check` runs `rust-fmt` and `rust-lint`, builds the Web UI (`make ui`, so the
 tests embed the real `ui/dist`), then runs the full workspace test suite (which
 includes the `otto-core` tests and the PTY tests), the Go connector checks,
@@ -403,6 +403,56 @@ Go implementation: the Rust build has no `OTTO_TRACE` writer (the name is only
 reserved in the resolution environment), so nothing in this repository produces
 the JSONL files the viewer reads. Do not document provider tracing as a working
 feature until a writer exists.
+
+### Local verification
+
+Locally, run the focused tests for the change and then `make check-fast`. Do
+not run `make check` or `make check-linux`; CI runs both on every PR. A full
+gate compiles the workspace in test mode and again in check mode for clippy,
+builds the web UI and the wasm package, and runs the Go race tests. Every
+worktree has its own `target/`, so two worktrees running a full gate at the
+same time each compile the whole dependency tree on every core.
+
+`make check-fast` first takes the lock file `otto-check-fast.lock` in the
+common git directory (`lockf` on macOS, `flock` on Linux). All worktrees of the
+checkout share that directory, so `check-fast` runs in one worktree at a time;
+a second invocation waits until the first exits, and the lock is released when
+the process exits, including on a crash. Then `scripts/check-changed.mjs`
+lists the paths changed since `git merge-base HEAD origin/main`, including
+uncommitted and untracked files, and runs only the commands those paths need:
+
+| Changed path | Commands |
+|---|---|
+| any `*.rs` file | `cargo fmt --all -- --check` |
+| anything under `crates/` or `testdata/`; root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | `cargo clippy --workspace --all-targets -- -D warnings` |
+| `crates/otto/src/<module>/…` or `crates/otto/src/<module>.rs` | `cargo test --workspace --lib -- <module>::`, one run for all changed modules |
+| `crates/otto/tests/<name>.rs` | `cargo test --workspace --test <name>` |
+| `crates/otto-core/`, `testdata/`, root manifests, `crates/otto/` `Cargo.toml`, `build.rs`, `src/lib.rs`, `src/main.rs`, `tests/common/`, `tests/fixtures/`, `tests/testdata/`, and any other path under `crates/` except `crates/otto-web/` | `cargo test --workspace`, in place of the two rows above |
+| `crates/otto-core/`, `crates/otto-web/`, root manifests | `make rust-wasm-check` |
+| `crates/otto-web/` | `wasm-pack test --node crates/otto-web`, `make ui ui-test` |
+| `ui/` | `make ui ui-test` |
+| `connect/` | `make connect-check` |
+| `scripts/` | `make scripts-test` |
+| `docs/`, `LICENSE`, Markdown outside `crates/` and `testdata/` | nothing |
+| anything else, such as `.github/`, `Makefile`, `desktop/` | nothing; printed as not checked |
+
+It ends with `git diff --check` against the same base.
+
+The selection follows Cargo's units. A crate compiles as a whole, so any change
+in `crates/otto` recompiles all of it; the selection only limits which test
+binaries are linked and which tests run. The module filter is a libtest name
+substring, so `memory::` also runs tests whose path contains `memory::` under
+another module. A change in one module runs that module's unit tests only;
+other modules' tests and the integration tests run in CI. Clippy with
+`--all-targets` still compiles every target, so a compile error anywhere is
+reported locally. When a change touches what an integration test covers, run
+it by name, for example `cargo test --workspace --test tui_pty --test
+tui_attach_pty` for `tui`. Use `--workspace` in focused Cargo commands too:
+`-p <crate>` resolves features differently and recompiles dependencies.
+
+`make check` takes no lock. To cap `check-fast`'s CPU use further, set
+`CARGO_BUILD_JOBS` in the environment; the script passes the environment to
+every command.
 
 ## Web UI workflow
 

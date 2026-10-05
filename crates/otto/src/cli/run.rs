@@ -40,20 +40,20 @@ use crate::sandbox::environment::{EnvironmentOptions, EnvironmentSnapshot, resol
 use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
 use crate::session;
 
-use super::boundary::{self, BoundaryInputs};
 use super::controller::{Controller, PROMPT_ACTIVE, SESSION_OPERATION_UNAVAILABLE};
 use super::flags::{CliOptions, ParseFailure, Parsed, parse_flags};
 use super::repl::{self, Repl};
-use super::runtime_builder::{
+use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
+use super::serve;
+use crate::runtime::boundary::{self, BoundaryInputs};
+use crate::runtime::builder::{
     Builder, Shared, SharedSession, leaked_workspace, resolve_initial_runtime,
     validate_session_workspace,
 };
-use super::sandbox_runtime::{
+use crate::runtime::sandbox_runtime::{
     OpenOptions, canonical_directory, canonical_executable_file, normalize_sandbox_runtime,
     open_sandbox_runtime, sandbox_runtime_warning, settings_from_config,
 };
-use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
-use super::serve;
 
 const MAX_PROMPT_BYTES: usize = 1 << 20;
 
@@ -734,7 +734,7 @@ pub async fn run(
     }
     if dynamic_content {
         let secrets = builder.secret_values(Some(&resolved));
-        match super::wiring::open_memory_service(&memory_config, &secrets, stderr) {
+        match crate::runtime::wiring::open_memory_service(&memory_config, &secrets, stderr) {
             Ok((service, user_scope, usable)) => {
                 let shared = builder.shared_mut();
                 shared.memory.service = service;
@@ -746,7 +746,7 @@ pub async fn run(
                 return fail(stderr, &builder.redact_error(&error, Some(&resolved)));
             }
         }
-        match super::wiring::workspace_memory_scope(&memory_config, &workspace_path) {
+        match crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path) {
             Ok(scope) => builder.workspace_scope = scope,
             Err(error) => {
                 let _ = control.close().await;
@@ -1462,7 +1462,7 @@ pub(super) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
 /// so promoting a symlink would widen the sandbox to whatever the link points
 /// at, and the default roots include the workspace-relative `.otto/skills`,
 /// which anything that writes to the workspace controls.
-pub(super) fn resolve_sandbox_settings(
+pub(crate) fn resolve_sandbox_settings(
     file: &File,
     environment: &HashMap<String, String>,
     workspace_path: &str,
@@ -1551,7 +1551,7 @@ pub(super) async fn compose_workspace_sandbox(
         builder.sandbox_secrets_complete && redactions_complete && merged_complete;
 
     let mut approval_executor: Option<Arc<Executor>> = None;
-    if sandbox_info.mode == super::info::SandboxMode::Seatbelt {
+    if sandbox_info.mode == crate::runtime::info::SandboxMode::Seatbelt {
         let elevated_environment = resolve_environment(&EnvironmentOptions {
             host_entries: builder.host_entries.clone(),
             provider_names: sandbox_provider_environment_names(&builder.config, api_key_env),
@@ -1674,7 +1674,7 @@ pub(super) async fn load_workspace(
     let memory_config =
         resolve_memory(&shared.config, &shared.environment).map_err(|error| error.to_string())?;
     builder.workspace_scope =
-        super::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
+        crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
 
     Ok((builder, composed.reloader))
 }
@@ -2111,7 +2111,7 @@ driver = "off"
 
         assert_eq!(
             builder.sandbox_info.mode,
-            super::super::info::SandboxMode::Off
+            crate::runtime::info::SandboxMode::Off
         );
         assert!(builder.sandbox_info.bash_available);
         assert!(builder.command_executor.is_some());
@@ -2136,7 +2136,7 @@ driver = "off"
 
         assert_eq!(
             builder.sandbox_info.mode,
-            super::super::info::SandboxMode::Off
+            crate::runtime::info::SandboxMode::Off
         );
     }
 
@@ -2175,7 +2175,7 @@ driver = "off"
 
         assert_eq!(
             builder.sandbox_info.mode,
-            super::super::info::SandboxMode::Seatbelt,
+            crate::runtime::info::SandboxMode::Seatbelt,
             "{}",
             String::from_utf8_lossy(&stderr)
         );

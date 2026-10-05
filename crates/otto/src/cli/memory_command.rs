@@ -15,9 +15,9 @@ use std::path::Path;
 use otto_core::config::memory::MemoryRuntime;
 use otto_core::config::resolve_memory;
 
-use super::boundary::{self, BoundaryInputs};
 use super::run::fail;
 use crate::memory::{ForgetRequest, ListRequest, MAX_PAGE_SIZE, RecordRef, Scope, Service};
+use crate::runtime::boundary::{self, BoundaryInputs};
 
 const STORE_UNAVAILABLE_WARNING: &str =
     "warning: memory store unavailable, continuing without memory";
@@ -183,7 +183,8 @@ pub fn run(
             stderr,
         ),
         "forget" => {
-            let Ok(workspace) = super::sandbox_runtime::canonical_directory(Path::new(&flags.cwd))
+            let Ok(workspace) =
+                crate::runtime::sandbox_runtime::canonical_directory(Path::new(&flags.cwd))
             else {
                 return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
             };
@@ -209,7 +210,7 @@ fn status(
 ) -> i32 {
     let mut warning = Vec::new();
     let Ok((service, user_scope, usable)) =
-        super::wiring::open_memory_service(config, secret_values, &mut warning)
+        crate::runtime::wiring::open_memory_service(config, secret_values, &mut warning)
     else {
         return fail(stderr, BACKEND_UNAVAILABLE);
     };
@@ -225,10 +226,11 @@ fn status(
     if usable {
         // The scopes `/memory review` lists: the user and the current workspace.
         let standing = service.standing_usage(&user_scope);
-        let pending = super::sandbox_runtime::canonical_directory(Path::new(cwd))
+        let pending = crate::runtime::sandbox_runtime::canonical_directory(Path::new(cwd))
             .ok()
             .and_then(|workspace| {
-                super::wiring::workspace_memory_scope(config, &workspace.to_string_lossy()).ok()
+                crate::runtime::wiring::workspace_memory_scope(config, &workspace.to_string_lossy())
+                    .ok()
             })
             .and_then(|workspace_scope| {
                 service.pending_summary(&[user_scope, workspace_scope]).ok()
@@ -287,12 +289,12 @@ fn list(input: ListInput<'_>) -> i32 {
         stdout,
         stderr,
     } = input;
-    let Ok(workspace) = super::sandbox_runtime::canonical_directory(Path::new(cwd)) else {
+    let Ok(workspace) = crate::runtime::sandbox_runtime::canonical_directory(Path::new(cwd)) else {
         return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
     };
     let mut warning = Vec::new();
     let Ok((service, user_scope, usable)) =
-        super::wiring::open_memory_service(config, secret_values, &mut warning)
+        crate::runtime::wiring::open_memory_service(config, secret_values, &mut warning)
     else {
         return fail(stderr, BACKEND_UNAVAILABLE);
     };
@@ -300,14 +302,16 @@ fn list(input: ListInput<'_>) -> i32 {
         let _ = service.close();
         return fail(stderr, "memory is not usable");
     }
-    let workspace_scope =
-        match super::wiring::workspace_memory_scope(config, &workspace.to_string_lossy()) {
-            Ok(scope) => scope,
-            Err(_) => {
-                let _ = service.close();
-                return fail(stderr, WORKSPACE_UNAVAILABLE);
-            }
-        };
+    let workspace_scope = match crate::runtime::wiring::workspace_memory_scope(
+        config,
+        &workspace.to_string_lossy(),
+    ) {
+        Ok(scope) => scope,
+        Err(_) => {
+            let _ = service.close();
+            return fail(stderr, WORKSPACE_UNAVAILABLE);
+        }
+    };
     let (all_scopes, scopes) = match scope {
         "current" => (false, vec![user_scope, workspace_scope]),
         "user" => (false, vec![user_scope]),
@@ -364,12 +368,12 @@ fn show(
     if scope == "all" {
         return fail(stderr, "show requires --scope current, user, or workspace");
     }
-    let Ok(workspace) = super::sandbox_runtime::canonical_directory(Path::new(cwd)) else {
+    let Ok(workspace) = crate::runtime::sandbox_runtime::canonical_directory(Path::new(cwd)) else {
         return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
     };
     let mut warning = Vec::new();
     let Ok((service, user_scope, usable)) =
-        super::wiring::open_memory_service(config, secret_values, &mut warning)
+        crate::runtime::wiring::open_memory_service(config, secret_values, &mut warning)
     else {
         return fail(stderr, BACKEND_UNAVAILABLE);
     };
@@ -377,11 +381,13 @@ fn show(
         let _ = service.close();
         return fail(stderr, "memory is not usable");
     }
-    let workspace_scope =
-        match super::wiring::workspace_memory_scope(config, &workspace.to_string_lossy()) {
-            Ok(scope) => scope,
-            Err(_) => return fail(stderr, WORKSPACE_UNAVAILABLE),
-        };
+    let workspace_scope = match crate::runtime::wiring::workspace_memory_scope(
+        config,
+        &workspace.to_string_lossy(),
+    ) {
+        Ok(scope) => scope,
+        Err(_) => return fail(stderr, WORKSPACE_UNAVAILABLE),
+    };
     let scopes = match scope {
         "current" => vec![user_scope, workspace_scope],
         "user" => vec![user_scope],
@@ -428,7 +434,7 @@ fn forget(
 ) -> i32 {
     let mut warning = Vec::new();
     let Ok((service, user_scope, usable)) =
-        super::wiring::open_memory_service(config, secret_values, &mut warning)
+        crate::runtime::wiring::open_memory_service(config, secret_values, &mut warning)
     else {
         return fail(stderr, BACKEND_UNAVAILABLE);
     };
@@ -460,7 +466,9 @@ fn forget_record(
     if !usable {
         return fail(stderr, "memory is not usable");
     }
-    let Ok(workspace_scope) = super::wiring::workspace_memory_scope(config, workspace_path) else {
+    let Ok(workspace_scope) =
+        crate::runtime::wiring::workspace_memory_scope(config, workspace_path)
+    else {
         return fail(stderr, WORKSPACE_UNAVAILABLE);
     };
 
@@ -555,9 +563,9 @@ mod tests {
             ..MemoryRuntime::default()
         };
         let (service, user, _) =
-            super::super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+            crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                 .expect("open");
-        let current = super::super::wiring::workspace_memory_scope(
+        let current = crate::runtime::wiring::workspace_memory_scope(
             &runtime,
             &workspace.path().to_string_lossy(),
         )
@@ -696,15 +704,15 @@ mod tests {
             ..MemoryRuntime::default()
         };
         let (service, user, usable) =
-            super::super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+            crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                 .expect("open");
         assert!(usable);
-        let current = super::super::wiring::workspace_memory_scope(
+        let current = crate::runtime::wiring::workspace_memory_scope(
             &runtime,
             &workspace.path().to_string_lossy(),
         )
         .expect("current scope");
-        let other = super::super::wiring::workspace_memory_scope(
+        let other = crate::runtime::wiring::workspace_memory_scope(
             &runtime,
             &other_workspace.path().to_string_lossy(),
         )
@@ -746,7 +754,7 @@ mod tests {
     fn forget_removes_a_record_from_the_workspace_scope() {
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
-        let workspace_path = super::super::sandbox_runtime::canonical_directory(workspace.path())
+        let workspace_path = crate::runtime::sandbox_runtime::canonical_directory(workspace.path())
             .expect("canonical workspace");
         let store = tempfile::tempdir().expect("store");
         let db_path = store
@@ -764,10 +772,10 @@ mod tests {
             ..MemoryRuntime::default()
         };
         let (service, _, usable) =
-            super::super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+            crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                 .expect("open memory service");
         assert!(usable, "the store must be usable");
-        let scope = super::super::wiring::workspace_memory_scope(
+        let scope = crate::runtime::wiring::workspace_memory_scope(
             &runtime,
             &workspace_path.to_string_lossy(),
         )
@@ -798,7 +806,7 @@ mod tests {
         assert!(stdout.contains(&record.id), "stdout = {stdout:?}");
 
         let (reopened, _, usable) =
-            super::super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+            crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                 .expect("reopen memory service");
         assert!(usable, "the reopened store must be usable");
         let reference = RecordRef {

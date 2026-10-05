@@ -11,7 +11,7 @@
 //! [`SANDBOX_RELOAD_UNAVAILABLE`](super::SANDBOX_RELOAD_UNAVAILABLE) rather
 //! than a failure with nothing to re-point.
 
-use crate::cli::info::SandboxInfo;
+use crate::runtime::info::SandboxInfo;
 
 /// Reads the live sandbox state and replaces it.
 ///

@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::log::Logger;
 
-use super::metrics::{Metrics, ProviderOperationMetric};
+use crate::metrics::{Metrics, ProviderOperationMetric};
 
 /// Accepted with `"queue": true` behind another turn; not started yet.
 pub const TURN_QUEUED: &str = "queued";

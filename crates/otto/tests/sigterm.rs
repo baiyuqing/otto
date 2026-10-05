@@ -112,7 +112,7 @@ fn find_session_file(root: &Path) -> Option<PathBuf> {
 }
 
 /// Finds the one child transcript for `task_id` inside `children_dir`. The
-/// real wiring (`cli::wiring::child_sessions`) names it
+/// real wiring (`runtime::wiring::child_sessions`) names it
 /// `<task_id>-<random session id>.jsonl`, not a fixed `<task_id>-child.jsonl`
 /// suffix (that fixed name is only a unit-test fixture convention elsewhere
 /// in this crate).

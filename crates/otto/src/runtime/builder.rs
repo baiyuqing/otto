@@ -1575,7 +1575,7 @@ impl Builder {
         } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
             ProviderClient::ChatGpt {
                 client: Arc::new(
-                    super::login::chatgpt_client(
+                    chatgpt_client(
                         &self.auth_path,
                         &self.auth_credentials,
                         self.auth_credentials_loaded,
@@ -2133,6 +2133,33 @@ pub fn validate_session_workspace(session_workspace: &str, workspace: &str) -> R
         ));
     }
     Ok(())
+}
+
+/// The ChatGPT provider client for the signed-in credentials at `path`.
+fn chatgpt_client(
+    path: &str,
+    credentials: &crate::auth::Credentials,
+    loaded: bool,
+) -> Result<crate::provider::chatgpt::Client, String> {
+    if !loaded {
+        return Err(crate::auth::AuthError::NoCredentials.to_string());
+    }
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(crate::auth::AuthError::CredentialsUnavailable.to_string());
+    }
+    // `build_runner` has no token to pass, so the source gets a fresh
+    // never-cancelled base and every request still aborts on the per-call token
+    // the agent hands `Provider::complete`.
+    let tokens = crate::auth::token::TokenSource::new(
+        credentials.clone(),
+        std::path::PathBuf::from(path),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    Ok(crate::provider::chatgpt::Client::new(
+        tokens,
+        &credentials.account_id,
+    ))
 }
 
 #[cfg(test)]
@@ -3312,5 +3339,22 @@ mod tests {
         assert!(session.lease().is_none());
 
         session.close().expect("close");
+    }
+
+    #[test]
+    fn the_chatgpt_client_needs_loaded_credentials_and_a_path() {
+        let stored = crate::auth::Credentials {
+            account_id: "acct-1".to_owned(),
+            ..crate::auth::Credentials::default()
+        };
+        assert_eq!(
+            chatgpt_client("/tmp/x.json", &stored, false).err(),
+            Some(crate::auth::AuthError::NoCredentials.to_string())
+        );
+        assert_eq!(
+            chatgpt_client("   ", &stored, true).err(),
+            Some(crate::auth::AuthError::CredentialsUnavailable.to_string())
+        );
+        assert!(chatgpt_client("/tmp/x.json", &stored, true).is_ok());
     }
 }

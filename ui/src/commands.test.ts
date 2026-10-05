@@ -79,6 +79,7 @@ describe('web slash commands', () => {
       { name: '/compact', description: 'compact context with optional focus' },
       { name: '/reflect', description: 'queue memory candidates and skills from this session, with optional focus' },
       { name: '/skill', description: 'list skills reflection wrote, or undo one: generated | revert <name>' },
+      { name: '/auto', description: 'show approval mode, or set on/off for this session' },
       { name: '/sandbox', description: 'show sandbox state, or reload configuration' },
       { name: '/approve', description: 'allow the elevated Bash command a running turn is waiting on' },
       { name: '/deny', description: 'deny the elevated Bash command a running turn is waiting on' },
@@ -97,4 +98,11 @@ describe('web slash commands', () => {
     ])
     expect(webCommandSuggestions('hello')).toEqual([])
   })
+})
+
+it('parses session auto mode without sending invalid mode arguments to the model', () => {
+ expect(parseWebCommand('/auto')).toEqual({kind:'auto'})
+ expect(parseWebCommand('/auto on')).toEqual({kind:'auto',automatic:true})
+ expect(parseWebCommand('/auto off')).toEqual({kind:'auto',automatic:false})
+ expect(parseWebCommand('/auto nope')).toEqual({kind:'error',message:'usage: /auto [on|off]'})
 })

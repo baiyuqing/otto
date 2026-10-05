@@ -186,6 +186,7 @@ pub(crate) enum Action {
     Resume(String),
     Archive(String),
     SandboxReload,
+    AutoMode(String),
     /// One resolved absolute path to add to the sandbox `read_paths`.
     SandboxAllow(String),
     /// The sandbox network mode, `allow` or `deny`.
@@ -1138,6 +1139,21 @@ impl App {
             KeyCode::Enter => {
                 let draft: String = self.input.iter().collect();
                 match commands::parse_slash_command(draft.trim()) {
+                    Some((command, args)) if command.kind == SlashCommandKind::Auto => {
+                        match backend {
+                            Backend::Local(controller) => {
+                                match controller.auto_mode_command(&args) {
+                                    Ok(line) => self.push_system(line),
+                                    Err(error) => self.push_system(error),
+                                }
+                                self.info = controller.info();
+                            }
+                            Backend::Attach(_) => self.outgoing.push(Action::AutoMode(args)),
+                        }
+                        self.input.clear();
+                        self.cursor = 0;
+                        self.suggestion = 0;
+                    }
                     Some((command, _)) if command.kind == SlashCommandKind::Agents => {
                         self.agents = Some(AgentsView::open(backend));
                         self.input.clear();
@@ -1484,6 +1500,7 @@ impl App {
             return None;
         };
         match command.kind {
+            SlashCommandKind::Auto => Some(Action::AutoMode(args)),
             SlashCommandKind::Help => {
                 if !args.is_empty() {
                     self.push_system(format!("unknown command: {line}"));
@@ -1966,7 +1983,31 @@ impl App {
             }
             "approval_changed" => {
                 if let Some(request) = &event.approval {
-                    if request.state == crate::approval::State::Pending {
+                    if request
+                        .decision
+                        .as_ref()
+                        .is_some_and(|d| d.transport == "auto-mode")
+                    {
+                        self.push_system(format!(
+                            "[approval] {} ({}): automatically approved · application {:?}\n{}{}",
+                            request.title,
+                            request.id,
+                            request.application,
+                            request.subject.details,
+                            if request.application_error.is_empty() {
+                                String::new()
+                            } else {
+                                format!("\n{}", request.application_error)
+                            }
+                        ));
+                    }
+                    if request.state == crate::approval::State::Pending && self.info.auto_mode {
+                        self.push_system(format!(
+                            "[approval] requested: {} ({})\n{}\nReason: {}",
+                            request.title, request.id, request.subject.details, request.reason
+                        ));
+                    }
+                    if request.state == crate::approval::State::Pending && !self.info.auto_mode {
                         if self.approval_hidden.is_none()
                             && self.approval.as_ref().is_none_or(|dialog| {
                                 dialog.id == request.id && dialog.title.is_empty()
@@ -2405,6 +2446,17 @@ mod tests {
         let remote = super::super::attach::Remote::offline(Vec::new());
         let mut app = App::new(&Backend::Attach(&remote));
         let service = crate::approval::Service::in_memory().unwrap();
+        service
+            .set_auto_mode(
+                &crate::approval::Scope {
+                    workspace: "/work".into(),
+                    session_id: "s1".into(),
+                    task_id: String::new(),
+                    run_id: String::new(),
+                },
+                false,
+            )
+            .unwrap();
         let create = |id: &str| {
             service
                 .create(crate::approval::Proposal {

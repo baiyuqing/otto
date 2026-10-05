@@ -744,7 +744,7 @@ Turns:
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/rename`, `/compact`,
-`/image`, `/context`, `/agents`, `/sandbox`, `/sandbox reload`,
+`/image`, `/context`, `/agents`, `/auto [on|off]`, `/sandbox`, `/sandbox reload`,
 `/approve <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/reflect`, `/memory`, `/remember`, `/skill`,
@@ -1163,6 +1163,26 @@ overflow. For private deployments, set `context_window` and optionally
 `compaction_window` on the selected profile.
 
 ## Unified approvals
+
+Sessions start in **AUTO** mode: every session-owned approval is recorded and
+automatically approved. Otto shows the request and its automatic decision;
+execution/application failure remains a separate outcome. This includes tool
+permissions, proposal confirmations and session-owned persistent grants.
+Workspace-wide approvals and independent child tasks remain manual.
+
+Use `/auto` to inspect the mode, `/auto off` to require manual approval, and
+`/auto on` to approve automatically, including pending requests in this session.
+The preference survives session loading and process restarts in `approvals.db`;
+new sessions start in AUTO. TUI and Web footers show AUTO or MANUAL. The same
+commands work in ACP, Telegram and Feishu. Telegram's command menu includes
+`/auto`; its AUTO/MANUAL buttons apply only to the session shown on the message.
+
+The session API exposes `GET /v1/sessions/{id}/approval-mode` and `PUT` with
+`{"automatic":true|false}`, returning `{"automatic":boolean}`. ACP clients use
+`_otto/approval_mode/get|set` with `sessionId` and, for set, `automatic`.
+`GET /v1/sessions/{id}/approval-events?after=<cursor>` returns ordered recorded
+requests and decisions. See the [session mode contract](specs/2026-10-05-session-auto-mode.md).
+
 
 Otto uses one approval service for tool permissions, memory review, workflow
 gates, generated skills and profile changes. Pending requests survive in

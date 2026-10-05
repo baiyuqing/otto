@@ -692,6 +692,14 @@ impl Server {
                 post(skills::disable),
             )
             .route("/v1/sandbox/reload", post(sandbox::reload))
+            .route(
+                "/v1/sessions/{id}/approval-events",
+                get(approvals::session_events),
+            )
+            .route(
+                "/v1/sessions/{id}/approval-mode",
+                get(approvals::mode).put(approvals::set_mode),
+            )
             .route("/v1/schedule/claim", post(schedule::claim))
             .route("/v1/schedule/{id}/delivered", post(schedule::delivered))
             .route("/v1/tasks", get(agents::list))
@@ -835,6 +843,7 @@ impl Server {
             usage: info.usage,
             context_input_tokens: info.context_input_tokens,
             sandbox: sandbox_wire(&info.sandbox),
+            auto_mode: info.auto_mode,
             turn,
         }
     }
@@ -915,6 +924,7 @@ impl Server {
                     queued,
                     approvals,
                     tasks,
+                    auto_mode: info.auto_mode,
                 }
             })
             .collect();
@@ -1556,6 +1566,7 @@ struct SessionWire {
     usage: Usage,
     context_input_tokens: i64,
     sandbox: SandboxWire,
+    auto_mode: bool,
     turn: Option<SessionTurnWire>,
 }
 
@@ -1598,6 +1609,7 @@ struct HealthzWire {
 /// turn starts.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct StatusSessionWire {
+    auto_mode: bool,
     id: String,
     workspace: String,
     turn: Option<String>,
@@ -8025,6 +8037,84 @@ mod tests {
         let summary = harness.wait_turn_done(&id, &turn_id).await;
         assert_eq!(summary["trigger"], turn::TRIGGER_TASK);
         assert_eq!(summary["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn approval_mode_api_is_session_scoped_and_events_capture_auto_decisions() {
+        let harness = Harness::new();
+        let one = harness.create().await;
+        let two = harness.create().await;
+        let url = format!("/v1/sessions/{one}/approval-mode");
+        assert_eq!(
+            harness.send("GET", &url, None).await.json()["automatic"],
+            true
+        );
+        assert_eq!(
+            harness
+                .send("PUT", &url, Some(r#"{"automatic":false}"#))
+                .await
+                .status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            harness.send("GET", &url, None).await.json()["automatic"],
+            false
+        );
+        assert_eq!(
+            harness
+                .send("GET", &format!("/v1/sessions/{two}/approval-mode"), None)
+                .await
+                .json()["automatic"],
+            true
+        );
+        assert_eq!(
+            harness
+                .send("PUT", &url, Some(r#"{"automatic":"yes"}"#))
+                .await
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+        let ctrl = &harness.server.lookup(&two).unwrap().ctrl;
+        let request = ctrl
+            .approval_service()
+            .create(crate::approval::Proposal {
+                kind: crate::approval::Kind::Confirmation,
+                scope: ctrl.approval_scope(),
+                subject: crate::approval::Subject {
+                    source: "conversation".into(),
+                    id: "api-test".into(),
+                    version: "1".into(),
+                    details: "Test plan".into(),
+                    tool_call_id: String::new(),
+                },
+                title: "Plan approval".into(),
+                reason: "Test consent".into(),
+                blocking: true,
+                persistent: false,
+                expires_at: None,
+            })
+            .unwrap();
+        assert_eq!(request.state, crate::approval::State::Approved);
+        let events = harness
+            .send(
+                "GET",
+                &format!("/v1/sessions/{two}/approval-events?after=0"),
+                None,
+            )
+            .await
+            .json();
+        assert_eq!(events.as_array().unwrap().len(), 2);
+        assert_eq!(events[0]["request"]["state"], "pending");
+        assert_eq!(events[1]["request"]["decision"]["transport"], "auto-mode");
+        let other = harness
+            .send(
+                "GET",
+                &format!("/v1/sessions/{one}/approval-events?after=0"),
+                None,
+            )
+            .await
+            .json();
+        assert!(other.as_array().unwrap().is_empty());
     }
 
     // ---- observability: request ID and step events ----

@@ -20,7 +20,10 @@ type SharedApproval struct {
 	State            string `json:"state"`
 	Application      string `json:"application"`
 	ApplicationError string `json:"application_error"`
-	Subject          struct {
+	Decision         *struct {
+		Transport string `json:"transport"`
+	} `json:"decision"`
+	Subject struct {
 		Source  string `json:"source"`
 		Details string `json:"details"`
 	} `json:"subject"`

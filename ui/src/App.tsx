@@ -118,6 +118,10 @@ export function App() {
   // list means the session list is stale.
   const knownSessionIds = new Set(sessions.map((s) => s.id))
   const status = useStatus(knownSessionIds, () => void refreshSessions(), fail)
+  const activeMode = session ? status.get(session.id)?.auto_mode : undefined
+  useEffect(() => {
+    if (activeMode !== undefined) setSession((current) => current ? { ...current, auto_mode: activeMode } : current)
+  }, [activeMode])
 
   // consume reads a turn's stream to the end. The stream closes when the
   // turn is done, but also when the connection drops, so it then asks the
@@ -467,6 +471,14 @@ export function App() {
       } catch (e) {
         fail(e)
       }
+      return
+    }
+    if (command.kind === 'auto') {
+      try {
+        const mode = await api.approvalMode(session.id, command.automatic)
+        setSession((prev) => prev?.id === session.id ? { ...prev, auto_mode: mode.automatic } : prev)
+        setItems((prev) => [...prev, { kind: 'notice', text: `Approval mode: ${mode.automatic ? 'AUTO' : 'MANUAL'}` }])
+      } catch (e) { fail(e) }
       return
     }
     if (command.kind === 'sandbox') {

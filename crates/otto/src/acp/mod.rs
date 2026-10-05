@@ -1020,6 +1020,14 @@ impl Connection {
             (Backend::Local(local), command) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
                 match command {
+                    command::Command::Auto { args } => {
+                        let text = session
+                            .controller
+                            .auto_mode_command(args)
+                            .map_err(|e| invalid_params(&e))?;
+                        self.say(session_id, &text);
+                        end_turn()
+                    }
                     command::Command::Context => {
                         let report = session.controller.context_report();
                         self.say(
@@ -1507,11 +1515,11 @@ fn initialize_result(local: bool) -> Reply {
     let capabilities = match local {
         true => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "approvals":{"version":1}}),
+            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
         )])),
         false => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "approvals":{"version":1}}),
+            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
         )])),
     };
     result(
@@ -1741,6 +1749,12 @@ impl Dispatcher {
                             },
                         },
                     };
+                    connection.reply(id, reply);
+                });
+            }
+            "_otto/approval_mode/get" | "_otto/approval_mode/set" => {
+                self.tasks.spawn(async move {
+                    let reply = connection.approval_mode(&method, params).await;
                     connection.reply(id, reply);
                 });
             }

@@ -19,6 +19,7 @@ use otto_core::wire::events::WireCompaction;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Command<'a> {
     Context,
+    Auto { args: &'a str },
     Compact { focus: &'a str },
     Reflect { focus: &'a str },
     Skill { args: &'a str },
@@ -29,6 +30,11 @@ pub(super) enum Command<'a> {
 /// `Some` when the whole prompt is one of the supported slash commands.
 pub(super) fn parse(text: &str) -> Option<Command<'_>> {
     let text = text.trim();
+    if let Some(rest) = text.strip_prefix("/auto")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        return Some(Command::Auto { args: rest.trim() });
+    }
     if text == "/context" {
         return Some(Command::Context);
     }
@@ -102,6 +108,10 @@ pub(super) fn available_commands() -> SessionUpdate {
         .input(AvailableCommandInput::Unstructured(
             UnstructuredCommandInput::new("prompt"),
         )),
+        AvailableCommand::new(
+            "auto",
+            "Show approval mode or set /auto on|off for this session",
+        ),
     ]))
 }
 

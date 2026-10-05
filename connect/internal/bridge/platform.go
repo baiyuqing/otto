@@ -14,10 +14,11 @@ type Message struct {
 	MessageID string
 	// Text is the message text with any mention of the bot removed and a
 	// command addressed to the bot ("/stop@name") reduced to "/stop".
-	ApprovalID string // non-empty only for a button callback; never parsed from chat text
-	Text       string
-	Time       time.Time // when the platform received the message
-	Group      bool
+	ModeSession string // session bound to a mode shortcut; never parsed from chat text
+	ApprovalID  string // non-empty only for a button callback; never parsed from chat text
+	Text        string
+	Time        time.Time // when the platform received the message
+	Group       bool
 	// Attachment is true when the message carried a photo, file or other
 	// non-text content; the adapter drops that content.
 	Attachment bool

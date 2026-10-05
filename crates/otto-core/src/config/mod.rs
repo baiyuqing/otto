@@ -122,9 +122,8 @@ impl Experimental {
     }
 }
 
-/// The `[web]` table: hosts the `web_fetch` and `web_search` tools may reach
-/// without asking. Entries are bare lowercase host names (no scheme, port or
-/// path); anything else is ignored by the tools.
+/// Legacy `[web]` configuration, accepted for compatibility.
+/// Public web access no longer requires host grants; `allow_hosts` is ignored.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Web {

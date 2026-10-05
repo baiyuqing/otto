@@ -57,13 +57,15 @@ Apply these requirements to every feature, fix, and refactor:
 Use the Makefile targets as the canonical commands:
 
 ```bash
-make check-fast   # rustfmt, clippy, focused otto-core tests, git diff --check
+make check-fast   # the local gate: only the checks for paths changed since origin/main, one worktree at a time
 make check        # full macOS lint/UI-build/all-tests/wasm-test/PTY/UI-test gate (no release build)
 make check-linux  # the Linux gate: the same minus Seatbelt conformance and the UI
 ```
 
-See the [development guide](docs/development.md)
-for the focused package set, test commands, and contract-specific checks.
+Locally, run the focused tests and `make check-fast`; do not run `make check`
+or `make check-linux`. CI runs both full gates on every PR. See the
+[development guide](docs/development.md#local-verification) for what
+`check-fast` selects, test commands, and contract-specific checks.
 
 CI runs `make check` on macOS, split into two parallel jobs (`rust-fmt` with
 `rust-lint`, and `check-tests`), and `make check-linux` on Linux, with the

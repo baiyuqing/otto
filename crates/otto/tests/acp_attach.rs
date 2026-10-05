@@ -793,6 +793,16 @@ fn start_without_serve_prints_the_reason_and_exits_with_status_1() {
 mod approval {
     use super::*;
 
+    fn manual_session(client: &mut Client, workspace: &Path) -> String {
+        let session_id = client.new_session(workspace);
+        let (_, response) = client.call(
+            "_otto/approval_mode/set",
+            json!({"sessionId": session_id, "automatic": false}),
+        );
+        assert_eq!(response["result"]["automatic"], false, "{response}");
+        session_id
+    }
+
     fn escalated(call_id: &str) -> String {
         let arguments = json!({
             "command": "cat \"$HOME/elevated.txt\"",
@@ -906,7 +916,7 @@ mod approval {
         let (home, workspace, serve, served) = start();
         let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
         relay.initialize();
-        let session_id = relay.new_session(workspace.path());
+        let session_id = manual_session(&mut relay, workspace.path());
         let id = relay.start("session/prompt", prompt(&session_id, "read the fixture"));
         let mut requests = Vec::new();
         let (frames, response) = relay.finish(id, &mut |frame| {
@@ -938,7 +948,7 @@ mod approval {
             let (home, workspace, serve, served) = start_with_read(true);
             let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
             relay.initialize();
-            let session_id = relay.new_session(workspace.path());
+            let session_id = manual_session(&mut relay, workspace.path());
             let id = relay.start("session/prompt", prompt(&session_id, "read fixture"));
             let mut requests = Vec::new();
             let (frames, response) = relay.finish(id, &mut |frame| {
@@ -1013,7 +1023,7 @@ mod approval {
         let (home, workspace, serve, served) = start();
         let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
         relay.initialize();
-        let session_id = relay.new_session(workspace.path());
+        let session_id = manual_session(&mut relay, workspace.path());
         let id = relay.start("session/prompt", prompt(&session_id, "read the fixture"));
         let mut frames = Vec::new();
         let request = loop {
@@ -1096,7 +1106,7 @@ mod approval {
         ]);
         let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
         relay.initialize();
-        let session_id = relay.new_session(workspace.path());
+        let session_id = manual_session(&mut relay, workspace.path());
         let (prompt_id, permission) = pending_request(&mut relay, &session_id);
         let other_session = relay.new_session(workspace.path());
         let (_, other) = relay.call(
@@ -1160,7 +1170,7 @@ mod approval {
         ]);
         let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
         relay.initialize();
-        let session_id = relay.new_session(workspace.path());
+        let session_id = manual_session(&mut relay, workspace.path());
         let (prompt_id, permission) = pending_request(&mut relay, &session_id);
         let other_session = relay.new_session(workspace.path());
         let (_, other) = relay.call(
@@ -1255,6 +1265,7 @@ fn a_relay_advertises_commands_and_runs_context_and_compact_on_serve() {
     assert_eq!(update["availableCommands"][3]["name"], "skill");
     assert_eq!(update["availableCommands"][4]["name"], "steer");
     assert_eq!(update["availableCommands"][5]["name"], "queue");
+    assert_eq!(update["availableCommands"][6]["name"], "auto");
 
     let (_, first_response) = relay.call("session/prompt", prompt(&session_id, "MARKER-USER-1"));
     assert_eq!(

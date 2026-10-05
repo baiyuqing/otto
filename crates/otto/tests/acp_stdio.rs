@@ -994,6 +994,16 @@ fn sigterm_with_a_lease_migrates_the_session() {
 mod approval {
     use super::*;
 
+    fn manual_session(client: &mut Client, workspace: &Path) -> String {
+        let session_id = client.new_session(workspace);
+        let (_, response) = client.call(
+            "_otto/approval_mode/set",
+            json!({"sessionId": session_id, "automatic": false}),
+        );
+        assert_eq!(response["result"]["automatic"], false, "{response}");
+        session_id
+    }
+
     struct Run {
         frames: Vec<Value>,
         response: Value,
@@ -1019,7 +1029,7 @@ mod approval {
         configure(home.path(), &base_url);
         let mut client = Client::spawn(home.path(), workspace.path(), "seatbelt");
         client.initialize();
-        let session_id = client.new_session(workspace.path());
+        let session_id = manual_session(&mut client, workspace.path());
         let id = client.start("session/prompt", prompt(&session_id, "read the fixture"));
         let mut permission_requests = Vec::new();
         let (frames, response) = client.finish(id, &mut |frame| {
@@ -1215,7 +1225,7 @@ mod approval {
             text_reply("The task is queued."),
             text_reply("The approval was denied."),
         ]);
-        let session_id = client.new_session(workspace.path());
+        let session_id = manual_session(&mut client, workspace.path());
         let (prompt_id, permission) = pending_request(&mut client, &session_id);
         let other_session = client.new_session(workspace.path());
         let (_, other) = client.call(
@@ -1278,7 +1288,7 @@ mod approval {
             text_reply("Withdrawn."),
             text_reply("The request was withdrawn."),
         ]);
-        let session_id = client.new_session(workspace.path());
+        let session_id = manual_session(&mut client, workspace.path());
         let (prompt_id, permission) = pending_request(&mut client, &session_id);
         let other_session = client.new_session(workspace.path());
         let (_, other) = client.call(
@@ -1400,13 +1410,15 @@ fn session_new_and_load_are_followed_by_the_command_list() {
             &json!("reflect"),
             &json!("skill"),
             &json!("steer"),
-            &json!("queue")
+            &json!("queue"),
+            &json!("auto")
         ]
     );
     assert_eq!(
         update["availableCommands"][0]["input"]["hint"],
         "optional focus"
     );
+    let available_commands = update["availableCommands"].clone();
     // The session file exists only after a prompt; load it in a new process.
     client.call("session/prompt", prompt(&session_id, "hi"));
     assert_eq!(client.close(), Some(0));
@@ -1421,6 +1433,10 @@ fn session_new_and_load_are_followed_by_the_command_list() {
     let frame = client.recv();
     assert_eq!(
         frame["params"]["update"]["sessionUpdate"], "available_commands_update",
+        "{frame}"
+    );
+    assert_eq!(
+        frame["params"]["update"]["availableCommands"], available_commands,
         "{frame}"
     );
     assert_eq!(client.close(), Some(0));

@@ -288,6 +288,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- Fix the stale ACP command-list test expectation after adding `/auto`; verify
+  the command is advertised for new, loaded, and attached sessions. Approval
+  interaction tests explicitly select MANUAL now that AUTO is the default.
+
 - Establish canonical Make gates, offline behavioral/contract tests, PTY
   integration coverage, Rust/WASM boundary checks, browser UI tests, Linux
   checks, and Go connector race tests. Skip full gates for docs-only changes.

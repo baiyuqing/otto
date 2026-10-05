@@ -423,6 +423,18 @@ impl Builder {
         max_output: usize,
         stderr: &mut dyn Write,
     ) -> Result<CatalogWiring, BuildError> {
+        let plugins =
+            crate::plugin::Snapshot::load(Path::new(&self.home), &self.config, &self.environment);
+        self.build_catalogs_with_plugins(tools, max_output, stderr, &plugins)
+    }
+
+    pub(crate) fn build_catalogs_with_plugins(
+        &self,
+        tools: &mut Vec<Box<dyn Tool + Send + Sync>>,
+        max_output: usize,
+        stderr: &mut dyn Write,
+        plugins: &crate::plugin::Snapshot,
+    ) -> Result<CatalogWiring, BuildError> {
         let skills = resolve_skills(&self.config, &self.environment, &self.workspace_path);
         let skill_roots = crate::config::layered::catalog_roots(
             &self.config,
@@ -431,7 +443,9 @@ impl Builder {
             &skills.roots,
             "skills",
         )?;
-        let (discovered_catalog, mut warnings) = skill::Catalog::discover(&roots(&skill_roots));
+        let (mut discovered_catalog, mut warnings) = skill::Catalog::discover(&roots(&skill_roots));
+        warnings.extend(plugins.diagnostics.clone());
+        warnings.extend(plugins.extend_skills(&mut discovered_catalog));
         let catalog = discovered_catalog.without_names(&skills.disabled);
 
         let agents = resolve_agents(&self.config, &self.environment, &self.workspace_path)
@@ -722,10 +736,15 @@ impl Builder {
         if !self.mcp.enabled {
             return servers;
         }
-        for server in &self.mcp.servers {
+        let plugins =
+            crate::plugin::Snapshot::load(Path::new(&self.home), &self.config, &self.environment);
+        for server in self.mcp.servers.iter().chain(plugins.servers.iter()) {
             servers.push(
                 mcp::ServerStatus {
-                    name: server.name.clone(),
+                    name: plugins
+                        .guards
+                        .get(&server.name)
+                        .map_or_else(|| server.name.clone(), |g| g.logical_name.clone()),
                     transport: transport_label(&server.transport),
                     era: None,
                     state: if server.enabled {
@@ -779,6 +798,23 @@ impl Builder {
         Vec<ConnectedServer>,
         Arc<mcp::Servers>,
     ) {
+        let plugins =
+            crate::plugin::Snapshot::load(Path::new(&self.home), &self.config, &self.environment);
+        self.connect_mcp_with_plugins(max_output, cancellation_grace, warnings, &plugins)
+            .await
+    }
+
+    pub(crate) async fn connect_mcp_with_plugins(
+        &self,
+        max_output: usize,
+        cancellation_grace: Duration,
+        warnings: &mut (dyn Write + Send),
+        plugins: &crate::plugin::Snapshot,
+    ) -> (
+        Vec<Box<dyn Tool + Send + Sync>>,
+        Vec<ConnectedServer>,
+        Arc<mcp::Servers>,
+    ) {
         let servers = Arc::new(mcp::Servers::default());
         let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
         let mut connected: Vec<ConnectedServer> = Vec::new();
@@ -789,47 +825,62 @@ impl Builder {
         let cancel = CancellationToken::new();
         let connect_timeout = Duration::from_secs(self.mcp.connect_timeout_secs);
         let call_timeout = Duration::from_secs(self.mcp.call_timeout_secs);
-        let outcomes = join_all(self.mcp.servers.iter().cloned().map(|server| {
-            let cancel = cancel.clone();
-            async move {
-                let transport = transport_label(&server.transport);
-                if !server.enabled {
-                    return McpConnectOutcome {
-                        server,
-                        transport,
-                        result: McpConnectResult::Disabled,
-                    };
-                }
-                let Some(marker) = dynamic_redaction_marker(&server.secrets) else {
-                    return McpConnectOutcome {
-                        server,
-                        transport,
-                        result: McpConnectResult::RedactionLimit,
-                    };
-                };
-                let result = match self
-                    .connect_one(
-                        &server,
-                        connect_timeout,
-                        call_timeout,
-                        cancellation_grace,
-                        &cancel,
-                    )
-                    .await
-                {
-                    Ok((client, bearer)) => McpConnectResult::Connected(client, bearer),
-                    Err(mcp::CallError::NeedsLogin) => McpConnectResult::NeedsLogin,
-                    Err(error) => {
-                        McpConnectResult::Failed(failure_message(&error, &server.secrets, &marker))
+        let outcomes = join_all(
+            self.mcp
+                .servers
+                .iter()
+                .chain(plugins.servers.iter())
+                .cloned()
+                .map(|server| {
+                    let cancel = cancel.clone();
+                    async move {
+                        let transport = transport_label(&server.transport);
+                        if !server.enabled {
+                            return McpConnectOutcome {
+                                server,
+                                transport,
+                                result: McpConnectResult::Disabled,
+                            };
+                        }
+                        let Some(marker) = dynamic_redaction_marker(&server.secrets) else {
+                            return McpConnectOutcome {
+                                server,
+                                transport,
+                                result: McpConnectResult::RedactionLimit,
+                            };
+                        };
+                        let result = if plugins.guards.get(&server.name).is_some_and(|g| !g.valid())
+                        {
+                            Err(mcp::CallError::Transport(
+                                "plugin authorization changed before connection".into(),
+                            ))
+                        } else {
+                            self.connect_one(
+                                &server,
+                                connect_timeout,
+                                call_timeout,
+                                cancellation_grace,
+                                &cancel,
+                            )
+                            .await
+                        };
+                        let result = match result {
+                            Ok((client, bearer)) => McpConnectResult::Connected(client, bearer),
+                            Err(mcp::CallError::NeedsLogin) => McpConnectResult::NeedsLogin,
+                            Err(error) => McpConnectResult::Failed(failure_message(
+                                &error,
+                                &server.secrets,
+                                &marker,
+                            )),
+                        };
+                        McpConnectOutcome {
+                            server,
+                            transport,
+                            result,
+                        }
                     }
-                };
-                McpConnectOutcome {
-                    server,
-                    transport,
-                    result,
-                }
-            }
-        }))
+                }),
+        )
         .await;
 
         let mut registered_names: HashSet<String> = HashSet::new();
@@ -840,7 +891,10 @@ impl Builder {
                 McpConnectResult::Disabled => {
                     servers.push(
                         mcp::ServerStatus {
-                            name: server.name,
+                            name: plugins
+                                .guards
+                                .get(&server.name)
+                                .map_or_else(|| server.name.clone(), |g| g.logical_name.clone()),
                             transport: transport_kind,
                             era: None,
                             state: mcp::ServerState::Disabled,
@@ -851,7 +905,10 @@ impl Builder {
                 McpConnectResult::RedactionLimit => {
                     servers.push(
                         mcp::ServerStatus {
-                            name: server.name.clone(),
+                            name: plugins
+                                .guards
+                                .get(&server.name)
+                                .map_or_else(|| server.name.clone(), |g| g.logical_name.clone()),
                             transport: transport_kind,
                             era: None,
                             state: mcp::ServerState::Failed(SECRETS_EXCEED_REDACTION_LIMITS.into()),
@@ -871,6 +928,36 @@ impl Builder {
                 }
                 McpConnectResult::Connected(client, bearer) => {
                     let client = Arc::new(client);
+                    let tool_server: Arc<dyn mcp::ToolServer> =
+                        if let Some(authorization) = plugins.guards.get(&server.name) {
+                            if !authorization.valid() {
+                                client.close().await;
+                                let _ = writeln!(
+                                    warnings,
+                                    "warning: plugin {} authorization changed during connection",
+                                    authorization.logical_name
+                                );
+                                servers.push(
+                                    mcp::ServerStatus {
+                                        name: authorization.logical_name.clone(),
+                                        transport: transport_kind,
+                                        era: None,
+                                        state: mcp::ServerState::Failed(
+                                            "plugin authorization changed".into(),
+                                        ),
+                                    },
+                                    None,
+                                );
+                                continue;
+                            }
+                            authorization.watch(&client, &servers);
+                            Arc::new(crate::plugin::GuardedServer::new(
+                                Arc::clone(&client),
+                                authorization.clone(),
+                            ))
+                        } else {
+                            Arc::clone(&client) as Arc<dyn mcp::ToolServer>
+                        };
                     let mut secrets = server.secrets.clone();
                     if let Some(bearer) = &bearer {
                         for secret in bearer.secrets() {
@@ -880,7 +967,7 @@ impl Builder {
                         }
                     }
                     let (server_tools, tool_warnings) = tools_for(
-                        Arc::clone(&client) as Arc<dyn mcp::ToolServer>,
+                        Arc::clone(&tool_server),
                         client.tools(),
                         max_output,
                         secrets.clone(),
@@ -911,7 +998,10 @@ impl Builder {
                     );
                     servers.push(
                         mcp::ServerStatus {
-                            name: server.name.clone(),
+                            name: plugins
+                                .guards
+                                .get(&server.name)
+                                .map_or_else(|| server.name.clone(), |g| g.logical_name.clone()),
                             transport: transport_kind,
                             era: Some(client.era().clone()),
                             state: mcp::ServerState::Connected {
@@ -921,8 +1011,22 @@ impl Builder {
                         Some(Arc::clone(&client)),
                     );
                     connected.push(ConnectedServer {
-                        server: Arc::clone(&client) as Arc<dyn mcp::ToolServer>,
-                        tool_infos: client.tools().to_vec(),
+                        server: tool_server,
+                        tool_infos: client
+                            .tools()
+                            .iter()
+                            .cloned()
+                            .map(|mut info| {
+                                if let Some(g) = plugins.guards.get(&server.name) {
+                                    info.description = Some(format!(
+                                        "[{}] {}",
+                                        g.logical_name,
+                                        info.description.as_deref().unwrap_or(&info.name)
+                                    ));
+                                }
+                                info
+                            })
+                            .collect(),
                         secrets,
                         bearer,
                         tool_names,
@@ -931,7 +1035,10 @@ impl Builder {
                 McpConnectResult::NeedsLogin => {
                     servers.push(
                         mcp::ServerStatus {
-                            name: server.name.clone(),
+                            name: plugins
+                                .guards
+                                .get(&server.name)
+                                .map_or_else(|| server.name.clone(), |g| g.logical_name.clone()),
                             transport: transport_kind,
                             era: None,
                             state: mcp::ServerState::NeedsLogin,
@@ -948,7 +1055,10 @@ impl Builder {
                     self.log_mcp_failed(&server.name, transport_kind, &message);
                     servers.push(
                         mcp::ServerStatus {
-                            name: server.name.clone(),
+                            name: plugins
+                                .guards
+                                .get(&server.name)
+                                .map_or_else(|| server.name.clone(), |g| g.logical_name.clone()),
                             transport: transport_kind,
                             era: None,
                             state: mcp::ServerState::Failed(message.clone()),

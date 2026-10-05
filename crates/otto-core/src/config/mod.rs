@@ -22,6 +22,7 @@ pub mod mcp;
 pub mod memory;
 pub mod model_limits;
 mod paths;
+pub mod plugins;
 pub mod projects;
 pub mod reflection;
 pub mod resolve;
@@ -40,6 +41,7 @@ pub use failover::{Failover, FailoverRuntime, resolve_failover};
 pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
 pub use memory::{Memory, MemoryRuntime, MemoryTurso, resolve_memory};
 pub use model_limits::ModelLimits;
+pub use plugins::{PluginBindings, Plugins};
 pub use projects::{Project, TrustLevel};
 pub use reflection::{Auto, Reflection, ReflectionRuntime, SkillSource, resolve_reflection};
 pub use resolve::{
@@ -98,6 +100,8 @@ pub struct File {
     pub mcp: Mcp,
     #[serde(default)]
     pub skills: Skills,
+    #[serde(default)]
+    pub plugins: Plugins,
     #[serde(default)]
     pub agents: Agents,
     #[serde(default, skip_serializing_if = "Experimental::is_default")]

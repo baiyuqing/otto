@@ -258,9 +258,15 @@ macOS, and minus the release build, the Node wasm tests, and the web UI, which
 are platform independent and stay on the macOS job. Keep platform-specific
 code behind `cfg` rather than runtime checks, so a target that cannot use it
 does not compile it.
-A documentation-only change skips both gates. The workflow's `changes` job
+On macOS, CI runs `make check` as two parallel jobs: `macOS lint` runs
+`rust-fmt` and `rust-lint`, and `macOS acceptance` runs `make check-tests`,
+which is everything else in `check`. Clippy compiles the workspace a second
+time, so running it beside the tests takes it off the critical path; the lint
+job keeps its own dependency cache, since the tests' cache holds no
+check-mode metadata.
+A documentation-only change skips every gate. The workflow's `changes` job
 classifies the diff first: when every changed path is Markdown outside
-`crates/` and `testdata/`, under `docs/`, or `LICENSE`, both gates start and
+`crates/` and `testdata/`, under `docs/`, or `LICENSE`, the gates start and
 skip every step, so they still report a status without installing a toolchain.
 Anything else — including a workflow edit, `testdata/server/openapi.yaml`, or a
 Markdown fixture the skill and agent loaders discover by name — runs the full
@@ -317,6 +323,7 @@ The canonical Make targets are:
 ```bash
 make check-fast     # rustfmt --check, clippy -D warnings, focused otto-core tests, git diff --check
 make check          # full macOS gate: rust-fmt, rust-lint, ui, all tests (PTY tests included), wasm test, UI test (no release build)
+make check-tests    # `check` without rust-fmt and rust-lint (CI's macOS acceptance job)
 make build          # the release build: the Web UI, cargo build --release, then copy ./otto
 make install        # build and install otto, otto-connect and bundled skills
 make rust-fmt       # cargo fmt --all -- --check
@@ -357,7 +364,7 @@ flags) offline: it must not need network access, provider credentials, or a
 real interactive terminal.
 
 The Node helpers under `scripts/` are opt-in, but their tests are not: `make
-scripts-test` runs every `scripts/*.test.mjs`, and both gates include it. It
+scripts-test` runs every `scripts/*.test.mjs`, and `check`, `check-tests` and `check-linux` include it. It
 needs no build and no network.
 `scripts/pi-session-interop.mjs` covers the optional Pi interoperability probe
 described in the user manual. `scripts/skill-exec-measure.mjs` reports what the

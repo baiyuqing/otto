@@ -208,8 +208,11 @@ func (b *Bridge) loadBoundSessions() {
 	}
 }
 
-// shutdown sends session/cancel for every running prompt and stops the chat
-// workers, which then return without replying.
+// shutdown stops the chat workers, which then return without replying, and
+// sends session/cancel for every running prompt. workCtx ends first: a prompt
+// that returns cancelled, or a permission request the agent withdraws, while
+// workCtx is still live is reported to the chat as "Stopped." or as answered
+// elsewhere. The agent connection stays open until Run closes it.
 func (b *Bridge) shutdown() {
 	b.mu.Lock()
 	b.closing = true
@@ -218,12 +221,12 @@ func (b *Bridge) shutdown() {
 		sids = append(sids, sid)
 	}
 	b.mu.Unlock()
+	b.stopWork()
 	for _, sid := range sids {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = b.opts.Agent.Cancel(ctx, sid)
 		cancel()
 	}
-	b.stopWork()
 }
 
 // Extension implements agent.ExtensionHandler. _otto/schedule/deliver sends

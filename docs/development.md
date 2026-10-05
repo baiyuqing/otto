@@ -1,7 +1,8 @@
 # Development guide
 
 [Code organization](code-organization.md) is the repository navigation map,
-and `AGENTS.md` is the short, canonical repository rulebook. This page holds
+and the root `AGENTS.md` holds repository-wide rules. Scoped `AGENTS.md`
+files in the Rust crates and `docs/` add only their owning layer's constraints. This page holds
 the detailed package contracts and development workflow. The wasm32
 architecture boundary is enforced by `make rust-wasm-check`, which
 requires `crates/otto-core` and `crates/otto-web` to stay buildable for
@@ -20,14 +21,14 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `tool`: tool definitions and schema assembly
   - `session`: the Pi v3 JSONL codec, compaction, and context association types
   - `agent`: provider/tool orchestration and event emission
-  - `config`: TOML loading and runtime resolution, and `config::edit`, the in-place text edits every config write uses: each changes one key or table, keeps every other byte, and returns an error instead of a result that parses to anything besides the intended change
+  - `config`: raw TOML merging, field authority, provenance, managed constraints and runtime resolution, and `config::edit`, the in-place text edits every config write uses: each changes one key or table, keeps every other byte, and returns an error instead of a result that parses to anything besides the intended change
   - `wire`: shared wire DTOs
   - `safetext`: redaction and secret-form detection shared by native and wasm code
 - `crates/otto` (native binary):
   - `cli`: composition root, flag parsing, process lifecycle, signal handling, the REPL, and concrete dependency injection
   - `app`: shared lifecycle, turn admission, session replacement, task/authentication capabilities, profile selection, and session info/history access
   - `session`: native JSONL session storage built on `otto_core::session`
-  - `config`: the native config path, loading, and the one writer every config change goes through: a compare-and-swap against the bytes the caller read, an atomic temp-file rename, and a timestamped copy of the replaced contents under `backups/`
+  - `config`: native layer discovery, content-bound executable trust, config paths and loading, and the one writer every config change goes through: a compare-and-swap against the bytes the caller read, an atomic temp-file rename, and a timestamped copy of the replaced contents under `backups/`
   - `tool`: native execution of workspace-confined `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`, in-process `remind`, `list_models` (the OpenAI-compatible endpoint's `GET /models`), and the MCP tool adapter (`tool::mcp`) that presents one external server's tools to the model
   - `mcp`: the JSON-RPC codec, the stdio and HTTP transports, OAuth 2.1 sign-in for HTTP servers, and the per-server client that negotiates the protocol era and serves `tools/list`/`tools/call`
   - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers
@@ -35,7 +36,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
   - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the Turso/FTS store and retriever. `memory::advice` holds the advisory review hints: a `Backend` trait (`Advisor` runs it for a batch of candidates), the `session` prompt/parser, the `jev` backend, and the append-only audit store `~/.otto/memory-advice.db` (`PRAGMA user_version` 1). `Advisor::propose` calls `Service::check_proposal` first and queues the candidate without advice on timeout (20 s), error or invalid answer; the session-model backend (`runtime::advice`) is built in `runtime::wiring`, and `TYPESAFE_API_KEY` selects the Jev backend. Advice is stored as `advice.*` candidate metadata and rendered only by `memory::advice::advice_line`
   - `typesafe`: the HTTP client of the TypeSafe auxiliary model (`jev-latest`), shared by `skill::check` and `memory::advice::jev`
-  - `reflection`: the `/reflect` use case: it reads the part of a session no earlier run covered (from the session file, so compacted entries stay reachable), classifies entries as local or external (`taint`), builds one tool-less request (`prompt`), parses and validates the answer (`output`), verifies quoted evidence in code (`evidence`), writes a per-run Markdown log of every proposal and its outcome to `~/.otto/reflection/runs` (`runlog`), and queues survivors as memory candidates through `Service::propose` with `Origin::Extractor`. `store` keeps run rows, per-session watermarks, and skill ownership in `~/.otto/reflection.db`. Skills pass `guard` (structure and the rule table), `review` (a fail-closed second-model call), and Python syntax validation in `skillwrite`, the only file that mutates skill files; it accepts only a `guard::Vetted`, versions the complete Markdown/Python file set, and publishes staged directories atomically through `fsops::publish_directory`; which only `guard::approve` builds. `crates/otto/tests/reflection_boundary.rs` fails if this module ever writes, forgets, or reviews a memory record directly, if a file other than `skillwrite.rs` mutates the filesystem (except `runlog.rs`, which creates each run log with `OpenOptions` and `create_new`), or if `Vetted` is built outside `guard.rs`. A new scan rule goes in the `RULES` table in `guard.rs` with a positive and a negative test case
+  - `reflection`: the `/reflect` use case, also started by the model's `reflect` tool (`tool::reflect` is the port; `app::requested_reflection` binds it to each installed runner and runs it beside the turn with trigger `requested`, sharing the background single-flight flag): it reads the part of a session no earlier run covered (from the session file, so compacted entries stay reachable), classifies entries as local or external (`taint`), builds one tool-less request (`prompt`), parses and validates the answer (`output`), verifies quoted evidence in code (`evidence`), writes a per-run Markdown log, opening with the model's retrospective and listing every proposal and its outcome, to `~/.otto/reflection/runs` (`runlog`, which also lists and reads those logs for `/reflect list|show` by matching directory entry names), and queues survivors as memory candidates through `Service::propose` with `Origin::Extractor`. `store` keeps run rows, per-session watermarks, and skill ownership in `~/.otto/reflection.db`. Skills pass `guard` (structure and the rule table), `review` (a fail-closed second-model call), and Python syntax validation in `skillwrite`, the only file that mutates skill files; it accepts only a `guard::Vetted`, versions the complete Markdown/Python file set, and publishes staged directories atomically through `fsops::publish_directory`; which only `guard::approve` builds. `crates/otto/tests/reflection_boundary.rs` fails if this module ever writes, forgets, or reviews a memory record directly, if a file other than `skillwrite.rs` mutates the filesystem (except `runlog.rs`, which creates each run log with `OpenOptions` and `create_new`), or if `Vetted` is built outside `guard.rs`. A new scan rule goes in the `RULES` table in `guard.rs` with a positive and a negative test case
   - `usage`: native collection of parent, sub-agent, and compaction token events; append-only Turso storage; and total/daily aggregate queries consumed by the server
   - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
   - `subagent`: child agent construction (`Runner`), task lifecycle, the parent-facing `agent`/`agent_wait`/`agent_status`/`agent_send` tools, the child-only `agent_report` tool, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
@@ -640,3 +641,15 @@ a new request. The optional `read_path` on `approval_requested` distinguishes
 read grants from elevation for attached clients. ACP advertises `allow_always`
 and discloses persistence in the title; the connector routes it through its
 existing cards and callback admission checks.
+
+## Agent implementation contracts
+
+Apply these requirements to every feature, fix, and refactor:
+
+- Keep agent instruction files short navigation maps and rulebooks. Put detailed contracts next to their owning code or in this development guide, and link to one canonical source instead of copying it across agent instructions.
+- Make changes easy to locate: use consistent domain names, cohesive packages, explicit entry points, and adjacent tests. Update the task map when responsibilities move or new packages are introduced.
+- Keep dependencies explicit and one-way. Put shared behavior in its owning layer and inject dependencies at the composition root; avoid hidden global state and frontend-specific copies of shared use cases.
+- Make contracts readable from types and focused documentation: define valid states, ownership and mutation, concurrency and cancellation, error behavior, and compatibility where relevant. Validate data at trust boundaries.
+- Extend existing patterns with the smallest cohesive change. Add interfaces only at real consumer boundaries; do not add speculative frameworks, registries, or configuration for future implementations.
+- Turn important invariants into executable checks. Update architecture guards and contract tests when boundaries change; failures should identify the violated rule and where to fix it. Keep focused checks fast, offline, and deterministic, and preserve full acceptance coverage.
+- Keep code, schemas, tests, and canonical docs consistent in the same change. Remove stale instructions or mark superseded designs as historical; record durable rationale in the repository rather than relying on chat history.

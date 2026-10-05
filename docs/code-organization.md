@@ -5,6 +5,11 @@ it, and which entry point to start from. It complements the detailed contracts
 in the [development guide](development.md); that guide is the canonical source
 for invariants and implementation constraints.
 
+Root `AGENTS.md` carries cross-repository rules. The Rust crates and `docs/`
+have scoped `AGENTS.md` files; read the ones on the path being edited.
+Detailed inventories and contracts stay on this page and in the development
+guide rather than being copied into those instruction files.
+
 ## Repository map
 
 | Path | Owns | Start here |
@@ -63,6 +68,12 @@ modules are:
 - `agent`: provider/tool turn orchestration and emitted events.
 - `config`, `wire`, and `safetext`: shared configuration resolution, frontend
   DTOs, and secret-safe text handling.
+
+`config/layered.rs` owns presence-preserving merge, field authority,
+provenance and managed constraints. Native `config/layered.rs` discovers
+workspace sources and content-bound executable trust; `cli/config_command.rs`
+composes offline inspection/scoped editing, and `tool/project_guard.rs`
+rechecks authorization at tool effects and requests cancellation on revocation.
 
 Change shared contracts here only when both native and browser consumers need
 them. Keep provider-specific transport and credential behavior out of this

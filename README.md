@@ -101,6 +101,10 @@ Chat Completions.
 Otto reads API keys from the profile's `api_key_env` variable or falls back to
 `OTTO_API_KEY`. Keys have no CLI flag and must not be stored in TOML. For a
 persistent setup, see [configuration](docs/user-manual.md#configuration).
+Otto merges user, shared and local project configuration beneath managed
+policy. `otto config explain --json` shows sources and ignored fields;
+`otto config set KEY TOML_VALUE --scope user|shared|local` edits one source.
+Project MCP, skills and agents require `otto trust DIR --executables`.
 
 ## Try a task
 

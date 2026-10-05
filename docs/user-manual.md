@@ -1176,6 +1176,8 @@ The preference survives session loading and process restarts in `approvals.db`;
 new sessions start in AUTO. TUI and Web footers show AUTO or MANUAL. The same
 commands work in ACP, Telegram and Feishu. Telegram's command menu includes
 `/auto`; its AUTO/MANUAL buttons apply only to the session shown on the message.
+After a successful selection, the message shows the resulting mode and removes
+the buttons. Send `/auto` again to open fresh controls.
 Clicking a mode button updates that message instead of sending another card.
 
 The session API exposes `GET /v1/sessions/{id}/approval-mode` and `PUT` with

@@ -847,7 +847,7 @@ func TestApprovalModeMessageShowsModeAndOffersBothShortcuts(t *testing.T) {
 	}
 }
 
-func TestApprovalModeClicksEditOriginalCard(t *testing.T) {
+func TestApprovalModeClicksShowSelectionAndRemoveButtons(t *testing.T) {
 	for _, desc := range []string{"", "Bad Request: message is not modified", "Bad Request: message to edit not found"} {
 		t.Run(desc, func(t *testing.T) {
 			api := newAPI(t, func(method string, body map[string]any) resp {
@@ -879,6 +879,10 @@ func TestApprovalModeClicksEditOriginalCard(t *testing.T) {
 				}
 				if edit.body["message_id"] != float64(42) || edit.body["chat_id"] != float64(123) || !strings.Contains(edit.body["text"].(string), "Approval mode: "+mode) {
 					t.Fatalf("edit = %v", edit.body)
+				}
+				buttons := edit.body["reply_markup"].(map[string]any)["inline_keyboard"].([]any)
+				if len(buttons) != 0 {
+					t.Fatalf("selected card still has buttons: %v", edit.body)
 				}
 			}
 		})

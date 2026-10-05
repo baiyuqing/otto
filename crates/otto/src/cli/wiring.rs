@@ -2057,11 +2057,12 @@ mod tests {
 
         recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
 
-        let (activated, _warnings) =
+        let (activated, _warnings) = crate::failover::lease::without_acquire_wait(|| {
             crate::session::Prepared::prepare(Path::new(&parent_path), None)
-                .expect("prepare takes over")
-                .activate()
-                .expect("activate");
+        })
+        .expect("prepare takes over")
+        .activate()
+        .expect("activate");
         let session = SharedSession::new(Arc::new(activated));
 
         let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
@@ -2123,11 +2124,12 @@ mod tests {
 
         recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
 
-        let (activated, _warnings) =
+        let (activated, _warnings) = crate::failover::lease::without_acquire_wait(|| {
             crate::session::Prepared::prepare(Path::new(&parent_path), None)
-                .expect("prepare takes over")
-                .activate()
-                .expect("activate");
+        })
+        .expect("prepare takes over")
+        .activate()
+        .expect("activate");
         assert!(
             activated.take_takeover().is_some(),
             "sanity: the parent must actually have been taken over"
@@ -2165,11 +2167,12 @@ mod tests {
 
         recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
 
-        let (activated, _warnings) =
+        let (activated, _warnings) = crate::failover::lease::without_acquire_wait(|| {
             crate::session::Prepared::prepare(Path::new(&parent_path), None)
-                .expect("prepare takes over")
-                .activate()
-                .expect("activate");
+        })
+        .expect("prepare takes over")
+        .activate()
+        .expect("activate");
         let session = SharedSession::new(Arc::new(activated));
 
         let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());

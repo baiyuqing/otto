@@ -69,3 +69,17 @@ tower = { version = "=0.5.3", features = ["util"] }
 # Native-only embedded Rust database, including full-text search.
 turso = { version = "=0.8.1", default-features = false, features = ["fts"] }
 otto-core = { path = "crates/otto-core" }
+
+# The memory, usage, task and workflow stores run every query through Turso,
+# and its unoptimized SQL compiler and VM made those tests about three times
+# slower than they are at opt-level 2. These crates are dependencies, so the
+# extra compile time is paid once per Turso version, not per change. Otto's
+# own crates stay unoptimized.
+[profile.dev.package.turso_core]
+opt-level = 2
+
+[profile.dev.package.turso_parser]
+opt-level = 2
+
+[profile.dev.package.turso_ext]
+opt-level = 2

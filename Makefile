@@ -56,11 +56,16 @@ bump: ## set a new release version in every manifest and lockfile (VERSION=X.Y.Z
 release-tag: ## tag origin/main with the Cargo.toml version, push the tag and create the GitHub release (needs gh)
 	node scripts/release.mjs tag
 
-test-tui: ## run the TUI PTY tests, local and --attach (need a real PTY)
+test-tui: ## run only the TUI PTY tests, local and --attach (rust-test runs them too)
 	cargo test -p otto --test tui_pty --test tui_attach_pty
 
+# `cargo test --workspace --no-run` rather than `cargo build -p otto`: both
+# leave target/debug/otto, but only this one resolves the same features as
+# rust-test, so in a gate it reuses that build instead of compiling the whole
+# dependency tree and otto again (a `cargo build` leaves dev-dependency
+# features off, which changes even proc-macro crates).
 connect-check: ## Go chat connector: gofmt, vet, race tests; builds target/debug/otto for its end-to-end test
-	cargo build -p otto
+	cargo test --workspace --no-run
 	@unformatted="$$(cd $(CONNECT_DIR) && gofmt -l .)"; test -z "$$unformatted" || { echo "gofmt needed: $$unformatted"; exit 1; }
 	cd $(CONNECT_DIR) && go vet ./...
 	cd $(CONNECT_DIR) && OTTO_BIN="$(CURDIR)/target/debug/otto" go test -race ./...
@@ -72,10 +77,10 @@ check-fast: rust-fmt rust-lint ## quick feedback: formatting, lint, focused core
 	cargo test -p otto-core
 	@git diff --check
 
-check: rust-fmt rust-lint ui rust-test connect-check rust-wasm-test scripts-test test-tui ui-test ## full macOS acceptance: format, lint, web UI build, all Rust tests, host integration, PTY and web UI tests (no release build; see `build`)
+check: rust-fmt rust-lint ui rust-test connect-check rust-wasm-test scripts-test ui-test ## full macOS acceptance: format, lint, web UI build, all Rust tests (PTY tests included), host integration and web UI tests (no release build; see `build`)
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
-check-linux: rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test test-tui ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
+check-linux: rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 ui-deps: ## build the wasm package and install web UI dependencies (needs Node 24+ and wasm-pack)

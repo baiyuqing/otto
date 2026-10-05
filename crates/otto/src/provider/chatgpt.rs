@@ -1013,7 +1013,8 @@ mod tests {
     }
 
     /// A connection that is refused carries no provider text into the error.
-    #[tokio::test]
+    /// Paused time skips the 1 + 2 + 4 s backoff.
+    #[tokio::test(start_paused = true)]
     async fn a_transport_failure_stops_after_three_retries() {
         let client = Client::with_base_url("http://127.0.0.1:1", static_tokens("token"), "acct-1");
         let (settlement, events) = complete(&client, &Request::default()).await;

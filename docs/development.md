@@ -267,6 +267,40 @@ Markdown fixture the skill and agent loaders discover by name — runs the full
 gate. An unusual range, such as a new branch or a force push that dropped the
 old tip, also runs it.
 
+### CI build cache
+
+Most of a CI run is compilation, so the workflow keeps it down in three ways:
+
+- It sets `CARGO_INCREMENTAL=0` and `line-tables-only` debuginfo for the dev
+  and test profiles. A CI build never reuses incremental state, and line
+  tables are enough for a failing test's backtrace. Local builds keep Cargo's
+  defaults.
+- The cargo cache holds the registry and the third-party part of `target/`,
+  keyed by the root `Cargo.toml` (which holds the profiles), `Cargo.lock` and
+  `rust-toolchain.toml`. A run saves it only when no
+  cache matched the key exactly, after `node scripts/ci-cache.mjs prune`
+  removes the workspace crates' own output, which changes with every commit
+  and is most of `target/`. A failed gate still saves once
+  `cargo test --workspace --no-run` finishes the build, since the key is
+  saved only once and a failing test would otherwise leave every later run
+  building cold. A push to `main` restores only an exact match, so
+  the cache it saves never accumulates artifacts of older lock files; a pull
+  request may fall back to `main`'s previous cache. Bump the `v2-` key prefix
+  when a workflow change makes the cached artifacts unusable, such as the
+  `CARGO_PROFILE_*` variables.
+- `wasm-pack` and `wasm-bindgen-cli` are cached by version, saved right
+  after they are installed. wasm-pack uses the
+  `wasm-bindgen` on `PATH` when it matches the version `Cargo.lock` pins
+  (`node scripts/ci-cache.mjs lock-version wasm-bindgen`); without it,
+  wasm-pack compiles its own copy on every run.
+
+Each gate builds `crates/otto` once per feature set, so its targets must not
+ask Cargo for a different one; see `connect-check` below. The root
+`Cargo.toml` builds the Turso crates at `opt-level = 2` in the dev profile:
+the stores' tests spend most of their time in Turso, and an optimized Turso
+runs them about three times faster at a compile cost paid once per Turso
+version.
+
 The copied Apple broker fixtures are ad-hoc-signed arm64e executables, which
 require the third-party arm64e support introduced in macOS 26. CI selects
 `/Library/Developer/CommandLineTools` so Git and Clang use the existing reviewed
@@ -282,7 +316,7 @@ The canonical Make targets are:
 
 ```bash
 make check-fast     # rustfmt --check, clippy -D warnings, focused otto-core tests, git diff --check
-make check          # full macOS gate: rust-fmt, rust-lint, ui, all tests, wasm test, PTY test, UI test (no release build)
+make check          # full macOS gate: rust-fmt, rust-lint, ui, all tests (PTY tests included), wasm test, UI test (no release build)
 make build          # the release build: the Web UI, cargo build --release, then copy ./otto
 make install        # build and install otto, otto-connect and bundled skills
 make rust-fmt       # cargo fmt --all -- --check
@@ -290,8 +324,8 @@ make rust-lint      # cargo clippy --workspace --all-targets -- -D warnings
 make rust-test      # cargo test --workspace (offline)
 make rust-wasm-check # cargo check -p otto-core and -p otto-web for wasm32-unknown-unknown
 make rust-wasm-test  # wasm-pack test --node for otto-core and otto-web
-make test-tui       # cargo test -p otto --test tui_pty (needs a real PTY)
-make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, connect-check, rust-wasm-check, test-tui
+make test-tui       # only the PTY tests: cargo test -p otto --test tui_pty --test tui_attach_pty
+make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, connect-check, rust-wasm-check, scripts-test
 make connect-check  # Go connector: gofmt -l, go vet, go test -race (builds target/debug/otto for its end-to-end test)
 make connect-build  # build the Go connector to target/otto-connect
 ```
@@ -299,21 +333,26 @@ make connect-build  # build the Go connector to target/otto-connect
 `check-fast` runs `rustfmt`, `clippy`, and the focused `otto-core` test suite;
 `check` runs `rust-fmt` and `rust-lint`, builds the Web UI (`make ui`, so the
 tests embed the real `ui/dist`), then runs the full workspace test suite (which
-includes the `otto-core` tests), the Go connector checks, the wasm tests under
-Node, the PTY smoke test, and `make ui-test`. It does not run `cargo build
+includes the `otto-core` tests and the PTY tests), the Go connector checks,
+the wasm tests under Node, and `make ui-test`. It does not run `cargo build
 --release` or `rust-wasm-check`; `make build` is the release build, and
 `make check-linux` runs `rust-wasm-check`.
 
 `connect-check` needs the Go version named in `connect/go.mod`; CI installs it
-with `actions/setup-go` from that file. Its end-to-end tests drive the real
+with `actions/setup-go` from that file. It gets `target/debug/otto` from
+`cargo test --workspace --no-run`, which resolves the same features as
+`rust-test` and so reuses its build; `cargo build -p otto` would leave the
+dev-dependency features off and recompile most of the dependency tree. Its end-to-end tests drive the real
 `otto acp`, and `otto serve` with `otto acp --attach`, from `target/debug/otto`
 against a loopback fake provider, so they are offline like the Rust tests.
 
 `rust-wasm-test` and `make ui`/`make ui-test` need `wasm-pack` (pinned to
 0.15.0 in CI via `cargo install wasm-pack --version 0.15.0 --locked`).
-`test-tui` needs a real PTY, which is unavailable in some sandboxed shells;
-run it directly with `cargo test -p otto --test tui_pty` on a host that has
-one. Keep the default test suite (`cargo test --workspace` without extra
+The PTY tests (`tui_pty`, `tui_attach_pty`) open a pseudo-terminal, which is
+unavailable in some sandboxed shells; `cargo test --workspace` runs them, and
+`make test-tui` runs only them. Neither gate runs `test-tui` separately:
+`cargo test -p otto` resolves features differently from `--workspace` and
+would compile `crates/otto` again just to repeat the same tests. Keep the default test suite (`cargo test --workspace` without extra
 flags) offline: it must not need network access, provider credentials, or a
 real interactive terminal.
 

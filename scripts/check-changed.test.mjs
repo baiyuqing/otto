@@ -9,6 +9,7 @@ const CLIPPY = 'cargo clippy --workspace --all-targets -- -D warnings';
 const FULL = 'cargo test --workspace';
 const WASM = 'make rust-wasm-check';
 const UI = 'make ui ui-test';
+const LICENSE = 'make license-check';
 
 test('two modules share one --lib step, no full test', () => {
   const { steps, unchecked } = plan(['crates/otto/src/memory/store.rs', 'crates/otto/src/tui.rs', 'crates/otto/src/memory/x.rs']);
@@ -39,7 +40,7 @@ test('test support directories and crate entry files select full tests', () => {
 });
 
 test('root Cargo files select clippy, wasm check and full tests, no fmt', () => {
-  assert.deepEqual(plan(['Cargo.lock']).steps, [CLIPPY, WASM, FULL]);
+  assert.deepEqual(plan(['Cargo.lock']).steps, [CLIPPY, WASM, FULL, LICENSE]);
 });
 
 test('ui-only change runs only ui build and tests', () => {
@@ -69,6 +70,13 @@ test('markdown fixture under crates follows the module rule', () => {
 test('connect and scripts paths', () => {
   assert.deepEqual(plan(['connect/main.go']).steps, ['make connect-check']);
   assert.deepEqual(plan(['scripts/a.mjs']).steps, ['make scripts-test']);
+});
+
+test('license check runs for manifests and lock files only', () => {
+  for (const p of ['Cargo.lock', 'Cargo.toml', 'crates/otto/Cargo.toml', 'ui/package.json', 'ui/package-lock.json', 'scripts/license-check.mjs']) {
+    assert.ok(plan([p]).steps.includes(LICENSE), p);
+  }
+  for (const p of ['crates/otto/src/tool/x.rs', 'ui/src/App.tsx', 'scripts/a.mjs']) assert.ok(!plan([p]).steps.includes(LICENSE), p);
 });
 
 test('mixed change keeps the documented order', () => {

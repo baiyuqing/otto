@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT_RUST = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'];
 const FULL_FILES = [...ROOT_RUST, 'crates/otto/Cargo.toml', 'crates/otto/build.rs', 'crates/otto/src/lib.rs', 'crates/otto/src/main.rs'];
+const LICENSE_INPUTS = /^(Cargo\.toml|Cargo\.lock|crates\/[^/]+\/Cargo\.toml|ui\/package(-lock)?\.json|scripts\/license-check\.mjs)$/;
 
 // plan maps repo-relative POSIX paths to the ordered commands that check them
 // and the sorted list of paths no rule covers.
@@ -49,6 +50,7 @@ export function plan(paths) {
   if (under('connect/')) steps.push('make connect-check');
   if (under('desktop/')) steps.push('make desktop-check');
   if (under('scripts/')) steps.push('make scripts-test');
+  if (has((p) => LICENSE_INPUTS.test(p))) steps.push('make license-check');
   return { steps, unchecked: unchecked.sort() };
 }
 

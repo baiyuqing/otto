@@ -95,6 +95,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Let ACP clients attached to one `otto serve` select admitted workspaces per
+  request. Route scheduled chat messages to each connector's declared chats;
+  suspend ambiguous legacy delivery and recover when clients disconnect or
+  their offers expire. Preserve scheduled items when upgrading the store.
+  ([#357](https://github.com/baiyuqing/otto/pull/357))
+
 - Ask the agent for a retrospective in plain words: the new `reflect` tool runs the same
   reflection as `/reflect` instead of the model writing its own file. Every reflection
   run now writes a short retrospective as the first section of its run log under

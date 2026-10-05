@@ -10,8 +10,8 @@
 //! Ownership: [`serve`] owns the connection until stdin ends or the process
 //! token is cancelled. It then cancels every running prompt, waits for the
 //! request tasks, and returns the session controllers; the caller closes them
-//! (see `cli/acp.rs`). One workspace per process: `cwd` in every request must
-//! canonicalize to the configured workspace.
+//! (see `cli/acp.rs`). Local ACP stays in one workspace. Attached ACP forwards
+//! each request's workspace to serve for canonicalization and admission.
 //!
 //! Concurrency: the read loop handles `initialize` and `session/cancel`
 //! inline and runs every other method as a task, so a long prompt never
@@ -425,7 +425,8 @@ struct NoticeWatch {
 
 struct Connection {
     client_capabilities: Mutex<Value>,
-    /// The canonical workspace every request's `cwd` must match.
+    /// Local requests must match this startup workspace; attached lists use
+    /// it only when their request omits `cwd`.
     workspace: PathBuf,
     backend: Backend,
     out: mpsc::UnboundedSender<Value>,
@@ -491,14 +492,17 @@ impl Connection {
         }
     }
 
-    /// Accepts `cwd` only when it canonicalizes to the process workspace.
-    fn check_cwd(&self, cwd: Option<&str>) -> Result<(), Error> {
+    /// Local ACP stays pinned to its workspace; serve owns attach admission.
+    fn request_workspace(&self, cwd: Option<&str>) -> Result<PathBuf, Error> {
         let cwd = cwd.ok_or_else(|| invalid_params("cwd is required"))?;
         if !Path::new(cwd).is_absolute() {
             return Err(invalid_params("cwd must be an absolute path"));
         }
+        if matches!(&self.backend, Backend::Attach(_)) {
+            return Ok(PathBuf::from(cwd));
+        }
         match crate::runtime::sandbox_runtime::canonical_directory(Path::new(cwd)) {
-            Ok(canonical) if canonical == self.workspace => Ok(()),
+            Ok(canonical) if canonical == self.workspace => Ok(canonical),
             _ => Err(invalid_params(format!(
                 "cwd must be the workspace {}",
                 self.workspace.display()
@@ -508,11 +512,11 @@ impl Connection {
 
     async fn new_session(self: &Arc<Self>, params: Value) -> Reply {
         let params = SessionParams::parse(params)?;
-        self.check_cwd(params.cwd.as_deref())?;
+        let workspace = self.request_workspace(params.cwd.as_deref())?;
         params.check_mcp_servers()?;
         let reply = match &self.backend {
             Backend::Local(local) => local.new_session().await,
-            Backend::Attach(relay) => relay.new_session(&self.workspace).await,
+            Backend::Attach(relay) => relay.new_session(&workspace).await,
         }?;
         let id = reply
             .get("sessionId")
@@ -525,7 +529,7 @@ impl Connection {
 
     async fn load_session(self: &Arc<Self>, params: Value) -> Reply {
         let params = SessionParams::parse(params)?;
-        self.check_cwd(params.cwd.as_deref())?;
+        let workspace = self.request_workspace(params.cwd.as_deref())?;
         params.check_mcp_servers()?;
         let id = params.session_id.unwrap_or_default();
         if !is_session_id(&id) {
@@ -534,8 +538,8 @@ impl Connection {
             ));
         }
         let history = match &self.backend {
-            Backend::Local(local) => local.load_session(&id, &self.workspace).await?,
-            Backend::Attach(relay) => relay.load_session(&id, &self.workspace).await?,
+            Backend::Local(local) => local.load_session(&id, &workspace).await?,
+            Backend::Attach(relay) => relay.load_session(&id, &workspace).await?,
         };
         for update in update::history_updates(&history) {
             self.update(&id, update);
@@ -837,10 +841,13 @@ impl Connection {
     }
 
     async fn list_sessions(&self, params: Value) -> Reply {
-        self.check_cwd(params.get("cwd").and_then(Value::as_str))?;
+        let workspace = match params.get("cwd") {
+            None | Some(Value::Null) => self.workspace.clone(),
+            Some(value) => self.request_workspace(value.as_str())?,
+        };
         let sessions = match &self.backend {
             Backend::Local(local) => local.list_sessions().await?,
-            Backend::Attach(relay) => relay.list_sessions(&self.workspace).await?,
+            Backend::Attach(relay) => relay.list_sessions(&workspace).await?,
         };
         result(ListSessionsResponse::new(sessions))
     }
@@ -1551,11 +1558,11 @@ fn initialize_result(local: bool) -> Reply {
     let capabilities = match local {
         true => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
+            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "scheduleDeliveryChats": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
         )])),
         false => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
+            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "scheduleDeliveryChats": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
         )])),
     };
     result(
@@ -1640,19 +1647,22 @@ impl Dispatcher {
                     Backend::Local(_) => true,
                     Backend::Attach(relay) => relay.server.is_some(),
                 };
+                let platforms = schedule::delivery_platforms(&params);
+                if let Err(message) = schedule::delivery_chats(&params, &platforms) {
+                    return connection.reply(id, Err(invalid_params(message)));
+                }
                 *connection
                     .client_capabilities
                     .lock()
                     .expect("ACP capabilities") = params.clone();
-                connection.reply(id, initialize_result(local));
-                if !self.scheduling {
-                    let platforms = schedule::delivery_platforms(&params);
-                    if let Some(worker) = schedule::worker(&connection, platforms) {
-                        self.scheduling = true;
-                        let stop = self.stop.clone();
-                        self.tasks.spawn(worker.run(stop));
-                    }
+                if !self.scheduling
+                    && let Some(worker) = schedule::worker(&connection, platforms)
+                {
+                    self.scheduling = true;
+                    let stop = self.stop.clone();
+                    self.tasks.spawn(worker.run(stop));
                 }
+                connection.reply(id, initialize_result(local));
             }
             "session/new" => {
                 self.tasks.spawn(async move {

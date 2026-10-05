@@ -101,6 +101,20 @@ func New(opts Options) *Bridge {
 		names = append(names, p.Name())
 	}
 	opts.Agent.SetPlatforms(names)
+	chats := []string{}
+	for _, p := range opts.Platforms {
+		if p.Name() != "telegram" && p.Name() != "feishu" {
+			continue
+		}
+		access := opts.Access[p.Name()]
+		if len(access.Senders) == 0 {
+			continue
+		}
+		for _, id := range access.Chats {
+			chats = append(chats, p.Name()+":"+id)
+		}
+	}
+	opts.Agent.SetDeliveryChats(chats)
 	return b
 }
 

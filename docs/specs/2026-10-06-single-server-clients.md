@@ -1,6 +1,6 @@
 # One server, multiple clients and workspaces
 
-Status: proposed; interface changes below require user approval.
+Status: approved and implemented on 2026-10-06; PR #357.
 
 ## Goal and trust boundary
 
@@ -41,6 +41,18 @@ replies continue to reach every admitted chat bound to that session.
   acknowledgement semantics remain unchanged; successful delivery is not
   guaranteed exactly once across an unknown external send outcome.
 
+## Coordination and recovery
+
+TCP connections and separate attach processes coordinate in the existing
+schedule database. Schema v2 adds leased delivery declarations and migrates
+v1 without changing items or delivery history. A 15 s heartbeat renews a 90 s
+lease independently of sends; normal disconnect unregisters immediately,
+and expired declarations stop affecting claims after a crash. Registrations
+contain destinations, never tokens or credentials. Conflict warnings name
+platforms without disclosing message bodies. Claims scan eligible due rows
+without a fixed candidate cutoff; unclaimable overdue rows do not cause a
+minimum-delay polling loop.
+
 ## Acceptance
 
 Offline tests cover simultaneous ACP sessions in two admitted workspaces,
@@ -51,7 +63,6 @@ behavior and local ACP compatibility must keep passing.
 
 ## Existing bug fixes
 
-The accompanying implementation fixes workspace matching on resume, per-
+The implementation also fixes workspace matching on resume, per-
 workspace runtime/sandbox composition, read-grant wiring, subscription rebinding
-and connector allowlist enforcement. These restore existing contracts and do
-not depend on approval of the interface changes above.
+and connector allowlist enforcement. These restore existing contracts alongside the approved interface changes.

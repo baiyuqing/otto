@@ -245,7 +245,7 @@ fn create_temp(directory: &Path) -> Result<(PathBuf, File), AuthError> {
 }
 
 /// `N` bytes from `/dev/urandom`, hex encoded. Same source as `randomID` in
-/// `cli::runtime_builder` and the workspace write tool.
+/// `runtime::builder` and the workspace write tool.
 pub(crate) fn random_hex<const N: usize>() -> std::io::Result<String> {
     let mut bytes = [0u8; N];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;

@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use crate::app::SandboxControl;
 use crate::sandbox::{CommandExecutor, Error as SandboxError, ExitStatus, Request, Streams};
 
-use super::info::SandboxInfo;
-use super::sandbox_runtime::{
+use crate::runtime::info::SandboxInfo;
+use crate::runtime::sandbox_runtime::{
     CloseError, OpenOptions, ReconfigureError, SandboxRuntime, normalize_sandbox_runtime,
     open_sandbox_runtime, settings_from_config,
 };
@@ -171,7 +171,7 @@ fn usable(runtime: &SandboxRuntime) -> bool {
 /// as a runtime failure.
 fn reload_reason(info: &SandboxInfo) -> &'static str {
     match info.reason_code() {
-        "" => super::info::SandboxReason::RuntimeFailure.as_str(),
+        "" => crate::runtime::info::SandboxReason::RuntimeFailure.as_str(),
         code => code,
     }
 }
@@ -660,7 +660,7 @@ mod tests {
         let info = SandboxControl::reload(&reloader).await.expect("reload");
         assert_eq!(
             info.network,
-            super::super::info::SandboxNetwork::Allowed,
+            crate::runtime::info::SandboxNetwork::Allowed,
             "{info:?}"
         );
         assert_eq!(control.info(), info);

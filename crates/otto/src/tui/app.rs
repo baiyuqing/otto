@@ -28,11 +28,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::tasks::{Task, TaskStatus};
 use crate::app::{Controller, Info, PROFILE_SWITCH_UNAVAILABLE};
-use crate::cli::info::{SandboxInfo, SandboxNetwork};
 use crate::cli::login;
 use crate::cli::repl_commands;
-use crate::cli::sandbox_setup::parse_exclude_entry;
 use crate::memory::{CandidateListRequest, CandidateState};
+use crate::runtime::info::{SandboxInfo, SandboxNetwork};
+use crate::runtime::sandbox_config::parse_exclude_entry;
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 use super::agents_view::AgentsView;

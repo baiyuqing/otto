@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::Controller;
 use super::approval::{ApprovalDecision, Step, Stop};
-use crate::cli::runtime_builder::Builder;
+use crate::runtime::builder::Builder;
 use crate::schedule::worker::{PromptRunner, Sink};
 use crate::schedule::{Origin, RunOutcome};
 use otto_core::config::resolve::Runtime;

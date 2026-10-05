@@ -6,7 +6,7 @@
 //! the workspace, so every layer between the flag parser and the sandbox is
 //! exercised in one process.
 //!
-//! macOS only: both runs are about the Seatbelt path — one turn under the
+//! macOS only: every run is about the Seatbelt path — turns under the
 //! sandbox, and one command elevated out of it. Otto has no confined driver
 //! on other targets, where `bash` is disabled unless `--sandbox off` is asked
 //! for explicitly, so there is nothing here for them to run. An end-to-end
@@ -130,6 +130,69 @@ fn the_binary_runs_one_prompt_turn_with_bash_and_write_under_seatbelt() {
         .expect("the write tool created notes.txt");
     assert_eq!(written, "written by the agent\n");
     assert_eq!(served.load(Ordering::SeqCst), 3, "stdout:\n{stdout}");
+}
+
+/// zsh writes here-documents to a temporary file named after `TMPPREFIX`,
+/// whose default `/tmp/zsh` Seatbelt denies; the sandbox must point it at the
+/// private temporary directory so `cat > file <<EOF` works.
+#[test]
+fn a_zsh_here_document_writes_its_file_under_seatbelt() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+
+    let served = Arc::new(AtomicUsize::new(0));
+    let (base_url, _requests) = serve(Script {
+        replies: vec![
+            tool_call_reply(
+                "call-1",
+                "bash",
+                r#"{"command":"cat > heredoc.txt <<'EOF'\nfrom-heredoc\nEOF"}"#,
+            ),
+            text_reply("all done"),
+        ],
+        served: Arc::clone(&served),
+    });
+
+    configure(home.path(), &base_url);
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_otto"));
+    command
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("SHELL", "/bin/zsh")
+        .env("OTTO_API_KEY", "sk-e2e-not-a-real-key")
+        .arg("--cwd")
+        .arg(workspace.path())
+        .arg("--sandbox")
+        .arg("seatbelt")
+        .arg("--prompt")
+        .arg("write a file with a heredoc");
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        command.env("TMPDIR", tmpdir);
+    }
+    let output = command.output().expect("run the otto binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "exit = {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code()
+    );
+    assert!(
+        !stderr.contains("bash is unavailable"),
+        "Seatbelt did not come up:\n{stderr}"
+    );
+    let written = std::fs::read_to_string(workspace.path().join("heredoc.txt"))
+        .expect("the heredoc created heredoc.txt");
+    assert_eq!(
+        written,
+        "from-heredoc\n",
+        "transcript:\n{}",
+        only_session_transcript(home.path())
+    );
+    assert_eq!(served.load(Ordering::SeqCst), 2, "stdout:\n{stdout}");
 }
 
 #[test]

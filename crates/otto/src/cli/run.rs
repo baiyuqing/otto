@@ -892,7 +892,6 @@ pub async fn run(
                 return fail(stderr, &builder.redact_error(&error.to_string(), None));
             }
         };
-        let exit_on_stdin_close = options.exit_on_stdin_close.then_some(stdin);
         let exit = serve::run(
             serve::ServeOptions {
                 builder,
@@ -903,7 +902,6 @@ pub async fn run(
                 control,
                 reloader,
                 open: options.open,
-                exit_on_stdin_close,
                 terminate,
             },
             stdout,

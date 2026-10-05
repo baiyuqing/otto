@@ -7,12 +7,7 @@ SKILLS_INSTALL_DIR ?= $(HOME)/.otto/skills
 
 CONNECT_DIR := connect
 
-DESKTOP_DIR := desktop
-DESKTOP_TARGET := aarch64-apple-darwin
-DESKTOP_SIDECAR := $(DESKTOP_DIR)/resources/darwin-arm64/bin/otto
-DESKTOP_APP := $(DESKTOP_DIR)/build/darwin-arm64/Otto.app
-
-.PHONY: all build install check-fast check check-tests check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
+.PHONY: all build install check-fast check check-tests check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
 
 all: build
 
@@ -93,10 +88,10 @@ check: rust-fmt rust-lint check-tests ## full macOS acceptance: format, lint, we
 
 # CI's macOS acceptance job runs this, and a separate job runs rust-fmt and
 # rust-lint at the same time.
-check-tests: ui rust-test connect-check desktop-check rust-wasm-test scripts-test ui-test ## `check` without rust-fmt and rust-lint
+check-tests: ui rust-test connect-check rust-wasm-test scripts-test ui-test ## `check` without rust-fmt and rust-lint
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
-check-linux: rust-fmt rust-lint rust-test connect-check desktop-check rust-wasm-check scripts-test license-check ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
+check-linux: rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test license-check ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 ui-deps: ## build the wasm package and install web UI dependencies (needs Node 24+ and wasm-pack)
@@ -109,32 +104,6 @@ ui: ui-deps ## build the web UI into ui/dist (needs Node 24+ and wasm-pack)
 
 ui-test: ui-deps ## run the web UI unit tests (needs Node 24+ and wasm-pack)
 	cd ui && npm test
-
-desktop-sidecar: ui ## build the web UI and otto for arm64, then copy it to MyGo's platform resources
-	cargo build --release --target $(DESKTOP_TARGET) -p otto
-	mkdir -p $(dir $(DESKTOP_SIDECAR))
-	cp target/$(DESKTOP_TARGET)/release/otto $(DESKTOP_SIDECAR)
-
-desktop-check: ## format, vet, race-test desktop contracts against otto, and cross-compile the macOS arm64 shell
-	cargo test --workspace --no-run
-	@unformatted="$$(cd $(DESKTOP_DIR) && gofmt -l .)"; test -z "$$unformatted" || { echo "gofmt needed: $$unformatted"; exit 1; }
-	cd $(DESKTOP_DIR) && go vet ./...
-	cd $(DESKTOP_DIR) && OTTO_BIN="$(CURDIR)/target/debug/otto" go test -race ./...
-	cd $(DESKTOP_DIR) && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go vet ./...
-	cd $(DESKTOP_DIR) && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o ../target/otto-desktop .
-
-desktop-release: ## build, sign and notarize the macOS desktop app (needs APPLE_SIGNING_IDENTITY and NOTARY_PROFILE)
-	@test -n "$(APPLE_SIGNING_IDENTITY)" || { echo "desktop-release: set APPLE_SIGNING_IDENTITY to a Developer ID Application identity"; exit 1; }
-	@test -n "$(NOTARY_PROFILE)" || { echo "desktop-release: set NOTARY_PROFILE to a notarytool keychain profile (see: xcrun notarytool store-credentials)"; exit 1; }
-	$(MAKE) desktop-sidecar
-	cd $(DESKTOP_DIR) && go run github.com/egoist/mygo/cmd/mygo build -platform darwin/arm64 -skip-dmg -skip-notarize -sign "$(APPLE_SIGNING_IDENTITY)"
-	ditto -c -k --keepParent $(DESKTOP_APP) $(DESKTOP_APP).zip
-	xcrun notarytool submit $(DESKTOP_APP).zip --keychain-profile "$(NOTARY_PROFILE)" --wait
-	xcrun stapler staple $(DESKTOP_APP)
-
-desktop-app: desktop-sidecar ## build Otto.app for this Mac with an ad-hoc signature (no Developer ID or notarization)
-	cd $(DESKTOP_DIR) && go run github.com/egoist/mygo/cmd/mygo build -platform darwin/arm64 -skip-dmg -skip-notarize -sign -
-	@echo "built $(DESKTOP_APP)"
 
 clean: ## remove the built binary and all Cargo build outputs in target/
 	rm -f ./$(BINARY)

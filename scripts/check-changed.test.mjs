@@ -56,10 +56,10 @@ test('documentation needs no step and is not unchecked', () => {
   assert.deepEqual(plan(['docs/x.md', 'README.md', 'LICENSE']), { steps: [], unchecked: [] });
 });
 
-test('desktop selects its gate; CI config and Makefile are unchecked, sorted', () => {
+test('CI config, Makefile and unknown directories are unchecked, sorted', () => {
   assert.deepEqual(plan(['desktop/a', 'Makefile', '.github/workflows/checks.yml']), {
-    steps: ['make desktop-check'],
-    unchecked: ['.github/workflows/checks.yml', 'Makefile'],
+    steps: [],
+    unchecked: ['.github/workflows/checks.yml', 'Makefile', 'desktop/a'],
   });
 });
 

@@ -444,14 +444,16 @@ changelog maintenance itself need no entry.
   `Build and CI`, and `Documentation`. Omit empty categories.
 - Describe the resulting behavior and its practical impact in concise English,
   with a PR link (or commit link when there is no PR). Group related changes;
-  do not copy the commit log. Add the link once the PR number is known.
+  do not copy the commit log. Add the link once the PR number is known. The
+  complete historical index is a fixed initial backfill, not a per-PR ledger.
 - Put breaking changes, changed defaults, migration steps, and required user
   action in `Usage and compatibility`. Link the manual for detailed setup.
   Use other categories for distinct aspects of the same change without
   repeating the same explanation. Do not claim unmeasured speedups.
 - In a release PR, move the pending entries into `## X.Y.Z - YYYY-MM-DD`
   using the intended release date and leave `## Unreleased` above it.
-  Keep releases newest first and preserve prior release entries. `make bump`
+  Keep releases newest first and preserve prior release entries and the fixed
+  historical index. `make bump`
   updates version files only; this changelog step is manual.
 
 ## Releases

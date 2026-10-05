@@ -521,6 +521,29 @@ baseline for unchanged failures, and never weaken validation or safety checks
 to obtain a pass. Preserve unrelated behavioral assertions when migrating test
 fixtures.
 
+## Docker acceptance
+
+After changing `Dockerfile`, `.dockerignore` or `compose.yaml`, build the
+image with `docker build -t otto:local .`, then run
+`node scripts/docker-smoke.mjs`. This opt-in test requires Docker Compose
+and a free localhost port 8787. It uses a disposable project, workspace and
+state volume; it calls no live provider and deletes its own resources.
+It checks the real setup flow across recreation, non-root execution,
+embedded UI assets, API token enforcement and rotation, session persistence,
+workspace writes and graceful SIGTERM shutdown. It does not run as part of
+the default offline script tests. Check Docker Desktop on each Mac
+architecture separately; Linux execution cannot verify macOS file sharing.
+
+For managed environments with an inspection proxy, supply a trusted combined
+CA bundle:
+
+```bash
+docker build --secret id=proxy_ca,src=/path/to/ca-bundle.pem -t otto:local .
+```
+
+The build uses this optional secret only during networked
+toolchain and dependency installation; it is not copied into the image.
+
 ## Changelog
 
 [CHANGELOG.md](../CHANGELOG.md) is the curated record of notable user and

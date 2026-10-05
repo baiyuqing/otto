@@ -1,0 +1,46 @@
+services:
+  otto:
+    image: otto:local
+    build:
+      context: .
+      args:
+        OTTO_GIT_HASH: ${OTTO_GIT_HASH:-unknown}
+    init: true
+    command: ["serve", "--listen", "127.0.0.1:8787", "--cwd", "/workspace"]
+    environment:
+      OTTO_API_KEY: ${OTTO_API_KEY:-}
+    ports:
+      - "127.0.0.1:8787:8788"
+    volumes:
+      - otto-state:/home/otto
+      - type: bind
+        source: ${OTTO_WORKSPACE:-.}
+        target: /workspace
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=2).status == 200"
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 6
+
+  # Preserve Otto's loopback-only listener and bearer-token authentication.
+  # Sharing the network namespace makes its loopback reachable by the relay.
+  relay:
+    image: otto:local
+    init: true
+    network_mode: service:otto
+    depends_on:
+      otto:
+        condition: service_healthy
+    entrypoint: ["socat"]
+    command: ["TCP-LISTEN:8788,bind=0.0.0.0,reuseaddr,fork", "TCP:127.0.0.1:8787"]
+    read_only: true
+    cap_drop: ["ALL"]
+
+volumes:
+  otto-state:

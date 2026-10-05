@@ -39,6 +39,25 @@ otto --help
 如果只想在当前 checkout 中保留本地二进制，可运行 `make build`，然后执行
 `./otto --help`。
 
+## 在 Mac 上使用 Docker
+
+启动 Docker Desktop 后，在仓库目录运行：
+
+```bash
+docker compose build
+docker compose run --rm otto setup
+docker compose up -d
+docker compose logs otto
+```
+
+在 Mac 浏览器中打开日志中的 `http://127.0.0.1:8787/?token=...` 地址。
+镜像会按本机架构构建，支持 M 系列和 Intel Mac，包含完整 Web UI。
+配置和会话保存在命名卷中；可通过 `OTTO_WORKSPACE` 指定挂载的工作目录。
+使用 API key 时，在 setup 中将环境变量名选为 `OTTO_API_KEY`，并在启动
+Compose 前导出该变量。CLI 用法、指定架构、停止和升级步骤见
+[Docker 使用说明](docs/user-manual.md#docker-on-mac)。容器内运行 Linux，
+没有 macOS Seatbelt；执行 Bash 需要显式指定 `--sandbox off`。
+
 ## 快速开始
 
 安装后运行 `otto setup` 创建默认 profile。它不会保存 API key，Shell 命令默认仍在沙箱中运行。模型 ID 必须由你从自己的账号或服务商中选择，Otto 不会预设模型。

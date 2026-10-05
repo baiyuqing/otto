@@ -309,6 +309,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   script checks when those directories change), and a lock in the common git
   directory lets it run in one worktree at a time. Local work no longer runs
   `make check`; CI runs the full gates.
+  ([#341](https://github.com/baiyuqing/otto/pull/341))
 
 ### Documentation
 

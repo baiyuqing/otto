@@ -22,6 +22,8 @@ mod extract;
 mod policy;
 mod search;
 
+pub use search::{BRAVE_KEY_ENV, GOOGLE_ENGINE_ENV, GOOGLE_KEY_ENV};
+
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 

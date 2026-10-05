@@ -206,6 +206,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Compare the layered-configuration directory chain against canonical paths in its
+  test, so it passes where the temporary directory is reached through a symbolic link,
+  as on macOS.
+
 - Select manual approval mode in the macOS interactive elevation test so it
   continues to verify explicit approval with sessions defaulting to AUTO.
 

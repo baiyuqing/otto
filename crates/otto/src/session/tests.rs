@@ -3145,10 +3145,13 @@ fn takeover_through_prepare_records_the_holder_and_repairs_the_dangling_calls() 
 
     let session_path = Path::new(&path);
     // `L` = 6, the minimum for a lease this process ends up holding live
-    // (see the section header); the takeover wait is 7L/6 = 7s.
+    // (see the section header); the 7L/6 takeover wait runs on a virtual
+    // clock, since the holder never renews.
     let dir = write_lease_dir_by_hand(session_path, 6, 1, "stopped-host", 9001, false);
 
-    let prepared = Prepared::prepare(session_path, None).expect("prepare takes over");
+    let prepared =
+        crate::failover::lease::without_acquire_wait(|| Prepared::prepare(session_path, None))
+            .expect("prepare takes over");
     let (activated, _warnings) = prepared.activate().expect("activate");
 
     let takeover = activated.take_takeover().expect("takeover recorded");
@@ -3217,9 +3220,10 @@ fn take_over_with(
         .close()
         .expect("close before simulating a stopped holder");
     write_lease_dir_by_hand(Path::new(&path), 6, 1, "stopped-host", 9001, false);
-    let prepared = Prepared::prepare(Path::new(&path), None)
-        .expect("prepare takes over")
-        .with_replayable(replayable);
+    let prepared =
+        crate::failover::lease::without_acquire_wait(|| Prepared::prepare(Path::new(&path), None))
+            .expect("prepare takes over")
+            .with_replayable(replayable);
     let (activated, _warnings) = prepared.activate().expect("activate");
     (temp, activated, path)
 }

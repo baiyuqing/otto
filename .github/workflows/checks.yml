@@ -8,6 +8,15 @@ on:
 permissions:
   contents: read
 
+# CI builds from scratch every time apart from the dependency cache below, so
+# incremental compilation only writes files nobody reads, and line tables are
+# all a test failure's backtrace needs; full debuginfo roughly doubles what the
+# test binaries cost to compile and link. Local builds keep Cargo's defaults.
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -70,7 +79,7 @@ jobs:
     name: macOS acceptance
     needs: changes
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.docs_only != 'true'
@@ -86,40 +95,104 @@ jobs:
         run: |
           rustup toolchain install
           rustc --version
-      - name: Cache cargo registry and build output
+      - name: Restore the cargo dependency cache
+        id: cargo-cache
         if: needs.changes.outputs.docs_only != 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
-            ~/.cargo/bin
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-
-      - name: Install wasm-pack
-        if: needs.changes.outputs.docs_only != 'true'
-        run: |
-          wasm-pack --version 2>/dev/null | grep -qx 'wasm-pack 0.15.0' ||
-            cargo install wasm-pack --version 0.15.0 --locked --force
+          key: v2-${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+          # A pull request that changes Cargo.lock starts from main's older
+          # dependencies. A push to main starts clean, so the cache it saves
+          # holds only what the current lock file builds and does not grow.
+          restore-keys: ${{ github.event_name == 'pull_request' && format('v2-{0}-cargo-', runner.os) || '' }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: needs.changes.outputs.docs_only != 'true'
         with:
           node-version: '24'
+      # wasm-pack runs the wasm-bindgen it finds on PATH when the version
+      # matches the one Cargo.lock pins; otherwise it compiles its own copy
+      # from source on every run.
+      - name: Resolve wasm tool versions
+        if: needs.changes.outputs.docs_only != 'true'
+        id: wasm-tools
+        run: echo "wasm_bindgen=$(node scripts/ci-cache.mjs lock-version wasm-bindgen)" >> "$GITHUB_OUTPUT"
+      - name: Restore wasm-pack and wasm-bindgen-cli
+        if: needs.changes.outputs.docs_only != 'true'
+        id: wasm-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/wasm-pack
+            ~/.cargo/bin/wasm-bindgen
+            ~/.cargo/bin/wasm-bindgen-test-runner
+          key: ${{ runner.os }}-wasm-pack-0.15.0-wasm-bindgen-${{ steps.wasm-tools.outputs.wasm_bindgen }}
+      - name: Install wasm-pack and wasm-bindgen-cli
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          WASM_BINDGEN: ${{ steps.wasm-tools.outputs.wasm_bindgen }}
+        run: |
+          wasm-pack --version 2>/dev/null | grep -qx 'wasm-pack 0.15.0' ||
+            cargo install wasm-pack --version 0.15.0 --locked --force
+          wasm-bindgen --version 2>/dev/null | grep -qx "wasm-bindgen $WASM_BINDGEN" ||
+            cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked --force
+      # Saved before the gate runs, so a failing gate does not throw away the
+      # three minutes these took to compile.
+      - name: Save wasm-pack and wasm-bindgen-cli
+        if: needs.changes.outputs.docs_only != 'true' && steps.wasm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/wasm-pack
+            ~/.cargo/bin/wasm-bindgen
+            ~/.cargo/bin/wasm-bindgen-test-runner
+          key: ${{ runner.os }}-wasm-pack-0.15.0-wasm-bindgen-${{ steps.wasm-tools.outputs.wasm_bindgen }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: needs.changes.outputs.docs_only != 'true'
         with:
           go-version-file: connect/go.mod
           cache-dependency-path: connect/go.sum
-      - if: needs.changes.outputs.docs_only != 'true'
+      - name: Run make check
+        id: gate
+        if: needs.changes.outputs.docs_only != 'true'
         run: make check
+      # A run saves only when no cache matched its key exactly, which happens
+      # once per Cargo.lock, root Cargo.toml or toolchain change; a later run
+      # with the same key restores it and never saves again. Main's cache is
+      # the one every pull request restores; a pull request's own copy is
+      # visible only to that pull request. A failed gate still saves, after
+      # the test build is finished, so that one failing test does not leave
+      # every following run building its dependencies cold; a build that
+      # cannot finish is not saved. The workspace's own output is removed
+      # first: it changes with every commit.
+      - name: Finish the test build for the cargo cache
+        id: finish-build
+        if: failure() && needs.changes.outputs.docs_only != 'true' && steps.cargo-cache.outputs.cache-hit != 'true' && steps.gate.outcome == 'failure'
+        run: cargo test --workspace --no-run
+      - name: Drop workspace build output from the cargo cache
+        id: prune
+        if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && steps.cargo-cache.outputs.cache-hit != 'true' && (steps.gate.outcome == 'success' || steps.finish-build.outcome == 'success') }}
+        run: node scripts/ci-cache.mjs prune
+      - name: Save the cargo dependency cache
+        if: ${{ !cancelled() && steps.prune.outcome == 'success' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: v2-${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
 
   check-linux:
     name: Linux checks
     needs: changes
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: needs.changes.outputs.docs_only != 'true'
@@ -130,17 +203,18 @@ jobs:
         run: |
           rustup toolchain install
           rustc --version
-      - name: Cache cargo registry and build output
+      - name: Restore the cargo dependency cache
+        id: cargo-cache
         if: needs.changes.outputs.docs_only != 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: v2-${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ github.event_name == 'pull_request' && format('v2-{0}-cargo-', runner.os) || '' }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: needs.changes.outputs.docs_only != 'true'
         with:
@@ -149,5 +223,34 @@ jobs:
       # Linux has no Seatbelt, so this is the Rust gate without the sandbox
       # conformance suite; the web UI is platform independent and stays on
       # the macOS job, which is the one that ships a binary.
-      - if: needs.changes.outputs.docs_only != 'true'
+      - name: Run make check-linux
+        id: gate
+        if: needs.changes.outputs.docs_only != 'true'
         run: make check-linux
+      # A run saves only when no cache matched its key exactly, which happens
+      # once per Cargo.lock, root Cargo.toml or toolchain change; a later run
+      # with the same key restores it and never saves again. Main's cache is
+      # the one every pull request restores; a pull request's own copy is
+      # visible only to that pull request. A failed gate still saves, after
+      # the test build is finished, so that one failing test does not leave
+      # every following run building its dependencies cold; a build that
+      # cannot finish is not saved. The workspace's own output is removed
+      # first: it changes with every commit.
+      - name: Finish the test build for the cargo cache
+        id: finish-build
+        if: failure() && needs.changes.outputs.docs_only != 'true' && steps.cargo-cache.outputs.cache-hit != 'true' && steps.gate.outcome == 'failure'
+        run: cargo test --workspace --no-run
+      - name: Drop workspace build output from the cargo cache
+        id: prune
+        if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && steps.cargo-cache.outputs.cache-hit != 'true' && (steps.gate.outcome == 'success' || steps.finish-build.outcome == 'success') }}
+        run: node scripts/ci-cache.mjs prune
+      - name: Save the cargo dependency cache
+        if: ${{ !cancelled() && steps.prune.outcome == 'success' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: v2-${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}

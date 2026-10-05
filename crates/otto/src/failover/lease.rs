@@ -382,6 +382,45 @@ impl Clock for RealClock {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static SKIP_ACQUIRE_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only: runs `f` with every [`Lease::acquire`] on this thread waiting
+/// out the liveness window on a virtual clock, so taking over a holder that
+/// never renews costs no real time instead of 7`L`/6 (7 s at `L` = 6). Only
+/// for a holder simulated by hand that stays stopped: a running holder's
+/// heartbeat changes in real time, which the virtual window cannot observe.
+#[cfg(test)]
+pub(crate) fn without_acquire_wait<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SKIP_ACQUIRE_WAIT.with(|skip| skip.set(self.0));
+        }
+    }
+    let _reset = Reset(SKIP_ACQUIRE_WAIT.with(|skip| skip.replace(true)));
+    f()
+}
+
+/// A [`Clock`] whose sleeps advance it instantly; see
+/// [`without_acquire_wait`].
+#[cfg(test)]
+#[derive(Default)]
+struct VirtualClock(Mutex<Duration>);
+
+#[cfg(test)]
+impl Clock for VirtualClock {
+    fn now(&self) -> Duration {
+        *self.0.lock().unwrap()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        *self.0.lock().unwrap() += duration;
+    }
+}
+
 /// A held session lease: one epoch, on one host, for one process.
 #[derive(Debug)]
 pub struct Lease {
@@ -411,6 +450,10 @@ impl Lease {
     /// [`Keeper`], which renews it every `L`/3 and fences this process if
     /// renewal falls behind or a successor epoch appears.
     pub fn acquire(session_path: &Path) -> Result<(Arc<Lease>, Acquired), AcquireError> {
+        #[cfg(test)]
+        if SKIP_ACQUIRE_WAIT.with(std::cell::Cell::get) {
+            return acquire_with(session_path, &VirtualClock::default(), Keeper::global());
+        }
         acquire_with(session_path, &RealClock, Keeper::global())
     }
 
@@ -1076,6 +1119,25 @@ mod tests {
 
     fn no_op_keeper() -> Arc<Keeper> {
         Keeper::new_for_test(Box::new(|| {}), Arc::new(Children::new()), TEST_TICK)
+    }
+
+    #[test]
+    fn without_acquire_wait_is_scoped_to_its_closure_even_when_it_panics() {
+        let skip = || SKIP_ACQUIRE_WAIT.with(std::cell::Cell::get);
+        assert!(!skip());
+        without_acquire_wait(|| {
+            assert!(skip());
+            without_acquire_wait(|| assert!(skip()));
+            assert!(skip(), "a nested call restores the outer setting");
+        });
+        assert!(!skip());
+        let panicked = std::panic::catch_unwind(|| without_acquire_wait(|| panic!("inside")));
+        assert!(panicked.is_err());
+        assert!(!skip(), "a panic inside does not leave the wait skipped");
+        without_acquire_wait(|| {
+            let other = std::thread::spawn(skip).join().unwrap();
+            assert!(!other, "other threads keep the real clock");
+        });
     }
 
     #[test]

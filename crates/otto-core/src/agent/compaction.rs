@@ -96,6 +96,40 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
     ) -> Result<CompactionResult, AgentError> {
+        stopped(control)?;
+        if self.options.hooks.is_some() {
+            let start = self
+                .start_hooks(control)
+                .await
+                .map_err(|message| self.hook_error(message, control))?;
+            if start.decision == Some(super::hooks::Decision::Deny) {
+                return Err(AgentError::Other(
+                    start.reason.unwrap_or_else(|| "Hook denied session".into()),
+                ));
+            }
+        }
+        let response = self
+            .hook(
+                "before_compaction",
+                serde_json::json!({"reason":format!("{reason:?}"),"focus":focus}),
+                control,
+            )
+            .await
+            .map_err(|message| self.hook_error(message, control))?;
+        if response.decision == Some(super::hooks::Decision::Deny) {
+            return Err(AgentError::Other(
+                response
+                    .reason
+                    .unwrap_or_else(|| "Hook denied compaction".into()),
+            ));
+        }
+        let focus = format!(
+            "{focus}{}",
+            response
+                .context
+                .map(|s| format!("\nUntrusted plugin retention hint:\n{s}"))
+                .unwrap_or_default()
+        );
         let automatic = reason != CompactionReason::Manual;
         emit(Event::CompactionStarted {
             compaction: CompactionResult {
@@ -141,7 +175,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let (prepared, turn_prepared) = self
             .prepare_summary_requests(
                 &prepared_selection,
-                &self.redactor.redact_string(focus),
+                &self.redactor.redact_string(&focus),
                 &previous_details,
             )
             .map_err(AgentError::InvalidCompactionSummary)?;
@@ -260,6 +294,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 cause: error.to_string(),
             })?;
         result.checkpoint_id = metadata.id;
+        let token = CancellationToken::new();
+        if let Err(message) = self.hook("after_compaction", serde_json::json!({"checkpoint_id":result.checkpoint_id,"reason":format!("{reason:?}")}), &token).await { self.hook_warning(emit,&message); }
         emit(Event::CompactionCompleted {
             compaction: result.clone(),
         });

@@ -164,6 +164,20 @@ impl Snapshot {
                     .iter()
                     .map(|d| format!("plugin {}: {d}", installed.name)),
             );
+            if !installed.trusted
+                && (!package.otto.tools.is_empty()
+                    || package
+                        .otto
+                        .hooks
+                        .entries()
+                        .iter()
+                        .any(|(_, h)| !h.is_empty()))
+            {
+                snapshot.diagnostics.push(format!(
+                    "plugin {}: hooks and custom tools disabled; run otto plugin trust {}",
+                    installed.name, installed.name
+                ));
+            }
             if file.skills.enabled != Some(false) {
                 snapshot.skill_paths.push((
                     installed.name.clone(),
@@ -236,7 +250,7 @@ pub fn internal_name(logical: &str) -> String {
     let digest = format!("{:x}", Sha256::digest(logical.as_bytes()));
     format!("p_{}", &digest[..16])
 }
-fn expand(raw: &str, root: &Path, data: &Path, legacy: bool) -> String {
+pub(super) fn expand(raw: &str, root: &Path, data: &Path, legacy: bool) -> String {
     let value = raw
         .replace("${PLUGIN_ROOT}", &root.to_string_lossy())
         .replace("${PLUGIN_DATA}", &data.to_string_lossy());

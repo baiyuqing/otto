@@ -346,6 +346,23 @@ fn grants(home: &Path) -> Result<(Vec<u8>, Grants), String> {
     Ok((bytes, value))
 }
 
+pub(crate) fn command_sources(
+    hooks: &otto_core::config::plugins::Hooks,
+    workspace: &Path,
+) -> Vec<PathBuf> {
+    hooks
+        .entries()
+        .into_iter()
+        .flat_map(|(_, entries)| entries.iter())
+        .flat_map(|h| h.command.iter())
+        .map(|arg| workspace.join(arg))
+        .filter(|path| {
+            path.starts_with(workspace)
+                && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() || m.is_symlink())
+        })
+        .collect()
+}
+
 fn digest(
     home: &Path,
     user: &Path,
@@ -355,12 +372,23 @@ fn digest(
     let root = dirs[0].display().to_string();
     let mut hash = Sha256::new();
     let mut sources = Vec::new();
+    let mut hook_sources = Vec::new();
     // Bind absence as well as definitions; config prefs outside MCP identity do not invalidate.
     for dir in &dirs {
         for relative in [".otto/config.toml", ".otto/config.local.toml"] {
             if let Some(text) = project_read(dir, relative)? {
                 let raw: toml::Table =
                     toml::from_str(&text).map_err(|_| "invalid project configuration")?;
+                if let Some(hooks) = raw.get("hooks") {
+                    let hooks: otto_core::config::plugins::Hooks = hooks
+                        .clone()
+                        .try_into()
+                        .map_err(|_| "invalid hook configuration")?;
+                    hook_sources.extend(command_sources(&hooks, dirs.last().expect("workspace")));
+                    hash.update(dir.join(relative).as_os_str().as_encoded_bytes());
+                    hash.update(serde_json::to_vec(&hooks).map_err(|_| "cannot digest hooks")?);
+                    sources.push(dir.join(relative).display().to_string());
+                }
                 if let Some(servers) = raw
                     .get("mcp")
                     .and_then(toml::Value::as_table)
@@ -429,6 +457,7 @@ fn digest(
         .map(PathBuf::from)
         .collect();
     for dir in &dirs {
+        roots.insert(dir.join(".otto/hooks"));
         if file.skills.paths.is_none() && skills.enabled {
             roots.insert(dir.join(".otto/skills"));
         }
@@ -436,6 +465,11 @@ fn digest(
             roots.insert(dir.join(".otto/agents"));
         }
     }
+    roots.extend(hook_sources);
+    roots.extend(command_sources(
+        &file.hooks,
+        dirs.last().expect("workspace"),
+    ));
     let mut total_bytes = 0usize;
     let pinned = Workspace::new(&dirs[0]).map_err(|_| "cannot pin executable boundary")?;
     for path in roots {

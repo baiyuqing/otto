@@ -29,6 +29,7 @@ pub mod compaction_select;
 pub mod context_estimate;
 pub mod context_report;
 pub mod events;
+pub mod hooks;
 pub mod inbox;
 pub mod memory;
 pub mod oneshot;
@@ -81,6 +82,8 @@ use tasks::TaskRegistry;
 /// itself: the clock and the identifier generator. Keeping them here is what
 /// lets `otto-core` build for `wasm32-unknown-unknown`.
 pub struct Options {
+    pub hooks: Option<Arc<dyn hooks::Hooks>>,
+    pub hook_state: Arc<hooks::State>,
     pub model: String,
     pub provider_name: String,
     pub system_prompt: String,
@@ -124,6 +127,8 @@ impl Default for Options {
     fn default() -> Self {
         let operation_counter = AtomicU64::new(0);
         Self {
+            hooks: None,
+            hook_state: Arc::default(),
             model: String::new(),
             provider_name: String::new(),
             system_prompt: String::new(),
@@ -159,6 +164,7 @@ pub struct Agent<P, T, S> {
     pub(super) redactor: Redactor,
     /// The memory block the last user turn recalled, for the context report.
     last_memory_context: std::sync::Mutex<String>,
+    hook_turn_id: std::sync::Mutex<String>,
 }
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
@@ -199,6 +205,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             session,
             options,
             redactor,
+            hook_turn_id: std::sync::Mutex::new(String::new()),
             last_memory_context: std::sync::Mutex::default(),
         }
     }
@@ -408,6 +415,66 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     }
 
     async fn run_with_image_system_context_control_kind(
+        &self,
+        user_text: &str,
+        image: Option<Block>,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+        followup: bool,
+    ) -> Result<(), AgentError> {
+        if self.options.hooks.is_none() || !self.redactor.allows_dynamic_content() {
+            return self
+                .run_inner(user_text, image, system_context, emit, control, followup)
+                .await;
+        }
+        *self
+            .hook_turn_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (self.options.new_operation_id)()
+            .map_err(|message| self.fail(emit, AgentError::OperationIdentity { message }))?
+            .to_string();
+        let result = async {
+            let mut context = system_context.to_owned();
+            let start=self.start_hooks(control).await.map_err(|message|self.fail(emit,self.hook_error(message,control)))?;
+            if start.decision==Some(hooks::Decision::Deny) {return Err(self.fail(emit,AgentError::Other(start.reason.unwrap_or_else(||"Hook denied session".into()))));}
+            if let Some(text)=start.context {context.push_str(&format!("\n<plugin_context>Untrusted plugin context:\n{text}\n</plugin_context>"));}
+            for event in ["before_prompt"] {
+                let response = self.hook(event, serde_json::json!({"prompt": self.redactor.redact_string(user_text), "followup":followup,"has_image":image.is_some()}), control).await
+                    .map_err(|message| self.fail(emit, self.hook_error(message,control)))?;
+                if response.decision == Some(hooks::Decision::Deny) {
+                    return Err(self.fail(emit, AgentError::Other(response.reason.unwrap_or_else(|| "Hook denied this turn".into()))));
+                }
+                if let Some(text) = response.context { context.push_str(&format!("\n<plugin_context>Untrusted plugin context:\n{text}\n</plugin_context>")); }
+            }
+            self.run_inner(user_text, image, &context, emit, control, followup).await
+        }.await;
+        let end_control = CancellationToken::new();
+        let status = if result.is_ok() {
+            "success"
+        } else if control.stop_reason().is_some() {
+            "cancelled"
+        } else {
+            "error"
+        };
+        if let Err(message) = self
+            .hook(
+                "turn_end",
+                serde_json::json!({"status":status,"stop_reason":control.stop_reason(),"error":result.as_ref().err().map(|e|self.redactor.redact_string(&e.to_string()))}),
+                &end_control,
+            )
+            .await
+        {
+            self.hook_warning(emit, &message);
+        }
+        self.hook_turn_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        result
+    }
+
+    async fn run_inner(
         &self,
         user_text: &str,
         image: Option<Block>,
@@ -628,7 +695,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         prior: Option<(OperationId, u32)>,
         skipped: bool,
     ) -> Result<crate::approval::BatchControl, AgentError> {
-        let arguments = block.arguments.clone().unwrap_or_else(empty_object);
+        let mut arguments = block.arguments.clone().unwrap_or_else(empty_object);
         let (operation_id, attempt) = match prior {
             Some((operation_id, attempts)) => (operation_id, attempts + 1),
             None => match (self.options.new_operation_id)() {
@@ -660,7 +727,45 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             tool_call_id: block.tool_call_id.clone(),
             arguments: arguments.get().to_owned(),
         });
-        let mut execution = if skipped {
+        let mut hook_denial = None;
+        if !skipped
+            && control.admission_stop_reason().is_none()
+            && self.options.hooks.is_some()
+            && self
+                .tools
+                .definitions()
+                .iter()
+                .any(|tool| tool.name == block.tool_name)
+        {
+            match self.hook("before_tool", serde_json::json!({"tool":block.tool_name, "tool_call_id":block.tool_call_id,"operation_id":operation_id, "attempt":attempt,"arguments":serde_json::from_str::<serde_json::Value>(arguments.get()).unwrap_or_default()}), control).await {
+                Err(message) => hook_denial = Some(message),
+                Ok(response) if response.decision == Some(hooks::Decision::Deny) => hook_denial = Some(response.reason.unwrap_or_else(|| "Hook denied this tool".into())),
+                Ok(response) => if let Some(value) = response.arguments {
+                    if !value.is_object() { hook_denial = Some("Hook arguments must be a JSON object".into()); }
+                    else {
+                        let replacement = RawValue::from_string(value.to_string()).expect("serialized JSON");
+                        if replacement.get() != arguments.get() {
+                            let audit = serde_json::json!({"version":1,"tool_call_id":block.tool_call_id,"operation_id":operation_id,"arguments":value}).to_string();
+                            self.session.append_custom("otto.hook.arguments", self.redactor.redact_json_strings(&audit).get()).map_err(|source| self.fail(emit, AgentError::Persist {kind:"hook arguments".into(), source}))?;
+                            arguments = replacement;
+                        }
+                    }
+                },
+            }
+        }
+        let hook_blocked = hook_denial.is_some();
+        let mut execution = if let Some(reason) = control.admission_stop_reason() {
+            stopped_tool_execution(reason)
+        } else if let Some(message) = hook_denial {
+            ToolExecution {
+                result: ToolResult::error(message),
+                outcome: OperationOutcome {
+                    disposition: OperationDisposition::Error,
+                    effect_certainty: EffectCertainty::NotStarted,
+                    stop_reason: None,
+                },
+            }
+        } else if skipped {
             ToolExecution {
                 result: ToolResult::error("Not started: a preceding approval requires replanning."),
                 outcome: OperationOutcome {
@@ -685,6 +790,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 )
                 .await
         };
+        if self.options.hooks.is_some()
+            && execution.outcome.effect_certainty != EffectCertainty::NotStarted
+        {
+            // After hooks have their own bounded cleanup budget, even after cancellation.
+            let token = CancellationToken::new();
+            match self.hook("after_tool", serde_json::json!({"tool":block.tool_name,"tool_call_id":block.tool_call_id,"operation_id":operation_id,"attempt":attempt,"arguments":serde_json::from_str::<serde_json::Value>(arguments.get()).unwrap_or_default(),"content":self.redactor.redact_string(&execution.result.content),"is_error":execution.result.is_error,"outcome":execution.outcome}), &token).await {
+                Err(message) => self.hook_warning(emit, &message),
+                Ok(response) => if let Some(content) = response.content {
+                    let audit = serde_json::json!({"version":1,"tool_call_id":block.tool_call_id,"operation_id":operation_id,"content":execution.result.persisted_text(),"is_error":execution.result.is_error,"outcome":execution.outcome}).to_string();
+                    self.session.append_custom("otto.hook.result", self.redactor.redact_json_strings(&audit).get()).map_err(|source| self.fail(emit, AgentError::Persist{kind:"original tool result".into(),source}))?;
+                    execution.result.content = content;
+                    execution.result.persisted_content = None;
+                },
+            }
+        }
         execution.result.content = self.redactor.redact_string(&execution.result.content);
         execution.result.persisted_content = execution
             .result
@@ -702,7 +822,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
             None => execution.result.content.clone(),
         };
-        let batch_control = self.tools.batch_control(&block.tool_name, &execution);
+        let batch_control = if hook_blocked {
+            crate::approval::BatchControl::Replan
+        } else {
+            self.tools.batch_control(&block.tool_name, &execution)
+        };
         let is_error = execution.result.is_error;
         let terminal = OperationFact::terminal(
             operation_id.clone(),
@@ -795,7 +919,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         if pending.is_empty()
             || !pending
                 .iter()
-                .all(|call| self.tools.replayable(&call.tool_name))
+                .all(|call| self.options.hooks.is_none() && self.tools.replayable(&call.tool_name))
         {
             return Ok(());
         }
@@ -2022,5 +2146,174 @@ mod tests {
         assert_eq!(requests[0].messages.len(), 1);
         assert_eq!(requests[0].messages[0].text(), "hello");
         assert_eq!(requests[0].tools, EchoExecutor.definitions());
+    }
+    #[derive(Default)]
+    struct TestHooks {
+        events: Mutex<Vec<(String, serde_json::Value)>>,
+        deny: bool,
+        after_fail: bool,
+    }
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+    impl hooks::Hooks for TestHooks {
+        async fn run(
+            &self,
+            event: &str,
+            data: serde_json::Value,
+            _: &dyn OperationControl,
+        ) -> Result<hooks::Response, String> {
+            self.events.lock().unwrap().push((event.into(), data));
+            match event {
+                "before_prompt" => Ok(hooks::Response {
+                    context: Some("plugin context".into()),
+                    ..Default::default()
+                }),
+                "before_tool" if self.deny => Ok(hooks::Response {
+                    decision: Some(hooks::Decision::Deny),
+                    reason: Some("denied".into()),
+                    ..Default::default()
+                }),
+                "before_tool" => Ok(hooks::Response {
+                    arguments: Some(serde_json::json!({"value":2})),
+                    ..Default::default()
+                }),
+                "after_tool" if self.after_fail => Err("failed after hook".into()),
+                "after_tool" => Ok(hooks::Response {
+                    content: Some("filtered".into()),
+                    ..Default::default()
+                }),
+                _ => Ok(Default::default()),
+            }
+        }
+    }
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn hooks_rewrite_before_execution_preserve_effects_and_share_session_lifecycle() {
+        let hooks = Arc::new(TestHooks::default());
+        let mut options = test_options();
+        options.hooks = Some(hooks.clone());
+        let agent = Agent::new(
+            ScriptedProvider::new(vec![
+                (Vec::new(), assistant_tool_call()),
+                (Vec::new(), assistant_text()),
+                (Vec::new(), assistant_text()),
+            ]),
+            EchoExecutor,
+            MemorySession::new(),
+            options,
+        );
+        let mut events = Vec::new();
+        agent
+            .run("first", &mut |e| events.push(e), &CancellationToken::new())
+            .await
+            .unwrap();
+        agent
+            .run("second", &mut |e| events.push(e), &CancellationToken::new())
+            .await
+            .unwrap();
+        agent.end_hooks().await;
+        agent.end_hooks().await;
+        let recorded = hooks.events.lock().unwrap();
+        assert_eq!(
+            recorded.iter().map(|(e, _)| e.as_str()).collect::<Vec<_>>(),
+            vec![
+                "session_start",
+                "before_prompt",
+                "before_tool",
+                "after_tool",
+                "turn_end",
+                "before_prompt",
+                "turn_end",
+                "session_end"
+            ]
+        );
+        assert_eq!(
+            recorded.iter().find(|(e, _)| e == "after_tool").unwrap().1["content"],
+            r#"{"value":2}"#
+        );
+        assert!(
+            !recorded
+                .iter()
+                .find(|(e, _)| e == "before_prompt")
+                .unwrap()
+                .1["turn_id"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            agent
+                .provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|r| r.system_prompt.contains("Untrusted plugin context"))
+        );
+        assert!(events.iter().any(|e|matches!(e,Event::ToolCallFinished{result,outcome,..} if result.content=="filtered" && outcome.effect_certainty==EffectCertainty::Completed)));
+        assert!(
+            agent
+                .session
+                .messages()
+                .iter()
+                .any(|m| m.role == Role::Tool && m.blocks.iter().any(|b| b.text == "filtered"))
+        );
+    }
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn hook_denial_is_not_started_and_after_failure_keeps_the_tool_result() {
+        for deny in [true, false] {
+            let hooks = Arc::new(TestHooks {
+                deny,
+                after_fail: true,
+                ..Default::default()
+            });
+            let mut options = test_options();
+            options.hooks = Some(hooks.clone());
+            let agent = Agent::new(
+                ScriptedProvider::new(vec![
+                    (Vec::new(), assistant_tool_call()),
+                    (Vec::new(), assistant_text()),
+                ]),
+                EchoExecutor,
+                MemorySession::new(),
+                options,
+            );
+            let mut events = Vec::new();
+            agent
+                .run("run", &mut |e| events.push(e), &CancellationToken::new())
+                .await
+                .unwrap();
+            let terminal = events
+                .iter()
+                .find_map(|e| {
+                    if let Event::ToolCallFinished {
+                        result, outcome, ..
+                    } = e
+                    {
+                        Some((result, outcome))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            if deny {
+                assert_eq!(terminal.1.effect_certainty, EffectCertainty::NotStarted);
+                assert_eq!(terminal.0.content, "denied");
+                assert!(
+                    !hooks
+                        .events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(e, _)| e == "after_tool")
+                );
+            } else {
+                assert_eq!(terminal.1.effect_certainty, EffectCertainty::Completed);
+                assert_eq!(terminal.0.content, r#"{"value":2}"#);
+                assert!(!terminal.0.is_error);
+                assert!(events.iter().any(|e|matches!(e,Event::Notification{text,..} if text.contains("failed after hook"))));
+            }
+        }
     }
 }

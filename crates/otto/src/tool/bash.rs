@@ -518,6 +518,7 @@ impl BashTool {
             dir: self.workspace_root.clone(),
             env: environment.to_vec(),
             report_denials: true,
+            stdin: None,
         }
     }
 
@@ -1588,6 +1589,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                 dir: workspace.root().to_path_buf(),
                 env: strings(&["FIRST=original", "SECOND=preserved"]),
                 report_denials: true,
+                stdin: None,
             })
             .collect();
         assert_eq!(executor.requests(), expected);

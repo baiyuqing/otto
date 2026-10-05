@@ -33,6 +33,7 @@ Apply these requirements to every feature, fix, and refactor:
 
 ## Change rules
 
+- Update [CHANGELOG.md](CHANGELOG.md) in the same PR for notable user or contributor changes; follow the [changelog rules](docs/development.md#changelog).
 - Ship requested features enabled by default; do not add default-off gates or require an extra enable step.
 - After implementation and required verification, open a PR without asking for confirmation again.
 - Use a dedicated Git worktree at `.worktree/<name>` under the primary checkout (never a sibling directory) and a development branch for every feature or bug fix; never implement directly on `main`.
@@ -64,10 +65,11 @@ make check-linux  # the Linux gate: the same minus Seatbelt conformance and the 
 See the [development guide](docs/development.md)
 for the focused package set, test commands, and contract-specific checks.
 
-CI runs `make check` on macOS and `make check-linux` on Linux, with the
+CI runs `make check` on macOS, split into two parallel jobs (`rust-fmt` with
+`rust-lint`, and `check-tests`), and `make check-linux` on Linux, with the
 toolchain and action pins in [the workflow](.github/workflows/checks.yml). A
 change that touches only Markdown outside `crates/` and `testdata/`, `docs/`,
-or `LICENSE` skips both gates; everything else runs them in full.
+or `LICENSE` skips every gate; everything else runs them in full.
 Full host validation requires macOS 26+ and standalone Command Line Tools;
 see the development guide.
 

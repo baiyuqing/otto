@@ -1413,7 +1413,8 @@ fn load_config(options: &CliOptions, home: &str) -> Result<(String, File), ()> {
 
 /// Unlike `crate::config::resolution_environment`, every fixed key is always
 /// present, even when the process has no such variable: the empty string is
-/// inserted, and resolution distinguishes "absent" from "empty" nowhere.
+/// inserted, and resolution distinguishes "absent" from "empty" nowhere. The
+/// map also holds each profile's `api_key_env` and the `web_search` key names.
 fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<String, String> {
     const FIXED_KEYS: [&str; 7] = [
         "HOME",
@@ -1424,7 +1425,9 @@ fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<String
         "OTTO_UI",
         "OTTO_TRACE",
     ];
+    use crate::tool::web::{BRAVE_KEY_ENV, GOOGLE_ENGINE_ENV, GOOGLE_KEY_ENV};
     let mut keys: BTreeSet<&str> = FIXED_KEYS.into_iter().collect();
+    keys.extend([GOOGLE_KEY_ENV, GOOGLE_ENGINE_ENV, BRAVE_KEY_ENV]);
     for profile in file.profiles.values() {
         if !profile.api_key_env.is_empty() {
             keys.insert(profile.api_key_env.as_str());
@@ -1821,6 +1824,25 @@ mod tests {
             environment.get("ALPHA_KEY").map(String::as_str),
             Some("sk-alpha")
         );
+    }
+
+    #[test]
+    fn the_config_environment_carries_the_web_search_keys() {
+        let file = otto_core::config::File::default();
+        let keyless = |lookup: &[(&str, &str)]| {
+            let lookup: HashMap<String, String> = lookup
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let environment = config_environment(&file, &lookup);
+            crate::tool::web::search_is_keyless(&|name| environment.get(name).cloned())
+        };
+        assert!(keyless(&[]));
+        assert!(!keyless(&[("BRAVE_API_KEY", "brave")]));
+        assert!(!keyless(&[
+            ("GOOGLE_API_KEY", "google"),
+            ("GOOGLE_SEARCH_ENGINE_ID", "cx"),
+        ]));
     }
 
     #[test]

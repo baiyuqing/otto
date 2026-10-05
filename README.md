@@ -4,7 +4,7 @@
 
 # Otto — a local-first personal AI agent
 
-[简体中文](README.zh-CN.md) · [User manual](docs/user-manual.md)
+[简体中文](README.zh-CN.md) · [User manual](docs/user-manual.md) · [Changelog](CHANGELOG.md)
 
 **Otto helps with research, writing, planning, coding, and practical tasks.**
 Work with it from your terminal, a browser, Telegram, or Feishu. It uses the

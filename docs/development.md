@@ -258,9 +258,15 @@ macOS, and minus the release build, the Node wasm tests, and the web UI, which
 are platform independent and stay on the macOS job. Keep platform-specific
 code behind `cfg` rather than runtime checks, so a target that cannot use it
 does not compile it.
-A documentation-only change skips both gates. The workflow's `changes` job
+On macOS, CI runs `make check` as two parallel jobs: `macOS lint` runs
+`rust-fmt` and `rust-lint`, and `macOS acceptance` runs `make check-tests`,
+which is everything else in `check`. Clippy compiles the workspace a second
+time, so running it beside the tests takes it off the critical path; the lint
+job keeps its own dependency cache, since the tests' cache holds no
+check-mode metadata.
+A documentation-only change skips every gate. The workflow's `changes` job
 classifies the diff first: when every changed path is Markdown outside
-`crates/` and `testdata/`, under `docs/`, or `LICENSE`, both gates start and
+`crates/` and `testdata/`, under `docs/`, or `LICENSE`, the gates start and
 skip every step, so they still report a status without installing a toolchain.
 Anything else — including a workflow edit, `testdata/server/openapi.yaml`, or a
 Markdown fixture the skill and agent loaders discover by name — runs the full
@@ -317,6 +323,7 @@ The canonical Make targets are:
 ```bash
 make check-fast     # rustfmt --check, clippy -D warnings, focused otto-core tests, git diff --check
 make check          # full macOS gate: rust-fmt, rust-lint, ui, all tests (PTY tests included), wasm test, UI test (no release build)
+make check-tests    # `check` without rust-fmt and rust-lint (CI's macOS acceptance job)
 make build          # the release build: the Web UI, cargo build --release, then copy ./otto
 make install        # build and install otto, otto-connect and bundled skills
 make rust-fmt       # cargo fmt --all -- --check
@@ -357,7 +364,7 @@ flags) offline: it must not need network access, provider credentials, or a
 real interactive terminal.
 
 The Node helpers under `scripts/` are opt-in, but their tests are not: `make
-scripts-test` runs every `scripts/*.test.mjs`, and both gates include it. It
+scripts-test` runs every `scripts/*.test.mjs`, and `check`, `check-tests` and `check-linux` include it. It
 needs no build and no network.
 `scripts/pi-session-interop.mjs` covers the optional Pi interoperability probe
 described in the user manual. `scripts/skill-exec-measure.mjs` reports what the
@@ -430,6 +437,32 @@ baseline for unchanged failures, and never weaken validation or safety checks
 to obtain a pass. Preserve unrelated behavioral assertions when migrating test
 fixtures.
 
+## Changelog
+
+[CHANGELOG.md](../CHANGELOG.md) is the curated record of notable user and
+contributor changes. Update it in the same PR as features, fixes, compatibility
+changes, security changes, performance improvements, or build/CI changes.
+Documentation changes that affect how people use or develop Otto also belong
+there; typo-only edits, internal refactors with no observable effect, and
+changelog maintenance itself need no entry.
+
+- Add pending entries under `Unreleased`. Use these categories in order:
+  `Usage and compatibility`, `Features`, `Fixes`, `Security`, `Performance`,
+  `Build and CI`, and `Documentation`. Omit empty categories.
+- Describe the resulting behavior and its practical impact in concise English,
+  with a PR link (or commit link when there is no PR). Group related changes;
+  do not copy the commit log. Add the link once the PR number is known. The
+  complete historical index is a fixed initial backfill, not a per-PR ledger.
+- Put breaking changes, changed defaults, migration steps, and required user
+  action in `Usage and compatibility`. Link the manual for detailed setup.
+  Use other categories for distinct aspects of the same change without
+  repeating the same explanation. Do not claim unmeasured speedups.
+- In a release PR, move the pending entries into `## X.Y.Z - YYYY-MM-DD`
+  using the intended release date and leave `## Unreleased` above it.
+  Keep releases newest first and preserve prior release entries and the fixed
+  historical index. `make bump`
+  updates version files only; this changelog step is manual.
+
 ## Releases
 
 The version is `[workspace.package] version` in `Cargo.toml`, shared by `otto`, `otto-core` and `otto-web`. `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/tauri.conf.json`, the `otto`, `otto-core` and `otto-web` entries of `Cargo.lock` and the `otto-desktop` entry of `desktop/src-tauri/Cargo.lock` must carry the same value; a test fails `make check` when they differ.
@@ -437,10 +470,10 @@ The version is `[workspace.package] version` in `Cargo.toml`, shared by `otto`, 
 Versioning follows SemVer in the 0.x range: a new feature or an incompatible change raises the minor version (0.1.0 to 0.2.0); only fixes raise the patch version (0.1.0 to 0.1.1). Moving to 1.0.0 is a maintainer decision. Version numbers change only in a release PR.
 
 1. On a branch, run `make bump VERSION=X.Y.Z`. `scripts/release.mjs` requires X.Y.Z to be a plain version greater than the current one, rewrites the five files above by exact text replacement (no other line changes, no network), and exits with an error if a location is missing or matches more than once.
-2. Commit, open a PR titled `Release vX.Y.Z`, and merge it.
+2. Archive the `Unreleased` changelog entries as described above. Commit, open a PR titled `Release vX.Y.Z`, and merge it.
 3. On an up-to-date `main`, run `make release-tag`. It checks that HEAD equals `origin/main`, the working tree is clean and the tag does not exist locally or on origin, then creates the annotated tag `vX.Y.Z`, pushes it and runs `gh release create` (needs `gh`).
 
-Release notes are generated by GitHub from the PR titles merged since the previous tag. There is no CHANGELOG file.
+Release notes are generated by GitHub from the PR titles merged since the previous tag. The curated, categorized history lives in [CHANGELOG.md](../CHANGELOG.md); review it alongside the generated notes.
 
 ### Build metadata
 

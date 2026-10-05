@@ -215,6 +215,17 @@ pub async fn run(
     cancel: &CancellationToken,
     terminate: &super::terminate::Terminate,
 ) -> i32 {
+    if args.first().is_some_and(|a| a == "config") {
+        let entries = match capture_environment(environment_entries) {
+            Ok(v) => v,
+            Err(e) => return fail(stderr, &e),
+        };
+        let lookup = match environment_lookup(&entries) {
+            Ok(v) => v,
+            Err(e) => return fail(stderr, &e),
+        };
+        return super::config_command::run(&args[1..], stdout, stderr, &lookup);
+    }
     if args.first().is_some_and(|command| command == "workspace") {
         return super::workspace_command::run(&args[1..], stdout, stderr);
     }
@@ -365,14 +376,29 @@ pub async fn run(
     };
     let (config_path, config_file) = match load_config(&options, &home) {
         Ok(loaded) => loaded,
-        Err(()) => {
-            return fail(
-                stderr,
-                "load config: configuration is invalid or unavailable",
-            );
-        }
+        Err(message) => return fail(stderr, &format!("load config: {message}")),
     };
     startup_trace.mark("config/load");
+    if !options.acp_listen.is_empty()
+        && config_file
+            .policy
+            .as_ref()
+            .and_then(|p| p.force.get("server"))
+            .and_then(toml::Value::as_table)
+            .is_some_and(|p| p.contains_key("socket") || p.contains_key("listen"))
+    {
+        return fail(
+            stderr,
+            "ACP listener override is prohibited by managed server policy",
+        );
+    }
+    for diagnostic in &config_file.diagnostics {
+        let _ = writeln!(
+            stderr,
+            "warning: {} in {}: {}",
+            diagnostic.key, diagnostic.source, diagnostic.reason
+        );
+    }
     let mut environment = config_environment(&config_file, &lookup);
     environment.insert("HOME".to_string(), home.clone());
 
@@ -1343,14 +1369,14 @@ pub(crate) fn load_config_for(
     explicit: bool,
     home: &str,
 ) -> Result<(String, File), ()> {
-    load_config(
-        &CliOptions {
-            config_path: config_path.to_string(),
-            explicit_config: explicit,
-            ..CliOptions::default()
-        },
-        home,
-    )
+    let path = if config_path.is_empty() {
+        PathBuf::from(home).join(".config/otto/config.toml")
+    } else {
+        PathBuf::from(config_path)
+    };
+    let file =
+        crate::config::layered::load_user(Path::new(home), &path, explicit).map_err(|_| ())?;
+    Ok((path.display().to_string(), file))
 }
 
 pub(crate) fn config_environment_for(
@@ -1406,19 +1432,20 @@ fn open_schedule(
     }
 }
 
-fn load_config(options: &CliOptions, home: &str) -> Result<(String, File), ()> {
+fn load_config(options: &CliOptions, home: &str) -> Result<(String, File), String> {
     let path: PathBuf = if options.config_path.is_empty() {
         [home, ".config", "otto", "config.toml"].iter().collect()
     } else {
         PathBuf::from(&options.config_path)
     };
-    match crate::config::load_required(&path) {
-        Ok(file) => Ok((path.to_string_lossy().into_owned(), file)),
-        Err(error) if error.is_not_found() && !options.explicit_config => {
-            Ok((path.to_string_lossy().into_owned(), File::default()))
-        }
-        Err(_) => Err(()),
-    }
+    let workspace = if options.cwd.is_empty() {
+        Path::new(".")
+    } else {
+        Path::new(&options.cwd)
+    };
+    let loaded =
+        crate::config::layered::load(Path::new(home), &path, options.explicit_config, workspace)?;
+    Ok((path.to_string_lossy().into_owned(), loaded.file))
 }
 
 /// Unlike `crate::config::resolution_environment`, every fixed key is always
@@ -1484,16 +1511,28 @@ pub(crate) fn resolve_sandbox_settings(
     let mut raw = file.sandbox.clone();
     let agents =
         resolve_agents(file, environment, workspace_path).map_err(|error| error.to_string())?;
-    let roots = resolve_skills(file, environment, workspace_path)
-        .roots
-        .into_iter()
-        .chain(agents.roots);
+    let home = Path::new(environment.get("HOME").map(String::as_str).unwrap_or(""));
+    let workspace = Path::new(workspace_path);
+    let skill_roots = crate::config::layered::catalog_roots(
+        file,
+        home,
+        workspace,
+        &resolve_skills(file, environment, workspace_path).roots,
+        "skills",
+    )?;
+    let agent_roots =
+        crate::config::layered::catalog_roots(file, home, workspace, &agents.roots, "agents")?;
+    let roots = skill_roots.into_iter().chain(agent_roots);
     for root in roots {
         if std::fs::symlink_metadata(&root).is_ok_and(|info| info.is_dir()) {
             raw.read_paths.push(root);
         }
     }
-    resolve_sandbox(&raw, driver_override).map_err(|error| error.to_string())
+    let settings = resolve_sandbox(&raw, driver_override).map_err(|error| error.to_string())?;
+    if let Some(policy) = &file.policy {
+        policy.sandbox(&settings).map_err(|e| e.to_string())?;
+    }
+    Ok(settings)
 }
 
 /// The sandbox artifacts one workspace's composition produces: the switch
@@ -1650,6 +1689,24 @@ pub(super) async fn load_workspace(
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),
 ) -> Result<(Builder, Option<Arc<SandboxReloader>>), String> {
+    let mut scoped = (*shared).clone();
+    if shared.config.user_values.is_some() {
+        let loaded = crate::config::layered::for_workspace(
+            Path::new(&shared.home),
+            &shared.config_path,
+            &shared.config,
+            canonical_path,
+        )?;
+        for diagnostic in &loaded.file.diagnostics {
+            let _ = writeln!(
+                stderr,
+                "warning: {}: ignored {}: {}",
+                diagnostic.source, diagnostic.key, diagnostic.reason
+            );
+        }
+        scoped.config = loaded.file;
+    }
+    let shared = Arc::new(scoped);
     let workspace_path = canonical_path.to_string_lossy().into_owned();
     let memory_config =
         resolve_memory(&shared.config, &shared.environment).map_err(|error| error.to_string())?;

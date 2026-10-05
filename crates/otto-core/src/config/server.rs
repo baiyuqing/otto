@@ -66,6 +66,34 @@ pub fn resolve_server(
     } else {
         resolve_socket(DEFAULT_SERVER_SOCKET, env)?
     };
+    if let Some(forced) = file
+        .policy
+        .as_ref()
+        .and_then(|p| p.force.get("server"))
+        .and_then(toml::Value::as_table)
+    {
+        if let Some(socket) = forced.get("socket").and_then(toml::Value::as_str) {
+            let expected = if socket.is_empty() {
+                String::new()
+            } else {
+                resolve_socket(socket, env)?.socket
+            };
+            if runtime.socket != expected {
+                return Err(ConfigError::new(
+                    "server socket is forced by managed policy",
+                ));
+            }
+        }
+        if forced
+            .get("listen")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|listen| runtime.listen != listen)
+        {
+            return Err(ConfigError::new(
+                "server listener is forced by managed policy",
+            ));
+        }
+    }
     runtime.workspace_roots = file
         .server
         .workspace_roots
@@ -250,5 +278,18 @@ mod tests {
         let mut file = File::default();
         file.server.workspace_roots = vec!["~/Work".into()];
         assert!(resolve_server(&file, &HashMap::new(), "", "").is_err());
+    }
+    #[test]
+    fn managed_socket_cannot_be_shadowed_by_a_listen_flag_or_lower_layer() {
+        let mut file = super::super::parse("[server]\nlisten='127.0.0.1:4321'").unwrap();
+        let policy: super::super::layered::ManagedPolicy =
+            toml::from_str("[force.server]\nsocket='/managed/otto.sock'").unwrap();
+        file.server.socket = "/managed/otto.sock".into();
+        file.policy = Some(policy);
+        assert!(resolve_server(&file, &HashMap::new(), "", "").is_err());
+        file.server.listen.clear();
+        assert!(resolve_server(&file, &HashMap::new(), "", "").is_ok());
+        assert!(resolve_server(&file, &HashMap::new(), "", "127.0.0.1:4321").is_err());
+        assert!(resolve_server(&file, &HashMap::new(), "/other.sock", "").is_err());
     }
 }

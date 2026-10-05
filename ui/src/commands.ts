@@ -10,6 +10,8 @@ export type WebCommand =
   | { kind: 'rename'; name: string }
   | { kind: 'compact'; focus: string }
   | { kind: 'reflect'; focus: string }
+  | { kind: 'reflectionRuns' }
+  | { kind: 'reflectionRun'; id: string }
   | { kind: 'generatedSkills' }
   | { kind: 'revertSkill'; name: string }
   | { kind: 'auto'; automatic?: boolean }
@@ -39,7 +41,7 @@ export const supportedCommands: WebCommandSuggestion[] = [
   { name: '/model', description: 'show current model and configured profiles' },
   { name: '/rename', description: 'rename the current session' },
   { name: '/compact', description: 'compact context with optional focus' },
-  { name: '/reflect', description: 'queue memory candidates and skills from this session, with optional focus' },
+  { name: '/reflect', description: 'retrospective plus memory and skill proposals, with optional focus; list | show <id> for past runs' },
   { name: '/skill', description: 'list skills reflection wrote, or undo one: generated | revert <name>' },
   { name: '/auto', description: 'show approval mode, or set on/off for this session' },
   { name: '/sandbox', description: 'show sandbox state, or reload configuration' },
@@ -83,8 +85,17 @@ export function parseWebCommand(text: string): WebCommand {
       return argument ? { kind: 'rename', name: argument } : { kind: 'error', message: 'usage: /rename <name>' }
     case '/compact':
       return { kind: 'compact', focus: argument }
-    case '/reflect':
+    case '/reflect': {
+      // As in the terminal: `list` and `show <id>` read run logs, and any
+      // other text is the focus of a new run.
+      const parts = argument.split(/\s+/).filter(Boolean)
+      if (parts.length === 1 && parts[0] === 'list') return { kind: 'reflectionRuns' }
+      if (parts[0] === 'show' && parts.length === 1) {
+        return { kind: 'error', message: 'usage: /reflect [focus] | /reflect list | /reflect show <id>' }
+      }
+      if (parts[0] === 'show' && parts.length === 2) return { kind: 'reflectionRun', id: parts[1] }
       return { kind: 'reflect', focus: argument }
+    }
     case '/skill': {
       const parts = argument.split(/\s+/).filter(Boolean)
       if (parts.length === 1 && parts[0] === 'generated') return { kind: 'generatedSkills' }

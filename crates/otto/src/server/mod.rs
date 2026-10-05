@@ -662,6 +662,14 @@ impl Server {
                 get(reflection::wake_replies),
             )
             .route(
+                "/v1/sessions/{id}/reflection/runs",
+                get(reflection::list_runs),
+            )
+            .route(
+                "/v1/sessions/{id}/reflection/runs/{run}",
+                get(reflection::show_run),
+            )
+            .route(
                 "/v1/sessions/{id}/reflection/skills",
                 get(reflection::list_skills),
             )
@@ -2999,10 +3007,13 @@ mod tests {
                 builder.shared_mut().home = home.to_string_lossy().into_owned();
                 builder.shared_mut().config.skills.paths =
                     Some(vec![skills_root.to_string_lossy().into_owned()]);
-                builder.shared_mut().reflector = Arc::new(crate::reflection::Reflector::new(
-                    otto_core::config::ReflectionRuntime::default(),
-                    Some(Arc::clone(store)),
-                ));
+                builder.shared_mut().reflector = Arc::new(
+                    crate::reflection::Reflector::new(
+                        otto_core::config::ReflectionRuntime::default(),
+                        Some(Arc::clone(store)),
+                    )
+                    .with_log_dir(home.join(".otto/reflection/runs")),
+                );
             }
             if options.elevate {
                 let executor = crate::sandbox::Executor::new(
@@ -5436,6 +5447,53 @@ mod tests {
             .send("GET", "/v1/sessions/missing/reflection/skills", None)
             .await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reflection_run_logs_list_and_show_over_http() {
+        let home = reflection_home();
+        let harness = Harness::with(HarnessOptions {
+            reflection: Some((Arc::clone(&home.store), home.path.clone())),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let list = format!("/v1/sessions/{id}/reflection/runs");
+        let reply = harness.send("GET", &list, None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert_eq!(
+            reply.json(),
+            serde_json::json!({"enabled": true, "runs": []})
+        );
+
+        let dir = home.path.join(".otto/reflection/runs");
+        crate::reflection::runlog::write(
+            &dir,
+            "2026-10-05T02:03:00Z",
+            "abcd1234-run",
+            "# Reflection run abcd1234-run\n\n- trigger: requested\n- status: ok\n- started: 2026-10-05T02:03:00Z\n\n## Retrospective\n\n> Read the docs first.\n",
+        )
+        .expect("write a log");
+        let reply = harness.send("GET", &list, None).await;
+        let runs = &reply.json()["runs"];
+        assert_eq!(runs.as_array().expect("array").len(), 1, "{runs}");
+        assert_eq!(runs[0]["id"], "abcd1234");
+        assert_eq!(runs[0]["trigger"], "requested");
+        assert_eq!(runs[0]["headline"], "Read the docs first.");
+
+        let reply = harness.send("GET", &format!("{list}/abcd1234"), None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert!(
+            reply.json()["content"]
+                .as_str()
+                .expect("content")
+                .contains("> Read the docs first.")
+        );
+        for missing in ["zzzz9999", "..%2Fsessions"] {
+            let reply = harness
+                .send("GET", &format!("{list}/{missing}"), None)
+                .await;
+            assert_eq!(reply.status, StatusCode::NOT_FOUND, "{missing}");
+        }
     }
 
     #[tokio::test]

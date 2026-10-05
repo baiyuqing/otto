@@ -135,6 +135,10 @@ pub struct Report {
     /// The run log: `None` when no log directory is configured or the run
     /// was skipped.
     pub log: Option<Result<PathBuf, String>>,
+    /// The model's retrospective of the slice, redacted, with a field that
+    /// still matched a secret rule replaced by a marker. Empty when the run
+    /// made no model call or the model gave none.
+    pub retrospective: String,
 }
 
 impl Report {
@@ -156,6 +160,7 @@ impl Report {
             external: Vec::new(),
             skills_note: "",
             log: None,
+            retrospective: String::new(),
         }
     }
 
@@ -173,6 +178,12 @@ impl Report {
     /// candidate or wrote a skill.
     pub fn changed_something(&self) -> bool {
         !self.candidates.is_empty() || !self.skills.is_empty() || !self.skill_approvals.is_empty()
+    }
+
+    /// What `/reflect` shows: [`Self::line`], then the retrospective when
+    /// the run has one.
+    pub fn summary(&self) -> String {
+        summary_text(&self.line(), &self.retrospective)
     }
 
     /// One line for a frontend.
@@ -223,10 +234,22 @@ impl Report {
     }
 }
 
-/// What started a run. Only `Manual` ignores `[reflection].auto`.
+/// [`Report::summary`] from its parts, for a client that has the report's
+/// line and retrospective but not the report.
+pub fn summary_text(line: &str, retrospective: &str) -> String {
+    if retrospective.is_empty() {
+        return line.to_owned();
+    }
+    format!("{line}\n\nRetrospective:\n{retrospective}")
+}
+
+/// What started a run. `Manual` (`/reflect`) and `Requested` (the model's
+/// `reflect` tool, called when the user asks) ignore `[reflection].auto` and
+/// the automatic cooldown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     Manual,
+    Requested,
     OnWork,
     OnCompaction,
     OnExit,
@@ -237,6 +260,7 @@ impl Trigger {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Manual => "manual",
+            Self::Requested => "requested",
             Self::OnWork => "on_work",
             Self::OnCompaction => "on_compaction",
             Self::OnExit => "on_exit",
@@ -356,6 +380,29 @@ impl Reflector {
         self.store.as_ref()?.generated(name).ok().flatten()
     }
 
+    /// The newest run logs, newest first, for `/reflect list`. Empty when no
+    /// log directory is configured.
+    pub fn runs(&self, limit: usize) -> Result<Vec<runlog::Summary>, Error> {
+        if !self.config.enabled {
+            return Err(Error::Disabled);
+        }
+        match &self.log_dir {
+            Some(dir) => runlog::list(dir, limit).map_err(Error::Read),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The run log `id` names, with its content, for `/reflect show`.
+    pub fn run_log(&self, id: &str) -> Result<Option<(PathBuf, String)>, Error> {
+        if !self.config.enabled {
+            return Err(Error::Disabled);
+        }
+        match &self.log_dir {
+            Some(dir) => runlog::read(dir, id).map_err(Error::Read),
+            None => Ok(None),
+        }
+    }
+
     /// Runs one reflection over what no earlier run covered.
     pub async fn run(
         &self,
@@ -368,7 +415,7 @@ impl Reflector {
             return Err(Error::Disabled);
         }
         let enabled = match trigger {
-            Trigger::Manual => true,
+            Trigger::Manual | Trigger::Requested => true,
             Trigger::OnWork => self.auto() == Auto::OnWork,
             Trigger::OnCompaction => {
                 matches!(self.auto(), Auto::OnCompaction | Auto::OnWork)
@@ -450,6 +497,7 @@ impl Reflector {
                 .collect(),
             skills_note: "",
             log: None,
+            retrospective: String::new(),
         };
 
         let user_turns = slice
@@ -527,6 +575,7 @@ impl Reflector {
             }
         };
         report.dropped = plan.dropped.clone();
+        report.retrospective = runlog::clean(&plan.retrospective, &redact);
         let skill_candidates = plan.skills.clone();
         let rejected = plan.rejected.clone();
         self.apply(context, &run_id, plan, &mut report, cancel)
@@ -864,6 +913,7 @@ impl Reflector {
                     external: &report.external,
                     skills_note: report.skills_note,
                     items: &report.items,
+                    retrospective: &report.retrospective,
                 },
                 &redact,
             );

@@ -240,7 +240,11 @@ func (a *Agent) clientMeta() map[string]any {
 	if len(a.platforms) == 0 {
 		return nil
 	}
-	return map[string]any{"otto": map[string]any{"scheduleDelivery": a.platforms}}
+	meta := map[string]any{"scheduleDelivery": a.platforms}
+	if a.deliveryChats != nil {
+		meta["scheduleDeliveryChats"] = a.deliveryChats
+	}
+	return map[string]any{"otto": meta}
 }
 
 // advertisesMemoryReview reads _meta.otto.memoryReview.

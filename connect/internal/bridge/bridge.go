@@ -101,6 +101,20 @@ func New(opts Options) *Bridge {
 		names = append(names, p.Name())
 	}
 	opts.Agent.SetPlatforms(names)
+	chats := []string{}
+	for _, p := range opts.Platforms {
+		if p.Name() != "telegram" && p.Name() != "feishu" {
+			continue
+		}
+		access := opts.Access[p.Name()]
+		if len(access.Senders) == 0 {
+			continue
+		}
+		for _, id := range access.Chats {
+			chats = append(chats, p.Name()+":"+id)
+		}
+	}
+	opts.Agent.SetDeliveryChats(chats)
 	return b
 }
 
@@ -193,7 +207,7 @@ func (b *Bridge) loadBoundSessions() {
 	for _, key := range keys {
 		name, id, ok := strings.Cut(key, ":")
 		p := b.platforms[name]
-		if !ok || p == nil {
+		if !ok || p == nil || !slices.Contains(b.opts.Access[name].Chats, id) || len(b.opts.Access[name].Senders) == 0 {
 			continue
 		}
 		b.chat(p, id)
@@ -1023,7 +1037,7 @@ func (c *chat) sendBackground(sessionID, text string, markdown bool) {
 				return
 			}
 		}
-		if c.b.opts.Store.Session(c.key) == sessionID {
+		if access := c.b.opts.Access[c.p.Name()]; c.b.opts.Store.Session(c.key) == sessionID && slices.Contains(access.Chats, c.id) && len(access.Senders) > 0 {
 			c.post(c.b.workCtx, "", "", text, markdown)
 		}
 	}()

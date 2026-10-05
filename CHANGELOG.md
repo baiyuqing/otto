@@ -49,6 +49,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Preserve workspace session and memory ownership across restarts and directory
+  moves using a local identity marker. Add `otto workspace status|fork` for
+  inspection and independent copies; adopt existing state without rewriting
+  history. See [workspace identity](docs/user-manual.md#workspace-identity).
+
 - Establish the agent runtime, OpenAI-compatible streaming, TOML provider
   profiles, workspace file tools, cancellable shell execution, and a CLI REPL.
   ([initial implementation](https://github.com/baiyuqing/otto/compare/c582761...d1212b8))

@@ -680,6 +680,7 @@ fn render_write_rules(
     // setting turns them off.
     let protected: Vec<Filter> = crate::sandbox::GIT_READ_ONLY
         .iter()
+        .chain(crate::workspace::READ_ONLY_PATHS.iter())
         .map(|(name, subpath)| Filter {
             kind: if *subpath {
                 FilterKind::Subpath
@@ -1283,18 +1284,20 @@ mod tests {
     }
 
     #[test]
-    fn workspace_git_metadata_is_denied_after_every_write_allow() {
+    fn workspace_git_metadata_and_identity_are_denied_after_every_write_allow() {
         let fixture = new_fixture();
         let workspace = fixture.options.workspace.clone();
         let profile = fixture.render();
         let tag = tag_message(&fixture);
         let deny = format!(
-            "(deny file-write*\n  (literal {})\n  (literal {})\n  (literal {})\n  (literal {})\n  (subpath {})\n  {tag}\n)\n",
+            "(deny file-write*\n  (literal {})\n  (literal {})\n  (literal {})\n  (literal {})\n  (subpath {})\n  (literal {})\n  (literal {})\n  {tag}\n)\n",
             quote(&format!("{workspace}/.git")),
             quote(&format!("{workspace}/.git/config")),
             quote(&format!("{workspace}/.git/config.worktree")),
             quote(&format!("{workspace}/.git/commondir")),
             quote(&format!("{workspace}/.git/hooks")),
+            quote(&format!("{workspace}/.otto")),
+            quote(&format!("{workspace}/.otto/workspace.json")),
         );
         assert_eq!(count(&profile, &deny), 1, "git deny missing:\n{profile}");
         // Seatbelt applies the last matching rule.

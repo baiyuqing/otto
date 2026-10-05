@@ -86,3 +86,6 @@ credentials
 
 # Provider trace dumps: `otto --trace` output holds full request bodies.
 trace*.jsonl
+
+# Persistent local workspace identity must not be cloned through Git.
+.otto/workspace.json

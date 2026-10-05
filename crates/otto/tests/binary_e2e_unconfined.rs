@@ -151,3 +151,81 @@ fn without_a_confined_driver_bash_is_unavailable_but_file_tools_still_run() {
     );
     assert_eq!(served.load(Ordering::SeqCst), 2, "stdout:\n{stdout}");
 }
+
+#[test]
+fn workspace_move_continues_the_same_session_and_executes_in_the_new_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let original = parent.path().join("original");
+    std::fs::create_dir(&original).unwrap();
+    let (_, stderr, ok) = run_prompt(
+        home.path(),
+        &original,
+        "off",
+        vec![text_reply("first turn")],
+        Arc::new(AtomicUsize::new(0)),
+    );
+    assert!(ok, "{stderr}");
+    let identity = otto::workspace::read(&original).unwrap().unwrap();
+    let root = home.path().join(".otto/sessions");
+    let first = otto::session::list(&root, original.to_str().unwrap(), "", 20).unwrap();
+    let session_id = first.sessions[0].id.clone();
+    let session_path = first.sessions[0].path.clone();
+    let transcript_before = std::fs::read(&session_path).unwrap();
+    let moved = parent.path().join("moved");
+    std::fs::rename(&original, &moved).unwrap();
+
+    let (base_url, _requests) = serve(Script {
+        replies: vec![
+            tool_call_reply(
+                "write-after-move",
+                "write",
+                r#"{"path":"after-move.txt","content":"new directory"}"#,
+            ),
+            text_reply("continued turn"),
+        ],
+        served: Arc::new(AtomicUsize::new(0)),
+    });
+    configure(home.path(), &base_url);
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_otto"));
+    command
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("SHELL", "/bin/sh")
+        .env("OTTO_API_KEY", "sk-e2e-not-a-real-key")
+        .arg("--cwd")
+        .arg(&moved)
+        .arg("--sandbox")
+        .arg("off")
+        .arg("--continue")
+        .arg("--prompt")
+        .arg("continue after move");
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        command.env("TMPDIR", tmpdir);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("continued turn"));
+    assert_eq!(
+        std::fs::read_to_string(moved.join("after-move.txt")).unwrap(),
+        "new directory"
+    );
+    assert_eq!(
+        otto::workspace::read(&moved).unwrap().unwrap().id,
+        identity.id
+    );
+    let listed = otto::session::list(&root, moved.to_str().unwrap(), "", 20).unwrap();
+    assert_eq!(listed.sessions.len(), 1);
+    assert_eq!(listed.sessions[0].id, session_id);
+    assert_eq!(listed.sessions[0].path, session_path);
+    assert!(
+        std::fs::read(&session_path)
+            .unwrap()
+            .starts_with(&transcript_before)
+    );
+}

@@ -3241,6 +3241,43 @@ boolean approval steps. It does not implement loops, conditions, group chat,
 nested workflows, free-form human input, automatic retry, or OpenTelemetry
 export.
 
+## Workspace identity
+
+Otto creates a local `.otto/workspace.json` on startup. Its UUID identifies
+the workspace across process restarts and upgrades; it is separate from
+session IDs and execution leases. The marker is local state: keep it out of
+Git so new clones and independently created Git worktrees get new identities.
+
+Stop Otto before moving the directory. Moving it with its marker keeps its
+session and memory ownership.
+On first initialization, Otto adopts the existing path-derived session key
+and memory scope, including a configured `[memory.workspace_ids]` override.
+Existing transcripts and memory records are not rewritten. Later conflicting
+memory overrides fail startup rather than silently switch to another scope.
+
+```bash
+otto workspace status --cwd /path/to/workspace
+```
+
+A copy that includes the marker continues the same identity. To make the copy
+independent, stop Otto processes using the copy, then run:
+
+```bash
+otto workspace fork --cwd /path/to/copy
+```
+
+This assigns a new UUID, session key, and workspace memory scope. Old sessions
+and memory remain in storage; user-scope memory remains shared. Remove any
+`[memory.workspace_ids]` override for the copy before starting it with the new
+identity. Status is read-only and does not initialize a marker.
+
+A move preserves history lookup, not filesystem permissions: tools, approvals,
+and sandbox execution use the current canonical directory. Historical `cwd`
+entries remain historical facts. The marker does not move `~/.otto` data to
+another machine or provide cloud synchronization. File tools and Seatbelt
+protect the marker from writes; explicit `--sandbox off` remains unrestricted.
+Malformed or symlinked markers are rejected rather than regenerated.
+
 ## Memory
 
 Otto has a local, per-workspace/per-user memory store backed by Turso/FTS

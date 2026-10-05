@@ -25,3 +25,4 @@ pub mod terminate;
 pub mod testutil;
 pub mod trust;
 pub mod workflow;
+pub mod workspace_command;

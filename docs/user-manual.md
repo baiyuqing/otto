@@ -348,11 +348,14 @@ Key points:
   remaining deadline; compaction and follow-up work never reset that budget.
   `cancellation_grace` defaults to `5s` and bounds cooperative cleanup before
   Bash or a shared stdio MCP server is force-stopped.
-- ChatGPT transport failures before any streamed output are retried up to
-  three times, waiting 1, 2, then 4 seconds within the same turn deadline.
-  Only the current model request is repeated; previously executed tools are
-  not rerun. HTTP errors (including 429/5xx), authorization errors, protocol
-  errors, and failures after streamed output are not retried.
+- ChatGPT transport failures, and stream errors with code
+  `server_is_overloaded` or `server_error`, are retried up to three times
+  when no output has been streamed yet, waiting 1, 2, then 4 seconds within
+  the same turn deadline. Only the current model request is repeated;
+  previously executed tools are not rerun. HTTP errors (including 429/5xx),
+  other stream error codes (such as `rate_limit_exceeded`), authorization
+  errors, protocol errors, and failures after streamed output are not
+  retried.
   OpenAI-compatible requests are not automatically retried after dispatch.
 
 Deadline checks are cooperative at synchronous filesystem and Turso
@@ -1466,9 +1469,11 @@ to write the reviewed configuration, then restart Otto with the printed command.
 
 On macOS, the default is `--sandbox auto`, which means Seatbelt. The sandboxed
 command gets whole-workspace write access plus Otto-managed private `home`,
-`tmp`, and `cache` directories beneath your user cache. Otto keeps generated
-profile files in a separate private `profiles` directory that the sandboxed
-child cannot read. Otto does not treat the workspace as protected: source,
+`tmp`, and `cache` directories beneath your user cache. `HOME` points to the
+private `home`, so `~` in a command does not name your home directory; the
+`bash` tool description tells the model to use absolute paths for your files.
+Otto keeps generated profile files in a separate private `profiles` directory
+that the sandboxed child cannot read. Otto does not treat the workspace as protected: source,
 `.git`, tests, and generated files remain writable.
 
 Host home content is not automatically readable. Git config, shell dotfiles,

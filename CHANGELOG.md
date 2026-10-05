@@ -164,6 +164,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- ChatGPT stream errors with code `server_is_overloaded` or `server_error`
+  are now retried like transport failures (up to three times, 1, 2, then 4
+  seconds) when no output has been streamed yet. Previously the turn failed on
+  the first such error.
+- Under Seatbelt, the `bash` tool description now states that `HOME` and `~`
+  are a private sandbox directory, so the model uses absolute paths for the
+  user's files instead of reading `~/...` from the private home.
 - `web_fetch` and `web_search` now work on Macs where a TUN interface answers
   DNS with fake IPs from 198.18.0.0/15. The tools blocked those answers as
   non-public, so every request failed.

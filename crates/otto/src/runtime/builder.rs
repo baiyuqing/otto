@@ -746,8 +746,7 @@ impl Runner {
                 result=&mut future=>{
                     while let Ok(event)=events.try_recv(){emit(event);}
                     if let Some((service,scope))=&self.approvals {
-                        loop {
-                            let Ok(changes)=service.events(&scope.workspace,Some(&scope.session_id),cursor) else {break};
+                        while let Ok(changes)=service.events(&scope.workspace,Some(&scope.session_id),cursor) {
                             if changes.is_empty() {break;}
                             for change in changes {cursor=change.sequence;emit(otto_core::agent::Event::ApprovalChanged{request:Box::new(change.request)});}
                         }

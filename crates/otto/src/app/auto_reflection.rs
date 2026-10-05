@@ -107,7 +107,7 @@ impl Notices {
 }
 
 /// Clears the single-flight flag when a background run ends, however it ends.
-struct Running(Arc<AtomicBool>);
+pub(super) struct Running(pub(super) Arc<AtomicBool>);
 
 impl Drop for Running {
     fn drop(&mut self) {
@@ -268,7 +268,7 @@ impl Controller {
                 matches!(reflector.auto(), Auto::OnCompaction | Auto::OnWork)
             }
             Trigger::OnWork => reflector.auto() == Auto::OnWork,
-            Trigger::Manual | Trigger::OnExit => false,
+            Trigger::Manual | Trigger::Requested | Trigger::OnExit => false,
         };
         if !enabled || !self.dynamic_content {
             return;
@@ -617,6 +617,8 @@ mod tests {
         reflection: String,
         compactions: AtomicUsize,
         reflections: AtomicUsize,
+        /// How long a reflection answer takes.
+        delay: std::time::Duration,
     }
 
     #[async_trait::async_trait]
@@ -625,7 +627,7 @@ mod tests {
             &self,
             request: &Request,
             _emit: StreamSink<'_>,
-            _control: &dyn OperationControl,
+            control: &dyn OperationControl,
         ) -> ProviderSettlement {
             let text = if request
                 .system_prompt
@@ -635,6 +637,16 @@ mod tests {
                 SUMMARY.to_owned()
             } else {
                 self.reflections.fetch_add(1, Ordering::SeqCst);
+                tokio::select! {
+                    () = tokio::time::sleep(self.delay) => {}
+                    () = control.cancellation_token().cancelled() => {
+                        return ProviderSettlement::failed(
+                            otto_core::provider::ProviderError::Cancelled,
+                            1,
+                            EffectCertainty::KnownNoEffect,
+                        );
+                    }
+                }
                 self.reflection.clone()
             };
             ProviderSettlement::succeeded(
@@ -662,6 +674,10 @@ mod tests {
     /// A controller over a persisted session of `exchanges` user and assistant
     /// pairs, with a real memory store and a reflector configured by `auto`.
     async fn rig(auto: Auto, exchanges: usize) -> Rig {
+        rig_with(auto, exchanges, std::time::Duration::ZERO).await
+    }
+
+    async fn rig_with(auto: Auto, exchanges: usize, delay: std::time::Duration) -> Rig {
         use crate::reflection::{Reflector, Store};
         use crate::runtime::wiring::{MemoryWiring, open_memory_service, workspace_memory_scope};
         use otto_core::config::ReflectionRuntime;
@@ -696,14 +712,17 @@ mod tests {
         builder.workspace_scope =
             workspace_memory_scope(&runtime_config, &workspace.path().to_string_lossy())
                 .expect("workspace scope");
-        builder.shared_mut().reflector = Arc::new(Reflector::new(
-            ReflectionRuntime {
-                auto,
-                skills: false,
-                ..ReflectionRuntime::default()
-            },
-            Some(Arc::new(Store::open_in_memory().expect("store"))),
-        ));
+        builder.shared_mut().reflector = Arc::new(
+            Reflector::new(
+                ReflectionRuntime {
+                    auto,
+                    skills: false,
+                    ..ReflectionRuntime::default()
+                },
+                Some(Arc::new(Store::open_in_memory().expect("store"))),
+            )
+            .with_log_dir(home.path().join(".otto/reflection/runs")),
+        );
         let runtime = initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let mut user_ids = Vec::new();
@@ -731,7 +750,7 @@ mod tests {
                 .await
                 .expect("append assistant");
         }
-        let reflection = serde_json::json!({"memories": [{
+        let reflection = serde_json::json!({"retrospective": "Asked for Chinese replies; nothing took a detour.", "memories": [{
             "action": "create", "scope": "user", "kind": "preference", "key": "language",
             "text": "Answer in Chinese", "confidence": 0.9, "reason": "the user said so",
             "evidence": [{"entry": user_ids.first().cloned().unwrap_or_default(), "quote": "always answer in Chinese"}],
@@ -741,6 +760,7 @@ mod tests {
             reflection,
             compactions: AtomicUsize::new(0),
             reflections: AtomicUsize::new(0),
+            delay,
         });
         let runner = Runner::scripted(
             session.clone(),
@@ -931,5 +951,132 @@ mod tests {
             None
         );
         assert_eq!(short.provider.reflections.load(Ordering::SeqCst), 0);
+    }
+
+    /// The `reflect` tool of the controller's current runner.
+    fn reflect_tool(rig: &Rig) -> crate::tool::reflect::ReflectTool {
+        let runner = rig.controller.runner().expect("runner");
+        crate::tool::reflect::ReflectTool::new(Arc::clone(&runner.reflection))
+    }
+
+    async fn call(
+        tool: &crate::tool::reflect::ReflectTool,
+        cancel: &CancellationToken,
+    ) -> ToolResult {
+        use crate::tool::Tool;
+        tool.execute(
+            &crate::tool::testutil::raw(r#"{"focus":"language"}"#),
+            cancel,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_reflect_tool_runs_a_requested_reflection_whatever_the_auto_mode() {
+        let rig = rig(Auto::Off, 3).await;
+        let result = call(&reflect_tool(&rig), &CancellationToken::new()).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(
+            result.content.contains("1 candidate(s) queued for review"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains(
+                "\n\nRetrospective:\nAsked for Chinese replies; nothing took a detour.\n"
+            ),
+            "{}",
+            result.content
+        );
+        assert_eq!(pending(&rig), 1);
+        assert_eq!(rig.provider.reflections.load(Ordering::SeqCst), 1);
+
+        // Every frontend gets the same line as a notice, and the run log
+        // opens with the retrospective.
+        let notices = rig.controller.take_notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        let log = notices[0].rsplit("; log: ").next().expect("log path");
+        let log = std::fs::read_to_string(log).expect("run log");
+        assert!(log.contains("- trigger: requested"), "{log}");
+        assert!(
+            log.contains("## Retrospective\n\n> Asked for Chinese replies"),
+            "{log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reflect_tool_is_rebound_when_the_runner_is_replaced() {
+        let rig = rig(Auto::Off, 3).await;
+        let session = rig.controller.current_session_opt().expect("session");
+        let replaced = Runner::scripted(
+            session.clone(),
+            Arc::clone(&rig.provider) as Arc<dyn Provider + Send + Sync>,
+            Arc::new(Tasks::new()),
+        );
+        let builder = &rig.controller.builder;
+        let info = builder.runtime_info(&initial_runtime(builder));
+        assert!(
+            rig.controller
+                .replace_runner_if_current(&session.header().id, replaced, info)
+                .expect("replace")
+        );
+        let result = call(&reflect_tool(&rig), &CancellationToken::new()).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(rig.provider.reflections.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_reflect_tool_shares_the_single_flight_flag_and_ignores_the_cooldown() {
+        let rig = rig(Auto::OnWork, 6).await;
+        rig.controller.auto_running.store(true, Ordering::SeqCst);
+        let result = call(&reflect_tool(&rig), &CancellationToken::new()).await;
+        assert!(!result.is_error);
+        assert_eq!(
+            result.content,
+            super::super::requested_reflection::ALREADY_RUNNING
+        );
+        assert_eq!(rig.provider.reflections.load(Ordering::SeqCst), 0);
+        rig.controller.auto_running.store(false, Ordering::SeqCst);
+
+        // An automatic run just started, and the cooldown would hold back
+        // another automatic one; a requested one still runs.
+        rig.controller.after_prompt(&successful_work(), true);
+        let _ = first_notice(&rig).await;
+        assert_eq!(rig.provider.reflections.load(Ordering::SeqCst), 1);
+        let session = rig.controller.current_session_opt().expect("session");
+        session
+            .append(Message {
+                role: Role::User,
+                blocks: vec![otto_core::model::Block::text(
+                    "Please do a retrospective of this session.",
+                )],
+                created_at: chrono::Utc::now(),
+                ..Message::default()
+            })
+            .await
+            .expect("append the request");
+        let result = call(&reflect_tool(&rig), &CancellationToken::new()).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(rig.provider.reflections.load(Ordering::SeqCst), 2);
+        assert!(!rig.controller.auto_running.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_turn_cancels_a_requested_reflection() {
+        let rig = rig_with(Auto::Off, 3, std::time::Duration::from_secs(30)).await;
+        let cancel = CancellationToken::new();
+        let tool = reflect_tool(&rig);
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            stop.cancel();
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), call(&tool, &cancel))
+            .await
+            .expect("the cancel ends the run");
+        assert!(result.is_error);
+        assert!(result.content.contains("cancel"), "{}", result.content);
+        assert_eq!(pending(&rig), 0);
+        assert!(!rig.controller.auto_running.load(Ordering::SeqCst));
     }
 }

@@ -1,6 +1,6 @@
 # Model-requested reflection and retrospectives
 
-Status: proposed, 2026-10-05.
+Status: approved and implemented, 2026-10-05.
 
 ## Problem
 
@@ -69,7 +69,13 @@ retrospective, as before.
 `/reflect list` shows the newest run logs (time, trigger, one-line result).
 `/reflect show <id>` prints one. They are available wherever `/reflect`
 already is: REPL, TUI, Web UI, ACP and the chat connector. HTTP:
-`GET /v1/reflection/runs` and `GET /v1/reflection/runs/{id}`.
+`GET /v1/sessions/{id}/reflection/runs` and
+`GET /v1/sessions/{id}/reflection/runs/{run}`. They are per session, like the
+generated-skill routes, because the session selects the controller and its
+configuration; the logs themselves live under `~/.otto`.
+
+`/reflect` itself now prints the retrospective after its result line in
+every frontend, so the text is visible without opening the log.
 
 ### 4. System prompt
 

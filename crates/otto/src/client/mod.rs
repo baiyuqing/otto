@@ -97,6 +97,9 @@ pub struct SessionRow {
 #[derive(Debug, Deserialize)]
 pub struct ReflectionResult {
     pub line: String,
+    /// Empty from a serve that has none, or predates the field.
+    #[serde(default)]
+    pub retrospective: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +116,18 @@ pub struct GeneratedSkill {
 pub struct GeneratedSkillList {
     pub enabled: bool,
     pub skills: Vec<GeneratedSkill>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReflectionRunList {
+    pub enabled: bool,
+    pub runs: Vec<crate::reflection::runlog::Summary>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReflectionRunLog {
+    pub path: std::path::PathBuf,
+    pub content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -502,6 +517,35 @@ impl Client {
             )
             .await?;
         decode(response).await
+    }
+
+    /// `GET /v1/sessions/{id}/reflection/runs`.
+    pub async fn reflection_runs(&self, session_id: &str) -> Result<ReflectionRunList, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/reflection/runs")),
+            )
+            .await?;
+        decode(response).await
+    }
+
+    /// `GET /v1/sessions/{id}/reflection/runs/{run}`; `None` when serve has
+    /// no such run log.
+    pub async fn reflection_run(
+        &self,
+        session_id: &str,
+        run: &str,
+    ) -> Result<Option<ReflectionRunLog>, Error> {
+        let mut url = reqwest::Url::parse(BASE).expect("static Otto base URL");
+        url.path_segments_mut()
+            .expect("base URL supports path segments")
+            .extend(["v1", "sessions", session_id, "reflection", "runs", run]);
+        match self.send(self.http.get(url.as_str())).await {
+            Ok(response) => decode(response).await.map(Some),
+            Err(Error::Http { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// `POST /v1/sessions/{id}/reflection/skills/{name}/revert`.
@@ -1320,6 +1364,39 @@ mod tests {
         );
         assert_eq!(request(&seen, 1).1, json!({"request_id":"acp-1"}));
         assert_eq!(request(&seen, 4).0, "GET /v1/sessions/s1/notices?after=2");
+    }
+
+    #[tokio::test]
+    async fn reflection_run_logs_use_their_routes_and_a_missing_run_is_none() {
+        let (client, seen, _dir) = stub(|_, path| match path {
+            "/v1/sessions/s1/reflection/runs" => json_body(
+                StatusCode::OK,
+                r#"{"enabled":true,"runs":[{"id":"abcd1234","path":"/h/.otto/reflection/runs/x.md","started":"2026-10-05T02:03:00Z","trigger":"requested","status":"ok","headline":"Read the docs first."}]}"#,
+            ),
+            "/v1/sessions/s1/reflection/runs/abcd1234" => json_body(
+                StatusCode::OK,
+                r##"{"id":"abcd1234","path":"/h/.otto/reflection/runs/x.md","content":"# Reflection run"}"##,
+            ),
+            _ => json_body(
+                StatusCode::NOT_FOUND,
+                r#"{"error":{"code":"not_found","message":"reflection run not found"}}"#,
+            ),
+        });
+        let list = client.reflection_runs("s1").await.unwrap();
+        assert!(list.enabled);
+        assert_eq!(list.runs[0].id, "abcd1234");
+        assert_eq!(list.runs[0].headline, "Read the docs first.");
+        let log = client
+            .reflection_run("s1", "abcd1234")
+            .await
+            .unwrap()
+            .expect("log");
+        assert_eq!(log.content, "# Reflection run");
+        assert!(client.reflection_run("s1", "a/b").await.unwrap().is_none());
+        assert_eq!(
+            request(&seen, 2).0,
+            "GET /v1/sessions/s1/reflection/runs/a%2Fb"
+        );
     }
 
     #[tokio::test]

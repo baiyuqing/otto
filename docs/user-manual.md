@@ -794,6 +794,9 @@ Shared commands:
   Use `unset` or `default` to omit the provider reasoning-effort field.
 - `/compact [focus]` creates a manual context checkpoint, or reports
   `[context] no-op` when nothing can be compacted.
+- `/reflect [focus]` runs [reflection](#reflection): a retrospective of the session
+  plus memory and skill proposals for your review. `/reflect list` and
+  `/reflect show <id>` show past runs.
 - `/sandbox` shows the sandbox state now in effect. `/sandbox reload` re-reads
   `[sandbox]` from the config file and applies it to the running process,
   printing the new state. It is rejected while a turn is in flight, and a
@@ -1438,6 +1441,18 @@ Web content is untrusted. Results begin with a notice saying so, and
 `/reflect` never shows `web_fetch` or `web_search` results to the reflection
 model or cites them as evidence. A page can still try to steer the model.
 
+### `reflect`
+
+`reflect` runs [reflection](#reflection) on the current session when you ask the agent for
+a retrospective, a review of the session, or to distil lessons or skills from it. It takes
+an optional `focus` (at most 2 KiB), the same text as `/reflect [focus]`. It writes the
+retrospective to the run log under `~/.otto/reflection/runs/`, queues memory proposals for
+`/memory review`, and publishes skill proposals as approval requests; it writes no memory
+or skill itself, so it needs no approval of its own. It returns the result line, which names
+the run log, and the retrospective. While another reflection (requested or automatic) runs,
+it returns at once and that run's result arrives as a notice. It is not registered when
+`[reflection].enabled = false`, in a `--no-session` session, or in a sub-agent.
+
 ### `list_models`
 
 With the `openai-compatible` provider, `list_models` returns the model ids the
@@ -1954,7 +1969,8 @@ composer:
 - Typing `/` in the composer shows local suggestions for supported Web slash
   commands; Tab or click completes the highlighted command. Supported commands
   are `/help`, `/init`, `/session`, `/new`, `/clear`, `/resume`, `/model`,
-  `/rename <name>`, `/compact [focus]`, `/reflect [focus]`,
+  `/rename <name>`, `/compact [focus]`, `/reflect [focus]`, `/reflect list`,
+  `/reflect show <id>`,
   `/skill generated`, `/skill revert <name>`, `/sandbox`, `/sandbox reload`,
   `/approve <id>`, `/deny <id>`, `/tasks`, `/task <id|name>`,
   `/task cancel <id|name>`,
@@ -2004,7 +2020,8 @@ composer:
   composer is sent as the `focus`. The result appears as a notice in the
   transcript (`Nothing to compact` when the server reports a no-op).
 - `/reflect [focus]` calls `POST /v1/sessions/{id}/reflect` and shows the one-line
-  report as a notice; the composer is held while it runs, as for a compaction.
+  report and the retrospective as a notice; `/reflect list` and `/reflect show <id>` read
+  `GET /v1/sessions/{id}/reflection/runs[/{run}]`; the composer is held while it runs, as for a compaction.
   `/skill generated` lists the skills reflection wrote
   (`GET /v1/sessions/{id}/reflection/skills`) and `/skill revert <name>` undoes
   one. Lines that background reflection queues after a compaction appear in the
@@ -2076,8 +2093,10 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
-| `POST /v1/sessions/{id}/reflect` | Run one reflection now, optionally with `{"focus":"..."}`, and return what it did (`status`, `candidates`, `skills`, `dropped`, and the one-line summary). Memory proposals are queued as pending candidates; skills that pass every check are written to `~/.otto/skills`. `409 turn_active` while a turn runs or is queued, or a compaction or reflection runs; `409 reflection_unavailable` when reflection is disabled, the session has no file, memory is unavailable, or the redaction boundary is closed; `409 reflection_failed` when the model call or its answer failed (nothing is marked covered). |
+| `POST /v1/sessions/{id}/reflect` | Run one reflection now, optionally with `{"focus":"..."}`, and return what it did (`status`, `candidates`, `skills`, `dropped`, the one-line summary, and the `retrospective`). Memory proposals are queued as pending candidates; skills that pass every check are written to `~/.otto/skills`. `409 turn_active` while a turn runs or is queued, or a compaction or reflection runs; `409 reflection_unavailable` when reflection is disabled, the session has no file, memory is unavailable, or the redaction boundary is closed; `409 reflection_failed` when the model call or its answer failed (nothing is marked covered). |
 | `POST /v1/sessions/{id}/reflect/cancel` | With `{"request_id":"..."}`, cancel only the matching manual reflection and return `202`. Supply the same optional ID on `POST .../reflect`: 1–64 ASCII letters, digits, underscores, or hyphens, with a fresh ID for each operation. The session retains the 16 most recent cancelled IDs to handle cancellation arriving before registration. This cannot cancel a turn, compaction, automatic reflection, or a manual reflection with another or no ID. |
+| `GET /v1/sessions/{id}/reflection/runs` | List the 50 newest reflection run logs, newest first, each with `id`, `path`, `started`, `trigger`, `status`, and `headline` (the retrospective's first line). `enabled:false` when reflection is turned off. |
+| `GET /v1/sessions/{id}/reflection/runs/{run}` | Return one run log, `{"id","path","content"}`, by the `id` the list shows. `404` when there is no such log; `409 reflection_unavailable` when reflection is turned off. Like the skill routes, these read the user's `~/.otto`, not the session. |
 | `GET /v1/sessions/{id}/reflection/skills` | List the skills reflection wrote and not reverted, with the run, session, time, reason, and `owned` (false once the file was edited by hand). `enabled:false` when reflection is turned off. |
 | `POST /v1/sessions/{id}/reflection/skills/{name}/revert` | Restore the previous version of a skill reflection wrote, or remove it if reflection created it (`result` is `restored` or `removed`). `404` when reflection did not write it; `409 skill_not_owned` when it was edited by hand; `409 skills_unavailable` when `[skills]` is disabled. These act on the user's `~/.otto/skills`, not on the session, and are as exposed as the skill enable and disable routes: any holder of the token or socket may call them. |
 | `GET /v1/sessions/{id}/notices` | The lines background reflection queued for this session, `{"notices":[{"id":1,"text":"..."}],"last":1}`; pass `?after=<last>` to read only newer ones. They are not removed by reading, so every client sees each one, and only the 20 newest are kept. |
@@ -2390,7 +2409,8 @@ After `session/new` and `session/load` has replied, Otto sends a
 `session/update` of type `available_commands_update` listing `compact`,
 `context`, `reflect`, `skill`, `steer`, `queue`, and `auto`.
 A `session/prompt` containing `/context`, `/compact [focus]`,
-`/reflect [focus]`, `/skill generated`, or `/skill revert <name>` is run by
+`/reflect [focus]`, `/reflect list`, `/reflect show <id>`, `/skill generated`, or
+`/skill revert <name>` is run by
 Otto itself and is not sent to the task model. Command names must match
 whole words; `/compactx` or a sentence that contains `/context` is a normal
 prompt. `otto acp --attach` does the same, running the command on
@@ -2409,8 +2429,9 @@ ACP advertises `_meta.otto.taskControl:true`. `_otto/tasks/steer` and
 `_otto/tasks/control` use the HTTP bodies above plus `sessionId`; replies are
 JSON-only, separate from the running prompt's updates.
 
-`/reflect [focus]` reports memory proposals and skill writes from the existing
-[reflection](#reflection) pipeline. `/skill generated` lists generated skills;
+`/reflect [focus]` reports memory proposals, skill writes and the retrospective from the
+existing [reflection](#reflection) pipeline; `/reflect list` and `/reflect show <id>` read
+past run logs. `/skill generated` lists generated skills;
 `/skill revert <name>` restores the previous version or removes a generated
 skill, and refuses a skill edited by hand. These commands are also available
 through the chat connector.
@@ -2809,7 +2830,7 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/queue <prompt>` | Queues an independent prompt without model routing. Starts immediately when idle, otherwise waits behind the task and any approval; acknowledges actual admission. |
 | `/compact [focus]` | Sent to Otto as a prompt; `otto acp` runs it as `/compact` (see [`/compact` and `/context` are slash commands](#compact-and-context-are-slash-commands)) and replies with the token counts before and after. Like any prompt it waits in the chat's queue behind a running turn. |
 | `/context` | Sent to Otto as a prompt; `otto acp` replies with the token counts of the next request, part by part. It waits in the chat's queue like any prompt. |
-| `/reflect [focus]` | Runs the existing reflection over the uncovered part of this session and reports the result. Memory proposals require `/memory` review; generated skills pass the existing evidence and safety checks. |
+| `/reflect [focus]` | Runs the existing reflection over the uncovered part of this session and reports the result and the retrospective. Memory proposals require `/memory` review; generated skills pass the existing evidence and safety checks. `/reflect list` and `/reflect show <id>` show past runs. |
 | `/skill generated` | Lists skills written by reflection. Generated skills become active in new sessions. |
 | `/skill revert <name>` | Restores the previous version or removes a skill created by reflection. Refuses a skill edited by hand. |
 | `/allow` | Answers the pending permission request with Allow once. |
@@ -3370,7 +3391,9 @@ What's wired:
 - Agent tools: `memory_search`, `remember`, `forget`.
 - Human commands in both frontends: `/memory list`, `/memory show`, `/memory search`, `/memory forget`,
   `/memory review`, `/memory review <id> accept|reject`, and `/remember`.
-- `/reflect [focus]` in the TUI, the REPL, and the Web UI: reflection, described below.
+- `/reflect [focus]`, `/reflect list`, and `/reflect show <id>` in the TUI, the REPL, and
+  the Web UI: reflection, described below.
+- Agent tool: `reflect`, which runs the same reflection when you ask for a retrospective.
 - Standalone CLI: `otto memory status`, `otto memory list`, `otto memory show <id>`, and
   `otto memory forget <id>`.
 
@@ -3476,9 +3499,12 @@ memory text sent with the previous turn, including the standing records.
 ### Reflection
 
 `/reflect [focus]` looks back at the part of the current session that no earlier
-reflection covered and asks the session's own model, once and with no tools, which
-durable facts and preferences are worth remembering, and which procedures are worth
-reusing as skills. Each memory survivor is queued as a pending candidate (origin
+reflection covered and asks the session's own model, once and with no tools, for a short
+retrospective of it (what was done, what took detours or failed and why, and what to do
+differently), which durable facts and preferences are worth remembering, and which
+procedures are worth reusing as skills. `/reflect` prints the result line followed by the
+retrospective, and the retrospective is the first section of the run log described below.
+Each memory survivor is queued as a pending candidate (origin
 `extractor`) that you review with `/memory review`; reflection never writes a memory
 record itself, and it appends nothing to the session file. Skills are different: a skill
 that passes every check below is published as an approval request, and the file is
@@ -3512,14 +3538,35 @@ the directory is mode 0700). The log lists every proposal the model returned, in
 its outcome: `queued as candidate <id>`, `approval request <id>`, or `dropped: <reason>`.
 It also lists the ids of the external entries whose content was withheld, why skills were not
 requested when they were not, and, for a run that failed on an unparseable answer, the raw
-answer. Each text field is redacted like a request, and a field that still matches a secret
-rule is replaced by `(withheld: <rule>)`; a field is cut at 16 KiB. A run that is skipped
+answer. The retrospective comes first, quoted so its Markdown cannot pose as another
+section, and is cut at 8 KiB. Each text field is redacted like a request, and a field that
+still matches a secret rule is replaced by `(withheld: <rule>)`; a field is cut at 16 KiB. A run that is skipped
 (the cooldown or `min_turns`) or that fails before it starts writes no log. Otto does not
 remove log files. A completed run advances a per-session watermark, so the next run covers
 only newer entries; a failed or canceled run leaves it in place and the next run covers the
 same entries again. Provider usage is recorded in the usage history under the task id
 `reflection:<run id>`. A session started with `--no-session` has no file to read and cannot
 be reflected on.
+
+#### Asking the agent for a retrospective
+
+When you ask the agent in plain words for a retrospective, a review of the session, or to
+distil lessons or skills from it, it calls the [`reflect`](#reflect) tool, which runs the
+same reflection as `/reflect` and returns its result line, run log path and retrospective.
+The agent then summarizes them; it does not write a retrospective file of its own. The
+result line also appears as a reflection notice in every frontend. The run is recorded with
+trigger `requested`, ignores `[reflection].auto` and the automatic cooldown, and runs beside
+the turn that asked for it, so it covers the session up to and including your request.
+
+#### Past runs
+
+- `/reflect list` shows the 50 newest run logs, newest first: the id, the start time (UTC),
+  the trigger, the status, and the retrospective's first line.
+- `/reflect show <id>` prints one run log in full, with its path.
+
+They work wherever `/reflect` does: the TUI, the REPL, the Web UI, ACP (including
+`otto acp --attach`) and the chat connector. Only the exact words `list` and `show <id>` are
+commands; `/reflect list what went wrong` is a run with that focus.
 
 #### Generated skills
 

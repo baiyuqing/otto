@@ -18,6 +18,14 @@ describe('web slash commands', () => {
     expect(parseWebCommand('/compact focus on auth')).toEqual({ kind: 'compact', focus: 'focus on auth' })
     expect(parseWebCommand('/reflect')).toEqual({ kind: 'reflect', focus: '' })
     expect(parseWebCommand('/reflect the editor setup')).toEqual({ kind: 'reflect', focus: 'the editor setup' })
+    expect(parseWebCommand('/reflect list')).toEqual({ kind: 'reflectionRuns' })
+    expect(parseWebCommand('/reflect show abcd1234')).toEqual({ kind: 'reflectionRun', id: 'abcd1234' })
+    expect(parseWebCommand('/reflect show')).toEqual({
+      kind: 'error',
+      message: 'usage: /reflect [focus] | /reflect list | /reflect show <id>',
+    })
+    expect(parseWebCommand('/reflect list what went wrong')).toEqual({ kind: 'reflect', focus: 'list what went wrong' })
+    expect(parseWebCommand('/reflect show me the detours')).toEqual({ kind: 'reflect', focus: 'show me the detours' })
     expect(parseWebCommand('/skill generated')).toEqual({ kind: 'generatedSkills' })
     expect(parseWebCommand('/skill revert lint-gate')).toEqual({ kind: 'revertSkill', name: 'lint-gate' })
     expect(parseWebCommand('/sandbox')).toEqual({ kind: 'sandbox' })
@@ -77,7 +85,7 @@ describe('web slash commands', () => {
       { name: '/model', description: 'show current model and configured profiles' },
       { name: '/rename', description: 'rename the current session' },
       { name: '/compact', description: 'compact context with optional focus' },
-      { name: '/reflect', description: 'queue memory candidates and skills from this session, with optional focus' },
+      { name: '/reflect', description: 'retrospective plus memory and skill proposals, with optional focus; list | show <id> for past runs' },
       { name: '/skill', description: 'list skills reflection wrote, or undo one: generated | revert <name>' },
       { name: '/auto', description: 'show approval mode, or set on/off for this session' },
       { name: '/sandbox', description: 'show sandbox state, or reload configuration' },
@@ -91,7 +99,7 @@ describe('web slash commands', () => {
     expect(webCommandSuggestions('/r')).toEqual([
       { name: '/resume', description: 'resume a session from the sidebar' },
       { name: '/rename', description: 'rename the current session' },
-      { name: '/reflect', description: 'queue memory candidates and skills from this session, with optional focus' },
+      { name: '/reflect', description: 'retrospective plus memory and skill proposals, with optional focus; list | show <id> for past runs' },
     ])
     expect(webCommandSuggestions('/cl')).toEqual([
       { name: '/clear', description: 'start a new session' },

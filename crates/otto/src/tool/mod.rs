@@ -25,6 +25,7 @@ pub mod memory;
 pub mod models;
 pub mod otto;
 pub mod read;
+pub mod reflect;
 pub mod registry;
 pub mod remind;
 pub mod result;

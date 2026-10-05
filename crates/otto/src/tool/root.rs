@@ -145,7 +145,11 @@ impl Root {
     /// Opens `path` as the root of the tree. Symbolic links in `path` itself
     /// are followed.
     pub fn open(path: &Path) -> io::Result<Self> {
-        let directory = File::open(path)?;
+        Self::from_directory(File::open(path)?)
+    }
+
+    /// Use a directory already pinned by a caller's no-follow open.
+    pub(crate) fn from_directory(directory: File) -> io::Result<Self> {
         let stat = nix::sys::stat::fstat(&directory).map_err(nix_error)?;
         if !is_dir(&stat) {
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));

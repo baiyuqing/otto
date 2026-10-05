@@ -3522,7 +3522,7 @@ be reflected on.
 When a run's slice is clean, the model may also propose skills: short task-scoped
 procedures that you asked for or approved and that ran successfully in the slice. A
 proposal that passes all of these, in order, is published as an approval request that shows
-the skill name, the target path, and the full content. `~/.otto/skills/<name>/SKILL.md` is
+the skill name, the target path, and the full content, including every Python script. `~/.otto/skills/<name>/SKILL.md` is
 written only when that request is approved; before then nothing is written. On approval the
 write is checked again: it fails if the cited session entries no longer pass the checks or
 if the existing skill file changed since the request was made. When no approval service is available the skill is dropped
@@ -3535,20 +3535,45 @@ written.
 2. **Evidence.** A skill must cite one of your messages and one entry showing the procedure
    ran (a successful tool result, or an assistant tool call), with verbatim quotes.
 3. **Structure and rule scan.** A valid name and description, a body of 40 characters to
-   16 KiB, and no match in a fixed rule table: secret patterns and any value Otto knows to
+   16 KiB, at most four Python scripts of 16 KiB each under `scripts/`, and no match in a fixed rule table: secret patterns and any value Otto knows to
    be secret, instruction-override and conceal-from-the-user phrasing (English and
    Chinese), tampering with the sandbox, approvals, or `~/.otto` state, pipe-to-shell,
    destructive and data-egress commands, URLs that no cited entry contains, invisible
    Unicode, and large encoded blobs. This is a tripwire for known-bad shapes, not a proof of
    safety.
 4. **Name and ownership.** A new skill never reuses a name that exists in any configured skill
-   root. Reflection revises only a skill it wrote whose file is unchanged since; a skill you
-   wrote, or a generated one you have since edited, is never revised or removed by it.
-5. **Model review** (`skill_review`, default on). A second tool-less call sees only the
-   candidate, never the transcript, and must answer `ALLOW`; an error, a timeout, or any other
-   answer rejects the skill.
+   root. Reflection revises only a skill it wrote whose complete file set is unchanged
+   since; a skill you wrote, or a generated one you have since edited, is never revised or removed by it.
+5. **Python syntax.** When scripts are present, Python 3 must be available as `python3` on
+   PATH. Otto checks their syntax with an isolated interpreter in a temporary directory
+   without importing or executing the generated code or writing bytecode. A missing
+   interpreter, invalid source, or a validation timeout drops the proposal before approval.
+6. **Model review** (`skill_review`, default on). A second tool-less call sees only the
+   candidate, including script source, never the transcript, and must answer `ALLOW`; an
+   error, a timeout, or any other answer rejects the skill.
 
-A generated skill carries only `name` and `description`: it never declares an `input`/`output`
+Reflection may turn a successfully performed, repeatable procedure into a skill containing
+`SKILL.md` and `scripts/*.py`. The Markdown explains when to use it, inputs, outputs,
+invocation and error handling; Python holds the deterministic work. Script names use
+lowercase letters, digits, underscores and hyphens, with no nested directories. Every
+revision supplies the complete file set, so a removed script is removed on publication.
+The complete serialized proposal is capped at 48 KiB to fit the existing approval request.
+For example, `/reflect Extract the successful report calculation into a reusable Python skill`
+steers a manual run toward this output; generation still requires the existing evidence checks.
+
+Approving the skill installs its files; it does not run them or grant execution permissions.
+A later task loads the skill with the `skill` tool and invokes Python through the normal
+`bash` tool using the skill location and current workspace. Existing sandbox and approval
+rules apply. Restart Otto if the skill root was created after startup and the shell cannot
+read it, so sandbox read paths are refreshed. Syntax validation does not prove that a
+script produces correct results.
+
+The entire skill is versioned and published together. Editing a script or adding a file
+transfers ownership to you, just as editing `SKILL.md` does. `/skill revert <name>` restores
+or removes the whole generated bundle, including scripts. Older Markdown-only skills and
+history remain readable without migration.
+
+Generated `SKILL.md` frontmatter carries only `name` and `description`: it never declares an `input`/`output`
 contract, so it is never run as a sub-agent, and it has no `allowed-tools`. At most
 `max_skills` are proposed per run and `max_generated_skills` may be owned in total. The
 `/reflect` result line reports the number of pending skill approvals; after an approved
@@ -3563,7 +3588,8 @@ not listed, they are written but not discovered.
 - `/skill <name>` on a generated skill shows where it came from.
 - `/skill revert <name>` restores the previous version, or removes the skill if reflection
   created it. It refuses a skill you have edited. Every version reflection wrote is kept under
-  `~/.otto/skill-history/`, outside the skill roots, so it is never loaded.
+  `~/.otto/skill-history/` (`.md` for Markdown-only versions, `.json` for bundles), outside
+  the skill roots, so it is never loaded.
 - `/skill set <name> disabled` also works on a generated skill.
 
 The residual risk is stated plainly: a skill is instructions the model follows in later
@@ -3630,8 +3656,8 @@ Not yet implemented:
 
 - `Binding.Observe` is not wired; reflection reads the session file instead.
 - The Web UI and the HTTP API cannot review memory candidates; use `/memory review` in a terminal.
-- Reflection never changes a skill you wrote, and it cannot create skills with scripts or
-  supporting files.
+- Reflection never changes a skill you wrote. Generated supporting files are limited to
+  Python scripts; arbitrary assets are not generated.
 - No backup/restore/verify commands.
 - No `otto memory backup|backups|verify|restore` subcommands.
 

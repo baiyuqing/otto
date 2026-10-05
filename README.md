@@ -140,7 +140,7 @@ The selected model and OpenAI-compatible endpoint must support image input.
 ## More workflows
 
 - [Local memory](docs/user-manual.md#memory): search, remember, review, and forget, plus [reflection](docs/user-manual.md#reflection), which proposes memories from a session for your review and can write vetted skills you can undo with `/skill revert`. It runs on `/reflect` and, by default, after a completed turn with at least 10 successful tool operations or a compaction; `auto = "off"` turns that off.
-- [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files.
+- [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files. Reflection can also extract reusable Python scripts, syntax-check them without execution, and publish the complete skill after approval; `/skill revert` restores both instructions and scripts.
 - [MCP servers](docs/user-manual.md#mcp-servers): connect stdio or HTTP Model
   Context Protocol servers and use their tools from the same turn loop.
 - [Timers](docs/user-manual.md#remind): the model schedules a later wake with

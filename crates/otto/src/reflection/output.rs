@@ -69,6 +69,8 @@ struct RawSkill {
     name: String,
     description: String,
     body: String,
+    #[serde(default)]
+    scripts: BTreeMap<String, String>,
     reason: String,
     #[serde(default)]
     evidence: Vec<Item>,
@@ -102,7 +104,7 @@ impl RawSkill {
             kind: runlog::Kind::Skill,
             title: format!("{} skill `{}`", self.action.trim(), self.name.trim()),
             text: self.description.trim().to_owned(),
-            body: self.body.trim().to_owned(),
+            body: super::guard::content(self.body.trim(), &self.scripts),
             reason: self.reason.trim().to_owned(),
             cited: self.evidence.iter().map(|i| i.entry.clone()).collect(),
             outcome: Outcome::Dropped(""),
@@ -263,6 +265,7 @@ fn validate_skill(
         name: raw.name.trim().to_owned(),
         description: raw.description.trim().to_owned(),
         body: raw.body.trim().to_owned(),
+        scripts: raw.scripts,
         reason: raw.reason.trim().to_owned(),
         cited,
     })

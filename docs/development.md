@@ -178,6 +178,31 @@ tests; cover the other states through pure functions such as
 `format_mcp_report` with hand-built `ServerStatus` fixtures instead of a real
 server or OAuth round-trip.
 
+## Workspace ownership
+
+`crates/otto::workspace` owns the local versioned identity marker. CLI startup
+initializes it before session discovery, including workspaces opened through
+`otto serve`. Session lookup and workspace memory binding read its adopted
+keys. Missing markers in read-only lookups retain legacy path-derived behavior.
+Configured memory IDs are adopted once; conflicts are errors.
+
+Marker reads and writes reuse `crates/otto::fsops` pinned directory descriptors
+and refuse symlinks. Session-specific key and Pi entry-ID helpers remain in
+`session::fsops`, so workspace identity does not depend on the session store.
+A directory lock serializes initialization, move-history updates and explicit
+forks; atomic rename publishes a synced complete marker. Corrupt markers fail
+closed. `paths` records historical session ownership, never execution authority;
+actual tool and approval boundaries stay path-based. Session candidate checks
+still validate the stable session directory, file identity and recorded cwd.
+Do not rewrite append-only transcripts to update workspace paths. Identity UUIDs
+are distinct from session IDs and lease epochs; keep process ownership in the
+existing lease implementation.
+
+Behavioral tests live in `workspace`, `runtime::wiring`, `session`, and the file-tool
+workspace boundary. Forking changes workspace ownership, leaves old state
+untouched, and must be performed with workspace processes stopped. No new
+storage engine, per-workspace database, or cloud synchronization is involved.
+
 ## Native database storage
 
 `crates/otto::storage` owns the synchronous boundary to the pinned Turso Rust

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { generatedSkillsText, mcpServerLine, sendHint, sessionLabel, workspaceName } from './uiText'
+import { generatedSkillsText, mcpServerLine, reflectionRunsText, reflectionText, sendHint, sessionLabel, workspaceName } from './uiText'
 
 describe('ui text helpers', () => {
   it('formats compact labels for the shell around the transcript', () => {
@@ -25,6 +25,30 @@ describe('ui text helpers', () => {
     ).toBe('legacy-tool: needs_login (http, 2025-11-25) - run: otto mcp login legacy-tool')
     expect(mcpServerLine({ name: 'broken', transport: 'stdio', protocol_version: null, state: 'failed', tools: 0, error: 'spawn failed: not found' })).toBe(
       'broken: failed: spawn failed: not found (stdio, -)',
+    )
+  })
+
+  it('lists reflection runs as the terminal does and shows the retrospective after a run', () => {
+    expect(reflectionRunsText({ enabled: false, runs: [] })).toBe('/reflect list: reflection is turned off')
+    expect(reflectionRunsText({ enabled: true, runs: [] })).toBe('No reflection runs yet.')
+    expect(
+      reflectionRunsText({
+        enabled: true,
+        runs: [
+          { id: 'abcd1234', started: '2026-10-05T02:03:00Z', trigger: 'requested', status: 'ok', headline: 'Read the docs first.' },
+          { id: 'ef567890', started: '', trigger: 'on_work', status: 'failed', headline: '' },
+        ],
+      }),
+    ).toBe(
+      [
+        'Reflection runs, newest first (/reflect show <id>):',
+        '  abcd1234  2026-10-05 02:03  requested  ok  Read the docs first.',
+        '  ef567890  -  on_work  failed',
+      ].join('\n'),
+    )
+    expect(reflectionText({ line: 'reflection: done', retrospective: '' })).toBe('reflection: done')
+    expect(reflectionText({ line: 'reflection: done', retrospective: 'Went well.' })).toBe(
+      'reflection: done\n\nRetrospective:\nWent well.',
     )
   })
 

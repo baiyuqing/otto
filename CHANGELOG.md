@@ -17,6 +17,31 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Keep the newest configuration backups when repeated writes land in the same
+  millisecond; pruned collision names are no longer reused.
+
+- Make the parallel bash redaction fixture register its notification waiters
+  before signalling readiness, preventing a lost wakeup from hanging tests.
+
+- Split repository agent instructions into a shorter root rulebook and scoped
+  Rust-crate/documentation rules; keep detailed ownership and implementation
+  contracts in the canonical contributor guides.
+
+- Add managed > workspace-local > workspace-shared > user > defaults
+  configuration, explicit scalar/table/list/named-map merge rules, source
+  diagnostics and offline `config explain`. `config set` edits one explicit
+  scope with the existing backed-up concurrent-change-safe writer. `--config`
+  now replaces only the user source. Each server workspace resolves its own
+  project files; project fields cannot redirect provider or MCP credentials.
+- Require explicit `otto trust DIR --executables` for project MCP, skills and
+  agents, including configured roots inside the project. Existing directory
+  admission grants do not authorize executables. Content changes or revocation
+  block future tool calls and request cancellation/MCP shutdown. Instructions
+  now append global and ancestor files with 16 KiB/file and 64 KiB total limits.
+- Enforce administrator-owned managed policy for provider/MCP destinations,
+  credential bindings, bash confinement and selected resource ceilings across
+  CLI/environment/session overrides and sandbox reload.
+
 - Replace the macOS Tauri desktop shell with MyGo. Keep the existing Rust
   server, web UI, workspace picker, saved workspace and log locations. Desktop
   builds now use Go 1.27.1+; desktop contract and server lifecycle tests run in
@@ -65,6 +90,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([#328](https://github.com/baiyuqing/otto/pull/328))
 
 ### Features
+
+- Ask the agent for a retrospective in plain words: the new `reflect` tool runs the same
+  reflection as `/reflect` instead of the model writing its own file. Every reflection
+  run now writes a short retrospective as the first section of its run log under
+  `~/.otto/reflection/runs/`, and `/reflect` prints it after the result line.
+  `/reflect list` and `/reflect show <id>` show past runs in every frontend, backed by
+  `GET /v1/sessions/{id}/reflection/runs[/{run}]`. The system prompt also tells the model
+  to create files with `write` rather than shell here-documents.
 
 - Preserve workspace session and memory ownership across restarts and directory
   moves using a local identity marker. Add `otto workspace status|fork` for
@@ -184,6 +217,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - Make zsh here-documents (`cat > file <<EOF`) work in the Seatbelt sandbox.
   The sandbox now sets `TMPPREFIX` to its private temporary directory, so zsh
   no longer tries to write the denied `/tmp/zsh*` and leave an empty target file.
+
+- Compare the layered-configuration directory chain against canonical paths in its
+  test, so it passes where the temporary directory is reached through a symbolic link,
+  as on macOS.
 
 - Select manual approval mode in the macOS interactive elevation test so it
   continues to verify explicit approval with sessions defaulting to AUTO.

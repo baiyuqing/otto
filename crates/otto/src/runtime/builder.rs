@@ -48,7 +48,7 @@ use super::boundary::{self, BoundaryInputs, FixedText};
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 use super::prompt::system_prompt_for;
 use super::sandbox_runtime::canonical_directory;
-use super::workspace_context::{split_workspace_instructions, workspace_context_for};
+use super::workspace_context::{layered_workspace_context, split_workspace_instructions};
 
 struct BuildTrace {
     last: Instant,
@@ -605,6 +605,9 @@ pub struct Runner {
     pub(crate) advisor: Option<Arc<crate::memory::advice::Advisor>>,
     /// The origin of the current user turn, read by the schedule tools.
     pub(crate) schedule_origin: Arc<crate::schedule::tools::TurnOrigin>,
+    /// Where the controller binds the `reflect` tool's port. Present whether
+    /// or not the tool is registered.
+    pub(crate) reflection: Arc<crate::tool::reflect::Handle>,
 }
 
 /// The tool-less agent behind the session-model advice backend.
@@ -1052,6 +1055,7 @@ impl Runner {
             task_control,
             advisor: None,
             schedule_origin: Default::default(),
+            reflection: Default::default(),
         }
     }
 
@@ -1081,6 +1085,7 @@ impl Runner {
 /// structure") for why the split exists: a server process that later loads
 /// more than one workspace builds this once and calls
 /// [`Builder::for_workspace`] once per workspace.
+#[derive(Clone)]
 pub struct Shared {
     pub approvals: Arc<crate::approval::Service>,
     pub config_path: PathBuf,
@@ -1715,6 +1720,14 @@ impl Builder {
             (Vec::new(), Vec::new(), self.connecting_mcp_servers())
         };
         tools.extend(mcp_tools);
+        if let Some(guard) = crate::tool::project_guard::Guard::for_config(
+            &self.config,
+            &self.home,
+            &self.workspace_path,
+        ) && guard.check_trust
+        {
+            guard.watch_mcp(&mcp_servers);
+        }
         mark_build_trace(&mut trace, "runner/mcp");
 
         if let ProviderClient::Compat { client, .. } = &client {
@@ -1733,14 +1746,15 @@ impl Builder {
         } else {
             None
         };
-        let environment = workspace_context_for(
+        let environment = layered_workspace_context(
+            Path::new(&self.home),
             &self.workspace_path,
             Utc::now(),
             context_executor,
             self.sandbox_environment.as_deref(),
             self.workspace,
         )
-        .await;
+        .await?;
         let prompt_tail = redactor.redact_string(&(environment.clone() + &catalogs.skill_section));
         mark_build_trace(&mut trace, "runner/workspace-context");
         let parent_agent_section = redactor.redact_string(&catalogs.agent_section);
@@ -1748,6 +1762,13 @@ impl Builder {
         let mut child_tools =
             self.child_tools(runtime, max_output, &redaction_values, &catalogs.skills)?;
         child_tools.extend(super::wiring::mcp_child_tools(&mcp_connected, max_output));
+        if let Some(guard) = crate::tool::project_guard::Guard::for_config(
+            &self.config,
+            &self.home,
+            &self.workspace_path,
+        ) {
+            child_tools = guard.tools(child_tools);
+        }
         let subagents = self.build_subagents(
             &mut tools,
             &catalogs,
@@ -1764,6 +1785,7 @@ impl Builder {
 
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+        let reflection = Arc::new(crate::tool::reflect::Handle::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
             tools.push(Box::new(crate::tool::approval::RequestApproval {
                 service: self.approvals.clone(),
@@ -1800,6 +1822,13 @@ impl Builder {
                 Arc::clone(&task_control),
                 &redaction_values,
             )));
+            // Parent-only, like the timer tools: a child has no session file
+            // of its own to reflect on.
+            if self.reflector.enabled() && !self.no_session {
+                tools.push(Box::new(crate::tool::reflect::ReflectTool::new(
+                    Arc::clone(&reflection),
+                )));
+            }
             let mut definitions: Vec<_> = tools.iter().map(|tool| tool.definition()).collect();
             definitions.push(
                 crate::tool::otto::Help {
@@ -1810,6 +1839,13 @@ impl Builder {
             tools.push(Box::new(crate::tool::otto::Help { definitions }));
         }
 
+        if let Some(guard) = crate::tool::project_guard::Guard::for_config(
+            &self.config,
+            &self.home,
+            &self.workspace_path,
+        ) {
+            tools = guard.tools(tools);
+        }
         let registry =
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
         let registry = registry.with_approval(
@@ -1917,6 +1953,7 @@ impl Builder {
                 task_control,
                 advisor,
                 schedule_origin,
+                reflection,
             },
             trace_entries,
         ))

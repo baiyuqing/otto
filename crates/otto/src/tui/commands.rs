@@ -126,7 +126,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/reflect",
-        description: "queue memory candidates from this session for review",
+        description: "retrospective and memory/skill proposals; list, show <id>",
         kind: SlashCommandKind::Reflect,
     },
     SlashCommand {

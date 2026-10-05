@@ -8,7 +8,7 @@
 //! reload opens a replacement runtime.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use otto_core::config::File;
@@ -234,11 +234,13 @@ impl SandboxControl for SandboxReloader {
 
 impl SandboxReloader {
     fn load_config(&self) -> Result<File, String> {
-        match crate::config::load_required(&self.config_path) {
-            Ok(file) => Ok(file),
-            Err(error) if error.is_not_found() && !self.explicit_config => Ok(File::default()),
-            Err(_) => Err("load config: configuration is invalid or unavailable".to_string()),
-        }
+        crate::config::layered::load(
+            Path::new(&self.reopen.home),
+            &self.config_path,
+            self.explicit_config,
+            Path::new(&self.reopen.workspace),
+        )
+        .map(|loaded| loaded.file)
     }
 }
 

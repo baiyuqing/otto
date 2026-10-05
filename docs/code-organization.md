@@ -5,6 +5,11 @@ it, and which entry point to start from. It complements the detailed contracts
 in the [development guide](development.md); that guide is the canonical source
 for invariants and implementation constraints.
 
+Root `AGENTS.md` carries cross-repository rules. The Rust crates and `docs/`
+have scoped `AGENTS.md` files; read the ones on the path being edited.
+Detailed inventories and contracts stay on this page and in the development
+guide rather than being copied into those instruction files.
+
 ## Repository map
 
 | Path | Owns | Start here |
@@ -63,6 +68,12 @@ modules are:
 - `agent`: provider/tool turn orchestration and emitted events.
 - `config`, `wire`, and `safetext`: shared configuration resolution, frontend
   DTOs, and secret-safe text handling.
+
+`config/layered.rs` owns presence-preserving merge, field authority,
+provenance and managed constraints. Native `config/layered.rs` discovers
+workspace sources and content-bound executable trust; `cli/config_command.rs`
+composes offline inspection/scoped editing, and `tool/project_guard.rs`
+rechecks authorization at tool effects and requests cancellation on revocation.
 
 Change shared contracts here only when both native and browser consumers need
 them. Keep provider-specific transport and credential behavior out of this
@@ -126,6 +137,7 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 | Active-task guidance and model follow-ups | `otto-core/src/agent/steering.rs`, `app/task_control.rs`, `tool/task_control.rs` | [Design and TODO](specs/2026-10-04-active-task-guidance.md), runtime tool/prompt wiring, HTTP/ACP and connector routing |
 | Per-turn chat channel context | `app/channel.rs`, then ACP prompt parsing | Core per-run system context, HTTP turn queue, `client/`, and `connect/` |
 | Reflection commands and background notices | `app/auto_reflection.rs`, `reflection/` | HTTP reflection routes, ACP commands, and chat updates |
+| Model-requested reflection (`reflect` tool) and run logs | `tool/reflect.rs` (port), `app/requested_reflection.rs` (binding), `reflection/runlog.rs` (`/reflect list|show`) | [Design](specs/2026-10-05-reflect-tool.md), `cli/repl_commands.rs` (`reflect_runs_report`) |
 | Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | [Design](specs/2026-10-04-web-fetch.md), `runtime/builder.rs` (`web_tools`), `reflection/taint.rs` |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
 | Web API or browser behavior | `crates/otto/src/server/` or `ui/` | `crates/otto-web/` for shared browser wire codecs |

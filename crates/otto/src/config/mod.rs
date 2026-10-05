@@ -11,6 +11,7 @@
 //! `_impl` twin directly instead of mutating the real environment.
 
 use std::collections::HashMap;
+pub mod layered;
 use std::fs;
 use std::fs::File as FsFile;
 use std::io;
@@ -262,20 +263,32 @@ fn parent_directory(path: &Path) -> &Path {
 /// the same millisecond) gets the [`backup_name`] suffix, which keeps them in
 /// write order too.
 fn back_up(directory: &Path, current: &[u8]) -> Result<(), &'static str> {
+    let stamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
+    back_up_with_stamp(directory, current, &stamp)
+}
+
+fn back_up_with_stamp(directory: &Path, current: &[u8], stamp: &str) -> Result<(), &'static str> {
     let backups = directory.join("backups");
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&backups)
         .map_err(|_| "cannot create configuration backup directory")?;
-    let stamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
-    let mut attempt = 0;
+    // Pruning frees the oldest names. Never reuse those slots: a reused name
+    // would sort before retained backups and immediately be pruned again.
+    let mut attempt = (0..=99)
+        .rev()
+        .find(|attempt| backups.join(backup_name(stamp, *attempt)).exists())
+        .map_or(0, |attempt| attempt + 1);
+    if attempt > 99 {
+        return Err("cannot write configuration backup");
+    }
     let mut file = loop {
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(backups.join(backup_name(&stamp, attempt)))
+            .open(backups.join(backup_name(stamp, attempt)))
         {
             Ok(file) => break file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempt < 99 => {
@@ -1181,6 +1194,23 @@ mod tests {
             written[3..],
             "prune must drop the three oldest, not the newest"
         );
+    }
+
+    #[test]
+    fn successive_backups_do_not_reuse_pruned_names_in_one_millisecond() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for index in 0..13 {
+            back_up_with_stamp(
+                dir.path(),
+                format!("p{index}").as_bytes(),
+                "20260923T101112.500Z",
+            )
+            .expect("backup");
+        }
+        let kept = backups(dir.path());
+        assert_eq!(kept.len(), BACKUP_LIMIT);
+        assert_eq!(fs::read_to_string(&kept[0]).expect("oldest"), "p3");
+        assert_eq!(fs::read_to_string(&kept[9]).expect("newest"), "p12");
     }
 
     #[test]

@@ -86,10 +86,10 @@ pub(super) fn available_commands() -> SessionUpdate {
         ),
         AvailableCommand::new(
             "reflect",
-            "Review this session for memory proposals and reusable skills; optional focus text",
+            "Write a retrospective of this session and propose memories and reusable skills; list or show <id> for past runs",
         )
         .input(AvailableCommandInput::Unstructured(
-            UnstructuredCommandInput::new("optional focus"),
+            UnstructuredCommandInput::new("optional focus | list | show <id>"),
         )),
         AvailableCommand::new(
             "skill",

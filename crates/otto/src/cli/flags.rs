@@ -304,6 +304,8 @@ const USAGE: &str = r"Usage: otto [options]
        otto workflow run|status|resume|fork|approve|reject|cancel ...
        otto sandbox setup [--config PATH] [--cwd PATH]
        otto setup [--config PATH]
+       otto config explain|set ...
+       otto trust <dir> [--executables | --revoke-executables] [--config PATH]
 
 Sandbox: on macOS, auto -> Seatbelt; elsewhere there is no confined driver.
 If one cannot be established, bash is disabled and the file tools remain.
@@ -313,7 +315,7 @@ File tools always stay within the selected workspace.
 Options:
   --help                 show help
   --version, -V          print version and exit
-  --config PATH          configuration file
+  --config PATH          user configuration source
   --cwd PATH             workspace directory
   --profile NAME         configuration profile
   --provider NAME        provider override

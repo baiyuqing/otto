@@ -130,6 +130,15 @@ pub struct WireEvent {
     pub item: Option<WireOutputItem>,
     #[serde(default)]
     pub response: Option<WireResult>,
+    /// The error object of an `error` event, as the ChatGPT backend sends it.
+    #[serde(default)]
+    pub error: Option<WireError>,
+    /// The code and message of an `error` event that carries them at the top
+    /// level, as the public Responses API sends it.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub code: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub message: String,
 }
 
 /// One output item announced by `response.output_item.added` or completed by
@@ -157,6 +166,18 @@ pub struct WireResult {
     pub usage: Option<WireUsage>,
     #[serde(default)]
     pub incomplete_details: Option<WireIncomplete>,
+    /// Why a `response.failed` response failed.
+    #[serde(default)]
+    pub error: Option<WireError>,
+}
+
+/// The error object of a failed response.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct WireError {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub code: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub message: String,
 }
 
 /// Why a response stopped before it was complete.

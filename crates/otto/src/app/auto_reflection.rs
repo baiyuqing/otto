@@ -605,8 +605,8 @@ mod tests {
     use otto_core::session::Session;
     use otto_core::tool::ToolResult;
 
-    use crate::cli::runtime_builder::Runner;
     use crate::cli::testutil::{builder, initial_runtime};
+    use crate::runtime::builder::Runner;
     use crate::subagent::tasks::Tasks;
 
     const SUMMARY: &str = "## Goal\nx\n## Constraints & Preferences\nx\n## Observations\nx\n## Progress\n### Done\nx\n### In Progress\nx\n### Blocked\nx\n## Key Decisions\nx\n## Next Steps\nx\n## Critical Context\nx";
@@ -662,8 +662,8 @@ mod tests {
     /// A controller over a persisted session of `exchanges` user and assistant
     /// pairs, with a real memory store and a reflector configured by `auto`.
     async fn rig(auto: Auto, exchanges: usize) -> Rig {
-        use crate::cli::wiring::{MemoryWiring, open_memory_service, workspace_memory_scope};
         use crate::reflection::{Reflector, Store};
+        use crate::runtime::wiring::{MemoryWiring, open_memory_service, workspace_memory_scope};
         use otto_core::config::ReflectionRuntime;
         use otto_core::config::memory::MemoryRuntime;
 

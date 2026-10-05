@@ -1111,7 +1111,7 @@ mod tests {
         app.info.profile = "terra".to_string();
         app.info.model = "gpt-5.6-terra".to_string();
         app.info.thinking.clear();
-        app.info.sandbox = testutil::seatbelt_info(crate::cli::info::SandboxNetwork::Allowed);
+        app.info.sandbox = testutil::seatbelt_info(crate::runtime::info::SandboxNetwork::Allowed);
 
         let footer = footer_text(&app);
 

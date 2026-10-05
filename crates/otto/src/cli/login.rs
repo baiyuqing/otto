@@ -152,32 +152,6 @@ pub(crate) fn browser_opener<'a, 'w: 'a>(
     }
 }
 
-pub fn chatgpt_client(
-    path: &str,
-    credentials: &Credentials,
-    loaded: bool,
-) -> Result<crate::provider::chatgpt::Client, String> {
-    if !loaded {
-        return Err(AuthError::NoCredentials.to_string());
-    }
-    let path = path.trim();
-    if path.is_empty() {
-        return Err(AuthError::CredentialsUnavailable.to_string());
-    }
-    // `build_runner` has no token to pass, so the source gets a fresh
-    // never-cancelled base and every request still aborts on the per-call token
-    // the agent hands `Provider::complete`.
-    let tokens = crate::auth::token::TokenSource::new(
-        credentials.clone(),
-        PathBuf::from(path),
-        CancellationToken::new(),
-    );
-    Ok(crate::provider::chatgpt::Client::new(
-        tokens,
-        &credentials.account_id,
-    ))
-}
-
 /// Writes `otto: {message}\n` and returns exit code 1.
 fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
     let _ = writeln!(stderr, "otto: {message}");
@@ -856,19 +830,5 @@ mod tests {
         .expect("save");
         let captured = capture_auth_credentials(&path);
         assert!(!captured.complete && !captured.loaded);
-    }
-
-    #[test]
-    fn the_chatgpt_client_needs_loaded_credentials_and_a_path() {
-        let stored = credentials("acct-1");
-        assert_eq!(
-            chatgpt_client("/tmp/x.json", &stored, false).err(),
-            Some(AuthError::NoCredentials.to_string())
-        );
-        assert_eq!(
-            chatgpt_client("   ", &stored, true).err(),
-            Some(AuthError::CredentialsUnavailable.to_string())
-        );
-        assert!(chatgpt_client("/tmp/x.json", &stored, true).is_ok());
     }
 }

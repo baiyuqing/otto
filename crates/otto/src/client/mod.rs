@@ -36,8 +36,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::app::Channel;
-use crate::cli::info::{SandboxMode, SandboxNetwork};
 use crate::mcp::sse::SseParser;
+use crate::runtime::info::{SandboxMode, SandboxNetwork};
 use crate::schedule::Origin;
 use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
@@ -796,7 +796,7 @@ impl SessionWire {
             context_window: self.context_window,
             context_input_tokens_present: self.context_input_tokens > 0,
             context_input_tokens: self.context_input_tokens,
-            sandbox: crate::cli::info::SandboxInfo {
+            sandbox: crate::runtime::info::SandboxInfo {
                 mode,
                 network,
                 bash_available: self.sandbox.bash_available,

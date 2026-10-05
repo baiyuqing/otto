@@ -794,13 +794,14 @@ impl Tool for BashTool {
             if expected["path"].as_str() != Some(path) {
                 return Err("read path changed after approval".into());
             }
-            let amendment = crate::cli::sandbox_setup::amend_sandbox_config_checked(
+            let amendment = crate::runtime::sandbox_config::amend_sandbox_config_checked(
                 config,
-                &crate::cli::sandbox_setup::SandboxChange::AllowReadPath(path.into()),
+                &crate::runtime::sandbox_config::SandboxChange::AllowReadPath(path.into()),
                 expected["config"].as_str(),
             )?;
             if let Err(error) = control.reload().await {
-                let rollback = crate::cli::sandbox_setup::revert_sandbox_config(config, &amendment);
+                let rollback =
+                    crate::runtime::sandbox_config::revert_sandbox_config(config, &amendment);
                 return Err(format!("{error}; rollback: {rollback:?}"));
             }
         }

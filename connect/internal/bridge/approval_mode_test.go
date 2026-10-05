@@ -1,8 +1,10 @@
 package bridge
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAutoCommandUsesSessionAPIAndSurvivesReload(t *testing.T) {
@@ -23,4 +25,57 @@ func TestAutoCommandUsesSessionAPIAndSurvivesReload(t *testing.T) {
 	h.waitFor(func() bool { return strings.Contains(strings.Join(h.plat.texts(), "\n"), "Usage: /auto") }, "invalid mode")
 	h.b.deliver(Message{Platform: "fake", ChatID: "c1", SenderID: "u1", ModeSession: "old-session", Text: "/auto off"})
 	h.waitFor(func() bool { return strings.Contains(strings.Join(h.plat.texts(), "\n"), "another session") }, "stale shortcut")
+}
+
+type modeCall struct {
+	chat, message, session string
+	automatic              bool
+}
+
+type modePlatform struct {
+	Platform
+	calls chan modeCall
+}
+
+func (p modePlatform) SendApprovalMode(_ context.Context, chat, message, session string, automatic bool) error {
+	p.calls <- modeCall{chat, message, session, automatic}
+	return nil
+}
+
+func TestAutoShortcutUpdatesClickedCardAndSessionMode(t *testing.T) {
+	calls := make(chan modeCall, 1)
+	h := newHarness(t, setup{mod: func(o *Options) {
+		o.Platforms = []Platform{modePlatform{o.Platforms[0], calls}}
+	}})
+	var sid string
+	for i, command := range []string{"/auto", "/auto on", "/auto on", "/auto off"} {
+		m := h.msg("c1", "u1", command)
+		wantID := ""
+		if i > 0 {
+			m.ModeSession, m.MessageID = sid, "42"
+			wantID = "42"
+		}
+		h.b.deliver(m)
+		select {
+		case call := <-calls:
+			if call.chat != "c1" || call.message != wantID || call.automatic != (i != 3) {
+				t.Fatalf("mode presentation = %+v", call)
+			}
+			if i == 0 {
+				sid = h.store.Session("fake:c1")
+			}
+			if sid == "" || call.session != sid {
+				t.Fatalf("session = %q, call = %+v", sid, call)
+			}
+			mode, err := h.agent.ApprovalMode(context.Background(), sid, nil)
+			if err != nil || mode != call.automatic {
+				t.Fatalf("stored mode = %v, error = %v", mode, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("mode presentation timed out")
+		}
+	}
+	if got := h.plat.texts(); len(got) != 0 {
+		t.Fatalf("unexpected extra messages: %v", got)
+	}
 }

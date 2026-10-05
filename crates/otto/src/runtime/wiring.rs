@@ -512,6 +512,8 @@ impl Builder {
         session: &SharedSession,
         prompt_for: PromptFor,
         child_tools: Vec<Box<dyn Tool + Send + Sync>>,
+        extensions: Option<Arc<crate::plugin::hooks::Runtime>>,
+        hook_guard: Option<Arc<crate::plugin::hooks::SessionGuard>>,
         stderr: &mut dyn Write,
     ) -> Result<SubagentWiring, BuildError> {
         let provider: Arc<dyn otto_core::provider::Provider + Send + Sync> = match client {
@@ -576,6 +578,8 @@ impl Builder {
             redaction_values: redaction_values.to_vec(),
             redaction_complete: redactor.allows_dynamic_content(),
             template: OptionsTemplate {
+                plugins: extensions,
+                hook_guard,
                 model: runtime.model.clone(),
                 provider_name: runtime.provider.clone(),
                 thinking: runtime.thinking.clone(),
@@ -2155,6 +2159,8 @@ mod tests {
                 session,
                 prompt_for,
                 Vec::new(),
+                None,
+                None,
                 &mut stderr,
             )
             .expect("build_subagents")

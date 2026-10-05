@@ -38,11 +38,11 @@ pub fn run(
             }
             ("install", [source]) => {
                 let p = service.install(source, None)?;
-                writeln!(stdout,"Installed {} ({}). Skills enabled; MCP requires explicit trust. Start a new session to activate.",p.name,p.digest).map_err(|_| "cannot write installation status")?;
+                writeln!(stdout,"Installed {} ({}). Skills enabled; MCP, hooks and custom tools require explicit trust. Start a new session to activate.",p.name,p.digest).map_err(|_| "cannot write installation status")?;
             }
             ("install", [source, flag, rev]) if flag == "--rev" => {
                 let p = service.install(source, Some(rev))?;
-                writeln!(stdout,"Installed {} at {}. Skills enabled; MCP requires explicit trust. Start a new session to activate.",p.name,p.commit.as_deref().unwrap_or("")).map_err(|_| "cannot write installation status")?;
+                writeln!(stdout,"Installed {} at {}. Skills enabled; MCP, hooks and custom tools require explicit trust. Start a new session to activate.",p.name,p.commit.as_deref().unwrap_or("")).map_err(|_| "cannot write installation status")?;
             }
             ("inspect", [name]) => {
                 let p = service.inspect(name)?;
@@ -72,13 +72,33 @@ pub fn run(
                     )
                     .map_err(|_| "cannot write trust details")?;
                 }
+                if !p
+                    .package
+                    .otto
+                    .hooks
+                    .entries()
+                    .iter()
+                    .all(|(_, h)| h.is_empty())
+                    || !p.package.otto.tools.is_empty()
+                {
+                    writeln!(
+                        stdout,
+                        "Otto hooks/tools: {}",
+                        serde_json::to_string(&p.package.otto)
+                            .map_err(|_| "cannot encode execution details")?
+                    )
+                    .map_err(|_| "cannot write trust details")?;
+                }
                 service.change(name, action)?;
-                writeln!(stdout, "Trusted. Start a new session to activate MCP.")
-                    .map_err(|_| "cannot write trust status")?;
+                writeln!(
+                    stdout,
+                    "Trusted. Start a new session to activate MCP, hooks and custom tools."
+                )
+                .map_err(|_| "cannot write trust status")?;
             }
             ("enable" | "disable" | "revoke" | "remove", [name]) => {
                 service.change(name, action)?;
-                writeln!(stdout,"Plugin {name}: {action}. Enable/disable changes apply to new sessions; revoke/remove stops active plugin MCP servers. Persistent data is retained.").map_err(|_| "cannot write plugin status")?;
+                writeln!(stdout,"Plugin {name}: {action}. Enable/disable changes apply to new sessions; revoke/remove stops active plugin commands and MCP servers. Persistent data is retained.").map_err(|_| "cannot write plugin status")?;
             }
             _ => return Err(USAGE.into()),
         }

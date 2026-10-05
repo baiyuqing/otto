@@ -102,6 +102,8 @@ pub struct File {
     pub skills: Skills,
     #[serde(default)]
     pub plugins: Plugins,
+    #[serde(default, skip_serializing_if = "plugins::Hooks::is_default")]
+    pub hooks: plugins::Hooks,
     #[serde(default)]
     pub agents: Agents,
     #[serde(default, skip_serializing_if = "Experimental::is_default")]

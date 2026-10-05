@@ -4,7 +4,7 @@ use otto_core::{
     tool::ToolResult,
 };
 use serde_json::json;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 struct Fixture {
@@ -636,4 +636,129 @@ fn literal_credentials_cannot_be_persisted_by_installation() {
             .contains("literal credential")
     );
     assert!(f.service().list().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn otto_commands_require_content_trust_and_revoke_without_reloading() {
+    use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy, direct::DirectDriver};
+    let f = Fixture::new();
+    let path = f.package("command-example");
+    let components = json!({"version":1,"hooks":{"before_tool":[{"matcher":["write"],"command":["/bin/sh","-c","read input; printf '%s' '{\"decision\":\"deny\",\"reason\":\"blocked\"}'"]}]},"tools":[{"name":"echo","description":"Echo the value","input_schema":{"type":"object","required":["value"],"properties":{"value":{"type":"integer","minimum":1}},"additionalProperties":false},"command":["/bin/sh","-c","read input; printf '%s' '{\"content\":\"done\"}'"]}]});
+    fs::write(path.join("plugin.json"),json!({"$schema":package::PLUGIN_SCHEMA,"name":"command-example","extensions":{"dev.otto":components}}).to_string()).unwrap();
+    f.install(&path);
+    let workspace = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(workspace.path()).unwrap();
+    let executor = Arc::new(
+        Executor::new(
+            Arc::new(DirectDriver::new()),
+            Policy {
+                filesystem: FilesystemMode::Unconfined,
+                network: NetworkMode::Allow,
+            },
+            &root,
+        )
+        .unwrap(),
+    );
+    let execution = hooks::Execution {
+        executor: Some(executor),
+        workspace: root,
+        environment: vec!["PATH=/usr/bin:/bin".into()],
+        guard: None,
+        secrets: Vec::new(),
+        logger: Arc::new(crate::log::Logger::discard()),
+    };
+    let snapshot = Snapshot::load(f.home.path(), &File::default(), &f.env());
+    let untrusted = hooks::Runtime::new(
+        &snapshot,
+        f.home.path(),
+        &Default::default(),
+        execution.clone(),
+    )
+    .unwrap();
+    assert!(untrusted.tools().is_empty());
+    assert!(!untrusted.has_hooks());
+    assert!(
+        snapshot
+            .diagnostics
+            .iter()
+            .any(|s| s.contains("hooks and custom tools disabled"))
+    );
+    f.service().change("command-example", "trust").unwrap();
+    let snapshot = Snapshot::load(f.home.path(), &File::default(), &f.env());
+    let runtime = hooks::Runtime::new(
+        &snapshot,
+        f.home.path(),
+        &Default::default(),
+        execution.clone(),
+    )
+    .unwrap();
+    let response = runtime
+        .bind("s".into(), None, String::new(), "new", None)
+        .run(
+            "before_tool",
+            json!({"tool":"write","arguments":{}}),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.decision,
+        Some(otto_core::agent::hooks::Decision::Deny)
+    );
+    let tools = runtime.tools();
+    assert_eq!(tools[0].definition().name, "plugin__command-example__echo");
+    let raw = |s: &str| serde_json::value::RawValue::from_string(s.into()).unwrap();
+    let bad = tools[0]
+        .execute(&raw("{\"value\":0}"), &CancellationToken::new())
+        .await;
+    assert!(bad.is_error);
+    assert_eq!(
+        bad.outcome_override.unwrap().effect_certainty,
+        otto_core::model::EffectCertainty::NotStarted
+    );
+    let good = tools[0]
+        .execute(&raw("{\"value\":1}"), &CancellationToken::new())
+        .await;
+    assert_eq!(good.content, "done");
+    assert!(!good.is_error);
+    f.service().change("command-example", "revoke").unwrap();
+    assert!(
+        tools[0]
+            .execute(&raw("{\"value\":1}"), &CancellationToken::new())
+            .await
+            .is_error
+    );
+    assert!(
+        runtime
+            .bind("s".into(), None, String::new(), "new", None)
+            .run(
+                "before_tool",
+                json!({"tool":"write"}),
+                &CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    f.service().change("command-example", "disable").unwrap();
+    let disabled = Snapshot::load(f.home.path(), &File::default(), &f.env());
+    assert!(
+        hooks::Runtime::new(&disabled, f.home.path(), &Default::default(), execution)
+            .unwrap()
+            .tools()
+            .is_empty()
+    );
+}
+
+#[test]
+fn invalid_otto_components_fail_installation_without_running_commands() {
+    let f = Fixture::new();
+    let path = f.package("bad-extension");
+    for extension in [
+        json!({"version":2}),
+        json!({"version":1,"hooks":{"before_tool":[{"command":[]} ]}}),
+        json!({"version":1,"tools":[{"name":"bad","description":"Bad tool","command":["/bin/sh"],"input_schema":{"$ref":"file:///etc/passwd"}}]}),
+    ] {
+        fs::write(path.join("plugin.json"),json!({"$schema":package::PLUGIN_SCHEMA,"name":"bad-extension","extensions":{"dev.otto":extension}}).to_string()).unwrap();
+        assert!(f.service().install(path.to_str().unwrap(), None).is_err());
+    }
 }

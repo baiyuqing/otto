@@ -214,6 +214,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Make zsh here-documents (`cat > file <<EOF`) work in the Seatbelt sandbox.
+  The sandbox now sets `TMPPREFIX` to its private temporary directory, so zsh
+  no longer tries to write the denied `/tmp/zsh*` and leave an empty target file.
+
 - Compare the layered-configuration directory chain against canonical paths in its
   test, so it passes where the temporary directory is reached through a symbolic link,
   as on macOS.

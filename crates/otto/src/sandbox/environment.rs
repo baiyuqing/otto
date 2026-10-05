@@ -133,8 +133,9 @@ pub fn parse_environment(entries: &[Vec<u8>]) -> Result<BTreeMap<String, String>
 /// A name is *ordinary* (passed through), *automatic* (withheld unless
 /// explicitly allowed, value always redacted), or *non-restorable* (withheld
 /// unconditionally, value always redacted). When `private_directories` is set,
-/// the per-session `HOME`, `TMPDIR` and cache variables replace whatever the
-/// host had, and the derived cache directories are created at mode 0700.
+/// the per-session `HOME`, `TMPDIR`, zsh's `TMPPREFIX` and cache variables
+/// replace whatever the host had, and the derived cache directories are
+/// created at mode 0700.
 ///
 /// Returns [`RejectedEnvironment`] when any input is unsafe. That path never
 /// creates directories: the bounds are enforced first.
@@ -247,6 +248,10 @@ pub fn resolve_environment(
             ("TMPDIR", display_path(&directories.temp)),
             ("TMP", display_path(&directories.temp)),
             ("TEMP", display_path(&directories.temp)),
+            // zsh names here-document and `=(...)` temporary files after
+            // `TMPPREFIX`, not `TMPDIR`; its default `/tmp/zsh` is outside the
+            // sandbox's writable set, so every heredoc would fail.
+            ("TMPPREFIX", display_path(&directories.temp.join("zsh"))),
             ("XDG_CACHE_HOME", cache("xdg")),
             ("GOCACHE", cache("go-build")),
             ("GOMODCACHE", cache("go-mod")),
@@ -1137,6 +1142,7 @@ mod tests {
                 "TMPDIR=/host/tmpdir",
                 "TMP=/host/tmp",
                 "TEMP=/host/temp",
+                "TMPPREFIX=/host/zsh",
                 "XDG_CACHE_HOME=/host/xdg",
                 "GOCACHE=/host/go-build",
                 "GOMODCACHE=/host/go-mod",
@@ -1157,6 +1163,7 @@ mod tests {
             ("TMPDIR", display_path(&directories.temp)),
             ("TMP", display_path(&directories.temp)),
             ("TEMP", display_path(&directories.temp)),
+            ("TMPPREFIX", display_path(&directories.temp.join("zsh"))),
             ("XDG_CACHE_HOME", cache("xdg")),
             ("GOCACHE", cache("go-build")),
             ("GOMODCACHE", cache("go-mod")),

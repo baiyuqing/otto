@@ -297,7 +297,7 @@ never retried automatically.
   the request remains pending until it is replaced, consumed, or Otto exits, and never changes `config.toml`.
 - Session files may contain workspace files, prompts, images, and tool results. Treat
   them as sensitive.
-- Plugin packages support Skills and MCP; Hooks, Commands, Agents, LSP,
+- Plugin packages support Skills, MCP and [Otto hooks/custom tools](docs/user-manual.md#hooks-and-custom-tools); legacy host Hooks, Commands, Agents, LSP,
   OpenAI Apps and Pi runtime extensions are not loaded. See
   [plugin packages](docs/user-manual.md#plugin-packages).
 - No automatic project-local config discovery, session trees/forks,

@@ -14,7 +14,7 @@ for invariants and implementation constraints.
 | `crates/otto-web/` | WebAssembly bindings that expose shared wire codecs to the browser | `src/lib.rs` |
 | `ui/` | TypeScript browser frontend | `package.json` and `src/` |
 | `connect/` | Independent Go Telegram and Feishu connector that communicates with Otto through ACP | `connect/README.md` and `connect/internal/` |
-| `desktop/` | Independent macOS Tauri shell around `otto serve` | `desktop/README.md` |
+| `desktop/` | Independent macOS MyGo shell around `otto serve` | `desktop/README.md` |
 | `crates/otto/src/fsops.rs` | Shared pinned filesystem descriptors and atomic operations | Native session and workspace callers |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
 | `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
@@ -111,8 +111,8 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 - `connect/` does not link Otto code. It starts `otto acp` over stdio or
   connects directly to `otto serve` over authenticated loopback ACP TCP.
   Both use ACP v1; see [ACP TCP](specs/2026-10-03-acp-tcp.md).
-- `desktop/` wraps `otto serve` in a macOS Tauri application and remains a
-  separate Cargo workspace.
+- `desktop/` wraps `otto serve` in a macOS MyGo application and remains a
+  separate Go module.
 
 ## Common change paths
 

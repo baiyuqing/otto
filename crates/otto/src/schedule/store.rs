@@ -29,7 +29,7 @@ use super::time::{format_duration, format_local, latest_occurrence, next_occurre
 use super::{Kind, Origin, Repeat, RunOutcome, Scope, State};
 use crate::storage::{Connection, params};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS items (
@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS deliveries (
     PRIMARY KEY (item_id, due_at)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS deliveries_pending ON deliveries(appended, delivered_at);
+CREATE TABLE IF NOT EXISTS delivery_clients (
+    id TEXT PRIMARY KEY,
+    platforms TEXT NOT NULL,
+    destinations TEXT,
+    expires_at INTEGER NOT NULL
+) STRICT;
 "#;
 
 const COLUMNS: &str = "id, origin, session_id, workspace, kind, body, repeat, local_time, due_at, \
@@ -328,11 +334,13 @@ impl Store {
             .query_row("PRAGMA user_version", (), |row| row.get(0))
             .map_err(|_| Error)?;
         match version {
-            0 => {
-                connection.execute_batch(SCHEMA).map_err(|_| Error)?;
-                connection
+            0 | 1 => {
+                let transaction = connection.unchecked_transaction().map_err(|_| Error)?;
+                transaction.execute_batch(SCHEMA).map_err(|_| Error)?;
+                transaction
                     .pragma_update("user_version", SCHEMA_VERSION)
                     .map_err(|_| Error)?;
+                transaction.commit().map_err(|_| Error)?;
             }
             version if version == SCHEMA_VERSION => {}
             _ => return Err(Error),
@@ -341,6 +349,48 @@ impl Store {
             connection: Mutex::new(connection),
             notify: Notify::new(),
         })
+    }
+
+    /// A live connection refreshes this lease independently of slow deliveries.
+    pub fn register_delivery_client(
+        &self,
+        id: &str,
+        platforms: &[String],
+        destinations: Option<&[Origin]>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let platforms = serde_json::to_string(platforms).map_err(|_| Error)?;
+        let destinations = destinations
+            .map(|origins| {
+                serde_json::to_string(&origins.iter().map(Origin::as_str).collect::<Vec<_>>())
+            })
+            .transpose()
+            .map_err(|_| Error)?;
+        self.write(|connection| {
+            connection.execute("DELETE FROM delivery_clients WHERE expires_at < ?1", params![ms(now - RETENTION)])?;
+            connection.execute("INSERT INTO delivery_clients (id, platforms, destinations, expires_at) VALUES (?1, ?2, ?3, ?4)",
+                params![id, platforms, destinations, ms(now + TimeDelta::seconds(90))])?;
+            Ok(())
+        })
+    }
+
+    pub fn refresh_delivery_client(&self, id: &str, now: DateTime<Utc>) -> Result<Vec<String>> {
+        self.write(|connection| {
+            connection.execute(
+                "UPDATE delivery_clients SET expires_at = ?2 WHERE id = ?1",
+                params![id, ms(now + TimeDelta::seconds(90))],
+            )?;
+            delivery_scope(connection, id, now).map(|(_, conflicts)| conflicts)
+        })
+    }
+
+    pub fn unregister_delivery_client(&self, id: &str) -> Result<()> {
+        self.write(|connection| {
+            connection.execute("DELETE FROM delivery_clients WHERE id = ?1", params![id])?;
+            Ok(())
+        })?;
+        self.notify.notify_waiters();
+        Ok(())
     }
 
     /// Wakes in-process workers after an item is created or cancelled.
@@ -592,12 +642,19 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<Vec<Item>> {
         self.write(|connection| {
+            let resolved;
+            let scope = if let Scope::DeliveryClient(id) = scope {
+                resolved = delivery_scope(connection, id, now)?.0;
+                &resolved
+            } else { scope };
+            // ponytail: scan due rows for dynamic scopes; use SQL filters if queues grow.
+
             let candidates = query_items(
                 connection,
                 &format!(
                     "SELECT {COLUMNS} FROM items WHERE next_try_at <= ?1 AND claimed_until <= ?1 \
                      AND (state = 'ready' OR (state = 'waiting' AND kind = 'text')) \
-                     ORDER BY next_try_at, id LIMIT 200"
+                     ORDER BY next_try_at, id"
                 ),
                 params![ms(now)],
             )?;
@@ -776,6 +833,53 @@ fn current(
     state: State,
 ) -> Db<Option<Item>> {
     Ok(get(connection, id)?.filter(|item| item.due_at == due_at && item.state == state))
+}
+
+/// Exact clients keep their destinations. A legacy platform is eligible only
+/// while this is the sole live connection offering that platform.
+fn delivery_scope(
+    connection: &Connection,
+    id: &str,
+    now: DateTime<Utc>,
+) -> Db<(Scope, Vec<String>)> {
+    let mut statement = connection.prepare(
+        "SELECT id, platforms, destinations FROM delivery_clients WHERE expires_at > ?1",
+    )?;
+    let rows = statement
+        .query_map(params![ms(now)], |row| {
+            Ok((
+                row.get::<String>(0)?,
+                row.get::<String>(1)?,
+                row.get::<Option<String>>(2)?,
+            ))
+        })?
+        .collect::<Db<Vec<_>>>()?;
+    let bad = || crate::storage::Error::ConversionFailure("bad delivery client".into());
+    let mut clients = Vec::new();
+    for (client, platforms, destinations) in rows {
+        let platforms: Vec<String> = serde_json::from_str(&platforms).map_err(|_| bad())?;
+        clients.push((client, platforms, destinations));
+    }
+    let Some((_, platforms, destinations)) = clients.iter().find(|(client, _, _)| client == id)
+    else {
+        return Ok((Scope::Origins(Vec::new()), Vec::new()));
+    };
+    if let Some(destinations) = destinations {
+        let values: Vec<String> = serde_json::from_str(destinations).map_err(|_| bad())?;
+        let origins = values
+            .iter()
+            .map(|value| Origin::parse(value).map_err(|_| bad()))
+            .collect::<Db<Vec<_>>>()?;
+        return Ok((Scope::Origins(origins), Vec::new()));
+    }
+    let (allowed, conflicts): (Vec<_>, Vec<_>) = platforms.iter().cloned().partition(|platform| {
+        clients
+            .iter()
+            .filter(|(_, offers, _)| offers.contains(platform))
+            .count()
+            == 1
+    });
+    Ok((Scope::Chats(allowed), conflicts))
 }
 
 fn make_ready(
@@ -1189,6 +1293,156 @@ mod tests {
             .unwrap();
         store.delivered(created.id, created.due_at, at).unwrap();
         assert_eq!(item(&store, created.id).last_error, "");
+    }
+
+    #[test]
+    fn delivery_clients_claim_only_their_exact_destinations_across_store_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schedule.db");
+        let first = Store::open(&path).unwrap();
+        let second = Store::open(&path).unwrap();
+        let now = now_ms();
+        let a = Origin::chat("telegram", "a").unwrap();
+        let b = Origin::chat("telegram", "b").unwrap();
+        first
+            .register_delivery_client(
+                "a",
+                &["telegram".into()],
+                Some(std::slice::from_ref(&a)),
+                now,
+            )
+            .unwrap();
+        second
+            .register_delivery_client(
+                "b",
+                &["telegram".into()],
+                Some(std::slice::from_ref(&b)),
+                now,
+            )
+            .unwrap();
+        for index in 0..201 {
+            let mut unrelated = new_item(Kind::Text, "unrelated", now);
+            unrelated.origin = Origin::chat("telegram", &format!("other-{index}")).unwrap();
+            first.create(unrelated, now).unwrap();
+        }
+        let mut left = new_item(Kind::Text, "only a", now);
+        left.origin = a;
+        let mut right = new_item(Kind::Text, "only b", now);
+        right.origin = b;
+        first.create(left, now).unwrap();
+        let created = second.create(right, now).unwrap();
+        let claimed = first
+            .claim_deliveries(&Scope::DeliveryClient("a".into()), ANY_LEASE, 10, now)
+            .unwrap();
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|row| row.body.as_str())
+                .collect::<Vec<_>>(),
+            ["only a"]
+        );
+        assert_eq!(
+            item(&second, created.id).claimed_until,
+            DateTime::<Utc>::default()
+        );
+        let claimed = second
+            .claim_deliveries(&Scope::DeliveryClient("b".into()), ANY_LEASE, 10, now)
+            .unwrap();
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|row| row.body.as_str())
+                .collect::<Vec<_>>(),
+            ["only b"]
+        );
+    }
+
+    #[test]
+    fn legacy_delivery_suspends_for_overlap_and_recovers_after_disconnect_or_expiry() {
+        let store = Store::open_in_memory().unwrap();
+        let now = now_ms();
+        store
+            .register_delivery_client("legacy", &["telegram".into()], None, now)
+            .unwrap();
+        store
+            .register_delivery_client("other", &["telegram".into()], None, now)
+            .unwrap();
+        store
+            .create(new_item(Kind::Text, "private", now), now)
+            .unwrap();
+        let scope = Scope::DeliveryClient("legacy".into());
+        assert!(
+            store
+                .claim_deliveries(&scope, ANY_LEASE, 10, now)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.refresh_delivery_client("legacy", now).unwrap(),
+            ["telegram"]
+        );
+        store.unregister_delivery_client("other").unwrap();
+        assert_eq!(
+            store
+                .claim_deliveries(&scope, ANY_LEASE, 10, now)
+                .unwrap()
+                .len(),
+            1
+        );
+        let exact = Origin::chat("telegram", "elsewhere").unwrap();
+        store
+            .register_delivery_client("exact", &["telegram".into()], Some(&[exact]), now)
+            .unwrap();
+        store
+            .create(new_item(Kind::Text, "next", now), now)
+            .unwrap();
+        assert!(
+            store
+                .claim_deliveries(&scope, ANY_LEASE, 10, now)
+                .unwrap()
+                .is_empty()
+        );
+        let later = now + TimeDelta::seconds(91);
+        assert!(
+            store
+                .refresh_delivery_client("legacy", later)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !store
+                .claim_deliveries(&scope, ANY_LEASE, 10, later)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn version_one_schedule_migrates_without_losing_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schedule.db");
+        let store = Store::open(&path).unwrap();
+        let now = now_ms();
+        let created = store
+            .create(new_item(Kind::Text, "keep", now), now)
+            .unwrap();
+        drop(store);
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch("DROP TABLE delivery_clients").unwrap();
+        raw.pragma_update("user_version", 1).unwrap();
+        drop(raw);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(item(&store, created.id).body, "keep");
+        store
+            .register_delivery_client("client", &["telegram".into()], None, now)
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_deliveries(&Scope::DeliveryClient("client".into()), ANY_LEASE, 10, now)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

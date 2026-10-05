@@ -627,9 +627,24 @@ fn session_load_replays_history_before_the_response_and_list_titles_follow_the_s
     assert_eq!(unknown["error"]["message"], "unknown sessionId");
     let (_, invalid) = second.load_session(workspace.path(), "NOT-HEX");
     assert_eq!(invalid["error"]["code"], -32602, "{invalid}");
-    // `cwd` checks are the local ones.
-    let (_, elsewhere) = second.call("session/new", json!({"cwd": home.path(), "mcpServers": []}));
-    assert_eq!(elsewhere["error"]["code"], -32602, "{elsewhere}");
+    // Serve admission rejects an untrusted cwd with the ACP caller-error code.
+    for (method, params) in [
+        ("session/new", json!({"cwd":home.path(), "mcpServers":[]})),
+        (
+            "session/load",
+            json!({"cwd":home.path(), "sessionId":session_id, "mcpServers":[]}),
+        ),
+        ("session/list", json!({"cwd":home.path()})),
+    ] {
+        let (_, elsewhere) = second.call(method, params);
+        assert_eq!(elsewhere["error"]["code"], -32602, "{elsewhere}");
+        assert!(
+            elsewhere["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("outside the startup workspace")
+        );
+    }
     assert_eq!(first.close(), Some(0));
     assert_eq!(second.close(), Some(0));
 }

@@ -35,6 +35,41 @@ func TestReplyIsChunkTextInOrder(t *testing.T) {
 	}
 }
 
+func TestRestoredBindingsAndBackgroundRepliesRespectAllowlist(t *testing.T) {
+	for _, revoked := range []string{"chat", "senders"} {
+		t.Run(revoked, func(t *testing.T) {
+			dir := t.TempDir()
+			id := sid("aaaa1111")
+			seedSessions(t, dir, seedLine(id, "private"))
+			store := newStore(t)
+			if err := store.SetSession("fake:revoked", id); err != nil {
+				t.Fatal(err)
+			}
+			s := setup{dir: dir, store: store}
+			if revoked == "senders" {
+				s.chats = []string{"revoked"}
+				s.senders = []string{}
+			}
+			h := newHarness(t, s)
+			h.waitCall("init:")
+			h.b.loadBoundSessions()
+			if got := h.calls("load:"); len(got) != 0 {
+				t.Fatalf("restored revoked binding: %v", got)
+			}
+			// Even an existing in-memory binding must be checked at delivery.
+			h.b.chat(h.plat, "revoked")
+			h.b.Update(id, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
+				Meta:    map[string]any{"otto": map[string]any{"wakeReply": true, "replyId": float64(1)}},
+				Content: acp.TextBlock("private background reply"),
+			}})
+			settle()
+			if got := h.plat.texts(); len(got) != 0 {
+				t.Fatalf("sent to revoked chat: %v", got)
+			}
+		})
+	}
+}
+
 func TestReflectionNoticeReachesOnlyTheChatBoundToItsSession(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
@@ -839,7 +874,7 @@ func TestStartupLoadsEachBoundSessionOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h := newHarness(t, setup{dir: dir, store: store})
+	h := newHarness(t, setup{dir: dir, store: store, chats: []string{"c1", "c2", "c3", "c4"}})
 	h.waitFor(func() bool { return len(h.calls("load:")) >= 3 }, "startup loads")
 	settle()
 	got := h.calls("load:")

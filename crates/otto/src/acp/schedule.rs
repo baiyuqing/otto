@@ -39,8 +39,53 @@ pub(super) fn delivery_platforms(params: &Value) -> Vec<String> {
     platforms
 }
 
+/// A present declaration is authoritative, including an empty list.
+pub(super) fn delivery_chats(
+    params: &Value,
+    platforms: &[String],
+) -> Result<Option<Vec<Origin>>, String> {
+    let Some(value) = params.pointer("/clientCapabilities/_meta/otto/scheduleDeliveryChats") else {
+        return Ok(None);
+    };
+    let values = value
+        .as_array()
+        .ok_or("scheduleDeliveryChats must be an array")?;
+    let mut chats = Vec::new();
+    for value in values {
+        let value = value
+            .as_str()
+            .ok_or("scheduleDeliveryChats entries must be strings")?;
+        let (platform, id) = value
+            .split_once(':')
+            .ok_or("delivery chat must be <platform>:<chat id>")?;
+        if !platforms.iter().any(|offered| offered == platform) {
+            return Err("delivery chat platform was not advertised".into());
+        }
+        let origin = Origin::chat(platform, id)?;
+        if !chats.contains(&origin) {
+            chats.push(origin);
+        }
+    }
+    Ok(Some(chats))
+}
+
 /// The worker of one connection, or `None` without platforms or a store.
-pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Option<Worker> {
+pub(super) fn worker(connection: &Arc<Connection>, mut platforms: Vec<String>) -> Option<Worker> {
+    let destinations = delivery_chats(
+        &connection
+            .client_capabilities
+            .lock()
+            .expect("ACP capabilities"),
+        &platforms,
+    )
+    .ok()?;
+    if let Some(chats) = &destinations {
+        platforms.retain(|p| {
+            chats
+                .iter()
+                .any(|chat| chat.chat_platform() == Some(p.as_str()))
+        });
+    }
     if platforms.is_empty() {
         return None;
     }
@@ -51,7 +96,10 @@ pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Op
                 runtime: local.config.runtime.clone(),
             };
             let run = RunRole {
-                scope: Scope::Chats(platforms.clone()),
+                scope: destinations
+                    .as_ref()
+                    .map(|origins| Scope::Origins(origins.clone()))
+                    .unwrap_or_else(|| Scope::Chats(platforms.clone())),
                 workspace: Some(local.config.workspace.to_string_lossy().into_owned()),
                 runner: Arc::new(runner),
             };
@@ -74,6 +122,19 @@ pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Op
                 .map(|server| Arc::clone(server.metrics())),
         ),
     };
+    let client_id = crate::runtime::builder::random_id().ok()?;
+    if store
+        .register_delivery_client(
+            &client_id,
+            &platforms,
+            destinations.as_deref(),
+            chrono::Utc::now(),
+        )
+        .is_err()
+    {
+        logger.warn("schedule_delivery_registration_failed", &[]);
+        return None;
+    }
     let sink = AcpSink {
         connection: Arc::clone(connection),
         timeout: DELIVERY_TIMEOUT,
@@ -82,7 +143,7 @@ pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Op
         store,
         run,
         deliver: Some(DeliverRole {
-            scope: Scope::Chats(platforms),
+            scope: Scope::DeliveryClient(client_id),
             sink: Arc::new(sink),
         }),
         logger,
@@ -147,7 +208,6 @@ impl Sink for AcpSink {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::collections::HashSet;
     use std::io::Write;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
@@ -174,7 +234,7 @@ mod tests {
             client_capabilities: Mutex::new(Value::Null),
             task_stop: CancellationToken::new(),
             notice_stop: CancellationToken::new(),
-            watching_notices: Mutex::new(HashSet::new()),
+            watching_notices: Mutex::new(HashMap::new()),
             notice_ready: Mutex::new(HashMap::new()),
             wake_loops: Mutex::new(HashMap::new()),
         });
@@ -237,6 +297,31 @@ mod tests {
         let sink = sink(&connection, Duration::from_millis(20));
         assert!(sink.deliver(&origin(), "x").await.is_err());
         assert!(connection.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn exact_delivery_metadata_is_validated_and_empty_is_authoritative() {
+        let params = |value| json!({"clientCapabilities":{"_meta":{"otto":{"scheduleDeliveryChats":value}}}});
+        let platforms = vec!["telegram".into()];
+        assert_eq!(
+            delivery_chats(&params(json!(["telegram:a", "telegram:a"])), &platforms).unwrap(),
+            Some(vec![Origin::chat("telegram", "a").unwrap()])
+        );
+        assert_eq!(
+            delivery_chats(&params(json!([])), &platforms).unwrap(),
+            Some(Vec::new())
+        );
+        for value in [
+            json!(null),
+            json!("telegram:a"),
+            json!([7]),
+            json!(["telegram:"]),
+            json!(["telegram:with space"]),
+            json!(["feishu:a"]),
+        ] {
+            assert!(delivery_chats(&params(value), &platforms).is_err());
+        }
+        assert_eq!(delivery_chats(&json!({}), &platforms).unwrap(), None);
     }
 
     #[test]
@@ -422,6 +507,83 @@ mod tests {
         }
         wire.close();
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_clients_receive_only_their_chats_and_disconnect_releases_legacy_conflicts() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (mut b, b_handle) = start(
+            Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
+                &store,
+            )))),
+            "/work",
+            |_| (),
+        );
+        let mut declare_b = initialize(json!(["telegram"]));
+        declare_b["params"]["clientCapabilities"]["_meta"]["otto"]["scheduleDeliveryChats"] =
+            json!(["telegram:456"]);
+        b.send(declare_b);
+        assert_eq!(b.recv_message().await["id"], 1);
+        due_text_item(&store, origin());
+        let (mut a, a_handle) = start(
+            Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
+                &store,
+            )))),
+            "/work",
+            |_| (),
+        );
+        let mut declare_a = initialize(json!(["telegram"]));
+        declare_a["params"]["clientCapabilities"]["_meta"]["otto"]["scheduleDeliveryChats"] =
+            json!(["telegram:123"]);
+        a.send(declare_a);
+        assert_eq!(a.recv_message().await["id"], 1);
+        let left = a.recv_message().await;
+        assert_eq!(left["params"]["chat"], "telegram:123");
+        a.send(json!({"jsonrpc":"2.0","id":left["id"],"result":{}}));
+        due_text_item(&store, Origin::chat("telegram", "456").unwrap());
+        let right = b.recv_message().await;
+        assert_eq!(right["params"]["chat"], "telegram:456");
+        b.send(json!({"jsonrpc":"2.0","id":right["id"],"result":{}}));
+        a.close();
+        b.close();
+        a_handle.await.unwrap();
+        b_handle.await.unwrap();
+        let (mut a, a_handle) = start(
+            Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
+                &store,
+            )))),
+            "/work",
+            |_| (),
+        );
+        let (mut b, b_handle) = start(
+            Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
+                &store,
+            )))),
+            "/work",
+            |_| (),
+        );
+        a.send(initialize(json!(["telegram"])));
+        a.recv_message().await;
+        b.send(initialize(json!(["telegram"])));
+        b.recv_message().await;
+        due_text_item(&store, origin());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), a.output.recv())
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), b.output.recv())
+                .await
+                .is_err()
+        );
+        b.close();
+        b_handle.await.unwrap();
+        let remaining = a.recv_message().await;
+        assert_eq!(remaining["params"]["chat"], "telegram:123");
+        a.send(json!({"jsonrpc":"2.0","id":remaining["id"],"result":{}}));
+        a.close();
+        a_handle.await.unwrap();
     }
 
     #[tokio::test]

@@ -20,7 +20,7 @@ export function plan(paths) {
   for (const p of paths) {
     const inRust = p.startsWith('crates/') || p.startsWith('testdata/');
     const known =
-      inRust || ROOT_RUST.includes(p) || /^(ui|connect|scripts|docs)\//.test(p) || p === 'LICENSE' || p.endsWith('.md');
+      inRust || ROOT_RUST.includes(p) || /^(ui|connect|desktop|scripts|docs)\//.test(p) || p === 'LICENSE' || p.endsWith('.md');
     if (!known) unchecked.push(p);
     if (ROOT_RUST.includes(p) || p.startsWith('testdata/') || p.startsWith('crates/otto-core/') || FULL_FILES.includes(p)) full = true;
     else if (inRust) {
@@ -47,6 +47,7 @@ export function plan(paths) {
   if (under('crates/otto-web/')) steps.push('wasm-pack test --node crates/otto-web');
   if (under('crates/otto-web/') || under('ui/')) steps.push('make ui ui-test');
   if (under('connect/')) steps.push('make connect-check');
+  if (under('desktop/')) steps.push('make desktop-check');
   if (under('scripts/')) steps.push('make scripts-test');
   return { steps, unchecked: unchecked.sort() };
 }

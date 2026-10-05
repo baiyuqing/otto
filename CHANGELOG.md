@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Replace the macOS Tauri desktop shell with MyGo. Keep the existing Rust
+  server, web UI, workspace picker, saved workspace and log locations. Desktop
+  builds now use Go 1.27.1+; desktop contract and server lifecycle tests run in
+  the local desktop gate and CI.
+
 - Let reflection generate reusable Python scripts alongside `SKILL.md`. Script source
   is scanned, syntax-checked without execution, reviewed and included in the existing
   approval request. Complete skills are versioned and reverted together; human edits

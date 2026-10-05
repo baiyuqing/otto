@@ -47,6 +47,10 @@ Keep responsibilities split along the current Rust crate/module layout:
 - `crates/otto-web`: the wasm cdylib the browser UI loads; exports `otto-core`'s wire codecs to JavaScript through `wasm-bindgen`
 - `ui/`: the TypeScript browser frontend; a client of `crates/otto`'s HTTP API and `crates/otto-web`'s wasm exports only, with no Rust code of its own; `make check-fast` runs its build and tests only when a path under `ui/` or `crates/otto-web/` changed
 - `connect/`: `otto-connect`, the Go chat connector (module `github.com/baiyuqing/otto/connect`). It is an ACP client that starts an ACP agent (by default `otto acp`) as a child process and links no otto code; its contract with otto is ACP v1 on stdio or authenticated loopback TCP (`[agent].address`). `internal/agent` owns the child process or TCP connection and the ACP handshake, `internal/bridge` the chat-to-session map, queues, commands, replies, permission requests and admission, `internal/telegram` the Bot API adapter (including Markdown rendering to entities), `internal/feishu` the Feishu/Lark adapter over `channel-sdk-go`, `internal/config` `connect.toml`, and `internal/state` the state file. Design: [chat connector](specs/2026-10-02-otto-connect.md)
+- `desktop/`: an independent Go module using MyGo for macOS windows, menus
+  and folder dialogs. `internal/shell` owns the Rust `otto serve` child,
+  login-shell environment capture, state and authenticated workspace HTTP
+  calls. See [the desktop README](../desktop/README.md).
 
 Keep provider-specific wire structs inside the two provider implementation
 modules. Keep file-tool workspace enforcement inside `crates/otto`'s `tool`
@@ -357,21 +361,24 @@ make rust-test      # cargo test --workspace (offline)
 make rust-wasm-check # cargo check -p otto-core and -p otto-web for wasm32-unknown-unknown
 make rust-wasm-test  # wasm-pack test --node for otto-core and otto-web
 make test-tui       # only the PTY tests: cargo test -p otto --test tui_pty --test tui_attach_pty
-make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, connect-check, rust-wasm-check, scripts-test
+make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, connect-check, desktop-check, rust-wasm-check, scripts-test
 make connect-check  # Go connector: gofmt -l, go vet, go test -race (builds target/debug/otto for its end-to-end test)
 make connect-build  # build the Go connector to target/otto-connect
+make desktop-check  # Go desktop contracts and real-server lifecycle; cross-compile macOS arm64
+make desktop-app    # build the Web UI, Rust sidecar and ad-hoc-signed MyGo Otto.app (macOS)
 ```
 
 `check-fast` is described under [Local verification](#local-verification).
 `check` runs `rust-fmt` and `rust-lint`, builds the Web UI (`make ui`, so the
 tests embed the real `ui/dist`), then runs the full workspace test suite (which
-includes the `otto-core` tests and the PTY tests), the Go connector checks,
-the wasm tests under Node, and `make ui-test`. It does not run `cargo build
+includes the `otto-core` tests and the PTY tests), the Go connector and desktop
+checks, the wasm tests under Node, and `make ui-test`. It does not run `cargo build
 --release` or `rust-wasm-check`; `make build` is the release build, and
 `make check-linux` runs `rust-wasm-check`.
 
-`connect-check` needs the Go version named in `connect/go.mod`; CI installs it
-with `actions/setup-go` from that file. It gets `target/debug/otto` from
+`connect-check` needs the Go version named in `connect/go.mod`. CI installs
+the newer Go version named in `desktop/go.mod` with `actions/setup-go`, which
+satisfies both modules. It gets `target/debug/otto` from
 `cargo test --workspace --no-run`, which resolves the same features as
 `rust-test` and so reuses its build; `cargo build -p otto` would leave the
 dev-dependency features off and recompile most of the dependency tree. Its end-to-end tests drive the real
@@ -434,7 +441,8 @@ uncommitted and untracked files, and runs only the commands those paths need:
 | `connect/` | `make connect-check` |
 | `scripts/` | `make scripts-test` |
 | `docs/`, `LICENSE`, Markdown outside `crates/` and `testdata/` | nothing |
-| anything else, such as `.github/`, `Makefile`, `desktop/` | nothing; printed as not checked |
+| `desktop/` | `make desktop-check` (Go contracts, real server lifecycle, macOS cross-compilation) |
+| anything else, such as `.github/`, `Makefile` | nothing; printed as not checked |
 
 It ends with `git diff --check` against the same base.
 
@@ -540,7 +548,7 @@ changelog maintenance itself need no entry.
 
 ## Releases
 
-The version is `[workspace.package] version` in `Cargo.toml`, shared by `otto`, `otto-core` and `otto-web`. `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/tauri.conf.json`, the `otto`, `otto-core` and `otto-web` entries of `Cargo.lock` and the `otto-desktop` entry of `desktop/src-tauri/Cargo.lock` must carry the same value; a test fails `make check` when they differ.
+The version is `[workspace.package] version` in `Cargo.toml`, shared by `otto`, `otto-core` and `otto-web`. `desktop/mygo.json` and the `otto`, `otto-core` and `otto-web` entries of `Cargo.lock` must carry the same value; a test fails `make check` when they differ.
 
 Versioning follows SemVer in the 0.x range: a new feature or an incompatible change raises the minor version (0.1.0 to 0.2.0); only fixes raise the patch version (0.1.0 to 0.1.1). Moving to 1.0.0 is a maintainer decision. Version numbers change only in a release PR.
 

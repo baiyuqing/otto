@@ -66,6 +66,7 @@ const SECRETS_EXCEED_REDACTION_LIMITS: &str =
 ///
 /// The default is a null service reporting memory as disabled, which every
 /// operation answers without touching a store.
+#[derive(Clone)]
 pub struct MemoryWiring {
     pub service: Arc<Service>,
     /// Whether the service is backed by a live store, and so worth exposing to
@@ -423,13 +424,27 @@ impl Builder {
         stderr: &mut dyn Write,
     ) -> Result<CatalogWiring, BuildError> {
         let skills = resolve_skills(&self.config, &self.environment, &self.workspace_path);
-        let (discovered_catalog, mut warnings) = skill::Catalog::discover(&roots(&skills.roots));
+        let skill_roots = crate::config::layered::catalog_roots(
+            &self.config,
+            Path::new(&self.home),
+            Path::new(&self.workspace_path),
+            &skills.roots,
+            "skills",
+        )?;
+        let (discovered_catalog, mut warnings) = skill::Catalog::discover(&roots(&skill_roots));
         let catalog = discovered_catalog.without_names(&skills.disabled);
 
         let agents = resolve_agents(&self.config, &self.environment, &self.workspace_path)
             .map_err(|error| error.to_string())?;
         let (mut agent_catalog, mut agent_warnings) = if agents.enabled {
-            subagent::Catalog::discover(&roots(&agents.roots))
+            let agent_roots = crate::config::layered::catalog_roots(
+                &self.config,
+                Path::new(&self.home),
+                Path::new(&self.workspace_path),
+                &agents.roots,
+                "agents",
+            )?;
+            subagent::Catalog::discover(&roots(&agent_roots))
         } else {
             (subagent::Catalog::default(), Vec::new())
         };
@@ -976,6 +991,17 @@ impl Builder {
         cancellation_grace: Duration,
         cancel: &CancellationToken,
     ) -> Result<(mcp::client::Client, Option<Arc<dyn mcp::BearerSource>>), mcp::CallError> {
+        if crate::tool::project_guard::Guard::for_config(
+            &self.config,
+            &self.home,
+            &self.workspace_path,
+        )
+        .is_some_and(|g| !g.valid())
+        {
+            return Err(mcp::CallError::Transport(
+                "project executable trust was revoked before connection".into(),
+            ));
+        }
         match &server.transport {
             McpTransport::Stdio {
                 command,
@@ -983,6 +1009,29 @@ impl Builder {
                 env,
                 cwd,
             } => {
+                if self
+                    .config
+                    .policy
+                    .as_ref()
+                    .and_then(|p| p.allowed_mcp_commands.as_ref())
+                    .is_some()
+                {
+                    // Policies name immutable administrator-controlled binaries, never a
+                    // PATH lookup or a workspace-owned file at an allowlisted spelling.
+                    let path = Path::new(command);
+                    for ancestor in path.ancestors() {
+                        use std::os::unix::fs::MetadataExt;
+                        let info = std::fs::symlink_metadata(ancestor).map_err(|_| {
+                            mcp::CallError::Transport("cannot inspect managed MCP command".into())
+                        })?;
+                        if info.file_type().is_symlink()
+                            || info.uid() != 0
+                            || info.mode() & 0o022 != 0
+                        {
+                            return Err(mcp::CallError::Transport("managed MCP command must be administrator-owned and not user-writable".into()));
+                        }
+                    }
+                }
                 let transport = mcp::stdio::StdioTransport::spawn_with_grace(
                     command,
                     args,

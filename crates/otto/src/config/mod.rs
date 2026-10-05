@@ -11,6 +11,7 @@
 //! `_impl` twin directly instead of mutating the real environment.
 
 use std::collections::HashMap;
+pub mod layered;
 use std::fs;
 use std::fs::File as FsFile;
 use std::io;

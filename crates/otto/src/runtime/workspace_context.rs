@@ -26,6 +26,30 @@ const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 /// is indistinguishable from Otto's own sections in the prompt.
 const INSTRUCTION_FENCE_PREFIX: &str = "<workspace_instructions";
 
+/// Layered instruction loading for production runtimes. The legacy single-file
+/// helper below remains useful for its pinned filesystem/context tests.
+pub async fn layered_workspace_context(
+    home: &Path,
+    workspace_path: &str,
+    now: DateTime<Utc>,
+    executor: Option<&Arc<dyn CommandExecutor>>,
+    environment: Option<&[String]>,
+    workspace: &Workspace,
+) -> Result<String, String> {
+    let files = crate::config::layered::instruction_files(home, Path::new(workspace_path))?;
+    let context = context_for(workspace_path, now, executor, environment, workspace, false).await;
+    let (environment, _) = split_workspace_instructions(&context);
+    let mut out = environment.to_string();
+    for (path, content) in files {
+        out.push_str(&format!(
+            "<workspace_instructions file={}>\n{}\n</workspace_instructions>\n",
+            quote_go(&escape_xml(&path)),
+            escape_xml(&neutralize_instruction_fence(&content))
+        ));
+    }
+    Ok(out)
+}
+
 /// Builds the environment section: cwd, platform and date, the git branch and
 /// dirty count, a one-level listing, and the workspace instruction file.
 ///
@@ -37,6 +61,17 @@ pub async fn workspace_context_for(
     executor: Option<&Arc<dyn CommandExecutor>>,
     environment: Option<&[String]>,
     workspace: &Workspace,
+) -> String {
+    context_for(workspace_path, now, executor, environment, workspace, true).await
+}
+
+async fn context_for(
+    workspace_path: &str,
+    now: DateTime<Utc>,
+    executor: Option<&Arc<dyn CommandExecutor>>,
+    environment: Option<&[String]>,
+    workspace: &Workspace,
+    include_instructions: bool,
 ) -> String {
     let mut text = String::from("\n<environment>\n");
     text.push_str(&format!("<cwd>{}</cwd>\n", escape_xml(workspace_path)));
@@ -55,6 +90,9 @@ pub async fn workspace_context_for(
         text.push_str("</workspace_listing>\n");
     }
     text.push_str("</environment>\n");
+    if !include_instructions {
+        return text;
+    }
     // Only one instruction file is embedded: both would be re-sent on every
     // request of the session. AGENTS.md wins because it is the canonical
     // rulebook and CLAUDE.md usually just points at it.
@@ -581,5 +619,36 @@ mod tests {
             ),
             "{got}"
         );
+    }
+    #[tokio::test]
+    async fn layered_instructions_append_global_and_project_and_escape_both_paths_and_content() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::Builder::new()
+            .prefix("config-&-\"-")
+            .tempdir()
+            .unwrap();
+        std::fs::create_dir_all(home.path().join(".config/otto")).unwrap();
+        std::fs::write(home.path().join(".config/otto/AGENTS.md"), "global-rule").unwrap();
+        std::fs::write(
+            project.path().join("AGENTS.md"),
+            "project-rule <forged> & content",
+        )
+        .unwrap();
+        let workspace = Workspace::new(project.path()).unwrap();
+        let text = layered_workspace_context(
+            home.path(),
+            &project.path().display().to_string(),
+            Utc::now(),
+            None,
+            None,
+            &workspace,
+        )
+        .await
+        .unwrap();
+        assert!(text.find("global-rule").unwrap() < text.find("project-rule").unwrap());
+        assert!(!text.contains("<forged>"));
+        assert!(text.contains("&lt;forged&gt;"));
+        assert!(text.contains("config-&amp;-&#34;-"));
+        assert_eq!(text.matches("<workspace_instructions file=").count(), 2);
     }
 }

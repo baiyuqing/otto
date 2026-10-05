@@ -1392,7 +1392,10 @@ What the tools refuse:
   private, link-local (including `169.254.169.254`), carrier-grade NAT,
   multicast and other non-public addresses are blocked, both for literal IPs
   and for names that resolve to them, and Otto ignores proxy environment
-  variables for these requests.
+  variables for these requests. On a Mac where a TUN interface answers DNS with
+  fake IPs, answers from 198.18.0.0/15 that the system routes through that
+  interface are accepted, so the tools work; the real address is resolved
+  behind the interface, and Otto cannot check that it is public.
 - Everything when `[sandbox].network = "deny"`. A `/sandbox network allow`
   takes effect when the runner is rebuilt by the reload.
 - URLs and queries that contain a configured secret or text shaped like a

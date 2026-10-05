@@ -303,6 +303,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - Run macOS formatting and clippy in their own CI job beside the tests, with
   their own dependency cache; `make check-tests` is `make check` without
   them. ([#332](https://github.com/baiyuqing/otto/pull/332))
+- Make `make check-fast` the local gate: it runs only the checks for the paths
+  changed since `origin/main` (formatting, clippy, the changed `crates/otto`
+  modules' unit tests, changed integration tests, and the UI, connector or
+  script checks when those directories change), and a lock in the common git
+  directory lets it run in one worktree at a time. Local work no longer runs
+  `make check`; CI runs the full gates.
 
 ### Documentation
 

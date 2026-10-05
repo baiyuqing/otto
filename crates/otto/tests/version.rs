@@ -76,21 +76,10 @@ fn lock_version(lock: &str, package: &str) -> String {
 #[test]
 fn release_version_is_consistent_across_files() {
     let mut found: Vec<(String, String)> = Vec::new();
-    let cargo: toml::Table = root_file("desktop/src-tauri/Cargo.toml")
-        .parse()
-        .expect("parse desktop Cargo.toml");
-    found.push((
-        "desktop/src-tauri/Cargo.toml".into(),
-        cargo["package"]["version"]
-            .as_str()
-            .expect("version")
-            .into(),
-    ));
     let conf: serde_json::Value =
-        serde_json::from_str(&root_file("desktop/src-tauri/tauri.conf.json"))
-            .expect("parse tauri.conf.json");
+        serde_json::from_str(&root_file("desktop/mygo.json")).expect("parse mygo.json");
     found.push((
-        "desktop/src-tauri/tauri.conf.json".into(),
+        "desktop/mygo.json".into(),
         conf["version"].as_str().expect("version").into(),
     ));
     let lock = root_file("Cargo.lock");
@@ -100,10 +89,6 @@ fn release_version_is_consistent_across_files() {
             lock_version(&lock, package),
         ));
     }
-    found.push((
-        "desktop/src-tauri/Cargo.lock (otto-desktop)".into(),
-        lock_version(&root_file("desktop/src-tauri/Cargo.lock"), "otto-desktop"),
-    ));
     for (file, version) in found {
         assert_eq!(
             version, VERSION,

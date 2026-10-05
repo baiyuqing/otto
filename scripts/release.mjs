@@ -54,8 +54,7 @@ export const readWorkspaceVersion = (cargoToml) => {
 };
 
 export const rewriteCargoToml = (t, v) => inTomlSection('\n' + t, '[workspace.package]', v, 'Cargo.toml').slice(1);
-export const rewriteDesktopCargoToml = (t, v) => inTomlSection('\n' + t, '[package]', v, 'desktop Cargo.toml').slice(1);
-export const rewriteTauriConf = (t, v) => replaceOnce(t, /(^  "version": ")[^"]*(")/m, v, 'tauri.conf.json top-level "version"');
+export const rewriteDesktopConfig = (t, v) => replaceOnce(t, /(^  "version": ")[^"]*(")/m, v, 'mygo.json top-level "version"');
 export function rewriteLock(text, names, v) {
   let out = text;
   for (const name of names) {
@@ -66,10 +65,8 @@ export function rewriteLock(text, names, v) {
 
 export const FILES = [
   ['Cargo.toml', rewriteCargoToml],
-  ['desktop/src-tauri/Cargo.toml', rewriteDesktopCargoToml],
-  ['desktop/src-tauri/tauri.conf.json', rewriteTauriConf],
+  ['desktop/mygo.json', rewriteDesktopConfig],
   ['Cargo.lock', (t, v) => rewriteLock(t, ['otto', 'otto-core', 'otto-web'], v)],
-  ['desktop/src-tauri/Cargo.lock', (t, v) => rewriteLock(t, ['otto-desktop'], v)],
 ];
 
 export function bump(root, next) {

@@ -1,72 +1,80 @@
 # Otto desktop shell
 
-A macOS Tauri 2 window around `otto serve`. It is a client of the HTTP API
-documented in [the user manual's Agent server
-section](../docs/user-manual.md#agent-server); it adds no server behavior of
-its own. See [the user manual's Desktop app
-section](../docs/user-manual.md#desktop-app-macos) for what the app does at
-startup, on **File > Open Folder…**, and on quit.
+A macOS [MyGo](https://github.com/egoist/mygo) window around the Rust
+`otto serve` process. The existing web UI is served by Otto, not embedded
+separately in the Go shell. The shell adds no agent or server behavior.
+See the [Desktop app section](../docs/user-manual.md#desktop-app-macos)
+for startup, **File > Open Folder…**, and quit behavior.
 
-`desktop/src-tauri` is its own Cargo workspace (`[workspace]` in its
-`Cargo.toml`), so it is not a member of the root Otto workspace and is not
-built or tested by `make check`/`make check-linux`.
+`desktop/` is an independent Go module. `main_darwin.go` owns the native
+window, menus and dialogs; `internal/shell` owns environment capture,
+saved state, process lifecycle, URL validation and workspace HTTP calls.
+MyGo is pinned in `go.mod` and `go.sum`; its CLI uses the same module version.
 
 ## Web UI bridge
 
-The main window loads `otto serve`'s page from `http://127.0.0.1:<port>`.
-An initialization script defines `window.__OTTO_DESKTOP__.openFolder()`,
-which the sidebar's **Add workspace…** button calls. It navigates to
-`/__otto_desktop/open-folder` on the same origin; the main window's
-navigation handler cancels that navigation and runs **File > Open Folder…**
-(native folder picker, `otto trust`, `POST /v1/workspaces`, reload). The
-page uses no Tauri IPC: the app grants it no commands and no plugin
-permissions.
+The main window loads `http://127.0.0.1:<port>`. A document-start script
+provides `window.__OTTO_DESKTOP__.openFolder()`, used by **Add workspace…**.
+It navigates to `/__otto_desktop/open-folder`; the same-origin navigation
+handler cancels it and runs the native folder picker, `otto trust`, an
+app-owned authenticated `POST /v1/workspaces`, and a page reload.
 
-## Build
+The shell binds no Go services and grants no additional trusted origins.
+Workspace HTTP requests use a proxy-free client and never follow redirects.
+All blocking startup, folder selection and process cleanup runs off the
+native main loop. Quitting during startup cancels pending commands and
+cleans up a child even if it was spawned concurrently with quit.
 
-Tauri's build script requires the `otto` sidecar binary to exist on disk,
-named for its target triple, before `cargo build` runs in this directory:
+## Build Otto.app
 
-```bash
-cargo build --release --target aarch64-apple-darwin -p otto   # from the repo root
-mkdir -p desktop/src-tauri/binaries
-cp target/aarch64-apple-darwin/release/otto \
-  desktop/src-tauri/binaries/otto-aarch64-apple-darwin
-cd desktop/src-tauri
-cargo build
-```
+Prerequisites on an Apple silicon Mac:
 
-The app is arm64-only (`aarch64-apple-darwin`); there is no Intel build.
-`make desktop-sidecar` runs the first three commands.
-
-## Build Otto.app for this Mac
+- Go 1.27.1 or newer, plus the repository's pinned Rust toolchain.
+- Node 24+, npm and wasm-pack for the existing Web UI build.
+- Standalone Apple Command Line Tools for signing and packaging.
 
 ```bash
-cargo install tauri-cli --version ^2   # once
-make desktop-app                       # from the repo root
+make desktop-app
 ```
 
-Builds `desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Otto.app`
-with an ad-hoc signature (`APPLE_SIGNING_IDENTITY=-`). It needs no Apple
-Developer account. A locally built app carries no quarantine attribute, so
-Gatekeeper opens it on the Mac that built it; copied to another Mac, it is
-blocked. For distribution, use `make desktop-release`.
+This builds the Web UI and Rust `otto` for `aarch64-apple-darwin`, copies
+it to `desktop/resources/darwin-arm64/bin/otto`, and runs the pinned MyGo
+CLI to build `desktop/build/darwin-arm64/Otto.app` with an ad-hoc signature.
+MyGo packages and signs the Rust helper under `Contents/Resources/bin/otto`.
+The app remains macOS arm64 only; no additional platform support is claimed.
+No Bun, separate frontend build for MyGo, or globally installed MyGo CLI
+is needed: the configuration is `mygo.json` and the UI comes from Otto.
+
+A locally built app carries no quarantine attribute and can open on its
+build Mac. For distribution, use the signed release target below.
 
 ## Check
 
 ```bash
-make desktop-check   # from the repo root
+make desktop-check
 ```
 
-Builds the release `otto` binary, copies it to the sidecar path above, then
-runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test`
-(unit tests plus an integration test that starts a real `otto serve`
-process, hits `/healthz`, and checks it exits within 5 seconds of its stdin
-closing and of receiving `SIGTERM`) inside `desktop/src-tauri`. Not part of
-`make check`.
+On macOS or Linux, this builds a native debug `otto` using the shared Rust
+test build, checks Go formatting and vet, runs race-enabled Go tests with
+`OTTO_BIN=target/debug/otto`, and cross-compiles/vets the macOS arm64 shell
+without cgo. The real-server tests check `/healthz`, authenticated workspace
+registration, stdin-close exit, and SIGTERM exit within five seconds.
+Other tests cover login-shell output parsing, probe timeout, state format
+and locations, startup URL validation, navigation origin restrictions,
+proxy/redirect isolation, spawn arguments/environment, and child cleanup.
 
-The integration test binds a loopback TCP port; an agent sandbox that denies
-local port binding needs that restriction lifted to run it.
+`make check-fast` selects this gate when desktop files change; CI runs it
+in `make check` and `make check-linux`. Loopback binding must be permitted
+by the execution environment. To run just the offline Go tests:
+
+```bash
+cd desktop
+go test -race ./...
+```
+
+The real-server tests skip unless `OTTO_BIN` is set to an absolute binary
+path. Cross-compilation does not verify native windows, directory dialogs,
+Finder login-shell capture, signing or notarization; validate these on a Mac.
 
 ## Release
 
@@ -76,21 +84,20 @@ NOTARY_PROFILE=otto-notary \
 make desktop-release
 ```
 
-Builds and copies the sidecar binary, runs `cargo tauri build` with hardened
-runtime and the given signing identity, then `xcrun notarytool submit
---wait` and `xcrun stapler staple` on the built `.app`. Fails immediately,
-before building anything, if either `APPLE_SIGNING_IDENTITY` or
-`NOTARY_PROFILE` is unset. `NOTARY_PROFILE` names a keychain profile created
-with `xcrun notarytool store-credentials`.
-
-This target needs `cargo-tauri` (`cargo install tauri-cli --version ^2`,
-not installed by any other Makefile target) and a Developer ID Application
-identity in the local keychain; neither is available in every environment
-this repository is checked out in.
+The target checks both variables before building, builds the UI and sidecar,
+and uses MyGo to sign the app and helper with hardened runtime. It then
+archives the `.app` with `ditto`, submits it through `xcrun notarytool
+--wait`, and staples the ticket onto the app. `NOTARY_PROFILE` names a
+keychain profile created with `xcrun notarytool store-credentials`.
+The Developer ID identity and profile must already exist in the Mac's keychain.
 
 ## Locations
 
+The bundle identifier and existing user paths are preserved on upgrade.
+MyGo's app-name-based default directories are not used for saved state/logs.
+
 | What | Path |
 | --- | --- |
-| Saved state (last opened folder) | `~/Library/Application Support/com.otto.desktop/state.json` |
-| Child process log (`otto serve`'s stderr) | `~/Library/Logs/com.otto.desktop/serve.log` |
+| Saved workspace | `~/Library/Application Support/com.otto.desktop/state.json` |
+| Server stderr (appended) | `~/Library/Logs/com.otto.desktop/serve.log` |
+| Bundled Rust server | `Otto.app/Contents/Resources/bin/otto` |

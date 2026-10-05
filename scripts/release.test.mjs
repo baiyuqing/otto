@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { FILES, bump, checkBump, readWorkspaceVersion, rewriteCargoToml, rewriteDesktopCargoToml, rewriteLock, rewriteTauriConf } from './release.mjs';
+import { FILES, bump, checkBump, readWorkspaceVersion, rewriteCargoToml, rewriteDesktopConfig, rewriteLock } from './release.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
@@ -27,15 +27,10 @@ test('Cargo.toml rewrite changes only [workspace.package] version', () => {
   assert.throws(() => rewriteCargoToml('[package]\nversion = "0.1.0"\n', '0.2.0'));
 });
 
-test('desktop Cargo.toml rewrite changes only [package] version', () => {
-  const src = '[package]\nname = "otto-desktop"\nversion = "0.1.0"\n\n[dependencies]\nserde = { version = "1" }\n[build-dependencies]\nversion = "0.1.0"\n';
-  assert.equal(rewriteDesktopCargoToml(src, '0.2.0'), src.replace('version = "0.1.0"\n\n', 'version = "0.2.0"\n\n'));
-});
-
-test('tauri.conf.json rewrite changes only the top-level version', () => {
-  const src = '{\n  "productName": "Otto",\n  "version": "0.1.0",\n  "bundle": {\n    "version": "0.1.0"\n  }\n}\n';
-  assert.equal(rewriteTauriConf(src, '0.2.0'), src.replace('  "version": "0.1.0",', '  "version": "0.2.0",'));
-  assert.throws(() => rewriteTauriConf('{ "name": "x" }', '0.2.0'));
+test('MyGo configuration rewrite changes only the top-level version', () => {
+  const src = '{\n  "name": "Otto",\n  "version": "0.1.0",\n  "macos": {\n    "version": "0.1.0"\n  }\n}\n';
+  assert.equal(rewriteDesktopConfig(src, '0.2.0'), src.replace('  "version": "0.1.0",', '  "version": "0.2.0",'));
+  assert.throws(() => rewriteDesktopConfig('{ "name": "x" }', '0.2.0'));
 });
 
 test('lockfile rewrite matches package names exactly', () => {
@@ -50,7 +45,7 @@ test('lockfile rewrite matches package names exactly', () => {
 test('bump rewrites a copy of the real files and keeps them consistent', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'otto-release-'));
   try {
-    mkdirSync(path.join(dir, 'desktop/src-tauri'), { recursive: true });
+    mkdirSync(path.join(dir, 'desktop'), { recursive: true });
     for (const [file] of FILES) cpSync(path.join(root, file), path.join(dir, file));
     const current = readWorkspaceVersion(readFileSync(path.join(dir, 'Cargo.toml'), 'utf8'));
     assert.throws(() => bump(dir, current));

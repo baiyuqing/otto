@@ -27,7 +27,7 @@ struct Args {
 pub fn request_definition() -> ToolDefinition {
     definition(
         "request_approval",
-        "Ask the user to approve a proposal or review a prepared action. Decide yourself when consent is needed. Supply exactly one of proposal or subject_ref. This waits for a real user decision and returns their feedback; later calls in this batch will not execute. Confirmation does not grant tool permissions. Never claim approval before the user decides.",
+        "Ask the user to approve a proposal or review a prepared action. Decide yourself when consent is needed. Supply exactly one of proposal or subject_ref. This records an approval request and returns its decision and feedback; AUTO sessions approve automatically, MANUAL sessions wait for the user; later calls in this batch will not execute. Confirmation does not grant tool permissions. Never claim approval before a recorded approval decision.",
         json!({"type":"object","additionalProperties":false,"properties":{
             "title":{"type":"string"},"reason":{"type":"string"},
             "proposal":{"type":"string"},"subject_ref":{"type":"string"}
@@ -118,7 +118,7 @@ impl Tool for Control {
             if self.revoke {
                 "Withdraw an exact pending approval in this session. Cannot approve, undo execution or remove permanent grants."
             } else {
-                "List pending approvals visible to this session. Only a user can decide."
+                "List pending approvals visible to this session. Decisions come from the user or the session AUTO policy."
             },
             if self.revoke {
                 json!({"type":"object","additionalProperties":false,"properties":{"id":{"type":"string"}},"required":["id"]})
@@ -264,6 +264,7 @@ mod tests {
                 task_id: String::new(),
                 run_id: String::new(),
             };
+            service.set_auto_mode(&scope, false).unwrap();
             let mut changes = service.changes();
             let tool = RequestApproval {
                 service: service.clone(),

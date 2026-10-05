@@ -326,3 +326,86 @@ pub async fn changes_shared(
         ),
     }
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModeBody {
+    automatic: bool,
+}
+
+pub async fn mode(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session
+        .ctrl
+        .approval_service()
+        .auto_mode(&session.ctrl.approval_scope())
+    {
+        Ok(automatic) => json_response(StatusCode::OK, &ModeBody { automatic }),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "approval_mode_failed",
+            &e.to_string(),
+        ),
+    }
+}
+
+pub async fn set_mode(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let Ok(input) = serde_json::from_slice::<ModeBody>(&body) else {
+        return bad_request("expected automatic: boolean");
+    };
+    match session
+        .ctrl
+        .approval_service()
+        .set_auto_mode(&session.ctrl.approval_scope(), input.automatic)
+    {
+        Ok(()) => {
+            server.bump_status();
+            json_response(StatusCode::OK, &input)
+        }
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "approval_mode_failed",
+            &e.to_string(),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct EventQuery {
+    #[serde(default)]
+    after: i64,
+}
+pub(super) async fn session_events(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<EventQuery>,
+) -> Response {
+    if query.after < 0 {
+        return bad_request("negative event cursor");
+    }
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let scope = session.ctrl.approval_scope();
+    match session.ctrl.approval_service().events(
+        &scope.workspace,
+        Some(&scope.session_id),
+        query.after,
+    ) {
+        Ok(changes) => json_response(StatusCode::OK, &changes),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "approval_events_failed",
+            &e.to_string(),
+        ),
+    }
+}

@@ -1,5 +1,8 @@
 # Unified approval service
 
+Session policy extension: [session automatic approval](2026-10-05-session-auto-mode.md)
+supersedes this design's assumption that every decision requires a human round trip.
+
 Status: approved design; implementation and acceptance verification in progress.
 Source baseline: `59dfe6e`, the checkout supplied for this discussion.
 

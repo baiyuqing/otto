@@ -77,6 +77,7 @@ export interface Session {
   usage: Usage
   context_input_tokens: number
   sandbox: Sandbox
+  auto_mode?: boolean
   turn: SessionTurn | null
 }
 

@@ -295,12 +295,18 @@ never retried automatically.
   token persistence. The Unix socket relies on file permissions for access
   control.
 
+Sessions default to **AUTO** approval: requests and automatic decisions remain
+visible and recorded. `/auto off` selects manual approval; `/auto on` restores
+AUTO for this session. The preference survives resume. Terminal and Web status
+bars show the mode; Telegram and Feishu support the same commands, and Telegram
+also offers mode buttons. See [unified approvals](docs/user-manual.md#unified-approvals).
+
 Configure shell permissions interactively with `otto sandbox setup`; see the
 [setup guide](docs/user-manual.md#interactive-sandbox-setup). In a running
 session, `/sandbox allow <path>` and `/sandbox network allow|deny` write the
 same `[sandbox]` settings and apply them to the current process. Models can
-also request a persistent read-path grant through a TUI approval dialog or
-a Telegram/Feishu approval card; the prompt shows the path and that it will
+also request a persistent read-path grant; in MANUAL mode this uses a TUI
+approval dialog or a Telegram/Feishu approval card; the prompt shows the path and that it will
 be saved. While an approval waits, you can ask Otto to explain or withdraw it;
 normal tasks remain queued. In the TUI, press `c` to chat without deciding.
 Otto can also consult its installed-version user manual and current tool list;

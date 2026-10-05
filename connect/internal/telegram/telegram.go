@@ -519,6 +519,9 @@ type callbackQuery struct {
 }
 
 func normalizeCallback(q *callbackQuery) (bridge.Message, bool) {
+	if parts := strings.Split(q.Data, ":"); len(parts) == 3 && parts[0] == "auto" && (parts[1] == "on" || parts[1] == "off") && len(parts[2]) == 32 && q.From != nil && q.Message != nil {
+		return bridge.Message{Platform: "telegram", ChatID: strconv.FormatInt(q.Message.Chat.ID, 10), SenderID: strconv.FormatInt(q.From.ID, 10), ModeSession: parts[2], Text: "/auto " + parts[1], Time: time.Now()}, true
+	}
 	action, id, ok := strings.Cut(q.Data, ":")
 	if !ok || len(id) != 32 || (action != "approve" && action != "deny") || q.From == nil || q.Message == nil {
 		return bridge.Message{}, false
@@ -545,4 +548,12 @@ func (b *Bot) SendApproval(ctx context.Context, chatID, requestID, text string) 
 	return func(ctx context.Context, status string) error {
 		return b.call(ctx, "editMessageText", map[string]any{"chat_id": chatParam(chatID), "message_id": sent.MessageID, "text": parts[len(parts)-1] + "\n\n" + status, "reply_markup": map[string]any{"inline_keyboard": [][]any{}}}, nil)
 	}, nil
+}
+
+func (b *Bot) SendApprovalMode(ctx context.Context, chatID, session string, automatic bool) error {
+	mode := "MANUAL"
+	if automatic {
+		mode = "AUTO"
+	}
+	return b.call(ctx, "sendMessage", map[string]any{"chat_id": chatParam(chatID), "text": "Approval mode: " + mode + "\nSession: " + session, "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "AUTO", "callback_data": "auto:on:" + session}, map[string]any{"text": "MANUAL", "callback_data": "auto:off:" + session}}}}}, nil)
 }

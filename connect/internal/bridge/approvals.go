@@ -60,6 +60,20 @@ func (c *chat) startApprovalWatch(sid string) {
 	}
 	c.approvalWatchSID = sid
 	c.mu.Unlock()
+	// Capture the cursor before returning to the caller that starts a turn.
+	// This keeps fast AUTO decisions visible without replaying older turns.
+	ctx, cancel := context.WithTimeout(c.b.workCtx, 10*time.Second)
+	page, err := c.b.opts.Agent.SharedApprovals(ctx, sid)
+	cancel()
+	if err != nil {
+		c.mu.Lock()
+		if c.approvalWatchSID == sid {
+			c.approvalWatchSID = ""
+		}
+		c.mu.Unlock()
+		return
+	}
+	initialCursor := page.Cursor
 	c.b.mu.Lock()
 	if c.b.closing {
 		c.b.mu.Unlock()
@@ -76,6 +90,7 @@ func (c *chat) startApprovalWatch(sid string) {
 			}
 			c.mu.Unlock()
 		}()
+		cursor := initialCursor
 		timer := time.NewTicker(500 * time.Millisecond)
 		defer timer.Stop()
 		for {
@@ -93,6 +108,20 @@ func (c *chat) startApprovalWatch(sid string) {
 			}
 			if err == nil {
 				c.showApprovals(ctx, sid, page.Requests)
+				changes, changeErr := c.b.opts.Agent.ApprovalChanges(ctx, sid, cursor)
+				if changeErr == nil {
+					for _, change := range changes {
+						r := change.Request
+						if r.Decision != nil && r.Decision.Transport == "auto-mode" {
+							if r.Application == "failed" || r.Application == "unknown" {
+								c.send(ctx, "", fmt.Sprintf("Approval %s was automatically approved; application %s: %s", r.ID, r.Application, r.ApplicationError))
+							} else if r.Application == "not_started" || r.Application == "not_required" {
+								c.send(ctx, "", fmt.Sprintf("Approval requested: %s\n%s\nReason: %s\nRequest: %s\nAutomatically approved (AUTO).", r.Title, r.Subject.Details, r.Reason, r.ID))
+							}
+						}
+						cursor = change.Sequence
+					}
+				}
 			}
 			cancel()
 			select {

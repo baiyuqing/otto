@@ -2305,7 +2305,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessi
 
 ### Desktop app (macOS)
 
-The desktop app (`desktop/`) is a native macOS window around `otto serve`. On
+The desktop app (`desktop/`) is a native macOS MyGo window around the Rust
+`otto serve` process. On
 launch it captures the login shell's environment, asks for a folder the
 first time it runs (or when the saved folder no longer exists), runs `otto
 trust` on it, starts `otto serve --exit-on-stdin-close` as a child process,

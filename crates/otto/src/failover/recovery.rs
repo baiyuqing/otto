@@ -7,7 +7,7 @@
 //! parent's own sub-agent children are not part of that record, since they
 //! are separate transcripts, so this module re-derives their state with
 //! [`crate::subagent::interrupted::scan`]. [`notify`] is called once, from
-//! `cli::wiring::Builder::build_subagents`, after sub-agent wiring is up: a
+//! `runtime::wiring::Builder::build_subagents`, after sub-agent wiring is up: a
 //! session that never takes over a lease, or whose caller disables
 //! sub-agents entirely (`build_subagents` returns before an inbox exists),
 //! never reaches it, so no notification is pushed in either case.

@@ -34,7 +34,7 @@ use crate::mcp::{BearerSource, CallError, CallOutcome, ContentBlock, ToolInfo, T
 
 /// Every registered MCP tool name starts with this.
 pub const NAME_PREFIX: &str = "mcp__";
-/// `safe_prompt_tool_name` in `crate::cli::prompt` rejects anything longer.
+/// `safe_prompt_tool_name` in `crate::runtime::prompt` rejects anything longer.
 pub const MAX_TOOL_NAME_BYTES: usize = 64;
 /// The advertised description is cut to this many bytes, on a char boundary.
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;
@@ -145,7 +145,7 @@ impl McpTool {
     }
 
     /// The tool's name as advertised by the server, before prefixing. Used by
-    /// `crate::cli::wiring`'s cross-server collision warning, which needs the
+    /// `crate::runtime::wiring`'s cross-server collision warning, which needs the
     /// remote name for its message even though the registered name is
     /// [`Self::name`]'s sanitized, server-prefixed form.
     pub fn remote_name(&self) -> &str {
@@ -198,7 +198,7 @@ impl McpTool {
                 // ponytail: the bearer's tokens pushed the combined secrets
                 // past the redaction limits (huge access/refresh token).
                 // Fall back to the static secrets, already known safe from
-                // the connect-time check in `cli::wiring::connect_mcp`,
+                // the connect-time check in `runtime::wiring::connect_mcp`,
                 // rather than blanking the whole result.
                 None => redact_exact_text(text, &self.secrets, &self.marker),
             }

@@ -2,7 +2,7 @@
 //!
 //! One [`app::Controller`] per session, a turn event buffer decoupled from the
 //! agent's synchronous emit callback ([`turn::Turn`]), Prometheus metrics
-//! ([`metrics::Metrics`]), and structured request logging. See
+//! ([`crate::metrics::Metrics`]), and structured request logging. See
 //! `docs/specs/2026-09-03-agent-server-design.md`.
 //!
 //! Concurrency: `sessions` is a plain `Mutex<HashMap>` held only for map
@@ -18,7 +18,6 @@ pub mod diff;
 pub mod fs;
 pub mod listen;
 pub mod mcp;
-pub mod metrics;
 pub mod reflection;
 pub mod sandbox;
 pub mod schedule;
@@ -51,12 +50,12 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{self, ApprovalDecision, ApprovalRequest, Channel, Controller, Step, Stop};
-use crate::cli::info::SandboxInfo;
-#[cfg(test)]
-use crate::cli::info::{SandboxMode, SandboxNetwork, SandboxReason};
 pub use crate::log::Logger;
 pub(crate) use crate::log::request_id;
-use metrics::{Metrics, SessionContext};
+use crate::metrics::{Metrics, SessionContext};
+use crate::runtime::info::SandboxInfo;
+#[cfg(test)]
+use crate::runtime::info::{SandboxMode, SandboxNetwork, SandboxReason};
 use otto_core::wire::events::WireEvent;
 use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
 
@@ -2273,8 +2272,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::cli::runtime_builder::{Builder, Runner, RuntimeInfo, SharedSession};
     use crate::cli::testutil;
+    use crate::runtime::builder::{Builder, Runner, RuntimeInfo, SharedSession};
     use axum::body::Body;
     use axum::http::Request;
     use base64::Engine as _;
@@ -4426,7 +4425,7 @@ mod tests {
     /// A child transcript at `<parent without .jsonl>/<task_id>-child.jsonl`,
     /// matching the file `subagent::runner::spawn` creates. Duplicated from
     /// [`crate::app::tests::child_store`] and
-    /// [`crate::cli::runtime_builder::tests::child_store`]: each is
+    /// [`crate::runtime::builder::tests::child_store`]: each is
     /// `#[cfg(test)]`-private to its own module, and the fixture is 12
     /// lines.
     fn child_store(

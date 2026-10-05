@@ -50,11 +50,11 @@ use otto_core::agent::oneshot::TextRequest;
 use otto_core::config::{Auto, ReflectionRuntime, SkillSource};
 use tokio_util::sync::CancellationToken;
 
-use crate::cli::runtime_builder::Runner;
 use crate::memory::{
     CandidateAction, CandidateState, Origin, ProposeRequest, Provenance, Scope, SearchRequest,
     Service,
 };
+use crate::runtime::builder::Runner;
 use output::{Action, Existing, Plan, Proposal, ScopeChoice};
 use store::RunRow;
 pub use store::{Status, Store};
@@ -1159,7 +1159,7 @@ mod tests {
         home: tempfile::TempDir,
         roots: skillwrite::Roots,
         runner: Runner,
-        session: crate::cli::runtime_builder::SharedSession,
+        session: crate::runtime::builder::SharedSession,
         provider: Arc<Scripted>,
         service: Arc<Service>,
         user_scope: Scope,

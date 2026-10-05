@@ -28,7 +28,7 @@ use otto_core::model::ToolDefinition;
 use otto_core::safetext::dynamic_redaction_marker;
 use tokio_util::sync::CancellationToken;
 
-use super::runtime_builder::{BuildError, Builder, ProviderClient, SharedSession};
+use super::builder::{BuildError, Builder, ProviderClient, SharedSession};
 use crate::failover;
 use crate::mcp;
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};
@@ -378,7 +378,7 @@ impl Builder {
     /// `None` when memory is unusable.
     pub fn advisor(
         &self,
-        agent: super::runtime_builder::AdviceAgent,
+        agent: super::builder::AdviceAgent,
         model: &str,
         usage: Option<crate::usage::Collector>,
     ) -> Option<Arc<crate::memory::advice::Advisor>> {
@@ -556,7 +556,7 @@ impl Builder {
                     reserve_tokens: runtime.compaction.reserve_tokens,
                     keep_recent_tokens: runtime.compaction.keep_recent_tokens,
                 },
-                new_operation_id: Arc::new(super::runtime_builder::new_operation_id),
+                new_operation_id: Arc::new(super::builder::new_operation_id),
                 provider_timeout: runtime.resilience.deadlines.provider_timeout,
                 cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
                 task_timeout: runtime.resilience.deadlines.subagent_timeout,
@@ -675,7 +675,7 @@ impl Builder {
                 executor,
                 &self.shell,
                 self.sandbox_environment.clone().unwrap_or_default(),
-                super::runtime_builder::shell_timeout(runtime.shell_timeout),
+                super::builder::shell_timeout(runtime.shell_timeout),
                 runtime.resilience.deadlines.cancellation_grace,
                 max_output,
                 redaction_values,
@@ -1514,7 +1514,7 @@ fn child_sessions(parent: SharedSession) -> ChildSession {
             return Ok(None);
         }
         let mut header = parent.header();
-        header.id = super::runtime_builder::random_id()
+        header.id = super::builder::random_id()
             .map_err(|error| format!("create sub-agent session id: {error}"))?;
         header.created_at = chrono::Utc::now();
         let name = format!("{task_id}-{}", header.id);
@@ -2592,7 +2592,7 @@ mod workspace_identity_tests {
                 .unwrap(),
             record
         );
-        crate::cli::runtime_builder::validate_session_workspace(
+        crate::runtime::builder::validate_session_workspace(
             original.to_str().unwrap(),
             moved.to_str().unwrap(),
         )
@@ -2610,7 +2610,7 @@ mod workspace_identity_tests {
                 .is_err()
         );
         assert!(
-            crate::cli::runtime_builder::validate_session_workspace(
+            crate::runtime::builder::validate_session_workspace(
                 original.to_str().unwrap(),
                 moved.to_str().unwrap()
             )

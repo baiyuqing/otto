@@ -14,7 +14,7 @@
 //! process-local.
 //!
 //! Ownership: [`Reminders`] is the single record of what is armed and what is
-//! on disk; the three tools and [`crate::cli::runtime_builder::Runner`] hold
+//! on disk; the three tools and [`crate::runtime::builder::Runner`] hold
 //! `Arc`s of it, and `/timers` reads the runner's. Concurrency: `execute`
 //! takes `&self` and may run concurrently, so every mutation goes through one
 //! mutex. Cancellation: the *turn* token only aborts a call that has not yet
@@ -270,7 +270,7 @@ pub(crate) fn write_private(path: &Path, body: &[u8]) -> Result<(), String> {
 /// host crash right after a successful rename can still lose it otherwise.
 /// Shared by the reminders sidecar (`<id>.reminders.json`, via
 /// [`Inner::save`]) and the inbox sidecar (`<id>.inbox.json`, via
-/// `write_inbox_file` in `cli::wiring`), so the temporary-file/fsync/rename
+/// `write_inbox_file` in `runtime::wiring`), so the temporary-file/fsync/rename
 /// pattern exists in exactly one place.
 pub(crate) fn replace_private(path: &Path, body: &[u8]) -> Result<(), String> {
     replace_private_typed(path, body, sync_directory).map_err(|error| error.to_string())
@@ -308,7 +308,7 @@ fn sync_parent_directory(path: &Path, sync: DirectorySync) -> std::io::Result<()
 /// into `archive/` before it removes the sidecars, so this is `false` for
 /// the rest of that call and afterwards. Shared by the reminders sidecar
 /// (via [`Inner::save`]) and the inbox sidecar (via `write_inbox_file` in
-/// `cli::wiring`).
+/// `runtime::wiring`).
 pub(crate) fn session_file_exists(sidecar: &Path, suffix: &str) -> bool {
     let Some(name) = sidecar.file_name().and_then(|name| name.to_str()) else {
         return true;

@@ -46,7 +46,7 @@ use crate::app::Controller;
 use crate::cli::login;
 use crate::cli::repl::{Error as ReplError, is_fatal_persistence};
 use crate::cli::repl_commands;
-use crate::cli::sandbox_setup::SandboxChange;
+use crate::runtime::sandbox_config::SandboxChange;
 use crate::subagent::tasks::Tasks;
 
 use app::{Action, App};
@@ -1675,7 +1675,7 @@ mod tests {
         };
         use ratatui::backend::TestBackend;
 
-        use crate::cli::runtime_builder::Runner;
+        use crate::runtime::builder::Runner;
         use crate::subagent::tasks::Tasks;
 
         struct ScriptedProvider {

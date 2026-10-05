@@ -12,7 +12,7 @@ use otto_core::agent::oneshot::TextRequest;
 use tokio_util::sync::CancellationToken;
 
 use super::guard::Candidate;
-use crate::cli::runtime_builder::Runner;
+use crate::runtime::builder::Runner;
 
 /// The largest accepted reviewer answer, in bytes.
 const MAXIMUM_ANSWER_BYTES: usize = 2 * 1024;

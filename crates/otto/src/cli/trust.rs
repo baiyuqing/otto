@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::run::fail;
-use super::sandbox_runtime::canonical_directory;
+use crate::runtime::sandbox_runtime::canonical_directory;
 
 const USAGE: &str = "usage: otto trust <dir> [--config PATH]";
 

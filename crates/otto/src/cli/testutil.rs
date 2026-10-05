@@ -14,8 +14,8 @@ use otto_core::config::{File, Profile};
 use otto_core::model::{Block, BlockType, Message, Role};
 
 use super::controller::Controller;
-use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
-use super::runtime_builder::{Builder, Shared, leaked_workspace, resolve_initial_runtime};
+use crate::runtime::builder::{Builder, Shared, leaked_workspace, resolve_initial_runtime};
+use crate::runtime::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 pub fn config() -> File {
     let mut profiles = HashMap::new();
@@ -216,10 +216,10 @@ pub async fn controller_with_memory(
         ..MemoryRuntime::default()
     };
     let (service, user_scope, usable) =
-        super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+        crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
             .expect("open memory service");
     assert!(usable, "the test store must be usable");
-    builder.shared_mut().memory = super::wiring::MemoryWiring {
+    builder.shared_mut().memory = crate::runtime::wiring::MemoryWiring {
         service,
         usable,
         user_scope,
@@ -228,7 +228,7 @@ pub async fn controller_with_memory(
         advice_audit: None,
     };
     builder.workspace_scope =
-        super::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
+        crate::runtime::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
             .expect("workspace scope");
     let runtime = initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
@@ -252,7 +252,7 @@ pub fn seed_over_budget_standing(store_path: &Path) {
         ..MemoryRuntime::default()
     };
     let (service, user_scope, _) =
-        super::wiring::open_memory_service(&runtime, &[], &mut Vec::new()).expect("open");
+        crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new()).expect("open");
     service.close().expect("close");
     let store = Store::open(store_path, Options::default()).expect("open store");
     for id in ["a", "b", "c"] {

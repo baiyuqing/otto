@@ -17,7 +17,7 @@ use crate::deadline::{Control, Deadline};
 use crate::memory::advice::{Answer, Backend, Exchange, Failure, Question, session};
 use crate::tool::registry::Registry;
 
-use super::runtime_builder::{ProviderClient, SharedSession};
+use super::builder::{ProviderClient, SharedSession};
 
 /// The usage task id of advice requests.
 pub const TASK_ID: &str = "memory-advice";
@@ -261,7 +261,7 @@ mod tests {
     fn selection_builder(
         key: Option<&str>,
         memory: bool,
-    ) -> (tempfile::TempDir, crate::cli::runtime_builder::Builder) {
+    ) -> (tempfile::TempDir, crate::runtime::builder::Builder) {
         let directory = tempfile::tempdir().expect("dir");
         let workspace = directory.path().join("ws");
         let sessions = directory.path().join("sessions");
@@ -285,20 +285,22 @@ mod tests {
                 ..otto_core::config::MemoryRuntime::default()
             };
             let (service, user_scope, usable) =
-                crate::cli::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+                crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                     .expect("memory");
             let shared = builder.shared_mut();
             shared.memory.service = service;
             shared.memory.user_scope = user_scope;
             shared.memory.usable = usable;
-            builder.workspace_scope =
-                crate::cli::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
-                    .expect("workspace scope");
+            builder.workspace_scope = crate::runtime::wiring::workspace_memory_scope(
+                &runtime,
+                &workspace.to_string_lossy(),
+            )
+            .expect("workspace scope");
         }
         (directory, builder)
     }
 
-    fn advice_agent() -> (crate::cli::runtime_builder::AdviceAgent, Arc<Scripted>) {
+    fn advice_agent() -> (crate::runtime::builder::AdviceAgent, Arc<Scripted>) {
         let (backend, provider, _) = backend("{}", &[]);
         (backend.agent, provider)
     }

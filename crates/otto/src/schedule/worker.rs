@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use super::store::{Item, delivery_text, run_text};
 use super::{Origin, RunOutcome, Scope, Store};
 use crate::log::Logger;
-use crate::server::metrics::Metrics;
+use crate::metrics::Metrics;
 
 /// A run is cancelled after this long; the claim lease is 15 min.
 const RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);

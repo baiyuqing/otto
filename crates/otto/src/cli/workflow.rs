@@ -10,8 +10,8 @@ use nix::fcntl::{Flock, FlockArg};
 use otto_core::config::resolve::Runtime;
 use otto_core::session::{CURRENT_VERSION, Header, Session};
 
-use super::runtime_builder::{Builder, MemoryHandle, Runner, SharedSession, random_id};
 use crate::deadline::Control;
+use crate::runtime::builder::{Builder, MemoryHandle, Runner, SharedSession, random_id};
 use crate::subagent::runner::{Runner as SubagentRunner, StartRequest};
 use crate::subagent::tasks::TaskStatus;
 use crate::workflow::{

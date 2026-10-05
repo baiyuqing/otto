@@ -236,7 +236,7 @@ impl Controller {
     async fn run_approved_step<F, Fut>(
         &self,
         first: Step<'_>,
-        runner: &crate::cli::runtime_builder::Runner,
+        runner: &crate::runtime::builder::Runner,
         system_context: &str,
         task_run: &super::task_control::Run,
         first_admission: Option<super::Admission<'_>>,
@@ -502,7 +502,8 @@ mod tests {
     use super::*;
     use crate::{
         app::PROMPT_ACTIVE,
-        cli::{runtime_builder::Runner, testutil::initial_runtime},
+        cli::testutil::initial_runtime,
+        runtime::builder::Runner,
         subagent::tasks::Tasks,
         tool::{Tool, definition},
     };

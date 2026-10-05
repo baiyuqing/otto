@@ -256,10 +256,8 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{
-        runtime_builder::Runner,
-        testutil::{builder, initial_runtime},
-    };
+    use crate::cli::testutil::{builder, initial_runtime};
+    use crate::runtime::builder::Runner;
     use otto_core::model::{Block, BlockType, FinishReason, Message, Role};
     use otto_core::operation::OperationControl;
     use otto_core::provider::{Provider, ProviderSettlement, Request, Response, StreamSink};

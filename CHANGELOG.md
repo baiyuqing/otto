@@ -341,6 +341,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   Compose setup for Docker Desktop on Apple Silicon and Intel Macs. Persist
   configuration and sessions, run as a non-root user, and preserve Otto's
   loopback listener and API token through a TCP relay.
+  ([#353](https://github.com/baiyuqing/otto/pull/353))
 
 - Fix the stale ACP command-list test expectation after adding `/auto`; verify
   the command is advertised for new, loaded, and attached sessions. Approval

@@ -100,7 +100,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
-- Open versioned lifecycle hooks and custom command tools on installed plugin snapshots, with sandbox execution, exact-argument authorization and append-only rewrite auditing.
+- Open versioned lifecycle hooks and custom command tools on installed plugin snapshots, with sandbox execution, exact-argument authorization and append-only rewrite auditing. ([#358](https://github.com/baiyuqing/otto/pull/358))
 
 - Ask the agent for a retrospective in plain words: the new `reflect` tool runs the same
   reflection as `/reflect` instead of the model writing its own file. Every reflection

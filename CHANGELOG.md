@@ -181,6 +181,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Make zsh here-documents (`cat > file <<EOF`) work in the Seatbelt sandbox.
+  The sandbox now sets `TMPPREFIX` to its private temporary directory, so zsh
+  no longer tries to write the denied `/tmp/zsh*` and leave an empty target file.
+
 - Select manual approval mode in the macOS interactive elevation test so it
   continues to verify explicit approval with sessions defaulting to AUTO.
 

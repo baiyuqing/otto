@@ -1206,7 +1206,7 @@ impl Builder {
     ) -> Builder {
         let sandbox_secrets = shared.sandbox_secrets_baseline.clone();
         let sandbox_secrets_complete = shared.sandbox_secrets_baseline_complete;
-        let web = crate::tool::web::Runtime::new(&shared.config.web.allow_hosts);
+        let web = crate::tool::web::Runtime::new();
         Builder {
             shared,
             web,

@@ -372,6 +372,7 @@ pub struct BashTool {
     dynamic_content: bool,
     approvals: Option<(String, Arc<BashApprovals>)>,
     excluded: Option<Arc<ExcludedCommands>>,
+    private_home: bool,
 }
 
 /// How the shell is invoked.
@@ -472,6 +473,7 @@ impl BashTool {
             dynamic_content,
             approvals: None,
             excluded: None,
+            private_home: false,
         })
     }
 
@@ -497,6 +499,12 @@ impl BashTool {
     /// Runs commands matching the excluded list outside the sandbox.
     pub fn with_excluded_commands(mut self, excluded: Arc<ExcludedCommands>) -> Self {
         self.excluded = Some(excluded);
+        self
+    }
+
+    /// Tells the model that `HOME` is a private sandbox directory.
+    pub fn with_private_home(mut self) -> Self {
+        self.private_home = true;
         self
     }
 
@@ -648,11 +656,22 @@ fn infrastructure_result(error: &Error) -> ToolResult {
     }
 }
 
+/// Appended to the description when the child's `HOME` is a private sandbox directory.
+const PRIVATE_HOME_NOTE: &str = "HOME and ~ are a private sandbox directory, not the user's home directory; use absolute paths for the user's files.";
+
+fn describe(base: &str, private_home: bool) -> String {
+    match (private_home, base.ends_with('.')) {
+        (false, _) => base.to_owned(),
+        (true, true) => format!("{base} {PRIVATE_HOME_NOTE}"),
+        (true, false) => format!("{base}. {PRIVATE_HOME_NOTE}"),
+    }
+}
+
 /// The schema advertised for `bash`.
-pub fn bash_definition() -> ToolDefinition {
+pub fn bash_definition(private_home: bool) -> ToolDefinition {
     definition(
         "bash",
-        "Execute a shell command from the workspace",
+        &describe("Execute a shell command from the workspace", private_home),
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -667,10 +686,13 @@ pub fn bash_definition() -> ToolDefinition {
     )
 }
 
-pub fn bash_definition_with_approvals() -> ToolDefinition {
+pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
     definition(
         "bash",
-        "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. Only the user can grant either request through the approval dialog/card or /approve; the command does not run until approval.",
+        &describe(
+            "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. Only the user can grant either request through the approval dialog/card or /approve; the command does not run until approval.",
+            private_home,
+        ),
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -702,9 +724,9 @@ pub fn bash_definition_with_approvals() -> ToolDefinition {
 impl Tool for BashTool {
     fn definition(&self) -> ToolDefinition {
         if self.approvals.is_some() {
-            bash_definition_with_approvals()
+            bash_definition_with_approvals(self.private_home)
         } else {
-            bash_definition()
+            bash_definition(self.private_home)
         }
     }
 
@@ -1489,12 +1511,45 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
     }
 
     #[tokio::test]
+    async fn the_private_home_note_is_advertised_only_when_requested() {
+        let note = "HOME and ~ are a private sandbox directory, not the user's home directory; use absolute paths for the user's files.";
+        for (plain, private) in [
+            (bash_definition(false), bash_definition(true)),
+            (
+                bash_definition_with_approvals(false),
+                bash_definition_with_approvals(true),
+            ),
+        ] {
+            assert!(!plain.description.contains("HOME"));
+            assert!(
+                private.description.ends_with(note),
+                "{}",
+                private.description
+            );
+            assert!(
+                private
+                    .description
+                    .starts_with(&plain.description.trim_end_matches('.').to_owned())
+            );
+        }
+        let (_dir, workspace) = temp_workspace();
+        let tool = bash(&workspace, Arc::new(FakeExecutor::default()), &[], 1, &[]);
+        assert!(!tool.definition().description.contains(note));
+        assert!(
+            tool.with_private_home()
+                .definition()
+                .description
+                .ends_with(note)
+        );
+    }
+
+    #[tokio::test]
     async fn the_definition_is_the_shared_schema() {
         let (_dir, workspace) = temp_workspace();
         let tool = bash(&workspace, Arc::new(FakeExecutor::default()), &[], 1, &[]);
         assert_eq!(
             serde_json::to_value(tool.definition()).unwrap(),
-            serde_json::to_value(bash_definition()).unwrap()
+            serde_json::to_value(bash_definition(false)).unwrap()
         );
     }
 

@@ -29,6 +29,7 @@ use otto_core::safetext::dynamic_redaction_marker;
 use tokio_util::sync::CancellationToken;
 
 use super::builder::{BuildError, Builder, ProviderClient, SharedSession};
+use super::info::SandboxMode;
 use crate::failover;
 use crate::mcp;
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};
@@ -672,6 +673,9 @@ impl Builder {
                 redaction_values,
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
+            if self.sandbox_info.mode == SandboxMode::Seatbelt {
+                tool = tool.with_private_home();
+            }
             if let Some(approvals) = &self.bash_approvals {
                 tool = tool.with_approvals(String::new(), approvals.clone());
             }

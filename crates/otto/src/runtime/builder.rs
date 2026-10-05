@@ -1345,9 +1345,10 @@ impl Builder {
         definitions.extend(self.boundary_memory_definitions(max_output));
         definitions.push(crate::tool::approval::request_definition());
         if self.planned_bash_available() {
+            let private_home = self.sandbox_info.mode == SandboxMode::Seatbelt;
             definitions.push(match self.bash_approvals.is_some() {
-                true => bash::bash_definition_with_approvals(),
-                false => bash::bash_definition(),
+                true => bash::bash_definition_with_approvals(private_home),
+                false => bash::bash_definition(private_home),
             });
         }
         if runtime.is_some_and(|runtime| runtime.provider != otto_core::config::PROVIDER_CHATGPT) {
@@ -1636,6 +1637,9 @@ impl Builder {
                 &redaction_values,
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
+            if self.sandbox_info.mode == SandboxMode::Seatbelt {
+                tool = tool.with_private_home();
+            }
             if let Some(approvals) = &self.bash_approvals {
                 tool = tool.with_approvals(session.header().id, Arc::clone(approvals));
             }
@@ -2678,6 +2682,45 @@ mod tests {
             .expect("runner");
         let names = tool_names(&runner);
         assert_eq!(names.iter().position(|name| name == "bash"), Some(8));
+    }
+
+    #[tokio::test]
+    async fn bash_advertises_the_private_home_only_under_seatbelt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for (mode, expected) in [(SandboxMode::Seatbelt, true), (SandboxMode::Off, false)] {
+            let mut builder = builder(dir.path());
+            with_bash(&mut builder, dir.path());
+            builder.sandbox_info.mode = mode;
+            let advertised = builder
+                .boundary_tool_definitions(None)
+                .into_iter()
+                .find(|definition| definition.name == "bash")
+                .expect("advertised bash");
+            let session = SharedSession::memory(Header::default());
+            let runner = builder
+                .build_runner(&session, &runtime())
+                .await
+                .expect("runner");
+            let built = runner
+                .definitions()
+                .into_iter()
+                .find(|definition| definition.name == "bash")
+                .expect("built bash");
+            let children = builder
+                .child_tools(&runtime(), 65536, &[], &Catalog::default())
+                .expect("child tools")
+                .iter()
+                .map(|tool| tool.definition())
+                .find(|definition| definition.name == "bash")
+                .expect("child bash");
+            for definition in [&advertised, &built, &children] {
+                assert_eq!(
+                    definition.description.contains("private sandbox directory"),
+                    expected,
+                    "{mode:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

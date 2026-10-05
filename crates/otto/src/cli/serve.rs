@@ -7,7 +7,7 @@
 //! /v1/sandbox/reload` replaces.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
@@ -732,12 +732,6 @@ pub struct ServeOptions<'a> {
     /// Open the printed TCP URL in the default browser. Unix listeners have
     /// no URL; [`run`] rejects that combination before bind.
     pub open: bool,
-    /// `--exit-on-stdin-close`'s reader. `Some` only when the flag was given;
-    /// its EOF or a read error then cancels serve the same way SIGTERM does.
-    /// `None` means stdin is never read. Unix listeners have no desktop-app
-    /// caller to close it; [`run`] rejects that combination before bind, like
-    /// `open`.
-    pub exit_on_stdin_close: Option<Box<dyn BufRead + Send + 'static>>,
     /// Set to "serving" before bind so a SIGTERM with no held lease cancels
     /// serve instead of killing the process; read after the listen loop
     /// returns to decide whether to run the migration.
@@ -759,18 +753,11 @@ pub async fn run(
         control,
         reloader,
         open,
-        exit_on_stdin_close,
         terminate,
     } = options;
     terminate.set_serve();
 
     if let Err(message) = require_tcp_for_open(open, &listen) {
-        let _ = control.close().await;
-        return fail(stderr, &message);
-    }
-    if let Err(message) =
-        require_tcp_for_exit_on_stdin_close(exit_on_stdin_close.is_some(), &listen)
-    {
         let _ = control.close().await;
         return fail(stderr, &message);
     }
@@ -891,7 +878,6 @@ pub async fn run(
             .run(serve_cancel.child_token()),
         )
     });
-    let _stdin_watch = spawn_stdin_watch(exit_on_stdin_close, serve_cancel.clone());
     let (serve_error, acp_error) = tokio::join!(
         serve_listeners(&server, tcp, socket, &serve_cancel),
         async {
@@ -981,39 +967,6 @@ fn require_tcp_for_open(open: bool, listen: &ServerRuntime) -> Result<(), String
         return Err("--open requires a TCP listener".into());
     }
     Ok(())
-}
-
-/// `--exit-on-stdin-close` requires a TCP listener, for the same reason
-/// `--open` does: it exists for the desktop app, which always uses one.
-fn require_tcp_for_exit_on_stdin_close(flag: bool, listen: &ServerRuntime) -> Result<(), String> {
-    if flag && listen.listen.is_empty() {
-        return Err("--exit-on-stdin-close requires a TCP listener".into());
-    }
-    Ok(())
-}
-
-/// `--exit-on-stdin-close`: spawns a thread that reads `stdin` until EOF or a
-/// read error, then cancels `token` — the same token SIGTERM cancels. `None`
-/// when the flag was not given, so stdin is never touched.
-///
-/// A detached `std::thread`, not `spawn_blocking`: dropping the tokio runtime
-/// waits for blocking tasks, so after SIGTERM with stdin still open the
-/// process would not exit. The handle is not joined for the same reason.
-fn spawn_stdin_watch(
-    stdin: Option<Box<dyn BufRead + Send + 'static>>,
-    token: CancellationToken,
-) -> Option<std::thread::JoinHandle<()>> {
-    let mut reader = stdin?;
-    Some(std::thread::spawn(move || {
-        let mut buffer = [0u8; 256];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-        token.cancel();
-    }))
 }
 
 fn announce_listen(stdout: &mut (dyn Write + Send), address: &str, token: &str, open: bool) {
@@ -1116,92 +1069,6 @@ mod tests {
             ..Default::default()
         };
         assert!(require_tcp_for_open(true, &tcp).is_ok());
-    }
-
-    #[test]
-    fn exit_on_stdin_close_without_a_tcp_listener_is_rejected() {
-        let unix = ServerRuntime {
-            socket: "/tmp/otto.sock".into(),
-            listen: String::new(),
-            ..Default::default()
-        };
-        assert_eq!(
-            require_tcp_for_exit_on_stdin_close(true, &unix).unwrap_err(),
-            "--exit-on-stdin-close requires a TCP listener"
-        );
-        assert!(require_tcp_for_exit_on_stdin_close(false, &unix).is_ok());
-        let tcp = ServerRuntime {
-            socket: String::new(),
-            listen: "127.0.0.1:0".into(),
-            ..Default::default()
-        };
-        assert!(require_tcp_for_exit_on_stdin_close(true, &tcp).is_ok());
-    }
-
-    #[tokio::test]
-    async fn stdin_eof_cancels_the_token() {
-        let reader: Box<dyn BufRead + Send + 'static> =
-            Box::new(std::io::Cursor::new(Vec::<u8>::new()));
-        let token = CancellationToken::new();
-        let handle = spawn_stdin_watch(Some(reader), token.clone()).expect("spawned");
-        handle.join().expect("join");
-        assert!(token.is_cancelled());
-    }
-
-    /// SIGTERM ends serve while the desktop app still holds stdin open; the
-    /// watch must not keep the runtime (and so the process) from exiting.
-    #[test]
-    fn an_open_stdin_does_not_hold_up_runtime_shutdown() {
-        let (reader, writer) = std::io::pipe().expect("pipe");
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        runtime.block_on(async {
-            let reader: Box<dyn BufRead + Send + 'static> =
-                Box::new(std::io::BufReader::new(reader));
-            spawn_stdin_watch(Some(reader), CancellationToken::new()).expect("spawned");
-        });
-        let (done, dropped) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            drop(runtime);
-            let _ = done.send(());
-        });
-        assert!(
-            dropped
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .is_ok(),
-            "dropping the runtime waited for the stdin watch"
-        );
-        drop(writer);
-    }
-
-    #[tokio::test]
-    async fn stdin_read_error_cancels_the_token() {
-        struct FailingReader;
-        impl Read for FailingReader {
-            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("boom"))
-            }
-        }
-        impl BufRead for FailingReader {
-            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-                Err(std::io::Error::other("boom"))
-            }
-            fn consume(&mut self, _amount: usize) {}
-        }
-        let reader: Box<dyn BufRead + Send + 'static> = Box::new(FailingReader);
-        let token = CancellationToken::new();
-        let handle = spawn_stdin_watch(Some(reader), token.clone()).expect("spawned");
-        handle.join().expect("join");
-        assert!(token.is_cancelled());
-    }
-
-    #[test]
-    fn no_reader_spawns_no_watch() {
-        let token = CancellationToken::new();
-        assert!(spawn_stdin_watch(None, token.clone()).is_none());
-        assert!(!token.is_cancelled());
     }
 
     fn with_launch_test<T>(body: impl FnOnce() -> T) -> T {

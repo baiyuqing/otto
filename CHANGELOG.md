@@ -88,6 +88,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
   hosted tool, which does not use the local destination checks. See
   [web tools](docs/user-manual.md#web-tools).
   ([#328](https://github.com/baiyuqing/otto/pull/328))
+- Remove the macOS desktop app (`desktop/`, `make desktop-app`,
+  `make desktop-release`, `make desktop-check`) and `otto serve
+  --exit-on-stdin-close`, which existed only for it. Use `otto serve --listen`
+  with a browser instead. ([#355](https://github.com/baiyuqing/otto/pull/355))
 
 ### Features
 

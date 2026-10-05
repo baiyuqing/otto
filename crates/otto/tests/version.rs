@@ -76,12 +76,6 @@ fn lock_version(lock: &str, package: &str) -> String {
 #[test]
 fn release_version_is_consistent_across_files() {
     let mut found: Vec<(String, String)> = Vec::new();
-    let conf: serde_json::Value =
-        serde_json::from_str(&root_file("desktop/mygo.json")).expect("parse mygo.json");
-    found.push((
-        "desktop/mygo.json".into(),
-        conf["version"].as_str().expect("version").into(),
-    ));
     let lock = root_file("Cargo.lock");
     for package in ["otto", "otto-core", "otto-web"] {
         found.push((

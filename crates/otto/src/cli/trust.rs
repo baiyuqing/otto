@@ -15,11 +15,14 @@ use std::path::{Path, PathBuf};
 use super::run::fail;
 use crate::runtime::sandbox_runtime::canonical_directory;
 
-const USAGE: &str = "usage: otto trust <dir> [--config PATH]";
+const USAGE: &str =
+    "usage: otto trust <dir> [--config PATH] [--executables | --revoke-executables]";
 
 struct Flags {
     dir: String,
     config_path: String,
+    executables: bool,
+    revoke: bool,
 }
 
 /// `otto trust <dir>` and `otto trust <dir> --config PATH`. `<dir>` is the
@@ -27,9 +30,21 @@ struct Flags {
 fn parse_flags(args: &[String]) -> Result<Option<Flags>, ()> {
     let mut dir: Option<String> = None;
     let mut config_path = String::new();
+    let mut executables = false;
+    let mut revoke = false;
     let mut index = 0;
     while index < args.len() {
         let argument = args[index].as_str();
+        if argument == "--executables" {
+            executables = true;
+            index += 1;
+            continue;
+        }
+        if argument == "--revoke-executables" {
+            revoke = true;
+            index += 1;
+            continue;
+        }
         if matches!(argument, "-h" | "-help" | "--help") {
             return Ok(None);
         }
@@ -59,7 +74,15 @@ fn parse_flags(args: &[String]) -> Result<Option<Flags>, ()> {
         index += 1;
     }
     let dir = dir.ok_or(())?;
-    Ok(Some(Flags { dir, config_path }))
+    if executables && revoke {
+        return Err(());
+    }
+    Ok(Some(Flags {
+        dir,
+        config_path,
+        executables,
+        revoke,
+    }))
 }
 
 /// Runs `otto trust <dir>` and returns its exit code.
@@ -90,6 +113,37 @@ pub fn run(
     let Ok(path) = std::path::absolute(&path) else {
         return fail(stderr, "invalid configuration path");
     };
+    if flags.executables || flags.revoke {
+        let home = match super::run::resolve_home_for(lookup) {
+            Ok(h) => h,
+            Err(e) => return fail(stderr, &e),
+        };
+        match crate::config::layered::set_trust_for(
+            Path::new(&home),
+            &path,
+            Path::new(&flags.dir),
+            flags.executables,
+        ) {
+            Ok(sources) => {
+                for source in sources {
+                    let _ = writeln!(stdout, "Executable source: {source}");
+                }
+                let _ = writeln!(
+                    stdout,
+                    "Project executable trust {}.",
+                    if flags.executables {
+                        "granted"
+                    } else {
+                        "revoked"
+                    }
+                );
+            }
+            Err(e) => return fail(stderr, &e),
+        }
+        if flags.revoke {
+            return 0;
+        }
+    }
     match trust_directory(&path, Path::new(&flags.dir)) {
         Ok(canonical) => {
             let _ = writeln!(stdout, "Trusted {canonical}.");

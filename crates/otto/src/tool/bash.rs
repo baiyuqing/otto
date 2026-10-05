@@ -2490,8 +2490,13 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
                         .stdout
                         .write_all(format!("{name}:shared-").as_bytes())
                         .unwrap();
+                    // Register before publishing readiness: notify_waiters does not
+                    // retain a wakeup for a future that has not registered yet.
+                    let notified = release.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
                     arrived.add_permits(1);
-                    release.notified().await;
+                    notified.await;
                     streams.stdout.write_all(b"secret").unwrap();
                     streams
                         .stderr

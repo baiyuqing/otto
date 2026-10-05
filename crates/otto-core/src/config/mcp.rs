@@ -115,6 +115,9 @@ pub fn resolve_mcp(
     env: &HashMap<String, String>,
     workspace_path: &str,
 ) -> Result<McpRuntime, ConfigError> {
+    if let Some(policy) = &file.policy {
+        policy.mcp(file)?;
+    }
     let enabled = file.mcp.enabled.unwrap_or(true);
     if !enabled {
         return Ok(McpRuntime {

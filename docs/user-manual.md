@@ -218,13 +218,15 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto workflow fork <run-id> --after-step <step-id>` | Create a new run from that step's committed success boundary. |
 | `otto workflow approve\|reject <request-id>` | Resolve one persisted workflow approval gate. |
 | `otto workflow cancel <run-id>` | Stop active attempts, then mark the run canceled. |
+| `otto config explain [--cwd PATH] [--json]` | Inspect merged values, origins, ignored fields and executable trust offline. |
+| `otto config set KEY TOML_VALUE --scope user\|shared\|local` | Edit a single explicitly chosen configuration source. |
 | `otto mcp list` | List MCP servers declared in the configuration file. See [MCP servers](#mcp-servers). |
 | `otto mcp add <server> ...` | Add an MCP server to `~/.config/otto/config.toml`. |
 | `otto mcp remove <server>` | Remove one configured MCP server. |
 | `otto mcp enable <server>` / `otto mcp disable <server>` | Toggle one configured MCP server. |
 | `otto mcp login <server>` | Run the OAuth sign-in flow for one configured MCP server. See [MCP servers](#mcp-servers). |
 | `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
-| `otto trust <dir> [--config PATH]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
+| `otto trust <dir> [--config PATH] [--executables \| --revoke-executables]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
 | `otto serve [--socket PATH] [--listen HOST:PORT [--open] [--exit-on-stdin-close]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket, a loopback TCP port, or both, instead of an interactive frontend. See [Agent server](#agent-server). |
 | `otto acp [--attach [--socket PATH]]` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as `otto-connect`. With `--attach`, forward each request to a running `otto serve` instead of opening sessions in this process. See [ACP agent server](#acp-agent-server). |
 | `otto --attach [--socket PATH] [--resume ID \| --continue]` | Run the TUI as a client of a running `otto serve`, on a session that the web UI and other clients can use at the same time. See [The TUI attached to `otto serve`](#the-tui-attached-to-otto-serve). |
@@ -233,7 +235,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | --- | --- |
 | `--help` | Show help and exit. |
 | `--version`, `-V` | Print the version and exit. The output is `otto X.Y.Z+<commit>`, where `<commit>` is the 12-character git commit the binary was built from, with `.dirty` appended if tracked files had uncommitted changes at build time; `+unknown` means the build had no git information. |
-| `--config PATH` | Configuration file. Defaults to `~/.config/otto/config.toml`. |
+| `--config PATH` | User configuration source. Defaults to `~/.config/otto/config.toml`; project discovery and managed policy still apply. |
 | `--cwd PATH` | Workspace directory. Defaults to `.`. |
 | `--profile NAME` | Configuration profile. |
 | `--provider NAME` | Provider override: `openai-compatible` or `chatgpt`. |
@@ -274,12 +276,140 @@ must never be stored in TOML.
 
 ## Configuration
 
-Otto auto-discovers only the global config file at `~/.config/otto/config.toml`.
-You can explicitly select any path with `--config`.
+Otto resolves ordinary configuration in this order, highest first:
+managed organization policy, workspace-local, workspace-shared, user-global,
+and built-in defaults. `--config PATH` selects the user source; it does not
+remove project discovery or managed policy. Review explicitly selected user
+sources: they can supply credentials, sandbox grants and executable settings.
 
-Review any explicit config path before you run Otto. Otto never auto-discovers
-repository-local config, but an explicit `--config` can request `driver = "off"`,
-extra `read_paths`, or `allow_env` grants on the next process start.
+| Source | Path |
+| --- | --- |
+| User | `~/.config/otto/config.toml`, or `--config PATH` |
+| Shared | `.otto/config.toml` in each directory from the enclosing Git worktree root to the selected workspace |
+| Local | `.otto/config.local.toml` along the same directory chain |
+| Managed | `/etc/otto/policy.toml` on Linux; `/Library/Application Support/Otto/policy.toml` on macOS |
+
+A nested Git checkout starts a new boundary. Outside Git, only the selected
+workspace contributes project configuration. All shared files merge from root
+to leaf, then all local files merge from root to leaf: a root local preference
+wins over a deeper shared preference. Add local files to repository ignore
+rules yourself. Unsafe paths and malformed discovered files fail loading.
+
+Scalars override, tables merge recursively, and lists replace completely;
+`[]` clears a list. Profiles and MCP servers merge by name and then by field.
+There is no `+item`, `-item`, `null`, or deletion syntax. `enabled = false`
+disables named entries that support it. Switching an MCP server's transport
+removes fields belonging to its previous transport.
+
+Project files may set `default_profile`, `ui.mode`, agent limits and deadlines,
+and profile model/thinking/context/compaction windows. Provider identity,
+provider URL, credentials, sandbox grants, server listeners, project admission,
+storage, reflection and catalog roots are restricted to user/managed sources.
+Ignored fields produce diagnostics. A project cannot change a credential-bound
+MCP server's command, arguments, working directory, transport or destination.
+Project MCP definitions cannot interpolate environment variables or supply
+`env`, headers, OAuth or other credential bindings.
+
+### Inspecting and editing scopes
+
+```bash
+otto config explain --cwd ./project --json
+otto config set ui.mode '"repl"' --scope local --cwd ./project
+otto config set profiles.work.model '"gpt-5"' --scope shared --cwd ./project
+otto config set default_profile '"work"' --scope user
+```
+
+`explain` is offline: it does not start a provider, connect MCP, launch hooks,
+or resolve environment credentials. Its JSON includes merged values, source
+origins, overwritten origins, ignored fields, executable trust and managed
+constraints. Environment bindings, URLs and executable arguments are redacted.
+`effective_runtime` shows credential-free runtime defaults when the selected
+provider/model is valid, and is `null` otherwise. JSON leaf paths use dotted
+names, matching `config set`'s key syntax.
+
+`set` requires an explicit scope and a TOML value. It edits only that source,
+preserves supported comments/layout, backs up the previous bytes and refuses
+concurrent changes. It never serializes the effective merged configuration.
+Existing MCP, profile, sandbox and memory management commands continue to
+write their user source. Values shadowed by another source remain shadowed;
+inspect `explain` after editing. Restart affected workspace runtimes for
+ordinary configuration changes. `--config PATH` applies to the user source
+for both commands.
+
+### Project executable trust
+
+Directory admission and executable trust are separate. `otto trust DIR`
+continues to admit a workspace to `otto serve`; it does not authorize project
+MCP, skills or agent definitions. Preferences and instruction text load before
+executable trust.
+
+```bash
+otto trust ./project --executables
+otto trust ./project --revoke-executables
+```
+
+`--executables` displays discovered sources and records an explicit content
+and path grant in `~/.config/otto/trust/executables.json`. Its backups stay in
+the separate `trust/backups/` directory. Use the same `--config`
+when granting trust for a custom user source. User-owned global catalogs keep
+working; custom catalog roots inside the repository require this grant too.
+Default catalogs load user roots first, then project roots from root to leaf;
+later names win. Explicit catalog paths, including `[]`, retain their normal
+replacement behavior.
+
+Changing executable MCP definitions, skills, agents or their resources
+invalidates the grant; ordinary UI/model changes do not. Grants reject unsafe
+symlinks, non-regular resources, trees exceeding 4,096 files/32 levels,
+resources larger than 1 MiB, and more than 16 MiB of resources in total.
+Existing sessions check authorization before future tool effects. Revocation
+also requests cancellation of running tools and closes MCP connections, with
+checks every 500 ms where cancellation is supported. Restart after reviewing
+and granting trust again; revocation cannot undo effects already completed.
+Revoking a grant also works when the project configuration has become invalid.
+
+### Managed policy
+
+The fixed policy path and every ancestor must be administrator-owned and not
+writable by group/others. Symlinks are rejected. A missing policy is optional;
+an unreadable, unsafe or invalid policy fails closed. CLI flags, environment,
+resumed sessions and sandbox reload cannot override managed constraints.
+Policies constrain Otto itself; they do not replace operating-system controls.
+
+Example administrator policy:
+
+```toml
+require_sandbox = true
+allow_project_executables = false
+allowed_provider_hosts = ["chatgpt.com"]
+allowed_mcp_hosts = ["tools.example.org"]
+allowed_credential_variables = ["TEAM_API_KEY"]
+# Commands must be absolute, administrator-owned paths with safe ancestors.
+allowed_mcp_commands = []
+
+[force]
+default_profile = "work"
+
+[force.profiles.work]
+provider = "chatgpt"
+model = "gpt-5"
+
+[ceilings]
+"agent.max_output_bytes" = 51200
+```
+
+`force` uses the ordinary configuration schema and has highest precedence.
+Supported ceilings are `agent.max_output_bytes`,
+`agent.compaction.reserve_tokens` and `agent.compaction.keep_recent_tokens`;
+explicit or resolved values above them fail rather than silently changing.
+Allowlist entries match exact hosts, command paths or environment variable
+names. Omitted lists impose no constraint; empty lists deny all. Command
+allowlists constrain the executable, not its arguments. Credential-variable
+policies also deny MCP OAuth. `require_sandbox` constrains bash, prohibits
+excluded commands and elevated execution, and cannot provide confinement on
+Linux. MCP stdio remains a separate external process governed by MCP policy.
+No hooks or extension execution framework is added.
+
+A complete user configuration example:
 
 ```toml
 default_profile = "deepseek"
@@ -532,7 +662,7 @@ Sandbox-driver precedence:
 
 ### Backups of the config file
 
-Commands that write the config file — `otto mcp add`/`remove`/`enable`/
+`otto config set` and commands that write the user config file — `otto mcp add`/`remove`/`enable`/
 `disable`, `otto sandbox setup`, `otto trust`, `/model` (which records the
 chosen profile as `default_profile`), `/thinking --save`, `/sandbox allow`,
 and `/sandbox network` — first copy the contents they replace into
@@ -1218,10 +1348,14 @@ Read-path requests explicitly disclose persistence; commands remain sandboxed.
 
 ## Tools and safety
 
-Startup reads `AGENTS.md` (or `CLAUDE.md`) through the workspace directory
-handle and includes at most 8 KiB. Links outside the workspace and non-regular
-files are skipped. Automatic Git status queries use the configured sandbox
-executor with fsmonitor disabled; unavailable executors produce no Git status.
+Startup appends `~/.config/otto/AGENTS.md`, then instruction files along the
+same Git-root-to-workspace directory chain as configuration. Each directory
+prefers `AGENTS.md` over `CLAUDE.md`. These files supplement Otto's built-in
+prompt; a project file never replaces the global file. Reads stay within
+pinned directory boundaries, dynamic content is XML-escaped and redacted, and
+unsafe/non-regular files or budgets above 16 KiB per file/64 KiB total fail
+startup. Automatic Git status queries use the configured sandbox executor
+with fsmonitor disabled; unavailable executors produce no Git status.
 
 `SKILL.md` and `AGENT.md` must stay within their respective skill or agent
 definition directory. Configured external roots and linked definition

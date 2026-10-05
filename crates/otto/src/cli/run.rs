@@ -48,7 +48,6 @@ use super::serve;
 use crate::runtime::boundary::{self, BoundaryInputs};
 use crate::runtime::builder::{
     Builder, Shared, SharedSession, leaked_workspace, resolve_initial_runtime,
-    validate_session_workspace,
 };
 use crate::runtime::sandbox_runtime::{
     OpenOptions, canonical_directory, canonical_executable_file, normalize_sandbox_runtime,
@@ -216,6 +215,9 @@ pub async fn run(
     cancel: &CancellationToken,
     terminate: &super::terminate::Terminate,
 ) -> i32 {
+    if args.first().is_some_and(|command| command == "workspace") {
+        return super::workspace_command::run(&args[1..], stdout, stderr);
+    }
     if args.first().is_some_and(|command| command == "storage") {
         return super::storage::run(&args[1..], stdout, stderr);
     }
@@ -470,6 +472,18 @@ pub async fn run(
         return crate::tui::attach::run(&socket, &workspace_path, start, schedule, cancel, stderr)
             .await;
     }
+    let memory_config = match resolve_memory(&config_file, &environment) {
+        Ok(config) => config,
+        Err(error) => return fail(stderr, &error.to_string()),
+    };
+    let memory_override = memory_config
+        .workspace_ids
+        .get(&workspace_path)
+        .map(String::as_str)
+        .unwrap_or_default();
+    if let Err(error) = crate::workspace::initialize(Path::new(&workspace_path), memory_override) {
+        return fail(stderr, &startup.redact(&error.to_string()));
+    }
     let workspace = match leaked_workspace(Path::new(&workspace_path)) {
         Ok(workspace) => workspace,
         Err(error) => {
@@ -545,10 +559,6 @@ pub async fn run(
     ) {
         Ok(settings) => settings,
         Err(message) => return fail(stderr, &startup.redact(&message)),
-    };
-    let memory_config = match resolve_memory(&config_file, &environment) {
-        Ok(config) => config,
-        Err(error) => return fail(stderr, &error.to_string()),
     };
     let mcp_config = match resolve_mcp(&config_file, &environment, &workspace_path) {
         Ok(config) => config,
@@ -1141,7 +1151,7 @@ fn prepare_session(
 ) -> Result<session::Prepared, String> {
     let prepared =
         session::Prepared::prepare(path, create_lease).map_err(|error| error.to_string())?;
-    match validate_session_workspace(&prepared.info().cwd, workspace) {
+    match crate::runtime::builder::validate_session_workspace(&prepared.info().cwd, workspace) {
         Ok(()) => Ok(prepared),
         Err(message) => {
             let _ = prepared.close();
@@ -1641,6 +1651,15 @@ pub(super) async fn load_workspace(
     stderr: &mut (dyn Write + Send),
 ) -> Result<(Builder, Option<Arc<SandboxReloader>>), String> {
     let workspace_path = canonical_path.to_string_lossy().into_owned();
+    let memory_config =
+        resolve_memory(&shared.config, &shared.environment).map_err(|error| error.to_string())?;
+    let memory_override = memory_config
+        .workspace_ids
+        .get(&workspace_path)
+        .map(String::as_str)
+        .unwrap_or_default();
+    crate::workspace::initialize(canonical_path, memory_override)
+        .map_err(|error| error.to_string())?;
     let workspace = leaked_workspace(canonical_path).map_err(|error| error.to_string())?;
     let mcp_config = resolve_mcp(&shared.config, &shared.environment, &workspace_path)
         .map_err(|error| error.to_string())?;
@@ -1674,8 +1693,6 @@ pub(super) async fn load_workspace(
     )
     .await;
 
-    let memory_config =
-        resolve_memory(&shared.config, &shared.environment).map_err(|error| error.to_string())?;
     builder.workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
 

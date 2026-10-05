@@ -537,8 +537,11 @@ mod tests {
     async fn a_failed_delivery_writes_a_warning_and_counts_it() {
         let harness = start(FakeRunner::default(), Scope::Any, None);
         *harness.sink.fail_with.lock().unwrap() = Some("platform down".into());
-        let id = harness.create(new_item(telegram(), Kind::Text, "hi"));
-        wait_for(STEP, || harness.item(&telegram(), id).attempts == 1).await;
+        // A distinctive opaque ID cannot accidentally match the log timestamp.
+        let chat_id = "private-chat-id-42";
+        let origin = Origin::chat("telegram", chat_id).unwrap();
+        let id = harness.create(new_item(origin.clone(), Kind::Text, "hi"));
+        wait_for(STEP, || harness.item(&origin, id).attempts == 1).await;
         let text = harness.log.text();
         let line = text
             .lines()
@@ -553,7 +556,7 @@ mod tests {
             assert!(line.contains(field), "{field} missing in {line}");
         }
         assert!(
-            !line.contains("42"),
+            !line.contains(chat_id),
             "the chat id must not be logged: {line}"
         );
         assert!(

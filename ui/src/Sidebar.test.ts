@@ -202,29 +202,6 @@ describe('Sidebar', () => {
     await waitFor(() => expect((within(picker).getByRole('button', { name: 'Up' }) as HTMLButtonElement).disabled).toBe(true))
   })
 
-  describe('in the desktop app', () => {
-    const openFolder = vi.fn()
-    beforeEach(() => {
-      ;(window as unknown as { __OTTO_DESKTOP__?: unknown }).__OTTO_DESKTOP__ = { openFolder }
-    })
-    afterEach(() => {
-      delete (window as unknown as { __OTTO_DESKTOP__?: unknown }).__OTTO_DESKTOP__
-      openFolder.mockReset()
-    })
-
-    it('hands Add workspace to the app, which picks, trusts, and registers the folder', async () => {
-      render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
-      await screen.findByText('other-session')
-
-      fireEvent.click(screen.getByRole('button', { name: 'Add workspace…' }))
-
-      expect(openFolder).toHaveBeenCalledTimes(1)
-      expect(api.addWorkspace).not.toHaveBeenCalled()
-      expect(api.listDirs).not.toHaveBeenCalled()
-      expect(screen.queryByRole('dialog')).toBeNull()
-    })
-  })
-
   it('disables every row and control while disabled', async () => {
     render(createElement(Sidebar, { sessions, current: '', disabled: true, onOpen: vi.fn() }))
     await screen.findByText('other-session')

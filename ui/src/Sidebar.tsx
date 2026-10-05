@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { SessionListRow } from './wire'
 import { api, ApiError, type SessionStatus, type WorkspaceEntry } from './api'
-import { desktopOpenFolder } from './desktop'
 import { FolderPicker } from './FolderPicker'
 import { sessionLabel, workspaceName } from './uiText'
 
@@ -85,9 +84,7 @@ export function Sidebar(props: {
 
   const chooseFolder = () => {
     setAddError('')
-    const openFolder = desktopOpenFolder()
-    if (openFolder) openFolder()
-    else setBrowsing(true)
+    setBrowsing(true)
   }
 
   const removeWorkspace = async (path: string) => {

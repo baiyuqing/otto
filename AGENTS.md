@@ -15,7 +15,6 @@ points and the [development guide](docs/development.md) for detailed contracts.
 | Documentation | [documentation rules](docs/AGENTS.md), `docs/user-manual.md` |
 | Browser frontend | `ui/`; client of native HTTP APIs and WASM exports |
 | Chat connector | `connect/`; independent Go ACP client; [design](docs/specs/2026-10-02-otto-connect.md) |
-| macOS desktop shell | `desktop/`; independent Go module; [README](desktop/README.md) |
 
 Otto supports only `openai-compatible` and `chatgpt`. Do not implement or
 advertise other providers or planned roadmap features.

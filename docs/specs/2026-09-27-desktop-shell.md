@@ -1,8 +1,7 @@
 # macOS desktop shell
 
-Status: approved 2026-09-27; historical framework/build details superseded
-by the MyGo migration approved 2026-10-05. See
-[the desktop README](../../desktop/README.md) for the current implementation.
+Status: approved 2026-09-27; MyGo migration approved 2026-10-05; removed
+2026-10-05 together with `desktop/` and `otto serve --exit-on-stdin-close`.
 
 Step 5 of the multi-session plan: a macOS app that runs `otto serve` as a
 child process and shows the existing Web UI in a native window. Steps 1-4

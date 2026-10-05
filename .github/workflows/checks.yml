@@ -154,10 +154,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: needs.changes.outputs.docs_only != 'true'
         with:
-          go-version-file: desktop/go.mod
-          cache-dependency-path: |
-            connect/go.sum
-            desktop/go.sum
+          go-version-file: connect/go.mod
+          cache-dependency-path: connect/go.sum
       # rust-fmt and rust-lint run in the macOS lint job below, at the same
       # time as this one; `make check` is check-tests plus those two.
       - name: Run make check-tests
@@ -284,10 +282,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: needs.changes.outputs.docs_only != 'true'
         with:
-          go-version-file: desktop/go.mod
-          cache-dependency-path: |
-            connect/go.sum
-            desktop/go.sum
+          go-version-file: connect/go.mod
+          cache-dependency-path: connect/go.sum
       # Linux has no Seatbelt, so this is the Rust gate without the sandbox
       # conformance suite; the web UI is platform independent and stays on
       # the macOS job, which is the one that ships a binary.

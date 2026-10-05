@@ -4,7 +4,7 @@ import { workspaceName } from './uiText'
 
 // FolderPicker browses the server's filesystem through GET /v1/fs/dirs. A
 // browser cannot report the absolute path of a folder the user picks, so
-// this is the browser's folder picker; the desktop app uses its native one.
+// this is the in-page folder picker.
 export function FolderPicker(props: { onChoose: (path: string) => void; onCancel: () => void }) {
   const [listing, setListing] = useState<DirListing | null>(null)
   const [error, setError] = useState('')

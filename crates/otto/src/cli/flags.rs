@@ -46,7 +46,6 @@ pub struct CliOptions {
     pub listen: String,
     pub acp_listen: String,
     pub open: bool,
-    pub exit_on_stdin_close: bool,
 
     pub explicit_config: bool,
     pub shell_time_set: bool,
@@ -136,7 +135,6 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     options.acp_listen = set.string("acp-listen");
     options.attach = set.bool_value("attach");
     options.open = set.bool_value("open");
-    options.exit_on_stdin_close = set.bool_value("exit-on-stdin-close");
 
     options.explicit_config = set.visited("config");
     options.shell_time_set = set.visited("shell-timeout");
@@ -251,16 +249,6 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
     if options.open && options.socket_set && !options.listen_set {
         return Err(reject("otto: --open cannot be used with --socket"));
     }
-    if options.exit_on_stdin_close && !options.serve {
-        return Err(reject(
-            "otto: --exit-on-stdin-close requires the serve subcommand",
-        ));
-    }
-    if options.exit_on_stdin_close && options.socket_set && !options.listen_set {
-        return Err(reject(
-            "otto: --exit-on-stdin-close cannot be used with --socket",
-        ));
-    }
     if options.shell_time_set && options.shell_timeout.is_zero() {
         return Err(reject("otto: --shell-timeout must be greater than zero"));
     }
@@ -290,7 +278,7 @@ pub fn print_usage(output: &mut dyn Write) {
 }
 
 const USAGE: &str = r"Usage: otto [options]
-       otto serve [options] [--socket PATH] [--listen HOST:PORT [--open] [--exit-on-stdin-close]]
+       otto serve [options] [--socket PATH] [--listen HOST:PORT [--open]]
        otto acp [options]      Agent Client Protocol server on stdin/stdout
        otto acp --attach [--socket PATH]   relay Agent Client Protocol to a running otto serve
        otto --attach [--socket PATH] [--resume ID | --continue]   terminal UI on a running otto serve
@@ -336,7 +324,6 @@ Options:
   --listen HOST:PORT     loopback TCP address for the serve subcommand (prints a URL with the access token)
   --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)
   --open                 open the serve URL in the default browser (TCP listener only)
-  --exit-on-stdin-close  exit when stdin closes (TCP listener only)
 ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -381,7 +368,6 @@ const DECLARED: &[(&str, Kind)] = &[
     ("listen", Kind::Str),
     ("acp-listen", Kind::Str),
     ("open", Kind::Bool),
-    ("exit-on-stdin-close", Kind::Bool),
 ];
 
 impl FlagSet {
@@ -694,15 +680,6 @@ mod tests {
     }
 
     #[test]
-    fn exit_on_stdin_close_is_serve_only_and_needs_a_tcp_listener() {
-        let got = options(&["serve", "--listen", "127.0.0.1:0", "--exit-on-stdin-close"]);
-        assert!(got.serve);
-        assert!(got.exit_on_stdin_close);
-        assert!(got.listen_set);
-        assert!(!options(&["serve", "--listen", "127.0.0.1:0"]).exit_on_stdin_close);
-    }
-
-    #[test]
     fn version_prints_build_version_and_stops() {
         for flag in ["--version", "-V"] {
             let mut stdout = Vec::new();
@@ -739,11 +716,6 @@ mod tests {
                 "  --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)
   --open                 open the serve URL in the default browser (TCP listener only)\n"
             ));
-            assert!(
-                text.contains(
-                    "  --exit-on-stdin-close  exit when stdin closes (TCP listener only)\n"
-                )
-            );
         }
     }
 
@@ -923,19 +895,6 @@ mod tests {
             (
                 &["acp", "--open"],
                 "otto: --open requires the serve subcommand\n",
-            ),
-            (
-                &["--exit-on-stdin-close"],
-                "otto: --exit-on-stdin-close requires the serve subcommand\n",
-            ),
-            (
-                &[
-                    "serve",
-                    "--exit-on-stdin-close",
-                    "--socket",
-                    "/tmp/otto.sock",
-                ],
-                "otto: --exit-on-stdin-close cannot be used with --socket\n",
             ),
             (
                 &["--shell-timeout", "0s"],

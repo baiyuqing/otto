@@ -31,7 +31,6 @@ ui/node_modules
 ui/dist/*
 !ui/dist/.gitkeep
 crates/otto-web/pkg
-desktop
 connect
 **/.env
 **/.env.*

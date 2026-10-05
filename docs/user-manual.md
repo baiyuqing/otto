@@ -80,8 +80,8 @@ restore variables the environment filter removed.
 Install and start Docker Desktop, then clone this repository. Docker handles
 the Rust, Node and WASM toolchains inside a multi-stage build; none need to
 be installed on your Mac. The runtime contains Otto with its embedded Web
-UI, Bash, Git, CA certificates and the bundled sandbox-setup skill. The
-native desktop application and `otto-connect` are separate installations.
+UI, Bash, Git, CA certificates and the bundled sandbox-setup skill.
+`otto-connect` is installed separately.
 
 From the checkout directory:
 
@@ -330,7 +330,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto mcp login <server>` | Run the OAuth sign-in flow for one configured MCP server. See [MCP servers](#mcp-servers). |
 | `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
 | `otto trust <dir> [--config PATH] [--executables \| --revoke-executables]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
-| `otto serve [--socket PATH] [--listen HOST:PORT [--open] [--exit-on-stdin-close]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket, a loopback TCP port, or both, instead of an interactive frontend. See [Agent server](#agent-server). |
+| `otto serve [--socket PATH] [--listen HOST:PORT [--open]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket, a loopback TCP port, or both, instead of an interactive frontend. See [Agent server](#agent-server). |
 | `otto acp [--attach [--socket PATH]]` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as `otto-connect`. With `--attach`, forward each request to a running `otto serve` instead of opening sessions in this process. See [ACP agent server](#acp-agent-server). |
 | `otto --attach [--socket PATH] [--resume ID \| --continue]` | Run the TUI as a client of a running `otto serve`, on a session that the web UI and other clients can use at the same time. See [The TUI attached to `otto serve`](#the-tui-attached-to-otto-serve). |
 
@@ -358,7 +358,6 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--socket PATH` | `serve`, `acp --attach`, or `--attach`. Unix domain socket path of `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. For `serve` with `--listen`, both listeners are opened. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. With `--socket`, both listeners are opened. |
 | `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). A failed launch is not fatal: the URL is still printed. |
-| `--exit-on-stdin-close` | `serve` only. Read stdin and shut down, as on `SIGTERM`, when it reaches end of file or a read fails. Without the flag stdin is not read. Requires a TCP listener. |
 
 ## Environment variables
 
@@ -2187,12 +2186,10 @@ composer:
 - Each group other than the startup workspace has a **Remove** button, which
   calls `DELETE /v1/workspaces`; a `409` message is shown next to the
   **Add workspace…** button.
-- **Add workspace…** at the bottom of the sidebar opens a folder picker. In
-  a browser it browses the server's directories through `GET /v1/fs/dirs`;
-  in the desktop app it is the native macOS folder dialog. The chosen folder
-  is registered with `POST /v1/workspaces` and appears as a group. If the
-  server answers `403 WORKSPACE_NOT_ADMITTED`, a **Trust this folder?**
-  dialog shows the path; **Trust and add** repeats the request with
+- **Add workspace…** at the bottom of the sidebar opens a folder picker that
+  browses the server's directories through `GET /v1/fs/dirs`. The chosen folder is registered with `POST /v1/workspaces` and appears as a
+  group. If the server answers `403 WORKSPACE_NOT_ADMITTED`, a **Trust this
+  folder?** dialog shows the path; **Trust and add** repeats the request with
   `"trust": true`, and **Cancel** adds nothing. **Enter a path** below the
   button expands a field for typing an absolute path, handled the same way.
   Other `400`/`500` errors are shown below the button.
@@ -2526,10 +2523,8 @@ child reaches the next normal notification checkpoint.
 
 `otto serve` shuts down on `SIGINT` or `SIGTERM`: it stops accepting new
 requests, cancels every active turn and compaction, closes every session,
-removes the socket file (socket mode), and exits `0`. With
-`--exit-on-stdin-close`, end of file on stdin, or a failed read, starts the
-same shutdown. When an open session holds a lease, `SIGTERM` first moves
-every open session as described in
+removes the socket file (socket mode), and exits `0`. When an open session
+holds a lease, `SIGTERM` first moves every open session as described in
 [Continuing a session on another host](#continuing-a-session-on-another-host),
 and a second `SIGTERM` exits at once; without a lease a second `SIGTERM` has
 no effect.
@@ -2558,32 +2553,6 @@ curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessi
   Workflow events are separate and durable.
 - Idle session eviction or a limit on how many sessions can stay open.
 - SSE heartbeats.
-
-### Desktop app (macOS)
-
-The desktop app (`desktop/`) is a native macOS MyGo window around the Rust
-`otto serve` process. On
-launch it captures the login shell's environment, asks for a folder the
-first time it runs (or when the saved folder no longer exists), runs `otto
-trust` on it, starts `otto serve --exit-on-stdin-close` as a child process,
-and loads the child's HTTP address in its main window once the child
-announces it. The window loads only that address. The page is a client of
-the same HTTP API described in this section. The sidebar's **Add
-workspace…** button runs the same action as **File > Open Folder…**.
-
-**File > Open Folder…** (`⌘O`) picks another directory, runs `otto trust` on
-it, registers it with the running server over `POST /v1/workspaces`, and
-reloads the window. Quitting the app sends the child `SIGTERM`, then
-`SIGKILL` after 10 seconds if it has not exited.
-
-State (the last opened folder) is stored at `~/Library/Application
-Support/com.otto.desktop/state.json`. The child's stderr is appended to
-`~/Library/Logs/com.otto.desktop/serve.log`; if the child exits before
-announcing its address, or does not announce one within 30 seconds, the app
-shows the exit status and the last 50 lines of that log.
-
-Building, checking, and releasing the app are covered in
-[`desktop/README.md`](../desktop/README.md).
 
 ## ACP agent server
 

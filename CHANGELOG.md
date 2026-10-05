@@ -286,6 +286,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([#299](https://github.com/baiyuqing/otto/pull/299),
   [#309](https://github.com/baiyuqing/otto/pull/309),
   [#330](https://github.com/baiyuqing/otto/pull/330))
+- Run macOS formatting and clippy in their own CI job beside the tests, with
+  their own dependency cache; `make check-tests` is `make check` without
+  them. ([#332](https://github.com/baiyuqing/otto/pull/332))
 
 ### Documentation
 

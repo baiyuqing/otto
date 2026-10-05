@@ -11,8 +11,8 @@ import (
 func TestNaturalTaskControlStaysSeparateAndQueuesFollowups(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{platform: "telegram"})
-	h.say("sleep")
-	h.waitCall("start:sleep")
+	h.say("hold:2")
+	h.waitCall("start:hold:2")
 	h.say("focus on the tests")
 	h.say("follow-up: summarize the result")
 
@@ -28,7 +28,7 @@ func TestNaturalTaskControlStaysSeparateAndQueuesFollowups(t *testing.T) {
 	if slices.Contains(calls, "start:focus on the tests") {
 		t.Fatalf("guidance became an ordinary prompt: %q", calls)
 	}
-	end := slices.Index(calls, "end:sleep")
+	end := slices.Index(calls, "end:hold:2")
 	followup := slices.Index(calls, "start:follow-up: summarize the result")
 	if end < 0 || followup < 0 || followup < end {
 		t.Fatalf("follow-up ran before active task ended: %q", calls)
@@ -45,13 +45,13 @@ func TestNaturalTaskControlStaysSeparateAndQueuesFollowups(t *testing.T) {
 func TestTaskControlNoDecisionQueuesOriginalMessage(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
-	h.say("sleep")
-	h.waitCall("start:sleep")
+	h.say("hold:1")
+	h.waitCall("start:hold:1")
 	h.say("no-decision")
 	h.waitCall("task_control:no-decision")
 	h.waitCall("start:no-decision")
 	calls := fake.Calls(h.dir)
-	end := slices.Index(calls, "end:sleep")
+	end := slices.Index(calls, "end:hold:1")
 	followup := slices.Index(calls, "start:no-decision")
 	if end < 0 || followup < 0 || followup < end {
 		t.Fatalf("message after a no-decision result did not queue after the task: %q", calls)
@@ -83,8 +83,8 @@ func TestNaturalTaskControlQueueUsesTheConfiguredLimit(t *testing.T) {
 func TestTaskControlErrorReportsUnknownRouteWithoutPromptFallback(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
-	h.say("sleep")
-	h.waitCall("start:sleep")
+	h.say("hold:1")
+	h.waitCall("start:hold:1")
 	h.say("control-error")
 	h.waitFor(func() bool {
 		for _, sent := range h.plat.texts() {
@@ -94,7 +94,7 @@ func TestTaskControlErrorReportsUnknownRouteWithoutPromptFallback(t *testing.T) 
 		}
 		return false
 	}, "uncertain control response")
-	h.waitCall("end:sleep")
+	h.waitCall("end:hold:1")
 	if slices.Contains(fake.Calls(h.dir), "start:control-error") {
 		t.Fatalf("failed control message was silently replayed as a prompt: %q", fake.Calls(h.dir))
 	}
@@ -124,8 +124,8 @@ func TestSteerAndQueueCommandsUseTheirExplicitRoutes(t *testing.T) {
 		t.Fatalf("idle steer reply = %q", h.plat.texts()[0])
 	}
 
-	h.say("sleep")
-	h.waitCall("start:sleep")
+	h.say("hold:1")
+	h.waitCall("start:hold:1")
 	h.say("/steer focus on the failing test")
 	h.waitCall("steer:focus on the failing test")
 	h.say("/queue prepare a short summary")
@@ -140,7 +140,7 @@ func TestSteerAndQueueCommandsUseTheirExplicitRoutes(t *testing.T) {
 		slices.Contains(calls, "start:/queue prepare a short summary") {
 		t.Fatalf("control commands became ordinary prompts: %q", calls)
 	}
-	end := slices.Index(calls, "end:sleep")
+	end := slices.Index(calls, "end:hold:1")
 	followup := slices.Index(calls, "start:prepare a short summary")
 	if end < 0 || followup < 0 || followup < end {
 		t.Fatalf("/queue did not wait for the active task: %q", calls)
@@ -187,8 +187,8 @@ func TestSteerAndQueueValidateTextLengthAndEmptiness(t *testing.T) {
 func TestNaturalTaskControlRejectsOversizeInput(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
-	h.say("sleep")
-	h.waitCall("start:sleep")
+	h.say("wait")
+	h.waitCall("start:wait")
 	tooLong := strings.Repeat("x", 32_001)
 	h.say(tooLong)
 	h.waitFor(func() bool {
@@ -198,6 +198,10 @@ func TestNaturalTaskControlRejectsOversizeInput(t *testing.T) {
 		slices.Contains(fake.Calls(h.dir), "start:"+tooLong) {
 		t.Fatal("oversized message reached task control or prompt")
 	}
+	if err := fake.Release(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	h.waitCall("end:wait")
 }
 
 func TestQueueCommandBypassesApprovalDialogueButWaitsForDecision(t *testing.T) {
@@ -239,8 +243,8 @@ func TestSteerCannotBypassPendingApproval(t *testing.T) {
 func TestLegacyAgentQueuesNaturalTextButNeverPromptsSteer(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{env: []string{"FAKE_NO_TASK_CONTROL=1"}})
-	h.say("sleep")
-	h.waitCall("start:sleep")
+	h.say("wait")
+	h.waitCall("start:wait")
 	h.say("/steer change the plan")
 	h.waitFor(func() bool {
 		return slices.ContainsFunc(h.plat.texts(), func(text string) bool {
@@ -253,12 +257,15 @@ func TestLegacyAgentQueuesNaturalTextButNeverPromptsSteer(t *testing.T) {
 			return strings.Contains(text, "does not support active-task guidance")
 		})
 	}, "legacy natural-message queue fallback")
+	if err := fake.Release(h.dir); err != nil {
+		t.Fatal(err)
+	}
 	h.waitCall("start:please check the test output")
 	calls := fake.Calls(h.dir)
 	if slices.Contains(calls, "start:/steer change the plan") {
 		t.Fatalf("unsupported /steer was sent as a prompt: %q", calls)
 	}
-	end := slices.Index(calls, "end:sleep")
+	end := slices.Index(calls, "end:wait")
 	followup := slices.Index(calls, "start:please check the test output")
 	if end < 0 || followup < 0 || followup < end {
 		t.Fatalf("legacy natural message was not queued after the task: %q", calls)

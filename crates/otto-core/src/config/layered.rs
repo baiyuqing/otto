@@ -171,6 +171,25 @@ impl Merged {
                 }
             }
         }
+        if layer.project()
+            && let Some(disabled) = table
+                .get_mut("plugins")
+                .and_then(Value::as_table_mut)
+                .and_then(|p| p.get_mut("disabled"))
+                .and_then(Value::as_array_mut)
+            && let Some(inherited) = self
+                .values
+                .get("plugins")
+                .and_then(Value::as_table)
+                .and_then(|p| p.get("disabled"))
+                .and_then(Value::as_array)
+        {
+            for value in inherited {
+                if !disabled.contains(value) {
+                    disabled.push(value.clone());
+                }
+            }
+        }
         let origin = Origin {
             layer,
             source: source.into(),
@@ -231,6 +250,15 @@ fn filter(
                 key: p.join("."),
                 source: source.into(),
                 reason: reason.into(),
+            });
+            table.remove(&key);
+            continue;
+        }
+        if p == ["plugins", "enabled"] && value.as_bool() != Some(false) {
+            diagnostics.push(Diagnostic {
+                key: p.join("."),
+                source: source.into(),
+                reason: "project configuration can only disable plugins".into(),
             });
             table.remove(&key);
             continue;
@@ -297,6 +325,8 @@ fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str
             }
             *field == "enabled"
         }
+        ["plugins", "disabled"] => true,
+        ["plugins", "enabled"] => true,
         ["web", "allow_hosts"] => true,
         _ => false,
     };
@@ -310,6 +340,7 @@ fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str
                 | ["mcp"]
                 | ["mcp", "servers"]
                 | ["mcp", "servers", _]
+                | ["plugins"]
                 | ["web"]
         );
     if allowed || container {

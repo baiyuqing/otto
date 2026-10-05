@@ -31,7 +31,8 @@ what the CLI actually does today.
 17. [Memory](#memory)
 18. [Skills](#skills)
 19. [MCP servers](#mcp-servers)
-20. [Troubleshooting](#troubleshooting)
+20. [Plugin packages](#plugin-packages)
+21. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -323,7 +324,8 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto workflow cancel <run-id>` | Stop active attempts, then mark the run canceled. |
 | `otto config explain [--cwd PATH] [--json]` | Inspect merged values, origins, ignored fields and executable trust offline. |
 | `otto config set KEY TOML_VALUE --scope user\|shared\|local` | Edit a single explicitly chosen configuration source. |
-| `otto mcp list` | List MCP servers declared in the configuration file. See [MCP servers](#mcp-servers). |
+| `otto plugin install\|list\|inspect\|enable\|disable\|trust\|revoke\|remove ...` | Manage Skills/MCP plugin packages. See [Plugin packages](#plugin-packages). |
+| `otto mcp list` | List configured MCP servers and installed plugin servers. See [MCP servers](#mcp-servers). |
 | `otto mcp add <server> ...` | Add an MCP server to `~/.config/otto/config.toml`. |
 | `otto mcp remove <server>` | Remove one configured MCP server. |
 | `otto mcp enable <server>` / `otto mcp disable <server>` | Toggle one configured MCP server. |
@@ -4175,6 +4177,145 @@ Not yet implemented:
 - Reloading `[mcp]` without a restart, and re-registering tools in a running
   session after `/mcp login`.
 - Resources, prompts, and per-tool approval prompts.
+
+## Plugin packages
+
+Plugins package reusable Skills and MCP servers. Otto supports the Skills and
+MCP components of [Agent Plugins 1.0](https://agent-plugins.org/), plus a limited
+adapter for `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`.
+Support is enabled by default; no installed packages means no added capability.
+
+A portable package has these root locations:
+
+```text
+my-plugin/
+  plugin.json
+  skills/review/SKILL.md
+  mcp.json
+  server.py
+```
+
+`plugin.json`:
+
+```json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "my-plugin",
+  "version": "1.0.0"
+}
+```
+
+`mcp.json` (optional):
+
+```json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "tools": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["${PLUGIN_ROOT}/server.py"]
+    }
+  }
+}
+```
+
+Skills use Markdown; MCP servers can use Python, TypeScript/JavaScript, Go,
+Rust or any other language implementing MCP. Install the required interpreter
+and dependencies yourself. The plugin installer does not run npm/pip installation scripts. Otto does not
+load language modules into its own process. Remote servers use
+`type: "streamable-http"` and `url`; HTTPS is required except on loopback.
+Legacy HTTP+SSE is unsupported.
+
+Manage packages without configuring an AI provider:
+
+```bash
+otto plugin install ./my-plugin
+otto plugin install https://github.com/example/my-plugin.git --rev <full-commit-id>
+otto plugin list
+otto plugin inspect my-plugin
+otto plugin trust my-plugin
+otto plugin disable my-plugin
+otto plugin enable my-plugin
+otto plugin revoke my-plugin
+otto plugin remove my-plugin
+```
+
+Git installation requires a full commit ID, not a branch or tag. Git hooks,
+global/system Git filters and submodules are not run. Authentication can use
+SSH agents or a configured `GIT_ASKPASS` helper. Global/system Git configuration
+and `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` overrides are excluded from install
+subprocesses to prevent package-triggered filters or hooks. URLs containing passwords,
+HTTPS usernames, query parameters or fragments are rejected.
+
+Installation copies a package into a versioned content snapshot under
+`~/.otto/plugins/packages/`. It enables Skills, but MCP requires the explicit
+`trust` command. Inspect the source and execution configuration before granting
+trust. Trust is tied to the installed content, including executable modes;
+changed content must be reinstalled and trusted again. The command authorizes
+both MCP process startup and HTTP connection. Stdio follows Otto's existing
+MCP execution model and runs outside the Bash sandbox.
+
+Enable/disable/installation changes apply at the next runner build, normally a
+new session or restart. If a package is installed while Otto is running,
+restart or run `/sandbox reload` before Bash scripts can read its new snapshot
+on macOS. Revoking or removing a package blocks subsequent MCP
+calls in active sessions and closes its servers. Removal retains package
+snapshots and `~/.otto/plugins/data/<name>/` so existing Skills and persistent
+data remain available; automatic snapshot/data garbage collection is not
+implemented. Package name replacement requires removal followed by installation.
+
+Skills appear as `my-plugin:review`; their local `SKILL.md` name remains
+`review`. MCP components have logical IDs such as `my-plugin:tools` and bounded
+internal IDs shown by `inspect`; the tool search/router exposes their tools.
+This keeps equal component names from different plugins separate.
+
+User-owned configuration can disable packages and supply credentials:
+
+```toml
+[plugins]
+enabled = true
+# disabled = ["my-plugin"]
+
+[plugins.bindings."my-plugin:tools".env]
+API_TOKEN = "${MY_PLUGIN_API_TOKEN}"
+
+# For an HTTP component instead:
+# [plugins.bindings."my-plugin:remote".headers]
+# Authorization = "Bearer ${MY_PLUGIN_API_TOKEN}"
+# [plugins.bindings."my-plugin:remote"]
+# auth = "oauth"
+```
+
+Never place literal API tokens in a package. Bindings use the existing MCP
+credential expansion/redaction rules and may also set `auth`,
+`oauth_client_id` and `oauth_scopes` for HTTP servers. OAuth cannot be combined
+with an Authorization header. Use the logical server ID (`my-plugin:remote`) or internal ID from `inspect`
+for `otto mcp login <server>` when OAuth is configured. `otto mcp list` includes
+plugin servers with both IDs. Project configuration may
+add disabled names or set `enabled = false`, but cannot grant trust, re-enable
+user-disabled packages or set credential bindings. Managed MCP restrictions
+also apply. `[skills].enabled = false` and `[mcp].enabled = false` disable the
+corresponding plugin components.
+
+Portable MCP expands only `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` in stdio
+arguments, environment values and working directories. The subprocess also
+receives both variables. Command, URL and header fields do not expand host
+variables. A command is one bare executable name or `./package/path`, never a
+shell command line. Working directories remain beneath the plugin root or its
+persistent data root.
+
+Legacy adapters support conventional/custom Skills paths and file/inline MCP
+configurations; package-root placeholders receive limited translation. Hooks,
+Commands, Agents, LSP, OpenAI Apps and Pi runtime code are not activated.
+Recognized unsupported components and invalid independent components produce
+diagnostics while valid Skills/MCP remain usable. This is not full Claude,
+Codex or Pi plugin compatibility. Skill `allowed-tools` remains parsed without
+permission enforcement.
+
+Session history records active package names, versions and content digests as
+append-only metadata. Resuming history does not install or authorize packages
+listed in old metadata; the current installation registry determines capability.
 
 ## Troubleshooting
 

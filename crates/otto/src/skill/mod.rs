@@ -53,7 +53,8 @@ pub struct Contract {
 
 /// One discovered skill.
 ///
-/// `name` is the frontmatter name, which must equal the directory base name.
+/// `name` is the catalog ID (qualified for plugins). Local frontmatter names
+/// must equal the directory base name.
 /// `directory` is absolute; `path` is `directory/SKILL.md`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
@@ -144,6 +145,60 @@ impl Catalog {
             },
             warnings,
         )
+    }
+
+    /// Adds package Skills without changing their local name validation.
+    pub fn extend_plugin(
+        &mut self,
+        plugin: &str,
+        package: &Path,
+        directories: &[PathBuf],
+    ) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let package_root = match Root::open(package) {
+            Ok(root) => root,
+            Err(_) => return vec![format!("plugin {plugin}: cannot open skill package")],
+        };
+        for relative in directories {
+            if package_root.stat(relative).is_err() {
+                warnings.push(format!(
+                    "plugin {plugin}: invalid skill path {}",
+                    relative.display()
+                ));
+                continue;
+            }
+            let directory = package.join(relative);
+            let Some(local_name) = relative.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let result = package_root
+                .open_file(
+                    relative,
+                    nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY,
+                    nix::sys::stat::Mode::empty(),
+                )
+                .and_then(Root::from_directory)
+                .map_err(|e| e.to_string())
+                .and_then(|root| {
+                    load_candidate(&directory, &directory.join("SKILL.md"), local_name, &root)
+                });
+            match result {
+                Ok((mut skill, warning)) => {
+                    if let Some(warning) = warning {
+                        warnings.push(warning);
+                    }
+                    skill.name = format!("{plugin}:{}", skill.name);
+                    if self.lookup(&skill.name).is_some() {
+                        warnings.push(format!("duplicate plugin skill {}", skill.name));
+                    } else {
+                        self.skills.push(skill);
+                    }
+                }
+                Err(error) => warnings.push(error),
+            }
+        }
+        self.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        warnings
     }
 
     /// Removes skills whose names are in `names`, preserving name order.

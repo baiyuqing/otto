@@ -215,7 +215,10 @@ pub async fn run(
     cancel: &CancellationToken,
     terminate: &super::terminate::Terminate,
 ) -> i32 {
-    if args.first().is_some_and(|a| a == "config") {
+    if args
+        .first()
+        .is_some_and(|a| matches!(a.as_str(), "config" | "plugin"))
+    {
         let entries = match capture_environment(environment_entries) {
             Ok(v) => v,
             Err(e) => return fail(stderr, &e),
@@ -224,6 +227,9 @@ pub async fn run(
             Ok(v) => v,
             Err(e) => return fail(stderr, &e),
         };
+        if args[0] == "plugin" {
+            return super::plugin::run(&args[1..], stdout, stderr, &lookup);
+        }
         return super::config_command::run(&args[1..], stdout, stderr, &lookup);
     }
     if args.first().is_some_and(|command| command == "workspace") {
@@ -1468,6 +1474,9 @@ fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<String
             keys.insert(profile.api_key_env.as_str());
         }
     }
+    let credential_variables = file.plugins.credential_variables();
+    keys.extend(credential_variables.iter().map(String::as_str));
+    keys.extend(["PATH", "TMPDIR", "LANG", "TERM"]);
     keys.into_iter()
         .map(|key| {
             (
@@ -1491,6 +1500,7 @@ pub(super) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
             names.insert(profile.api_key_env.clone());
         }
     }
+    names.extend(file.plugins.credential_variables());
     names.into_iter().collect()
 }
 
@@ -1520,7 +1530,27 @@ pub(crate) fn resolve_sandbox_settings(
     )?;
     let agent_roots =
         crate::config::layered::catalog_roots(file, home, workspace, &agents.roots, "agents")?;
-    let roots = skill_roots.into_iter().chain(agent_roots);
+    let plugin_roots = if file.skills.enabled != Some(false) {
+        let mut discovery = file.clone();
+        discovery.mcp.enabled = Some(false);
+        let service = crate::plugin::Service::new(home);
+        crate::plugin::Snapshot::load(home, &discovery, environment)
+            .packages
+            .into_iter()
+            .map(|p| {
+                service
+                    .package_path(&p.digest)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let roots = skill_roots
+        .into_iter()
+        .chain(agent_roots)
+        .chain(plugin_roots);
     for root in roots {
         if std::fs::symlink_metadata(&root).is_ok_and(|info| info.is_dir()) {
             raw.read_paths.push(root);

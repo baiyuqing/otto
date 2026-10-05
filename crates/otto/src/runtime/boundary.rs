@@ -118,6 +118,11 @@ pub fn boundary_secret_values(
             return (collect.values(), false);
         }
     }
+    for name in inputs.config.plugins.credential_variables() {
+        if !collect.add(&name) || !collect.add(environment_value(inputs, &name)) {
+            return (collect.values(), false);
+        }
+    }
     collect.add_url(inputs.overrides_base_url);
     if !collect.open {
         return (collect.values(), false);

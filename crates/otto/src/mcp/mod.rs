@@ -127,6 +127,9 @@ pub enum CallError {
     /// The client has begun stopping, so this request was never dispatched.
     #[error("mcp server is stopping")]
     Stopping,
+    /// A package guard rejected the call before any request was dispatched.
+    #[error("plugin execution authorization was revoked or package content changed")]
+    PluginUnauthorized,
     /// An HTTP server rejected or lacks a bearer token; the user must run
     /// `otto mcp login <server>`.
     #[error("authorization required; run 'otto mcp login <server>'")]
@@ -247,6 +250,19 @@ impl Servers {
     /// Status rows in configuration order.
     pub fn status(&self) -> Vec<ServerStatus> {
         self.status.lock().expect("mcp status lock").clone()
+    }
+
+    /// Records a guard-triggered disconnect for one logical server identity.
+    pub(crate) fn mark_failed(&self, name: &str, reason: &str) {
+        if let Some(status) = self
+            .status
+            .lock()
+            .expect("mcp status lock")
+            .iter_mut()
+            .find(|s| s.name == name)
+        {
+            status.state = ServerState::Failed(reason.into());
+        }
     }
 
     /// Shuts every client down. Idempotent. Cleanup is owned by a detached

@@ -91,7 +91,7 @@ pub(super) fn worker(connection: &Arc<Connection>, platforms: Vec<String>) -> Op
 }
 
 struct LocalRunner {
-    builder: Arc<crate::cli::runtime_builder::Builder>,
+    builder: Arc<crate::runtime::builder::Builder>,
     runtime: Runtime,
 }
 
@@ -509,7 +509,7 @@ mod tests {
         let controller = crate::app::Controller::create(Arc::clone(&builder), &runtime)
             .await
             .unwrap();
-        let runner = crate::cli::runtime_builder::Runner::scripted(
+        let runner = crate::runtime::builder::Runner::scripted(
             controller.current_session(),
             Arc::new(OkProvider),
             Arc::new(crate::subagent::tasks::Tasks::new()),

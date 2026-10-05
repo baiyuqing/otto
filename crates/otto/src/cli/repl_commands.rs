@@ -997,10 +997,10 @@ mod tests {
             ..MemoryRuntime::default()
         };
         let (service, user_scope, usable) =
-            super::super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+            crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                 .expect("open memory service");
         assert!(usable, "the test store must be usable");
-        builder.shared_mut().memory = super::super::wiring::MemoryWiring {
+        builder.shared_mut().memory = crate::runtime::wiring::MemoryWiring {
             service,
             usable,
             user_scope,
@@ -1009,7 +1009,7 @@ mod tests {
             advice_audit: None,
         };
         builder.workspace_scope =
-            super::super::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
+            crate::runtime::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
                 .expect("workspace scope");
         let runtime = testutil::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");

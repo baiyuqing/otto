@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{Channel, Controller, approval_control::ControlReply};
 use crate::{
-    cli::runtime_builder::Runner,
+    runtime::builder::Runner,
     tool::{Tool, otto::Help},
 };
 
@@ -380,10 +380,8 @@ mod tests {
     use super::*;
     use crate::{
         app::Controller,
-        cli::{
-            runtime_builder::Runner,
-            testutil::{builder, initial_runtime},
-        },
+        cli::testutil::{builder, initial_runtime},
+        runtime::builder::Runner,
         subagent::tasks::Tasks,
     };
     use otto_core::{

@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use otto_core::model::{Message, Usage};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::runtime_builder::Runner;
+use crate::runtime::builder::Runner;
 use crate::subagent::tasks::{TaskError, TaskStatus as SubagentStatus, Tasks as Registry};
 
 /// The server maps it to 409 `task_done`.

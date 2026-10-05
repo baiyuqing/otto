@@ -23,10 +23,10 @@ use crate::server::listen::{Listener, listen_tcp, listen_unix};
 use crate::server::{self, Factory, Info, Options, SESSION_NOT_FOUND, Server};
 use crate::session::{self as sessionfs, MAX_LIST_SESSIONS};
 
-use super::info::SandboxInfo;
-use super::runtime_builder::Builder;
-use super::sandbox_runtime::canonical_directory;
 use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
+use crate::runtime::builder::Builder;
+use crate::runtime::info::SandboxInfo;
+use crate::runtime::sandbox_runtime::canonical_directory;
 
 /// Writes `otto: {message}\n` and returns exit code 1.
 fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
@@ -126,7 +126,7 @@ impl Workspaces {
     async fn load(
         &self,
         canonical: &Path,
-        shared: &Arc<super::runtime_builder::Shared>,
+        shared: &Arc<crate::runtime::builder::Shared>,
         runtime: &Runtime,
         cancel: &CancellationToken,
         stderr: &mut (dyn Write + Send),
@@ -331,7 +331,7 @@ fn write_workspace_list(home: &str, workspaces: Vec<String>) -> std::io::Result<
     std::fs::create_dir_all(&directory)?;
     let json = serde_json::to_vec(&WorkspaceListFile { workspaces })
         .expect("a list of strings always serializes");
-    let suffix = super::runtime_builder::random_id()?;
+    let suffix = crate::runtime::builder::random_id()?;
     let temp = directory.join(format!(".serve-workspaces-{suffix}.json"));
     std::fs::write(&temp, &json)?;
     std::fs::rename(&temp, workspace_list_path(home))
@@ -366,7 +366,7 @@ fn remove_from_workspace_list(home: &str, path: &str) -> std::io::Result<()> {
 /// are already in it).
 async fn load_persisted_workspaces(
     workspaces: &Workspaces,
-    shared: &Arc<super::runtime_builder::Shared>,
+    shared: &Arc<crate::runtime::builder::Shared>,
     runtime: &Runtime,
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),
@@ -656,7 +656,7 @@ impl Factory for ServeFactory {
         let shared = Arc::clone(&self.builder().shared);
         // ponytail: no writer is threaded through `Factory::load_workspace`,
         // so a workflow-lock warning goes straight to the process stderr,
-        // matching `runtime_builder.rs`'s own `build_runner` warnings.
+        // matching `runtime/builder.rs`'s own `build_runner` warnings.
         let mut stderr = std::io::stderr();
         let (host, newly_loaded) = self
             .workspaces
@@ -1078,7 +1078,7 @@ fn bind(listen: &ServerRuntime) -> Result<Bound, String> {
     if !listen.listen.is_empty() {
         bound.tcp = Some(listen_tcp(&listen.listen).map_err(|error| format!("serve: {error}"))?);
         bound.token =
-            super::runtime_builder::random_id().map_err(|error| format!("serve: {error}"))?;
+            crate::runtime::builder::random_id().map_err(|error| format!("serve: {error}"))?;
     }
     if !listen.socket.is_empty() {
         let socket = match Path::new(&listen.socket).is_absolute() {
@@ -1632,7 +1632,7 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let canonical = canonical_directory(workspace.path()).expect("canonical");
         let shared = crate::cli::testutil::shared_with_offline_sandbox(shared_root.path());
-        let runtime = crate::cli::runtime_builder::resolve_initial_runtime(
+        let runtime = crate::runtime::builder::resolve_initial_runtime(
             &shared.config,
             &shared.environment,
             None,
@@ -1687,7 +1687,7 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let missing = shared_root.path().join("does-not-exist");
         let shared = crate::cli::testutil::shared_with_offline_sandbox(shared_root.path());
-        let runtime = crate::cli::runtime_builder::resolve_initial_runtime(
+        let runtime = crate::runtime::builder::resolve_initial_runtime(
             &shared.config,
             &shared.environment,
             None,
@@ -1875,8 +1875,8 @@ mod tests {
 
     // ---- persisted workspace list ----
 
-    fn runtime_for(shared: &Arc<crate::cli::runtime_builder::Shared>) -> Runtime {
-        crate::cli::runtime_builder::resolve_initial_runtime(
+    fn runtime_for(shared: &Arc<crate::runtime::builder::Shared>) -> Runtime {
+        crate::runtime::builder::resolve_initial_runtime(
             &shared.config,
             &shared.environment,
             None,

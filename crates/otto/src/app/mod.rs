@@ -44,9 +44,9 @@ use otto_core::session::{ListResult, RuntimeMetadata, Session};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::cli::info::SandboxInfo;
-use crate::cli::runtime_builder::{Builder, Runner, RuntimeInfo, SharedSession};
-use crate::cli::sandbox_setup::{self, SandboxChange};
+use crate::runtime::builder::{Builder, Runner, RuntimeInfo, SharedSession};
+use crate::runtime::info::SandboxInfo;
+use crate::runtime::sandbox_config::{self, SandboxChange};
 use crate::session::{self as sessionfs, ArchiveResult, MAX_LIST_SESSIONS};
 use crate::tool::remind::Reminders;
 pub use channel::Channel;
@@ -445,7 +445,7 @@ impl Controller {
     /// The process-wide memory service, its user scope, and the recall
     /// limits. `/memory` and `/remember` read them through
     /// `Controller::memory_manager`.
-    pub(crate) fn memory_wiring(&self) -> &crate::cli::wiring::MemoryWiring {
+    pub(crate) fn memory_wiring(&self) -> &crate::runtime::wiring::MemoryWiring {
         &self.builder.memory
     }
 
@@ -1646,7 +1646,7 @@ impl Controller {
     /// Resolves a user-supplied `/sandbox allow` path against this process's
     /// home directory and the filesystem, without changing anything.
     pub fn resolve_sandbox_read_path(&self, input: &str) -> Result<String, String> {
-        sandbox_setup::resolve_read_path(input, &self.builder.home)
+        sandbox_config::resolve_read_path(input, &self.builder.home)
     }
 
     /// Persists one `[sandbox]` change to the configuration file and applies
@@ -1677,11 +1677,11 @@ impl Controller {
             control
         };
         let path = self.builder.config_path.clone();
-        let amendment = sandbox_setup::amend_sandbox_config(&path, &change)?;
+        let amendment = sandbox_config::amend_sandbox_config(&path, &change)?;
         match control.reload().await {
             Ok(info) => Ok(info),
             Err(message) => Err(
-                match sandbox_setup::revert_sandbox_config(&path, &amendment) {
+                match sandbox_config::revert_sandbox_config(&path, &amendment) {
                     Ok(()) => format!("{message}; the configuration change was rolled back"),
                     Err(failure) => format!(
                         "{message}; the configuration change could not be rolled back: {failure}"
@@ -2089,8 +2089,8 @@ pub(crate) async fn controller_with_approvals_and_schedule(
     Arc<crate::tool::bash::BashApprovals>,
     Arc<Mutex<usize>>,
 ) {
-    use crate::cli::info::SandboxNetwork;
     use crate::cli::testutil::{FakeSandbox, builder, initial_runtime, seatbelt_info};
+    use crate::runtime::info::SandboxNetwork;
     use crate::sandbox::direct::DirectDriver;
     use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
 
@@ -2130,11 +2130,11 @@ pub(crate) async fn controller_with_approvals_and_schedule(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::info::SandboxNetwork;
-    use crate::cli::sandbox_setup::SandboxChange;
     use crate::cli::testutil::{
         FakeSandbox, builder, controller, initial_runtime, seatbelt_info, user,
     };
+    use crate::runtime::info::SandboxNetwork;
+    use crate::runtime::sandbox_config::SandboxChange;
 
     #[tokio::test]
     async fn info_reports_the_current_session_and_the_resolved_profile() {
@@ -2271,8 +2271,8 @@ mod tests {
 
     #[tokio::test]
     async fn read_approval_reload_failure_rolls_back_and_does_not_grant() {
-        use crate::cli::info::SandboxNetwork;
         use crate::cli::testutil::{FakeSandbox, seatbelt_info};
+        use crate::runtime::info::SandboxNetwork;
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
         let path = workspace.path().canonicalize().unwrap();
@@ -2978,7 +2978,7 @@ mod tests {
 
     /// A child transcript at `<parent without .jsonl>/<task_id>-child.jsonl`,
     /// matching the file `subagent::runner::spawn` creates. Duplicated from
-    /// [`crate::cli::runtime_builder::tests::child_store`]: both are
+    /// [`crate::runtime::builder::tests::child_store`]: both are
     /// `#[cfg(test)]`-private to their own module, and the fixture is 12
     /// lines.
     fn child_store(parent: &Path, task_id: &str) -> (crate::subagent::runner::Transcript, String) {
@@ -3022,7 +3022,7 @@ mod tests {
     /// rather than a real top-level "agent" tool call from a scripted
     /// provider: `Controller::migrate` calls `Runner::migrate`, already
     /// covered end to end by
-    /// `runtime_builder::tests::migrate_cancels_running_and_queued_subagent_tasks_and_notifies_the_parent`,
+    /// `runtime::builder::tests::migrate_cancels_running_and_queued_subagent_tasks_and_notifies_the_parent`,
     /// and adds only admission/close/lease-release around it, none of which
     /// depends on how the tasks were started.
     #[tokio::test]

@@ -284,7 +284,7 @@ async fn wait_for_close(close: &CloseCompletion) {
 
 /// Test fakes for building a real, connected [`client::Client`] without a
 /// live server. `pub(crate)` (not `#[cfg(test)] mod tests`-private) so
-/// `cli::runtime_builder`'s close-ordering regression test can reuse it
+/// `runtime::builder`'s close-ordering regression test can reuse it
 /// instead of duplicating a second copy of [`FakeTransport`].
 #[cfg(test)]
 pub(crate) mod test_support {

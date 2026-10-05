@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::subagent::tasks::{TaskError, Tasks};
 
 use super::controller::{Controller, PROFILE_SWITCH_UNAVAILABLE};
-use super::sandbox_setup::{SandboxChange, parse_exclude_entry};
+use crate::runtime::sandbox_config::{SandboxChange, parse_exclude_entry};
 
 /// The longest line the REPL accepts.
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
@@ -923,7 +923,7 @@ impl<'a> Repl<'a> {
         }
     }
 
-    fn print_sandbox(&mut self, info: crate::cli::info::SandboxInfo) {
+    fn print_sandbox(&mut self, info: crate::runtime::info::SandboxInfo) {
         let _ = writeln!(self.stdout, "Sandbox: {}", info.summary());
         let reason = info.reason_code();
         if !reason.is_empty() {
@@ -1284,9 +1284,9 @@ mod tests {
 
     use super::*;
     use crate::cli::controller::SANDBOX_RELOAD_UNAVAILABLE;
-    use crate::cli::info::SandboxNetwork;
-    use crate::cli::runtime_builder::Runner;
     use crate::cli::testutil::{self, controller, user};
+    use crate::runtime::builder::Runner;
+    use crate::runtime::info::SandboxNetwork;
     use crate::subagent::tasks::Tasks;
     use otto_core::agent::inbox::Notification;
     use otto_core::agent::{CompactionResult, Event};

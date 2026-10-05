@@ -16,9 +16,9 @@ use tokio_util::sync::CancellationToken;
 use crate::acp;
 use crate::app::SandboxControl;
 
-use super::runtime_builder::Builder;
 use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
 use super::terminate::Terminate;
+use crate::runtime::builder::Builder;
 
 fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
     let _ = writeln!(stderr, "otto: {message}");

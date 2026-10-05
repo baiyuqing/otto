@@ -55,7 +55,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::{
     ApprovalDecision, CLOSED, Channel, Controller, PROMPT_ACTIVE, SandboxControl, Step, Stop,
 };
-use crate::cli::runtime_builder::Builder;
+use crate::runtime::builder::Builder;
 use crate::schedule::Origin;
 use crate::session::{MAX_LIST_SESSIONS, is_session_id, session_directory};
 
@@ -492,7 +492,7 @@ impl Connection {
         if !Path::new(cwd).is_absolute() {
             return Err(invalid_params("cwd must be an absolute path"));
         }
-        match crate::cli::sandbox_runtime::canonical_directory(Path::new(cwd)) {
+        match crate::runtime::sandbox_runtime::canonical_directory(Path::new(cwd)) {
             Ok(canonical) if canonical == self.workspace => Ok(()),
             _ => Err(invalid_params(format!(
                 "cwd must be the workspace {}",

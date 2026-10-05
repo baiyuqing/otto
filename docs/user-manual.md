@@ -349,7 +349,8 @@ otto trust ./project --revoke-executables
 ```
 
 `--executables` displays discovered sources and records an explicit content
-and path grant in `~/.config/otto/executable-trust.json`. Use the same `--config`
+and path grant in `~/.config/otto/trust/executables.json`. Its backups stay in
+the separate `trust/backups/` directory. Use the same `--config`
 when granting trust for a custom user source. User-owned global catalogs keep
 working; custom catalog roots inside the repository require this grant too.
 Default catalogs load user roots first, then project roots from root to leaf;

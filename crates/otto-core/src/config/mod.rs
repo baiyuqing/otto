@@ -17,6 +17,7 @@ pub mod agents;
 pub mod duration;
 pub mod edit;
 pub mod failover;
+pub mod layered;
 pub mod mcp;
 pub mod memory;
 pub mod model_limits;
@@ -72,6 +73,19 @@ impl ConfigError {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct File {
+    /// Runtime-only authority metadata; never accepted from TOML or written back.
+    #[serde(skip)]
+    pub policy: Option<layered::ManagedPolicy>,
+    #[serde(skip)]
+    pub project_executables: Option<bool>,
+    #[serde(skip)]
+    pub executable_digest: Option<String>,
+    #[serde(skip)]
+    pub user_values: Option<toml::Table>,
+    #[serde(skip)]
+    pub user_source: Option<String>,
+    #[serde(skip)]
+    pub diagnostics: Vec<layered::Diagnostic>,
     #[serde(default)]
     pub default_profile: String,
     #[serde(default)]

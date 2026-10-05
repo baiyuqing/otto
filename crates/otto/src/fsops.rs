@@ -227,6 +227,40 @@ pub fn rename_at(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Publish a staged directory inside one pinned root. Creation is exclusive;
+/// replacement exchanges both names atomically, leaving the old tree at `from`.
+/// No fallback to a non-atomic sequence on unsupported filesystems.
+pub fn publish_directory(dir: &Dir, from: &str, to: &str, replace: bool) -> io::Result<()> {
+    let (from, to) = (c_name(from)?, c_name(to)?);
+    // SAFETY: the directory descriptor and both single-component names live
+    // through the call. Callers validate the names and own the staged directory.
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            dir.fd(),
+            from.as_ptr(),
+            dir.fd(),
+            to.as_ptr(),
+            if replace { 2u32 } else { 1u32 }, // RENAME_EXCHANGE / RENAME_NOREPLACE
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let result = unsafe {
+        libc::renameatx_np(
+            dir.fd(),
+            from.as_ptr(),
+            dir.fd(),
+            to.as_ptr(),
+            if replace { 0x0000_0002 } else { 0x0000_0004 }, // RENAME_SWAP / RENAME_EXCL
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Removes a file name inside a pinned directory.
 pub fn unlink_at(dir: &Dir, name: &str) -> io::Result<()> {
     let name = c_name(name)?;
@@ -396,6 +430,41 @@ pub fn is_enoent(error: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_publication_is_exclusive_and_exchanges_complete_trees() {
+        let home = tempfile::tempdir().expect("home");
+        for name in ["staged", "existing"] {
+            std::fs::create_dir(home.path().join(name)).expect("directory");
+            std::fs::write(home.path().join(name).join("content"), name).expect("content");
+        }
+        let root = open_dir_no_follow(home.path()).expect("root");
+        assert_eq!(
+            publish_directory(&root, "staged", "existing", false)
+                .expect_err("collision")
+                .raw_os_error(),
+            Some(libc::EEXIST)
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("existing/content")).expect("old"),
+            "existing"
+        );
+        publish_directory(&root, "staged", "existing", true).expect("exchange");
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("existing/content")).expect("new"),
+            "staged"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("staged/content")).expect("displaced"),
+            "existing"
+        );
+        publish_directory(&root, "staged", "created", false).expect("create");
+        assert!(!home.path().join("staged").exists());
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("created/content")).expect("created"),
+            "existing"
+        );
+    }
 
     /// The archive move: the session file lands at its destination and the
     /// source is gone.

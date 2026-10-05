@@ -115,6 +115,17 @@ impl Relay {
                 error(INTERNAL_ERROR, LOST)
             }
             ClientError::Http {
+                status: 400 | 403,
+                code,
+                message,
+            } if matches!(
+                code.as_str(),
+                "INVALID_WORKSPACE" | "WORKSPACE_NOT_ADMITTED"
+            ) =>
+            {
+                super::invalid_params(message)
+            }
+            ClientError::Http {
                 message, status, ..
             } if message.is_empty() => {
                 error(INTERNAL_ERROR, format!("otto serve answered HTTP {status}"))
@@ -664,4 +675,32 @@ pub(super) async fn serve_in_process(
 /// What `/reflect` shows for serve's report, as the local frontends show it.
 fn reflection_text(report: crate::client::ReflectionResult) -> String {
     crate::reflection::summary_text(&report.line, &report.retrospective)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_rejections_remain_invalid_params_without_losing_the_connection() {
+        let relay = Relay::with_router(axum::Router::new());
+        for (status, code) in [(400, "INVALID_WORKSPACE"), (403, "WORKSPACE_NOT_ADMITTED")] {
+            let response = serde_json::to_value(relay.fail(ClientError::Http {
+                status,
+                code: code.into(),
+                message: "workspace rejected".into(),
+            }))
+            .unwrap();
+            assert_eq!(response["code"], super::super::INVALID_PARAMS);
+            assert_eq!(response["message"], "workspace rejected");
+            assert!(!relay.lost.is_cancelled());
+        }
+        let response = serde_json::to_value(relay.fail(ClientError::Http {
+            status: 500,
+            code: "internal".into(),
+            message: "server failed".into(),
+        }))
+        .unwrap();
+        assert_eq!(response["code"], INTERNAL_ERROR);
+    }
 }

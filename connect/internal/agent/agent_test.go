@@ -58,6 +58,24 @@ func fakeAgent(t *testing.T, extra ...string) (*Agent, *recorder, string) {
 	return a, rec, dir
 }
 
+func TestDeliveryMetadataPreservesExactAndEmptyDeclarations(t *testing.T) {
+	a := New(Options{})
+	a.SetPlatforms([]string{"telegram"})
+	if _, ok := a.clientMeta()["otto"].(map[string]any)["scheduleDeliveryChats"]; ok {
+		t.Fatal("legacy client unexpectedly advertised exact chats")
+	}
+	a.SetDeliveryChats([]string{"telegram:a"})
+	value := a.clientMeta()["otto"].(map[string]any)["scheduleDeliveryChats"].([]string)
+	if !slices.Equal(value, []string{"telegram:a"}) {
+		t.Fatal(value)
+	}
+	a.SetDeliveryChats(nil)
+	value = a.clientMeta()["otto"].(map[string]any)["scheduleDeliveryChats"].([]string)
+	if value == nil || len(value) != 0 {
+		t.Fatalf("empty declaration must stay an array: %#v", value)
+	}
+}
+
 func TestSessionUpdateSuppressesLoadReplayExceptReflectionNotice(t *testing.T) {
 	rec := &recorder{}
 	p := &process{loading: map[string]bool{"s1": true}}

@@ -100,6 +100,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Let ACP clients attached to one `otto serve` select admitted workspaces per
+  request. Route scheduled chat messages to each connector's declared chats;
+  suspend ambiguous legacy delivery and recover when clients disconnect or
+  their offers expire. Preserve scheduled items when upgrading the store.
+  ([#357](https://github.com/baiyuqing/otto/pull/357))
+
 - Ask the agent for a retrospective in plain words: the new `reflect` tool runs the same
   reflection as `/reflect` instead of the model writing its own file. Every reflection
   run now writes a short retrospective as the first section of its run log under
@@ -223,6 +229,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Keep resumed sessions in the requested workspace, resolve new-session and
+  workflow runtimes from that workspace's configuration, and wire its own
+  sandbox control and persistent read approvals. Rebind ACP notifications
+  when a session is loaded again after being reopened. Preserve ACP invalid-parameter
+  errors when workspace admission rejects a request. ([#357](https://github.com/baiyuqing/otto/pull/357))
+
 - Make zsh here-documents (`cat > file <<EOF`) work in the Seatbelt sandbox.
   The sandbox now sets `TMPPREFIX` to its private temporary directory, so zsh
   no longer tries to write the denied `/tmp/zsh*` and leave an empty target file.
@@ -294,6 +306,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [#325](https://github.com/baiyuqing/otto/pull/325))
 
 ### Security
+
+- Recheck chat admission when restoring connector bindings and delivering
+  background replies, so removed chats no longer receive session notices. ([#357](https://github.com/baiyuqing/otto/pull/357))
 
 - Confine file tools to the workspace, validate canonical paths and symlinks,
   protect session resume identities, and bound file reads, edits, prompt files,

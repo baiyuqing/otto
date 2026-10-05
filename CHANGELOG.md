@@ -159,6 +159,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- `web_fetch` and `web_search` now work on Macs where a TUN interface answers
+  DNS with fake IPs from 198.18.0.0/15. The tools blocked those answers as
+  non-public, so every request failed.
+  ([#337](https://github.com/baiyuqing/otto/pull/337))
 - `BRAVE_API_KEY`, `GOOGLE_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID` now take
   effect. They were not passed to the web tools, so `web_search` always used
   ChatGPT hosted search or Bing. ([#335](https://github.com/baiyuqing/otto/pull/335))

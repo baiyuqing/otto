@@ -10,6 +10,11 @@
 //! address a host name resolves to at connect time, so a name that resolves
 //! to a private address, or one that changes its answer between a check and
 //! the connection, never reaches `connect`.
+//!
+//! Answers in 198.18.0.0/15 that the kernel routes from a local address in
+//! that range are fake IPs from a local TUN interface's DNS, and are accepted.
+//! On such machines the real address is resolved behind the TUN interface, so
+//! the public-address check cannot see it.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -92,11 +97,44 @@ fn public_v4(ip: Ipv4Addr) -> bool {
         // 192.0.0.0/24, IETF protocol assignments.
         || (a == 192 && b == 0 && c == 0)
         // 198.18.0.0/15, benchmarking.
-        || (a == 198 && (b == 18 || b == 19))
+        || benchmarking_v4(ip)
         // 240.0.0.0/4, reserved.
         || a >= 240
         // 0.0.0.0/8, "this network".
         || a == 0)
+}
+
+/// 198.18.0.0/15, the benchmarking range a TUN interface can use for fake IPs.
+fn benchmarking_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+    a == 198 && (b == 18 || b == 19)
+}
+
+/// True when `answer` is a fake IP and the kernel routes it from the local
+/// address `local`, which is in the same range: a local TUN interface holds
+/// that address. The interface's own address stays blocked.
+fn fake_ip_route(answer: Ipv4Addr, local: Ipv4Addr) -> bool {
+    benchmarking_v4(answer) && benchmarking_v4(local) && answer != local
+}
+
+/// Detects a fake IP handed out by a local TUN interface. The route lookup
+/// uses a UDP `connect`, which selects the source address and sends no packet.
+/// Any I/O error counts as not a fake IP.
+fn tun_fake_ip(ip: IpAddr) -> bool {
+    let IpAddr::V4(answer) = ip else {
+        return false;
+    };
+    if !benchmarking_v4(answer) {
+        return false;
+    }
+    let local = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).and_then(|socket| {
+        socket.connect((answer, 443))?;
+        socket.local_addr()
+    });
+    match local {
+        Ok(SocketAddr::V4(local)) => fake_ip_route(answer, *local.ip()),
+        _ => false,
+    }
 }
 
 fn public_v6(ip: Ipv6Addr) -> bool {
@@ -166,6 +204,7 @@ fn system_lookup() -> Lookup {
 pub(super) struct PublicResolver {
     lookup: Lookup,
     allow_private: bool,
+    fake_ip: fn(IpAddr) -> bool,
 }
 
 impl PublicResolver {
@@ -173,6 +212,7 @@ impl PublicResolver {
         Self {
             lookup: system_lookup(),
             allow_private: false,
+            fake_ip: tun_fake_ip,
         }
     }
 
@@ -182,7 +222,14 @@ impl PublicResolver {
         Self {
             lookup,
             allow_private: false,
+            fake_ip: |_| false,
         }
+    }
+
+    /// Replaces the fake-IP check, for tests.
+    #[cfg(test)]
+    fn with_fake_ip(self, fake_ip: fn(IpAddr) -> bool) -> Self {
+        Self { fake_ip, ..self }
     }
 
     /// A resolver that sends every name to `127.0.0.1` and accepts it, so a
@@ -195,6 +242,7 @@ impl PublicResolver {
                 Box::pin(async move { Ok(vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)]) })
             }),
             allow_private: true,
+            fake_ip: |_| false,
         }
     }
 
@@ -210,7 +258,7 @@ impl PublicResolver {
         let allowed: Vec<SocketAddr> = addrs
             .iter()
             .copied()
-            .filter(|addr| self.allow_private || public_ip(addr.ip()))
+            .filter(|addr| self.allow_private || public_ip(addr.ip()) || (self.fake_ip)(addr.ip()))
             .collect();
         if allowed.is_empty() {
             return Err(std::io::Error::other(blocked_message(host)));
@@ -276,6 +324,55 @@ mod tests {
         ] {
             assert!(!public_ip(ip(blocked)), "{blocked} must be blocked");
         }
+    }
+
+    #[test]
+    fn fake_ip_route_requires_both_addresses_in_range_and_differing() {
+        let v4 = |text: &str| -> Ipv4Addr { text.parse().unwrap() };
+        for (answer, local, expected) in [
+            ("198.18.0.141", "198.18.0.1", true),
+            ("198.19.255.1", "198.18.0.1", true),
+            ("198.18.0.141", "192.168.1.5", false),
+            ("198.18.0.1", "198.18.0.1", false),
+            ("8.8.8.8", "198.18.0.1", false),
+            ("10.0.0.1", "198.18.0.1", false),
+        ] {
+            assert_eq!(
+                fake_ip_route(v4(answer), v4(local)),
+                expected,
+                "{answer} via {local}"
+            );
+        }
+    }
+
+    #[test]
+    fn tun_fake_ip_is_false_outside_the_range() {
+        for outside in ["8.8.8.8", "127.0.0.1", "10.0.0.1", "::1"] {
+            assert!(!tun_fake_ip(ip(outside)), "{outside}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_accepts_fake_ip_only_when_the_check_says_so() {
+        let lookup = || -> Lookup {
+            Arc::new(|_host, port| {
+                Box::pin(async move { Ok(vec![SocketAddr::new(ip("198.18.0.141"), port)]) })
+            })
+        };
+        let accepted = PublicResolver::with_lookup(lookup())
+            .with_fake_ip(|_| true)
+            .resolve_public("api.example.com", 443)
+            .await
+            .expect("fake IP accepted");
+        assert_eq!(accepted, vec![SocketAddr::new(ip("198.18.0.141"), 443)]);
+        let refused = PublicResolver::with_lookup(lookup())
+            .resolve_public("api.example.com", 443)
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("not a public address"),
+            "{refused}"
+        );
     }
 
     #[test]

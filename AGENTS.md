@@ -33,6 +33,7 @@ Apply these requirements to every feature, fix, and refactor:
 
 ## Change rules
 
+- Update [CHANGELOG.md](CHANGELOG.md) in the same PR for notable user or contributor changes; follow the [changelog rules](docs/development.md#changelog).
 - Ship requested features enabled by default; do not add default-off gates or require an extra enable step.
 - After implementation and required verification, open a PR without asking for confirmation again.
 - Use a dedicated Git worktree at `.worktree/<name>` under the primary checkout (never a sibling directory) and a development branch for every feature or bug fix; never implement directly on `main`.

@@ -169,8 +169,8 @@ impl Prepared {
             },
             lease,
         )?;
-        match fsops::canonical_workspace(Path::new(&prepared.info.cwd)) {
-            Ok(candidate) if candidate == workspace_canonical => Ok(prepared),
+        match crate::workspace::owns_session(&workspace_canonical, &prepared.info.cwd) {
+            Ok(true) => Ok(prepared),
             _ => {
                 prepared.close()?;
                 Err(PiError::invalid(
@@ -375,9 +375,9 @@ pub(crate) fn archive_open_file(
         .to_string_lossy()
         .into_owned();
     let (session_info, _) = inspect_opened_session(&candidate_path, file, metadata)?;
-    match fsops::canonical_workspace(Path::new(&session_info.cwd)) {
-        Ok(recorded) if recorded == workspace_canonical => {}
-        _ => {
+    match crate::workspace::owns_session(&workspace_canonical, &session_info.cwd)? {
+        true => {}
+        false => {
             return Err(PiError::invalid(
                 "session workspace does not match expected workspace",
             ));
@@ -489,7 +489,7 @@ fn validate_listed_candidate_path(
 ) -> Result<(String, String, String, String), PiError> {
     let root_path = fsops::clean_go_path(&absolute(root)?);
     let workspace_canonical = fsops::canonical_workspace(Path::new(workspace))?;
-    let key = fsops::workspace_key_of_canonical(&workspace_canonical);
+    let key = crate::workspace::session_key(&workspace_canonical)?;
     let candidate_path = fsops::clean_go_path(&absolute(path)?);
     let basename = candidate_path
         .rsplit('/')

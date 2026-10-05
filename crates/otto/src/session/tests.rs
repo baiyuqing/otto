@@ -253,7 +253,7 @@ fn create_uses_expected_permissions_and_path() {
     let store = Store::create(&root, header.clone()).expect("create store");
 
     let resolved = fs::canonicalize(&canonical).expect("canonicalize");
-    let key = fsops::workspace_key_of_canonical(&resolved.to_string_lossy());
+    let key = fsops::workspace_key(&resolved).expect("workspace key");
     let want = root.join(key).join(format!("{}.jsonl", header.id));
     assert_eq!(store.path(), want.to_string_lossy());
     assert_eq!(mode(want.parent().expect("parent")), 0o700);
@@ -3514,4 +3514,81 @@ fn prepare_of_an_archived_lease_managed_session_acquires_without_waiting() {
         "a released lease must be acquired without waiting"
     );
     prepared.close().expect("close");
+}
+
+#[test]
+fn workspace_identity_adopts_legacy_sessions_and_preserves_listing_resume_and_archive_after_moves()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let store = Store::create(&root, test_header(&workspace)).unwrap();
+    let session_path = store.path();
+    store.close().unwrap();
+    let before = fs::read(&session_path).unwrap();
+    let identity = crate::workspace::initialize(&workspace, "").unwrap();
+    assert_eq!(
+        list::list(&root, workspace.to_str().unwrap(), "", 20)
+            .unwrap()
+            .sessions
+            .len(),
+        1
+    );
+
+    let moved = temp.path().join("moved");
+    fs::rename(&workspace, &moved).unwrap();
+    crate::workspace::initialize(&moved, "").unwrap();
+    let listed = list::list(&root, moved.to_str().unwrap(), "", 20).unwrap();
+    assert_eq!(listed.sessions[0].path, session_path);
+    let prepared = Prepared::prepare_listed(
+        &root,
+        moved.to_str().unwrap(),
+        Path::new(&session_path),
+        None,
+    )
+    .unwrap();
+    let (reopened, _) = prepared.activate().unwrap();
+    reopened.close().unwrap();
+    assert_eq!(fs::read(&session_path).unwrap(), before);
+
+    // New sessions belong to the same directory but retain their actual cwd.
+    let mut header = test_header(&moved);
+    header.id = "550e8400-e29b-41d4-a716-446655440001".into();
+    let second = Store::create(&root, header).unwrap();
+    let second_path = second.path();
+    second.close().unwrap();
+    assert_eq!(
+        Path::new(&second_path).parent().unwrap(),
+        root.join(&identity.session_key)
+    );
+    let twice = temp.path().join("twice");
+    fs::rename(&moved, &twice).unwrap();
+    crate::workspace::initialize(&twice, "").unwrap();
+    assert_eq!(
+        list::list(&root, twice.to_str().unwrap(), "", 20)
+            .unwrap()
+            .sessions
+            .len(),
+        2
+    );
+    let archived = archive(&root, twice.to_str().unwrap(), Path::new(&session_path)).unwrap();
+    assert_eq!(fs::read(archived.path).unwrap(), before);
+
+    crate::workspace::fork(&twice).unwrap();
+    assert!(
+        list::list(&root, twice.to_str().unwrap(), "", 20)
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    assert!(
+        Prepared::prepare_listed(
+            &root,
+            twice.to_str().unwrap(),
+            Path::new(&second_path),
+            None
+        )
+        .is_err()
+    );
 }

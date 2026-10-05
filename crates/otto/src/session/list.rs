@@ -100,12 +100,12 @@ pub fn list(
             result.skipped = increment_skipped(result.skipped);
             continue;
         };
-        match fsops::canonical_workspace(Path::new(&info.cwd)) {
-            Ok(candidate) if candidate == workspace_canonical => {}
-            _ => {
-                result.skipped = increment_skipped(result.skipped);
-                continue;
-            }
+        if !matches!(
+            crate::workspace::owns_session(&workspace_canonical, &info.cwd),
+            Ok(true)
+        ) {
+            result.skipped = increment_skipped(result.skipped);
+            continue;
         }
         if !seen_ids.insert(info.id.clone()) {
             result.skipped = increment_skipped(result.skipped);
@@ -167,7 +167,7 @@ pub(crate) fn open_workspace_session_directory_no_follow(
     root: &Path,
     workspace_canonical: &str,
 ) -> Result<Option<(Dir, String)>, PiError> {
-    let key = fsops::workspace_key_of_canonical(workspace_canonical);
+    let key = crate::workspace::session_key(workspace_canonical)?;
     let path = root.join(&key).to_string_lossy().into_owned();
     match fsops::open_dir_at_no_follow(root_dir, &key) {
         Ok(dir) => Ok(Some((dir, path))),

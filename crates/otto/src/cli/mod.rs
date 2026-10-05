@@ -8,6 +8,7 @@ pub mod acp;
 /// The phase-4c seam is gone: `otto::app` is the real controller and every
 /// `cli::controller::…` path keeps resolving to it.
 pub use crate::app as controller;
+pub mod config_command;
 pub mod flags;
 pub mod login;
 pub mod mcp;

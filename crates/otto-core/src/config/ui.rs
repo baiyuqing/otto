@@ -42,6 +42,17 @@ pub fn resolve_ui_mode(
     let otto_ui = env.get("OTTO_UI").map(String::as_str).unwrap_or("");
     for candidate in [override_value, otto_ui, file.ui.mode.as_str()] {
         if let Some(mode) = parse_ui_mode(candidate)? {
+            if let Some(forced) = file
+                .policy
+                .as_ref()
+                .and_then(|p| p.force.get("ui"))
+                .and_then(toml::Value::as_table)
+                .and_then(|p| p.get("mode"))
+                .and_then(toml::Value::as_str)
+                && UiMode::parse(forced) != Some(mode)
+            {
+                return Err(ConfigError::new("UI mode is forced by managed policy"));
+            }
             return Ok(mode);
         }
     }

@@ -20,7 +20,7 @@ the runtime, session history, and default memory storage.
   and Telegram/Feishu through `otto-connect`. Connect to `otto serve` to share
   sessions across the terminal, browser, and chats.
 - **Keep useful context.** Persistent sessions, memory that requires human
-  review, reusable skills, and selective reflection after completed work.
+  review, reusable skills and plugin packages, and selective reflection after completed work.
 - **Carry work forward.** Workspace tools, web fetch and search, and MCP integrations, bounded
   sub-agents, timers, and durable workflows with approvals and restart recovery.
 - **Control access.** Workspace-confined file tools, macOS Seatbelt shell
@@ -297,7 +297,10 @@ never retried automatically.
   the request remains pending until it is replaced, consumed, or Otto exits, and never changes `config.toml`.
 - Session files may contain workspace files, prompts, images, and tool results. Treat
   them as sensitive.
-- No plugins, automatic project-local config discovery, session trees/forks,
+- Plugin packages support Skills and MCP; Hooks, Commands, Agents, LSP,
+  OpenAI Apps and Pi runtime extensions are not loaded. See
+  [plugin packages](docs/user-manual.md#plugin-packages).
+- No automatic project-local config discovery, session trees/forks,
   deletion, or search.
 - No memory backup/restore/verify commands.
 - No per-skill `allowed-tools` enforcement.

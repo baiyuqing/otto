@@ -1707,13 +1707,17 @@ impl Builder {
             None
         };
         mark_build_trace(&mut trace, "runner/setup");
-        let catalogs = self.build_catalogs(&mut tools, max_output, warnings)?;
+        let plugins =
+            crate::plugin::Snapshot::load(Path::new(&self.home), &self.config, &self.environment);
+        let catalogs =
+            self.build_catalogs_with_plugins(&mut tools, max_output, warnings, &plugins)?;
         mark_build_trace(&mut trace, "runner/catalogs");
         let (mcp_tools, mcp_connected, mcp_servers) = if connect_mcp {
-            self.connect_mcp_with_grace(
+            self.connect_mcp_with_plugins(
                 max_output,
                 runtime.resilience.deadlines.cancellation_grace,
                 warnings,
+                &plugins,
             )
             .await
         } else {
@@ -1927,6 +1931,11 @@ impl Builder {
             ..Options::default()
         };
         mark_build_trace(&mut trace, "runner/registry-and-options");
+        if !plugins.packages.is_empty() {
+            session
+                .append_custom("otto.plugins", &plugins.provenance())
+                .map_err(|e| e.to_string())?;
+        }
         let trace_entries = trace.map(|trace| trace.entries).unwrap_or_default();
         Ok((
             Runner {

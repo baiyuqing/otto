@@ -461,6 +461,12 @@ fn strip_var_refs(raw: &str) -> String {
     out
 }
 
+/// Validates a credential template without resolving or revealing its value.
+/// Native package readers reuse this boundary before persisting configuration.
+pub fn validate_credential_template(raw: &str) -> Result<(), ConfigError> {
+    check_literal_credential("plugin", "credential", raw)
+}
+
 fn check_literal_credential(name: &str, key: &str, raw: &str) -> Result<(), ConfigError> {
     let stripped = strip_var_refs(raw);
     let looks_like_credential = BEARER_TOKEN_PATTERN.is_match(&stripped)

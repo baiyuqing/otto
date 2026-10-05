@@ -231,6 +231,9 @@ impl McpTool {
                 });
                 result
             }
+            CallError::PluginUnauthorized => {
+                error_result(format!("mcp {server}: {error}")).not_started()
+            }
             CallError::Stopping => error_result(format!("mcp {server}: {error}")).not_started(),
             CallError::Rpc { .. } => error_result(self.redact(&format!("mcp {server}: {error}"))),
             CallError::Transport(_) => {

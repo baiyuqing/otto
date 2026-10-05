@@ -21,6 +21,7 @@ pub mod log;
 pub mod mcp;
 pub mod memory;
 pub mod metrics;
+pub mod plugin;
 pub mod provider;
 pub mod reflection;
 pub mod retry;

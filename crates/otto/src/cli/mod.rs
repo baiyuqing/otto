@@ -13,6 +13,7 @@ pub mod flags;
 pub mod login;
 pub mod mcp;
 pub mod memory_command;
+pub mod plugin;
 pub mod repl;
 pub mod repl_commands;
 pub mod run;

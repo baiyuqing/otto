@@ -22,10 +22,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Both gates below always start, so a required status check always reports;
+  # The gates below always start, so a required status check always reports;
   # this job decides whether they have any work to do. A change that touches
   # only Markdown, `docs/`, or `LICENSE` cannot affect the build or the tests,
-  # so every step of both gates is skipped and they finish green without
+  # so every step of every gate is skipped and they finish green without
   # installing a toolchain. Anything else, including a workflow edit, runs the
   # full gate.
   changes:
@@ -156,10 +156,12 @@ jobs:
         with:
           go-version-file: connect/go.mod
           cache-dependency-path: connect/go.sum
-      - name: Run make check
+      # rust-fmt and rust-lint run in the macOS lint job below, at the same
+      # time as this one; `make check` is check-tests plus those two.
+      - name: Run make check-tests
         id: gate
         if: needs.changes.outputs.docs_only != 'true'
-        run: make check
+        run: make check-tests
       # A run saves only when no cache matched its key exactly, which happens
       # once per Cargo.lock, root Cargo.toml or toolchain change; a later run
       # with the same key restores it and never saves again. Main's cache is
@@ -187,6 +189,68 @@ jobs:
             ~/.cargo/git/db
             target
           key: v2-${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+
+  # Clippy compiles every workspace crate a second time, in check mode, so
+  # running it here instead of inside `make check` takes it off the macOS
+  # critical path. It keeps its own dependency cache: the acceptance job's
+  # cache has no check-mode metadata for the dependencies.
+  lint:
+    name: macOS lint
+    needs: changes
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.changes.outputs.docs_only != 'true'
+        with:
+          persist-credentials: false
+      - name: Select standalone command line tools
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          sudo xcode-select --switch /Library/Developer/CommandLineTools
+          xcode-select --print-path
+      - name: Install the pinned Rust toolchain
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          rustup toolchain install
+          rustc --version
+      - name: Restore the clippy dependency cache
+        id: cargo-cache
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: v2-${{ runner.os }}-clippy-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ github.event_name == 'pull_request' && format('v2-{0}-clippy-', runner.os) || '' }}
+      - name: Run make rust-fmt rust-lint
+        id: gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: make rust-fmt rust-lint
+      # Saved under the same rules as the acceptance job's cache. A failed
+      # lint still saves once a clippy run without -D warnings finishes the
+      # dependency build.
+      - name: Finish the clippy build for the cargo cache
+        id: finish-build
+        if: failure() && needs.changes.outputs.docs_only != 'true' && steps.cargo-cache.outputs.cache-hit != 'true' && steps.gate.outcome == 'failure'
+        run: cargo clippy --workspace --all-targets
+      - name: Drop workspace build output from the cargo cache
+        id: prune
+        if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && steps.cargo-cache.outputs.cache-hit != 'true' && (steps.gate.outcome == 'success' || steps.finish-build.outcome == 'success') }}
+        run: node scripts/ci-cache.mjs prune
+      - name: Save the clippy dependency cache
+        if: ${{ !cancelled() && steps.prune.outcome == 'success' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: v2-${{ runner.os }}-clippy-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
 
   check-linux:
     name: Linux checks

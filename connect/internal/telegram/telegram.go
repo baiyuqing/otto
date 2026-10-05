@@ -564,6 +564,7 @@ func (b *Bot) SendApprovalMode(ctx context.Context, chatID, messageID, session s
 		return fmt.Errorf("invalid mode message ID: %w", err)
 	}
 	params["message_id"] = id
+	params["reply_markup"] = map[string]any{"inline_keyboard": [][]any{}}
 	err = b.call(ctx, "editMessageText", params, nil)
 	var apiErr *apiError
 	if errors.As(err, &apiErr) && apiErr.Code == 400 && strings.Contains(apiErr.Desc, "message is not modified") {

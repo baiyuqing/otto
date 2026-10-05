@@ -7,9 +7,10 @@ import (
 )
 
 // ModePlatform presents session-bound shortcuts. The bridge still admits the
-// sender and checks the binding when a shortcut is used.
+// sender and checks the binding when a shortcut is used. A non-empty message ID
+// updates the clicked mode card instead of posting another one.
 type ModePlatform interface {
-	SendApprovalMode(context.Context, string, string, bool) error
+	SendApprovalMode(ctx context.Context, chatID, messageID, session string, automatic bool) error
 }
 
 func (c *chat) cmdAuto(m Message, arg string) {
@@ -48,7 +49,11 @@ func (c *chat) cmdAuto(m Message, arg string) {
 			return
 		}
 		if platform, ok := c.p.(ModePlatform); ok {
-			if err := platform.SendApprovalMode(ctx, c.id, sid, mode); err == nil {
+			messageID := ""
+			if m.ModeSession != "" {
+				messageID = m.MessageID
+			}
+			if err := platform.SendApprovalMode(ctx, c.id, messageID, sid, mode); err == nil {
 				return
 			}
 		}

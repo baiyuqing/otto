@@ -75,6 +75,109 @@ from `/etc/paths` and `/etc/paths.d`; elsewhere it runs as `sh -c`, because
 `/etc/profile.d/*` would write into the tool result the model reads and could
 restore variables the environment filter removed.
 
+### Docker on Mac
+
+Install and start Docker Desktop, then clone this repository. Docker handles
+the Rust, Node and WASM toolchains inside a multi-stage build; none need to
+be installed on your Mac. The runtime contains Otto with its embedded Web
+UI, Bash, Git, CA certificates and the bundled sandbox-setup skill. The
+native desktop application and `otto-connect` are separate installations.
+
+From the checkout directory:
+
+```bash
+docker compose build
+docker compose run --rm otto setup
+export OTTO_WORKSPACE="$HOME/my-project"
+docker compose up -d
+docker compose logs otto
+```
+
+Create the workspace directory before starting. Without `OTTO_WORKSPACE`,
+Compose mounts the checkout itself. For an OpenAI-compatible profile, use
+your endpoint/model and select `OTTO_API_KEY` as the key environment variable
+in setup. Export that variable in the shell before `docker compose up -d`;
+Compose passes it to Otto. If a profile uses a different key variable, add
+that variable to the service's `environment` mapping. Keys are never build
+arguments or TOML configuration. To use a model server on your Mac, its
+container-accessible hostname is `host.docker.internal`, rather than
+`localhost` inside the container.
+
+For ChatGPT, this Compose setup does not publish the OAuth loopback callback
+ports used by `otto login`. Sign in with a native Otto installation on your
+Mac first, select a `chatgpt` profile in container setup, then import the
+credentials into the container's state volume before starting the server:
+
+```bash
+otto login
+docker compose run --rm --no-deps -T --entrypoint sh otto -c \
+  'umask 077; mkdir -p "$HOME/.otto/auth"; cat > "$HOME/.otto/auth/chatgpt.json"' \
+  < "$HOME/.otto/auth/chatgpt.json"
+docker compose run --rm --no-deps otto login --status
+```
+
+The imported file is private authentication state, never part of an image
+or build context. Native and container logouts affect their own copies.
+
+Open the startup URL printed by `docker compose logs otto` on your Mac:
+`http://127.0.0.1:8787/?token=...`. Otto generates a new token each time the
+server starts. A separate TCP relay shares its network namespace and
+forwards container port 8788 to Otto's loopback listener on port 8787.
+Only Mac loopback port 8787 is published; the API retains its bearer-token
+authentication. This is a local Docker Desktop setup, not a public service.
+
+The `otto-state` named volume mounts at `/home/otto` and preserves
+configuration in `.config/otto`, plus sessions, memory and login state in
+`.otto`. The process runs as UID/GID
+1000, with `/workspace` as its working directory. Mounted projects must be
+writable by that user; Docker Desktop file sharing must allow the selected
+Mac directory. The relay has a read-only filesystem and no project or state
+mounts. To run the TUI with the same configuration and workspace:
+
+```bash
+docker compose run --rm otto --cwd /workspace
+```
+
+The CLI is also available without Compose:
+
+```bash
+docker build -t otto:local .
+docker run --rm -it \
+  -v otto-cli-state:/home/otto \
+  --mount "type=bind,src=$PWD,dst=/workspace" \
+  otto:local setup
+docker run --rm -it -e OTTO_API_KEY \
+  -v otto-cli-state:/home/otto \
+  --mount "type=bind,src=$PWD,dst=/workspace" \
+  otto:local --cwd /workspace
+```
+
+Those direct commands use their own `otto-cli-state` volume. The default
+standalone image command displays CLI help. Docker builds for the host's
+Linux architecture: `linux/arm64` on Apple Silicon, `linux/amd64` on Intel.
+To build a specific architecture instead:
+
+```bash
+docker buildx build --platform linux/arm64 --load -t otto:local .
+# Use --platform linux/amd64 for Intel.
+```
+
+To include the source revision in `otto --version`, pass
+`--build-arg OTTO_GIT_HASH="$(git rev-parse --short=12 HEAD)"` to a direct
+build, or export `OTTO_GIT_HASH` before `docker compose build`.
+
+Docker containers run Linux even on Mac. The default sandbox setting keeps
+Bash unavailable because Linux has no confined driver. To opt into Bash,
+pass `--sandbox off` to CLI commands or append it to the `otto` service's
+`command` list and recreate the services. Shell commands can then change
+all writable mounted files; Docker isolation does not provide Seatbelt.
+Never mount the Docker socket for ordinary Otto usage.
+
+Stop with `docker compose down`. It retains the state volume. After code
+updates, run `docker compose build` followed by
+`docker compose up -d --force-recreate` to recreate both Otto and its relay.
+`docker compose down -v` permanently removes the Compose state volume.
+
 ## Quick start
 
 Install the binary:

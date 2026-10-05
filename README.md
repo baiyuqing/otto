@@ -48,6 +48,26 @@ otto --version   # otto 0.1.0+a1b2c3d4e5f6; `.dirty` is appended for uncommitted
 If you only want a local copy in the checkout, run `make build` and then
 `./otto --help`.
 
+## Docker Desktop on Mac
+
+With Docker Desktop running, build and start the Web UI from this checkout:
+
+```bash
+docker compose build
+docker compose run --rm otto setup
+docker compose up -d
+docker compose logs otto
+```
+
+Open the printed `http://127.0.0.1:8787/?token=...` URL in your Mac browser.
+The image builds natively on Apple Silicon and Intel Macs and includes the
+complete Web UI. Configuration and sessions persist in a named volume;
+`OTTO_WORKSPACE` selects the directory mounted into the container.
+For API-key profiles, select `OTTO_API_KEY` during setup and export it before
+starting Compose. See [Docker on Mac](docs/user-manual.md#docker-on-mac) for
+CLI usage, architecture selection and lifecycle commands. Containers run
+Linux, so Bash requires explicitly selecting `--sandbox off`.
+
 ## Quick start
 
 Run `otto setup` after installation to create a default profile. It stores no

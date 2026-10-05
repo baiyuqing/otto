@@ -337,6 +337,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- Add a multi-stage Docker image with the complete embedded Web UI and a
+  Compose setup for Docker Desktop on Apple Silicon and Intel Macs. Persist
+  configuration and sessions, run as a non-root user, and preserve Otto's
+  loopback listener and API token through a TCP relay.
+
 - Fix the stale ACP command-list test expectation after adding `/auto`; verify
   the command is advertised for new, loaded, and attached sessions. Approval
   interaction tests explicitly select MANUAL now that AUTO is the default.

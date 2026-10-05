@@ -4,7 +4,7 @@
 
 # Otto — 本地优先的通用个人 AI Agent
 
-[English](README.md) · [用户手册（英文）](docs/user-manual.md)
+[English](README.md) · [用户手册（英文）](docs/user-manual.md) · [更新日志（英文）](CHANGELOG.md)
 
 **Otto 是一个使用 Rust 编写的通用个人 AI Agent，帮助你研究、写作、规划、编程和处理日常任务。**
 它按需调用当前会话可用的工具，并受对应权限约束。可在终端和浏览器中使用，

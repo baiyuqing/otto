@@ -184,7 +184,8 @@ fn an_interactive_approval_runs_one_exact_command_outside_seatbelt() {
             }
         }
     });
-    stdin.write_all(b"read the fixture\n").unwrap();
+    // Sessions default to AUTO; this test exercises the manual approval path.
+    stdin.write_all(b"/auto off\nread the fixture\n").unwrap();
     let mut stdout = String::new();
     let mut approval_id = None;
     loop {

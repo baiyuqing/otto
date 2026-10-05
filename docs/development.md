@@ -1,7 +1,8 @@
 # Development guide
 
 [Code organization](code-organization.md) is the repository navigation map,
-and `AGENTS.md` is the short, canonical repository rulebook. This page holds
+and the root `AGENTS.md` holds repository-wide rules. Scoped `AGENTS.md`
+files in the Rust crates and `docs/` add only their owning layer's constraints. This page holds
 the detailed package contracts and development workflow. The wasm32
 architecture boundary is enforced by `make rust-wasm-check`, which
 requires `crates/otto-core` and `crates/otto-web` to stay buildable for
@@ -20,14 +21,14 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `tool`: tool definitions and schema assembly
   - `session`: the Pi v3 JSONL codec, compaction, and context association types
   - `agent`: provider/tool orchestration and event emission
-  - `config`: TOML loading and runtime resolution, and `config::edit`, the in-place text edits every config write uses: each changes one key or table, keeps every other byte, and returns an error instead of a result that parses to anything besides the intended change
+  - `config`: raw TOML merging, field authority, provenance, managed constraints and runtime resolution, and `config::edit`, the in-place text edits every config write uses: each changes one key or table, keeps every other byte, and returns an error instead of a result that parses to anything besides the intended change
   - `wire`: shared wire DTOs
   - `safetext`: redaction and secret-form detection shared by native and wasm code
 - `crates/otto` (native binary):
   - `cli`: composition root, flag parsing, process lifecycle, signal handling, the REPL, and concrete dependency injection
   - `app`: shared lifecycle, turn admission, session replacement, task/authentication capabilities, profile selection, and session info/history access
   - `session`: native JSONL session storage built on `otto_core::session`
-  - `config`: the native config path, loading, and the one writer every config change goes through: a compare-and-swap against the bytes the caller read, an atomic temp-file rename, and a timestamped copy of the replaced contents under `backups/`
+  - `config`: native layer discovery, content-bound executable trust, config paths and loading, and the one writer every config change goes through: a compare-and-swap against the bytes the caller read, an atomic temp-file rename, and a timestamped copy of the replaced contents under `backups/`
   - `tool`: native execution of workspace-confined `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`, in-process `remind`, `list_models` (the OpenAI-compatible endpoint's `GET /models`), and the MCP tool adapter (`tool::mcp`) that presents one external server's tools to the model
   - `mcp`: the JSON-RPC codec, the stdio and HTTP transports, OAuth 2.1 sign-in for HTTP servers, and the per-server client that negotiates the protocol era and serves `tools/list`/`tools/call`
   - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers
@@ -640,3 +641,15 @@ a new request. The optional `read_path` on `approval_requested` distinguishes
 read grants from elevation for attached clients. ACP advertises `allow_always`
 and discloses persistence in the title; the connector routes it through its
 existing cards and callback admission checks.
+
+## Agent implementation contracts
+
+Apply these requirements to every feature, fix, and refactor:
+
+- Keep agent instruction files short navigation maps and rulebooks. Put detailed contracts next to their owning code or in this development guide, and link to one canonical source instead of copying it across agent instructions.
+- Make changes easy to locate: use consistent domain names, cohesive packages, explicit entry points, and adjacent tests. Update the task map when responsibilities move or new packages are introduced.
+- Keep dependencies explicit and one-way. Put shared behavior in its owning layer and inject dependencies at the composition root; avoid hidden global state and frontend-specific copies of shared use cases.
+- Make contracts readable from types and focused documentation: define valid states, ownership and mutation, concurrency and cancellation, error behavior, and compatibility where relevant. Validate data at trust boundaries.
+- Extend existing patterns with the smallest cohesive change. Add interfaces only at real consumer boundaries; do not add speculative frameworks, registries, or configuration for future implementations.
+- Turn important invariants into executable checks. Update architecture guards and contract tests when boundaries change; failures should identify the violated rule and where to fix it. Keep focused checks fast, offline, and deterministic, and preserve full acceptance coverage.
+- Keep code, schemas, tests, and canonical docs consistent in the same change. Remove stale instructions or mark superseded designs as historical; record durable rationale in the repository rather than relying on chat history.

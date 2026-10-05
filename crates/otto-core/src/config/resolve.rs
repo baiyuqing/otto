@@ -118,6 +118,26 @@ pub fn resolve(
     session: &SessionDefaults,
     overrides: &Overrides,
 ) -> Result<Runtime, ConfigError> {
+    resolve_impl(file, env, session, overrides, true)
+}
+
+/// Inspect effective model/runtime defaults without reading credential values.
+pub fn resolve_without_credentials(
+    file: &File,
+    env: &HashMap<String, String>,
+    session: &SessionDefaults,
+    overrides: &Overrides,
+) -> Result<Runtime, ConfigError> {
+    resolve_impl(file, env, session, overrides, false)
+}
+
+fn resolve_impl(
+    file: &File,
+    env: &HashMap<String, String>,
+    session: &SessionDefaults,
+    overrides: &Overrides,
+    credentials: bool,
+) -> Result<Runtime, ConfigError> {
     let explicit_profile = !overrides.profile.is_empty();
     let mut selected_profile = overrides.profile.clone();
     if selected_profile.is_empty() {
@@ -231,11 +251,27 @@ pub fn resolve(
     let resilience = resolve_resilience(&file.agent)?;
 
     let mut api_key = String::new();
-    if provider == super::PROVIDER_OPENAI_COMPATIBLE {
+    if provider == super::PROVIDER_OPENAI_COMPATIBLE && credentials {
+        if let Some(allowed) = file
+            .policy
+            .as_ref()
+            .and_then(|p| p.allowed_credential_variables.as_ref())
+        {
+            let actual = if !api_key_env.is_empty() && !env_value(env, &api_key_env).is_empty() {
+                api_key_env.as_str()
+            } else {
+                "OTTO_API_KEY"
+            };
+            if !allowed.iter().any(|name| name == actual) {
+                return Err(ConfigError::new(
+                    "provider credential binding is prohibited by managed policy",
+                ));
+            }
+        }
         api_key = resolve_api_key(env, &api_key_env)?;
     }
 
-    Ok(Runtime {
+    let runtime = Runtime {
         profile: runtime_profile,
         provider,
         base_url,
@@ -247,7 +283,11 @@ pub fn resolve(
         max_output_bytes,
         compaction,
         resilience,
-    })
+    };
+    if let Some(policy) = &file.policy {
+        policy.runtime(&runtime)?;
+    }
+    Ok(runtime)
 }
 
 fn resolve_resilience(agent: &super::Agent) -> Result<ResilienceRuntime, ConfigError> {
@@ -405,7 +445,7 @@ fn resolve_api_key(
 /// `otto::provider::openaicompat::normalize_base_url`, because otto-core cannot
 /// depend on the native `otto` crate that owns it. The tests below pin every
 /// accepted and rejected form, so the two implementations stay in sync.
-fn normalize_base_url(base_url: &str) -> Result<String, &'static str> {
+pub(super) fn normalize_base_url(base_url: &str) -> Result<String, &'static str> {
     const INVALID: &str = "invalid OpenAI-compatible base URL";
     let mut parsed = Url::parse(base_url).map_err(|_| INVALID)?;
     let scheme_ok = parsed.scheme() == "http" || parsed.scheme() == "https";

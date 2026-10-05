@@ -17,6 +17,28 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Make the parallel bash redaction fixture register its notification waiters
+  before signalling readiness, preventing a lost wakeup from hanging tests.
+
+- Split repository agent instructions into a shorter root rulebook and scoped
+  Rust-crate/documentation rules; keep detailed ownership and implementation
+  contracts in the canonical contributor guides.
+
+- Add managed > workspace-local > workspace-shared > user > defaults
+  configuration, explicit scalar/table/list/named-map merge rules, source
+  diagnostics and offline `config explain`. `config set` edits one explicit
+  scope with the existing backed-up concurrent-change-safe writer. `--config`
+  now replaces only the user source. Each server workspace resolves its own
+  project files; project fields cannot redirect provider or MCP credentials.
+- Require explicit `otto trust DIR --executables` for project MCP, skills and
+  agents, including configured roots inside the project. Existing directory
+  admission grants do not authorize executables. Content changes or revocation
+  block future tool calls and request cancellation/MCP shutdown. Instructions
+  now append global and ancestor files with 16 KiB/file and 64 KiB total limits.
+- Enforce administrator-owned managed policy for provider/MCP destinations,
+  credential bindings, bash confinement and selected resource ceilings across
+  CLI/environment/session overrides and sandbox reload.
+
 - Replace the macOS Tauri desktop shell with MyGo. Keep the existing Rust
   server, web UI, workspace picker, saved workspace and log locations. Desktop
   builds now use Go 1.27.1+; desktop contract and server lifecycle tests run in

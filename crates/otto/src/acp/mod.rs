@@ -1070,9 +1070,16 @@ impl Connection {
                         }
                     }
                     command::Command::Reflect { focus } => {
+                        if let Some(text) = crate::cli::repl_commands::reflect_runs_report(
+                            &session.controller,
+                            focus,
+                        ) {
+                            self.say(session_id, &local.redact(&text));
+                            return end_turn();
+                        }
                         match session.controller.reflect(focus, cancel).await {
                             Ok(report) => {
-                                self.say(session_id, &report.line());
+                                self.say(session_id, &report.summary());
                                 end_turn()
                             }
                             Err(_) if cancel.is_cancelled() => {

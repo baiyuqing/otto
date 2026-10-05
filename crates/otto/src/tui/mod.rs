@@ -550,7 +550,11 @@ async fn run_app<B: Backend>(
                     }
                 }
                 Action::Reflect(focus) => {
-                    if let Err(error) =
+                    if let Some(text) =
+                        crate::cli::repl_commands::reflect_runs_report(controller, &focus)
+                    {
+                        app.push_system(text);
+                    } else if let Err(error) =
                         run_reflect(&mut app, terminal, keys, controller, cancel, focus).await
                     {
                         propagate_turn_error(error)?;
@@ -1206,7 +1210,7 @@ async fn run_reflect<B: Backend>(
         return Err(ReplError::Cancelled);
     }
     match result {
-        Ok(report) => app.push_system(report.line()),
+        Ok(report) => app.push_system(report.summary()),
         Err(crate::reflection::Error::Cancelled) => {}
         Err(error) => app.push_system(format!("/reflect: {error}")),
     }

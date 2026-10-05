@@ -36,6 +36,31 @@ export interface Reflection {
   skills_withheld: boolean
   truncated: boolean
   note: string
+  /** The run's retrospective, redacted; empty when there is none. */
+  retrospective: string
+}
+
+/** One run log (`GET /v1/sessions/{id}/reflection/runs`). */
+export interface ReflectionRunSummary {
+  id: string
+  path: string
+  started: string
+  trigger: string
+  status: string
+  /** The first line of the retrospective; empty when it has none. */
+  headline: string
+}
+
+export interface ReflectionRunList {
+  /** False when reflection is turned off. */
+  enabled: boolean
+  runs: ReflectionRunSummary[]
+}
+
+export interface ReflectionRunLog {
+  id: string
+  path: string
+  content: string
 }
 
 export interface GeneratedSkill {
@@ -359,6 +384,9 @@ export const api = {
     json<Compaction>(`/v1/sessions/${id}/compact`, { method: 'POST', body: JSON.stringify({ focus }), signal }),
   reflect: (id: string, focus: string, signal?: AbortSignal) =>
     json<Reflection>(`/v1/sessions/${id}/reflect`, { method: 'POST', body: JSON.stringify({ focus }), signal }),
+  reflectionRuns: (id: string) => json<ReflectionRunList>(`/v1/sessions/${id}/reflection/runs`),
+  reflectionRun: (id: string, run: string) =>
+    json<ReflectionRunLog>(`/v1/sessions/${id}/reflection/runs/${encodeURIComponent(run)}`),
   generatedSkills: (id: string) => json<GeneratedSkillList>(`/v1/sessions/${id}/reflection/skills`),
   revertSkill: (id: string, name: string) =>
     json<SkillRevert>(`/v1/sessions/${id}/reflection/skills/${encodeURIComponent(name)}/revert`, { method: 'POST' }),

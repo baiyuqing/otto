@@ -1,4 +1,5 @@
-//! Reflection over HTTP: `POST /v1/sessions/{id}/reflect`, the generated
+//! Reflection over HTTP: `POST /v1/sessions/{id}/reflect`, the run logs
+//! (`GET .../reflection/runs`, `GET .../reflection/runs/{run}`), the generated
 //! skills (`GET .../reflection/skills`, `POST .../reflection/skills/{name}/revert`),
 //! and the notices background reflection queues (`GET .../notices`).
 //!
@@ -10,6 +11,10 @@
 //! selects the controller and its configuration. They are as exposed as
 //! `POST .../skills/{name}/enable`: any holder of the server token or socket
 //! may call them, and a revert refuses a skill the user has edited.
+//!
+//! Run logs are files under `~/.otto/reflection/runs/`, read like the
+//! generated skills: not tied to the session's state, and as exposed as the
+//! rest of these routes.
 //!
 //! Notices are read by id and never removed, so every client of a session sees
 //! each one.
@@ -78,6 +83,8 @@ struct ReflectionWire {
     skills_withheld: bool,
     truncated: bool,
     note: String,
+    /// The run's retrospective, redacted; empty when there is none.
+    retrospective: String,
 }
 
 impl From<&Report> for ReflectionWire {
@@ -109,6 +116,7 @@ impl From<&Report> for ReflectionWire {
             skills_withheld: report.skills_withheld,
             truncated: report.truncated,
             note: report.note.clone(),
+            retrospective: report.retrospective.clone(),
         }
     }
 }
@@ -240,6 +248,84 @@ pub async fn cancel(
         .status(StatusCode::ACCEPTED)
         .body(axum::body::Body::empty())
         .expect("static response")
+}
+
+#[derive(Debug, Serialize)]
+struct RunList {
+    /// False when reflection is turned off, in which case `runs` is empty.
+    enabled: bool,
+    runs: Vec<crate::reflection::runlog::Summary>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunLog {
+    id: String,
+    path: std::path::PathBuf,
+    content: String,
+}
+
+/// `GET /v1/sessions/{id}/reflection/runs`: the newest run logs, newest first.
+pub async fn list_runs(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session.ctrl.reflection_runs() {
+        Ok(runs) => json_response(
+            StatusCode::OK,
+            &RunList {
+                enabled: true,
+                runs,
+            },
+        ),
+        Err(Error::Disabled) => json_response(
+            StatusCode::OK,
+            &RunList {
+                enabled: false,
+                runs: Vec::new(),
+            },
+        ),
+        Err(error) => run_log_error(&server, id, &error),
+    }
+}
+
+/// `GET /v1/sessions/{id}/reflection/runs/{run}`: one run log, by the id the
+/// list shows.
+pub async fn show_run(
+    State(server): State<Arc<Server>>,
+    Path((id, run)): Path<(String, String)>,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session.ctrl.reflection_run(&run) {
+        Ok(Some((path, content))) => json_response(
+            StatusCode::OK,
+            &RunLog {
+                id: run,
+                path,
+                content,
+            },
+        ),
+        Ok(None) => not_found("reflection run not found"),
+        Err(error @ Error::Disabled) => error_response(
+            StatusCode::CONFLICT,
+            "reflection_unavailable",
+            &error.to_string(),
+        ),
+        Err(error) => run_log_error(&server, id, &error),
+    }
+}
+
+fn run_log_error(server: &Server, id: String, error: &Error) -> Response {
+    server.logger().error(
+        "reflection_error",
+        &[("session_id", id), ("error", error.to_string())],
+    );
+    error_response(
+        StatusCode::CONFLICT,
+        "reflection_failed",
+        &error.to_string(),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -459,9 +545,11 @@ mod tests {
             external: Vec::new(),
             skills_note: "",
             log: None,
+            retrospective: "Ran the lint gate twice.".into(),
         };
         let value = serde_json::to_value(ReflectionWire::from(&report)).expect("json");
         assert_eq!(value["status"], "ok");
+        assert_eq!(value["retrospective"], "Ran the lint gate twice.");
         assert_eq!(value["candidates"], serde_json::json!(["cand-1"]));
         assert_eq!(
             value["skills"],

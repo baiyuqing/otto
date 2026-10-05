@@ -1314,6 +1314,21 @@ fn a_relay_advertises_commands_and_runs_context_and_compact_on_serve() {
     assert_eq!(requests.lock().unwrap().len(), 4);
     assert!(requests.lock().unwrap()[3].contains("/contextual x"));
     assert_eq!(agent_text(&frames), "plain answer");
+
+    // Past reflection runs are read from serve, and never reach the model.
+    let (frames, response) = relay.call("session/prompt", prompt(&session_id, "/reflect list"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_eq!(agent_text(&frames), "No reflection runs yet.");
+    let (frames, response) = relay.call(
+        "session/prompt",
+        prompt(&session_id, "/reflect show abcd1234"),
+    );
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_eq!(
+        agent_text(&frames),
+        "No reflection run abcd1234; /reflect list shows the recent ones."
+    );
+    assert_eq!(requests.lock().unwrap().len(), 4);
     assert_eq!(relay.close(), Some(0));
 }
 

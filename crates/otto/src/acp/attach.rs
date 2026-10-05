@@ -216,7 +216,7 @@ impl Relay {
         use super::command::{Command, compaction_text, context_text};
         let command = match command {
             Command::Reflect { focus } => {
-                return self.reflect_command(session_id, focus, cancel).await;
+                return self.reflect_runs_command(session_id, focus, cancel).await;
             }
             Command::Skill { args } => return self.skill_command(session_id, args).await,
             Command::Steer { guidance } => {
@@ -278,6 +278,56 @@ impl Relay {
         }
     }
 
+    /// `/reflect list` and `/reflect show <id>` read serve's run logs; any
+    /// other `/reflect` starts a run there.
+    async fn reflect_runs_command(
+        &self,
+        session_id: &str,
+        args: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
+        use crate::cli::repl_commands::{
+            ReflectCommand, reflect_command, reflection_list_report, reflection_show_report,
+        };
+        let disabled = || crate::reflection::Error::Disabled.to_string();
+        let unavailable = |failure: crate::client::Error| match failure {
+            crate::client::Error::Http {
+                status: 409,
+                ref code,
+                ..
+            } if code == "reflection_unavailable" => Ok(disabled()),
+            failure => Err(failure),
+        };
+        let text = match reflect_command(args) {
+            ReflectCommand::Run { focus } => {
+                return self.reflect_command(session_id, focus, cancel).await;
+            }
+            ReflectCommand::List => {
+                let list = self
+                    .client
+                    .reflection_runs(session_id)
+                    .await
+                    .map_err(|failure| self.fail(failure))?;
+                reflection_list_report(if list.enabled {
+                    Ok(list.runs)
+                } else {
+                    Err(disabled())
+                })
+            }
+            ReflectCommand::Show { id } if id.is_empty() => reflection_show_report(id, Ok(None)),
+            ReflectCommand::Show { id } => {
+                let log = match self.client.reflection_run(session_id, id).await {
+                    Ok(log) => Ok(log.map(|log| (log.path, log.content))),
+                    Err(failure) => {
+                        Err(unavailable(failure).map_err(|failure| self.fail(failure))?)
+                    }
+                };
+                reflection_show_report(id, log)
+            }
+        };
+        Ok(Some(text))
+    }
+
     async fn reflect_command(
         &self,
         session_id: &str,
@@ -295,7 +345,7 @@ impl Relay {
             biased;
             () = self.lost.cancelled() => Err(error(INTERNAL_ERROR, LOST)),
             result = &mut reflect => result
-                .map(|report| report.map(|report| report.line))
+                .map(|report| report.map(reflection_text))
                 .map_err(|failure| self.fail(failure)),
             () = cancel.cancelled() => {
                 self.client
@@ -303,7 +353,7 @@ impl Relay {
                     .await
                     .map_err(|failure| self.fail(failure))?;
                 reflect.await
-                    .map(|report| report.map(|report| report.line))
+                    .map(|report| report.map(reflection_text))
                     .map_err(|failure| self.fail(failure))
             }
         }
@@ -609,4 +659,9 @@ pub(super) async fn serve_in_process(
         |_| (),
     )
     .await;
+}
+
+/// What `/reflect` shows for serve's report, as the local frontends show it.
+fn reflection_text(report: crate::client::ReflectionResult) -> String {
+    crate::reflection::summary_text(&report.line, &report.retrospective)
 }

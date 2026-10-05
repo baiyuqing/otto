@@ -162,6 +162,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - `BRAVE_API_KEY`, `GOOGLE_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID` now take
   effect. They were not passed to the web tools, so `web_search` always used
   ChatGPT hosted search or Bing. ([#335](https://github.com/baiyuqing/otto/pull/335))
+- Errors reported inside a ChatGPT response stream now include the server's
+  error code and message instead of only `responses stream reported error`.
+  ([#336](https://github.com/baiyuqing/otto/pull/336))
 - Harden frontend/session replacement, cancellation and close ownership,
   resume identity, tool ordering, empty message/output handling, cached usage,
   compaction cuts and summaries, and checkpoint reconciliation. Individual

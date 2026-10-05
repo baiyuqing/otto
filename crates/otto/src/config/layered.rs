@@ -669,9 +669,11 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         write(&root.path().join(".git/HEAD"), "ref: refs/heads/main");
         write(&root.path().join("sub/.git/HEAD"), "ref: refs/heads/main");
+        // `directories` returns canonical paths; macOS temporary directories
+        // sit under the `/var` -> `/private/var` symlink.
         assert_eq!(
             directories(&root.path().join("sub")).unwrap(),
-            [root.path().join("sub")]
+            [std::fs::canonicalize(root.path().join("sub")).unwrap()]
         );
         write(&outside.path().join("config.toml"), "[ui]\nmode='tui'");
         std::os::unix::fs::symlink(outside.path(), root.path().join("sub/.otto")).unwrap();

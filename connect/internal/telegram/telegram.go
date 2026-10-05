@@ -520,7 +520,7 @@ type callbackQuery struct {
 
 func normalizeCallback(q *callbackQuery) (bridge.Message, bool) {
 	if parts := strings.Split(q.Data, ":"); len(parts) == 3 && parts[0] == "auto" && (parts[1] == "on" || parts[1] == "off") && len(parts[2]) == 32 && q.From != nil && q.Message != nil {
-		return bridge.Message{Platform: "telegram", ChatID: strconv.FormatInt(q.Message.Chat.ID, 10), SenderID: strconv.FormatInt(q.From.ID, 10), ModeSession: parts[2], Text: "/auto " + parts[1], Time: time.Now()}, true
+		return bridge.Message{Platform: "telegram", ChatID: strconv.FormatInt(q.Message.Chat.ID, 10), SenderID: strconv.FormatInt(q.From.ID, 10), MessageID: strconv.FormatInt(q.Message.MessageID, 10), ModeSession: parts[2], Text: "/auto " + parts[1], Time: time.Now()}, true
 	}
 	action, id, ok := strings.Cut(q.Data, ":")
 	if !ok || len(id) != 32 || (action != "approve" && action != "deny") || q.From == nil || q.Message == nil {
@@ -550,10 +550,24 @@ func (b *Bot) SendApproval(ctx context.Context, chatID, requestID, text string) 
 	}, nil
 }
 
-func (b *Bot) SendApprovalMode(ctx context.Context, chatID, session string, automatic bool) error {
+func (b *Bot) SendApprovalMode(ctx context.Context, chatID, messageID, session string, automatic bool) error {
 	mode := "MANUAL"
 	if automatic {
 		mode = "AUTO"
 	}
-	return b.call(ctx, "sendMessage", map[string]any{"chat_id": chatParam(chatID), "text": "Approval mode: " + mode + "\nSession: " + session, "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "AUTO", "callback_data": "auto:on:" + session}, map[string]any{"text": "MANUAL", "callback_data": "auto:off:" + session}}}}}, nil)
+	params := map[string]any{"chat_id": chatParam(chatID), "text": "Approval mode: " + mode + "\nSession: " + session, "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "AUTO", "callback_data": "auto:on:" + session}, map[string]any{"text": "MANUAL", "callback_data": "auto:off:" + session}}}}}
+	if messageID == "" {
+		return b.call(ctx, "sendMessage", params, nil)
+	}
+	id, err := strconv.ParseInt(messageID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid mode message ID: %w", err)
+	}
+	params["message_id"] = id
+	err = b.call(ctx, "editMessageText", params, nil)
+	var apiErr *apiError
+	if errors.As(err, &apiErr) && apiErr.Code == 400 && strings.Contains(apiErr.Desc, "message is not modified") {
+		return nil // Clicking the current mode already has the desired result.
+	}
+	return err
 }

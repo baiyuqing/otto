@@ -66,7 +66,7 @@ impl Domain for Adapter {
             artifact.base_hash,
             artifact.candidate.name,
             artifact.candidate.description,
-            artifact.candidate.body
+            guard::content(&artifact.candidate.body, &artifact.candidate.scripts)
         ))
     }
     fn apply(&self, request: &Request) -> Result<()> {
@@ -75,7 +75,7 @@ impl Domain for Adapter {
         }
         let artifact = self.artifact(request)?;
         let vetted = self.vetted(&artifact)?;
-        let expected = skillwrite::hash(&skillwrite::render(&vetted));
+        let expected = skillwrite::version(&vetted);
         if let Some(receipt) = self
             .store
             .generated(vetted.name())
@@ -97,7 +97,7 @@ impl Domain for Adapter {
         if current != artifact.base_hash {
             return Err(Error::Conflict);
         }
-        skillwrite::apply(
+        skillwrite::apply_on_base(
             &self.store,
             &self.roots,
             &vetted,
@@ -105,6 +105,7 @@ impl Domain for Adapter {
             &artifact.session_id,
             &chrono::Utc::now().to_rfc3339(),
             self.maximum,
+            artifact.base_hash.as_deref(),
         )
         .map(|_| ())
         .map_err(|_| Error::Unavailable)
@@ -141,6 +142,7 @@ pub fn publish(
             name: vetted.name().into(),
             description: vetted.description().into(),
             body: vetted.body().into(),
+            scripts: vetted.scripts().clone(),
             reason: vetted.reason().into(),
             cited: vetted.cited().to_vec(),
         },

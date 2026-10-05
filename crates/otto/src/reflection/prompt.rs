@@ -42,13 +42,16 @@ Rules:
 pub const SKILLS_ADDENDUM: &str = r#"
 
 The answer object may also carry a "skills" array of reusable procedures:
-{"skills":[{"action":"create|revise","name":"kebab-case-name","description":"one line saying when to use it","body":"Markdown steps","reason":"why this is worth reusing","evidence":[{"entry":"<entry id>","quote":"<verbatim text from that entry>"}]}]}
+{"skills":[{"action":"create|revise","name":"kebab-case-name","description":"one line saying when to use it","body":"Markdown steps","scripts":{"scripts/example.py":"Python source"},"reason":"why this is worth reusing","evidence":[{"entry":"<entry id>","quote":"<verbatim text from that entry>"}]}]}
 
 Skill rules:
 - Prefer none. Propose a skill only for a procedure the user asked for or approved AND that was carried out successfully in this slice. Cite one of the user's entries and one entry that shows the procedure running; a skill without both is discarded.
 - If an owned skill already covers the procedure, prefer "revise" only when this slice shows a concrete, durable improvement; otherwise propose no skill. Do not create a duplicate of any listed skill. Create a skill only for a distinct reusable procedure not covered by any listed skill.
 - The body is a short, concrete, task-scoped list of steps another agent can follow. Do not include credentials, URLs that are not in the transcript, instructions to change the agent's own settings, sandbox, approvals, or files under ~/.otto, or instructions to hide anything from the user.
 - Use "create" with a name no listed skill uses. Use "revise" only for a skill listed as owned, and give its complete new body. A skill that is not owned cannot be revised.
+- When a successful procedure can be made deterministic and reusable, prefer extracting its computation into small Python scripts; keep SKILL.md for when to use them, inputs, outputs, invocation, and error handling. Prefer the standard library and explicit arguments, not hard-coded workspace paths. Scripts must reflect work successfully performed in this slice.
+- "scripts" is optional; use at most 4 files, each at most 16 KiB, with paths scripts/<lowercase-name>.py (letters, digits, underscores and hyphens only). Include the complete script file set on revisions, retaining existing files unless deliberately removing them. The full serialized candidate (including body, scripts and metadata) must fit 48 KiB. Every script is scanned and syntax-checked without executing it, then included in the existing approval request. No test run or execution permission is implied.
+- Call scripts with the existing bash tool using the loaded skill location and the current workspace; ordinary sandbox and approval rules apply.
 - Do not put a "skills" array in the answer unless you are proposing at least one."#;
 
 /// One skill the model is shown.
@@ -60,6 +63,7 @@ pub struct SkillInfo {
     pub owned: bool,
     /// The current body, shown only for an owned skill.
     pub body: Option<String>,
+    pub scripts: std::collections::BTreeMap<String, String>,
 }
 
 /// The most skills shown, and the most characters of an owned skill's body.
@@ -112,6 +116,7 @@ pub fn user_message(
             });
             if let (true, Some(body)) = (skill.owned, &skill.body) {
                 value["body"] = json!(truncate(body, SKILL_BODY_CHARS));
+                value["scripts"] = json!(skill.scripts);
             }
             text.push_str(&line(&value));
         }
@@ -271,18 +276,22 @@ mod tests {
                 description: "d".into(),
                 owned: true,
                 body: Some("owned body".into()),
+                scripts: [("scripts/report.py".into(), "print(1)".into())].into(),
             },
             SkillInfo {
                 name: "theirs".into(),
                 description: "d".into(),
                 owned: false,
                 body: Some("secret human body".into()),
+                scripts: [("scripts/private.py".into(), "human secret source".into())].into(),
             },
         ];
         let without = user_message(&[], &[], None, "");
         assert!(!without.contains("existing-skills"));
         let with = user_message(&[], &[], Some(&skills), "");
         assert!(with.contains("owned body"));
+        assert!(with.contains("scripts/report.py"));
+        assert!(!with.contains("human secret source"));
         assert!(!with.contains("secret human body"));
         assert!(with.contains("\"owned\":false"));
     }

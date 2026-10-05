@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Let reflection generate reusable Python scripts alongside `SKILL.md`. Script source
+  is scanned, syntax-checked without execution, reviewed and included in the existing
+  approval request. Complete skills are versioned and reverted together; human edits
+  to scripts or the file set prevent automatic replacement. Markdown-only history
+  remains compatible.
 - Default session approvals to AUTO, with persistent `/auto on|off` controls,
   mode status, recorded request/decision notifications, and a session mode API.
   Telegram and Feishu support the controls; Telegram includes menu shortcuts

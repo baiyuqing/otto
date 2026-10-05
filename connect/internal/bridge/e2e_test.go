@@ -451,6 +451,8 @@ func testEndToEndApprovalDialogueRevokesPermission(t *testing.T, tcp bool) {
 		options = tcpAgentOptions(t, diagnostics, workspace)
 	}
 	h := newHarness(t, setup{mod: func(o *Options) { o.PermissionTimeout = 2 * time.Minute }, agent: options})
+	h.say("/auto off")
+	h.waitSent(1)
 	h.say("Run the command after I approve it.")
 	h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.approvals) == 1 }, "real Otto approval card")
 	cardID := h.plat.approvalID()
@@ -706,6 +708,8 @@ func TestEndToEndModelInitiatedApproval(t *testing.T) {
 				options = tcpAgentOptions(t, diagnostics, workspace)
 			}
 			h := newHarness(t, setup{agent: options})
+			h.say("/auto off")
+			h.waitSent(1)
 			h.say("Ask me to approve the plan before continuing.")
 			waitCards(h, 1)
 			id := h.plat.approvalID()

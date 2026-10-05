@@ -817,8 +817,8 @@ func TestSendPlainKeepsTextAndOmitsEntities(t *testing.T) {
 func TestApprovalModeShortcutsAreSessionBound(t *testing.T) {
 	session := strings.Repeat("a", 32)
 	for _, mode := range []string{"on", "off"} {
-		msg, ok := normalizeCallback(&callbackQuery{From: &user{ID: 7}, Message: &message{}, Data: "auto:" + mode + ":" + session})
-		if !ok || msg.ModeSession != session || msg.Text != "/auto "+mode || msg.ApprovalID != "" {
+		msg, ok := normalizeCallback(&callbackQuery{From: &user{ID: 7}, Message: &message{MessageID: 42}, Data: "auto:" + mode + ":" + session})
+		if !ok || msg.ModeSession != session || msg.MessageID != "42" || msg.Text != "/auto "+mode || msg.ApprovalID != "" {
 			t.Fatalf("mode callback = %+v, %v", msg, ok)
 		}
 	}
@@ -832,7 +832,7 @@ func TestApprovalModeMessageShowsModeAndOffersBothShortcuts(t *testing.T) {
 	api := newAPI(t, func(method string, body map[string]any) resp { return okR(map[string]any{"message_id": 42}) })
 	bot := New(testToken, nil)
 	bot.APIBase = api.srv.URL
-	if err := bot.SendApprovalMode(context.Background(), "123", session, true); err != nil {
+	if err := bot.SendApprovalMode(context.Background(), "123", "", session, true); err != nil {
 		t.Fatal(err)
 	}
 	body := api.byMethod("sendMessage")[0].body
@@ -844,5 +844,43 @@ func TestApprovalModeMessageShowsModeAndOffersBothShortcuts(t *testing.T) {
 		if got := buttons[i].(map[string]any)["callback_data"]; got != "auto:"+mode+":"+session {
 			t.Fatalf("shortcut = %v", got)
 		}
+	}
+}
+
+func TestApprovalModeClicksEditOriginalCard(t *testing.T) {
+	for _, desc := range []string{"", "Bad Request: message is not modified", "Bad Request: message to edit not found"} {
+		t.Run(desc, func(t *testing.T) {
+			api := newAPI(t, func(method string, body map[string]any) resp {
+				if desc != "" {
+					return errR(400, desc, 0)
+				}
+				return okR(true)
+			})
+			bot := New(testToken, nil)
+			bot.APIBase = api.srv.URL
+			for _, automatic := range []bool{true, true, false} {
+				err := bot.SendApprovalMode(context.Background(), "123", "42", strings.Repeat("b", 32), automatic)
+				wantError := strings.Contains(desc, "not found")
+				if (err != nil) != wantError {
+					t.Fatalf("edit error = %v, want error %v", err, wantError)
+				}
+			}
+			if got := api.byMethod("sendMessage"); len(got) != 0 {
+				t.Fatalf("click sent new cards: %v", got)
+			}
+			edits := api.byMethod("editMessageText")
+			if len(edits) != 3 {
+				t.Fatalf("edits = %v", edits)
+			}
+			for i, edit := range edits {
+				mode := "AUTO"
+				if i == 2 {
+					mode = "MANUAL"
+				}
+				if edit.body["message_id"] != float64(42) || edit.body["chat_id"] != float64(123) || !strings.Contains(edit.body["text"].(string), "Approval mode: "+mode) {
+					t.Fatalf("edit = %v", edit.body)
+				}
+			}
+		})
 	}
 }

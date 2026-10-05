@@ -171,6 +171,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Telegram AUTO/MANUAL buttons update the original mode card; repeated clicks
+  no longer send duplicate cards.
+
 - ChatGPT stream errors with code `server_is_overloaded` or `server_error`
   are now retried like transport failures (up to three times, 1, 2, then 4
   seconds) when no output has been streamed yet. Previously the turn failed on

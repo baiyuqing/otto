@@ -72,9 +72,22 @@ async fn run_login_logout(
     else {
         return fail(stderr, "mcp configuration is invalid or unavailable");
     };
-    let Some(server) = mcp_config.servers.iter().find(|server| server.name == name) else {
+    let plugins = crate::plugin::Snapshot::load(Path::new(&home), &config_file, &environment);
+    let Some(server) = mcp_config
+        .servers
+        .iter()
+        .chain(plugins.servers.iter())
+        .find(|server| {
+            server.name == name
+                || plugins
+                    .guards
+                    .get(&server.name)
+                    .is_some_and(|g| g.logical_name == name)
+        })
+    else {
         return fail(stderr, &format!("unknown MCP server: {name}"));
     };
+    let name = server.name.as_str();
     let McpTransport::Http {
         url,
         auth,
@@ -200,7 +213,13 @@ fn run_list(
             "load config: configuration is invalid or unavailable",
         );
     };
-    if file.mcp.servers.is_empty() {
+    let home = match super::run::resolve_home_for(lookup) {
+        Ok(home) => home,
+        Err(e) => return fail(stderr, &e),
+    };
+    let environment = super::run::config_environment_for(&file, lookup);
+    let plugins = crate::plugin::Snapshot::load(Path::new(&home), &file, &environment);
+    if file.mcp.servers.is_empty() && plugins.servers.is_empty() {
         let _ = writeln!(stdout, "no MCP servers configured");
         return 0;
     }
@@ -216,6 +235,30 @@ fn run_list(
             "none"
         };
         let _ = writeln!(stdout, "{name}\t{}\t{enabled}\t{auth}", server.transport);
+    }
+    for server in &plugins.servers {
+        let logical = &plugins.guards[&server.name].logical_name;
+        let (transport, auth) = match &server.transport {
+            McpTransport::Stdio { .. } => ("stdio", "none"),
+            McpTransport::Http { auth, .. } => (
+                "http",
+                if *auth == McpAuth::OAuth {
+                    "oauth"
+                } else {
+                    "none"
+                },
+            ),
+        };
+        let _ = writeln!(
+            stdout,
+            "{logical} ({})\t{transport}\t{}\t{auth}",
+            server.name,
+            if server.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
     }
     0
 }

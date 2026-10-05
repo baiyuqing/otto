@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Install versioned plugin packages from local directories or pinned Git commits.
+  Load portable Skills and stdio/Streamable HTTP MCP, with limited Claude/Codex
+  manifest adapters, namespaced components and explicit content-bound MCP trust.
+  Manage packages with `otto plugin`; credentials stay in environment bindings.
+
 - Keep the newest configuration backups when repeated writes land in the same
   millisecond; pruned collision names are no longer reused.
 

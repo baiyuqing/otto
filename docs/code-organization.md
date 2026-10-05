@@ -95,11 +95,15 @@ other module, and no other module may import a frontend:
 The other modules group native responsibilities:
 
 - **User entry points:** `cli/`, `tui/`, `server/`, and `acp/`.
-- **Remote and external integrations:** `provider/`, `mcp/`, `auth/`, and
+- **Remote and external integrations:** `provider/`, `mcp/`, `plugin/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
   `reflection/`, `typesafe/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, `workflow.rs`,
   and `schedule/` (scheduled deliveries: store, tools, worker).
+- **Plugin packages:** `plugin/` owns snapshot installation, the user registry,
+  package validation and Skills/MCP adaptation with content-bound trust.
+  `cli/plugin.rs` exposes management commands; shared runner construction loads
+  packages for every native frontend.
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
 - **Runtime assembly:** `runtime/`, and `metrics.rs` (the HTTP and turn
   metrics `server/` exposes and the schedule worker records).

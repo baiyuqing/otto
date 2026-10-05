@@ -21,6 +21,8 @@ pub const KINDS: &[&str] = &["preference", "fact", "convention"];
 const MAXIMUM_KEY_BYTES: usize = 256;
 const MAXIMUM_TEXT_BYTES: usize = 8 * 1024;
 const MAXIMUM_REASON_BYTES: usize = 2 * 1024;
+/// The most bytes of the retrospective kept; a longer one is cut.
+pub const MAXIMUM_RETROSPECTIVE_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -60,6 +62,8 @@ struct Output {
     memories: Vec<RawMemory>,
     #[serde(default)]
     skills: Vec<RawSkill>,
+    #[serde(default)]
+    retrospective: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,6 +179,11 @@ pub struct Plan {
     /// The content of every dropped proposal, for the run log. Holds one
     /// entry per count in `dropped`.
     pub rejected: Vec<runlog::Item>,
+    /// The model's narrative of the slice, trimmed, without control
+    /// characters other than newline and tab, and cut to
+    /// [`MAXIMUM_RETROSPECTIVE_BYTES`]. Empty when the model gave none. Not
+    /// redacted here: the run log and the report redact it.
+    pub retrospective: String,
 }
 
 impl Plan {
@@ -214,7 +223,10 @@ pub fn plan(
         .map(|record| (record.scope, record.kind.clone(), record.key.clone()))
         .collect();
 
-    let mut plan = Plan::default();
+    let mut plan = Plan {
+        retrospective: retrospective(&output.retrospective),
+        ..Plan::default()
+    };
     for raw in output.memories {
         if plan.proposals.len() >= maximum {
             plan.reject("over_limit", raw.item());
@@ -380,6 +392,23 @@ fn check_content(key: &str, text: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The retrospective as kept: see [`Plan::retrospective`].
+fn retrospective(raw: &str) -> String {
+    let text: String = raw
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .collect();
+    if text.len() <= MAXIMUM_RETROSPECTIVE_BYTES {
+        return text;
+    }
+    let mut end = MAXIMUM_RETROSPECTIVE_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
 fn has_control(text: &str) -> bool {
     text.chars()
         .any(|character| character.is_control() && character != '\n' && character != '\t')
@@ -484,6 +513,25 @@ mod tests {
         assert!(plan(r#"{"memories":[],"extra":1}"#, &entries(), &[], 8).is_err());
         assert!(plan("not json", &entries(), &[], 8).is_err());
         assert!(plan(&memory(r#","unknown":1"#), &entries(), &[], 8).is_err());
+    }
+
+    #[test]
+    fn the_retrospective_is_kept_trimmed_and_without_control_characters() {
+        let answer = r#"{"memories":[],"retrospective":"  Went well.\n\tThen a detour.\u0007  "}"#;
+        let planned = plan(answer, &entries(), &[], 8).expect("plan");
+        assert_eq!(planned.retrospective, "Went well.\n\tThen a detour.");
+        let absent = plan(r#"{"memories":[]}"#, &entries(), &[], 8).expect("plan");
+        assert_eq!(absent.retrospective, "");
+    }
+
+    #[test]
+    fn a_long_retrospective_is_cut_on_a_character_boundary() {
+        let long = "é".repeat(MAXIMUM_RETROSPECTIVE_BYTES);
+        let answer = serde_json::json!({"memories": [], "retrospective": long}).to_string();
+        let planned = plan(&answer, &entries(), &[], 8).expect("plan");
+        assert!(planned.retrospective.len() <= MAXIMUM_RETROSPECTIVE_BYTES);
+        assert!(planned.retrospective.len() > MAXIMUM_RETROSPECTIVE_BYTES - 2);
+        assert!(planned.retrospective.chars().all(|c| c == 'é'));
     }
 
     #[test]

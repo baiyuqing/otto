@@ -605,6 +605,9 @@ pub struct Runner {
     pub(crate) advisor: Option<Arc<crate::memory::advice::Advisor>>,
     /// The origin of the current user turn, read by the schedule tools.
     pub(crate) schedule_origin: Arc<crate::schedule::tools::TurnOrigin>,
+    /// Where the controller binds the `reflect` tool's port. Present whether
+    /// or not the tool is registered.
+    pub(crate) reflection: Arc<crate::tool::reflect::Handle>,
 }
 
 /// The tool-less agent behind the session-model advice backend.
@@ -1052,6 +1055,7 @@ impl Runner {
             task_control,
             advisor: None,
             schedule_origin: Default::default(),
+            reflection: Default::default(),
         }
     }
 
@@ -1781,6 +1785,7 @@ impl Builder {
 
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+        let reflection = Arc::new(crate::tool::reflect::Handle::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
             tools.push(Box::new(crate::tool::approval::RequestApproval {
                 service: self.approvals.clone(),
@@ -1817,6 +1822,13 @@ impl Builder {
                 Arc::clone(&task_control),
                 &redaction_values,
             )));
+            // Parent-only, like the timer tools: a child has no session file
+            // of its own to reflect on.
+            if self.reflector.enabled() && !self.no_session {
+                tools.push(Box::new(crate::tool::reflect::ReflectTool::new(
+                    Arc::clone(&reflection),
+                )));
+            }
             let mut definitions: Vec<_> = tools.iter().map(|tool| tool.definition()).collect();
             definitions.push(
                 crate::tool::otto::Help {
@@ -1941,6 +1953,7 @@ impl Builder {
                 task_control,
                 advisor,
                 schedule_origin,
+                reflection,
             },
             trace_entries,
         ))

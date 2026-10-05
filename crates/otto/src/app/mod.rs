@@ -23,6 +23,7 @@ pub mod approval;
 pub mod approval_control;
 pub mod auto_reflection;
 pub mod channel;
+mod requested_reflection;
 pub(crate) mod task_control;
 
 /// Fixed, content-free frontend notice for a successful memory proposal.
@@ -269,6 +270,7 @@ impl Controller {
             bell: std::sync::atomic::AtomicBool::new(false),
         };
         controller.notify_memory_state();
+        controller.bind_reflection();
         controller
     }
 
@@ -667,6 +669,7 @@ impl Controller {
         match decision {
             Decision::Installed(old) => {
                 old.close();
+                self.bind_reflection();
                 Ok(true)
             }
             Decision::Busy => {
@@ -1163,6 +1166,24 @@ impl Controller {
             .await
     }
 
+    /// The newest reflection run logs, newest first. Reads files only, so it
+    /// needs no admission and may run beside a turn.
+    pub fn reflection_runs(
+        &self,
+    ) -> Result<Vec<crate::reflection::runlog::Summary>, crate::reflection::Error> {
+        self.builder
+            .reflector
+            .runs(crate::reflection::runlog::MAXIMUM_LISTED)
+    }
+
+    /// One reflection run log by the id [`Self::reflection_runs`] shows.
+    pub fn reflection_run(
+        &self,
+        id: &str,
+    ) -> Result<Option<(PathBuf, String)>, crate::reflection::Error> {
+        self.builder.reflector.run_log(id)
+    }
+
     /// Where reflection writes and looks up skills, or `None` when skills are
     /// disabled in `[skills]` or there is no home directory.
     pub fn reflection_skill_roots(&self) -> Option<crate::reflection::skillwrite::Roots> {
@@ -1271,6 +1292,7 @@ impl Controller {
             let old = std::mem::replace(&mut current.runner, runner);
             old.close();
         }
+        self.bind_reflection();
         drop(admission);
         Ok(())
     }
@@ -1376,6 +1398,7 @@ impl Controller {
             let old = std::mem::replace(&mut current.runner, runner);
             old.close();
         }
+        self.bind_reflection();
         drop(admission);
         Ok(ResumeResult {
             session_path: path,
@@ -1920,6 +1943,7 @@ impl Controller {
         if deferred {
             return Err(CLOSED.to_string());
         }
+        self.bind_reflection();
         self.notify_memory_state();
         match close_error {
             Some(error) => Err(self.builder.redact_error(&error, None)),
@@ -1966,6 +1990,7 @@ impl Controller {
             bell: std::sync::atomic::AtomicBool::new(false),
         };
         controller.notify_memory_state();
+        controller.bind_reflection();
         controller
     }
 }

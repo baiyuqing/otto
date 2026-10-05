@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, events, loadToken, setToken, type UsageSummary } from './api'
+import { ApiError, api, events, loadToken, setToken, type UsageSummary } from './api'
 import { parseWebCommand, supportedCommands } from './commands'
 import { fromHistory, phase, reduce, statusLine, type Info, type Item, type Session, type SessionListRow, type Usage } from './wire'
 import { Sidebar } from './Sidebar'
@@ -13,7 +13,7 @@ import { UsageView } from './UsageView'
 import { WorkflowsView } from './WorkflowsView'
 import { ChangesView } from './ChangesView'
 import { AgentsView } from './AgentsView'
-import { generatedSkillsText, mcpServerLine, sessionLabel, workspaceName } from './uiText'
+import { generatedSkillsText, mcpServerLine, reflectionRunsText, reflectionText, sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, NOTICE_POLL_MS, idleFollow } from './follow'
 import { useStatus } from './status'
 import { ScheduledNotices } from './ScheduledNotices'
@@ -451,6 +451,31 @@ export function App() {
       await reflect(command.focus)
       return
     }
+    if (command.kind === 'reflectionRuns') {
+      try {
+        const list = await api.reflectionRuns(session.id)
+        setItems((prev) => [...prev, { kind: 'notice', text: reflectionRunsText(list) }])
+      } catch (e) {
+        fail(e)
+      }
+      return
+    }
+    if (command.kind === 'reflectionRun') {
+      try {
+        const log = await api.reflectionRun(session.id, command.id)
+        setItems((prev) => [...prev, { kind: 'notice', text: `Run log: ${log.path}\n\n${log.content.trimEnd()}` }])
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) {
+          setItems((prev) => [
+            ...prev,
+            { kind: 'notice', text: `No reflection run ${command.id}; /reflect list shows the recent ones.` },
+          ])
+        } else {
+          fail(e)
+        }
+      }
+      return
+    }
     if (command.kind === 'generatedSkills') {
       try {
         const list = await api.generatedSkills(session.id)
@@ -611,7 +636,7 @@ export function App() {
     reflectAbort.current = ac
     try {
       const r = await api.reflect(session.id, focus, ac.signal)
-      setItems((prev) => [...prev, { kind: 'notice', text: r.line }])
+      setItems((prev) => [...prev, { kind: 'notice', text: reflectionText(r) }])
     } catch (e) {
       if (!ac.signal.aborted) fail(e)
     } finally {

@@ -280,7 +280,7 @@ var Commands = []Command{
 	{"queue", "Run a separate follow-up: /queue <prompt>", false},
 	{"compact", "Compact the session context: /compact [focus]", true},
 	{"context", "Show what the next request sends, with token counts", true},
-	{"reflect", "Review this session: /reflect [focus]", true},
+	{"reflect", "Retrospective and proposals: /reflect [focus], list, show <id>", true},
 	{"skill", "List generated skills or undo one: /skill generated | /skill revert <name>", true},
 	{"sessions", "List the newest sessions", false},
 	{"use", "Switch to a session: /use <id>", false},

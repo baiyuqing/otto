@@ -91,6 +91,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Ask the agent for a retrospective in plain words: the new `reflect` tool runs the same
+  reflection as `/reflect` instead of the model writing its own file. Every reflection
+  run now writes a short retrospective as the first section of its run log under
+  `~/.otto/reflection/runs/`, and `/reflect` prints it after the result line.
+  `/reflect list` and `/reflect show <id>` show past runs in every frontend, backed by
+  `GET /v1/sessions/{id}/reflection/runs[/{run}]`. The system prompt also tells the model
+  to create files with `write` rather than shell here-documents.
+
 - Preserve workspace session and memory ownership across restarts and directory
   moves using a local identity marker. Add `otto workspace status|fork` for
   inspection and independent copies; adopt existing state without rewriting

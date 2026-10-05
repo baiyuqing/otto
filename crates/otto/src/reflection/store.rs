@@ -307,12 +307,13 @@ impl Store {
         transaction.commit().map_err(|_| Error::Io)
     }
 
-    /// When the most recent automatic (not `manual`) run for `session_id`
+    /// When the most recent automatic (not `manual` or `requested`) run for `session_id`
     /// started, as the RFC 3339 text it was recorded with.
     pub fn last_auto_started(&self, session_id: &str) -> Result<Option<String>> {
         self.lock()?
             .query_row(
-                "SELECT MAX(started_at) FROM runs WHERE session_id = ?1 AND trigger != 'manual'",
+                "SELECT MAX(started_at) FROM runs WHERE session_id = ?1 \
+                 AND trigger NOT IN ('manual', 'requested')",
                 params![session_id],
                 |row| row.get::<Option<String>>(0),
             )
@@ -669,13 +670,15 @@ mod tests {
     }
 
     #[test]
-    fn the_last_automatic_run_ignores_manual_ones() {
+    fn the_last_automatic_run_ignores_manual_and_requested_ones() {
         let store = Store::open_in_memory().expect("open");
         assert_eq!(store.last_auto_started("session-1").expect("read"), None);
-        let mut manual = row("a", Status::Ok, "aaaaaaaa");
-        manual.trigger = "manual".into();
-        manual.started_at = "2026-10-02T05:00:00Z".into();
-        store.record(&manual).expect("manual");
+        for (id, trigger) in [("a", "manual"), ("aa", "requested")] {
+            let mut asked = row(id, Status::Ok, "aaaaaaaa");
+            asked.trigger = trigger.into();
+            asked.started_at = "2026-10-02T05:00:00Z".into();
+            store.record(&asked).expect(trigger);
+        }
         assert_eq!(store.last_auto_started("session-1").expect("read"), None);
         for (id, trigger, started) in [
             ("bb", "on_compaction", "2026-10-02T01:00:00Z"),

@@ -32,6 +32,7 @@ const BASE_SAFETY: &[(&str, RetrySafety)] = &[
     ("skill", RetrySafety::NonIdempotent),
     ("remember", RetrySafety::NonIdempotent),
     ("forget", RetrySafety::NonIdempotent),
+    ("reflect", RetrySafety::NonIdempotent),
     ("remind", RetrySafety::NonIdempotent),
     ("remind_status", RetrySafety::NonIdempotent),
     ("remind_cancel", RetrySafety::NonIdempotent),

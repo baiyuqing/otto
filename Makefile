@@ -14,7 +14,7 @@ DESKTOP_APP := $(DESKTOP_DIR)/target/$(DESKTOP_TARGET)/release/bundle/macos/Otto
 # `cargo tauri build` runs `xattr -crs` on the bundle; /usr/bin comes first so
 # a pip-installed `xattr` earlier on PATH, which has no -r, is not used.
 
-.PHONY: all build install check-fast check check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test bump release-tag test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
+.PHONY: all build install check-fast check check-tests check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test bump release-tag test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
 
 all: build
 
@@ -77,7 +77,11 @@ check-fast: rust-fmt rust-lint ## quick feedback: formatting, lint, focused core
 	cargo test -p otto-core
 	@git diff --check
 
-check: rust-fmt rust-lint ui rust-test connect-check rust-wasm-test scripts-test ui-test ## full macOS acceptance: format, lint, web UI build, all Rust tests (PTY tests included), host integration and web UI tests (no release build; see `build`)
+check: rust-fmt rust-lint check-tests ## full macOS acceptance: format, lint, web UI build, all Rust tests (PTY tests included), host integration and web UI tests (no release build; see `build`)
+
+# CI's macOS acceptance job runs this, and a separate job runs rust-fmt and
+# rust-lint at the same time.
+check-tests: ui rust-test connect-check rust-wasm-test scripts-test ui-test ## `check` without rust-fmt and rust-lint
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 check-linux: rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`

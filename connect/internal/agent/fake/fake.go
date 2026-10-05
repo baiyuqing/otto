@@ -8,6 +8,11 @@
 //	chunks       "Hello", a thought, " world", a tool call, "After tool"
 //	block        waits for session/cancel, then ends with stop reason cancelled
 //	sleep        waits 300 ms, then echoes
+//	hold:<n>     waits until the session has received n task-control or
+//	             steer requests (or session/cancel), then echoes; a test
+//	             that acts on an active task uses it instead of racing sleep
+//	wait         waits until the test calls Release (or session/cancel),
+//	             then echoes; for a task the agent hears nothing about
 //	perm:<title> requests permission for a tool call titled <title>; ends
 //	             with stop reason cancelled when the outcome is cancelled,
 //	             otherwise replies "outcome=<option id>"
@@ -61,8 +66,14 @@ const envDir = "OTTO_CONNECT_FAKE_AGENT"
 
 // Env returns the environment that makes the test binary run as the agent
 // with state in dir. extra entries (KEY=value) are appended.
+//
+// Under -race the fake agent is a race-instrumented binary, and the race
+// runtime sleeps atexit_sleep_ms (default 1 s) before every exit; the
+// harness waits for that exit on every shutdown, so the sleep is turned off.
+// Any GORACE options the caller set are kept.
 func Env(dir string, extra ...string) []string {
-	return append(append(os.Environ(), envDir+"="+dir), extra...)
+	gorace := strings.TrimSpace(os.Getenv("GORACE") + " atexit_sleep_ms=0")
+	return append(append(os.Environ(), envDir+"="+dir, "GORACE="+gorace), extra...)
 }
 
 // Calls returns the lines of <dir>/calls.
@@ -74,13 +85,18 @@ func Calls(dir string) []string {
 	return strings.Split(strings.TrimSpace(string(raw)), "\n")
 }
 
+// Release ends the "wait" prompts of the agent with state in dir.
+func Release(dir string) error {
+	return os.WriteFile(dir+"/release", nil, 0o600)
+}
+
 // Main runs the agent when the environment selects it.
 func Main() bool {
 	dir := os.Getenv(envDir)
 	if dir == "" {
 		return false
 	}
-	a := &agent{dir: dir, cancels: map[string]chan struct{}{}, approvals: map[string]bool{}}
+	a := &agent{dir: dir, cancels: map[string]chan struct{}{}, approvals: map[string]bool{}, controls: map[string]chan struct{}{}}
 	conn := acp.NewAgentSideConnection(a, os.Stdout, os.Stdin)
 	a.conn.Store(conn)
 	<-conn.Done()
@@ -110,6 +126,21 @@ type agent struct {
 	cancels   map[string]chan struct{} // current prompt of each session
 	blocked   int                      // "block" prompts waiting for session/cancel
 	approvals map[string]bool
+	controls  map[string]chan struct{} // signalled per control request to a "hold:<n>" prompt
+}
+
+// controlled signals a "hold:<n>" prompt of session that a task-control or
+// steer request arrived.
+func (a *agent) controlled(session string) {
+	a.mu.Lock()
+	ch := a.controls[session]
+	a.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (a *agent) log(format string, args ...any) {
@@ -248,6 +279,32 @@ func (a *agent) chunk(ctx context.Context, id acp.SessionId, text string) {
 func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResponse, error) {
 	text := p.Prompt[0].Text.Text
 	id := string(p.SessionId)
+	// The prompt is active, and a "hold:<n>" prompt listens for control
+	// requests, before start is logged, since a test acts on an active task
+	// as soon as it sees start.
+	cancelled := make(chan struct{})
+	a.mu.Lock()
+	a.cancels[id] = cancelled
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		if a.cancels[id] == cancelled {
+			delete(a.cancels, id)
+		}
+		a.mu.Unlock()
+	}()
+	var signal chan struct{}
+	if strings.HasPrefix(text, "hold:") {
+		signal = make(chan struct{}, 16)
+		a.mu.Lock()
+		a.controls[id] = signal
+		a.mu.Unlock()
+		defer func() {
+			a.mu.Lock()
+			delete(a.controls, id)
+			a.mu.Unlock()
+		}()
+	}
 	a.log("start:%s", text)
 	if channel := channelFromMeta(p.Meta); channel != "" {
 		a.log("channel:%s", channel)
@@ -261,17 +318,6 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 		}
 	}
 	defer func() { a.log("end:%s", text) }()
-	cancelled := make(chan struct{})
-	a.mu.Lock()
-	a.cancels[id] = cancelled
-	a.mu.Unlock()
-	defer func() {
-		a.mu.Lock()
-		if a.cancels[id] == cancelled {
-			delete(a.cancels, id)
-		}
-		a.mu.Unlock()
-	}()
 
 	end := acp.PromptResponse{StopReason: acp.StopReasonEndTurn}
 	switch {
@@ -298,6 +344,31 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 		case <-time.After(300 * time.Millisecond):
 		case <-cancelled:
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+		}
+		a.chunk(ctx, p.SessionId, "echo: "+text)
+	case text == "wait":
+		for {
+			if _, err := os.Stat(a.dir + "/release"); err == nil {
+				break
+			}
+			select {
+			case <-time.After(5 * time.Millisecond):
+			case <-cancelled:
+				return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+			}
+		}
+		a.chunk(ctx, p.SessionId, "echo: "+text)
+	case strings.HasPrefix(text, "hold:"):
+		n, err := strconv.Atoi(strings.TrimPrefix(text, "hold:"))
+		if err != nil {
+			return end, err
+		}
+		for ; n > 0; n-- {
+			select {
+			case <-signal:
+			case <-cancelled:
+				return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+			}
 		}
 		a.chunk(ctx, p.SessionId, "echo: "+text)
 	case strings.HasPrefix(text, "perm:"), strings.HasPrefix(text, "permcancel:"), strings.HasPrefix(text, "permread:"):
@@ -465,6 +536,7 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 		if req.Channel != "" {
 			a.log("task_control_channel:%s", req.Channel)
 		}
+		defer a.controlled(req.SessionID)
 		if strings.HasPrefix(req.Text, "slow-follow-up: ") || req.Text == "hold-control" {
 			time.Sleep(200 * time.Millisecond)
 		}
@@ -496,6 +568,7 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 			return nil, &acp.RequestError{Code: -32021, Message: "no active task"}
 		}
 		a.log("steer:%s", req.Text)
+		a.controlled(req.SessionID)
 		return map[string]any{"accepted": true}, nil
 	}
 	return nil, acp.NewMethodNotFound(method)

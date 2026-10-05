@@ -753,22 +753,45 @@ mod tests {
         assert!(!marker.exists(), "backgrounded descendant survived");
     }
 
+    /// A shell script that runs `trap`, then creates `ready`, then loops; the
+    /// TERM disposition is in place once `ready` exists. Signalling earlier
+    /// races the shell's startup and kills it with the default TERM action.
+    fn trapping_loop(trap: &str, ready: &std::path::Path) -> String {
+        format!(
+            "trap {trap} TERM; : > '{}'; while :; do sleep 1; done",
+            ready.display()
+        )
+    }
+
+    async fn wait_ready(ready: &std::path::Path) {
+        for _ in 0..5_000 {
+            if ready.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("child did not install its TERM handler");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancellation_allows_a_cooperative_term_exit() {
         let manager = Manager::default();
         let mut stdout = std::io::sink();
         let mut stderr = std::io::sink();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let ready = directory.path().join("ready");
+        let command = trapping_loop("'exit 23'", &ready);
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            wait_ready(&ready).await;
             token.cancel();
         });
         let (outcome, result) = manager
             .run(
                 spec(
                     "/bin/sh",
-                    &["-c", "trap 'exit 23' TERM; while :; do sleep 1; done"],
+                    &["-c", &command],
                     std::path::Path::new("/"),
                     &["PATH=/usr/bin:/bin"],
                 ),
@@ -790,17 +813,20 @@ mod tests {
         let manager = Manager::default();
         let mut stdout = std::io::sink();
         let mut stderr = std::io::sink();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let ready = directory.path().join("ready");
+        let command = trapping_loop("''", &ready);
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            wait_ready(&ready).await;
             token.cancel();
         });
         let (outcome, result) = manager
             .run(
                 spec(
                     "/bin/sh",
-                    &["-c", "trap '' TERM; while :; do sleep 1; done"],
+                    &["-c", &command],
                     std::path::Path::new("/"),
                     &["PATH=/usr/bin:/bin"],
                 ),
@@ -821,10 +847,7 @@ mod tests {
     async fn custom_cancellation_grace_escalates_before_the_default() {
         let directory = tempfile::tempdir().expect("temp dir");
         let ready = directory.path().join("ready");
-        let command = format!(
-            "trap '' TERM; : > '{}'; while :; do sleep 1; done",
-            ready.display()
-        );
+        let command = trapping_loop("''", &ready);
         let manager = Arc::new(Manager::default());
         let runner = manager.clone();
         let cancel = CancellationToken::new();
@@ -850,13 +873,7 @@ mod tests {
                 .await
         });
 
-        for _ in 0..1_000 {
-            if ready.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        assert!(ready.exists(), "child did not install its TERM handler");
+        wait_ready(&ready).await;
 
         let cancelled_at = std::time::Instant::now();
         cancel.cancel();
@@ -876,6 +893,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_close_cooperatively_cleans_up_once() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let ready = directory.path().join("ready");
+        let command = trapping_loop("'exit 24'", &ready);
         let manager = Arc::new(Manager::default());
         let runner = manager.clone();
         let run = tokio::spawn(async move {
@@ -886,7 +906,7 @@ mod tests {
                 .run(
                     spec(
                         "/bin/sh",
-                        &["-c", "trap 'exit 24' TERM; while :; do sleep 1; done"],
+                        &["-c", &command],
                         std::path::Path::new("/"),
                         &["PATH=/usr/bin:/bin"],
                     ),
@@ -899,7 +919,7 @@ mod tests {
                 .await
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_ready(&ready).await;
         let first = {
             let manager = manager.clone();
             std::thread::spawn(move || manager.close())

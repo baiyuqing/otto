@@ -17,7 +17,7 @@ for invariants and implementation constraints.
 | `desktop/` | Independent macOS Tauri shell around `otto serve` | `desktop/README.md` |
 | `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
-| `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag` | `Makefile` |
+| `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow | `Makefile`, `.github/workflows/checks.yml` |
 
 The root Cargo workspace contains `otto-core`, `otto`, and `otto-web` only.
 `connect/` and `desktop/` have their own build definitions and are not root

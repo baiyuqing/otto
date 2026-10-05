@@ -107,11 +107,15 @@ func TestReflectionNoticeIsDroppedAfterTheChatSwitchesSessions(t *testing.T) {
 func TestNaturalMessageDuringActiveTaskUsesControlDialogue(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
-	h.say("sleep")
-	h.waitCall("start:sleep")
+	h.say("wait")
+	h.waitCall("start:wait")
 	h.say("second")
+	h.waitSent(1)
+	if err := fake.Release(h.dir); err != nil {
+		t.Fatal(err)
+	}
 	h.waitSent(2)
-	if got := h.plat.texts(); !slices.Equal(got, []string{"Guidance accepted.", "echo: sleep"}) {
+	if got := h.plat.texts(); !slices.Equal(got, []string{"Guidance accepted.", "echo: wait"}) {
 		t.Fatalf("sent = %q", got)
 	}
 	var seq []string
@@ -120,7 +124,7 @@ func TestNaturalMessageDuringActiveTaskUsesControlDialogue(t *testing.T) {
 			seq = append(seq, c)
 		}
 	}
-	if want := []string{"start:sleep", "task_control:second", "end:sleep"}; !slices.Equal(seq, want) {
+	if want := []string{"start:wait", "task_control:second", "end:wait"}; !slices.Equal(seq, want) {
 		t.Fatalf("agent saw %q, want active-task control %q", seq, want)
 	}
 	if n := len(h.calls("new:")); n != 1 {
@@ -530,14 +534,17 @@ func TestConfigProfilesIsHandledByConnectorNotAgent(t *testing.T) {
 func TestTypingWhilePromptRuns(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{mod: func(o *Options) { o.TypingInterval = 30 * time.Millisecond }})
-	h.say("sleep")
-	h.waitSent(1)
-	h.plat.mu.Lock()
-	n := h.plat.typing
-	h.plat.mu.Unlock()
-	if n < 3 {
-		t.Fatalf("typing sent %d times during a 300 ms prompt at a 30 ms interval", n)
+	h.say("wait")
+	h.waitCall("start:wait")
+	h.waitFor(func() bool {
+		h.plat.mu.Lock()
+		defer h.plat.mu.Unlock()
+		return h.plat.typing >= 3
+	}, "repeated typing while the prompt runs")
+	if err := fake.Release(h.dir); err != nil {
+		t.Fatal(err)
 	}
+	h.waitSent(1)
 }
 
 func TestShutdownCancelsRunningPrompt(t *testing.T) {

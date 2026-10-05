@@ -32,7 +32,9 @@ pub enum StreamError {
     /// A `data:` payload was not valid event JSON.
     #[error("decode responses stream: {0}")]
     Decode(String),
-    /// The backend sent a `response.failed` or an `error` event.
+    /// The backend sent a `response.failed` or an `error` event. The text is
+    /// the event type followed by `: <code>: <message>` for the parts the
+    /// event carried.
     #[error("responses stream reported {0}")]
     Reported(String),
     /// The body ended before a terminal `response.completed` event.
@@ -290,7 +292,20 @@ impl StreamAssembler {
                 }
             }
             "response.failed" | "error" => {
-                return Err(StreamError::Reported(event.event_type));
+                let (code, message) = match event.response.and_then(|r| r.error).or(event.error) {
+                    Some(error) => (error.code, error.message),
+                    None => (event.code, event.message),
+                };
+                let detail = [code, message]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(": ");
+                return Err(StreamError::Reported(if detail.is_empty() {
+                    event.event_type
+                } else {
+                    format!("{}: {detail}", event.event_type)
+                }));
             }
             _ => {}
         }
@@ -531,6 +546,43 @@ mod tests {
             response.expect("stream assembles").message.finish_reason,
             Some(FinishReason::Length)
         );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn reported_errors_carry_the_server_detail() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "error code and message",
+                "data: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"try later\",\"param\":null}\n\n",
+                "responses stream reported error: server_error: try later",
+            ),
+            (
+                "error with a nested error object",
+                "data: {\"type\":\"error\",\"status\":429,\"error\":{\"type\":\"usage_limit_reached\",\"code\":\"rate_limit_exceeded\",\"message\":\"The usage limit has been reached\"}}\n\n",
+                "responses stream reported error: rate_limit_exceeded: The usage limit has been reached",
+            ),
+            (
+                "error message only",
+                "data: {\"type\":\"error\",\"code\":null,\"message\":\"boom\"}\n\n",
+                "responses stream reported error: boom",
+            ),
+            (
+                "failed response error",
+                "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"rate_limit\",\"message\":\"slow down\"}}}\n\n",
+                "responses stream reported response.failed: rate_limit: slow down",
+            ),
+            (
+                "failed response with null error",
+                "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}\n\n",
+                "responses stream reported response.failed",
+            ),
+        ];
+        for (name, body, want) in cases {
+            let (result, _) = assemble(body.as_bytes(), 0);
+            let error = result.expect_err(name).to_string();
+            assert_eq!(error, *want, "{name}");
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

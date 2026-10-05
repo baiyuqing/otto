@@ -12,7 +12,7 @@ DESKTOP_TARGET := aarch64-apple-darwin
 DESKTOP_SIDECAR := $(DESKTOP_DIR)/resources/darwin-arm64/bin/otto
 DESKTOP_APP := $(DESKTOP_DIR)/build/darwin-arm64/Otto.app
 
-.PHONY: all build install check-fast check check-tests check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test bump release-tag test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
+.PHONY: all build install check-fast check check-tests check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build desktop-sidecar desktop-check desktop-app desktop-release clean help
 
 all: build
 
@@ -46,6 +46,9 @@ rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
 
 scripts-test: ## run the Node tests beside scripts/ (offline, no build needed)
 	node --test scripts/*.test.mjs
+
+license-check: ## fail if a shipped Rust crate or web UI npm package uses a license outside the allowlist in scripts/license-check.mjs
+	node scripts/license-check.mjs
 
 bump: ## set a new release version in every manifest and lockfile (VERSION=X.Y.Z)
 	@test -n "$(VERSION)" || { echo "usage: make bump VERSION=X.Y.Z"; exit 1; }
@@ -93,7 +96,7 @@ check: rust-fmt rust-lint check-tests ## full macOS acceptance: format, lint, we
 check-tests: ui rust-test connect-check desktop-check rust-wasm-test scripts-test ui-test ## `check` without rust-fmt and rust-lint
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
-check-linux: rust-fmt rust-lint rust-test connect-check desktop-check rust-wasm-check scripts-test ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
+check-linux: rust-fmt rust-lint rust-test connect-check desktop-check rust-wasm-check scripts-test license-check ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 ui-deps: ## build the wasm package and install web UI dependencies (needs Node 24+ and wasm-pack)

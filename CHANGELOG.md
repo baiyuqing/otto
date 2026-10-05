@@ -337,6 +337,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- Fail the Linux gate when a shipped Rust crate or web UI npm package declares
+  a license outside the allowlist (MIT, Apache-2.0, BSD-2-Clause,
+  BSD-3-Clause, ISC, Zlib, Unicode-3.0, Unlicense); `make check-fast` runs the
+  check when a manifest or lock file changes.
+  ([#354](https://github.com/baiyuqing/otto/pull/354))
+
 - Add a multi-stage Docker image with the complete embedded Web UI and a
   Compose setup for Docker Desktop on Apple Silicon and Intel Macs. Persist
   configuration and sessions, run as a non-root user, and preserve Otto's

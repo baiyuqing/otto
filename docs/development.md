@@ -362,7 +362,8 @@ make rust-test      # cargo test --workspace (offline)
 make rust-wasm-check # cargo check -p otto-core and -p otto-web for wasm32-unknown-unknown
 make rust-wasm-test  # wasm-pack test --node for otto-core and otto-web
 make test-tui       # only the PTY tests: cargo test -p otto --test tui_pty --test tui_attach_pty
-make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, connect-check, desktop-check, rust-wasm-check, scripts-test
+make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, connect-check, desktop-check, rust-wasm-check, scripts-test, license-check
+make license-check  # fail if a shipped Rust crate or web UI npm package uses a license outside the allowlist
 make connect-check  # Go connector: gofmt -l, go vet, go test -race (builds target/debug/otto for its end-to-end test)
 make connect-build  # build the Go connector to target/otto-connect
 make desktop-check  # Go desktop contracts and real-server lifecycle; cross-compile macOS arm64
@@ -412,6 +413,33 @@ reserved in the resolution environment), so nothing in this repository produces
 the JSONL files the viewer reads. Do not document provider tracing as a working
 feature until a writer exists.
 
+### Dependency licenses
+
+`make license-check` runs `scripts/license-check.mjs`, and `make check-linux`
+runs it. It reads the `license` field of every Rust crate in the non-dev
+dependency graph (`cargo metadata --locked`, all targets) and of every non-dev
+package in `ui/package-lock.json`, and fails when a license expression is not
+satisfied by the allowlist `ALLOWED`: MIT, Apache-2.0, BSD-2-Clause,
+BSD-3-Clause, ISC, Zlib, Unicode-3.0 and Unlicense. An `OR` expression passes
+when one alternative is allowed; `AND` requires all. The check needs network
+access in CI only if `cargo metadata` has to fetch crates. `cargo metadata`
+resolves features for all targets together with dev-dependencies, so the
+checked set also contains optional crates that a release build does not
+compile (36 of 479 on 2026-10-05); such a crate can fail the check without
+shipping.
+
+Dev-only Rust crates and npm `devDependencies` are not checked because they do
+not ship. Go modules under `connect/` and `desktop/` are not checked because
+`go.mod` carries no license metadata.
+
+When the check fails, read the package's license. If it is acceptable, add its
+identifier to `ALLOWED`. For a package without a license field, read its
+license file and add a `name@version` entry to `CLARIFIED`; the version is part
+of the key, so a new version is reviewed again.
+
+Otto's binaries are not distributed, so no third-party notice file ships. If
+binaries are distributed, the MIT, BSD and Apache-2.0 terms require one.
+
 ### Local verification
 
 Locally, run the focused tests for the change and then `make check-fast`. Do
@@ -441,6 +469,7 @@ uncommitted and untracked files, and runs only the commands those paths need:
 | `ui/` | `make ui ui-test` |
 | `connect/` | `make connect-check` |
 | `scripts/` | `make scripts-test` |
+| root `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml`, `ui/package.json`, `ui/package-lock.json`, `scripts/license-check.mjs` | `make license-check` |
 | `docs/`, `LICENSE`, Markdown outside `crates/` and `testdata/` | nothing |
 | `desktop/` | `make desktop-check` (Go contracts, real server lifecycle, macOS cross-compilation) |
 | anything else, such as `.github/`, `Makefile` | nothing; printed as not checked |

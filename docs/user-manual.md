@@ -1373,21 +1373,20 @@ runner is built, by the first rule that applies:
    results page.
 
 Hosted search runs at OpenAI inside the model response. It does not use Otto's
-host approvals, Otto does not see the queries or the pages read, and
+local destination checks, Otto does not see the queries or the pages read, and
 `/reflect` cannot tell that an answer drew on the web, so its source isolation
 does not cover it. `[sandbox].network = "deny"` turns it off. Whether a ChatGPT
 subscription accepts the hosted tool depends on the backend; if searches fail,
 set a Google or Brave key to use a local backend instead.
 
-Each local backend needs its own approval, since each is a different host
-(`www.googleapis.com`, `api.search.brave.com`, `www.bing.com`). A failure of the
-chosen backend, such as an exhausted quota, is reported as an error; Otto does
+Local backends run without approval. A failure of the chosen backend, such as
+an exhausted quota, is reported as an error; Otto does
 not switch to another backend for that call. The Bing backend reads an HTML
 page Bing does not document as an interface, so a layout change or Bing
 blocking automated requests makes it fail with an error that says so rather
 than returning "no results"; set a Brave or Google key for a stable interface.
 Keys are sent only in the request to their own service and are never placed in
-config, results or approval text. The result header names the backend used.
+config or results. The result header names the backend used.
 
 What the tools refuse:
 
@@ -1404,27 +1403,17 @@ What the tools refuse:
 - URLs and queries that contain a configured secret or text shaped like a
   credential (API keys, tokens, private keys). This is a best-effort check.
 - Redirects to a different host, and from `https` to `http`. The result names
-  the target; the model has to ask for it with a new call, which is approved
-  on its own. Redirects within the same host are followed, up to five.
+  the target; the model has to request it with a new call. Redirects within the
+  same host are followed, up to five.
 
-Approval is per host. The first call to a host that is not already allowed
-raises an approval request showing the host and the full URL; approving it lets
-later calls reach that host until Otto restarts. To allow hosts permanently,
-list them in the config file:
-
-```toml
-[web]
-allow_hosts = ["docs.rs", "doc.rust-lang.org"]
-```
-
-Entries are bare host names and match exactly (no wildcards or subdomains).
-Sub-agents and scheduled runs use the same approvals; requests from a sub-agent
-are decided by you, not by the parent agent.
+Public web access needs no approval when `[sandbox].network = "allow"` (the
+default). The same destination, credential and network checks apply to
+sub-agents and scheduled runs. Legacy `[web].allow_hosts` entries are still
+accepted in config but have no effect.
 
 Web content is untrusted. Results begin with a notice saying so, and
 `/reflect` never shows `web_fetch` or `web_search` results to the reflection
-model or cites them as evidence. A page can still try to steer the model;
-review approval requests for unfamiliar hosts.
+model or cites them as evidence. A page can still try to steer the model.
 
 ### `list_models`
 

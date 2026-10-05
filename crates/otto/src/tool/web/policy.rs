@@ -64,8 +64,7 @@ fn blocked_message(host: &str) -> String {
     format!("{host} is not a public address; local and private network addresses are blocked")
 }
 
-/// The lowercase `host` of `url`, the unit approvals and `[web].allow_hosts`
-/// are keyed by.
+/// The lowercase `host` of `url`, used to check redirect destinations.
 pub(super) fn host_key(url: &Url) -> Option<String> {
     url.host_str().map(|host| host.to_ascii_lowercase())
 }

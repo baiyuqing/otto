@@ -116,13 +116,6 @@ impl Backend {
         }
     }
 
-    pub(super) fn host(&self) -> String {
-        self.endpoint()
-            .host_str()
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-    }
-
     /// The largest `count` the backend accepts.
     pub(super) fn max_count(&self, requested: usize) -> usize {
         match self {
@@ -453,10 +446,16 @@ mod tests {
             ("BRAVE_API_KEY", "b"),
         ];
         assert_eq!(backend(&all).label(), "Google");
-        assert_eq!(backend(&all).host(), "www.googleapis.com");
-        assert_eq!(backend(&[]).host(), "www.bing.com");
         assert_eq!(
-            backend(&[("BRAVE_API_KEY", "b")]).host(),
+            backend(&all).endpoint().host_str().unwrap(),
+            "www.googleapis.com"
+        );
+        assert_eq!(backend(&[]).endpoint().host_str().unwrap(), "www.bing.com");
+        assert_eq!(
+            backend(&[("BRAVE_API_KEY", "b")])
+                .endpoint()
+                .host_str()
+                .unwrap(),
             "api.search.brave.com"
         );
     }

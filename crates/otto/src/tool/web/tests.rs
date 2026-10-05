@@ -7,12 +7,10 @@ use crate::tool::testutil::{raw, run, run_cancelled};
 const PAGE: &str = "<html><head><title>T</title><script>var leaked = 1;</script></head><body>\
 <main><h1>Guide</h1><p>Read the <a href=\"/docs/next\">next page</a>.</p></main></body></html>";
 
-fn runtime(allow: &[&str]) -> Arc<Runtime> {
-    let allow: Vec<String> = allow.iter().map(|host| host.to_string()).collect();
-    Arc::new(Runtime::with_client(
-        &allow,
-        Client::new(PolicyForTests::resolver()),
-    ))
+fn runtime() -> Arc<Runtime> {
+    Arc::new(Runtime {
+        client: Client::new(PolicyForTests::resolver()),
+    })
 }
 
 /// Namespacing for the test resolver constructor.
@@ -60,7 +58,7 @@ async fn html_server() -> Server {
 #[tokio::test]
 async fn fetch_returns_markdown_with_a_header_and_the_untrusted_notice() {
     let server = html_server().await;
-    let tool = fetch(&runtime(&["page.test"]));
+    let tool = fetch(&runtime());
     let result = run(&tool, &args(&server, "/docs/start?token=hidden")).await;
     assert!(!result.is_error, "{}", result.content);
     let text = &result.content;
@@ -93,7 +91,7 @@ async fn fetch_pages_through_a_long_document_with_offset_and_limit() {
         response("200 OK", &[("Content-Type", "text/plain")], body.as_bytes())
     }))
     .await;
-    let tool = fetch(&runtime(&["page.test"]));
+    let tool = fetch(&runtime());
     let url = format!("http://page.test:{}/", server.addr.port());
     let first = run(&tool, &format!(r#"{{"url":"{url}","limit":30}}"#)).await;
     assert!(
@@ -135,7 +133,7 @@ async fn fetch_caps_output_to_the_byte_budget() {
         )
     }))
     .await;
-    let mut tool = fetch(&runtime(&["page.test"]));
+    let mut tool = fetch(&runtime());
     tool.shared.max_output = 4096;
     let result = run(
         &tool,
@@ -173,7 +171,7 @@ async fn fetch_reports_http_errors_unsupported_types_and_cross_host_redirects() 
         }
     }))
     .await;
-    let tool = fetch(&runtime(&["page.test"]));
+    let tool = fetch(&runtime());
     let missing = run(&tool, &args(&server, "/missing")).await;
     assert!(
         missing.is_error && missing.content.contains("HTTP 404"),
@@ -208,7 +206,7 @@ async fn fetch_notes_pages_that_look_javascript_rendered() {
         )
     }))
     .await;
-    let result = run(&fetch(&runtime(&["page.test"])), &args(&server, "/")).await;
+    let result = run(&fetch(&runtime()), &args(&server, "/")).await;
     assert!(
         result.content.contains("rendered by JavaScript"),
         "{}",
@@ -217,74 +215,23 @@ async fn fetch_notes_pages_that_look_javascript_rendered() {
 }
 
 #[tokio::test]
-async fn an_unapproved_host_asks_then_runs_once_granted() {
+async fn fetch_reaches_new_hosts_without_approval() {
     let server = html_server().await;
-    let runtime = runtime(&[]);
+    let runtime = runtime();
     let tool = fetch(&runtime);
-    let arguments = args(&server, "/a?x=1");
-
-    let refused = run(&tool, &arguments).await;
-    assert!(
-        refused.is_error && refused.content.contains("has not been approved"),
-        "{}",
-        refused.content
-    );
-    assert!(
-        server.requests.lock().unwrap().is_empty(),
-        "no request before approval"
-    );
-
-    let spec = tool
-        .approval_spec(&raw(&arguments))
-        .expect("valid arguments")
-        .expect("an unapproved host needs approval");
-    assert_eq!(spec.source, "web");
-    assert_eq!(spec.title, "Allow web access to page.test?");
-    assert_eq!(spec.version, crate::approval::digest("page.test"));
-    assert!(!spec.persistent);
-    let details: serde_json::Value = serde_json::from_str(&spec.details).unwrap();
-    assert_eq!(details["host"], "page.test");
-    assert!(
-        details["url"].as_str().unwrap().ends_with("/a?x=1"),
-        "the full URL is shown for review"
-    );
-
-    runtime.grant("page.test");
-    assert!(tool.approval_spec(&raw(&arguments)).unwrap().is_none());
-    assert!(!run(&tool, &arguments).await.is_error);
-}
-
-#[tokio::test]
-async fn configured_hosts_need_no_approval_and_bad_entries_are_ignored() {
-    let runtime = runtime(&[
-        "Page.Test",
-        " ",
-        "https://x.example",
-        "a/b",
-        "ok-host.example",
-    ]);
-    let tool = fetch(&runtime);
-    assert!(
-        tool.approval_spec(&raw(r#"{"url":"http://page.test/x"}"#))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        tool.approval_spec(&raw(r#"{"url":"http://ok-host.example/"}"#))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        tool.approval_spec(&raw(r#"{"url":"http://x.example/"}"#))
-            .unwrap()
-            .is_some()
-    );
+    for host in ["page.test", "other.test"] {
+        let arguments = format!(r#"{{"url":"http://{host}:{}/a?x=1"}}"#, server.addr.port());
+        assert!(tool.approval_spec(&raw(&arguments)).unwrap().is_none());
+        let result = run(&tool, &arguments).await;
+        assert!(!result.is_error, "{}", result.content);
+    }
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
 async fn network_deny_blocks_both_tools_before_any_request() {
     let server = html_server().await;
-    let runtime = runtime(&["page.test", "search.test"]);
+    let runtime = runtime();
     let fetch = WebFetch {
         shared: shared(&runtime, true, &[]),
     };
@@ -305,12 +252,13 @@ async fn network_deny_blocks_both_tools_before_any_request() {
         "{}",
         result.content
     );
+    assert!(search.approval_spec(&raw(r#"{"query":"x"}"#)).is_err());
     assert!(server.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn private_urls_and_credentials_are_refused_before_approval_or_request() {
-    let runtime = runtime(&["page.test"]);
+    let runtime = runtime();
     let tool = WebFetch {
         shared: shared(&runtime, false, &["s3cr3t-value"]),
     };
@@ -355,10 +303,9 @@ async fn private_urls_and_credentials_are_refused_before_approval_or_request() {
 
 #[tokio::test]
 async fn a_hostname_that_resolves_to_a_private_address_is_blocked_by_the_system_resolver() {
-    let runtime = Arc::new(Runtime::with_client(
-        &["localhost".to_string()],
-        Client::new(PublicResolver::system()),
-    ));
+    let runtime = Arc::new(Runtime {
+        client: Client::new(PublicResolver::system()),
+    });
     let result = run(&fetch(&runtime), r#"{"url":"http://localhost:9/"}"#).await;
     assert!(
         result.is_error && result.content.contains("not a public address"),
@@ -370,7 +317,7 @@ async fn a_hostname_that_resolves_to_a_private_address_is_blocked_by_the_system_
 #[tokio::test]
 async fn cancellation_is_reported_without_a_request() {
     let server = html_server().await;
-    let tool = fetch(&runtime(&["page.test"]));
+    let tool = fetch(&runtime());
     let result = run_cancelled(&tool, &args(&server, "/")).await;
     assert!(
         result.is_error && result.content == "context canceled",
@@ -382,7 +329,7 @@ async fn cancellation_is_reported_without_a_request() {
 
 #[tokio::test]
 async fn invalid_arguments_are_in_band_errors() {
-    let tool = fetch(&runtime(&[]));
+    let tool = fetch(&runtime());
     for arguments in [r#"{}"#, r#"{"url":""}"#, r#"{"url":5}"#] {
         let result = run(&tool, arguments).await;
         assert!(result.is_error, "{arguments}: {}", result.content);
@@ -444,7 +391,7 @@ async fn search_server() -> Server {
 #[tokio::test]
 async fn search_sends_the_key_as_a_header_and_never_returns_it() {
     let server = search_server().await;
-    let runtime = runtime(&["search.test"]);
+    let runtime = runtime();
     let tool = search_tool(&runtime, &server, "key-123456-abc");
     let result = run(&tool, r#"{"query":"rust & go","count":2}"#).await;
     assert!(!result.is_error, "{}", result.content);
@@ -473,9 +420,9 @@ async fn search_sends_the_key_as_a_header_and_never_returns_it() {
 }
 
 #[tokio::test]
-async fn search_validates_arguments_and_asks_once_per_backend_host() {
+async fn search_validates_arguments_and_runs_without_approval() {
     let server = search_server().await;
-    let runtime = runtime(&[]);
+    let runtime = runtime();
     let tool = search_tool(&runtime, &server, "key-123456-abc");
     for arguments in [r#"{"query":""}"#, r#"{"query":"   "}"#] {
         assert!(run(&tool, arguments).await.is_error, "{arguments}");
@@ -483,18 +430,6 @@ async fn search_validates_arguments_and_asks_once_per_backend_host() {
     let long = format!(r#"{{"query":"{}"}}"#, "a".repeat(MAX_QUERY_CHARS + 1));
     assert!(run(&tool, &long).await.content.contains("longer"));
 
-    let spec = tool
-        .approval_spec(&raw(r#"{"query":"rust"}"#))
-        .unwrap()
-        .expect("asks first");
-    assert_eq!(spec.title, "Allow web access to search.test?");
-    assert!(
-        run(&tool, r#"{"query":"rust"}"#)
-            .await
-            .content
-            .contains("has not been approved")
-    );
-    runtime.grant("search.test");
     assert!(
         tool.approval_spec(&raw(r#"{"query":"other"}"#))
             .unwrap()
@@ -514,7 +449,7 @@ async fn search_refuses_a_credential_in_the_query_and_reports_service_errors() {
         response("429 Too Many Requests", &[], b"slow down")
     }))
     .await;
-    let runtime = runtime(&["search.test"]);
+    let runtime = runtime();
     let tool = search_tool(&runtime, &server, "key-123456-abc");
     let result = run(&tool, r#"{"query":"key-123456-abc"}"#).await;
     assert!(
@@ -532,7 +467,7 @@ async fn search_refuses_a_credential_in_the_query_and_reports_service_errors() {
 
 #[test]
 fn both_tools_are_always_registered_and_the_backend_comes_from_the_environment() {
-    let runtime = Runtime::new(&[]);
+    let runtime = Runtime::new();
     let names = |vars: &'static [(&'static str, &'static str)], hosted: bool| -> Vec<String> {
         tools(
             &runtime,
@@ -577,7 +512,7 @@ async fn google_sends_key_and_engine_as_parameters_clamps_count_and_never_return
         )
     }))
     .await;
-    let runtime = runtime(&["search.test"]);
+    let runtime = runtime();
     let google = backend(&[
         ("GOOGLE_API_KEY", "gkey-1234567"),
         ("GOOGLE_SEARCH_ENGINE_ID", "cx-987654"),
@@ -620,7 +555,7 @@ async fn bing_needs_no_key_and_sends_no_credentials() {
         )
     }))
     .await;
-    let runtime = runtime(&["search.test"]);
+    let runtime = runtime();
     let tool = search_tool_with(&runtime, &server, backend(&[]));
     let result = run(&tool, r#"{"query":"tokio"}"#).await;
     assert!(!result.is_error, "{}", result.content);
@@ -649,7 +584,7 @@ async fn a_bing_page_that_cannot_be_read_is_an_error_not_an_empty_answer() {
         )
     }))
     .await;
-    let tool = search_tool_with(&runtime(&["search.test"]), &server, backend(&[]));
+    let tool = search_tool_with(&runtime(), &server, backend(&[]));
     let result = run(&tool, r#"{"query":"x"}"#).await;
     assert!(
         result.is_error && result.content.contains("no recognizable results"),

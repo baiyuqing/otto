@@ -574,7 +574,7 @@ impl<'a> Repl<'a> {
                     Some(false)
                 }
                 "reflect" => {
-                    match super::repl_commands::reflect_runs_report(&self.controller, args) {
+                    match super::repl_commands::reflect_runs_report(self.controller, args) {
                         Some(text) => {
                             let _ = writeln!(self.stdout, "{text}");
                         }

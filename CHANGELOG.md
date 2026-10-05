@@ -17,6 +17,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Keep the newest configuration backups when repeated writes land in the same
+  millisecond; pruned collision names are no longer reused.
+
 - Make the parallel bash redaction fixture register its notification waiters
   before signalling readiness, preventing a lost wakeup from hanging tests.
 

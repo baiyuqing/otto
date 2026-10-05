@@ -317,7 +317,7 @@ struct Grants {
 }
 
 fn trust_path(home: &Path) -> PathBuf {
-    home.join(".config/otto/executable-trust.json")
+    home.join(".config/otto/trust/executables.json")
 }
 
 fn grants(home: &Path) -> Result<(Vec<u8>, Grants), String> {
@@ -908,5 +908,14 @@ mod tests {
         set_trust(home.path(), &alias, true).unwrap();
         assert!(approved(home.path(), project.path()).unwrap());
         assert!(approved(home.path(), &alias).unwrap());
+    }
+    #[test]
+    fn executable_state_backups_do_not_mix_with_user_config_backups() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        set_trust(home.path(), project.path(), true).unwrap();
+        set_trust(home.path(), project.path(), false).unwrap();
+        assert!(home.path().join(".config/otto/trust/backups").exists());
+        assert!(!home.path().join(".config/otto/backups").exists());
     }
 }

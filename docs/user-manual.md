@@ -2385,7 +2385,7 @@ them.
 
 After `session/new` and `session/load` has replied, Otto sends a
 `session/update` of type `available_commands_update` listing `compact`,
-`context`, `reflect`, `skill`, `steer`, and `queue`.
+`context`, `reflect`, `skill`, `steer`, `queue`, and `auto`.
 A `session/prompt` containing `/context`, `/compact [focus]`,
 `/reflect [focus]`, `/skill generated`, or `/skill revert <name>` is run by
 Otto itself and is not sent to the task model. Command names must match

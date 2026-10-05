@@ -181,6 +181,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Select manual approval mode in the macOS interactive elevation test so it
+  continues to verify explicit approval with sessions defaulting to AUTO.
+
 - Remove Telegram approval mode buttons after a successful selection; the
   original card shows the resulting AUTO or MANUAL mode, including when selecting
   the already active mode. Use `/auto` to open fresh controls.

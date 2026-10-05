@@ -159,6 +159,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- `BRAVE_API_KEY`, `GOOGLE_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID` now take
+  effect. They were not passed to the web tools, so `web_search` always used
+  ChatGPT hosted search or Bing. ([#TBD](https://github.com/baiyuqing/otto/pull/TBD))
 - Harden frontend/session replacement, cancellation and close ownership,
   resume identity, tool ordering, empty message/output handling, cached usage,
   compaction cuts and summaries, and checkpoint reconciliation. Individual

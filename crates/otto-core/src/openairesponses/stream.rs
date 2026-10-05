@@ -34,9 +34,9 @@ pub enum StreamError {
     Decode(String),
     /// The backend sent a `response.failed` or an `error` event. The text is
     /// the event type followed by `: <code>: <message>` for the parts the
-    /// event carried.
-    #[error("responses stream reported {0}")]
-    Reported(String),
+    /// event carried. `code` is the event's error code, empty when absent.
+    #[error("responses stream reported {detail}")]
+    Reported { detail: String, code: String },
     /// The body ended before a terminal `response.completed` event.
     #[error("responses stream ended without response.completed")]
     MissingCompletion,
@@ -296,16 +296,19 @@ impl StreamAssembler {
                     Some(error) => (error.code, error.message),
                     None => (event.code, event.message),
                 };
-                let detail = [code, message]
+                let detail = [code.clone(), message]
                     .into_iter()
                     .filter(|part| !part.is_empty())
                     .collect::<Vec<_>>()
                     .join(": ");
-                return Err(StreamError::Reported(if detail.is_empty() {
-                    event.event_type
-                } else {
-                    format!("{}: {detail}", event.event_type)
-                }));
+                return Err(StreamError::Reported {
+                    detail: if detail.is_empty() {
+                        event.event_type
+                    } else {
+                        format!("{}: {detail}", event.event_type)
+                    },
+                    code,
+                });
             }
             _ => {}
         }

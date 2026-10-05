@@ -19,7 +19,6 @@ guide rather than being copied into those instruction files.
 | `crates/otto-web/` | WebAssembly bindings that expose shared wire codecs to the browser | `src/lib.rs` |
 | `ui/` | TypeScript browser frontend | `package.json` and `src/` |
 | `connect/` | Independent Go Telegram and Feishu connector that communicates with Otto through ACP | `connect/README.md` and `connect/internal/` |
-| `desktop/` | Independent macOS MyGo shell around `otto serve` | `desktop/README.md` |
 | `crates/otto/src/fsops.rs` | Shared pinned filesystem descriptors and atomic operations | Native session and workspace callers |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
 | `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
@@ -27,8 +26,7 @@ guide rather than being copied into those instruction files.
 | `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check` | `Makefile`, `.github/workflows/checks.yml` |
 
 The root Cargo workspace contains `otto-core`, `otto`, and `otto-web` only.
-`connect/` and `desktop/` have their own build definitions and are not root
-workspace crates.
+`connect/` has its own build definition and is not a root workspace crate.
 
 ## Rust layers
 
@@ -113,7 +111,7 @@ The other modules group native responsibilities:
 Place native tool execution and workspace enforcement in `tool/`; `bash`
 execution goes through `sandbox/`. Keep session persistence append-only.
 
-### Browser, chat, and desktop clients
+### Browser and chat clients
 
 - `crates/otto-web` is intentionally thin: it exposes `otto-core` wire codecs
   through `wasm-bindgen`.
@@ -122,8 +120,6 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 - `connect/` does not link Otto code. It starts `otto acp` over stdio or
   connects directly to `otto serve` over authenticated loopback ACP TCP.
   Both use ACP v1; see [ACP TCP](specs/2026-10-03-acp-tcp.md).
-- `desktop/` wraps `otto serve` in a macOS MyGo application and remains a
-  separate Go module.
 
 ## Common change paths
 

@@ -54,7 +54,6 @@ export const readWorkspaceVersion = (cargoToml) => {
 };
 
 export const rewriteCargoToml = (t, v) => inTomlSection('\n' + t, '[workspace.package]', v, 'Cargo.toml').slice(1);
-export const rewriteDesktopConfig = (t, v) => replaceOnce(t, /(^  "version": ")[^"]*(")/m, v, 'mygo.json top-level "version"');
 export function rewriteLock(text, names, v) {
   let out = text;
   for (const name of names) {
@@ -65,7 +64,6 @@ export function rewriteLock(text, names, v) {
 
 export const FILES = [
   ['Cargo.toml', rewriteCargoToml],
-  ['desktop/mygo.json', rewriteDesktopConfig],
   ['Cargo.lock', (t, v) => rewriteLock(t, ['otto', 'otto-core', 'otto-web'], v)],
 ];
 

@@ -20,10 +20,6 @@ ui/node_modules/
 target/
 crates/otto-web/pkg/
 
-# MyGo desktop bundles and the Rust sidecar copied into platform resources.
-desktop/build/
-desktop/resources/darwin-arm64/
-
 # Secrets — never commit credentials or config that may hold them.
 # Defensive/broad on purpose: better to ignore too much than leak one file.
 

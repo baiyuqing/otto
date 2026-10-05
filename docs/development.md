@@ -280,12 +280,16 @@ Most of a CI run is compilation, so the workflow keeps it down in three ways:
   `rust-toolchain.toml`. A run saves it only when no
   cache matched the key exactly, after `node scripts/ci-cache.mjs prune`
   removes the workspace crates' own output, which changes with every commit
-  and is most of `target/`. A push to `main` restores only an exact match, so
+  and is most of `target/`. A failed gate still saves once
+  `cargo test --workspace --no-run` finishes the build, since the key is
+  saved only once and a failing test would otherwise leave every later run
+  building cold. A push to `main` restores only an exact match, so
   the cache it saves never accumulates artifacts of older lock files; a pull
   request may fall back to `main`'s previous cache. Bump the `v2-` key prefix
   when a workflow change makes the cached artifacts unusable, such as the
   `CARGO_PROFILE_*` variables.
-- `wasm-pack` and `wasm-bindgen-cli` are cached by version. wasm-pack uses the
+- `wasm-pack` and `wasm-bindgen-cli` are cached by version, saved right
+  after they are installed. wasm-pack uses the
   `wasm-bindgen` on `PATH` when it matches the version `Cargo.lock` pins
   (`node scripts/ci-cache.mjs lock-version wasm-bindgen`); without it,
   wasm-pack compiles its own copy on every run.

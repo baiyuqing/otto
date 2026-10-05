@@ -264,7 +264,8 @@ fn footer_text(app: &App) -> String {
         escape_single_line_text(&app.info.thinking)
     };
     let mut text = format!(
-        "{profile_model} | {thinking} | {} | {} | tokens {}/{}",
+        "{profile_model} | {thinking} | {} | {} | {} | tokens {}/{}",
+        if app.info.auto_mode { "AUTO" } else { "MANUAL" },
         app.info.sandbox.status_summary(),
         escape_single_line_text(&footer_workspace(&app.info.workspace)),
         format_token_count(app.usage.input_tokens),
@@ -1116,7 +1117,7 @@ mod tests {
         let footer = footer_text(&app);
 
         assert!(
-            footer.starts_with("gpt-5.6-terra | default | sb · write · net | "),
+            footer.starts_with("gpt-5.6-terra | default | AUTO | sb · write · net | "),
             "{footer}"
         );
         assert!(!footer.contains("terra/gpt-5.6-terra"), "{footer}");

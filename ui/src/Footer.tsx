@@ -27,7 +27,7 @@ export function Footer(props: {
       )}
       {session && (
         <span>
-          context {n(session.context_input_tokens)}
+          {session.auto_mode ? 'AUTO' : 'MANUAL'} · context {n(session.context_input_tokens)}
           {session.context_window > 0 && ` / ${n(session.context_window)}`} · session in {n(session.usage.input_tokens)} out{' '}
           {n(session.usage.output_tokens)} cached {n(session.usage.cached_input_tokens)}
         </span>

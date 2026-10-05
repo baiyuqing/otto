@@ -165,12 +165,37 @@ impl Client {
         let response = match method {
             "_otto/approvals/list" => self.send(self.http.get(format!("{BASE}/v1/approvals")).query(&[("session_id",session)])).await?,
             "_otto/approvals/get" => self.send(self.http.get(format!("{BASE}/v1/approvals/{id}")).query(&[("session_id",session)])).await?,
-            "_otto/approvals/watch" => self.send(self.http.get(format!("{BASE}/v1/approvals/changes")).query(&[("session_id",session),("after",&after.to_string())])).await?,
+            "_otto/approvals/watch" => self.send(self.http.get(format!("{BASE}/v1/sessions/{session}/approval-events")).query(&[("session_id",session),("after",&after.to_string())])).await?,
             _ => self.send(self.post(&format!("{BASE}/v1/approvals/{id}/{}",if method.ends_with("withdraw") {"withdraw"} else {"decision"}),
                 &json!({"session_id":session,"revision":revision,"option_id":option,"feedback":feedback}))).await?,
         };
         serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
             .map_err(unreachable_error)
+    }
+
+    pub async fn approval_mode(
+        &self,
+        session: &str,
+        automatic: Option<bool>,
+    ) -> Result<bool, Error> {
+        let url = format!("{BASE}/v1/sessions/{session}/approval-mode");
+        let request = match automatic {
+            Some(automatic) => self
+                .http
+                .put(url)
+                .header(CONTENT_TYPE, "application/json")
+                .body(json!({"automatic":automatic}).to_string()),
+            None => self.http.get(url),
+        };
+        #[derive(Deserialize)]
+        struct Mode {
+            automatic: bool,
+        }
+        let response = self.send(request).await?;
+        let mode: Mode =
+            serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
+                .map_err(unreachable_error)?;
+        Ok(mode.automatic)
     }
 
     pub async fn approval_message(
@@ -757,6 +782,8 @@ struct SessionWire {
     context_input_tokens: i64,
     #[serde(default)]
     sandbox: SandboxWireIn,
+    #[serde(default)]
+    auto_mode: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -784,6 +811,7 @@ impl SessionWire {
             _ => SandboxNetwork::default(),
         };
         crate::app::Info {
+            auto_mode: self.auto_mode,
             session_id: self.id,
             session_name: self.name,
             workspace: self.workspace,
@@ -887,6 +915,8 @@ impl TurnStream {
 /// One row of a `GET /v1/status` snapshot (server: `StatusSessionWire`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct StatusRow {
+    #[serde(default)]
+    pub auto_mode: bool,
     pub id: String,
     #[serde(default)]
     pub workspace: String,
@@ -1149,6 +1179,7 @@ mod tests {
         assert_eq!(
             rows[0],
             StatusRow {
+                auto_mode: false,
                 id: "s1".into(),
                 workspace: "/w".into(),
                 turn: Some("running".into()),

@@ -56,6 +56,7 @@ pub enum SlashCommandKind {
     Timers,
     Skill,
     Sandbox,
+    Auto,
     Approve,
     Mcp,
 }
@@ -63,6 +64,11 @@ pub enum SlashCommandKind {
 /// The command table used by completion and `/help`. `/approve` sits beside the
 /// sandbox command it controls.
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/auto",
+        description: "show approval mode, or set on/off for this session",
+        kind: SlashCommandKind::Auto,
+    },
     SlashCommand {
         name: "/help",
         description: "show help",

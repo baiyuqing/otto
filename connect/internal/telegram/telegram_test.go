@@ -813,3 +813,36 @@ func TestSendPlainKeepsTextAndOmitsEntities(t *testing.T) {
 		t.Errorf("plain send = %v", got[0])
 	}
 }
+
+func TestApprovalModeShortcutsAreSessionBound(t *testing.T) {
+	session := strings.Repeat("a", 32)
+	for _, mode := range []string{"on", "off"} {
+		msg, ok := normalizeCallback(&callbackQuery{From: &user{ID: 7}, Message: &message{}, Data: "auto:" + mode + ":" + session})
+		if !ok || msg.ModeSession != session || msg.Text != "/auto "+mode || msg.ApprovalID != "" {
+			t.Fatalf("mode callback = %+v, %v", msg, ok)
+		}
+	}
+	if _, ok := normalizeCallback(&callbackQuery{From: &user{ID: 7}, Message: &message{}, Data: "auto:invalid:" + session}); ok {
+		t.Fatal("invalid mode accepted")
+	}
+}
+
+func TestApprovalModeMessageShowsModeAndOffersBothShortcuts(t *testing.T) {
+	session := strings.Repeat("b", 32)
+	api := newAPI(t, func(method string, body map[string]any) resp { return okR(map[string]any{"message_id": 42}) })
+	bot := New(testToken, nil)
+	bot.APIBase = api.srv.URL
+	if err := bot.SendApprovalMode(context.Background(), "123", session, true); err != nil {
+		t.Fatal(err)
+	}
+	body := api.byMethod("sendMessage")[0].body
+	if !strings.Contains(body["text"].(string), "AUTO") {
+		t.Fatalf("mode text = %v", body)
+	}
+	buttons := body["reply_markup"].(map[string]any)["inline_keyboard"].([]any)[0].([]any)
+	for i, mode := range []string{"on", "off"} {
+		if got := buttons[i].(map[string]any)["callback_data"]; got != "auto:"+mode+":"+session {
+			t.Fatalf("shortcut = %v", got)
+		}
+	}
+}

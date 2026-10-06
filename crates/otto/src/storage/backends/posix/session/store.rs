@@ -1276,6 +1276,15 @@ impl Session for Store {
         Store::operation_ledger(self)
     }
 
+    fn observed_tools(&self) -> Option<Vec<String>> {
+        let state = self.lock().expect("session mutex");
+        let leaf = state.leaf_id.as_deref().unwrap_or_default();
+        build_context(&state.entries, leaf)
+            .expect("stored session remains a valid context")
+            .0
+            .observed_tools
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         Store::append_custom_entry(self, custom_type, data)
             .map_err(|error| SessionError::Persist(error.to_string()))

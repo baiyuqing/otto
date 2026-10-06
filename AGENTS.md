@@ -40,6 +40,10 @@ advertise other providers or planned roadmap features.
   apply to every feature, fix and refactor.
 - If work is delegated, the parent owns interfaces, integration and acceptance;
   hand off bounded file ownership and preserve other workers' changes.
+- Adding, changing, removing or renaming a model-callable capability updates
+  its [capability descriptions](docs/development.md#capability-descriptions)
+  in the same PR. Descriptions are short and unambiguous and state the
+  capability, inputs and outputs. This rule is mandatory.
 - Version numbers change only in release PRs via `make bump VERSION=X.Y.Z`.
 - After implementation and required checks, open a PR without asking again.
 

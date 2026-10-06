@@ -24,6 +24,7 @@ use chrono::{DateTime, Utc};
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
+mod capabilities;
 pub mod compaction;
 pub mod compaction_select;
 pub mod context_estimate;
@@ -531,6 +532,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(self.fail(emit, error));
         }
 
+        if let Err(error) = self.announce_tool_changes().await {
+            return Err(self.fail(emit, error));
+        }
+
         if !text.is_empty() || image.is_some() {
             let redacted = self.redactor.redact_string(user_text);
             let persisted_text = if followup {
@@ -1001,6 +1006,52 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         Ok(())
     }
 
+    /// Appends the one-time tool-set change notice as a context message, then
+    /// the `otto.capabilities` record. The message goes first: a failure
+    /// between the two repeats the notice, while the reverse order could lose
+    /// it.
+    async fn announce_tool_changes(&self) -> Result<(), AgentError> {
+        let current = self.current_tool_names();
+        let observed = self.session.observed_tools();
+        let has_history = self.session.latest_compaction().is_some()
+            || self
+                .session
+                .model_messages()
+                .iter()
+                .any(|message| message.role == Role::Assistant);
+        let notice = capabilities::notice(observed.as_deref(), &current, has_history);
+        if !notice.is_empty() {
+            let message = crate::session::context::new_context_message(
+                &(self.options.new_id)(),
+                crate::session::CAPABILITY_UPDATE_CONTEXT_TYPE,
+                true,
+                notice,
+                (self.options.now)(),
+                None,
+            );
+            self.session
+                .append(message)
+                .await
+                .map_err(|source| AgentError::Persist {
+                    kind: "capability update".into(),
+                    source,
+                })?;
+        }
+        if observed.as_deref() != Some(&current[..]) {
+            self.session
+                .append_custom(
+                    crate::session::CAPABILITIES_CUSTOM_TYPE,
+                    &crate::session::encode_capabilities(&current),
+                )
+                .await
+                .map_err(|source| AgentError::Persist {
+                    kind: "capability record".into(),
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+
     async fn deliver_steering(
         &self,
         steering: &steering::Run,
@@ -1196,6 +1247,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             Some(error) => Err(error),
             None => Ok(response),
         }
+    }
+
+    /// The sorted, deduplicated names of the tool definitions a request sends.
+    fn current_tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .tools
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Builds the request for one ordinary provider step and estimates it.
@@ -1790,8 +1854,15 @@ mod tests {
             .collect();
         assert_eq!(
             roles,
-            vec![Role::Assistant, Role::Tool, Role::User, Role::Assistant],
-            "the result follows its call before the user message"
+            vec![
+                Role::Assistant,
+                Role::Tool,
+                Role::Context,
+                Role::User,
+                Role::Assistant
+            ],
+            "the result follows its call; the legacy tool-set notice (history, no record) \
+             precedes the user message"
         );
     }
 

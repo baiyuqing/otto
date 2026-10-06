@@ -26,6 +26,12 @@ the runtime, session history, and default memory storage.
 - **Control access.** Workspace-confined file tools, macOS Seatbelt shell
   sandboxing by default, and explicit permission requests for additional access.
 
+## Code architecture
+
+[![Otto code architecture: access, frontends, application runtime, native services, and portable core](docs/architecture/otto-architecture.png)](docs/architecture/otto-architecture.svg)
+
+[Code organization](docs/code-organization.md) · [SVG](docs/architecture/otto-architecture.svg) · [Editable HTML](docs/architecture/otto-architecture.html)
+
 ## Install from source
 
 Requires the pinned **Rust 1.98** toolchain (`rustup toolchain install` picks

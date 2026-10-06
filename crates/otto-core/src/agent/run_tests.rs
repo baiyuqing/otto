@@ -604,7 +604,7 @@ async fn pending_notifications_are_delivered_before_the_user_message() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -662,7 +662,7 @@ async fn the_inbox_is_drained_again_before_the_next_provider_request() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -707,7 +707,7 @@ async fn user_input_queued_during_a_provider_call_continues_the_same_turn() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -784,7 +784,7 @@ async fn empty_text_with_a_notification_is_a_wake_turn() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -819,7 +819,7 @@ async fn a_notification_without_a_generated_task_id_still_persists() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -2940,7 +2940,7 @@ async fn a_failed_notification_append_leaves_it_and_later_ones_queued() {
         EchoExecutor::default(),
         FailingSession::new(0),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -2963,7 +2963,7 @@ async fn a_failed_notification_append_leaves_it_and_later_ones_queued() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );

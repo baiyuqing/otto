@@ -1715,7 +1715,7 @@ impl Controller {
             let Some(current) = state.current.as_ref() else {
                 return Err(CLOSED.to_string());
             };
-            current.runner.inbox().len()
+            current.runner.mailbox().len()
         };
         if pending == 0 {
             return Ok(None);
@@ -1741,7 +1741,7 @@ impl Controller {
             };
             Arc::clone(&current.runner)
         };
-        runner.inbox().push(Notification {
+        runner.mailbox().push(Notification {
             kind: Some(NotificationKind::UserMessage),
             text: text.to_string(),
             ..Notification::default()
@@ -1759,7 +1759,7 @@ impl Controller {
             Arc::clone(&current.runner)
         };
         runner
-            .inbox()
+            .mailbox()
             .remove("", NotificationKind::UserMessage)
             .is_some()
     }

@@ -16,7 +16,7 @@ use crate::subagent::runner::{Runner as SubagentRunner, StartRequest};
 use crate::subagent::tasks::TaskStatus;
 use crate::workflow::{
     ApprovalRequest, Attempt, Catalog, Controller, DeadlinePolicy, Executor, Run, RunStatus,
-    RuntimeIdentity, Store,
+    RuntimeIdentity,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -282,9 +282,9 @@ pub async fn build_controller(
     for warning in warnings {
         let _ = writeln!(stderr, "warning: {warning}");
     }
-    let store = Arc::new(Store::open(
-        &Path::new(&builder.home).join(".otto/workflows.db"),
-    )?);
+    let store = builder
+        .storage
+        .workflow(&Path::new(&builder.home).join(".otto/workflows.db"))?;
     store.recover(&builder.workspace_path)?;
     let agents = otto_core::config::resolve_agents(
         &builder.config,

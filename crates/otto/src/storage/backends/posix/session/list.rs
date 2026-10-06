@@ -12,8 +12,9 @@ use chrono::{DateTime, Utc};
 use otto_core::session::context::preview_text;
 use otto_core::session::{ListResult, PiError, SessionInfo, Warning, build_context};
 
-use super::fsops::{self, Dir};
 use super::store::{decode_pi_file_read_only, reject_oversized_session_file, validate_pi_header};
+use crate::session::fsops::{self, Dir};
+use crate::storage::files::JournalFile;
 
 /// The most sessions one [`list`] call may return.
 pub const MAX_LIST_SESSIONS: usize = 20;
@@ -217,7 +218,7 @@ pub(crate) fn open_session_file_read_only_no_follow_at(
     Ok((file, metadata, path))
 }
 
-fn regular_file_metadata(file: &File) -> Result<Metadata, PiError> {
+fn regular_file_metadata(file: &dyn JournalFile) -> Result<Metadata, PiError> {
     let metadata = file
         .metadata()
         .map_err(|error| PiError::other(format!("stat session file: {error}")))?;
@@ -230,7 +231,7 @@ fn regular_file_metadata(file: &File) -> Result<Metadata, PiError> {
 /// Builds the listing row for an already-opened session file.
 pub(crate) fn inspect_opened_session(
     path: &str,
-    file: &mut File,
+    file: &mut dyn JournalFile,
     metadata: &Metadata,
 ) -> Result<(SessionInfo, Vec<Warning>), PiError> {
     reject_oversized_session_file(file)?;

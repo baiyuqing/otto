@@ -711,7 +711,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             block.tool_call_id.clone(),
             block.tool_name.clone(),
         );
-        if let Err(source) = self.session.append_operation_fact(attempt_fact) {
+        if let Err(source) = self.session.append_operation_fact(attempt_fact).await {
             return Err(self.fail(
                 emit,
                 AgentError::Persist {
@@ -746,7 +746,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         let replacement = RawValue::from_string(value.to_string()).expect("serialized JSON");
                         if replacement.get() != arguments.get() {
                             let audit = serde_json::json!({"version":1,"tool_call_id":block.tool_call_id,"operation_id":operation_id,"arguments":value}).to_string();
-                            self.session.append_custom("otto.hook.arguments", self.redactor.redact_json_strings(&audit).get()).map_err(|source| self.fail(emit, AgentError::Persist {kind:"hook arguments".into(), source}))?;
+                            self.session.append_custom("otto.hook.arguments", self.redactor.redact_json_strings(&audit).get()).await.map_err(|source| self.fail(emit, AgentError::Persist {kind:"hook arguments".into(), source}))?;
                             arguments = replacement;
                         }
                     }
@@ -799,7 +799,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 Err(message) => self.hook_warning(emit, &message),
                 Ok(response) => if let Some(content) = response.content {
                     let audit = serde_json::json!({"version":1,"tool_call_id":block.tool_call_id,"operation_id":operation_id,"content":execution.result.persisted_text(),"is_error":execution.result.is_error,"outcome":execution.outcome}).to_string();
-                    self.session.append_custom("otto.hook.result", self.redactor.redact_json_strings(&audit).get()).map_err(|source| self.fail(emit, AgentError::Persist{kind:"original tool result".into(),source}))?;
+                    self.session.append_custom("otto.hook.result", self.redactor.redact_json_strings(&audit).get()).await.map_err(|source| self.fail(emit, AgentError::Persist{kind:"original tool result".into(),source}))?;
                     execution.result.content = content;
                     execution.result.persisted_content = None;
                 },
@@ -835,7 +835,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             block.tool_name.clone(),
             execution.outcome.clone(),
         );
-        if let Err(source) = self.session.append_operation_fact(terminal) {
+        if let Err(source) = self.session.append_operation_fact(terminal).await {
             emit(Event::ToolCallFinished {
                 operation_id,
                 attempt,
@@ -1737,6 +1737,7 @@ mod tests {
                     "call-1",
                     "echo",
                 ))
+                .await
                 .expect("attempt fact");
         }
         session

@@ -222,7 +222,7 @@ mod tests {
     use otto_core::session::Session as _;
 
     fn connection(
-        schedule: Option<Arc<Store>>,
+        schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     ) -> (Arc<Connection>, mpsc::UnboundedReceiver<Value>) {
         let (out, frames) = mpsc::unbounded_channel();
         let connection = Arc::new(Connection {
@@ -468,10 +468,10 @@ mod tests {
     async fn a_due_chat_item_is_delivered_after_initialize_declares_its_platform() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let chat = origin();
-        due_text_item(&store, chat.clone());
-        let backend = Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
-            &store,
-        ))));
+        due_text_item(store.as_ref(), chat.clone());
+        let backend = Backend::Attach(super::super::attach::Relay::unreachable(Some(
+            store.clone(),
+        )));
         let (mut wire, handle) = start(backend, "/work", |_| ());
         wire.send(initialize(json!(["telegram"])));
         let reply = wire.recv_message().await;
@@ -513,9 +513,9 @@ mod tests {
     async fn exact_clients_receive_only_their_chats_and_disconnect_releases_legacy_conflicts() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let (mut b, b_handle) = start(
-            Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
-                &store,
-            )))),
+            Backend::Attach(super::super::attach::Relay::unreachable(Some(
+                store.clone(),
+            ))),
             "/work",
             |_| (),
         );
@@ -524,11 +524,11 @@ mod tests {
             json!(["telegram:456"]);
         b.send(declare_b);
         assert_eq!(b.recv_message().await["id"], 1);
-        due_text_item(&store, origin());
+        due_text_item(store.as_ref(), origin());
         let (mut a, a_handle) = start(
-            Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
-                &store,
-            )))),
+            Backend::Attach(super::super::attach::Relay::unreachable(Some(
+                store.clone(),
+            ))),
             "/work",
             |_| (),
         );
@@ -540,7 +540,7 @@ mod tests {
         let left = a.recv_message().await;
         assert_eq!(left["params"]["chat"], "telegram:123");
         a.send(json!({"jsonrpc":"2.0","id":left["id"],"result":{}}));
-        due_text_item(&store, Origin::chat("telegram", "456").unwrap());
+        due_text_item(store.as_ref(), Origin::chat("telegram", "456").unwrap());
         let right = b.recv_message().await;
         assert_eq!(right["params"]["chat"], "telegram:456");
         b.send(json!({"jsonrpc":"2.0","id":right["id"],"result":{}}));
@@ -549,16 +549,16 @@ mod tests {
         a_handle.await.unwrap();
         b_handle.await.unwrap();
         let (mut a, a_handle) = start(
-            Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
-                &store,
-            )))),
+            Backend::Attach(super::super::attach::Relay::unreachable(Some(
+                store.clone(),
+            ))),
             "/work",
             |_| (),
         );
         let (mut b, b_handle) = start(
-            Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
-                &store,
-            )))),
+            Backend::Attach(super::super::attach::Relay::unreachable(Some(
+                store.clone(),
+            ))),
             "/work",
             |_| (),
         );
@@ -566,7 +566,7 @@ mod tests {
         a.recv_message().await;
         b.send(initialize(json!(["telegram"])));
         b.recv_message().await;
-        due_text_item(&store, origin());
+        due_text_item(store.as_ref(), origin());
         assert!(
             tokio::time::timeout(Duration::from_millis(50), a.output.recv())
                 .await
@@ -590,10 +590,10 @@ mod tests {
     async fn without_the_capability_nothing_is_delivered() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let chat = origin();
-        due_text_item(&store, chat.clone());
-        let backend = Backend::Attach(super::super::attach::Relay::unreachable(Some(Arc::clone(
-            &store,
-        ))));
+        due_text_item(store.as_ref(), chat.clone());
+        let backend = Backend::Attach(super::super::attach::Relay::unreachable(Some(
+            store.clone(),
+        )));
         let (mut wire, handle) = start(backend, "/work", |_| ());
         wire.send(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}));
         wire.send(initialize(json!(["slack"])));

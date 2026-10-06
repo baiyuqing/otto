@@ -317,7 +317,10 @@ pub fn verify_schema(conn: &Connection) -> Result<StoreIdentity> {
     let applications = expected_application_objects();
     let application_tables = expected_application_object_tables();
     let autoindexes = expected_sqlite_autoindexes();
-    let expected_count = (applications.len() + autoindexes.len()) as i64;
+    let migration_objects =
+        super::super::migration::verified_schema_objects(conn, normalize_schema_sql)
+            .map_err(super::map_storage_error)?;
+    let expected_count = (applications.len() + autoindexes.len() + migration_objects.len()) as i64;
     if schema_object_count(conn)? != expected_count {
         return Err(Error::new(ErrorKind::Corrupt));
     }

@@ -15,12 +15,9 @@ pub mod standing;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::memory::guard::ContentGuard;
+use crate::memory::{Error, ErrorKind, MAX_DUPLICATE_ID_RETRIES, Result, Scope, StoreIdentity};
 use crate::storage::Connection;
-
-use super::guard::ContentGuard;
-use super::{Error, ErrorKind, MAX_DUPLICATE_ID_RETRIES, Result, Scope, StoreIdentity, new_id};
-
-const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Driver diagnostics can contain row data; only domain error kinds escape.
 pub fn map_storage_error(error: crate::storage::Error) -> Error {
@@ -37,28 +34,13 @@ pub fn map_storage_error(error: crate::storage::Error) -> Error {
             }
         }
         DriverError::Corrupt(_) | DriverError::NotAdb(_) => ErrorKind::Corrupt,
-        DriverError::Misuse(_) => ErrorKind::Closed,
+        DriverError::Misuse(_) | DriverError::Closed => ErrorKind::Closed,
         _ => ErrorKind::Unavailable,
     };
     Error::new(kind)
 }
 
-/// How a [`Store`] is opened.
-pub struct Options {
-    pub busy_timeout: Duration,
-    pub new_id: Box<dyn Fn() -> Result<String> + Send + Sync>,
-    pub guard: Box<dyn ContentGuard>,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            busy_timeout: DEFAULT_BUSY_TIMEOUT,
-            new_id: Box::new(new_id),
-            guard: Box::new(super::guard::DefaultGuard),
-        }
-    }
-}
+pub use crate::memory::repository::MemoryOptions as Options;
 
 struct Inner {
     connection: Option<Connection>,
@@ -90,22 +72,34 @@ impl Store {
             std::fs::create_dir_all(parent).map_err(|_| Error::new(ErrorKind::Unavailable))?;
         }
         let connection = Connection::open(filename).map_err(map_storage_error)?;
+        Self::from_connection(connection, options)
+    }
+
+    pub fn from_connection(connection: Connection, options: Options) -> Result<Self> {
+        crate::storage::sql::require(
+            &connection,
+            crate::storage::SqlRequirements {
+                fts: true,
+                ..crate::storage::SqlRequirements::EPHEMERAL
+            },
+        )
+        .map_err(map_storage_error)?;
         configure_connection(&connection, options.busy_timeout)?;
 
-        let ids = super::generate_distinct_ids(2, options.new_id.as_ref())?;
+        let ids = crate::memory::generate_distinct_ids(2, options.new_id.as_ref())?;
         for id in &ids {
             if !schema::valid_database_id(id) {
-                return Err(super::invalid_request("database ID"));
+                return Err(crate::memory::invalid_request("database ID"));
             }
         }
-        options.guard.check(&super::GuardInput {
+        options.guard.check(&crate::memory::GuardInput {
             fields: vec![
-                super::GuardField {
+                crate::memory::GuardField {
                     name: "database ID".into(),
                     value: ids[0].clone(),
                     opaque: true,
                 },
-                super::GuardField {
+                crate::memory::GuardField {
                     name: "user scope ID".into(),
                     value: ids[1].clone(),
                     opaque: true,
@@ -233,6 +227,103 @@ impl Drop for Store {
     }
 }
 
+impl crate::memory::MemoryStore for Store {
+    fn identity(&self) -> Result<StoreIdentity> {
+        Store::identity(self)
+    }
+    fn close(&self) -> Result<()> {
+        Store::close(self)
+    }
+
+    fn get(&self, reference: &crate::memory::RecordRef) -> Result<crate::memory::Record> {
+        Store::get(self, reference)
+    }
+
+    fn get_by_key(&self, key: &crate::memory::RecordKey) -> Result<crate::memory::Record> {
+        Store::get_by_key(self, key)
+    }
+
+    fn list(&self, request: &crate::memory::ListRequest) -> Result<crate::memory::RecordPage> {
+        Store::list(self, request)
+    }
+
+    fn get_tombstone(
+        &self,
+        reference: &crate::memory::RecordRef,
+    ) -> Result<crate::memory::Tombstone> {
+        Store::get_tombstone(self, reference)
+    }
+
+    fn get_candidate(
+        &self,
+        reference: &crate::memory::CandidateRef,
+    ) -> Result<crate::memory::Candidate> {
+        Store::get_candidate(self, reference)
+    }
+
+    fn list_candidates(
+        &self,
+        request: &crate::memory::CandidateListRequest,
+    ) -> Result<crate::memory::CandidatePage> {
+        Store::list_candidates(self, request)
+    }
+
+    fn retrieve(
+        &self,
+        request: &crate::memory::RetrievalRequest,
+    ) -> Result<crate::memory::RetrievalResult> {
+        Store::retrieve(self, request)
+    }
+
+    fn upsert_within_standing_budget(
+        &self,
+        request: &crate::memory::UpsertRequest,
+    ) -> Result<crate::memory::Record> {
+        Store::upsert_within_standing_budget(self, request)
+    }
+
+    fn standing_usage(
+        &self,
+        user_scope: &crate::memory::Scope,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::memory::StandingUsage> {
+        Store::standing_usage(self, user_scope, now)
+    }
+
+    fn standing_records(
+        &self,
+        user_scope: &crate::memory::Scope,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<crate::memory::Record>> {
+        Store::standing_records(self, user_scope, now)
+    }
+
+    fn forget(
+        &self,
+        request: &crate::memory::StoreForgetRequest,
+    ) -> Result<crate::memory::Tombstone> {
+        Store::forget(self, request)
+    }
+
+    fn review_within_standing_budget(
+        &self,
+        request: &crate::memory::StoreReviewRequest,
+    ) -> Result<crate::memory::ReviewResult> {
+        Store::review_within_standing_budget(self, request)
+    }
+
+    fn propose(
+        &self,
+        candidates: &[crate::memory::Candidate],
+    ) -> Result<Vec<crate::memory::Candidate>> {
+        Store::propose(self, candidates)
+    }
+
+    fn check_proposals(&self, candidates: &[crate::memory::Candidate]) -> Result<()> {
+        Store::check_proposals(self, candidates)
+    }
+}
+
 fn configure_connection(connection: &Connection, busy_timeout: Duration) -> Result<()> {
     connection
         .busy_timeout(busy_timeout)
@@ -250,7 +341,7 @@ fn configure_connection(connection: &Connection, busy_timeout: Duration) -> Resu
 }
 
 /// Refuse missing, duplicate, tombstoned, or stale search copies at open time.
-fn verify_fts_integrity(connection: &Connection) -> Result<()> {
+pub(crate) fn verify_fts_integrity(connection: &Connection) -> Result<()> {
     let invalid: i64 = connection.query_row(
         "SELECT count(*) FROM (
             SELECT r.id FROM memory_records r LEFT JOIN memory_records_fts f ON f.record_id=r.id

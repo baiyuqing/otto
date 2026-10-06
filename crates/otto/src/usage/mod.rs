@@ -1,44 +1,14 @@
-//! Provider token usage collection, local Turso storage, and aggregate queries.
+//! Usage collection and aggregate query contracts.
 
-use std::collections::BTreeMap;
+pub mod repository;
+
 use std::fmt;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
-use crate::storage::{Connection, params};
 use chrono::{Days, NaiveDate, SecondsFormat, Utc};
 use otto_core::agent::Event;
 use otto_core::model::Usage;
 use serde::Serialize;
-
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS usage_events (
-    id INTEGER PRIMARY KEY,
-    occurred_at TEXT NOT NULL,
-    workspace TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    task_id TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    profile TEXT NOT NULL,
-    model TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('provider','compaction')),
-    input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
-    output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
-    cached_input_tokens INTEGER NOT NULL CHECK (
-        cached_input_tokens >= 0 AND cached_input_tokens <= input_tokens
-    ),
-    usage_present INTEGER NOT NULL CHECK (usage_present IN (0, 1)),
-    CHECK (usage_present = 1 OR (
-        input_tokens = 0 AND output_tokens = 0 AND cached_input_tokens = 0
-    ))
-) STRICT;
-CREATE INDEX IF NOT EXISTS usage_events_session
-ON usage_events(session_id, occurred_at);
-CREATE INDEX IF NOT EXISTS usage_events_model
-ON usage_events(provider, model, occurred_at);
-"#;
 
 /// A storage failure carries no database text, paths, or row values across the
 /// adapter boundary.
@@ -82,6 +52,8 @@ pub trait Sink: Send + Sync {
     fn append(&self, record: &UsageRecord) -> Result<()>;
 }
 
+pub use crate::storage::backends::turso::usage::Store;
+
 /// Persisted token totals. Cache hit rate is weighted by input tokens rather
 /// than averaged across requests.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -116,7 +88,7 @@ impl Analysis {
         Self::empty_range(start, today, days)
     }
 
-    fn empty_range(start: NaiveDate, today: NaiveDate, days: u16) -> Result<Self> {
+    pub(crate) fn empty_range(start: NaiveDate, today: NaiveDate, days: u16) -> Result<Self> {
         let mut date = start;
         let mut daily = Vec::with_capacity(days as usize);
         loop {
@@ -135,7 +107,7 @@ impl Analysis {
         })
     }
 
-    fn total(&mut self) {
+    pub(crate) fn total(&mut self) {
         let mut summary = Summary::default();
         for point in &self.daily {
             summary.requests = summary.requests.saturating_add(point.requests);
@@ -156,7 +128,7 @@ impl Analysis {
     }
 }
 
-fn date_range(days: u16) -> Result<(NaiveDate, NaiveDate)> {
+pub(crate) fn date_range(days: u16) -> Result<(NaiveDate, NaiveDate)> {
     if !(1..=365).contains(&days) {
         return Err(Error);
     }
@@ -165,165 +137,6 @@ fn date_range(days: u16) -> Result<(NaiveDate, NaiveDate)> {
         .checked_sub_days(Days::new(u64::from(days - 1)))
         .ok_or(Error)?;
     Ok((start, today))
-}
-
-/// One local Turso database shared by collection and read-only analysis.
-/// Each operation holds the connection only for one short statement.
-pub struct Store {
-    connection: Mutex<Connection>,
-}
-
-impl Store {
-    pub fn open(filename: &Path) -> Result<Self> {
-        if let Some(parent) = filename.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|_| Error)?;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .map_err(|_| Error)?;
-        }
-        let connection = Connection::open(filename).map_err(|_| Error)?;
-        std::fs::set_permissions(filename, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| Error)?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(|_| Error)?;
-        connection
-            .pragma_update("journal_mode", "WAL")
-            .map_err(|_| Error)?;
-        Self::initialize(connection)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_in_memory() -> Result<Self> {
-        Self::initialize(Connection::open_in_memory().map_err(|_| Error)?)
-    }
-
-    fn initialize(connection: Connection) -> Result<Self> {
-        connection.execute_batch(SCHEMA).map_err(|_| Error)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-        })
-    }
-
-    fn append_record(&self, record: &UsageRecord) -> Result<()> {
-        record.usage.validate().map_err(|_| Error)?;
-        if !record.usage_present && record.usage != Usage::default() {
-            return Err(Error);
-        }
-        self.connection
-            .lock()
-            .map_err(|_| Error)?
-            .execute(
-                "INSERT INTO usage_events (
-                    occurred_at, workspace, session_id, task_id, provider, profile, model,
-                    kind, input_tokens, output_tokens, cached_input_tokens, usage_present
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
-                    record.occurred_at,
-                    record.context.workspace,
-                    record.context.session_id,
-                    record.context.task_id,
-                    record.context.provider,
-                    record.context.profile,
-                    record.context.model,
-                    record.kind,
-                    record.usage.input_tokens,
-                    record.usage.output_tokens,
-                    record.usage.cached_input_tokens,
-                    record.usage_present,
-                ],
-            )
-            .map_err(|_| Error)?;
-        Ok(())
-    }
-
-    /// Returns all recorded usage, or one session when `session_id` is set.
-    pub fn summary(&self, session_id: Option<&str>) -> Result<Summary> {
-        let connection = self.connection.lock().map_err(|_| Error)?;
-        let mut statement = connection
-            .prepare(
-                "SELECT
-                    COUNT(*),
-                    COALESCE(SUM(usage_present), 0),
-                    COALESCE(SUM(input_tokens), 0),
-                    COALESCE(SUM(output_tokens), 0),
-                    COALESCE(SUM(cached_input_tokens), 0)
-                 FROM usage_events
-                 WHERE (?1 IS NULL OR session_id = ?1)",
-            )
-            .map_err(|_| Error)?;
-        let mut summary = statement
-            .query_row([session_id], |row| {
-                Ok(Summary {
-                    requests: row.get(0)?,
-                    reported_requests: row.get(1)?,
-                    input_tokens: row.get(2)?,
-                    output_tokens: row.get(3)?,
-                    cached_input_tokens: row.get(4)?,
-                    cache_hit_rate: 0.0,
-                })
-            })
-            .map_err(|_| Error)?;
-        if summary.input_tokens > 0 {
-            summary.cache_hit_rate =
-                summary.cached_input_tokens as f64 / summary.input_tokens as f64;
-        }
-        Ok(summary)
-    }
-
-    /// Returns a zero-filled UTC day series, including today.
-    pub fn daily(&self, days: u16, session_id: Option<&str>) -> Result<Analysis> {
-        let (start, today) = date_range(days)?;
-        let since = format!("{start}T00:00:00.000000000Z");
-        let connection = self.connection.lock().map_err(|_| Error)?;
-        let mut statement = connection
-            .prepare(
-                "SELECT
-                    substr(occurred_at, 1, 10),
-                    COUNT(*),
-                    COALESCE(SUM(usage_present), 0),
-                    COALESCE(SUM(input_tokens), 0),
-                    COALESCE(SUM(output_tokens), 0),
-                    COALESCE(SUM(cached_input_tokens), 0)
-                 FROM usage_events
-                 WHERE occurred_at >= ?1 AND (?2 IS NULL OR session_id = ?2)
-                 GROUP BY substr(occurred_at, 1, 10)
-                 ORDER BY substr(occurred_at, 1, 10)",
-            )
-            .map_err(|_| Error)?;
-        let rows = statement
-            .query_map(params![since, session_id], |row| {
-                Ok(DailyPoint {
-                    date: row.get(0)?,
-                    requests: row.get(1)?,
-                    reported_requests: row.get(2)?,
-                    input_tokens: row.get(3)?,
-                    output_tokens: row.get(4)?,
-                    cached_input_tokens: row.get(5)?,
-                })
-            })
-            .map_err(|_| Error)?;
-        let mut recorded = BTreeMap::new();
-        for row in rows {
-            let point = row.map_err(|_| Error)?;
-            recorded.insert(point.date.clone(), point);
-        }
-        let mut analysis = Analysis::empty_range(start, today, days)?;
-        for point in &mut analysis.daily {
-            if let Some(recorded) = recorded.remove(&point.date) {
-                *point = recorded;
-            }
-        }
-        analysis.total();
-        Ok(analysis)
-    }
-}
-
-impl Sink for Store {
-    fn append(&self, record: &UsageRecord) -> Result<()> {
-        self.append_record(record)
-    }
 }
 
 /// Maps neutral agent events into the small persisted usage contract.
@@ -335,6 +148,10 @@ pub struct Collector {
 
 impl Collector {
     pub fn new<S: Sink + 'static>(sink: Arc<S>, context: Context) -> Self {
+        Self::from_sink(sink, context)
+    }
+
+    pub fn from_sink(sink: Arc<dyn Sink>, context: Context) -> Self {
         Self { sink, context }
     }
 
@@ -364,13 +181,47 @@ impl Collector {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex};
 
     use chrono::{Days, SecondsFormat, Utc};
     use otto_core::agent::{CompactionResult, Event};
     use otto_core::model::Usage;
 
     use super::{Collector, Context, Sink, Store, UsageRecord};
+
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<UsageRecord>>);
+
+    impl Sink for RecordingSink {
+        fn append(&self, record: &UsageRecord) -> super::Result<()> {
+            self.0.lock().expect("records").push(record.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn collector_uses_an_injected_sink() {
+        let sink = Arc::new(RecordingSink::default());
+        let collector = Collector::new(
+            Arc::clone(&sink),
+            Context {
+                session_id: "injected".into(),
+                ..Context::default()
+            },
+        );
+
+        collector
+            .record(&Event::ProviderUsage {
+                usage: usage(12, 3, 4),
+                present: true,
+            })
+            .expect("record");
+        let records = sink.0.lock().expect("records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].context.session_id, "injected");
+        assert_eq!(records[0].usage, usage(12, 3, 4));
+    }
 
     fn usage(input: i64, output: i64, cached: i64) -> Usage {
         Usage {
@@ -488,7 +339,6 @@ mod tests {
         assert_eq!(summary.output_tokens, 3);
         assert_eq!(summary.cached_input_tokens, 2);
 
-        use std::os::unix::fs::PermissionsExt;
         let directory_mode = std::fs::metadata(path.parent().expect("parent"))
             .expect("directory metadata")
             .permissions()

@@ -1,25 +1,17 @@
-//! The append-only advice audit log, `~/.otto/memory-advice.db`.
-//!
-//! One row per advice request, for both backends: what was sent, what came
-//! back, and how it ended. The request holds the body or prompt as sent and
-//! never the API key or an `Authorization` header. A row is never updated or
-//! deleted. Same pattern as the skill-check database: the `storage` adapter,
-//! `PRAGMA user_version` for the schema version, owner-only permissions.
-
+//! Turso implementation of the memory-advice audit repository.
+use crate::memory::advice::audit::{AuditStore, Error, NewRow};
+use crate::storage::{Connection, params};
+use chrono::{SecondsFormat, Utc};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use chrono::{SecondsFormat, Utc};
-
-use crate::storage::{Connection, params};
-
 /// The schema version this build writes and expects. A database with another
 /// version is left untouched and reported as [`Error::UnknownVersion`].
-const SCHEMA_VERSION: i64 = 1;
+pub(super) const SCHEMA_VERSION: i64 = 1;
 
-const SCHEMA: &str = r#"
+pub(super) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS memory_advice (
     id INTEGER PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -35,44 +27,10 @@ CREATE TABLE IF NOT EXISTS memory_advice (
 ) STRICT;
 "#;
 
-/// A storage failure carries no database text, paths, or row values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
-    Io,
-    UnknownVersion,
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Io => "memory advice audit log unavailable",
-            Self::UnknownVersion => "memory advice audit log has an unrecognized schema version",
-        })
-    }
-}
-
-impl std::error::Error for Error {}
-
-/// One request, before the candidate id is known.
-#[derive(Debug, Clone, PartialEq)]
-pub struct NewRow {
-    pub model: String,
-    pub auxiliary: bool,
-    /// The namespace of the candidate's scope.
-    pub scope: String,
-    pub request: String,
-    pub response: Option<String>,
-    /// `ok`, `timeout`, `error` or `invalid`.
-    pub outcome: &'static str,
-    pub error: Option<String>,
-    pub latency_ms: i64,
-}
-
 #[derive(Debug)]
 pub struct Store {
     connection: Mutex<Connection>,
 }
-
 impl Store {
     pub fn open(filename: &Path) -> Result<Self, Error> {
         if let Some(parent) = filename.parent()
@@ -85,6 +43,10 @@ impl Store {
         let connection = Connection::open(filename).map_err(|_| Error::Io)?;
         std::fs::set_permissions(filename, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error::Io)?;
+        Self::from_connection(connection)
+    }
+
+    pub(crate) fn from_connection(connection: Connection) -> Result<Self, Error> {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| Error::Io)?;
@@ -179,6 +141,12 @@ impl Store {
             });
         }
         out
+    }
+}
+
+impl AuditStore for Store {
+    fn append(&self, row: &NewRow, candidate_id: Option<&str>) -> Result<(), Error> {
+        Store::append(self, row, candidate_id)
     }
 }
 

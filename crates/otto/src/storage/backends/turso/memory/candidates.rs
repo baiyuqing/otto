@@ -254,7 +254,7 @@ pub struct CandidateSnapshot {
     pub observation_id: String,
 }
 
-fn decode_candidate_row(row: &Row) -> Result<CandidateSnapshot> {
+pub(crate) fn decode_candidate_row(row: &Row) -> Result<CandidateSnapshot> {
     let valid: Option<i64> = row.get(0).map_err(map_storage_error)?;
     if valid != Some(1) {
         return Err(corrupt());

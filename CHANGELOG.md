@@ -27,6 +27,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - Prevent a generic conversational confirmation from being requested before the
   exact memory review for the same model-originated `remember` proposal.
 
+### Storage and migration
+
+- Separate native state semantics from SQL and POSIX persistence with typed
+  domain ports, capability drivers, backend repositories, and runtime
+  injection. Keep local Turso and confined POSIX storage as the defaults.
+- Add resumable local state transfer with `otto storage transfer`, plus
+  `otto storage abort` for pre-publication recovery. Keep
+  `otto storage migrate <legacy.db> <new.db>` for recognized legacy imports.
+
 ### Usage and compatibility
 
 - Rebuild TUI feature interaction around injected presenters, a command catalog,

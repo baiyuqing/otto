@@ -185,7 +185,9 @@ pub trait Session {
     }
 
     /// Appends one message after validating it and the tool-call ordering
-    /// rule. Nothing is stored when the call returns an error.
+    /// rule. Validation errors store nothing. A persistence failure may have
+    /// committed without acknowledgement: stop and recover durable history
+    /// before retrying, rather than assuming rollback.
     async fn append(&self, message: Message) -> Result<(), SessionError>;
 
     /// The compaction checkpoint currently in force, or `None` when the session
@@ -194,18 +196,16 @@ pub trait Session {
 
     /// Records a compaction checkpoint: the transcript becomes the summary
     /// context message followed by the messages from
-    /// `checkpoint.first_kept_entry_id` onward. Nothing changes when the call
-    /// returns an error.
+    /// `checkpoint.first_kept_entry_id` onward. Validation failures do not
+    /// change history; persistence failures follow the same uncertain-commit
+    /// recovery contract as `append`.
     async fn append_compaction(
         &self,
         checkpoint: CompactionCheckpoint,
     ) -> Result<CompactionMetadata, SessionError>;
 
     /// Appends one typed operation fact after strict history validation.
-    fn append_operation_fact(&self, fact: OperationFact) -> Result<(), SessionError> {
-        let encoded = encode_operation_fact(&fact)?;
-        self.append_custom(OPERATION_CUSTOM_TYPE, &encoded)
-    }
+    async fn append_operation_fact(&self, fact: OperationFact) -> Result<(), SessionError>;
 
     /// Typed operation facts in append order. Stores that support operation
     /// recovery override this; compatibility wrappers may return no history.
@@ -225,7 +225,7 @@ pub trait Session {
     /// it already ignores `otto.runtime`.
     ///
     /// [`pi_entry_to_context_messages`]: crate::session::context::pi_entry_to_context_messages
-    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError>;
+    async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError>;
 }
 
 /// Tool calls from the most recent assistant message that have no result yet.
@@ -458,7 +458,7 @@ impl Session for MemorySession {
         Ok(metadata)
     }
 
-    fn append_operation_fact(&self, fact: OperationFact) -> Result<(), SessionError> {
+    async fn append_operation_fact(&self, fact: OperationFact) -> Result<(), SessionError> {
         let mut state = self.state.lock().expect("session mutex");
         let mut candidate = state.operation_ledger.clone();
         candidate.apply(fact.clone())?;
@@ -483,12 +483,12 @@ impl Session for MemorySession {
             .clone()
     }
 
-    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+    async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         if custom_type != OPERATION_CUSTOM_TYPE {
             return Ok(());
         }
         match operation::decode_operation_fact(data)? {
-            DecodedOperationFact::Fact(fact) => self.append_operation_fact(fact),
+            DecodedOperationFact::Fact(fact) => self.append_operation_fact(fact).await,
             DecodedOperationFact::Unsupported { .. } => Ok(()),
         }
     }
@@ -597,6 +597,7 @@ mod tests {
         let json = r#"{"event":"attempt","schemaVersion":1,"operationId":"op_1","attempt":1,"kind":"tool_call","toolCallId":"c1","toolName":"read"}"#;
         session
             .append_custom(OPERATION_CUSTOM_TYPE, json)
+            .await
             .expect("append fact");
         session
             .append(tool_result("c1", "read"))
@@ -612,8 +613,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn operation_custom_known_malformed_is_rejected_atomically() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn operation_custom_known_malformed_is_rejected_atomically() {
         let session = MemorySession::new();
         assert!(
             session
@@ -621,6 +623,7 @@ mod tests {
                     OPERATION_CUSTOM_TYPE,
                     r#"{"schemaVersion":1,"event":"attempt"}"#,
                 )
+                .await
                 .is_err()
         );
         assert!(session.operation_history().is_empty());
@@ -629,10 +632,12 @@ mod tests {
                 OPERATION_CUSTOM_TYPE,
                 r#"{"schemaVersion":2,"future":true}"#,
             )
+            .await
             .expect("future schema ignored");
         assert!(session.operation_history().is_empty());
         session
             .append_custom("other.custom", "not json")
+            .await
             .expect("other custom unchanged");
     }
 

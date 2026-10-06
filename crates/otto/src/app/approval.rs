@@ -970,7 +970,7 @@ mod tests {
         workspace: &std::path::Path,
         sessions: &std::path::Path,
         script: Vec<(&'static str, bool)>,
-        store: Option<Arc<crate::schedule::Store>>,
+        store: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     ) -> Controller {
         let (controller, _, _) =
             crate::app::controller_with_approvals_and_schedule(workspace, sessions, store).await;
@@ -1222,7 +1222,7 @@ mod tests {
             workspace.path(),
             sessions.path(),
             vec![("a", false), ("b", false), ("c", false)],
-            Some(Arc::clone(&store)),
+            Some(store.clone()),
         )
         .await;
         let session_id = controller.info().session_id;
@@ -1266,7 +1266,7 @@ mod tests {
             workspace.path(),
             sessions.path(),
             vec![("a", false), ("b", false)],
-            Some(Arc::clone(&store)),
+            Some(store.clone()),
         )
         .await;
         let chat = crate::schedule::Origin::chat("telegram", "42").unwrap();

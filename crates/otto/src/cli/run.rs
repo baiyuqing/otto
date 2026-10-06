@@ -167,6 +167,7 @@ async fn reflect_on_exit(
 }
 
 fn skill_checker(
+    storage: &crate::runtime::storage::Storage,
     config: &File,
     environment: &HashMap<String, String>,
     home: &str,
@@ -186,8 +187,11 @@ fn skill_checker(
         return None;
     }
     let db_path = Path::new(home).join(".otto/skill-checks.db");
-    match crate::skill::check::Checker::open(&db_path, crate::typesafe::BASE_URL, api_key) {
-        Ok(checker) => Some(Arc::new(checker)),
+    match storage.skill_checks(&db_path) {
+        Ok(store) => Some(Arc::new(crate::skill::check::Checker::with_store(
+            store,
+            crate::typesafe::Client::new(crate::typesafe::BASE_URL, api_key),
+        ))),
         Err(message) => {
             let _ = writeln!(
                 stderr,
@@ -236,7 +240,7 @@ pub async fn run(
         return super::workspace_command::run(&args[1..], stdout, stderr);
     }
     if args.first().is_some_and(|command| command == "storage") {
-        return super::storage::run(&args[1..], stdout, stderr);
+        return super::storage::run_async(&args[1..], stdout, stderr).await;
     }
     let startup_started = Instant::now();
     let mut startup_trace: StartupTrace;
@@ -254,7 +258,22 @@ pub async fn run(
             Err(message) => return fail(stderr, &message),
         };
         if first == "memory" {
-            return super::memory_command::run(&args[1..], stdout, stderr, &lookup);
+            let home = match resolve_home(&lookup) {
+                Ok(home) => home,
+                Err(message) => return fail(stderr, &message),
+            };
+            let storage = match crate::runtime::storage::Storage::open_home(Path::new(&home)).await
+            {
+                Ok(storage) => storage,
+                Err(message) => return fail(stderr, &message),
+            };
+            return super::memory_command::run_with_storage(
+                &args[1..],
+                stdout,
+                stderr,
+                &lookup,
+                &storage,
+            );
         }
         return super::sandbox_setup::run(
             &args[1..],
@@ -385,6 +404,10 @@ pub async fn run(
         Err(message) => return fail(stderr, &format!("load config: {message}")),
     };
     startup_trace.mark("config/load");
+    let storage = match crate::runtime::storage::Storage::open_home(Path::new(&home)).await {
+        Ok(storage) => Arc::new(storage),
+        Err(error) => return fail(stderr, &startup.redact(&error)),
+    };
     if !options.acp_listen.is_empty()
         && config_file
             .policy
@@ -477,7 +500,7 @@ pub async fn run(
             Ok(socket) => socket,
             Err(message) => return fail(stderr, &startup.redact(&message)),
         };
-        let schedule = open_schedule(&home, &mut *stderr);
+        let schedule = open_schedule(&storage, &home, &mut *stderr);
         if options.acp {
             return crate::acp::attach::run(
                 &socket,
@@ -525,14 +548,16 @@ pub async fn run(
             );
         }
     };
-    let session_root: PathBuf = [home.as_str(), ".otto", "sessions"].iter().collect();
+    let default_session_root: PathBuf = [home.as_str(), ".otto", "sessions"].iter().collect();
+    let session_root = match storage.session_root(&default_session_root) {
+        Ok(root) => root,
+        Err(error) => return fail(stderr, &startup.redact(&error)),
+    };
 
     if !options.archive_path.is_empty() {
-        return match session::archive(
-            &session_root,
-            &workspace_path,
-            Path::new(&options.archive_path),
-        ) {
+        return match storage.sessions().and_then(|repository| {
+            repository.archive(&session_root, &workspace_path, &options.archive_path)
+        }) {
             Ok(result) => {
                 let _ = writeln!(
                     stdout,
@@ -548,7 +573,10 @@ pub async fn run(
     let mut session_path = options.resume_path.clone();
     let mut listed_session_path = false;
     if options.continue_last {
-        let listed = match session::list(&session_root, &workspace_path, "", 1) {
+        let listed = match storage
+            .sessions()
+            .and_then(|repository| repository.list(&session_root, &workspace_path, "", 1))
+        {
             Ok(listed) => listed,
             Err(error) => return fail(stderr, &startup.redact(&error.to_string())),
         };
@@ -596,8 +624,8 @@ pub async fn run(
         Ok(config) => config,
         Err(error) => return fail(stderr, &error.to_string()),
     };
-    let usage = match crate::usage::Store::open(&Path::new(&home).join(".otto/usage.db")) {
-        Ok(store) => Some(Arc::new(store)),
+    let usage = match storage.usage(&Path::new(&home).join(".otto/usage.db")) {
+        Ok(store) => Some(store),
         Err(_) => {
             let _ = writeln!(
                 stderr,
@@ -606,26 +634,25 @@ pub async fn run(
             None
         }
     };
-    let task_recorder =
-        match crate::subagent::record::Store::open(&Path::new(&home).join(".otto/tasks.db")) {
-            Ok(store) => Some(Arc::new(store)),
-            Err(_) => {
-                let _ = writeln!(
-                    stderr,
-                    "warning: task history store unavailable, continuing without task recording"
-                );
-                None
-            }
-        };
-    let schedule = open_schedule(&home, &mut *stderr);
-    let skill_checker = skill_checker(&config_file, &environment, &home, &mut *stderr);
+    let task_recorder = match storage.tasks(&Path::new(&home).join(".otto/tasks.db")) {
+        Ok(store) => Some(store),
+        Err(_) => {
+            let _ = writeln!(
+                stderr,
+                "warning: task history store unavailable, continuing without task recording"
+            );
+            None
+        }
+    };
+    let schedule = open_schedule(&storage, &home, &mut *stderr);
+    let skill_checker = skill_checker(&storage, &config_file, &environment, &home, &mut *stderr);
     let reflection_config = match resolve_reflection(&config_file) {
         Ok(config) => config,
         Err(error) => return fail(stderr, &error.to_string()),
     };
     let reflection_store = if reflection_config.enabled {
-        match crate::reflection::Store::open(&Path::new(&home).join(".otto/reflection.db")) {
-            Ok(store) => Some(Arc::new(store)),
+        match storage.reflection(&Path::new(&home).join(".otto/reflection.db")) {
+            Ok(store) => Some(store),
             Err(_) => {
                 let _ = writeln!(
                     stderr,
@@ -637,17 +664,20 @@ pub async fn run(
     } else {
         None
     };
-    let mut reflector = crate::reflection::Reflector::new(reflection_config, reflection_store);
+    let mut reflector =
+        crate::reflection::Reflector::with_store(reflection_config, reflection_store);
     if !home.is_empty() {
         reflector = reflector.with_log_dir(Path::new(&home).join(".otto/reflection/runs"));
     }
     let reflector = Arc::new(reflector);
 
-    let approvals =
-        match crate::approval::Service::open(&Path::new(&home).join(".otto/approvals.db")) {
-            Ok(service) => Arc::new(service),
-            Err(error) => return fail(stderr, &error.to_string()),
-        };
+    let approvals = match storage
+        .approvals(&Path::new(&home).join(".otto/approvals.db"))
+        .and_then(crate::approval::Service::from_store)
+    {
+        Ok(service) => Arc::new(service),
+        Err(error) => return fail(stderr, &error.to_string()),
+    };
     approvals.start();
     // Stderr is free for serve, acp and workflow; the REPL, TUI and one-shot
     // frontends own the terminal or already print warnings there.
@@ -659,6 +689,7 @@ pub async fn run(
         },
     );
     let shared = Arc::new(Shared {
+        storage: Arc::clone(&storage),
         approvals,
         config_path: PathBuf::from(&config_path),
         config: config_file.clone(),
@@ -686,24 +717,25 @@ pub async fn run(
     });
     let mut builder = Builder::for_workspace(shared, workspace, workspace_path.clone(), mcp_config);
 
-    let mut prepared_initial = None;
+    let mut prepared_initial: Option<Box<dyn session::PreparedSession>> = None;
     let mut metadata = None;
     if !session_path.is_empty() {
         let create_lease = match builder.create_lease() {
             Ok(create_lease) => create_lease,
             Err(error) => return fail(stderr, &builder.redact_error(&error, None)),
         };
-        let prepared = if listed_session_path {
-            session::Prepared::prepare_listed(
-                &session_root,
-                &workspace_path,
-                Path::new(&session_path),
-                create_lease,
-            )
-            .map_err(|error| error.to_string())
-        } else {
-            prepare_session(Path::new(&session_path), &workspace_path, create_lease)
+        let repository = match builder.storage.sessions() {
+            Ok(repository) => repository,
+            Err(error) => return fail(stderr, &startup.redact(&error)),
         };
+        let prepared = prepare_session_backend(
+            repository,
+            &session_root,
+            &workspace_path,
+            &session_path,
+            create_lease,
+            listed_session_path,
+        );
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -773,7 +805,12 @@ pub async fn run(
     }
     if dynamic_content {
         let secrets = builder.secret_values(Some(&resolved));
-        match crate::runtime::wiring::open_memory_service(&memory_config, &secrets, stderr) {
+        match crate::runtime::wiring::open_memory_service_with_storage(
+            &builder.storage,
+            &memory_config,
+            &secrets,
+            stderr,
+        ) {
             Ok((service, user_scope, usable)) => {
                 let shared = builder.shared_mut();
                 shared.memory.service = service;
@@ -794,23 +831,28 @@ pub async fn run(
         }
     }
     startup_trace.mark("memory/open");
+    let advice_audit = if builder.memory.usable {
+        match builder
+            .storage
+            .memory_advice(&Path::new(&home).join(".otto/memory-advice.db"))
+        {
+            Ok(store) => Some(store),
+            Err(_) => {
+                let _ = writeln!(
+                    stderr,
+                    "warning: memory advice audit log unavailable, continuing without it"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     {
         let shared = builder.shared_mut();
         shared.memory.recall_limit = memory_config.max_results;
         shared.memory.recall_token_budget = memory_config.recall_tokens;
-        if shared.memory.usable {
-            match crate::memory::advice::audit::Store::open(
-                &Path::new(&home).join(".otto/memory-advice.db"),
-            ) {
-                Ok(store) => shared.memory.advice_audit = Some(Arc::new(store)),
-                Err(_) => {
-                    let _ = writeln!(
-                        stderr,
-                        "warning: memory advice audit log unavailable, continuing without it"
-                    );
-                }
-            }
-        }
+        shared.memory.advice_audit = advice_audit;
     }
     let memory_service = Arc::clone(&builder.memory.service);
     if cancel.is_cancelled() {
@@ -920,14 +962,20 @@ pub async fn run(
         return exit;
     }
 
-    let (initial_session, warnings) =
-        match activate_initial_session(&builder, prepared_initial, dynamic_content, &resolved) {
-            Ok(activated) => activated,
-            Err(message) => {
-                let _ = control.close().await;
-                return fail(stderr, &message);
-            }
-        };
+    let (initial_session, warnings) = match activate_initial_session(
+        &builder,
+        prepared_initial,
+        dynamic_content,
+        &resolved,
+    )
+    .await
+    {
+        Ok(activated) => activated,
+        Err(message) => {
+            let _ = control.close().await;
+            return fail(stderr, &message);
+        }
+    };
     startup_trace.mark("session/activate");
     for warning in &warnings {
         let _ = writeln!(stderr, "warning: {warning}");
@@ -1169,39 +1217,45 @@ fn spawn_mcp_runner_swap(
     })
 }
 
-/// A directly named session file must belong to the current workspace.
-fn prepare_session(
-    path: &Path,
+fn prepare_session_backend(
+    repository: &dyn session::SessionRepository,
+    root: &Path,
     workspace: &str,
+    reference: &str,
     create_lease: Option<u64>,
-) -> Result<session::Prepared, String> {
-    let prepared =
-        session::Prepared::prepare(path, create_lease).map_err(|error| error.to_string())?;
-    match crate::runtime::builder::validate_session_workspace(&prepared.info().cwd, workspace) {
-        Ok(()) => Ok(prepared),
-        Err(message) => {
-            let _ = prepared.close();
-            Err(message)
-        }
+    listed: bool,
+) -> Result<Box<dyn session::PreparedSession>, String> {
+    let prepared = if listed {
+        repository.prepare_listed(root, workspace, reference, create_lease)
+    } else {
+        repository.prepare_in(root, reference, create_lease)
+    }?;
+    if let Err(error) =
+        crate::runtime::builder::validate_session_workspace(&prepared.info().cwd, workspace)
+    {
+        let _ = prepared.close();
+        return Err(error);
     }
+    Ok(prepared)
 }
 
-fn activate_initial_session(
+async fn activate_initial_session(
     builder: &Builder,
-    prepared: Option<session::Prepared>,
+    prepared: Option<Box<dyn crate::session::PreparedSession>>,
     dynamic_content: bool,
     runtime: &Runtime,
 ) -> Result<(SharedSession, Vec<String>), String> {
     if let Some(prepared) = prepared {
-        let (store, warnings) = prepared
-            .with_replayable(crate::tool::safety::is_replayable)
-            .activate()
-            .map_err(|error| builder.redact_error(&error.to_string(), Some(runtime)))?;
+        let prepared = prepared.with_replayable(crate::tool::safety::is_replayable);
+        let (session, warnings) = tokio::task::spawn_blocking(move || prepared.activate())
+            .await
+            .map_err(|error| format!("session activation task panicked: {error}"))?
+            .map_err(|error| builder.redact_error(&error, Some(runtime)))?;
         let messages = warnings
             .into_iter()
             .map(|warning| builder.redact_error(&warning.message, Some(runtime)))
             .collect();
-        return Ok((SharedSession::new(Arc::new(store)), messages));
+        return Ok((SharedSession::new(session), messages));
     }
     if !dynamic_content {
         let header = Header {
@@ -1417,11 +1471,12 @@ fn current_user_home() -> Option<String> {
 /// Opens `~/.otto/schedule.db`. Without it the process runs with no schedule
 /// store and no delivery worker, after one warning.
 fn open_schedule(
+    storage: &crate::runtime::storage::Storage,
     home: &str,
     stderr: &mut (dyn Write + Send),
-) -> Option<Arc<crate::schedule::Store>> {
-    match crate::schedule::Store::open(&Path::new(home).join(".otto/schedule.db")) {
-        Ok(store) => Some(Arc::new(store)),
+) -> Option<Arc<dyn crate::schedule::ScheduleStore>> {
+    match storage.schedule(&Path::new(home).join(".otto/schedule.db")) {
+        Ok(store) => Some(store),
         Err(_) => {
             let _ = writeln!(
                 stderr,
@@ -1855,7 +1910,16 @@ mod tests {
         let environment = HashMap::from([("TYPESAFE_API_KEY".to_string(), "key".to_string())]);
         let mut stderr = Cursor::new(Vec::new());
 
-        assert!(skill_checker(&file, &environment, "/nonexistent", &mut stderr).is_none());
+        assert!(
+            skill_checker(
+                &crate::runtime::storage::Storage::default(),
+                &file,
+                &environment,
+                "/nonexistent",
+                &mut stderr,
+            )
+            .is_none()
+        );
         assert!(stderr.get_ref().is_empty());
     }
 
@@ -1865,7 +1929,16 @@ mod tests {
         let environment = HashMap::from([("TYPESAFE_API_KEY".to_string(), "key".to_string())]);
         let mut stderr = Cursor::new(Vec::new());
 
-        assert!(skill_checker(&file, &environment, "/nonexistent", &mut stderr).is_none());
+        assert!(
+            skill_checker(
+                &crate::runtime::storage::Storage::default(),
+                &file,
+                &environment,
+                "/nonexistent",
+                &mut stderr,
+            )
+            .is_none()
+        );
         assert!(stderr.get_ref().is_empty());
     }
 
@@ -1875,7 +1948,16 @@ mod tests {
         let environment = HashMap::new();
         let mut stderr = Cursor::new(Vec::new());
 
-        assert!(skill_checker(&file, &environment, "/nonexistent", &mut stderr).is_none());
+        assert!(
+            skill_checker(
+                &crate::runtime::storage::Storage::default(),
+                &file,
+                &environment,
+                "/nonexistent",
+                &mut stderr,
+            )
+            .is_none()
+        );
         assert!(stderr.get_ref().is_empty());
     }
 
@@ -1887,6 +1969,7 @@ mod tests {
         let mut stderr = Cursor::new(Vec::new());
 
         let checker = skill_checker(
+            &crate::runtime::storage::Storage::default(),
             &file,
             &environment,
             &home.path().to_string_lossy(),

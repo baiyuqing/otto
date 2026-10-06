@@ -33,6 +33,7 @@ pub mod evidence;
 pub mod guard;
 pub mod output;
 pub mod prompt;
+pub mod repository;
 pub mod review;
 pub mod runlog;
 pub mod skillwrite;
@@ -56,6 +57,7 @@ use crate::memory::{
 };
 use crate::runtime::builder::Runner;
 use output::{Action, Existing, Plan, Proposal, ScopeChoice};
+use repository::ReflectionStore;
 use store::RunRow;
 pub use store::{Status, Store};
 use transcript::EntryRole;
@@ -291,7 +293,7 @@ pub struct Context<'a> {
 /// The reflection use case, built at the composition root.
 pub struct Reflector {
     config: ReflectionRuntime,
-    store: Option<Arc<Store>>,
+    store: Option<Arc<dyn ReflectionStore>>,
     minimum_interval: chrono::Duration,
     /// Where each run writes its Markdown log; `None` writes none.
     log_dir: Option<PathBuf>,
@@ -299,6 +301,11 @@ pub struct Reflector {
 
 impl Reflector {
     pub fn new(config: ReflectionRuntime, store: Option<Arc<Store>>) -> Self {
+        Self::with_store(config, store.map(|store| store as Arc<dyn ReflectionStore>))
+    }
+
+    /// Builds a reflector with a selected persistence adapter.
+    pub fn with_store(config: ReflectionRuntime, store: Option<Arc<dyn ReflectionStore>>) -> Self {
         Self {
             config,
             store,
@@ -372,7 +379,7 @@ impl Reflector {
         let store = self.store.as_ref().ok_or_else(|| {
             skillwrite::RevertError::Failed("reflection is disabled ([reflection].enabled)".into())
         })?;
-        skillwrite::revert(store, roots, name, &now())
+        skillwrite::revert(store.as_ref(), roots, name, &now())
     }
 
     /// The skill reflection owns under `name`, if any.
@@ -738,7 +745,7 @@ impl Reflector {
             // Refuse what cannot be written before spending a review call.
             let candidate = checked.candidate();
             if let Err(reason) = skillwrite::precheck(
-                store,
+                store.as_ref(),
                 roots,
                 candidate.action,
                 &candidate.name,
@@ -2299,7 +2306,7 @@ mod tests {
                 .contains("Re-run the tests")
         );
 
-        let reverted = skillwrite::revert(&fixture.store, &fixture.roots, "lint-gate", "t");
+        let reverted = skillwrite::revert(fixture.store.as_ref(), &fixture.roots, "lint-gate", "t");
         assert_eq!(reverted, Ok(skillwrite::Reverted::Restored));
         assert_eq!(
             skill_file_text(&fixture, "lint-gate").expect("file"),

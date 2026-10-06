@@ -293,8 +293,8 @@ impl Session for SharedTranscript {
         self.0.append_operation_fact(fact).await
     }
 
-    fn observed_tools(&self) -> Option<Vec<String>> {
-        self.0.observed_tools()
+    fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+        self.0.observed_capabilities()
     }
 
     async fn append_custom(
@@ -1300,6 +1300,7 @@ impl Runner {
             memory: None,
             tasks: None,
             mailbox: child_inbox,
+            version: env!("CARGO_PKG_VERSION").into(),
             ..Options::default()
         };
 
@@ -2685,8 +2686,8 @@ mod tests {
             self.inner.append_operation_fact(fact).await
         }
 
-        fn observed_tools(&self) -> Option<Vec<String>> {
-            self.inner.observed_tools()
+        fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+            self.inner.observed_capabilities()
         }
 
         async fn append_custom(
@@ -3896,7 +3897,10 @@ mod tests {
             store
                 .append_custom_entry(
                     otto_core::session::CAPABILITIES_CUSTOM_TYPE,
-                    &otto_core::session::encode_capabilities(names),
+                    &otto_core::session::encode_capabilities(&otto_core::session::Capabilities {
+                        tools: names.to_vec(),
+                        ..Default::default()
+                    }),
                 )
                 .expect("append capabilities");
         }

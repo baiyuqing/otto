@@ -3619,7 +3619,7 @@ fn capabilities_record_survives_reopen_and_the_latest_applies() {
     use otto_core::session::Session;
     let temp = TempDir::new();
     let (store, _) = new_store(&temp);
-    assert_eq!(Session::observed_tools(&store), None);
+    assert_eq!(Session::observed_capabilities(&store), None);
     store.append_message(&user("hello")).expect("append");
     store
         .append_custom_entry("otto.capabilities", r#"{"tools":["a","b"]}"#)
@@ -3633,10 +3633,32 @@ fn capabilities_record_survives_reopen_and_the_latest_applies() {
     let (reopened, warnings) = Store::open(&path).expect("open");
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(
-        Session::observed_tools(&reopened),
+        Session::observed_capabilities(&reopened).map(|c| c.tools),
         Some(vec!["b".to_owned(), "c".to_owned()])
     );
     assert_eq!(reopened.messages().len(), 1, "the record is not a message");
+    reopened.close().expect("close");
+}
+
+#[test]
+fn capabilities_record_with_all_fields_survives_reopen() {
+    use otto_core::session::{Capabilities, Session, encode_capabilities};
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    let record = Capabilities {
+        tools: vec!["a".to_owned()],
+        definitions: Some([("a".to_owned(), "d1".to_owned())].into()),
+        version: Some("0.2.1".to_owned()),
+    };
+    store
+        .append_custom_entry("otto.capabilities", &encode_capabilities(&record))
+        .expect("record");
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, warnings) = Store::open(&path).expect("open");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(Session::observed_capabilities(&reopened), Some(record));
     reopened.close().expect("close");
 }
 
@@ -3658,7 +3680,7 @@ fn capabilities_record_on_another_branch_does_not_apply() {
     let (store, warnings) = Store::open(&path).expect("open");
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(
-        Session::observed_tools(&store),
+        Session::observed_capabilities(&store).map(|c| c.tools),
         Some(vec!["main".to_owned()])
     );
     store.close().expect("close");
@@ -3676,7 +3698,7 @@ fn malformed_capabilities_record_is_ignored_with_a_warning() {
     );
 
     let (store, warnings) = Store::open(&path).expect("a malformed record does not block open");
-    assert_eq!(Session::observed_tools(&store), None);
+    assert_eq!(Session::observed_capabilities(&store), None);
     assert!(
         warnings
             .iter()

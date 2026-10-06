@@ -1276,13 +1276,13 @@ impl Session for Store {
         Store::operation_ledger(self)
     }
 
-    fn observed_tools(&self) -> Option<Vec<String>> {
+    fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
         let state = self.lock().expect("session mutex");
         let leaf = state.leaf_id.as_deref().unwrap_or_default();
         build_context(&state.entries, leaf)
             .expect("stored session remains a valid context")
             .0
-            .observed_tools
+            .observed_capabilities
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {

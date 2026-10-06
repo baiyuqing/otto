@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
@@ -2725,7 +2726,17 @@ impl Session for AsyncOrderingSession {
         &self,
         fact: crate::session::OperationFact,
     ) -> Result<(), crate::session::SessionError> {
-        tokio::task::yield_now().await;
+        let mut yielded = false;
+        std::future::poll_fn(|cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
         self.inner.append_operation_fact(fact).await?;
         self.attempt_persisted.store(true, Ordering::SeqCst);
         Ok(())

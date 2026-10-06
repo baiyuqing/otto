@@ -85,10 +85,11 @@ type Agent struct {
 	handler Handler
 	// platforms are the configured platform names, sent at initialize as
 	// _meta.otto.scheduleDelivery.
-	platforms []string
-	cur       *process
-	delay     time.Duration // restart delay owed after the last exit
-	closed    bool
+	platforms     []string
+	deliveryChats []string
+	cur           *process
+	delay         time.Duration // restart delay owed after the last exit
+	closed        bool
 }
 
 // New returns an Agent that has not started a process.
@@ -116,6 +117,14 @@ func (a *Agent) SetHandler(h Handler) {
 func (a *Agent) SetPlatforms(names []string) {
 	a.mu.Lock()
 	a.platforms = slices.Clone(names)
+	a.mu.Unlock()
+}
+
+// SetDeliveryChats scopes scheduled deliveries to admitted chat destinations.
+// Call before connecting; an empty non-nil list explicitly disables delivery.
+func (a *Agent) SetDeliveryChats(chats []string) {
+	a.mu.Lock()
+	a.deliveryChats = append([]string{}, chats...)
 	a.mu.Unlock()
 }
 

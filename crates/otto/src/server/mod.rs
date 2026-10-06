@@ -815,12 +815,18 @@ impl Server {
             return Ok((self.register(ctrl), true));
         }
         if let Some(existing) = self.lookup(id) {
+            if workspace.is_some_and(|path| existing.ctrl.info().workspace != path) {
+                return Err(SESSION_NOT_FOUND.to_string());
+            }
             return Ok((existing, false));
         }
         let _gate = self.open_gate.lock().await;
         // Re-check: another resume of this id may have finished while we
         // waited for the gate.
         if let Some(existing) = self.lookup(id) {
+            if workspace.is_some_and(|path| existing.ctrl.info().workspace != path) {
+                return Err(SESSION_NOT_FOUND.to_string());
+            }
             return Ok((existing, false));
         }
         let ctrl = self.factory.open(id, workspace).await?;
@@ -3434,6 +3440,27 @@ mod tests {
         assert_eq!(harness.factory.open_calls.load(Ordering::SeqCst), 0);
     }
 
+    #[tokio::test]
+    async fn resuming_an_open_session_in_a_different_workspace_is_not_found() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let reply = harness
+            .send(
+                "POST",
+                "/v1/sessions",
+                Some(&format!(r#"{{"resume":"{id}","workspace":"/other"}}"#)),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+        assert_eq!(harness.factory.open_calls.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_resumes_of_one_id_call_open_once() {
         let gate = CancellationToken::new();
@@ -3618,7 +3645,11 @@ mod tests {
             },
             ..HarnessOptions::default()
         });
-        let id = harness.create().await;
+        let created = harness
+            .send("POST", "/v1/sessions", Some(r#"{"workspace":"/other"}"#))
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let id = created.json()["id"].as_str().unwrap().to_string();
 
         let without = harness
             .send(
@@ -3630,8 +3661,7 @@ mod tests {
         assert_eq!(without.status, StatusCode::OK, "{}", without.body);
         assert_eq!(without.json()["id"], id.as_str());
 
-        // Already open, so the registry answers without consulting the
-        // named workspace at all.
+        // An already-open session still requires the matching workspace.
         let with = harness
             .send(
                 "POST",

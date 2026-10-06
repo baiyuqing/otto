@@ -140,18 +140,29 @@ impl Workspaces {
         let (builder, reloader) =
             super::run::load_workspace(Arc::clone(shared), canonical, cancel, stderr).await?;
         let builder = Arc::new(builder);
-        let workflows =
-            match super::workflow::build_controller(Arc::clone(&builder), runtime, stderr).await {
-                Ok(controller) => Some(controller),
-                Err(error) => {
-                    let redacted = builder.redact_error(&error, Some(runtime));
-                    if !redacted.is_empty() {
-                        let _ =
-                            writeln!(stderr, "warning: workflows disabled for {path}: {redacted}");
-                    }
-                    None
+        let workspace_runtime = crate::runtime::builder::resolve_initial_runtime(
+            &builder.config,
+            &builder.environment,
+            None,
+            &builder.overrides,
+        )
+        .map_err(|error| builder.redact_error(&error.to_string(), Some(runtime)))?;
+        let workflows = match super::workflow::build_controller(
+            Arc::clone(&builder),
+            &workspace_runtime,
+            stderr,
+        )
+        .await
+        {
+            Ok(controller) => Some(controller),
+            Err(error) => {
+                let redacted = builder.redact_error(&error, Some(runtime));
+                if !redacted.is_empty() {
+                    let _ = writeln!(stderr, "warning: workflows disabled for {path}: {redacted}");
                 }
-            };
+                None
+            }
+        };
         let host = Arc::new(WorkspaceHost {
             builder,
             workflows,
@@ -437,8 +448,8 @@ impl ServeFactory {
         &self.workspaces.startup_host().builder
     }
 
-    fn wire(&self, controller: Controller) -> Controller {
-        match &self.workspaces.startup_host().reloader {
+    fn wire(&self, controller: Controller, host: &WorkspaceHost) -> Controller {
+        match &host.reloader {
             Some(control) => {
                 controller.with_sandbox_control(Arc::clone(control) as Arc<dyn SandboxControl>)
             }
@@ -478,8 +489,15 @@ impl Factory for ServeFactory {
                 .ok_or_else(|| format!("workspace not loaded: {path}"))?,
             None => Arc::clone(self.workspaces.startup_host()),
         };
-        let controller = Controller::create(Arc::clone(&host.builder), &self.runtime).await?;
-        Ok(self.wire(controller))
+        let runtime = crate::runtime::builder::resolve_initial_runtime(
+            &host.builder.config,
+            &host.builder.environment,
+            None,
+            &host.builder.overrides,
+        )
+        .map_err(|error| error.to_string())?;
+        let controller = Controller::create(Arc::clone(&host.builder), &runtime).await?;
+        Ok(self.wire(controller, &host))
     }
 
     async fn open(&self, id: &str, workspace: Option<&str>) -> Result<Controller, String> {
@@ -502,7 +520,7 @@ impl Factory for ServeFactory {
                 // the web UI reads the repaired history like any other.
                 let (controller, _warnings) =
                     Controller::open(Arc::clone(&host.builder), &path).await?;
-                return Ok(self.wire(controller));
+                return Ok(self.wire(controller, host));
             }
         }
         Err(SESSION_NOT_FOUND.to_string())
@@ -1603,14 +1621,38 @@ mod tests {
         let other = tempfile::tempdir().expect("other workspace");
         let other_path = canonical_directory(other.path()).expect("canonical");
         let other_sessions = tempfile::tempdir().expect("other sessions");
-        let other_host = dummy_host(&other_path, other_sessions.path());
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(other_sessions.path());
+        std::fs::write(&shared.config_path, "[sandbox]\ndriver='off'\n").expect("config");
+        let (mut builder, reloader) = super::super::run::load_workspace(
+            shared,
+            &other_path,
+            &CancellationToken::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .expect("load workspace B");
+        Arc::make_mut(&mut builder.shared)
+            .config
+            .profiles
+            .get_mut("alpha")
+            .unwrap()
+            .model = "workspace-b-model".into();
+        assert!(
+            builder.grant_control.is_some(),
+            "loaded workspace wires persistent read grants"
+        );
+        let other_host = Arc::new(WorkspaceHost {
+            builder: Arc::new(builder),
+            reloader,
+            workflows: None,
+        });
 
         let mut loaded = BTreeMap::new();
         loaded.insert(
             other_path.to_string_lossy().into_owned(),
             Arc::clone(&other_host),
         );
-        let runtime = crate::cli::testutil::initial_runtime(&other_host.builder);
+        let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
         let factory = ServeFactory {
             workspaces: Workspaces {
                 startup: startup_path.to_string_lossy().into_owned(),
@@ -1630,6 +1672,21 @@ mod tests {
 
         assert_eq!(controller.workspace(), other_path.to_string_lossy());
         assert_eq!(other_host.builder.workspace.root(), other_path);
+        assert_eq!(controller.info().model, "workspace-b-model");
+        controller
+            .reload_sandbox()
+            .await
+            .expect("reload B when startup has no reloader");
+        controller.close_mcp().await;
+        controller.close().expect("close");
+        other_host
+            .reloader
+            .as_ref()
+            .unwrap()
+            .control
+            .close()
+            .await
+            .expect("close sandbox");
     }
 
     fn factory_over(startup_path: &Path, sessions: &Path) -> (ServeFactory, Arc<WorkspaceHost>) {

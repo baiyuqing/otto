@@ -4167,3 +4167,32 @@ async fn the_next_input_id_marks_one_runs_user_message() {
     );
     assert!(agent.session().has_input("req-1"));
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_followup_step_message_carries_its_input_id() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("done")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent.set_next_input_id(Some("followup:task:1".into()));
+    agent
+        .run_followup_with_system_context_control(
+            "check the branch",
+            "",
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("follow-up step");
+    let followup = agent
+        .session()
+        .messages()
+        .into_iter()
+        .find(|message| message.context_type == "agent_followup")
+        .expect("agent_followup message");
+    assert_eq!(followup.input_id, "followup:task:1");
+    assert!(agent.session().has_input("followup:task:1"));
+}

@@ -686,32 +686,32 @@ impl Builder {
         })
     }
 
-    /// Gives `steering` its durable journal, `<id>.inputs.json` beside the
-    /// session file, so guidance accepted for a turn that process loss
-    /// interrupts reaches that turn's automatic resume. A no-op for
+    /// A durable journal beside the session file, `<id>.<extension>`, for
+    /// inputs a turn accepted and has not consumed yet: `inputs.json` for
+    /// steering, `followups.json` for model follow-ups. `None` for
     /// `--no-session`. The path is resolved at write time, as for the inbox,
     /// because a new session has no file until its first write.
-    pub(crate) fn install_steering_journal(
+    pub(crate) fn session_journal(
         &self,
-        steering: &otto_core::agent::steering::Steering,
         session: &SharedSession,
+        extension: &'static str,
         stderr: &mut dyn Write,
-    ) {
+    ) -> Option<Arc<dyn otto_core::mailbox::Mailbox>> {
         if self.no_session {
-            return;
+            return None;
         }
         let journal = Arc::new(otto_core::mailbox::InMemoryMailbox::new(None));
         let for_path = session.clone();
-        super::sidecar_mailbox::install(&journal, ".inputs.json", move || {
+        super::sidecar_mailbox::install(&journal, &format!(".{extension}"), move || {
             let path = for_path.path();
-            (!path.is_empty()).then(|| Path::new(&path).with_extension("inputs.json"))
+            (!path.is_empty()).then(|| Path::new(&path).with_extension(extension))
         });
-        if let Some(path) = self.sidecar_path(session, "inputs.json")
+        if let Some(path) = self.sidecar_path(session, extension)
             && let Some(warning) = super::sidecar_mailbox::load(&journal, &path)
         {
             let _ = writeln!(stderr, "warning: {warning}");
         }
-        steering.set_journal(journal);
+        Some(journal)
     }
 
     /// Where a top-level session sidecar (`reminders.json`, `inbox.json`)

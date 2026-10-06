@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::app::task_control::DUPLICATE_INPUT;
 use crate::app::{self, ApprovalDecision, ApprovalRequest, Channel, Controller, Step, Stop};
 pub use crate::log::Logger;
 pub(crate) use crate::log::request_id;
@@ -296,7 +297,12 @@ struct QueuedTurn {
     image: Option<Block>,
     channel: Option<Channel>,
     origin: Option<crate::schedule::Origin>,
+    input_id: Option<String>,
 }
+
+/// How many recent `input_id`s each session remembers for answering a client
+/// retry with the turn it already started.
+const MAX_REMEMBERED_INPUTS: usize = 256;
 
 /// The elevated command the running turn waits on. At most one per session,
 /// because the turn waits.
@@ -330,6 +336,8 @@ struct SessionState {
     queue: VecDeque<QueuedTurn>,
     waiting: Option<WaitingApproval>,
     decided: VecDeque<String>,
+    /// The turns started for recent client `input_id`s, newest last.
+    inputs: VecDeque<(String, Arc<Turn>)>,
 }
 
 impl SessionState {
@@ -1209,6 +1217,11 @@ impl Server {
     /// the session is busy. The `trigger == triggerTask` branch lives in
     /// [`Server::wake_turn`], because a wake turn needs no HTTP reply and is
     /// awaited by the wake loop that admitted it.
+    /// Starts or queues a user turn. A turn whose `input_id` this session
+    /// started recently is returned again instead of starting a second one;
+    /// one whose `input_id` the transcript already holds fails with
+    /// [`DUPLICATE_INPUT`].
+    #[allow(clippy::too_many_arguments)]
     fn start_turn(
         self: &Arc<Self>,
         session: &Arc<OpenSession>,
@@ -1217,9 +1230,18 @@ impl Server {
         (channel, origin): (Option<Channel>, Option<crate::schedule::Origin>),
         queue: bool,
         request_id: &str,
+        input_id: Option<String>,
     ) -> Result<Arc<Turn>, String> {
         let (turn, running) = {
             let mut state = session.lock();
+            if let Some(input_id) = &input_id {
+                if let Some((_, turn)) = state.inputs.iter().find(|(id, _)| id == input_id) {
+                    return Ok(Arc::clone(turn));
+                }
+                if session.ctrl.has_input(input_id) {
+                    return Err(DUPLICATE_INPUT.to_string());
+                }
+            }
             let busy = state.busy();
             if busy && !queue {
                 return Err(TURN_ACTIVE.to_string());
@@ -1231,7 +1253,7 @@ impl Server {
             let cancel = self.cancel.child_token();
             let session_id = session.ctrl.info().session_id;
             let log = Arc::clone(&self.log);
-            if busy {
+            let (turn, running) = if busy {
                 let turn = Arc::new(Turn::queued(id, TRIGGER_USER, cancel).with_log(
                     log,
                     &session_id,
@@ -1243,6 +1265,7 @@ impl Server {
                     image,
                     channel,
                     origin,
+                    input_id: input_id.clone(),
                 });
                 (turn, None)
             } else {
@@ -1253,12 +1276,26 @@ impl Server {
                 ));
                 turn.start_running(session.ctrl.history().len());
                 state.turn = Some(Arc::clone(&turn));
-                (turn, Some((text, image, channel, origin)))
+                (turn, Some((text, image, channel, origin, input_id.clone())))
+            };
+            if let Some(input_id) = input_id {
+                if state.inputs.len() >= MAX_REMEMBERED_INPUTS {
+                    state.inputs.pop_front();
+                }
+                state.inputs.push_back((input_id, Arc::clone(&turn)));
             }
+            (turn, running)
         };
         self.bump_status();
-        if let Some((text, image, channel, origin)) = running {
-            self.spawn_user_turn(session, Arc::clone(&turn), text, image, channel, origin);
+        if let Some((text, image, channel, origin, input_id)) = running {
+            self.spawn_user_turn(
+                session,
+                Arc::clone(&turn),
+                text,
+                image,
+                (channel, origin),
+                input_id,
+            );
         }
         Ok(turn)
     }
@@ -1290,8 +1327,8 @@ impl Server {
                 next.turn,
                 next.text,
                 next.image,
-                next.channel,
-                next.origin,
+                (next.channel, next.origin),
+                next.input_id,
             );
         }
     }
@@ -1303,8 +1340,8 @@ impl Server {
         turn: Arc<Turn>,
         text: String,
         image: Option<Block>,
-        channel: Option<Channel>,
-        origin: Option<crate::schedule::Origin>,
+        (channel, origin): (Option<Channel>, Option<crate::schedule::Origin>),
+        input_id: Option<String>,
     ) {
         turn.push_event(WireEvent::user_message(&text, image.is_some()));
         self.metrics.turn_started();
@@ -1318,9 +1355,11 @@ impl Server {
                 Some(image) => Step::Image(&text, image),
                 None => Step::Text(&text),
             };
+            session.ctrl.set_next_input_id(input_id);
             server
                 .run_turn(&session, &turn, first, TRIGGER_USER, channel, origin)
                 .await;
+            session.ctrl.set_next_input_id(None);
             server.start_next(&session);
             // A notification that landed too late for this turn's own drain is
             // caught by the wake loop's end-of-turn check.
@@ -1899,7 +1938,14 @@ struct StartTurnBody {
     /// `chat:<platform>:<chat id>`. Absent means `web`.
     #[serde(default)]
     origin: Option<String>,
+    /// The client's stable id for this input, so a retry is not run twice.
+    #[serde(default)]
+    input_id: Option<String>,
 }
+
+/// The `400` message for a malformed `input_id`.
+pub(crate) const INVALID_INPUT_ID: &str =
+    "input_id must be 1 to 128 ASCII letters, digits, '.', '_', ':' or '-'";
 
 #[derive(Debug, Deserialize)]
 struct StartTurnImage {
@@ -1962,6 +2008,13 @@ async fn start_turn(
     }
     let stream = parsed.stream.unwrap_or(true);
 
+    if parsed
+        .input_id
+        .as_deref()
+        .is_some_and(|id| !otto_core::model::is_input_id(id))
+    {
+        return bad_request(INVALID_INPUT_ID);
+    }
     let turn = match server.start_turn(
         &session,
         parsed.text,
@@ -1969,8 +2022,12 @@ async fn start_turn(
         (parsed.channel, Some(origin)),
         parsed.queue,
         &request_id,
+        parsed.input_id,
     ) {
         Ok(turn) => turn,
+        Err(error) if error == DUPLICATE_INPUT => {
+            return error_response(StatusCode::CONFLICT, "duplicate_input", DUPLICATE_INPUT);
+        }
         Err(error) if error == TURN_ACTIVE => {
             return turn_active("a turn is already active for this session");
         }
@@ -7132,6 +7189,45 @@ mod tests {
         assert_eq!(done["trigger"], turn::TRIGGER_TASK);
     }
 
+    /// A client retry of `POST .../turns` with the same `input_id` returns
+    /// the turn it already started; after a restart, when only the
+    /// transcript remembers the id, it answers `409 duplicate_input`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_repeated_input_id_starts_one_turn() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["ok".to_string()],
+                ..Script::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let path = format!("/v1/sessions/{id}/turns");
+        let body =
+            serde_json::json!({"text": "hi", "stream": false, "input_id": "req-1"}).to_string();
+        let first = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+        let again = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+        assert_eq!(first.json()["id"], again.json()["id"]);
+        assert_eq!(harness.provider.texts().len(), 1, "the retry ran no turn");
+
+        let session = harness.server.lookup(&id).expect("session");
+        assert!(
+            session.ctrl.has_input("req-1"),
+            "the user message carries it"
+        );
+        // A restart forgets the turns the server started.
+        session.lock().inputs.clear();
+        let after_restart = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(after_restart.status, StatusCode::CONFLICT);
+        assert_eq!(after_restart.json()["error"]["code"], "duplicate_input");
+
+        let bad = serde_json::json!({"text": "hi", "input_id": "no spaces"}).to_string();
+        let rejected = harness.send("POST", &path, Some(&bad)).await;
+        assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+    }
+
     /// A wake turn on a session whose last turn never ended resumes it and
     /// is reported with trigger `recovery`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7723,6 +7819,7 @@ mod tests {
             image: None,
             channel: None,
             origin: None,
+            input_id: None,
         });
 
         tasks.notifications().push(notification());
@@ -7785,6 +7882,7 @@ mod tests {
             image: None,
             channel: None,
             origin: None,
+            input_id: None,
         });
         assert!(state.busy());
     }

@@ -884,6 +884,11 @@ impl Runner {
         &self.system_prompt
     }
 
+    /// Records the client's input id for the next run's user message.
+    pub fn set_next_input_id(&self, input_id: Option<String>) {
+        self.agent.set_next_input_id(input_id);
+    }
+
     pub(crate) fn task_control(&self) -> Arc<crate::app::task_control::TaskControl> {
         Arc::clone(&self.task_control)
     }

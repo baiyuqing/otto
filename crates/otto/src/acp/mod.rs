@@ -925,7 +925,7 @@ impl Connection {
         text: String,
         channel: Option<Channel>,
         origin: Option<Origin>,
-        request_id: Option<&str>,
+        (request_id, input_id): (Option<&str>, Option<&str>),
         cancel: &CancellationToken,
     ) -> Reply {
         if let Some(command) = command::parse(&text) {
@@ -934,8 +934,19 @@ impl Connection {
         match &self.backend {
             Backend::Local(local) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
-                self.local_prompt(local, &session, session_id, text, (channel, origin), cancel)
-                    .await
+                if let Some(input_id) = input_id {
+                    if session.controller.has_input(input_id) {
+                        return Err(invalid_params(crate::app::task_control::DUPLICATE_INPUT));
+                    }
+                    session
+                        .controller
+                        .set_next_input_id(Some(input_id.to_string()));
+                }
+                let reply = self
+                    .local_prompt(local, &session, session_id, text, (channel, origin), cancel)
+                    .await;
+                session.controller.set_next_input_id(None);
+                reply
             }
             Backend::Attach(relay) => {
                 relay
@@ -944,7 +955,7 @@ impl Connection {
                         session_id,
                         &text,
                         (channel, origin.as_ref()),
-                        request_id,
+                        (request_id, input_id),
                         cancel,
                     )
                     .await
@@ -976,7 +987,7 @@ impl Connection {
                         session_id,
                         &text,
                         (channel, origin.as_ref()),
-                        request_id,
+                        (request_id, None),
                         cancel,
                     )
                     .await
@@ -990,17 +1001,18 @@ impl Connection {
         &self,
         session_id: &str,
         text: &str,
+        input_id: Option<&str>,
     ) -> Result<ActiveInputAdmission, agent_client_protocol_schema::v1::Error> {
         match &self.backend {
             Backend::Local(local) => local
                 .session(session_id)
                 .ok_or_else(unknown_session)?
                 .controller
-                .admit_active_input(text)
+                .admit_active_input_with(text, input_id)
                 .map_err(|message| error(INTERNAL_ERROR, message)),
             Backend::Attach(relay) => relay
                 .client
-                .admit_input(session_id, text)
+                .admit_input(session_id, text, input_id)
                 .await
                 .map_err(|failure| relay.task_control_error(failure)),
         }
@@ -1572,6 +1584,25 @@ fn parse_request_id(params: &Value) -> Option<String> {
     Some(crate::log::request_id(raw.as_bytes())).filter(|id| !id.is_empty())
 }
 
+/// The idempotency key of a `session/prompt`, from `_meta.otto.inputId`: a
+/// retry with the same id in the same session runs once. Unlike
+/// `requestId`, a malformed value rejects the prompt.
+fn parse_input_id(
+    params: &Value,
+) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
+    let Some(raw) = params
+        .get("_meta")
+        .and_then(|meta| meta.get("otto"))
+        .and_then(|otto| otto.get("inputId"))
+    else {
+        return Ok(None);
+    };
+    match raw.as_str() {
+        Some(id) if otto_core::model::is_input_id(id) => Ok(Some(id.to_string())),
+        _ => Err(invalid_params(crate::server::INVALID_INPUT_ID)),
+    }
+}
+
 fn channel_name(channel: Channel) -> &'static str {
     match channel {
         Channel::Telegram => "telegram",
@@ -1874,6 +1905,10 @@ impl Dispatcher {
         };
         let origin = parse_origin(params, channel);
         let request_id = parse_request_id(params);
+        let input_id = match parse_input_id(params) {
+            Ok(input_id) => input_id,
+            Err(failure) => return connection.reply(id, Err(failure)),
+        };
         let Some(slot) = connection.slot(&session_id) else {
             return connection.reply(id, Err(unknown_session()));
         };
@@ -1987,7 +2022,10 @@ impl Dispatcher {
         }
         let stop = self.stop.clone();
         self.tasks.spawn(async move {
-            match connection.admit_prompt(&session_id, &text).await {
+            match connection
+                .admit_prompt(&session_id, &text, input_id.as_deref())
+                .await
+            {
                 Ok(ActiveInputAdmission::Steered) => {
                     connection.say(
                         &session_id,
@@ -2024,7 +2062,7 @@ impl Dispatcher {
                             text,
                             channel,
                             origin,
-                            request_id.as_deref(),
+                            (request_id.as_deref(), input_id.as_deref()),
                             &token,
                         )
                         .await;
@@ -2043,7 +2081,7 @@ impl Dispatcher {
                     text,
                     channel,
                     origin,
-                    request_id.as_deref(),
+                    (request_id.as_deref(), input_id.as_deref()),
                     &token,
                 )
                 .await;
@@ -2423,6 +2461,17 @@ mod channel_tests {
         assert_eq!(waiting.await.unwrap(), second);
         assert!(canceled.is_cancelled());
         slot.finish_followup_admission(second);
+    }
+
+    #[test]
+    fn input_id_metadata_is_optional_but_must_be_well_formed() {
+        assert_eq!(parse_input_id(&json!({})).unwrap(), None);
+        assert_eq!(
+            parse_input_id(&json!({"_meta": {"otto": {"inputId": "chat:telegram:c1:7"}}})).unwrap(),
+            Some("chat:telegram:c1:7".to_string())
+        );
+        assert!(parse_input_id(&json!({"_meta": {"otto": {"inputId": "bad id"}}})).is_err());
+        assert!(parse_input_id(&json!({"_meta": {"otto": {"inputId": 7}}})).is_err());
     }
 
     #[test]

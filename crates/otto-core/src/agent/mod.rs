@@ -173,9 +173,23 @@ pub struct Agent<P, T, S> {
     /// The memory block the last user turn recalled, for the context report.
     last_memory_context: std::sync::Mutex<String>,
     hook_turn_id: std::sync::Mutex<String>,
+    /// The client input id of the next run's user message; taken by every
+    /// run, used or not. See [`Agent::set_next_input_id`].
+    next_input_id: std::sync::Mutex<Option<String>>,
 }
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
+    /// Records the client's input id for the user message of the next run,
+    /// so a client retry can be recognised in the transcript
+    /// ([`Session::has_input`]). Every run takes it, whether or not it
+    /// appends a user message.
+    pub fn set_next_input_id(&self, input_id: Option<String>) {
+        *self
+            .next_input_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = input_id;
+    }
+
     /// An agent that redacts nothing.
     pub fn new(provider: P, tools: T, session: S, options: Options) -> Self {
         Self::with_redactor(provider, tools, session, options, Redactor::new(&[]))
@@ -214,6 +228,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             options,
             redactor,
             hook_turn_id: std::sync::Mutex::new(String::new()),
+            next_input_id: std::sync::Mutex::new(None),
             last_memory_context: std::sync::Mutex::default(),
         }
     }
@@ -491,6 +506,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
         followup: bool,
     ) -> Result<(), AgentError> {
+        let input_id = self
+            .next_input_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         if !self.redactor.allows_dynamic_content() {
             return self.run_with_incomplete_redactions(emit, control);
         }
@@ -512,6 +532,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 control,
                 followup,
                 (&turn_id, resumes.as_deref()),
+                input_id,
             )
             .await;
         self.end_turn(turn_id, &result, control).await;
@@ -596,6 +617,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
         followup: bool,
         turn: (&str, Option<&str>),
+        input_id: Option<String>,
     ) -> Result<(), AgentError> {
         let text = trim_go_space(user_text);
         let steering = self.options.steering.begin_turn(turn.0, turn.1);
@@ -666,6 +688,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 display: followup,
                 created_at: (self.options.now)(),
                 blocks,
+                input_id: if followup {
+                    String::new()
+                } else {
+                    input_id.unwrap_or_default()
+                },
                 ..Message::default()
             };
             if let Err(source) = self.session.append(user).await {

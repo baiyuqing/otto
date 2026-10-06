@@ -756,10 +756,22 @@ that tool set differs from the one recorded for the session, or the session has
 history and was written before Otto recorded tool sets, Otto appends one
 `capability_update` message before the run's user message. It is shown in the
 transcript and stays in the session history, so every later request contains
-it. It lists the added and removed tool names, or the current tool names when
-the earlier tool set was not recorded: sessions written by older Otto versions,
-and sub-agents started with `context: inherit`. A new session gets no such
-message.
+it. It lists the added and removed tool names and the names of tools whose
+description or parameters changed. When the Otto version differs from the
+recorded one, the message also states both versions, and when `otto_help` is
+available it states that earlier `otto_help` results labelled with the old
+version describe the previous version. When the earlier tool set was not
+recorded (sessions written by older Otto versions, and sub-agents started with
+`context: inherit`), it lists the current tool names instead. A new session
+gets no such message.
+
+Otto stores, in an `otto.capabilities` session entry, the tool names, one
+digest per tool of its description and parameters, and the Otto package
+version. A field missing from an entry written by an older Otto is unknown and
+produces no line. A version change with no tool change and no `otto_help`
+produces no message. The message lists names, not content. Changes to the
+manual sections, the system prompt policy text, workspace instructions, and the
+skill and agent catalogs are not reported individually.
 
 UI mode precedence:
 
@@ -2415,7 +2427,7 @@ are not rows in `tasks.db`. If the child receives an `agent_send` message, it
 is written into that child's transcript as parent-message context when the
 child reaches the next normal notification checkpoint.
 
-### Shutdown
+### Agent server shutdown
 
 `otto serve` shuts down on `SIGINT` or `SIGTERM`: it stops accepting new
 requests, cancels every active turn and compaction, closes every session,
@@ -2597,7 +2609,7 @@ If the wake turn writes assistant text, Otto sends it after the turn as one
 for each session and increases by one. A wake turn that writes no text sends
 nothing.
 
-### Shutdown
+### ACP agent server shutdown
 
 End of file on stdin, `SIGINT`, or `SIGTERM` cancels every running prompt,
 answers each with `cancelled`, closes every session, and exits `0`. A
@@ -2715,7 +2727,7 @@ Feishu rejects exits with status 1 and `otto-connect: <message>`. A Feishu
 connection that fails for another reason, such as no network, is retried by
 the SDK and each failure is logged as `feishu connection error`.
 
-### Configuration
+### Chat connector configuration
 
 `~/.config/otto/connect.toml`, or the file given with `--config`:
 

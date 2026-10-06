@@ -28,8 +28,8 @@ pub mod types;
 pub use codec::{PiRecord, decode_pi_entry, decode_pi_file, decode_pi_header, encode_pi_record};
 pub use context::{
     BRANCH_CONTEXT_TYPE, CAPABILITIES_CUSTOM_TYPE, CAPABILITY_UPDATE_CONTEXT_TYPE,
-    COMPACTION_CONTEXT_TYPE, ContextEntryIndex, OTTO_RUNTIME_CUSTOM_TYPE, ResolvedContext,
-    active_context_path, build_context, decode_capabilities, encode_capabilities,
+    COMPACTION_CONTEXT_TYPE, Capabilities, ContextEntryIndex, OTTO_RUNTIME_CUSTOM_TYPE,
+    ResolvedContext, active_context_path, build_context, decode_capabilities, encode_capabilities,
     index_context_entries, is_pi_entry_id, new_context_message,
 };
 pub use operation::{
@@ -228,10 +228,10 @@ pub trait Session {
     /// [`pi_entry_to_context_messages`]: crate::session::context::pi_entry_to_context_messages
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError>;
 
-    /// The tool names in the latest `otto.capabilities` record on the active
-    /// path, or `None` when there is none. Like `append_custom`, it has no
+    /// The latest `otto.capabilities` record on the active path, or `None`
+    /// when there is none. Like `append_custom`, it has no
     /// default body: every implementation forwards or states its behavior.
-    fn observed_tools(&self) -> Option<Vec<String>>;
+    fn observed_capabilities(&self) -> Option<Capabilities>;
 }
 
 /// Tool calls from the most recent assistant message that have no result yet.
@@ -251,7 +251,7 @@ struct State {
     checkpoint_counter: u64,
     operation_facts: Vec<OperationFact>,
     operation_ledger: OperationLedger,
-    observed_tools: Option<Vec<String>>,
+    observed_capabilities: Option<Capabilities>,
 }
 
 impl State {
@@ -490,19 +490,22 @@ impl Session for MemorySession {
             .clone()
     }
 
-    fn observed_tools(&self) -> Option<Vec<String>> {
+    fn observed_capabilities(&self) -> Option<Capabilities> {
         self.state
             .lock()
             .expect("session mutex")
-            .observed_tools
+            .observed_capabilities
             .clone()
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         if custom_type == CAPABILITIES_CUSTOM_TYPE {
-            let tools = decode_capabilities(data)
+            let capabilities = decode_capabilities(data)
                 .ok_or_else(|| SessionError::Persist("malformed otto.capabilities data".into()))?;
-            self.state.lock().expect("session mutex").observed_tools = Some(tools);
+            self.state
+                .lock()
+                .expect("session mutex")
+                .observed_capabilities = Some(capabilities);
             return Ok(());
         }
         if custom_type != OPERATION_CUSTOM_TYPE {

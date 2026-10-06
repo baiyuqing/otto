@@ -8,7 +8,7 @@
 //! Concurrency: no shared state. Errors: every failure is a [`PiError`],
 //! classified by [`PiError::kind`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 
@@ -78,9 +78,9 @@ pub struct ResolvedContext {
     pub session_name: String,
     pub thinking_level: String,
     pub operation_ledger: OperationLedger,
-    /// The tool names in the latest `otto.capabilities` entry on the active
-    /// path, or `None` when there is none or it is malformed.
-    pub observed_tools: Option<Vec<String>>,
+    /// The latest `otto.capabilities` entry on the active path, or `None`
+    /// when there is none or it is malformed.
+    pub observed_capabilities: Option<Capabilities>,
 }
 
 impl Default for ResolvedContext {
@@ -94,7 +94,7 @@ impl Default for ResolvedContext {
             session_name: String::new(),
             thinking_level: "off".into(),
             operation_ledger: OperationLedger::default(),
-            observed_tools: None,
+            observed_capabilities: None,
         }
     }
 }
@@ -221,8 +221,8 @@ pub fn build_context(
                     latest_runtime = Some(decode_runtime_metadata(custom.data.as_deref())?);
                 } else if custom.custom_type == CAPABILITIES_CUSTOM_TYPE {
                     let raw = custom.data.as_deref().map(RawValue::get);
-                    resolved.observed_tools = decode_capabilities(raw.unwrap_or_default());
-                    if resolved.observed_tools.is_none() {
+                    resolved.observed_capabilities = decode_capabilities(raw.unwrap_or_default());
+                    if resolved.observed_capabilities.is_none() {
                         collector.add(format!(
                             "ignored malformed {CAPABILITIES_CUSTOM_TYPE} entry {}",
                             entry.id
@@ -902,22 +902,32 @@ fn sanitize_warning_type(entry_type: &str) -> String {
     sanitized
 }
 
-/// Decodes `{"tools":[...]}` into sorted, deduplicated names; `None` when the
-/// data has another shape.
-pub fn decode_capabilities(data: &str) -> Option<Vec<String>> {
-    #[derive(serde::Deserialize)]
-    struct Data {
-        tools: Vec<String>,
-    }
-    let mut tools = serde_json::from_str::<Data>(data).ok()?.tools;
-    tools.sort();
-    tools.dedup();
-    Some(tools)
+/// The capability state recorded in an `otto.capabilities` custom entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Capabilities {
+    /// Sorted, deduplicated tool names.
+    pub tools: Vec<String>,
+    /// Digest per tool name of its description and parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definitions: Option<BTreeMap<String, String>>,
+    /// The Otto package version that wrote the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
-/// Encodes sorted, deduplicated tool names as `otto.capabilities` data.
-pub fn encode_capabilities(tools: &[String]) -> String {
-    serde_json::json!({ "tools": tools }).to_string()
+/// Decodes `otto.capabilities` data, sorting and deduplicating the tool
+/// names; `None` when the data has another shape. Fields absent from older
+/// records decode as `None` and unknown fields are ignored.
+pub fn decode_capabilities(data: &str) -> Option<Capabilities> {
+    let mut capabilities = serde_json::from_str::<Capabilities>(data).ok()?;
+    capabilities.tools.sort();
+    capabilities.tools.dedup();
+    Some(capabilities)
+}
+
+/// Encodes a [`Capabilities`] value as `otto.capabilities` data.
+pub fn encode_capabilities(capabilities: &Capabilities) -> String {
+    serde_json::to_string(capabilities).expect("capabilities serialize")
 }
 
 /// Decodes an `otto.runtime` custom entry's `data` field.
@@ -1827,6 +1837,32 @@ mod tests {
             fn $name() $body
         };
     }
+
+    test!(capabilities_decode_old_records_and_ignore_unknown_fields {
+        let old = decode_capabilities(r#"{"tools":["b","a","a"]}"#).expect("old record");
+        assert_eq!(
+            old,
+            Capabilities {
+                tools: vec!["a".into(), "b".into()],
+                ..Capabilities::default()
+            }
+        );
+        let extra = decode_capabilities(r#"{"tools":["a"],"future":1}"#).expect("extra field");
+        assert_eq!(extra.tools, ["a"]);
+        assert_eq!(decode_capabilities(r#"{"tools":"a"}"#), None);
+    });
+
+    test!(capabilities_round_trip_all_fields {
+        let capabilities = Capabilities {
+            tools: vec!["a".into()],
+            definitions: Some(BTreeMap::from([("a".into(), "d1".into())])),
+            version: Some("0.2.1".into()),
+        };
+        assert_eq!(
+            decode_capabilities(&encode_capabilities(&capabilities)),
+            Some(capabilities)
+        );
+    });
 
     fn entry(entry_type: &str, id: &str, parent_id: Option<&str>) -> PiEntry {
         PiEntry::new(

@@ -119,6 +119,9 @@ pub struct Options {
     pub steering: Arc<steering::Steering>,
     /// The subagent task registry, closed by [`Agent::close`].
     pub tasks: Option<Arc<dyn TaskRegistry + Send + Sync>>,
+    /// The running Otto package version, recorded with the tool set. Empty
+    /// when unknown.
+    pub version: String,
 }
 
 /// The default clock returns the zero time and the default identifier
@@ -149,6 +152,7 @@ impl Default for Options {
             mailbox: Arc::new(InMemoryMailbox::default()),
             steering: Arc::new(steering::Steering::default()),
             tasks: None,
+            version: String::new(),
         }
     }
 }
@@ -1006,20 +1010,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         Ok(())
     }
 
-    /// Appends the one-time tool-set change notice as a context message, then
-    /// the `otto.capabilities` record. The message goes first: a failure
+    /// Appends the one-time capability change notice as a context message,
+    /// then the `otto.capabilities` record. The message goes first: a failure
     /// between the two repeats the notice, while the reverse order could lose
-    /// it.
+    /// it. The record is also rewritten, without a notice, when only fields
+    /// that produce no notice differ, such as the Otto version.
     async fn announce_tool_changes(&self) -> Result<(), AgentError> {
-        let current = self.current_tool_names();
-        let observed = self.session.observed_tools();
+        let current = self.current_capabilities();
+        let observed = self.session.observed_capabilities();
         let has_history = self.session.latest_compaction().is_some()
             || self
                 .session
                 .model_messages()
                 .iter()
                 .any(|message| message.role == Role::Assistant);
-        let notice = capabilities::notice(observed.as_deref(), &current, has_history);
+        let notice = capabilities::notice(observed.as_ref(), &current, has_history);
         if !notice.is_empty() {
             let message = crate::session::context::new_context_message(
                 &(self.options.new_id)(),
@@ -1037,7 +1042,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     source,
                 })?;
         }
-        if observed.as_deref() != Some(&current[..]) {
+        if observed.as_ref() != Some(&current) {
             self.session
                 .append_custom(
                     crate::session::CAPABILITIES_CUSTOM_TYPE,
@@ -1249,17 +1254,23 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
     }
 
-    /// The sorted, deduplicated names of the tool definitions a request sends.
-    fn current_tool_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .tools
-            .definitions()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect();
-        names.sort();
-        names.dedup();
-        names
+    /// The capabilities a request sends: sorted, deduplicated tool names,
+    /// their definition digests and the version.
+    fn current_capabilities(&self) -> crate::session::Capabilities {
+        let definitions = self.tools.definitions();
+        let mut tools: Vec<String> = definitions.iter().map(|d| d.name.clone()).collect();
+        tools.sort();
+        tools.dedup();
+        crate::session::Capabilities {
+            tools,
+            definitions: Some(
+                definitions
+                    .iter()
+                    .map(|d| (d.name.clone(), capabilities::definition_digest(d)))
+                    .collect(),
+            ),
+            version: (!self.options.version.is_empty()).then(|| self.options.version.clone()),
+        }
     }
 
     /// Builds the request for one ordinary provider step and estimates it.

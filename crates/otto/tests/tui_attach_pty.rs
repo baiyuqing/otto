@@ -13,7 +13,10 @@ use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
 mod common;
-use common::pty::{raw_contains, spawn, wait_for_raw_bytes, wait_for_screen_text, wait_until};
+use common::pty::{
+    raw_contains, spawn, wait_for_raw_bytes, wait_for_screen_text, wait_for_screen_text_gone,
+    wait_until,
+};
 use common::{Script, serve, text_reply};
 
 fn otto(home: &Path) -> Command {
@@ -31,6 +34,7 @@ fn otto(home: &Path) -> Command {
 }
 
 const DISCONNECTED: &str = "disconnected from otto serve";
+const BUSY_TITLE: &str = "Esc cancels turn";
 
 fn healthy(socket: &Path) -> bool {
     let Ok(mut stream) = UnixStream::connect(socket) else {
@@ -113,9 +117,15 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
     const REPLY: &str = "reply visible over the attach pty";
     const OTHER_PROMPT: &str = "prompt from another client";
     const OTHER_REPLY: &str = "reply to the other client";
+    const UNICODE_PROMPT: &str = "中文对话";
+    const UNICODE_REPLY: &str = "reply to the Unicode prompt";
     let served = Arc::new(AtomicUsize::new(0));
-    let (base_url, _requests) = serve(Script {
-        replies: vec![text_reply(REPLY), text_reply(OTHER_REPLY)],
+    let (base_url, requests) = serve(Script {
+        replies: vec![
+            text_reply(REPLY),
+            text_reply(OTHER_REPLY),
+            text_reply(UNICODE_REPLY),
+        ],
         served: Arc::clone(&served),
     });
     std::fs::create_dir_all(home.path().join("Library/Caches")).expect("cache base");
@@ -149,6 +159,8 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
         .expect("type the prompt");
     wait_for_screen_text(&shared, &format!("❯ {PROMPT}"));
     wait_for_screen_text(&shared, REPLY);
+    wait_for_raw_bytes(&shared, BUSY_TITLE.as_bytes());
+    wait_for_screen_text_gone(&shared, BUSY_TITLE);
 
     master.write_all(b"/model\r").expect("type /model");
     wait_for_screen_text(&shared, "/model: not available with --attach");
@@ -169,6 +181,7 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
         .as_str()
         .expect("session id")
         .to_string();
+    let remote_turn_raw_before = shared.raw.lock().unwrap().len();
     http(
         &socket,
         "POST",
@@ -177,6 +190,35 @@ fn attach_renders_a_served_turn_rejects_local_commands_and_restores_the_terminal
     );
     wait_for_screen_text(&shared, &format!("❯ {OTHER_PROMPT}"));
     wait_for_screen_text(&shared, OTHER_REPLY);
+    wait_until(&shared, "the remote turn's busy composer", |shared| {
+        shared.raw.lock().unwrap()[remote_turn_raw_before..]
+            .windows(BUSY_TITLE.len())
+            .any(|window| window == BUSY_TITLE.as_bytes())
+    });
+    wait_for_screen_text_gone(&shared, BUSY_TITLE);
+
+    master
+        .write_all(b"/context\r")
+        .expect("open remote context");
+    wait_for_screen_text(&shared, "Context");
+    master
+        .write_all(b"\x1b")
+        .expect("return to attached composer");
+    wait_for_screen_text_gone(&shared, "Context");
+
+    master
+        .write_all("中文会话\x1b[D\x7f对\r".as_bytes())
+        .expect("edit and submit a Unicode prompt");
+    wait_for_screen_text(&shared, &format!("❯ {UNICODE_PROMPT}"));
+    wait_for_screen_text(&shared, UNICODE_REPLY);
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|body| body.contains(UNICODE_PROMPT)),
+        "the provider never received the edited Unicode prompt"
+    );
 
     // With serve gone the prompt is refused and the loop keeps retrying; the
     // session is resumed when serve returns on the same socket.

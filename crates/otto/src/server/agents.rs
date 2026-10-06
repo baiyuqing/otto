@@ -5,6 +5,7 @@
 //! [`crate::subagent::record`] and answer for tasks started by any otto
 //! process on the machine, not only ones this server has open.
 
+use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -56,6 +57,50 @@ fn cancelable(server: &Server, row: &TaskRow) -> bool {
     !is_final_status(&row.status) && server.lookup(&row.parent_session).is_some()
 }
 
+fn task_history(row: &TaskRow) -> Option<Vec<Message>> {
+    if row.session_path.is_empty()
+        || row.task_id.is_empty()
+        || !row
+            .task_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
+    }
+
+    let parent_path = FsPath::new(&row.parent_session_path);
+    let child_dir = parent_path.with_extension("");
+    let transcript_path = FsPath::new(&row.session_path);
+    let file_name = transcript_path.file_name().and_then(|name| name.to_str())?;
+    if transcript_path.parent() != Some(child_dir.as_path())
+        || !file_name.starts_with(&format!("{}-", row.task_id))
+        || transcript_path.extension().and_then(|ext| ext.to_str()) != Some("jsonl")
+    {
+        return None;
+    }
+
+    let Ok(directory_metadata) = std::fs::symlink_metadata(&child_dir) else {
+        return None;
+    };
+    let Ok(file_metadata) = std::fs::symlink_metadata(transcript_path) else {
+        return None;
+    };
+    if !directory_metadata.file_type().is_dir() || !file_metadata.file_type().is_file() {
+        return None;
+    }
+    let Ok(canonical_dir) = std::fs::canonicalize(&child_dir) else {
+        return None;
+    };
+    let Ok(canonical_file) = std::fs::canonicalize(transcript_path) else {
+        return None;
+    };
+    if canonical_file.parent() != Some(canonical_dir.as_path()) {
+        return None;
+    }
+
+    crate::session::Store::read_transcript(canonical_file).ok()
+}
+
 pub async fn list(State(server): State<Arc<Server>>, Query(filter): Query<ListFilter>) -> Response {
     let query = record::ListQuery {
         status: filter.status,
@@ -91,21 +136,17 @@ pub async fn get(
 ) -> Response {
     match server.factory.tasks_get(&parent_session, &task_id) {
         Ok(Some(row)) => {
+            if row.parent_session != parent_session || row.task_id != task_id {
+                return not_found("task not found");
+            }
             let cancelable = cancelable(&server, &row);
-            let (history, transcript_missing) = if row.session_path.is_empty() {
-                (Vec::new(), true)
-            } else {
-                match crate::session::Store::read_transcript(&row.session_path) {
-                    Ok(messages) => (messages, false),
-                    Err(_) => (Vec::new(), true),
-                }
-            };
+            let history = task_history(&row);
             json_response(
                 StatusCode::OK,
                 &TaskDetailResponse {
                     task: TaskRowResponse { row, cancelable },
-                    history,
-                    transcript_missing,
+                    transcript_missing: history.is_none(),
+                    history: history.unwrap_or_default(),
                 },
             )
         }

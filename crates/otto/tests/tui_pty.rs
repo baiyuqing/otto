@@ -25,16 +25,17 @@
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};
+use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 
 mod common;
 use common::pty::{
     Screen, Shared, raw_contains, wait_for_raw_bytes, wait_for_screen_text,
-    wait_for_screen_text_gone,
+    wait_for_screen_text_gone, wait_until,
 };
-use common::{Script, serve, text_reply};
 
 const WIDTH: usize = 120;
 const HEIGHT: usize = 30;
@@ -43,6 +44,90 @@ const HEIGHT: usize = 30;
 /// Esc cancels turn" and "Queued next input · Ctrl+U withdraw · Esc cancels
 /// turn".
 const BUSY_TITLE: &str = "Esc cancels turn";
+
+/// Returns the usual complete reply first, then holds the second provider
+/// stream after its first text delta until the test releases it.
+fn serve_with_held_second_turn(
+    first_reply: &str,
+    held_text: &str,
+    released_text: &str,
+) -> (String, Arc<AtomicUsize>, mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind provider");
+    let base_url = format!("http://{}", listener.local_addr().expect("address"));
+    let served = Arc::new(AtomicUsize::new(0));
+    let received = Arc::clone(&served);
+    let first_reply = common::text_reply(first_reply);
+    let prefix = format!(
+        "data: {}\n\n",
+        serde_json::json!({"choices": [{"delta": {"content": held_text}}]})
+    );
+    let tail = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({"choices": [{"delta": {"content": released_text}}]}),
+        serde_json::json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    );
+    let (release, gate) = mpsc::channel();
+
+    thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else { continue };
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let header_end = loop {
+                if let Some(index) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break 0,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            };
+            if header_end == 0 {
+                continue;
+            }
+            let head = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut body = request[header_end..].to_vec();
+            while body.len() < length {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => body.extend_from_slice(&buffer[..read]),
+                }
+            }
+            match received.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{first_reply}",
+                        first_reply.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                1 => {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                    );
+                    let _ = stream.write_all(prefix.as_bytes());
+                    let _ = stream.flush();
+                    let _ = gate.recv();
+                    let _ = stream.write_all(tail.as_bytes());
+                }
+                _ => {
+                    let fallback = common::text_reply("unexpected extra provider request");
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{fallback}",
+                        fallback.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            }
+        }
+    });
+    (base_url, served, release)
+}
 
 #[test]
 fn screen_handles_carriage_return_and_line_feed() {
@@ -67,13 +152,14 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     // so don't synchronize on workspace text here.
     const STARTUP_MARKER: &str = "└";
 
-    let served = Arc::new(AtomicUsize::new(0));
     const PROMPT: &str = "send the scripted prompt";
     const REPLY: &str = "reply visible over the pty smoke test";
-    let (base_url, _requests) = serve(Script {
-        replies: vec![text_reply(REPLY)],
-        served: Arc::clone(&served),
-    });
+    const SECOND_PROMPT: &str = "keep the live turn running";
+    const HELD_TEXT: &str = "stream held";
+    const RELEASED_SUFFIX: &str = " then released";
+    const RELEASED_TEXT: &str = "stream held then released";
+    let (base_url, server_count, release_provider) =
+        serve_with_held_second_turn(REPLY, HELD_TEXT, RELEASED_SUFFIX);
 
     // Seatbelt's private state directory must pre-exist even though this
     // smoke test issues no tool calls (see binary_e2e.rs for the same
@@ -192,8 +278,58 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         "the submitted prompt is missing from the transcript:\n{screen}"
     );
     assert!(
-        served.load(Ordering::SeqCst) >= 1,
+        server_count.load(Ordering::SeqCst) >= 1,
         "the loopback server was never called"
+    );
+
+    master.write_all(b"/rename\r").expect("open rename form");
+    wait_for_screen_text(&shared, "Rename session");
+    master
+        .write_all("中文会话".as_bytes())
+        .expect("type the original Unicode name");
+    master
+        .write_all(b"\x1b[D\x7f")
+        .expect("move left and delete one Unicode character");
+    master
+        .write_all("对\r".as_bytes())
+        .expect("finish the Unicode name and submit");
+    wait_for_screen_text(&shared, "Session name: 中文对话");
+
+    master
+        .write_all(b"/session\r")
+        .expect("open session details");
+    wait_for_screen_text(&shared, "Workspace:");
+    wait_for_screen_text(&shared, "中文对话");
+    master.write_all(b"\x1b").expect("return to the composer");
+    wait_for_screen_text_gone(&shared, "Workspace:");
+
+    master
+        .write_all(format!("{SECOND_PROMPT}\r").as_bytes())
+        .expect("start the held turn");
+    wait_for_screen_text(&shared, HELD_TEXT);
+    wait_for_raw_bytes(&shared, BUSY_TITLE.as_bytes());
+    let raw_before_context = shared.raw.lock().unwrap().len();
+    master
+        .write_all(b"/context\r")
+        .expect("open context while busy");
+    wait_for_screen_text(&shared, "Context");
+    master
+        .write_all(b"\x1b")
+        .expect("return from context without canceling the turn");
+    wait_until(&shared, "the busy composer to return", |shared| {
+        shared.raw.lock().unwrap()[raw_before_context..]
+            .windows(BUSY_TITLE.len())
+            .any(|window| window == BUSY_TITLE.as_bytes())
+    });
+    release_provider
+        .send(())
+        .expect("release the provider after returning to the composer");
+    wait_for_screen_text(&shared, RELEASED_TEXT);
+    wait_for_screen_text_gone(&shared, BUSY_TITLE);
+    assert_eq!(
+        server_count.load(Ordering::SeqCst),
+        2,
+        "the live turn should reach the provider exactly once"
     );
 
     master.write_all(b"/exit\r").expect("type /exit");

@@ -163,6 +163,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
   carries summarized notices verbatim in a `<capability-updates>` block.
   ([#373](https://github.com/baiyuqing/otto/pull/373))
 
+- Extend the resumed-session `capability_update` message to name tools whose
+  description or parameters changed and the Otto version change. When the
+  version changed and `otto_help` is available, it states that earlier
+  `otto_help` results labelled with the old version describe the previous
+  version. The `otto.capabilities` entry now also stores a digest per tool
+  definition and the Otto version; entries from earlier versions produce no
+  such lines. The duplicate `Shutdown` and `Configuration` manual headings
+  under the agent server, ACP agent server and chat connector are renamed so
+  `otto_help` can return each section.
+  ([#374](https://github.com/baiyuqing/otto/pull/374))
+
 - Open versioned lifecycle hooks and custom command tools on installed plugin
   snapshots, with sandbox execution, exact-argument authorization and
   append-only rewrite auditing. ([#358](https://github.com/baiyuqing/otto/pull/358))

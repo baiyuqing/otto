@@ -7195,7 +7195,7 @@ mod tests {
             interrupted_turn: None,
         };
         crate::failover::recovery::notify(
-            tasks.notifications(),
+            tasks.notifications().as_ref(),
             Some(takeover),
             &tempfile::tempdir().expect("dir").path().join("children"),
             1000,

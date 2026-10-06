@@ -688,11 +688,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 display: followup,
                 created_at: (self.options.now)(),
                 blocks,
-                input_id: if followup {
-                    String::new()
-                } else {
-                    input_id.unwrap_or_default()
-                },
+                input_id: input_id.unwrap_or_default(),
                 ..Message::default()
             };
             if let Err(source) = self.session.append(user).await {

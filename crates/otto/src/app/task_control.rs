@@ -1,12 +1,14 @@
 //! Turn-bound steering and model-originated follow-up admission.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
+use otto_core::agent::inbox::{MailboxError, Notification, NotificationKind};
 use otto_core::agent::{
     AgentError,
     steering::{Steering, SubmitError},
 };
+use otto_core::mailbox::Mailbox;
 use otto_core::model::Role;
 use otto_core::session::Session;
 use tokio_util::sync::CancellationToken;
@@ -30,22 +32,41 @@ struct ActiveRun {
     session_id: String,
     original_task: String,
     current_task: String,
-    followups: VecDeque<String>,
+    /// Identifies this logical task's follow-ups in the journal.
+    scope: String,
+    followups: VecDeque<Followup>,
     accepted: usize,
 }
 
+/// One model-scheduled follow-up and the input id its `agent_followup`
+/// message carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Followup {
+    pub(crate) text: String,
+    pub(crate) input_id: String,
+}
+
 /// Shared control state for one runner. Undelivered follow-ups exist only for
-/// the logical turn that accepted them.
+/// the logical turn that accepted them; with a journal
+/// ([`TaskControl::set_followup_journal`]) they also survive process loss for
+/// that turn's automatic resume.
 #[derive(Default)]
 pub(crate) struct TaskControl {
     steering: Arc<Steering>,
     state: Mutex<State>,
+    journal: OnceLock<Arc<dyn Mailbox>>,
 }
 
 pub(crate) struct Run {
     control: Arc<TaskControl>,
     generation: u64,
+    /// Follow-ups of an earlier logical task that this run discarded,
+    /// because that task will not be resumed.
+    discarded: usize,
 }
+
+/// The error text of a follow-up whose durable copy could not be saved.
+const FOLLOWUP_NOT_PERSISTED: &str = "the follow-up could not be saved and was not queued";
 
 impl TaskControl {
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -58,28 +79,88 @@ impl TaskControl {
         Arc::clone(&self.steering)
     }
 
+    /// Whether a logical task is active (its `Run` is alive).
+    pub(crate) fn is_active(&self) -> bool {
+        self.lock().active.is_some()
+    }
+
+    /// Installs the durable follow-up journal. A later call is ignored.
+    pub(crate) fn set_followup_journal(&self, journal: Arc<dyn Mailbox>) {
+        let _ = self.journal.set(journal);
+    }
+
     /// Starts one logical turn. Approval retries reuse this guard explicitly.
+    ///
+    /// Journaled follow-ups of an earlier logical task are left only by
+    /// process loss. When this run `resumes` that task (a recovery turn), it
+    /// adopts them, in order, to run after its own step; otherwise they are
+    /// discarded and counted in [`Run::discarded`].
     pub(crate) fn begin(
         self: &Arc<Self>,
         session_id: &str,
         original_task: &str,
     ) -> Result<Run, String> {
+        self.begin_resuming(session_id, original_task, false)
+    }
+
+    /// [`Self::begin`] for a run that may resume an interrupted task.
+    pub(crate) fn begin_resuming(
+        self: &Arc<Self>,
+        session_id: &str,
+        original_task: &str,
+        resumes: bool,
+    ) -> Result<Run, String> {
         let mut state = self.lock();
         if state.active.is_some() {
             return Err("a task is already active".into());
+        }
+        let mut scope = crate::runtime::sidecar_mailbox::new_input_id();
+        let mut followups = VecDeque::new();
+        let mut discarded = 0;
+        if let Some(journal) = self.journal.get() {
+            for entry in journal.queued() {
+                if resumes {
+                    scope = entry.notification.scope.clone();
+                    followups.push_back(Followup {
+                        text: entry.notification.text,
+                        input_id: entry.notification.id,
+                    });
+                } else {
+                    journal.ack(entry.seq);
+                    discarded += 1;
+                }
+            }
         }
         state.generation = state.generation.wrapping_add(1);
         state.active = Some(ActiveRun {
             session_id: session_id.to_string(),
             original_task: original_task.to_string(),
             current_task: original_task.to_string(),
-            followups: VecDeque::new(),
-            accepted: 0,
+            scope,
+            accepted: followups.len(),
+            followups,
         });
         Ok(Run {
             control: Arc::clone(self),
             generation: state.generation,
+            discarded,
         })
+    }
+
+    /// Removes the journal entries of `scope`, or the one with `input_id`.
+    fn forget(&self, scope: &str, input_id: Option<&str>) {
+        let Some(journal) = self.journal.get() else {
+            return;
+        };
+        for entry in journal.queued() {
+            let matches = match input_id {
+                Some(input_id) => entry.notification.id == input_id,
+                None => entry.notification.scope == scope,
+            };
+            if matches {
+                journal.ack(entry.seq);
+            }
+        }
     }
 
     pub(crate) fn original_task(&self, session_id: &str) -> Option<String> {
@@ -131,7 +212,24 @@ impl TaskControl {
             ));
         }
         active.accepted += 1;
-        active.followups.push_back(text.to_string());
+        let input_id = format!("followup:{}:{}", active.scope, active.accepted);
+        if let Some(journal) = self.journal.get()
+            && let Err(MailboxError::NotPersisted { seq, .. }) = journal.enqueue(Notification {
+                kind: Some(NotificationKind::Message),
+                text: text.to_string(),
+                id: input_id.clone(),
+                scope: active.scope.clone(),
+                ..Notification::default()
+            })
+        {
+            journal.ack(seq);
+            active.accepted -= 1;
+            return Err(FOLLOWUP_NOT_PERSISTED.into());
+        }
+        active.followups.push_back(Followup {
+            text: text.to_string(),
+            input_id,
+        });
         Ok(())
     }
 }
@@ -146,12 +244,35 @@ impl Run {
         }
     }
 
-    pub(crate) fn next_followup(&self) -> Option<String> {
+    pub(crate) fn next_followup(&self) -> Option<Followup> {
         let mut state = self.control.lock();
         if state.generation != self.generation {
             return None;
         }
         state.active.as_mut()?.followups.pop_front()
+    }
+
+    /// Removes a follow-up from the journal once its step ran (its
+    /// `agent_followup` message carries `followup.input_id`).
+    pub(crate) fn followup_done(&self, followup: &Followup) {
+        self.control.forget("", Some(&followup.input_id));
+    }
+
+    /// Puts `followup` back at the front, as an adopted journal entry would
+    /// be after a restart.
+    #[cfg(test)]
+    pub(crate) fn requeue(&self, followup: Followup) {
+        let mut state = self.control.lock();
+        if state.generation == self.generation
+            && let Some(active) = state.active.as_mut()
+        {
+            active.followups.push_front(followup);
+        }
+    }
+
+    /// How many follow-ups of an earlier, unresumed task this run discarded.
+    pub(crate) fn discarded(&self) -> usize {
+        self.discarded
     }
 
     pub(crate) fn clear_followups(&self) -> usize {
@@ -161,6 +282,9 @@ impl Run {
         {
             let count = active.followups.len();
             active.followups.clear();
+            let scope = active.scope.clone();
+            drop(state);
+            self.control.forget(&scope, None);
             return count;
         }
         0
@@ -168,10 +292,16 @@ impl Run {
 }
 
 impl Drop for Run {
+    /// Every way a logical task ends discards its remaining follow-ups,
+    /// journal included; only process loss skips this drop.
     fn drop(&mut self) {
         let mut state = self.control.lock();
         if state.generation == self.generation {
-            state.active = None;
+            let scope = state.active.take().map(|active| active.scope);
+            drop(state);
+            if let Some(scope) = scope {
+                self.control.forget(&scope, None);
+            }
         }
     }
 }
@@ -541,7 +671,7 @@ mod tests {
         }
         assert!(control.queue_followup("overflow").is_err());
         assert_eq!(
-            run.next_followup().as_deref(),
+            run.next_followup().map(|followup| followup.text).as_deref(),
             Some("survives refused second prompt")
         );
         drop(run);
@@ -655,5 +785,74 @@ mod tests {
                 "{users:?}"
             );
         }
+    }
+
+    fn journaled() -> (Arc<TaskControl>, Arc<otto_core::mailbox::InMemoryMailbox>) {
+        let journal = Arc::new(otto_core::mailbox::InMemoryMailbox::default());
+        let control = Arc::new(TaskControl::default());
+        control.set_followup_journal(journal.clone());
+        (control, journal)
+    }
+
+    #[test]
+    fn followups_are_journaled_until_their_step_runs_or_the_task_ends() {
+        let (control, journal) = journaled();
+        let run = control.begin("s1", "task").unwrap();
+        control.queue_followup("first").unwrap();
+        control.queue_followup("second").unwrap();
+        assert_eq!(journal.len(), 2);
+        let first = run.next_followup().unwrap();
+        assert!(first.input_id.starts_with("followup:") && first.input_id.ends_with(":1"));
+        run.followup_done(&first);
+        assert_eq!(journal.len(), 1);
+        drop(run);
+        assert!(journal.is_empty(), "the task's end discards the rest");
+    }
+
+    #[test]
+    fn a_resuming_run_adopts_the_interrupted_tasks_followups_in_order() {
+        let (control, journal) = journaled();
+        let run = control.begin("s1", "task").unwrap();
+        control.queue_followup("first").unwrap();
+        control.queue_followup("second").unwrap();
+        // Process loss: the run never ends.
+        std::mem::forget(run);
+
+        let restarted = Arc::new(TaskControl::default());
+        restarted.set_followup_journal(journal.clone());
+        let run = restarted.begin_resuming("s1", "", true).unwrap();
+        assert_eq!(run.discarded(), 0);
+        let texts: Vec<String> = std::iter::from_fn(|| run.next_followup())
+            .map(|followup| followup.text)
+            .collect();
+        assert_eq!(texts, ["first", "second"]);
+        assert_eq!(journal.len(), 2, "entries stay until their steps run");
+    }
+
+    #[test]
+    fn a_new_task_discards_and_counts_an_unresumed_tasks_followups() {
+        let (control, journal) = journaled();
+        let run = control.begin("s1", "task").unwrap();
+        control.queue_followup("first").unwrap();
+        std::mem::forget(run);
+
+        let restarted = Arc::new(TaskControl::default());
+        restarted.set_followup_journal(journal.clone());
+        let run = restarted.begin("s1", "new task").unwrap();
+        assert_eq!(run.discarded(), 1);
+        assert!(run.next_followup().is_none());
+        assert!(journal.is_empty());
+    }
+
+    #[test]
+    fn a_followup_that_cannot_be_saved_is_not_queued() {
+        let journal = Arc::new(otto_core::mailbox::InMemoryMailbox::default());
+        journal.set_persist(Box::new(|_| Err("disk full".into())));
+        let control = Arc::new(TaskControl::default());
+        control.set_followup_journal(journal.clone());
+        let run = control.begin("s1", "task").unwrap();
+        assert!(control.queue_followup("first").is_err());
+        assert!(run.next_followup().is_none());
+        assert!(journal.is_empty());
     }
 }

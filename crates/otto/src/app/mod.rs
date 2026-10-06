@@ -967,6 +967,8 @@ impl Controller {
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))
             .map_err(AgentError::Other)?;
+        self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
+            .await?;
         self.run_prompt_step(&runner, text, system_context, &mut *emit, cancel)
             .await?;
         self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
@@ -1004,17 +1006,88 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        while let Some(text) = task_run.next_followup() {
+        while let Some(followup) = task_run.next_followup() {
             if self.pending_approval().is_some() {
                 task_run.clear_followups();
                 self.record_skipped_followup(runner, emit).await?;
                 return Ok(());
             }
-            task_run.set_current_task(&text);
-            self.run_followup_step(runner, &text, system_context, &mut *emit, cancel)
+            if otto_core::session::Session::has_input(runner.session(), &followup.input_id) {
+                // Its step ran before an interruption kept it journaled.
+                task_run.followup_done(&followup);
+                continue;
+            }
+            task_run.set_current_task(&followup.text);
+            runner.set_next_input_id(Some(followup.input_id.clone()));
+            self.run_followup_step(runner, &followup.text, system_context, &mut *emit, cancel)
                 .await?;
+            task_run.followup_done(&followup);
         }
         Ok(())
+    }
+
+    /// Records, as a persisted and visible `agent_followup` notice, that
+    /// `count` follow-ups of an earlier task were discarded because Otto
+    /// stopped before they started and that task is not being resumed.
+    pub(crate) async fn record_unrun_followups(
+        &self,
+        runner: &Runner,
+        count: usize,
+        emit: EventSink<'_>,
+    ) -> Result<(), AgentError> {
+        if count == 0 {
+            return Ok(());
+        }
+        let text = format!(
+            "{count} agent-scheduled follow-up(s) from an earlier task were not run because Otto stopped before they started. Schedule them again if they are still needed."
+        );
+        runner
+            .session()
+            .append(Message {
+                role: otto_core::model::Role::Context,
+                blocks: vec![Block::text(&text)],
+                created_at: chrono::Utc::now(),
+                context_type: "agent_followup".into(),
+                display: true,
+                ..Message::default()
+            })
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        emit(otto_core::agent::Event::Notification {
+            kind: Some(NotificationKind::TaskReport),
+            task_id: "agent_followup".into(),
+            text,
+            usage: Usage::default(),
+            present: false,
+        });
+        Ok(())
+    }
+
+    /// Runs the journaled follow-ups of the task a wake turn just resumed,
+    /// in order, under the same rules as any follow-up.
+    pub(crate) async fn run_resumed_followups(
+        &self,
+        runner: &Runner,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        let task_run = runner
+            .task_control()
+            .begin_resuming(&runner.session().header().id, "", true)
+            .map_err(AgentError::Other)?;
+        self.run_followups_held(runner, &task_run, "", emit, cancel)
+            .await
+    }
+
+    /// Whether the session's last turn was interrupted by process loss and
+    /// still has its automatic resume: the next wake turn resumes it and
+    /// adopts its journaled follow-ups.
+    pub(crate) fn resumable_interrupted_turn(&self) -> bool {
+        let state = self.lock();
+        state.current.as_ref().is_some_and(|current| {
+            otto_core::session::Session::interrupted_turn(&current.session)
+                .is_some_and(|turn| !turn.resume_exhausted())
+        })
     }
 
     /// Sets the turn origin the schedule tools read and appends the scheduled
@@ -1147,6 +1220,8 @@ impl Controller {
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))
             .map_err(AgentError::Other)?;
+        self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
+            .await?;
         let observation = auto_reflection::RunObservation::default();
         let result = runner
             .run_with_image_system_context(
@@ -2497,6 +2572,57 @@ mod tests {
         assert!(
             matches!(events.as_slice(), [otto_core::agent::Event::Notification { text, .. }] if text == &notice.text())
         );
+        assert!(task_run.next_followup().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_followup_whose_step_already_ran_is_not_run_again() {
+        use otto_core::session::Session;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let (controller, _approvals, _) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let runner = controller.runner().expect("runner");
+        let session_id = runner.session().header().id.clone();
+        let task_run = runner
+            .task_control()
+            .begin(&session_id, "initial task")
+            .expect("logical task");
+        runner
+            .task_control()
+            .queue_followup("inspect the pushed branch")
+            .expect("followup");
+        // The step's agent_followup message was appended before Otto stopped.
+        let queued = task_run.next_followup().expect("queued");
+        runner
+            .session()
+            .append_input_if_absent(
+                &queued.input_id,
+                otto_core::model::Message {
+                    role: otto_core::model::Role::Context,
+                    context_type: "agent_followup".into(),
+                    display: true,
+                    blocks: vec![Block::text("[Agent follow-up]\ninspect the pushed branch")],
+                    created_at: chrono::Utc::now(),
+                    ..otto_core::model::Message::default()
+                },
+            )
+            .await
+            .expect("earlier step");
+        task_run.requeue(queued);
+        let mut events = Vec::new();
+        // No provider is scripted: running the step would fail.
+        controller
+            .run_followups_held(
+                &runner,
+                &task_run,
+                "",
+                &mut |event| events.push(event),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the step is skipped");
         assert!(task_run.next_followup().is_none());
     }
 

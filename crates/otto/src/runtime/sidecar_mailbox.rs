@@ -204,4 +204,49 @@ mod tests {
         assert_eq!(queued[0].seq, 3);
         assert!(queued[0].notification.id.starts_with("in_"));
     }
+
+    /// Consumers depend on the `Mailbox` port. Only the places that create
+    /// the in-memory adapter name `Inbox` outside tests: this composition
+    /// layer, the task registry that owns the parent and child queues, and
+    /// the runner's fallback for a task it cannot find.
+    #[test]
+    fn only_composition_code_names_the_concrete_inbox() {
+        const ALLOWED: &[&str] = &["runtime/", "subagent/tasks.rs", "subagent/runner.rs"];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if ALLOWED.iter().any(|allowed| relative.starts_with(allowed)) {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read source");
+                let production = text.split("#[cfg(test)]").next().unwrap_or_default();
+                if production
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("//"))
+                    .any(|line| line.contains("Inbox"))
+                {
+                    offenders.push(relative);
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "depend on otto_core::mailbox::Mailbox instead of Inbox in {offenders:?}"
+        );
+    }
 }

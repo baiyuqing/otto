@@ -1037,7 +1037,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     /// reports it, removing it from the inbox only after its append
     /// returned. A no-op when the inbox is empty. A failed append leaves that
     /// item and every later one queued, so a following call (or a later
-    /// resume, for a persisted inbox) delivers it exactly once more.
+    /// resume, for a persisted inbox) delivers it again. A notification with
+    /// an id is appended through [`Session::append_input_if_absent`], so one
+    /// that was appended before an interruption kept it queued is
+    /// acknowledged without a second message.
     ///
     /// The queue is read once at the top, not drained: an item pushed by
     /// another task while this loop awaits an append is not in this read and
@@ -1072,14 +1075,23 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 blocks: vec![Block::text(text.clone())],
                 ..Message::default()
             };
-            self.session
-                .append(message)
-                .await
-                .map_err(|source| AgentError::Persist {
-                    kind: "notification".into(),
-                    source,
-                })?;
+            let appended = if notification.id.is_empty() {
+                self.session.append(message).await.map(|()| true)
+            } else {
+                self.session
+                    .append_input_if_absent(&notification.id, message)
+                    .await
+                    .map(|outcome| outcome == crate::session::AppendOutcome::Appended)
+            }
+            .map_err(|source| AgentError::Persist {
+                kind: "notification".into(),
+                source,
+            })?;
             self.options.mailbox.ack(entry.seq);
+            if !appended {
+                // Delivered before an interruption that kept it queued.
+                continue;
+            }
             emit(Event::Notification {
                 kind: notification.kind,
                 task_id: notification.task_id,

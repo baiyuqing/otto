@@ -595,6 +595,7 @@ impl Tasks {
             kind: Some(NotificationKind::Message),
             text: format!("[parent-message] {message}"),
             usage: None,
+            ..Default::default()
         });
         reports_left.fetch_add(1, Ordering::SeqCst);
         self.signal();
@@ -858,6 +859,7 @@ mod tests {
                     kind: Some(NotificationKind::Message),
                     text: "queued while the session was closed".into(),
                     usage: None,
+                    ..Default::default()
                 },
             }]);
 
@@ -950,6 +952,7 @@ mod tests {
                 kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
                 text: "x".into(),
                 usage: None,
+                ..Default::default()
             });
         assert_eq!(tasks.pending(), 1);
 

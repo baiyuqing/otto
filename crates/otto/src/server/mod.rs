@@ -7102,6 +7102,7 @@ mod tests {
             kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
             text: "done".to_string(),
             usage: None,
+            ..Default::default()
         }
     }
 
@@ -7276,6 +7277,7 @@ mod tests {
                                 kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
                                 text: "done".to_string(),
                                 usage: None,
+                                ..Default::default()
                             });
                     }
                 })),

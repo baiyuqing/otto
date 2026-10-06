@@ -85,6 +85,10 @@ pub struct ResolvedContext {
     /// The newest `otto.turn` start on the active path without a matching
     /// end; see [`crate::session::turn`].
     pub interrupted_turn: Option<InterruptedTurn>,
+    /// Every input id delivered on the active path, including messages a
+    /// compaction checkpoint has since summarized away, so an input is
+    /// recognised as delivered for as long as its entry is on the path.
+    pub input_ids: HashSet<String>,
 }
 
 impl Default for ResolvedContext {
@@ -100,8 +104,32 @@ impl Default for ResolvedContext {
             operation_ledger: OperationLedger::default(),
             observed_capabilities: None,
             interrupted_turn: None,
+            input_ids: HashSet::new(),
         }
     }
+}
+
+/// The input ids on the whole active `path`: those of the context
+/// `messages` plus those of entries before the latest compaction checkpoint.
+/// Entries a checkpoint summarized were valid when appended; one that no
+/// longer decodes contributes no id rather than failing the resolution.
+fn path_input_ids(
+    path: &[PiEntry],
+    context_path: &[PiEntry],
+    messages: &[Message],
+) -> HashSet<String> {
+    let in_context: HashSet<&str> = context_path.iter().map(|entry| entry.id.as_str()).collect();
+    let summarized = path
+        .iter()
+        .filter(|entry| !in_context.contains(entry.id.as_str()))
+        .flat_map(|entry| pi_entry_to_context_messages(entry).unwrap_or_default());
+    messages
+        .iter()
+        .cloned()
+        .chain(summarized)
+        .filter(|message| !message.input_id.is_empty())
+        .map(|message| message.input_id)
+        .collect()
 }
 
 /// Entry lookup built once per resolution: id to entry and id to file position.
@@ -291,6 +319,7 @@ pub fn build_context(
         collector.add(repair);
     }
     pending_tool_calls(&resolved.messages)?;
+    resolved.input_ids = path_input_ids(&path, &context_path, &resolved.messages);
 
     let edits = context_edits(&path, &context_path, &mut collector);
     for entry in context_path {

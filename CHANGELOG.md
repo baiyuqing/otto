@@ -36,6 +36,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Architecture and reliability
 
+- Add public `otto_core::conformance` checks for the `Session` and `Mailbox`
+  ports (default-on `conformance` feature), run against every session
+  implementation and wrapper and the durable inbox adapter, including across
+  a reopen. They found and fixed two bugs: session wrappers hid the operation
+  ledger, so crash recovery could replay a tool call recorded as not
+  read-only or already retried; and the session file forgot input ids from
+  before a compaction checkpoint, so such an input could be delivered twice
+  ([design](docs/specs/2026-10-06-session-and-mailbox-conformance.md)).
 - Retry OpenAI-compatible requests whose connection could not be
   established, up to three times 1, 2 and 4 seconds apart within the turn
   deadline. Such a request never reached the endpoint, so it cannot run

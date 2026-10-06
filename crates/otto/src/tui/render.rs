@@ -653,6 +653,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
                 .title(picker.kind.title()),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -1508,6 +1509,42 @@ mod tests {
                 .expect("popup cell")
                 .symbol(),
             " "
+        );
+    }
+
+    #[tokio::test]
+    async fn picker_text_has_horizontal_padding_inside_its_border() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.picker = Some(Picker {
+            kind: PickerKind::Profile,
+            rows: vec![PickerRow {
+                label: "model [workspace]".to_string(),
+                value: "profile".to_string(),
+            }],
+            selected: 0,
+        });
+
+        let width = 100;
+        let height = 30;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw");
+        let popup = centered_rect(80, 70, Rect::new(0, 0, width, height));
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(
+            buffer
+                .cell((popup.x + 1, popup.y + 1))
+                .expect("left inner padding")
+                .symbol(),
+            " "
+        );
+        assert_eq!(
+            buffer
+                .cell((popup.x + 2, popup.y + 1))
+                .expect("picker label")
+                .symbol(),
+            "m"
         );
     }
 

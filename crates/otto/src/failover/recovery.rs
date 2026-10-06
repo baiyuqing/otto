@@ -77,12 +77,23 @@ pub fn notify(
         || !ends_with_a_finished_assistant_turn(parent_messages)
     {
         let text = render(&recovery, &interrupted_children, max_output_bytes);
-        inbox.push(Notification {
+        // A stable id keeps a notice that was queued before another
+        // interruption from being queued or delivered twice.
+        let id = match (&recovery.interrupted_turn, &recovery.cause) {
+            (Some(turn), _) => format!("recovery:{}", turn.turn_id),
+            (None, RecoveryCause::TakenOver(holder)) => format!("takeover:{}", holder.epoch),
+            (None, RecoveryCause::ProcessLost) => String::new(),
+        };
+        if let Err(error) = inbox.enqueue(Notification {
             task_id: String::new(),
             kind: Some(NotificationKind::Message),
             text,
             usage: None,
-        });
+            id,
+            ..Default::default()
+        }) {
+            warnings.push(format!("recovery: {error}"));
+        }
     }
 
     for child in &interrupted_children {
@@ -144,6 +155,7 @@ pub fn notify_moved(
         kind: Some(NotificationKind::Message),
         text,
         usage: None,
+        ..Default::default()
     });
     warnings
 }

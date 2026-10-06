@@ -648,22 +648,18 @@ impl Builder {
         // persistence for a session that gets its first write only after this
         // function returns (see `Store::path`).
         let no_session = self.no_session;
-        inbox.set_persist(Box::new(move |entries| {
-            if no_session {
-                return;
-            }
+        super::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
             let path = session_for_inbox.path();
-            if path.is_empty() {
-                return;
-            }
-            write_inbox_file(&Path::new(&path).with_extension("inbox.json"), entries)
-        }));
+            (!no_session && !path.is_empty()).then(|| Path::new(&path).with_extension("inbox.json"))
+        });
         // A session with no persisted inbox path (`--no-session`, or nothing
         // written yet) never takes over a lease either, so it never has a
         // takeover to report; the recovery scan lives in this branch rather
         // than running unconditionally.
         if let Some(path) = inbox_persist {
-            load_inbox(&inbox, &path);
+            if let Some(warning) = super::sidecar_mailbox::load(&inbox, &path) {
+                let _ = writeln!(stderr, "warning: {warning}");
+            }
             let recovery_warnings = failover::recovery::notify(
                 &inbox,
                 session_for_recovery.take_recovery(),
@@ -1710,48 +1706,6 @@ fn child_sessions(parent: SharedSession, storage: Arc<super::storage::Storage>) 
     })
 }
 
-/// Loads `<id>.inbox.json` into `inbox`, if the file exists and decodes.
-/// Otherwise the inbox starts empty, exactly like a missing or corrupt
-/// `<id>.reminders.json`. Must run before the inbox is shared with any
-/// producer, so the loaded items are the ones a wake decision sees.
-fn load_inbox(inbox: &Inbox, path: &Path) {
-    let loaded: Vec<otto_core::agent::inbox::Entry> = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    inbox.load(loaded);
-}
-
-/// Mirrors the inbox's current entries to `path` via
-/// [`remind::replace_private`], the same temporary-file/`fsync`/rename/
-/// directory-`fsync` pattern `Reminders` uses for `<id>.reminders.json`,
-/// including removing the file once the inbox is empty. A write failure is
-/// dropped, the same as a reminder file write failure from a timer firing in
-/// the background (`Inner::fire`): there is no foreground caller to report it
-/// to.
-///
-/// Skips the write once the session's own file is gone
-/// ([`remind::session_file_exists`]): a notification pushed after this
-/// session is archived — a sub-agent finishing late, or a timer racing the
-/// archive on another thread — must not recreate the sidecar the archive
-/// already removed.
-fn write_inbox_file(path: &Path, entries: &[otto_core::agent::inbox::Entry]) {
-    if entries.is_empty() {
-        let _ = std::fs::remove_file(path);
-        return;
-    }
-    if !remind::session_file_exists(path, ".inbox.json") {
-        return;
-    }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Ok(body) = serde_json::to_vec_pretty(entries) else {
-        return;
-    };
-    let _ = remind::replace_private(path, &body);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1850,11 +1804,11 @@ mod tests {
         .expect("write sidecar");
 
         let inbox = Inbox::new(None);
-        load_inbox(&inbox, &path);
+        assert_eq!(super::super::sidecar_mailbox::load(&inbox, &path), None);
         let hook_path = path.clone();
-        inbox.set_persist(Box::new(move |entries| {
-            write_inbox_file(&hook_path, entries)
-        }));
+        super::super::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
+            Some(hook_path.clone())
+        });
 
         let queued = inbox.queued();
         assert_eq!(
@@ -2215,6 +2169,7 @@ mod tests {
                     kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
                     text: "already queued".to_string(),
                     usage: None,
+                    ..Default::default()
                 },
             }])
             .expect("encode inbox"),

@@ -580,12 +580,13 @@ pub fn pi_entry_to_context_messages(entry: &PiEntry) -> Result<Vec<Message>, PiE
                 created_at,
                 None,
             );
-            if let Some(details) = decode_pi_otto_details(custom.details.as_deref())?
-                && !details.task_id.is_empty()
-            {
-                message.context_metadata = Some(ContextMetadata {
-                    task_id: details.task_id,
-                });
+            if let Some(details) = decode_pi_otto_details(custom.details.as_deref())? {
+                message.input_id = details.input_id;
+                if !details.task_id.is_empty() {
+                    message.context_metadata = Some(ContextMetadata {
+                        task_id: details.task_id,
+                    });
+                }
             }
             Ok(vec![message])
         }
@@ -611,6 +612,9 @@ fn pi_message_to_context_message(
             }
             message.role = Role::User;
             message.blocks = blocks;
+            if let Some(details) = decode_pi_otto_details(wire.details.as_deref())? {
+                message.input_id = details.input_id;
+            }
         }
         "assistant" => {
             let blocks = pi_context_text_and_tool_blocks(wire, Role::Assistant)?;
@@ -1000,6 +1004,15 @@ pub fn model_message_to_pi_entry(
                     "user message contains assistant-only metadata",
                 ));
             }
+            if !message.input_id.is_empty() {
+                if !crate::model::is_input_id(&message.input_id) {
+                    return Err(PiError::invalid("invalid input id"));
+                }
+                wire.details = Some(encode_pi_otto_details(&PiOttoDetails {
+                    input_id: message.input_id.clone(),
+                    ..PiOttoDetails::default()
+                })?);
+            }
         }
         Role::Assistant => {
             let stop_reason = model_finish_reason_to_pi(message.finish_reason.clone())?;
@@ -1119,9 +1132,17 @@ fn model_context_message_to_pi_entry(
         content_text: Some(content.clone()),
         ..PiCustomMessage::default()
     };
-    if let Some(metadata) = message.context_metadata.as_ref() {
+    if !message.input_id.is_empty() && !crate::model::is_input_id(&message.input_id) {
+        return Err(PiError::invalid("invalid input id"));
+    }
+    if message.context_metadata.is_some() || !message.input_id.is_empty() {
         custom.details = Some(encode_pi_otto_details(&PiOttoDetails {
-            task_id: metadata.task_id.clone(),
+            task_id: message
+                .context_metadata
+                .as_ref()
+                .map(|metadata| metadata.task_id.clone())
+                .unwrap_or_default(),
+            input_id: message.input_id.clone(),
             ..PiOttoDetails::default()
         })?);
     }
@@ -1143,6 +1164,7 @@ fn model_context_message_to_pi_entry(
         context_type: message.context_type.clone(),
         display: message.display,
         context_metadata: message.context_metadata.clone(),
+        input_id: message.input_id.clone(),
         ..Message::default()
     };
     Ok((entry, persisted))

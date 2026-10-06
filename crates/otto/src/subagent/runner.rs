@@ -301,6 +301,18 @@ impl Session for SharedTranscript {
         self.0.interrupted_turn()
     }
 
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: otto_core::model::Message,
+    ) -> Result<otto_core::session::AppendOutcome, otto_core::session::SessionError> {
+        self.0.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.0.has_input(input_id)
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -399,6 +411,7 @@ impl ChildTools {
             kind: Some(NotificationKind::TaskReport),
             text,
             usage: None,
+            ..Default::default()
         });
         text_result("report sent to parent")
     }
@@ -1549,6 +1562,7 @@ impl Runner {
                 kind: Some(NotificationKind::TaskFinished),
                 text: completion_text(&final_task, self.config.max_output_bytes),
                 usage: final_task.usage_present.then_some(final_task.usage),
+                ..Default::default()
             });
         }
         (result, error_text, migrating)
@@ -2696,6 +2710,18 @@ mod tests {
 
         fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
             self.inner.interrupted_turn()
+        }
+
+        async fn append_input_if_absent(
+            &self,
+            input_id: &str,
+            message: otto_core::model::Message,
+        ) -> Result<otto_core::session::AppendOutcome, otto_core::session::SessionError> {
+            self.inner.append_input_if_absent(input_id, message).await
+        }
+
+        fn has_input(&self, input_id: &str) -> bool {
+            self.inner.has_input(input_id)
         }
 
         async fn append_custom(

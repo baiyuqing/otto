@@ -18,7 +18,9 @@
 
 use std::fmt::Debug;
 
-pub use crate::agent::inbox::{Entry, Inbox, Notification, NotificationKind, PersistHook};
+pub use crate::agent::inbox::{
+    Entry, IdSource, Inbox, MailboxError, Notification, NotificationKind, PersistHook,
+};
 
 /// A synchronous FIFO notification port.
 ///
@@ -27,11 +29,16 @@ pub use crate::agent::inbox::{Entry, Inbox, Notification, NotificationKind, Pers
 /// effect succeeds; acknowledging an entry that is already absent is harmless.
 /// `remove` supports domain cancellation of a pending notification.
 pub trait Mailbox: Debug + Send + Sync {
-    /// Appends a notification after every notification already visible.
-    fn enqueue(&self, notification: Notification);
-    /// Compatibility spelling for enqueue. New callers should use `enqueue`.
+    /// Appends a notification after every notification already visible and
+    /// returns its sequence number. A notification whose non-empty `id` is
+    /// already queued is not added again. A durable adapter assigns an id to
+    /// a notification without one, and reports a persistence failure as
+    /// [`MailboxError::NotPersisted`] while keeping the entry queued.
+    fn enqueue(&self, notification: Notification) -> Result<u64, MailboxError>;
+    /// Enqueues and ignores a persistence failure, for background producers
+    /// with no caller to report it to.
     fn push(&self, notification: Notification) {
-        self.enqueue(notification);
+        let _ = self.enqueue(notification);
     }
     /// Returns the current ordered delivery candidates without claiming them.
     fn queued(&self) -> Vec<Entry>;
@@ -53,8 +60,8 @@ pub trait Mailbox: Debug + Send + Sync {
 }
 
 impl Mailbox for Inbox {
-    fn enqueue(&self, notification: Notification) {
-        self.push(notification);
+    fn enqueue(&self, notification: Notification) -> Result<u64, MailboxError> {
+        Inbox::enqueue(self, notification)
     }
 
     fn queued(&self) -> Vec<Entry> {
@@ -102,8 +109,8 @@ mod tests {
     #[test]
     fn default_adapter_obeys_fifo_ack_contract() {
         let mailbox = InMemoryMailbox::default();
-        mailbox.enqueue(notification("first"));
-        mailbox.enqueue(notification("second"));
+        Mailbox::enqueue(&mailbox, notification("first")).expect("enqueue");
+        Mailbox::enqueue(&mailbox, notification("second")).expect("enqueue");
         let queued = mailbox.queued();
         assert_eq!(queued.len(), 2);
         assert_eq!(queued[0].notification.text, "first");

@@ -1263,10 +1263,27 @@ Notes:
   and the REPL, the TUI, `otto serve`, and `otto acp` start a wake turn to
   deliver them.
   A turn started by user input delivers pending notifications before the
-  user's message. Delivery is at least once: a notification appended to the session just
-  before Otto exits can be delivered again after the session is reopened.
-  Archiving the session deletes the file. A write failure is not reported.
-  `--no-session` keeps notifications in memory only.
+  user's message. Each notification has an input id, recorded on the message
+  that delivers it, so one appended to the session just before Otto exits is
+  not delivered again after the session is reopened. Archiving the session
+  deletes the file. When the file cannot be written, `agent_send` and
+  `agent_report` return an error and the message is not sent; a background
+  notification (a finished task, a timer) stays queued in memory, and a
+  timer whose notification was not saved fires again after a restart. An
+  unreadable file is renamed to `<session-id>.inbox.json.corrupt-<seconds>`
+  with a warning on standard error. `--no-session` keeps notifications in
+  memory only.
+- **Guidance for a running turn** (steering from the TUI, `/inputs`,
+  `/tasks/steer`, or ACP) is also written to `<session-id>.inputs.json`
+  until it is delivered. Delivery, withdrawal, and every way a turn ends
+  remove it. When the Otto process stops during the turn, the turn that
+  resumes it after the session is reopened delivers that guidance first;
+  the next turn that does not resume it discards it. Guidance that cannot be
+  written is not accepted.
+- **Unread parent messages** (`agent_send`) for a sub-agent task are written
+  to `<child transcript>.inbox.json` beside the child's transcript. When the
+  task is interrupted and later resumed with `agent` `resume`, they are
+  delivered before the resume prompt, and the recovery notice counts them.
 - Each turn writes an `otto.turn` start entry before anything else and an end
   entry (`completed`, `failed`, or `cancelled`) when it returns. Neither
   reaches the model.
@@ -2251,7 +2268,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
 | `POST /v1/sessions/{id}/approvals/message` | Restricted dialogue during an unapproved request: `{"text":"..."}`. Returns `null` when none waits, otherwise `{"text","queued"}`. A true `queued` asks the client to put the original message in its normal task queue. Never approves. |
 | `POST /v1/sessions/{id}/approvals/{approval_id}` | Decide an elevated Bash command a running turn waits for: `{"decision":"allow"}` or `{"decision":"deny"}`. `200 {"decision"}` for the first decision; `409 approval_decided` when it was already decided; `409 approval_failed` when the id is not waiting. See [Approvals inside a turn](#approvals-inside-a-turn). |
-| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram` or `feishu`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `input_id` (1 to 128 ASCII letters, digits, `.`, `_`, `:`, `-`) makes a retry safe: the same `input_id` in the same session returns the turn it already started while the server remembers it (its 256 most recent per session), and `409 duplicate_input` once only the transcript holds it, for example after a restart. It is unrelated to the `X-Request-Id` log-correlation header. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram` or `feishu`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
@@ -2264,8 +2281,8 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/notices` | The lines background reflection queued for this session, `{"notices":[{"id":1,"text":"..."}],"last":1}`; pass `?after=<last>` to read only newer ones. They are not removed by reading, so every client sees each one, and only the 20 newest are kept. |
 | `GET /v1/sessions/{id}/wake-replies` | The assistant text of this session's finished wake turns, in the shape and with the rules of `.../notices`. `otto acp --attach` reads it to send wake replies to its ACP client. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn runs or is queued, or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
-| `POST /v1/sessions/{id}/inputs` | Admit ordinary `{"text":"..."}` without model routing or implicit queuing. Returns `"steered"` when bound to the active run's next safe boundary, `"idle"` when the caller may explicitly start a new turn, or `"approval_pending"` while an approval owns input. Nonblank text is limited to 32,000 UTF-8 bytes. |
-| `POST /v1/sessions/{id}/tasks/steer` | Explicit steering endpoint. It returns `{id,text,status:"queued"}` immediately, so clients display the exact guidance while it waits for the next safe boundary. |
+| `POST /v1/sessions/{id}/inputs` | Admit ordinary `{"text":"..."}` without model routing or implicit queuing. Returns `"steered"` when bound to the active run's next safe boundary, `"idle"` when the caller may explicitly start a new turn, or `"approval_pending"` while an approval owns input. Nonblank text is limited to 32,000 UTF-8 bytes. An optional `input_id` admits a retry once (`409 duplicate_input` after delivery). `503 input_not_persisted` when the guidance could not be saved; it was not accepted. |
+| `POST /v1/sessions/{id}/tasks/steer` | Explicit steering endpoint. It returns `{id,text,status:"queued",input_id}` immediately, so clients display the exact guidance while it waits for the next safe boundary. An optional `input_id` returns the same message for a retry while it is queued and `409 duplicate_input` after delivery; `503 input_not_persisted` when it could not be saved. |
 | `GET /v1/sessions/{id}/tasks/steer` | Lists transient steering items and their `queued`, `delivered`, `withdrawn`, or `discarded` status for the active run. |
 | `DELETE /v1/sessions/{id}/tasks/steer/{message_id}` | Withdraws exactly one still-`queued` steer. Delivered guidance is append-only session history and cannot be removed; a non-queued or unknown item returns `409 task_steer_withdraw_failed`. |
 | `POST /v1/sessions/{id}/tasks/control` | Interpret `{"text":"...","channel":"telegram"}` (`channel` optional, `telegram` or `feishu`) using the restricted control dialogue. Returns null if no active dialogue applies, otherwise `{"text","queued"}`. `queued:true` means the caller must submit the original message as a queued turn; this route does not itself admit a follow-up. `409 task_control_failed` reports routing failure. |
@@ -2447,10 +2464,11 @@ this build does not know, Otto prints one warning at startup and runs without
 recording. A write error later in the process stops recording for that
 process without output. Neither affects the task.
 
-`agent_send` messages and `agent_report` calls are runtime delivery only: they
-are not rows in `tasks.db`. If the child receives an `agent_send` message, it
-is written into that child's transcript as parent-message context when the
-child reaches the next normal notification checkpoint.
+`agent_send` messages and `agent_report` calls are not rows in `tasks.db`. If
+the child receives an `agent_send` message, it is written into that child's
+transcript as parent-message context when the child reaches the next normal
+notification checkpoint; until then it waits in the child's pending-message
+file (see [Sessions](#sessions)).
 
 ### Agent server shutdown
 
@@ -2519,7 +2537,7 @@ is rejected.
 | `session/new` | Creates a session. No session file is written until the first prompt. |
 | `session/load` | Opens a session of this workspace by its 32-character id, sends the stored conversation as `session/update` notifications, then responds. The response also carries `sessionId`. |
 | `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
-| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Optional `_meta.otto.chat` (`<platform>:<chat id>`) is the turn's chat origin for [`schedule`](#schedule); an invalid value, or a platform that differs from `_meta.otto.channel`, is ignored with a warning on stderr. Returns `end_turn`, or `cancelled` after `session/cancel`. |
+| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Optional `_meta.otto.chat` (`<platform>:<chat id>`) is the turn's chat origin for [`schedule`](#schedule); an invalid value, or a platform that differs from `_meta.otto.channel`, is ignored with a warning on stderr. Optional `_meta.otto.inputId` is the prompt's [`input_id`](#agent-server): a retry with the same value in the same session runs once, and a malformed value is rejected; `_meta.otto.requestId` only correlates logs. Returns `end_turn`, or `cancelled` after `session/cancel`. |
 | `_otto/approvals/message` | Restricted pending-approval dialogue with `sessionId` and `text`; advertised by `_meta.otto.approvalDialogue`. Returns `null` or `{"text","queued"}`. Available in local and attach mode. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
 | `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}` plus an optional string `advice` (the one-line advice, omitted when there is none); `nextCursor` is `""` on the last page. |
@@ -2731,6 +2749,10 @@ not change tool availability or permissions and does not carry over to a
 later turn from another frontend. With an older ACP agent that does not
 advertise this capability, the connector retains the previous text-prefix
 behavior for channel hints.
+
+Each prompt carries `chat:<platform>:<chat id>:<message id>` as
+`_meta.otto.inputId`, so a message the platform redelivers, or one the
+connector sends again after a restart, runs once in its session.
 
 ### Building and running
 

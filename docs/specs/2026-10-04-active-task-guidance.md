@@ -112,8 +112,10 @@ session fork/resume, and pagination are deferred.
   must be synchronized: guidance accepted before completion is consumed before
   successful completion; acceptance after completion is rejected. Cancellation
   or failure discards undelivered guidance, which never wakes a later turn.
-  Delivered guidance stays in append-only history. Pending guidance is not
-  persisted across process restart.
+  Delivered guidance stays in append-only history. Pending guidance is
+  persisted only for its turn's automatic resume after process loss; every
+  other turn end discards it, as before (amended 2026-10-06 by
+  [durable inputs](2026-10-06-durable-inputs.md)).
 - `/queue` submits a distinct normal text prompt for the same session. Idle
   sessions start it immediately; busy sessions execute accepted prompts in FIFO
   order after the active operation ends. Pending approval continues to block
@@ -139,6 +141,9 @@ The application/agent layer owns turn-bound steering acceptance, delivery, and
 cleanup. Expose the same operation through local ACP and the HTTP client/server
 for attached ACP. Do not use the persistent notification Inbox for undelivered
 steering, because its wake/recovery semantics deliberately survive a turn.
+Amended 2026-10-06 by [durable inputs](2026-10-06-durable-inputs.md):
+undelivered steering is journaled in its own mailbox (`<id>.inputs.json`),
+scoped to its turn; it never wakes a turn and is removed when the turn ends.
 
 Reuse existing normal-turn admission and queue execution paths for follow-ups;
 do not introduce a competing scheduler or copy the agent loop into adapters.

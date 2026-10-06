@@ -372,6 +372,9 @@ pub struct PiSessionInfo {
 pub struct PiOttoDetails {
     #[serde(rename = "taskId", default, skip_serializing_if = "String::is_empty")]
     pub task_id: String,
+    /// See [`crate::model::Message::input_id`].
+    #[serde(rename = "inputId", default, skip_serializing_if = "String::is_empty")]
+    pub input_id: String,
     #[serde(
         rename = "usagePresent",
         default,
@@ -449,6 +452,9 @@ pub fn decode_pi_otto_details(raw: Option<&RawValue>) -> Result<Option<PiOttoDet
         return Err(PiError::invalid(format!(
             "invalid context metadata: {error}"
         )));
+    }
+    if !otto.input_id.is_empty() && !crate::model::is_input_id(&otto.input_id) {
+        return Err(PiError::invalid("invalid input id"));
     }
     let has_outcome = otto.disposition.is_some()
         || otto.effect_certainty.is_some()

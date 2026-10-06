@@ -243,6 +243,28 @@ pub trait Session {
     /// ended or none was recorded. No default body, like
     /// [`Self::observed_capabilities`].
     fn interrupted_turn(&self) -> Option<InterruptedTurn>;
+
+    /// Appends `message` as the delivery of input `input_id` unless a message
+    /// with that input id is already on the active path. The check and the
+    /// append run under one lock; a file-backed store persists before it
+    /// returns [`AppendOutcome::Appended`]. [`AppendOutcome::AlreadyPresent`]
+    /// is the same committed delivery outcome. No default body: every
+    /// implementor, including wrappers, forwards or states its behavior.
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: Message,
+    ) -> Result<AppendOutcome, SessionError>;
+
+    /// Whether a message with input id `input_id` is on the active path.
+    fn has_input(&self, input_id: &str) -> bool;
+}
+
+/// What [`Session::append_input_if_absent`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendOutcome {
+    Appended,
+    AlreadyPresent,
 }
 
 /// Tool calls from the most recent assistant message that have no result yet.
@@ -264,9 +286,50 @@ struct State {
     operation_ledger: OperationLedger,
     observed_capabilities: Option<Capabilities>,
     interrupted_turn: Option<InterruptedTurn>,
+    /// Input ids of every appended message, for
+    /// [`Session::append_input_if_absent`].
+    seen_inputs: HashSet<String>,
 }
 
 impl State {
+    /// Appends one validated message under the session lock.
+    fn append(&mut self, mut message: Message) -> Result<(), SessionError> {
+        let state = self;
+        if message.id.trim().is_empty() {
+            message.id = state.generate_id();
+        }
+        if state.seen_ids.contains(&message.id) {
+            return Err(SessionError::Sequence("duplicate message id"));
+        }
+        state.check_sequence(&message)?;
+        if state
+            .latest_compaction
+            .as_ref()
+            .is_some_and(|latest| latest.first_post_checkpoint_message_id.is_empty())
+        {
+            if message.id.trim().is_empty() {
+                return Err(SessionError::Sequence(
+                    "first post-checkpoint message id is required",
+                ));
+            }
+            if !matches!(message.role, Role::User | Role::Assistant | Role::Tool) {
+                return Err(SessionError::Sequence(
+                    "first post-checkpoint message must have a normal role",
+                ));
+            }
+            let id = message.id.clone();
+            if let Some(latest) = state.latest_compaction.as_mut() {
+                latest.first_post_checkpoint_message_id = id;
+            }
+        }
+        state.seen_ids.insert(message.id.clone());
+        if !message.input_id.is_empty() {
+            state.seen_inputs.insert(message.input_id.clone());
+        }
+        state.record(message);
+        Ok(())
+    }
+
     /// The ordering rule, applied incrementally: a tool-result message must
     /// resolve a call from the immediately preceding assistant message, and no
     /// other message may come between the two.
@@ -382,39 +445,33 @@ impl Session for MemorySession {
         self.state.lock().expect("session mutex").messages.clone()
     }
 
-    async fn append(&self, mut message: Message) -> Result<(), SessionError> {
+    async fn append(&self, message: Message) -> Result<(), SessionError> {
         message.validate()?;
         let mut state = self.state.lock().expect("session mutex");
-        if message.id.trim().is_empty() {
-            message.id = state.generate_id();
+        state.append(message)
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        mut message: Message,
+    ) -> Result<AppendOutcome, SessionError> {
+        message.input_id = input_id.to_owned();
+        message.validate()?;
+        let mut state = self.state.lock().expect("session mutex");
+        if state.seen_inputs.contains(input_id) {
+            return Ok(AppendOutcome::AlreadyPresent);
         }
-        if state.seen_ids.contains(&message.id) {
-            return Err(SessionError::Sequence("duplicate message id"));
-        }
-        state.check_sequence(&message)?;
-        if state
-            .latest_compaction
-            .as_ref()
-            .is_some_and(|latest| latest.first_post_checkpoint_message_id.is_empty())
-        {
-            if message.id.trim().is_empty() {
-                return Err(SessionError::Sequence(
-                    "first post-checkpoint message id is required",
-                ));
-            }
-            if !matches!(message.role, Role::User | Role::Assistant | Role::Tool) {
-                return Err(SessionError::Sequence(
-                    "first post-checkpoint message must have a normal role",
-                ));
-            }
-            let id = message.id.clone();
-            if let Some(latest) = state.latest_compaction.as_mut() {
-                latest.first_post_checkpoint_message_id = id;
-            }
-        }
-        state.seen_ids.insert(message.id.clone());
-        state.record(message);
-        Ok(())
+        state.append(message)?;
+        Ok(AppendOutcome::Appended)
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .seen_inputs
+            .contains(input_id)
     }
 
     fn latest_compaction(&self) -> Option<CompactionMetadata> {

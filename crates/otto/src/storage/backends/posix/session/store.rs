@@ -121,17 +121,14 @@ pub struct Recovery {
     pub interrupted_turn: Option<InterruptedTurn>,
 }
 
-/// How many times Otto resumes an interrupted turn on its own: a resumed
-/// turn that is itself interrupted is not resumed again, so a request or a
-/// tool that kills the process cannot loop.
-pub const MAX_AUTOMATIC_RESUMES: u32 = 1;
+pub use otto_core::session::turn::MAX_AUTOMATIC_RESUMES;
 
 impl Recovery {
     /// Whether the interrupted turn already used its automatic resume.
     pub fn resume_exhausted(&self) -> bool {
         self.interrupted_turn
             .as_ref()
-            .is_some_and(|turn| turn.attempt > MAX_AUTOMATIC_RESUMES)
+            .is_some_and(InterruptedTurn::resume_exhausted)
     }
 }
 
@@ -723,6 +720,48 @@ impl Store {
     /// call returns an error.
     pub fn append_message(&self, message: &Message) -> Result<(), PiError> {
         let mut state = self.lock()?;
+        state.append_message(message)
+    }
+
+    /// Appends `message` with input id `input_id` unless a message with that
+    /// id is already on the active path; see
+    /// [`Session::append_input_if_absent`]. Returns whether it appended.
+    pub fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: &Message,
+    ) -> Result<bool, PiError> {
+        let mut state = self.lock()?;
+        if state
+            .messages
+            .iter()
+            .any(|existing| existing.input_id == input_id)
+        {
+            return Ok(false);
+        }
+        let mut message = message.clone();
+        message.input_id = input_id.to_owned();
+        state.append_message(&message)?;
+        Ok(true)
+    }
+
+    /// Whether a message with input id `input_id` is on the active path.
+    pub fn has_input(&self, input_id: &str) -> bool {
+        self.lock()
+            .map(|state| {
+                state
+                    .messages
+                    .iter()
+                    .any(|existing| existing.input_id == input_id)
+            })
+            .unwrap_or(false)
+    }
+}
+
+impl StoreState {
+    /// [`Store::append_message`] under the store lock.
+    fn append_message(&mut self, message: &Message) -> Result<(), PiError> {
+        let state = self;
         state.writable()?;
         message
             .validate()
@@ -750,7 +789,9 @@ impl Store {
         state.messages.push(persisted);
         Ok(())
     }
+}
 
+impl Store {
     /// Records a compaction checkpoint and returns the metadata now in force.
     ///
     /// Every check runs before the write: the checkpoint is validated, its
@@ -1302,6 +1343,22 @@ impl Session for Store {
     async fn append(&self, message: Message) -> Result<(), SessionError> {
         self.append_message(&message)
             .map_err(|error| SessionError::Persist(error.to_string()))
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: Message,
+    ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+        match Store::append_input_if_absent(self, input_id, &message) {
+            Ok(true) => Ok(otto_core::session::AppendOutcome::Appended),
+            Ok(false) => Ok(otto_core::session::AppendOutcome::AlreadyPresent),
+            Err(error) => Err(SessionError::Persist(error.to_string())),
+        }
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        Store::has_input(self, input_id)
     }
 
     fn latest_compaction(&self) -> Option<CompactionMetadata> {

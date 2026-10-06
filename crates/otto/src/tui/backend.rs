@@ -506,9 +506,9 @@ async fn local_command(c: Arc<Controller>, command: Command) -> Result<Reply, St
             format!("Approved {id}.")
         }
         Command::AdmitInput(text) => match c.admit_active_input(&text)? {
-            crate::app::ActiveInputAdmission::Steered => {
-                "Steering the active task; it will apply at the next safe boundary.".into()
-            }
+            crate::app::ActiveInputAdmission::Steered => format!(
+                "Guidance queued for the active task: {text}\nIt will be delivered at the next safe boundary."
+            ),
             crate::app::ActiveInputAdmission::Idle => {
                 prompt = Some(text);
                 String::new()
@@ -825,9 +825,9 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                     .await
                     .map_err(mutation_error)?
                 {
-                    crate::app::ActiveInputAdmission::Steered => {
-                        "Steering the active task; it will apply at the next safe boundary.".into()
-                    }
+                    crate::app::ActiveInputAdmission::Steered => format!(
+                        "Guidance queued for the active task: {text}\nIt will be delivered at the next safe boundary."
+                    ),
                     crate::app::ActiveInputAdmission::Idle => {
                         prompt = Some(text);
                         String::new()

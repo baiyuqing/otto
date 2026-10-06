@@ -1020,17 +1020,22 @@ impl Connection {
                 .steer(session_id, guidance)
                 .await
                 .map_err(|failure| relay.task_control_error(failure))
-                .and_then(|accepted| {
-                    accepted.then_some(()).ok_or_else(|| {
-                        error(INTERNAL_ERROR, "the active task did not accept guidance")
-                    })
+                .and_then(|message| {
+                    (message.status == otto_core::agent::steering::Status::Queued)
+                        .then_some(message)
+                        .ok_or_else(|| {
+                            error(INTERNAL_ERROR, "the active task did not accept guidance")
+                        })
                 }),
         };
         match accepted {
-            Ok(()) => {
+            Ok(message) => {
                 self.say(
                     session_id,
-                    "Guidance accepted for the active task; it will be delivered at the next safe boundary.",
+                    &format!(
+                        "Guidance queued (#{}): {}\nIt will be delivered at the next safe boundary.",
+                        message.id, message.text
+                    ),
                 );
                 result(PromptResponse::new(StopReason::EndTurn))
             }
@@ -1164,10 +1169,13 @@ impl Connection {
                     }
                     command::Command::Steer { guidance } => {
                         match session.controller.steer(guidance) {
-                            Ok(()) => {
+                            Ok(message) => {
                                 self.say(
                                     session_id,
-                                    "Guidance accepted for the active task; it will be delivered at the next safe boundary.",
+                                    &format!(
+                                        "Guidance queued (#{}): {}\nIt will be delivered at the next safe boundary.",
+                                        message.id, message.text
+                                    ),
                                 );
                                 end_turn()
                             }
@@ -1732,14 +1740,20 @@ impl Dispatcher {
                                 Some(session) => session
                                     .controller
                                     .steer(&input.text)
-                                    .map(|()| json!({"accepted": true}))
+                                    .map(|message| {
+                                        serde_json::to_value(message)
+                                            .expect("steering message serializes")
+                                    })
                                     .map_err(|failure| error(INTERNAL_ERROR, failure)),
                             },
                             Backend::Attach(relay) => relay
                                 .client
                                 .steer(&input.session_id, &input.text)
                                 .await
-                                .map(|accepted| json!({"accepted": accepted}))
+                                .map(|message| {
+                                    serde_json::to_value(message)
+                                        .expect("steering message serializes")
+                                })
                                 .map_err(|failure| relay.task_control_error(failure)),
                         },
                     };

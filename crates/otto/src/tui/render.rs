@@ -610,12 +610,17 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 
 fn draw_memory_review(frame: &mut Frame, area: Rect, dialog: &MemoryReviewDialog) {
     let popup = centered_rect(80, 60, area);
+    let choice = if dialog.accept_selected {
+        "❯ Accept\n  Reject"
+    } else {
+        "  Accept\n❯ Reject"
+    };
     let items: Vec<ListItem> = dialog
         .rows
         .iter()
         .map(|row| {
             ListItem::new(format!(
-                "{} {}/{}\n{}\nReason: {}\n{}{}",
+                "{} {}/{}\n{}\nReason: {}\n{}{}\n{}",
                 row.action,
                 row.kind,
                 row.key,
@@ -624,7 +629,8 @@ fn draw_memory_review(frame: &mut Frame, area: Rect, dialog: &MemoryReviewDialog
                 row.advice
                     .as_ref()
                     .map_or_else(String::new, |line| format!("{line}\n")),
-                "a accept · r reject · ↑/↓ select · Esc close"
+                choice,
+                "↑/↓ or j/k select · Enter confirm · Tab switch candidate · Esc close"
             ))
         })
         .collect();
@@ -632,7 +638,7 @@ fn draw_memory_review(frame: &mut Frame, area: Rect, dialog: &MemoryReviewDialog
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Memory review (no change until a/r)"),
+                .title("Memory review (Accept selected by default)"),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(dialog.selected));
@@ -1091,8 +1097,12 @@ mod tests {
         app.memory_review = Some(crate::tui::app::MemoryReviewDialog {
             rows: vec![row(Some("Advice (session model gpt-test): new"))],
             selected: 0,
+            accept_selected: true,
         });
         let with = screen_rows(&app, 120, 40).join("\n");
+        assert!(with.contains("❯ Accept"), "{with}");
+        assert!(with.contains("Enter confirm"), "{with}");
+        assert!(!with.contains("a accept"), "{with}");
         assert!(
             with.contains("Advice (session model gpt-test): new"),
             "{with}"
@@ -1101,8 +1111,10 @@ mod tests {
         app.memory_review = Some(crate::tui::app::MemoryReviewDialog {
             rows: vec![row(None)],
             selected: 0,
+            accept_selected: false,
         });
         let without = screen_rows(&app, 120, 40).join("\n");
+        assert!(without.contains("❯ Reject"), "{without}");
         assert!(without.contains("Reason: said so"), "{without}");
         assert!(!without.contains("Advice"), "{without}");
     }

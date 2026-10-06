@@ -154,7 +154,12 @@ pub(crate) struct MemoryReviewRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct MemoryReviewDialog {
     pub rows: Vec<MemoryReviewRow>,
+    /// The candidate row that Enter decides. Tab/BackTab move this focus.
     pub selected: usize,
+    /// Memory changes were explicitly requested for review, so accepting is
+    /// the default. Unlike permission grants, a stray Enter here cannot grant
+    /// a new capability.
+    pub accept_selected: bool,
 }
 
 /// Async work [`App::handle_key`] cannot start itself (every
@@ -785,6 +790,7 @@ impl App {
                         })
                         .collect(),
                     selected: 0,
+                    accept_selected: true,
                 });
             }
             Err(error) => self.push_system(format!("Memory review is unavailable: {error}")),
@@ -813,19 +819,38 @@ impl App {
         if let Some(dialog) = &mut self.memory_review {
             match key.code {
                 KeyCode::Esc => self.memory_review = None,
-                KeyCode::Up | KeyCode::Char('k') => {
+                // A review uses the same input-method-independent decision
+                // control as approvals: arrows (or j/k) select the outcome,
+                // then Enter confirms it.
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Char('k' | 'j' | 'h' | 'l') => {
+                    dialog.accept_selected = !dialog.accept_selected;
+                }
+                // Keep row navigation available for a reflection batch without
+                // overloading the decision keys.
+                KeyCode::Tab | KeyCode::Char(']') => {
+                    if !dialog.rows.is_empty() {
+                        dialog.selected = (dialog.selected + 1) % dialog.rows.len();
+                    }
+                }
+                KeyCode::BackTab | KeyCode::Char('[') => {
                     if !dialog.rows.is_empty() {
                         dialog.selected =
                             (dialog.selected + dialog.rows.len() - 1) % dialog.rows.len();
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if !dialog.rows.is_empty() {
-                        dialog.selected = (dialog.selected + 1) % dialog.rows.len();
-                    }
-                }
-                KeyCode::Char('a' | 'A') | KeyCode::Char('r' | 'R') => {
-                    let accept = matches!(key.code, KeyCode::Char('a' | 'A'));
+                KeyCode::Enter | KeyCode::Char('a' | 'A') | KeyCode::Char('r' | 'R') => {
+                    // a/r remain compatibility shortcuts, but keyboard layout
+                    // or input-method state is never required to decide.
+                    let accept = match key.code {
+                        KeyCode::Char('a' | 'A') => true,
+                        KeyCode::Char('r' | 'R') => false,
+                        KeyCode::Enter => dialog.accept_selected,
+                        _ => unreachable!("only decision keys reach this arm"),
+                    };
                     let row = dialog.rows.get(dialog.selected)?;
                     return Some(Action::MemoryReview {
                         id: row.id.clone(),
@@ -1246,22 +1271,36 @@ impl App {
         if line.is_empty() {
             return;
         }
-        let Backend::Local(controller) = backend else {
-            // The transcript shows the prompt when serve's `user_message`
-            // frame arrives, so nothing is held here. Slash commands wait for
-            // the turn to end, as in local mode.
-            if line.starts_with('/') {
-                self.queued_input = Some(line);
-            } else {
-                self.history.remember(&line);
-                self.push_system("Queued as the next turn (Ctrl+U withdraws it).");
-                self.outgoing.push(Action::Prompt(line));
-            }
+        // Slash commands retain their existing deferred semantics. Ordinary
+        // busy input is instead admitted to the exact active run: it must
+        // never silently become a later queued turn.
+        if line.starts_with('/') {
+            self.queued_input = Some(line);
             self.scroll = None;
             return;
+        }
+        let admission = match backend {
+            Backend::Local(controller) => controller.admit_active_input(&line),
+            Backend::Attach(remote) => remote.admit_active_input(&line),
         };
-        self.queued_input_sent = !line.starts_with('/') && controller.queue_user_message(&line);
-        self.queued_input = Some(line);
+        match admission {
+            Ok(crate::app::ActiveInputAdmission::Steered) => {
+                self.history.remember(&line);
+                self.push_system(
+                    "Steering the active task; it will apply at the next safe boundary.",
+                );
+            }
+            Ok(crate::app::ActiveInputAdmission::Idle) => {
+                // The turn closed in the admission race. This is now an
+                // explicit fresh prompt, never an invisible queue entry.
+                self.history.remember(&line);
+                self.outgoing.push(Action::Prompt(line));
+            }
+            Ok(crate::app::ActiveInputAdmission::ApprovalPending) => {
+                self.push_system("The task is waiting for approval; respond to that approval before steering it.");
+            }
+            Err(error) => self.push_system(format!("Could not steer the active task: {error}")),
+        }
         self.scroll = None;
     }
 
@@ -3881,14 +3920,88 @@ mod tests {
         assert_eq!(dialog.rows[0].reason, "private reason");
         assert_eq!(dialog.rows[0].advice, None);
 
+        // Accept is the default and Enter confirms it without relying on an
+        // alphabetic key (which may be unavailable under an input method).
+        assert!(dialog.accept_selected);
         let action = app.handle_key(
-            KeyEvent::from(KeyCode::Char('a')),
+            KeyEvent::from(KeyCode::Enter),
             &Backend::Local(&controller),
             &cancel,
         );
         assert!(
             matches!(action, Some(Action::MemoryReview { id, accept: true }) if id == candidate.id)
         );
+    }
+
+    #[tokio::test]
+    async fn memory_review_uses_arrows_and_enter_with_accept_as_the_default() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let cancel = CancellationToken::new();
+        let backend = Backend::Local(&controller);
+        let row = |id: &str| MemoryReviewRow {
+            id: id.to_string(),
+            action: "create".to_string(),
+            kind: "preference".to_string(),
+            key: id.to_string(),
+            text: "prefers concise replies".to_string(),
+            reason: "the user asked".to_string(),
+            advice: None,
+        };
+        let mut app = App::new(&backend);
+        app.memory_review = Some(MemoryReviewDialog {
+            rows: vec![row("first"), row("second")],
+            selected: 0,
+            accept_selected: true,
+        });
+
+        // The default is Accept, but an arrow or input-method-neutral j/k
+        // switches the decision before Enter submits it.
+        assert!(
+            app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &backend, &cancel)
+                .is_none()
+        );
+        assert!(!app.memory_review.as_ref().unwrap().accept_selected);
+        assert!(
+            app.handle_key(
+                key(KeyCode::Char('k'), KeyModifiers::NONE),
+                &backend,
+                &cancel
+            )
+            .is_none()
+        );
+        assert!(app.memory_review.as_ref().unwrap().accept_selected);
+        assert!(
+            app.handle_key(key(KeyCode::Left, KeyModifiers::NONE), &backend, &cancel)
+                .is_none()
+        );
+        assert!(!app.memory_review.as_ref().unwrap().accept_selected);
+
+        // Tab moves between candidates without changing the selected outcome.
+        assert!(
+            app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &backend, &cancel)
+                .is_none()
+        );
+        let dialog = app.memory_review.as_ref().unwrap();
+        assert_eq!(dialog.selected, 1);
+        assert!(!dialog.accept_selected);
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &backend, &cancel),
+            Some(Action::MemoryReview { id, accept: false }) if id == "second"
+        ));
+
+        // Esc closes a review without deciding it.
+        app.memory_review = Some(MemoryReviewDialog {
+            rows: vec![row("third")],
+            selected: 0,
+            accept_selected: true,
+        });
+        assert!(
+            app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &backend, &cancel)
+                .is_none()
+        );
+        assert!(app.memory_review.is_none());
     }
 
     #[tokio::test]

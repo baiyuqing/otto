@@ -35,7 +35,7 @@ use reqwest::header::CONTENT_TYPE;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::app::Channel;
+use crate::app::{ActiveInputAdmission, Channel};
 use crate::mcp::sse::SseParser;
 use crate::runtime::info::{SandboxMode, SandboxNetwork};
 use crate::schedule::Origin;
@@ -242,8 +242,25 @@ impl Client {
             .map_err(unreachable_error)
     }
 
+    /// `POST /v1/sessions/{id}/inputs`. Deterministically steers an active
+    /// task, reports idle for an explicit new turn, and never queues silently.
+    pub async fn admit_input(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<ActiveInputAdmission, Error> {
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/inputs"),
+                &json!({"text": text}),
+            ))
+            .await?;
+        decode(response).await
+    }
+
     /// `POST /v1/sessions/{id}/tasks/steer`. Accepts guidance only for the
-    /// active task in this session.
+    /// active task in this session. This explicit compatibility endpoint is
+    /// intentionally stricter than [`Self::admit_input`].
     pub async fn steer(&self, session_id: &str, text: &str) -> Result<bool, Error> {
         #[derive(Deserialize)]
         struct Accepted {

@@ -181,7 +181,7 @@ fn session_load_replays_history_before_the_response_and_list_titles_follow_the_s
 }
 
 #[test]
-fn prompts_of_two_relays_on_one_session_queue_and_each_gets_only_its_own_text() {
+fn ordinary_input_from_another_relay_steers_the_active_session() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let (base_url, received, release) = serve_gated(vec![
@@ -202,18 +202,22 @@ fn prompts_of_two_relays_on_one_session_queue_and_each_gets_only_its_own_text() 
     let first_id = first.start("session/prompt", prompt(&session_id, "first"));
     wait_for_count(&received, 1);
     let second_id = second.start("session/prompt", prompt(&session_id, "second"));
-    // The second turn is queued behind the first, which is held at the
-    // provider; give the request time to reach serve.
-    std::thread::sleep(Duration::from_millis(500));
+    let (second_frames, second_response) = second.finish(second_id, &mut |frame| panic!("{frame}"));
+    assert_eq!(second_response["result"]["stopReason"], "end_turn");
+    assert!(
+        agent_text(&second_frames).contains("Guidance accepted for the active task"),
+        "{second_frames:?}"
+    );
+    // Steering does not create a queued second turn. Once the first provider
+    // request reaches its safe boundary, the active logical turn re-plans and
+    // consumes the guidance in its own stream.
     assert_eq!(received.load(Ordering::SeqCst), 1);
     release.send(()).unwrap();
 
     let (first_frames, first_response) = first.finish(first_id, &mut |frame| panic!("{frame}"));
-    let (second_frames, second_response) = second.finish(second_id, &mut |frame| panic!("{frame}"));
     assert_eq!(first_response["result"]["stopReason"], "end_turn");
-    assert_eq!(second_response["result"]["stopReason"], "end_turn");
-    assert_eq!(agent_text(&first_frames), "reply to first");
-    assert_eq!(agent_text(&second_frames), "reply to second");
+    assert_eq!(agent_text(&first_frames), "reply to firstreply to second");
+    assert!(agent_text(&second_frames).contains("Guidance accepted"));
     assert_eq!(first.close(), Some(0));
     assert_eq!(second.close(), Some(0));
 }
@@ -238,9 +242,15 @@ fn session_cancel_ends_a_running_prompt_and_a_queued_one() {
 
     let first_id = first.start("session/prompt", prompt(&session_id, "wait"));
     wait_for_count(&accepted, 1);
-    // A second prompt on the same relay session is refused as locally.
-    let (_, busy) = first.call("session/prompt", prompt(&session_id, "again"));
-    assert_eq!(busy["error"]["message"], "a prompt is already running");
+    // Ordinary text on the same session steers the active task instead of
+    // failing behind the prompt slot or silently becoming a queued turn.
+    let (busy_frames, busy) = first.call("session/prompt", prompt(&session_id, "again"));
+    assert_eq!(busy["result"]["stopReason"], "end_turn", "{busy}");
+    assert!(
+        agent_text(&busy_frames).contains("Guidance accepted for the active task"),
+        "{busy_frames:?}"
+    );
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
 
     let (steer_frames, steered) = first.call(
         "session/prompt",

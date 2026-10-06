@@ -8,6 +8,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["storage-conformance"]
+storage-conformance = []
+
 [dependencies]
 otto-core.workspace = true
 async-trait.workspace = true

@@ -11,7 +11,6 @@ pub mod workflow;
 use crate::storage::migration::{chunk_hash, contracts::*};
 use crate::storage::{Connection, OptionalExtension, params};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -313,6 +312,53 @@ pub(super) fn verified_schema_objects(
 
 #[async_trait]
 impl StageImport for Stage {
+    async fn verification_chunk(
+        &self,
+        domain: &str,
+        cursor: &str,
+        max_bytes: usize,
+    ) -> Result<Chunk> {
+        if domain != self.codec.domain() || max_bytes == 0 || max_bytes > SCAN_LIMIT {
+            return Err(Error::Invalid(
+                "invalid logical verification request".into(),
+            ));
+        }
+        let mut connection = self.connection.lock().map_err(lock_error)?;
+        self.ensure_open(&mut connection)?;
+        let mut records = Vec::new();
+        let mut after = cursor.to_owned();
+        while let Some((next, record)) =
+            self.codec
+                .next_record(connection.as_ref().unwrap(), &after, max_bytes)?
+        {
+            records.push(record);
+            let chunk = Chunk {
+                cursor: cursor.into(),
+                next_cursor: Some(next.clone()),
+                records: records.clone(),
+                blobs: Vec::new(),
+            };
+            if chunk_hash(&chunk, max_bytes).is_err() {
+                records.pop();
+                if records.is_empty() {
+                    return Err(Error::Invalid("verification record exceeds bound".into()));
+                }
+                return Ok(Chunk {
+                    cursor: cursor.into(),
+                    next_cursor: Some(after),
+                    records,
+                    blobs: Vec::new(),
+                });
+            }
+            after = next;
+        }
+        Ok(Chunk {
+            cursor: cursor.into(),
+            next_cursor: None,
+            records,
+            blobs: Vec::new(),
+        })
+    }
     async fn validate_plan(&self, manifest: &Manifest) -> Result<()> {
         self.compatibility(manifest)?;
         if self.identity.is_empty() || self.path.as_os_str().is_empty() {
@@ -599,72 +645,7 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> Error {
 }
 
 pub struct ApprovalCodec;
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum ApprovalRecord {
-    Mode {
-        workspace: String,
-        session_id: String,
-        automatic: bool,
-    },
-    Request {
-        subject_key: String,
-        request: String,
-    },
-    Visibility {
-        approval_id: String,
-        workspace: String,
-        session_id: String,
-    },
-    InterruptedClaim {
-        approval_id: String,
-        recovery: String,
-    },
-    Event {
-        sequence: i64,
-        request: String,
-    },
-}
-impl ApprovalRecord {
-    fn metadata(&self) -> Result<(String, String)> {
-        Ok(match self {
-            ApprovalRecord::Mode {
-                workspace,
-                session_id,
-                ..
-            } => (
-                format!(
-                    "mode:{}",
-                    serde_json::to_string(&(workspace, session_id)).map_err(json_error)?
-                ),
-                "1".into(),
-            ),
-            ApprovalRecord::Request { request, .. } => {
-                let typed = approval_request(request)?;
-                (format!("request:{}", typed.id), typed.revision.to_string())
-            }
-            ApprovalRecord::Visibility {
-                approval_id,
-                workspace,
-                session_id,
-            } => (
-                format!(
-                    "visibility:{}",
-                    serde_json::to_string(&(approval_id, workspace, session_id))
-                        .map_err(json_error)?
-                ),
-                "1".into(),
-            ),
-            ApprovalRecord::InterruptedClaim { approval_id, .. } => {
-                (format!("claim:{approval_id}"), "1".into())
-            }
-            ApprovalRecord::Event { sequence, request } => (
-                format!("event:{sequence}"),
-                approval_request(request)?.revision.to_string(),
-            ),
-        })
-    }
-}
+use crate::approval::migration::ApprovalRecord;
 impl SqlDomainCodec for ApprovalCodec {
     fn domain(&self) -> &'static str {
         "approvals"

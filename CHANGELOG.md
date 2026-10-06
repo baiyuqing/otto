@@ -242,6 +242,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Clarify the mutually exclusive `edit` argument forms with JSON examples and
+  tell models how to correct mixed batch/single arguments before any file write.
+  [#362](https://github.com/baiyuqing/otto/pull/362)
+
 - Keep resumed sessions in the requested workspace, resolve new-session and
   workflow runtimes from that workspace's configuration, and wire its own
   sandbox control and persistent read approvals. Rebind ACP notifications

@@ -10,8 +10,6 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
 
 use otto_core::config::ServerRuntime;
 use otto_core::config::resolve::Runtime;
@@ -747,9 +745,6 @@ pub struct ServeOptions<'a> {
     /// `None` when bash never came up, so `POST /v1/sandbox/reload` answers 501
     /// rather than a failure.
     pub reloader: Option<Arc<SandboxReloader>>,
-    /// Open the printed TCP URL in the default browser. Unix listeners have
-    /// no URL; [`run`] rejects that combination before bind.
-    pub open: bool,
     /// Set to "serving" before bind so a SIGTERM with no held lease cancels
     /// serve instead of killing the process; read after the listen loop
     /// returns to decide whether to run the migration.
@@ -770,15 +765,9 @@ pub async fn run(
         acp_token,
         control,
         reloader,
-        open,
         terminate,
     } = options;
     terminate.set_serve();
-
-    if let Err(message) = require_tcp_for_open(open, &listen) {
-        let _ = control.close().await;
-        return fail(stderr, &message);
-    }
 
     let workspace_roots = match canonicalize_workspace_roots(&listen.workspace_roots) {
         Ok(roots) => roots,
@@ -816,7 +805,7 @@ pub async fn run(
         );
     }
     if let Some(tcp) = &tcp {
-        announce_listen(stdout, &tcp.address(), &token, open);
+        announce_listen(stdout, &tcp.address(), &token);
     }
 
     let builder = Arc::new(builder);
@@ -980,52 +969,8 @@ async fn serve_listeners(
     tcp_result.err().or(socket_result.err())
 }
 
-fn require_tcp_for_open(open: bool, listen: &ServerRuntime) -> Result<(), String> {
-    if open && listen.listen.is_empty() {
-        return Err("--open requires a TCP listener".into());
-    }
-    Ok(())
-}
-
-fn announce_listen(stdout: &mut (dyn Write + Send), address: &str, token: &str, open: bool) {
-    let url = format!("http://{address}/?token={token}");
-    let _ = writeln!(stdout, "otto serve: {url}");
-    if open {
-        launch_browser(&url);
-    }
-}
-
-/// The browser launcher. macOS is given as an absolute path because `PATH` is
-/// attacker-influenced input at this point; every other target resolves the
-/// freedesktop `xdg-open` through `PATH`, which is the only way it is ever
-/// installed. A failed launch is not fatal: the URL was already printed.
-#[cfg(all(not(test), target_os = "macos"))]
-const OPEN_BINARY: &str = "/usr/bin/open";
-/// See the macOS launcher above.
-#[cfg(all(not(test), not(target_os = "macos")))]
-const OPEN_BINARY: &str = "xdg-open";
-
-#[cfg(test)]
-static LAUNCH_TEST: Mutex<()> = Mutex::new(());
-#[cfg(test)]
-static LAUNCHES: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-#[cfg(test)]
-fn take_launches() -> Vec<String> {
-    std::mem::take(&mut *LAUNCHES.lock().unwrap_or_else(|poison| poison.into_inner()))
-}
-
-#[cfg(test)]
-fn launch_browser(url: &str) {
-    LAUNCHES
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(url.to_owned());
-}
-
-#[cfg(not(test))]
-fn launch_browser(url: &str) {
-    let _ = std::process::Command::new(OPEN_BINARY).arg(url).spawn();
+fn announce_listen(stdout: &mut (dyn Write + Send), address: &str, token: &str) {
+    let _ = writeln!(stdout, "otto serve: http://{address}/?token={token}");
 }
 
 /// The bound listeners. `token` is non-empty exactly when `tcp` is set.
@@ -1067,63 +1012,15 @@ fn bind(listen: &ServerRuntime) -> Result<Bound, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use otto_core::config::ServerRuntime;
 
     #[test]
-    fn open_without_a_tcp_listener_is_rejected() {
-        let unix = ServerRuntime {
-            socket: "/tmp/otto.sock".into(),
-            listen: String::new(),
-            ..Default::default()
-        };
+    fn tcp_startup_prints_connection_details() {
+        let mut stdout = Vec::new();
+        announce_listen(&mut stdout, "127.0.0.1:8787", "tok");
         assert_eq!(
-            require_tcp_for_open(true, &unix).unwrap_err(),
-            "--open requires a TCP listener"
+            String::from_utf8(stdout).expect("utf-8"),
+            "otto serve: http://127.0.0.1:8787/?token=tok\n"
         );
-        assert!(require_tcp_for_open(false, &unix).is_ok());
-        let tcp = ServerRuntime {
-            socket: String::new(),
-            listen: "127.0.0.1:0".into(),
-            ..Default::default()
-        };
-        assert!(require_tcp_for_open(true, &tcp).is_ok());
-    }
-
-    fn with_launch_test<T>(body: impl FnOnce() -> T) -> T {
-        let _guard = LAUNCH_TEST
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let _ = take_launches();
-        body()
-    }
-
-    #[test]
-    fn open_launches_the_printed_url() {
-        with_launch_test(|| {
-            let mut stdout = Vec::new();
-            announce_listen(&mut stdout, "127.0.0.1:8787", "tok", true);
-            assert_eq!(
-                String::from_utf8(stdout).expect("utf-8"),
-                "otto serve: http://127.0.0.1:8787/?token=tok\n"
-            );
-            assert_eq!(
-                take_launches(),
-                vec!["http://127.0.0.1:8787/?token=tok".to_string()]
-            );
-        });
-    }
-
-    #[test]
-    fn a_tcp_listener_without_open_does_not_launch() {
-        with_launch_test(|| {
-            let mut stdout = Vec::new();
-            announce_listen(&mut stdout, "127.0.0.1:8787", "tok", false);
-            assert!(take_launches().is_empty());
-            assert_eq!(
-                String::from_utf8(stdout).expect("utf-8"),
-                "otto serve: http://127.0.0.1:8787/?token=tok\n"
-            );
-        });
     }
 
     // ---- admission ----

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/otto-core", "crates/otto", "crates/otto-web"]
+members = ["crates/otto-core", "crates/otto"]
 
 [workspace.package]
 edition = "2024"
@@ -59,10 +59,6 @@ url = "=2.5.8"
 # HTTP routing for `otto serve`. hyper and tower arrive transitively at the
 # versions axum pins; nothing depends on them by name.
 axum = "=0.8.9"
-# Embeds ui/dist into the binary at build time.
-include_dir = "=0.7.4"
-# Serde bridge for the wasm-bindgen exports the browser UI calls.
-serde-wasm-bindgen = "=0.6.5"
 # Dev-only: `ServiceExt::oneshot` drives the router in-process, so the route
 # contract tests need no listening socket.
 tower = { version = "=0.5.3", features = ["util"] }

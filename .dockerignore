@@ -6,8 +6,6 @@
 !rust-toolchain.toml
 !crates
 !crates/**
-!ui
-!ui/**
 !docs
 !docs/user-manual.md
 !scripts
@@ -27,10 +25,6 @@
 .superpowers
 target
 otto
-ui/node_modules
-ui/dist/*
-!ui/dist/.gitkeep
-crates/otto-web/pkg
 connect
 **/.env
 **/.env.*

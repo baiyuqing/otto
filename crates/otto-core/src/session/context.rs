@@ -40,6 +40,9 @@ pub const COMPACTION_CONTEXT_TYPE: &str = "compaction";
 pub const BRANCH_CONTEXT_TYPE: &str = "branch_summary";
 /// Custom entry type carrying Otto's runtime metadata.
 pub const OTTO_RUNTIME_CUSTOM_TYPE: &str = "otto.runtime";
+/// Custom entry type carrying the tool names the session's latest run sent;
+/// written at run start when absent or different.
+pub const CAPABILITIES_CUSTOM_TYPE: &str = "otto.capabilities";
 
 const MAX_CONTEXT_WARNINGS: usize = 32;
 const MAX_WARNING_TYPE_BYTES: usize = 32;
@@ -49,6 +52,8 @@ const MAX_WARNING_TYPE_BYTES: usize = 32;
 // types written by other Pi-compatible tools.
 const TASK_NOTIFICATION_CONTEXT_TYPE: &str = "task_notification";
 const PARENT_MESSAGE_CONTEXT_TYPE: &str = "parent_message";
+/// Context type of the one-time tool-set change notice.
+pub const CAPABILITY_UPDATE_CONTEXT_TYPE: &str = "capability_update";
 
 static ENTRY_ID_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("^[0-9a-f]{8}$").expect("entry id pattern compiles"));
@@ -73,6 +78,9 @@ pub struct ResolvedContext {
     pub session_name: String,
     pub thinking_level: String,
     pub operation_ledger: OperationLedger,
+    /// The tool names in the latest `otto.capabilities` entry on the active
+    /// path, or `None` when there is none or it is malformed.
+    pub observed_tools: Option<Vec<String>>,
 }
 
 impl Default for ResolvedContext {
@@ -86,6 +94,7 @@ impl Default for ResolvedContext {
             session_name: String::new(),
             thinking_level: "off".into(),
             operation_ledger: OperationLedger::default(),
+            observed_tools: None,
         }
     }
 }
@@ -210,6 +219,15 @@ pub fn build_context(
                     .ok_or_else(|| PiError::invalid("custom payload is required"))?;
                 if custom.custom_type == OTTO_RUNTIME_CUSTOM_TYPE {
                     latest_runtime = Some(decode_runtime_metadata(custom.data.as_deref())?);
+                } else if custom.custom_type == CAPABILITIES_CUSTOM_TYPE {
+                    let raw = custom.data.as_deref().map(RawValue::get);
+                    resolved.observed_tools = decode_capabilities(raw.unwrap_or_default());
+                    if resolved.observed_tools.is_none() {
+                        collector.add(format!(
+                            "ignored malformed {CAPABILITIES_CUSTOM_TYPE} entry {}",
+                            entry.id
+                        ));
+                    }
                 } else if custom.custom_type == OPERATION_CUSTOM_TYPE {
                     match decode_operation_raw(custom.data.as_deref()).map_err(|error| {
                         PiError::invalid(format!("invalid otto.operation fact: {error}"))
@@ -798,7 +816,10 @@ pub fn new_context_message(
 }
 
 fn custom_context_text(custom_type: &str, text: &str) -> String {
-    if custom_type == TASK_NOTIFICATION_CONTEXT_TYPE || custom_type == PARENT_MESSAGE_CONTEXT_TYPE {
+    if custom_type == TASK_NOTIFICATION_CONTEXT_TYPE
+        || custom_type == PARENT_MESSAGE_CONTEXT_TYPE
+        || custom_type == CAPABILITY_UPDATE_CONTEXT_TYPE
+    {
         return text.to_owned();
     }
     format!("[Custom context: {custom_type}]\n{text}")
@@ -879,6 +900,24 @@ fn sanitize_warning_type(entry_type: &str) -> String {
         return "unknown".into();
     }
     sanitized
+}
+
+/// Decodes `{"tools":[...]}` into sorted, deduplicated names; `None` when the
+/// data has another shape.
+pub fn decode_capabilities(data: &str) -> Option<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct Data {
+        tools: Vec<String>,
+    }
+    let mut tools = serde_json::from_str::<Data>(data).ok()?.tools;
+    tools.sort();
+    tools.dedup();
+    Some(tools)
+}
+
+/// Encodes sorted, deduplicated tool names as `otto.capabilities` data.
+pub fn encode_capabilities(tools: &[String]) -> String {
+    serde_json::json!({ "tools": tools }).to_string()
 }
 
 /// Decodes an `otto.runtime` custom entry's `data` field.

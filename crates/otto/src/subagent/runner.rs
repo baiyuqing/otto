@@ -293,6 +293,10 @@ impl Session for SharedTranscript {
         self.0.append_operation_fact(fact).await
     }
 
+    fn observed_tools(&self) -> Option<Vec<String>> {
+        self.0.observed_tools()
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2681,6 +2685,10 @@ mod tests {
             self.inner.append_operation_fact(fact).await
         }
 
+        fn observed_tools(&self) -> Option<Vec<String>> {
+            self.inner.observed_tools()
+        }
+
         async fn append_custom(
             &self,
             custom_type: &str,
@@ -3322,9 +3330,14 @@ mod tests {
         wait_final(&tasks, &task.id).await;
 
         let messages = provider.requests()[0].messages.clone();
-        assert_eq!(messages.len(), want_snapshot.len() + 1, "{messages:#?}");
+        // The child has history and no tool-set record, so its first run adds
+        // the legacy tool-set notice between the snapshot and the prompt.
+        assert_eq!(messages.len(), want_snapshot.len() + 2, "{messages:#?}");
         assert_eq!(&messages[..want_snapshot.len()], want_snapshot.as_slice());
-        let last = &messages[want_snapshot.len()];
+        let notice = &messages[want_snapshot.len()];
+        assert_eq!(notice.role, Role::Context);
+        assert_eq!(notice.context_type, "capability_update");
+        let last = &messages[want_snapshot.len() + 1];
         assert_eq!(last.role, Role::User);
         assert_eq!(last.text(), "delegated task");
     }

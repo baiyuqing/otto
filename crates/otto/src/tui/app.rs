@@ -760,11 +760,12 @@ impl App {
             return None;
         }
         if self.busy() && !line.starts_with('/') {
-            if let Backend::Local(c) = backend {
-                self.queued_input_sent = c.queue_user_message(&line);
-            }
-            self.queue_input(&line);
-            return self.actions.pop();
+            // Natural language submitted during an active turn is guidance for
+            // that exact turn, never an implicit later queued prompt. The
+            // backend resolves the admission race: only an idle result starts
+            // a new prompt explicitly.
+            self.enqueue(0, Request::Command(backend::Command::AdmitInput(line)));
+            return None;
         }
         self.dispatch_line(&line, backend, cancel)
     }

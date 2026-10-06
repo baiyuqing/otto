@@ -24,6 +24,30 @@ struct Accepted {
     accepted: bool,
 }
 
+/// `POST /v1/sessions/{id}/inputs` deterministically admits ordinary human
+/// input to the active run. It never invokes the model routing dialogue and
+/// never creates a queued turn.
+pub async fn admit_input(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let input: TextInput = match serde_json::from_slice(&body) {
+        Ok(input) => input,
+        Err(_) => return bad_request("expected text"),
+    };
+    if let Some(message) = invalid_text(&input.text) {
+        return bad_request(message);
+    }
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session.ctrl.admit_active_input(&input.text) {
+        Ok(disposition) => json_response(StatusCode::OK, &disposition),
+        Err(message) => error_response(StatusCode::CONFLICT, "input_admission_failed", &message),
+    }
+}
+
 /// `POST /v1/sessions/{id}/tasks/steer`.
 pub async fn steer(
     State(server): State<Arc<Server>>,

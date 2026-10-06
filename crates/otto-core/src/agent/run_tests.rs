@@ -4087,3 +4087,48 @@ fn enqueue_skips_an_id_already_queued() {
     assert_eq!(first, again);
     assert_eq!(inbox.len(), 1);
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_recovery_turn_delivers_the_interrupted_turns_steering_once() {
+    let journal = Arc::new(Inbox::default());
+    journal.push(Notification {
+        kind: Some(NotificationKind::UserMessage),
+        text: "also update the docs".into(),
+        id: "steer:op_old:1".into(),
+        scope: "op_old".into(),
+        ..Notification::default()
+    });
+    let steering = Arc::new(super::steering::Steering::default());
+    steering.set_journal(journal.clone());
+    let inbox = Arc::new(Inbox::default());
+    inbox.push(Notification {
+        kind: Some(NotificationKind::Message),
+        text: "The previous Otto process stopped".into(),
+        ..Notification::default()
+    });
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("resumed")]),
+        EchoExecutor::default(),
+        interrupted_session().await,
+        Options {
+            mailbox: inbox,
+            steering,
+            ..options()
+        },
+    );
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("recovery turn");
+    let steered: Vec<Message> = agent
+        .session()
+        .messages()
+        .into_iter()
+        .filter(|message| message.role == Role::User)
+        .collect();
+    assert_eq!(steered.len(), 1);
+    assert_eq!(steered[0].text(), "also update the docs");
+    assert_eq!(steered[0].input_id, "steer:op_old:1");
+    assert!(journal.is_empty());
+}

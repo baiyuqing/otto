@@ -1823,6 +1823,7 @@ impl Builder {
         mark_build_trace(&mut trace, "runner/subagents");
 
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
+        self.install_steering_journal(&task_control.steering(), session, warnings);
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let reflection = Arc::new(crate::tool::reflect::Handle::default());
         if self.boundary_allows_dynamic(Some(runtime)) {

@@ -19,6 +19,23 @@ components:
         "Authorization: Bearer <token>". Missing or wrong tokens get 401 with
         WWW-Authenticate: Bearer. The Unix-socket listener has no token.
   schemas:
+    SteeringMessage:
+      type: object
+      required: [id, text, status]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          description: Transient identifier within the active run.
+        text:
+          type: string
+          description: Exact guidance text accepted from the user.
+        status:
+          type: string
+          enum: [queued, delivered, withdrawn, discarded]
+          description: >-
+            queued can be withdrawn; delivered is append-only session history;
+            withdrawn and discarded were never delivered to the agent.
     Error:
       type: object
       properties:
@@ -1526,12 +1543,31 @@ paths:
   /v1/sessions/{id}/tasks/steer:
     parameters:
       - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: List transient steering messages for the active task
+      description: >
+        Returns messages accepted for the current active run. A queued message
+        can be withdrawn; delivered guidance is append-only session history.
+        Records are transient and disappear after the run ends or Otto restarts.
+      responses:
+        "200":
+          description: Steering messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SteeringMessage" }
+        "404":
+          description: Unknown session
+        "409":
+          description: Steering is unavailable for the current session
     post:
       summary: Guide the active task at its next safe provider boundary
       description: >
         Accepts guidance only for the active task in this session. Acceptance
         does not interrupt a provider request or tool call and does not grant
-        permission. Guidance is transient and discarded when the task ends.
+        permission. The response includes the exact queued text and its id;
+        delete it before delivery to withdraw it.
       requestBody:
         required: true
         content:
@@ -1548,22 +1584,39 @@ paths:
                   description: Non-whitespace text, limited to 32000 UTF-8 bytes.
       responses:
         "200":
-          description: Guidance accepted
+          description: Guidance queued
           content:
             application/json:
-              schema:
-                type: object
-                required: [accepted]
-                properties:
-                  accepted:
-                    type: boolean
-                    enum: [true]
+              schema: { $ref: "#/components/schemas/SteeringMessage" }
         "400":
           description: Invalid JSON or text
         "404":
           description: Unknown session
         "409":
           description: No active task accepts guidance
+  /v1/sessions/{id}/tasks/steer/{message_id}:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: message_id
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    delete:
+      summary: Withdraw one queued steering message
+      description: >
+        Withdraws only a message still queued for the active run. A delivered,
+        withdrawn, discarded, unknown, or finished-run message returns 409;
+        delivered guidance cannot be removed from append-only history.
+      responses:
+        "200":
+          description: Guidance withdrawn
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SteeringMessage" }
+        "404":
+          description: Unknown session
+        "409":
+          description: Guidance is no longer queued for the active task
   /v1/sessions/{id}/tasks/control:
     parameters:
       - $ref: "#/components/parameters/sessionID"

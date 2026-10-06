@@ -236,12 +236,10 @@ impl Relay {
                     .steer(session_id, guidance)
                     .await
                     .map_err(|failure| self.task_control_error(failure))?;
-                return Ok(Some(if accepted {
-                    "Guidance accepted for the active task; it will be delivered at the next safe boundary."
-                        .to_string()
-                } else {
-                    "The active task did not accept guidance.".to_string()
-                }));
+                return Ok(Some(format!(
+                    "Guidance queued (#{}) for the active task: {}\nIt will be delivered at the next safe boundary.",
+                    accepted.id, accepted.text
+                )));
             }
             Command::Queue { .. } => {
                 return Ok(Some(

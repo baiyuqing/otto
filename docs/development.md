@@ -5,7 +5,7 @@ and the root `AGENTS.md` holds repository-wide rules. Scoped `AGENTS.md`
 files in the Rust crates and `docs/` add only their owning layer's constraints. This page holds
 the detailed package contracts and development workflow. The wasm32
 architecture boundary is enforced by `make rust-wasm-check`, which
-requires `crates/otto-core` and `crates/otto-web` to stay buildable for
+requires `crates/otto-core` to stay buildable for
 `wasm32-unknown-unknown`; the rationale and compatibility details are in the
 [architecture contract design](specs/2026-09-05-architecture-contracts.md).
 
@@ -43,10 +43,9 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `workflow`: workspace-scoped TOML DAG discovery, Turso run/step/attempt/approval/event state, committed-boundary recovery, and the shared CLI/server workflow controller
   - `acp`: the Agent Client Protocol v1 agent server behind `otto acp`: newline-delimited JSON-RPC on stdin/stdout with a single stdout writer, per-session `Controller`s on one `Builder`, the mapping from agent events and stored history to `session/update`, and the after-turn `session/request_permission` round trip for elevated `bash` and persistent sandbox read grants. `acp::tcp` is the opt-in `otto serve --acp-listen` transport; it uses the existing serve router in process and shares controllers, turn queues and approvals. Its authentication/lifecycle contract is [ACP TCP](specs/2026-10-03-acp-tcp.md). `acp::attach` is the `otto acp --attach` relay: the same transport and dispatcher with every session operation sent to `otto serve` through `client`. Message types come from the `agent-client-protocol-schema` crate; the designs are `docs/specs/2026-10-02-acp-agent-server.md` and `docs/specs/2026-10-02-shared-session.md`
   - `client`: the HTTP client of `otto serve` over its Unix socket, used by `acp::attach` and `tui::attach` (sessions, history, queued turns and their SSE streams, the `/v1/status` stream, turn cancel, approval decisions, compaction, context, sub-agent tasks, sandbox reload); it maps a failed connection to `Error::Unreachable` and a non-2xx answer to `Error::Http`
-  - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI (`ui/dist`, written by `make ui`)
+  - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`
   - `tui`: the terminal frontend on the alternate screen, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle. `App` reaches either the local `Controller` or, through `app::Backend::Attach`, `tui::attach::Remote`; `tui::attach` is `otto --attach`, the loop that sends turns to `otto serve` through `client`, follows the session's turns from the `/v1/status` stream, and reconnects after a lost connection. Both modes apply turn events as wire frames (`App::apply_event`)
-- `crates/otto-web`: the wasm cdylib the browser UI loads; exports `otto-core`'s wire codecs to JavaScript through `wasm-bindgen`
-- `ui/`: the TypeScript browser frontend; a client of `crates/otto`'s HTTP API and `crates/otto-web`'s wasm exports only, with no Rust code of its own; `make check-fast` runs its build and tests only when a path under `ui/` or `crates/otto-web/` changed
+- The browser UI and WASM bindings live in [otto-plus](https://github.com/baiyuqing/otto-plus), which consumes the shared core at a pinned revision.
 - `connect/`: `otto-connect`, the Go chat connector (module `github.com/baiyuqing/otto/connect`). It is an ACP client that starts an ACP agent (by default `otto acp`) as a child process and links no otto code; its contract with otto is ACP v1 on stdio or authenticated loopback TCP (`[agent].address`). `internal/agent` owns the child process or TCP connection and the ACP handshake, `internal/bridge` the chat-to-session map, queues, commands, replies, permission requests and admission, `internal/telegram` the Bot API adapter (including Markdown rendering to entities), `internal/feishu` the Feishu/Lark adapter over `channel-sdk-go`, `internal/config` `connect.toml`, and `internal/state` the state file. Design: [chat connector](specs/2026-10-02-otto-connect.md)
 
 Keep provider-specific wire structs inside the two provider implementation
@@ -214,7 +213,7 @@ remain streaming, dropped transactions roll back, and native diagnostics
 stay inside each service boundary. Turso FTS and multi-process WAL are
 explicitly enabled. The latter is experimental upstream: keep the process
 contention and crash/reopen tests in `tests/turso_storage.rs` as acceptance
-checks. `otto-core` and `otto-web` remain independent of the native engine.
+checks. `otto-core` remains independent of the native engine.
 
 Use `otto storage migrate <legacy.db> <new.db>` for offline legacy import;
 see the user manual for the procedure. Python 3 reads the old SQLite file
@@ -348,27 +347,26 @@ The canonical Make targets are:
 
 ```bash
 make check-fast     # the local gate: only the checks for paths changed since origin/main, one worktree at a time
-make check          # full macOS gate: rust-fmt, rust-lint, ui, all tests (PTY tests included), wasm test, UI test (no release build)
+make check          # full macOS gate: rust-fmt, rust-lint, all tests (PTY tests included), core wasm tests (no release build)
 make check-tests    # `check` without rust-fmt and rust-lint (CI's macOS acceptance job)
-make build          # the release build: the Web UI, cargo build --release, then copy ./otto
+make build          # the release build: cargo build --release, then copy ./otto
 make install        # build and install otto, otto-connect and bundled skills
 make rust-fmt       # cargo fmt --all -- --check
 make rust-lint      # cargo clippy --workspace --all-targets -- -D warnings
 make rust-test      # cargo test --workspace (offline)
-make rust-wasm-check # cargo check -p otto-core and -p otto-web for wasm32-unknown-unknown
-make rust-wasm-test  # wasm-pack test --node for otto-core and otto-web
+make rust-wasm-check # cargo check -p otto-core for wasm32-unknown-unknown
+make rust-wasm-test  # wasm-pack test --node for otto-core
 make test-tui       # only the PTY tests: cargo test -p otto --test tui_pty --test tui_attach_pty
 make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, connect-check, rust-wasm-check, scripts-test, license-check
-make license-check  # fail if a shipped Rust crate or web UI npm package uses a license outside the allowlist
+make license-check  # fail if a shipped Rust crate uses a license outside the allowlist
 make connect-check  # Go connector: gofmt -l, go vet, go test -race (builds target/debug/otto for its end-to-end test)
 make connect-build  # build the Go connector to target/otto-connect
 ```
 
 `check-fast` is described under [Local verification](#local-verification).
-`check` runs `rust-fmt` and `rust-lint`, builds the Web UI (`make ui`, so the
-tests embed the real `ui/dist`), then runs the full workspace test suite (which
+`check` runs `rust-fmt` and `rust-lint`, then runs the full workspace test suite (which
 includes the `otto-core` tests and the PTY tests), the Go connector
-checks, the wasm tests under Node, and `make ui-test`. It does not run `cargo build
+checks, and the core wasm tests under Node. It does not run `cargo build
 --release` or `rust-wasm-check`; `make build` is the release build, and
 `make check-linux` runs `rust-wasm-check`.
 
@@ -380,7 +378,7 @@ dev-dependency features off and recompile most of the dependency tree. Its end-t
 `otto acp`, and `otto serve` with `otto acp --attach`, from `target/debug/otto`
 against a loopback fake provider, so they are offline like the Rust tests.
 
-`rust-wasm-test` and `make ui`/`make ui-test` need `wasm-pack` (pinned to
+`rust-wasm-test` needs `wasm-pack` (pinned to
 0.15.0 in CI via `cargo install wasm-pack --version 0.15.0 --locked`).
 The PTY tests (`tui_pty`, `tui_attach_pty`) open a pseudo-terminal, which is
 unavailable in some sandboxed shells; `cargo test --workspace` runs them, and
@@ -410,8 +408,7 @@ feature until a writer exists.
 
 `make license-check` runs `scripts/license-check.mjs`, and `make check-linux`
 runs it. It reads the `license` field of every Rust crate in the non-dev
-dependency graph (`cargo metadata --locked`, all targets) and of every non-dev
-package in `ui/package-lock.json`, and fails when a license expression is not
+dependency graph (`cargo metadata --locked`, all targets), and fails when a license expression is not
 satisfied by the allowlist `ALLOWED`: MIT, Apache-2.0, BSD-2-Clause,
 BSD-3-Clause, ISC, Zlib, Unicode-3.0 and Unlicense. An `OR` expression passes
 when one alternative is allowed; `AND` requires all. The check needs network
@@ -421,7 +418,7 @@ checked set also contains optional crates that a release build does not
 compile (36 of 479 on 2026-10-05); such a crate can fail the check without
 shipping.
 
-Dev-only Rust crates and npm `devDependencies` are not checked because they do
+Dev-only Rust crates are not checked because they do
 not ship. The Go module under `connect/` is not checked because
 `go.mod` carries no license metadata.
 
@@ -438,7 +435,7 @@ binaries are distributed, the MIT, BSD and Apache-2.0 terms require one.
 Locally, run the focused tests for the change and then `make check-fast`. Do
 not run `make check` or `make check-linux`; CI runs both on every PR. A full
 gate compiles the workspace in test mode and again in check mode for clippy,
-builds the web UI and the wasm package, and runs the Go race tests. Every
+checks core WASM compatibility and runs the Go race tests. Every
 worktree has its own `target/`, so two worktrees running a full gate at the
 same time each compile the whole dependency tree on every core.
 
@@ -456,13 +453,11 @@ uncommitted and untracked files, and runs only the commands those paths need:
 | anything under `crates/` or `testdata/`; root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | `cargo clippy --workspace --all-targets -- -D warnings` |
 | `crates/otto/src/<module>/…` or `crates/otto/src/<module>.rs` | `cargo test --workspace --lib -- <module>::`, one run for all changed modules |
 | `crates/otto/tests/<name>.rs` | `cargo test --workspace --test <name>` |
-| `crates/otto-core/`, `testdata/`, root manifests, `crates/otto/` `Cargo.toml`, `build.rs`, `src/lib.rs`, `src/main.rs`, `tests/common/`, `tests/fixtures/`, `tests/testdata/`, and any other path under `crates/` except `crates/otto-web/` | `cargo test --workspace`, in place of the two rows above |
-| `crates/otto-core/`, `crates/otto-web/`, root manifests | `make rust-wasm-check` |
-| `crates/otto-web/` | `wasm-pack test --node crates/otto-web`, `make ui ui-test` |
-| `ui/` | `make ui ui-test` |
+| `crates/otto-core/`, `testdata/`, root manifests, `crates/otto/` `Cargo.toml`, `build.rs`, `src/lib.rs`, `src/main.rs`, `tests/common/`, `tests/fixtures/`, `tests/testdata/`, and any other path under `crates/`  | `cargo test --workspace`, in place of the two rows above |
+| `crates/otto-core/`, root manifests | `make rust-wasm-check` |
 | `connect/` | `make connect-check` |
 | `scripts/` | `make scripts-test` |
-| root `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml`, `ui/package.json`, `ui/package-lock.json`, `scripts/license-check.mjs` | `make license-check` |
+| root `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml`, `scripts/license-check.mjs` | `make license-check` |
 | `docs/`, `LICENSE`, Markdown outside `crates/` and `testdata/` | nothing |
 | anything else, such as `.github/`, `Makefile` | nothing; printed as not checked |
 
@@ -486,29 +481,12 @@ every command.
 
 ## Web UI workflow
 
-`ui/` is a Vite + React + TypeScript project. Its runtime dependencies are
-`react`/`react-dom`, `react-markdown` with `remark-gfm`, `remark-math` and
-`rehype-katex` plus `katex` for math, `mermaid` for fenced `mermaid` blocks
-and the usage chart, and the `otto-web` wasm package built from
-`crates/otto-web`. It needs Node 24+ and wasm-pack, and it is exercised by
-`make check` through the Web UI build and `make ui-test`.
-
-```bash
-make ui-deps  # wasm-pack build, then npm ci; `ui` and `ui-test` depend on it, so it runs once per make invocation
-make ui       # ui-deps, then npm run build → ui/dist, embedded by cargo build
-make ui-test  # ui-deps, then npm test (vitest): the SSE frame parser and the transcript reducer
-```
-
-`make build` runs `make ui` first. `ui/dist` is a build output: only `.gitkeep`
-is tracked, and a direct `cargo build` without a prior `make ui` embeds the
-placeholder page. Do not commit built assets.
-
-For development, run `otto serve --listen 127.0.0.1:8787` in one terminal and
-`cd ui && OTTO_URL=http://127.0.0.1:8787 npm run dev` in another, then open the
-Vite URL with the `?token=` query from the `otto serve` startup line. Vite
-proxies `/v1` to the server, so the page stays same-origin and no CORS is
-involved. Wire types in `ui/src/types.ts` mirror
-[openapi.yaml](../testdata/server/openapi.yaml); update both together.
+The browser frontend and WASM bindings live in
+[otto-plus](https://github.com/baiyuqing/otto-plus). Build and test them there.
+Otto builds independently, serves authenticated HTTP APIs, and keeps its core
+WASM conformance checks. Coordinate API/schema changes with the frontend's
+pinned core revision and wire declarations; use its same-origin proxy rather
+than adding CORS or static assets to Otto.
 
 ## Tests
 
@@ -550,7 +528,7 @@ image with `docker build -t otto:local .`, then run
 and a free localhost port 8787. It uses a disposable project, workspace and
 state volume; it calls no live provider and deletes its own resources.
 It checks the real setup flow across recreation, non-root execution,
-embedded UI assets, API token enforcement and rotation, session persistence,
+API token enforcement and rotation, session persistence,
 workspace writes and graceful SIGTERM shutdown. It does not run as part of
 the default offline script tests. Check Docker Desktop on each Mac
 architecture separately; Linux execution cannot verify macOS file sharing.
@@ -593,7 +571,7 @@ changelog maintenance itself need no entry.
 
 ## Releases
 
-The version is `[workspace.package] version` in `Cargo.toml`, shared by `otto`, `otto-core` and `otto-web`. The `otto`, `otto-core` and `otto-web` entries of `Cargo.lock` must carry the same value; a test fails `make check` when they differ.
+The version is `[workspace.package] version` in `Cargo.toml`, shared by `otto` and `otto-core`. The `otto` and `otto-core` entries of `Cargo.lock` must carry the same value; a test fails `make check` when they differ.
 
 Versioning follows SemVer in the 0.x range: a new feature or an incompatible change raises the minor version (0.1.0 to 0.2.0); only fixes raise the patch version (0.1.0 to 0.1.1). Moving to 1.0.0 is a maintainer decision. Version numbers change only in a release PR.
 

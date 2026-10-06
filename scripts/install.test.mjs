@@ -13,3 +13,12 @@ test('make install builds and installs the chat connector', () => {
   assert.ok(build >= 0, 'install must build otto-connect');
   assert.ok(install > build, 'install must copy the freshly built otto-connect');
 });
+
+
+test('make build does not build a browser frontend', () => {
+  const output = execFileSync('make', ['-n', 'build'], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8',
+  });
+  assert.ok(output.includes('cargo build --release'));
+  assert.doesNotMatch(output, /npm|wasm-pack|ui\/|otto-web/);
+});

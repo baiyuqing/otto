@@ -16,8 +16,6 @@ guide rather than being copied into those instruction files.
 | --- | --- | --- |
 | `crates/otto-core/` | WebAssembly-safe shared domain logic and protocol codecs | `src/lib.rs` |
 | `crates/otto/` | Native Otto executable, runtime, persistence, integrations, and terminal/server frontends | `src/main.rs`, then `src/cli/` |
-| `crates/otto-web/` | WebAssembly bindings that expose shared wire codecs to the browser | `src/lib.rs` |
-| `ui/` | TypeScript browser frontend | `package.json` and `src/` |
 | `connect/` | Independent Go Telegram and Feishu connector that communicates with Otto through ACP | `connect/README.md` and `connect/internal/` |
 | `crates/otto/src/fsops.rs` | Shared pinned filesystem descriptors and atomic operations | Native session and workspace callers |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
@@ -25,7 +23,7 @@ guide rather than being copied into those instruction files.
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check` | `Makefile`, `.github/workflows/checks.yml` |
 
-The root Cargo workspace contains `otto-core`, `otto`, and `otto-web` only.
+The root Cargo workspace contains `otto-core` and `otto` only.
 `connect/` has its own build definition and is not a root workspace crate.
 
 ## Rust layers
@@ -40,10 +38,10 @@ CLI / TUI / HTTP server / ACP
  crates/otto-core: shared contracts and agent loop
               ▲
               │
-crates/otto-web: browser-facing WASM bindings
+otto-plus (separate repository): browser UI and WASM bindings
               ▲
               │
-        ui/: TypeScript browser client
+        React/TypeScript browser client
 ```
 
 `otto-core` must remain buildable for `wasm32-unknown-unknown`. Native-only
@@ -119,10 +117,9 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 
 ### Browser and chat clients
 
-- `crates/otto-web` is intentionally thin: it exposes `otto-core` wire codecs
-  through `wasm-bindgen`.
-- `ui/` calls the HTTP API provided by `crates/otto::server` and the WASM
-  exports from `otto-web`; it does not contain Rust code.
+- [otto-plus](https://github.com/baiyuqing/otto-plus) owns the browser UI and
+  thin WASM bindings. It consumes `otto-core` at a pinned revision and calls
+  Otto HTTP APIs; Otto does not depend on it.
 - `connect/` does not link Otto code. It starts `otto acp` over stdio or
   connects directly to `otto serve` over authenticated loopback ACP TCP.
   Both use ACP v1; see [ACP TCP](specs/2026-10-03-acp-tcp.md).
@@ -142,10 +139,10 @@ execution goes through `sandbox/`. Keep session persistence append-only.
 | Model-requested reflection (`reflect` tool) and run logs | `tool/reflect.rs` (port), `app/requested_reflection.rs` (binding), `reflection/runlog.rs` (`/reflect list|show`) | [Design](specs/2026-10-05-reflect-tool.md), `cli/repl_commands.rs` (`reflect_runs_report`) |
 | Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | [Design](specs/2026-10-04-web-fetch.md), `runtime/builder.rs` (`web_tools`), `reflection/taint.rs` |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
-| Web API or browser behavior | `crates/otto/src/server/` or `ui/` | `crates/otto-web/` for shared browser wire codecs |
+| Web API or browser behavior | `crates/otto/src/server/` or external otto-plus | `otto-core` for shared wire codecs |
 | ACP integrations | `crates/otto/src/acp/` | `client/` for attach mode; `connect/` for chat connector behavior |
 | Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `acp/mod.rs` wake loop | [Design](specs/2026-10-04-acp-wake-replies.md), the `wake-replies` HTTP route, `client/`, `connect/internal/bridge` |
-| Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | [Design](specs/2026-10-04-scheduled-deliveries.md), turn origin in `app/approval.rs`, the worker spawn in `cli/run.rs` and `cli/serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `connect/internal/bridge`, `ui/` |
+| Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | [Design](specs/2026-10-04-scheduled-deliveries.md), turn origin in `app/approval.rs`, the worker spawn in `cli/run.rs` and `cli/serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `connect/internal/bridge`, external otto-plus |
 | Persistent memories, sessions, workflow runs, or token aggregates | The matching native state module | Its store and lifecycle tests |
 
 ## Dependency and documentation rules

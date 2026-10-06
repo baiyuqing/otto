@@ -1,7 +1,7 @@
 //! `otto serve` over a real loopback listener.
 //!
 //! The whole startup path runs in-process, so the listener, the token gate,
-//! the session factory and the embedded UI are all exercised against a bound
+//! the session factory and the API are all exercised against a bound
 //! socket rather than a `oneshot` service.
 
 use std::io::Write;
@@ -250,8 +250,10 @@ async fn the_listen_address_can_come_from_the_config_file() {
     let (stdout, stderr, handle) = run_serve(&fixture, &[], cancel.clone()).await;
     let (base, _token) = await_startup(&stdout, &stderr).await;
 
-    let page = reqwest::get(format!("{base}/")).await.expect("root page");
-    assert_eq!(page.status().as_u16(), 200);
+    let page = reqwest::get(format!("{base}/"))
+        .await
+        .expect("root request");
+    assert_eq!(page.status().as_u16(), 404);
 
     cancel.cancel();
     let code = tokio::time::timeout(Duration::from_secs(7), handle)

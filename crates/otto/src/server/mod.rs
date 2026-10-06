@@ -26,7 +26,6 @@ pub mod task_control;
 pub mod tasks;
 pub mod timers;
 pub mod turn;
-pub mod ui;
 pub mod workflows;
 pub mod workspaces;
 
@@ -741,11 +740,6 @@ impl Server {
             .route("/v1/openapi.yaml", get(openapi))
             .route("/healthz", get(healthz))
             .route("/metrics", get(prometheus))
-            // The embedded web UI is not part of the API: no token, not in
-            // openapi.yaml. "/" is an exact match, so unknown paths still 404
-            // instead of falling through to index.html.
-            .route("/", get(index_page))
-            .route("/assets/{*path}", get(asset))
             .layer(DefaultBodyLimit::max(1 << 20))
             .layer(axum::middleware::from_fn_with_state(
                 Arc::clone(&state),
@@ -1402,13 +1396,10 @@ async fn instrument(
 }
 
 /// The metric and log label for one request. axum's [`MatchedPath`] carries
-/// only the path, and spells the two UI routes differently, so both are mapped
-/// back and the method is prepended.
+/// only the path, so the method is prepended.
 fn route_label(method: &Method, matched: Option<&str>) -> String {
     match matched {
         None => "unmatched".to_string(),
-        Some("/") => "GET /{$}".to_string(),
-        Some("/assets/{*path}") => "GET /assets/".to_string(),
         Some(path) => format!("{method} {path}"),
     }
 }
@@ -2177,15 +2168,6 @@ async fn prometheus(State(server): State<Arc<Server>>) -> Response {
         )
         .body(Body::from(server.metrics.render()))
         .expect("static header values")
-}
-
-async fn index_page() -> Response {
-    ui::index_response(ui::index_page())
-}
-
-async fn asset(Path(path): Path<String>) -> Response {
-    let full = format!("assets/{path}");
-    ui::asset_response(&full, ui::dist_file(&full))
 }
 
 // ---- SSE streaming ----
@@ -5105,7 +5087,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_token_gates_the_v1_routes_but_not_healthz_or_the_ui() {
+    async fn a_token_gates_the_v1_routes_but_not_healthz_or_metrics() {
         let harness = Harness::with(HarnessOptions {
             token: "secret".to_string(),
             ..HarnessOptions::default()
@@ -5114,7 +5096,7 @@ mod tests {
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
         assert_eq!(reply.json()["error"]["code"], "unauthorized");
 
-        for path in ["/healthz", "/metrics", "/"] {
+        for path in ["/healthz", "/metrics"] {
             assert_eq!(
                 harness.send("GET", path, None).await.status,
                 StatusCode::OK,
@@ -7396,32 +7378,26 @@ mod tests {
         );
     }
 
-    // ---- the web UI ----
-
     #[tokio::test]
-    async fn the_root_page_is_served_without_a_token_and_never_cached() {
+    async fn api_server_does_not_serve_frontend_resources() {
         let harness = Harness::with(HarnessOptions {
             token: "secret".to_string(),
             ..HarnessOptions::default()
         });
-        let reply = harness.send("GET", "/", None).await;
-        assert_eq!(reply.status, StatusCode::OK);
-        assert_eq!(reply.header("cache-control"), "no-cache");
-        // An unbuilt checkout serves the placeholder; a built one the bundle.
-        assert!(
-            reply.body == ui::PLACEHOLDER || reply.body.contains("<html"),
-            "unexpected root body: {:?}",
-            &reply.body[..reply.body.len().min(120)]
-        );
-
+        for path in ["/", "/assets/app.js", "/no-such-path"] {
+            assert_eq!(
+                harness.send("GET", path, None).await.status,
+                StatusCode::NOT_FOUND,
+                "{path} must not serve a frontend"
+            );
+        }
         assert_eq!(
-            harness.send("GET", "/assets/missing.js", None).await.status,
-            StatusCode::NOT_FOUND
+            harness.send("GET", "/healthz", None).await.status,
+            StatusCode::OK
         );
         assert_eq!(
-            harness.send("GET", "/no-such-path", None).await.status,
-            StatusCode::NOT_FOUND,
-            "an unknown path must not fall through to index.html"
+            harness.send("GET", "/v1/sessions", None).await.status,
+            StatusCode::UNAUTHORIZED
         );
     }
 

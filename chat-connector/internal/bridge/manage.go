@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/baiyuqing/otto/connect/internal/manage"
+	"github.com/baiyuqing/otto/chat-connector/internal/manage"
 )
 
 const manageTimeout = 30 * time.Second

@@ -28,8 +28,8 @@ requests and tool calls in order, each with its duration.
 
 | Hop | Carrier | Owner |
 | --- | --- | --- |
-| Platform message admitted by connect | New `request_id`: 32 lowercase hex characters from 16 random bytes | `connect/internal/bridge` |
-| connect to ACP agent | `session/prompt` `_meta.otto.requestId`, next to `_meta.otto.chat` and `_meta.otto.channel` | `connect/internal/agent` |
+| Platform message admitted by connect | New `request_id`: 32 lowercase hex characters from 16 random bytes | `chat-connector/internal/bridge` |
+| connect to ACP agent | `session/prompt` `_meta.otto.requestId`, next to `_meta.otto.chat` and `_meta.otto.channel` | `chat-connector/internal/agent` |
 | `otto acp` | Parsed with the same rule serve applies to `X-Request-Id` (`request_id`: printable ASCII, at most 64 bytes); an empty result is treated as absent | `crates/otto/src/acp` |
 | ACP relay to serve (`--attach` and serve's `--acp-listen`) | `X-Request-Id` header on `POST /v1/sessions/{id}/turns` | `crates/otto/src/client`, `crates/otto/src/acp/attach.rs` |
 | serve | The client-supplied `X-Request-Id` is stored on the turn and written on every turn and step event | `crates/otto/src/server` |

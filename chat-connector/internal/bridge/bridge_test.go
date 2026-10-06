@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/baiyuqing/otto/connect/internal/agent/fake"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent/fake"
 	"github.com/coder/acp-go-sdk"
 )
 

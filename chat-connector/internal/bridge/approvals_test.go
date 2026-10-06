@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/baiyuqing/otto/connect/internal/agent"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 )
 
 func TestSharedCardRetryKeepsDetailsAndDoesNotCloseAnInFlightDecision(t *testing.T) {

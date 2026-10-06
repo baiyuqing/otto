@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/baiyuqing/otto/connect/internal/agent/fake"
-	"github.com/baiyuqing/otto/connect/internal/state"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent/fake"
+	"github.com/baiyuqing/otto/chat-connector/internal/state"
 )
 
 // seedSessions writes sessions "<id>\t<updatedAt>\t<title>" into the fake

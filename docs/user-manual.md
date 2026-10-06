@@ -591,6 +591,11 @@ Key points:
   errors, protocol errors, and failures after streamed output are not
   retried.
   OpenAI-compatible requests are not automatically retried after dispatch.
+  When the connection to an OpenAI-compatible endpoint cannot be
+  established (refused, unreachable, or a failed TLS or connect timeout), the
+  request never left Otto, so it is tried again up to three times, 1, 2,
+  then 4 seconds apart within the same turn deadline, and reported as not
+  started if all attempts fail.
 
 Deadline checks are cooperative at synchronous filesystem and Turso
 boundaries: Otto checks before and after the call, but does not detach an
@@ -883,7 +888,8 @@ OTTO_UI=repl otto
   `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and the
   seconds since the turn started. The phase is `waiting for model`,
   `reasoning`, `responding`, `compacting`, or `running TOOL ARGS` (arguments
-  truncated to 60 characters). During a ChatGPT transport retry, it shows
+  truncated to 60 characters). During a ChatGPT transport retry or an
+  OpenAI-compatible connection retry, it shows
   `retry A/M after REASON, waiting Ns`, with a live countdown, followed by
   `requesting` once the delay ends. `A/M` counts retries (1/3 through 3/3);
   the phase and turn elapsed times keep updating. Esc or Ctrl+C cancels the

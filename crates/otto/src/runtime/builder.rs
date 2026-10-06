@@ -165,6 +165,14 @@ impl Session for MemoryHandle {
         self.inner.append_operation_fact(fact).await
     }
 
+    fn operation_history(&self) -> Vec<otto_core::session::OperationFact> {
+        self.inner.operation_history()
+    }
+
+    fn operation_ledger(&self) -> otto_core::session::OperationLedger {
+        self.inner.operation_ledger()
+    }
+
     fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
         self.inner.observed_capabilities()
     }
@@ -353,6 +361,14 @@ impl Session for SharedSession {
         fact: otto_core::session::OperationFact,
     ) -> Result<(), SessionError> {
         self.0.append_operation_fact(fact).await
+    }
+
+    fn operation_history(&self) -> Vec<otto_core::session::OperationFact> {
+        self.0.operation_history()
+    }
+
+    fn operation_ledger(&self) -> otto_core::session::OperationLedger {
+        self.0.operation_ledger()
     }
 
     fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {

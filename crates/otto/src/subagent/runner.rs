@@ -298,6 +298,14 @@ impl Session for SharedTranscript {
         self.0.append_operation_fact(fact).await
     }
 
+    fn operation_history(&self) -> Vec<otto_core::session::OperationFact> {
+        self.0.operation_history()
+    }
+
+    fn operation_ledger(&self) -> otto_core::session::OperationLedger {
+        self.0.operation_ledger()
+    }
+
     fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
         self.0.observed_capabilities()
     }
@@ -1846,6 +1854,14 @@ mod tests {
     /// so the transcript is created before `Tasks::add` publishes the history
     /// closure.
     const _: () = ();
+
+    #[tokio::test]
+    async fn a_shared_transcript_keeps_the_session_contract() {
+        let fresh = || SharedTranscript(Arc::new(otto_core::session::MemorySession::new()));
+        otto_core::conformance::session(&fresh, None)
+            .await
+            .unwrap_or_else(|failure| panic!("{failure}"));
+    }
 
     fn runner(config: Config) -> (Arc<Runner>, Vec<String>) {
         let (runner, warnings) = Runner::new(config).expect("the test config is valid");

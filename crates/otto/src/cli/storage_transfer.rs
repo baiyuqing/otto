@@ -13,7 +13,7 @@ use crate::{
             turso::migration::{self as sql, SqlDomainCodec},
         },
         migration::{
-            self, Coordinator, FreezeGuard, MigrationJournal, SnapshotExport, StageImport,
+            self, Coordinator, Cutover, FreezeGuard, MigrationJournal, SnapshotExport, StageImport,
             StorageRoute,
             group::{GroupSource, GroupStage},
         },
@@ -71,15 +71,45 @@ impl Options {
     }
 }
 
+#[cfg(test)]
 pub async fn run(
     args: &[String],
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
 ) -> i32 {
-    let result = match Options::parse(args) {
-        Ok(options) => transfer(options).await,
-        Err(error) => Err(error),
-    };
+    run_with_backends(
+        args,
+        stdout,
+        stderr,
+        &Default::default(),
+        &Default::default(),
+    )
+    .await
+}
+
+pub async fn run_with_backends(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    backends: &crate::runtime::storage::BackendRegistry,
+    environment: &HashMap<String, String>,
+) -> i32 {
+    let result = async {
+        let (args, destination_config) = match args {
+            [rest @ .., flag, path] if flag == "--to-config" => {
+                (rest, Some(read_configuration(&absolute(Path::new(path))?)?))
+            }
+            _ => (args, None),
+        };
+        transfer_registered(
+            Options::parse(args)?,
+            backends,
+            environment,
+            destination_config.as_ref(),
+        )
+        .await
+    }
+    .await;
     match result {
         Ok(manifest) => {
             let _ = writeln!(
@@ -87,6 +117,161 @@ pub async fn run(
                 "transferred {} domains; route generation {}",
                 manifest.source.domains.len(),
                 manifest.published_generation.unwrap_or_default()
+            );
+            0
+        }
+        Err(error) => {
+            // Extension adapters may wrap SDK failures; never print their payloads.
+            if !backends.is_empty() {
+                let message = match error {
+                    migration::Error::Conflict(_) => {
+                        "storage transfer conflicts with persisted state"
+                    }
+                    migration::Error::Invalid(_) => {
+                        "storage transfer data, configuration or profile is incompatible"
+                    }
+                    migration::Error::Unavailable(_) => "storage transfer backend is unavailable",
+                    migration::Error::CommitUnknown => {
+                        "storage transfer commit outcome is unknown; reconcile its receipt"
+                    }
+                };
+                let _ = writeln!(stderr, "{message}");
+            } else {
+                let _ = writeln!(stderr, "{error}");
+            }
+            1
+        }
+    }
+}
+
+struct EmptyInstallation(Vec<PathBuf>);
+impl StoppedOwners for EmptyInstallation {
+    fn verify_stopped(&self) -> Result<()> {
+        for path in &self.0 {
+            match std::fs::symlink_metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                _ => {
+                    return Err(invalid(
+                        "storage initialization refuses existing authority state; transfer it instead",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn read_configuration(path: &Path) -> Result<otto_core::config::File> {
+    let file = open_file(path, libc::O_RDONLY).map_err(unavailable)?;
+    if file.metadata().map_err(unavailable)?.len() > MAX_CONFIG {
+        return Err(invalid("storage configuration exceeds read limit"));
+    }
+    let mut text = String::new();
+    file.take(MAX_CONFIG + 1)
+        .read_to_string(&mut text)
+        .map_err(unavailable)?;
+    if text.len() as u64 > MAX_CONFIG {
+        return Err(invalid("storage configuration exceeds read limit"));
+    }
+    otto_core::config::parse(&text).map_err(|_| invalid("storage configuration is invalid"))
+}
+
+pub async fn initialize(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    registry: &crate::runtime::storage::BackendRegistry,
+    environment: &HashMap<String, String>,
+) -> i32 {
+    let result = async {
+        let [home, config] = args else {
+            return Err(invalid("usage: otto storage init <home> <config-path>"));
+        };
+        let home = absolute(Path::new(home))?;
+        pin_directory(&home).map_err(unavailable)?;
+        let config = read_configuration(&absolute(Path::new(config))?)?;
+        let bindings =
+            crate::runtime::storage::backend::resolve(&config.storage, environment, &home)
+                .map_err(|_| invalid("storage endpoint configuration is invalid"))?;
+        let mut domains = crate::runtime::storage::backend::configured_routes(&config.storage);
+        if domains.is_empty() {
+            return Err(invalid(
+                "storage initialization requires explicit domain routes",
+            ));
+        }
+        let memory = memory_path(&Options {
+            home: home.clone(),
+            destination: PathBuf::new(),
+            id: String::new(),
+            memory_db: None,
+        })?;
+        let empty = Arc::new(EmptyInstallation(vec![
+            memory,
+            home.join(".otto/approvals.db"),
+            home.join(".otto/workflows.db"),
+            home.join(".otto/schedule.db"),
+            home.join(".otto/usage.db"),
+            home.join(".otto/tasks.db"),
+            home.join(".otto/reflection.db"),
+            home.join(".otto/skill-checks.db"),
+            home.join(".otto/memory-advice.db"),
+            home.join(".otto/sessions"),
+        ]));
+        empty.verify_stopped()?;
+        // This creates only the normal empty local route authority, never a domain store.
+        let storage = crate::runtime::storage::Storage::open_home(&home)
+            .await
+            .map_err(|_| invalid("storage bootstrap authority is unavailable"))?;
+        drop(storage);
+        let cutover = LocalCutover::open_existing(&home.join(".otto/storage"))?;
+        if !cutover.routes().await?.domains.is_empty() {
+            return Err(invalid("storage bootstrap requires a fresh installation"));
+        }
+        let mut by_instance: BTreeMap<
+            String,
+            Vec<crate::runtime::storage::RepositoryRequirements>,
+        > = BTreeMap::new();
+        for (domain, instance) in &config.storage.routes {
+            by_instance.entry(instance.clone()).or_default().push(
+                crate::runtime::storage::RepositoryRequirements::for_domain(domain)
+                    .map_err(|_| invalid("unsupported domain"))?,
+            );
+        }
+        for (instance, requirements) in by_instance {
+            let binding = &bindings[&instance];
+            let factory = registry
+                .configured_factory(&binding.factory, &binding.endpoint, &binding.options)
+                .await
+                .map_err(|_| invalid("storage backend is unavailable"))?;
+            let identity = factory
+                .initialize(&binding.endpoint, &requirements, &binding.options)
+                .await
+                .map_err(|_| invalid("backend namespace initialization failed"))?;
+            identity
+                .validate()
+                .map_err(|_| invalid("backend namespace identity is invalid"))?;
+            for requirement in requirements {
+                let verified = factory
+                    .validate(&binding.endpoint, &requirement, &binding.options)
+                    .await
+                    .map_err(|_| invalid("initialized namespace profile is incompatible"))?;
+                if verified != identity {
+                    return Err(invalid("initialized namespace identity differs"));
+                }
+                domains
+                    .get_mut(&requirement.domain)
+                    .unwrap()
+                    .namespace_identity = Some(identity.0.clone());
+            }
+        }
+        cutover.initialize_routes(domains, empty).await
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            let _ = writeln!(
+                stdout,
+                "initialized storage routes; existing-state replacement requires transfer"
             );
             0
         }
@@ -388,6 +573,21 @@ fn memory_path(options: &Options) -> Result<PathBuf> {
     absolute(Path::new(&resolved.turso_path))
 }
 
+fn codec(domain: &str) -> Result<Arc<dyn SqlDomainCodec>> {
+    Ok(match domain {
+        "memory" => Arc::new(sql::memory::MemoryCodec),
+        "approvals" => Arc::new(sql::ApprovalCodec),
+        "workflows" => Arc::new(sql::workflow::WorkflowCodec),
+        "schedule" => Arc::new(sql::schedule::ScheduleCodec),
+        "usage" => Arc::new(sql::usage::UsageCodec),
+        "tasks" => Arc::new(sql::tasks::TaskCodec),
+        "reflection" => Arc::new(sql::reflection::ReflectionCodec),
+        "skill_checks" => Arc::new(sql::skill_checks::SkillChecksCodec),
+        "memory_advice" => Arc::new(sql::memory_advice::MemoryAdviceCodec),
+        _ => return Err(invalid("unsupported local destination domain")),
+    })
+}
+
 struct Database {
     path: PathBuf,
     codec: Arc<dyn SqlDomainCodec>,
@@ -432,10 +632,8 @@ fn databases(options: &Options, routes: &BTreeMap<String, StorageRoute>) -> Resu
     let mut seen = BTreeSet::new();
     for (default, codec) in defaults {
         let path = if let Some(route) = routes.get(codec.domain()) {
-            if route.backend != "sqlite" {
-                return Err(invalid(
-                    "transfer supports existing sqlite and posix routes only",
-                ));
+            if route.backend != "sqlite" || route.endpoint.starts_with("instance:") {
+                continue;
             }
             absolute(Path::new(&route.endpoint))?
         } else {
@@ -555,7 +753,18 @@ impl FreezeGuard for Fence {
     }
 }
 
-async fn transfer(options: Options) -> Result<migration::Manifest> {
+struct ExternalDomain {
+    domain: String,
+    factory: Arc<dyn crate::runtime::storage::RepositoryFactory>,
+    binding: crate::runtime::storage::backend::ConfiguredEndpoint,
+}
+
+async fn transfer_registered(
+    options: Options,
+    registry: &crate::runtime::storage::BackendRegistry,
+    environment: &HashMap<String, String>,
+    destination_config: Option<&otto_core::config::File>,
+) -> Result<migration::Manifest> {
     let home = pin_directory(&options.home).map_err(unavailable)?;
     let otto = mkdir(&home, ".otto")?;
     let _control = mkdir(&otto, "storage")?;
@@ -573,7 +782,22 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
         },
     )?;
     let journal = LocalJournal::open(&control_path)?;
-    let previous = journal.load(&options.id).await?;
+    let mut previous = journal.load(&options.id).await?;
+    if let Some(entry) = &mut previous
+        && entry.manifest.published_generation.is_none()
+        && let Some(generation) = cutover.receipt(&options.id).await?
+    {
+        if !entry.manifest.sealed
+            || entry.manifest.rolled_back
+            || generation == entry.manifest.expected_route_generation
+        {
+            return Err(invalid(
+                "publication receipt differs from the sealed manifest",
+            ));
+        }
+        entry.manifest.published_generation = Some(generation);
+        entry.revision = journal.save(Some(entry.revision), &entry.manifest).await?;
+    }
     if let Some(entry) = &previous {
         if entry.manifest.destination_identity != identity(&options.destination) {
             return Err(invalid(
@@ -581,6 +805,51 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
             ));
         }
         if entry.manifest.published_generation.is_some() {
+            if let Some(config) = destination_config {
+                let published = cutover
+                    .published_routes(&options.id)
+                    .await?
+                    .ok_or_else(|| invalid("published routing receipt is missing"))?;
+                let bindings = crate::runtime::storage::backend::resolve(
+                    &config.storage,
+                    environment,
+                    &options.home,
+                )
+                .map_err(|_| invalid("destination backend configuration is invalid"))?;
+                for (domain, requested) in
+                    crate::runtime::storage::backend::configured_routes(&config.storage)
+                {
+                    let route = published
+                        .get(&domain)
+                        .ok_or_else(|| invalid("resume domain differs from published routes"))?;
+                    if route.backend != requested.backend || route.endpoint != requested.endpoint {
+                        return Err(invalid("resume backend differs from the published route"));
+                    }
+                    let instance = requested
+                        .endpoint
+                        .strip_prefix("instance:")
+                        .ok_or_else(|| invalid("invalid destination instance"))?;
+                    let binding = &bindings[instance];
+                    let factory = registry
+                        .configured_factory(&binding.factory, &binding.endpoint, &binding.options)
+                        .await
+                        .map_err(|_| invalid("destination backend is unavailable"))?;
+                    let requirement =
+                        crate::runtime::storage::RepositoryRequirements::for_domain(&domain)
+                            .map_err(|_| invalid("unsupported destination domain"))?;
+                    let actual = factory
+                        .validate(&binding.endpoint, &requirement, &binding.options)
+                        .await
+                        .map_err(|_| {
+                            invalid("published destination is unavailable or incompatible")
+                        })?;
+                    if route.namespace_identity.as_deref() != Some(actual.0.as_str()) {
+                        return Err(invalid(
+                            "resume namespace differs from the publication receipt",
+                        ));
+                    }
+                }
+            }
             return Ok(entry.manifest.clone());
         }
         if entry.manifest.rolled_back {
@@ -609,6 +878,59 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
             "source routing contains a state domain unsupported by offline transfer",
         ));
     }
+    let source_config_path = options.home.join(".config/otto/config.toml");
+    let source_config = if present_file(&source_config_path)? {
+        read_configuration(&source_config_path)?
+    } else {
+        Default::default()
+    };
+    let source_bindings = crate::runtime::storage::backend::resolve(
+        &source_config.storage,
+        environment,
+        &options.home,
+    )
+    .map_err(|_| invalid("source backend configuration is invalid"))?;
+    let mut external_sources = Vec::new();
+    for (domain, route) in &routes.domains {
+        if route.backend == "posix"
+            || route.backend == "sqlite" && !route.endpoint.starts_with("instance:")
+        {
+            continue;
+        }
+        let instance = route
+            .endpoint
+            .strip_prefix("instance:")
+            .ok_or_else(|| invalid("external source requires a configured backend instance"))?;
+        let binding = source_bindings
+            .get(instance)
+            .ok_or_else(|| invalid("source backend instance is not configured"))?
+            .clone();
+        if binding.factory != route.backend {
+            return Err(invalid(
+                "source backend instance differs from the published route",
+            ));
+        }
+        let factory = registry
+            .configured_factory(&binding.factory, &binding.endpoint, &binding.options)
+            .await
+            .map_err(|_| invalid("source backend is unavailable"))?;
+        let requirements = crate::runtime::storage::RepositoryRequirements::for_domain(domain)
+            .map_err(|_| invalid("unsupported source domain"))?;
+        let actual = factory
+            .validate(&binding.endpoint, &requirements, &binding.options)
+            .await
+            .map_err(|_| invalid("source backend profile is unavailable or incompatible"))?;
+        if route.namespace_identity.as_deref() != Some(actual.0.as_str()) {
+            return Err(invalid(
+                "source backend namespace differs from the published route",
+            ));
+        }
+        external_sources.push(ExternalDomain {
+            domain: domain.clone(),
+            factory,
+            binding,
+        });
+    }
     let databases = databases(&options, &routes.domains)?;
     let session_root = match routes.domains.get("sessions") {
         Some(route) if route.backend == "posix" => absolute(Path::new(&route.endpoint))?,
@@ -636,7 +958,7 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
         }
         Err(error) => return Err(unavailable(error)),
     };
-    if databases.is_empty() && session_inputs.is_none() {
+    if databases.is_empty() && external_sources.is_empty() && session_inputs.is_none() {
         return Err(invalid("source contains no supported persistent state"));
     }
     let staged_root = destination(&options, &routes.identity)?;
@@ -656,6 +978,7 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
             StorageRoute {
                 backend: "sqlite".into(),
                 endpoint: endpoint(&database.path)?,
+                namespace_identity: None,
             },
         );
         destination_routes.insert(
@@ -663,6 +986,7 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
             StorageRoute {
                 backend: "sqlite".into(),
                 endpoint: endpoint(&target)?,
+                namespace_identity: None,
             },
         );
         staged_databases.insert(domain, target);
@@ -673,6 +997,7 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
             StorageRoute {
                 backend: "posix".into(),
                 endpoint: endpoint(&session_root)?,
+                namespace_identity: None,
             },
         );
         destination_routes.insert(
@@ -680,10 +1005,73 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
             StorageRoute {
                 backend: "posix".into(),
                 endpoint: endpoint(&staged_sessions)?,
+                namespace_identity: None,
             },
         );
     }
+    for source in &external_sources {
+        source_routes.insert(
+            source.domain.clone(),
+            routes.domains[&source.domain].clone(),
+        );
+        let target = options.destination.join(format!("{}.db", source.domain));
+        destination_routes.insert(
+            source.domain.clone(),
+            StorageRoute {
+                backend: "sqlite".into(),
+                endpoint: endpoint(&target)?,
+                namespace_identity: None,
+            },
+        );
+        staged_databases.insert(source.domain.clone(), target);
+    }
     let generation = format!("frozen:{}", options.id);
+    let fence: Arc<dyn FreezeGuard> = Arc::new(Fence(cutover.clone()));
+    let context = crate::runtime::storage::backend::MigrationContext {
+        migration_id: options.id.clone(),
+        source_identity: routes.identity.clone(),
+        destination_identity: identity(&options.destination),
+        generation: generation.clone(),
+        fence: fence.clone(),
+    };
+    let mut imported_stages = BTreeMap::new();
+    if let Some(config) = destination_config {
+        let bindings =
+            crate::runtime::storage::backend::resolve(&config.storage, environment, &options.home)
+                .map_err(|_| invalid("destination backend configuration is invalid"))?;
+        for (domain, instance) in &config.storage.routes {
+            if !source_routes.contains_key(domain) {
+                return Err(invalid(
+                    "destination route names a domain absent from the source snapshot",
+                ));
+            }
+            let binding = &bindings[instance];
+            let factory = registry
+                .configured_factory(&binding.factory, &binding.endpoint, &binding.options)
+                .await
+                .map_err(|_| invalid("destination backend is unavailable"))?;
+            let requirement = crate::runtime::storage::RepositoryRequirements::for_domain(domain)
+                .map_err(|_| invalid("unsupported destination domain"))?;
+            let prepared = factory
+                .prepare_import(&binding.endpoint, &requirement, &binding.options, &context)
+                .await
+                .map_err(|_| invalid("destination logical import preparation failed"))?;
+            prepared
+                .namespace_identity
+                .validate()
+                .map_err(|_| invalid("destination namespace identity is invalid"))?;
+            imported_stages.insert(domain.clone(), prepared.stage);
+            staged_databases.remove(domain);
+            destination_routes.insert(
+                domain.clone(),
+                StorageRoute {
+                    backend: binding.factory.clone(),
+                    endpoint: format!("instance:{instance}"),
+                    namespace_identity: Some(prepared.namespace_identity.0),
+                },
+            );
+        }
+    }
     let prepared = PreparedCutover {
         migration_id: options.id.clone(),
         source_identity: routes.identity.clone(),
@@ -709,7 +1097,6 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
             .unwrap_or_default(),
     });
     cutover.freeze(prepared.clone(), stopped).await?;
-    let fence: Arc<dyn FreezeGuard> = Arc::new(Fence(cutover.clone()));
     let assembled = assemble(
         &databases,
         session_inputs,
@@ -718,6 +1105,8 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
         &staged_databases,
         &prepared,
         fence,
+        &external_sources,
+        imported_stages,
     )
     .await;
     let (source, stage) = match assembled {
@@ -757,6 +1146,7 @@ async fn transfer(options: Options) -> Result<migration::Manifest> {
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn assemble(
     databases: &[Database],
     session_inputs: Option<Vec<JournalInput>>,
@@ -765,7 +1155,10 @@ async fn assemble(
     staged_databases: &BTreeMap<String, PathBuf>,
     prepared: &PreparedCutover,
     fence: Arc<dyn FreezeGuard>,
+    external_sources: &[ExternalDomain],
+    mut imported_stages: BTreeMap<String, Arc<dyn StageImport>>,
 ) -> Result<(GroupSource, GroupStage)> {
+    let portable = !external_sources.is_empty() || !imported_stages.is_empty();
     let mut sources: Vec<Arc<dyn SnapshotExport>> = Vec::new();
     let mut stages: BTreeMap<String, Arc<dyn StageImport>> = BTreeMap::new();
     for database in databases {
@@ -786,14 +1179,57 @@ async fn assemble(
             }
         };
         sources.push(Arc::new(source));
-        stages.insert(
-            database.codec.domain().into(),
+        let stage = imported_stages
+            .remove(database.codec.domain())
+            .unwrap_or_else(|| {
+                Arc::new(sql::Stage::new(
+                    staged_databases[database.codec.domain()].clone(),
+                    prepared.destination_identity.clone(),
+                    database.codec.clone(),
+                ))
+            });
+        stages.insert(database.codec.domain().into(), stage);
+    }
+    let context = crate::runtime::storage::backend::MigrationContext {
+        migration_id: prepared.migration_id.clone(),
+        source_identity: prepared.source_identity.clone(),
+        destination_identity: prepared.destination_identity.clone(),
+        generation: prepared.source_generation.clone(),
+        fence: fence.clone(),
+    };
+    for source in external_sources {
+        let requirements =
+            crate::runtime::storage::RepositoryRequirements::for_domain(&source.domain)
+                .map_err(|_| invalid("unsupported source domain"))?;
+        let exported = match source
+            .factory
+            .export(
+                &source.binding.endpoint,
+                &requirements,
+                &source.binding.options,
+                &context,
+            )
+            .await
+        {
+            Ok(exported) => exported,
+            Err(_) => {
+                for source in &sources {
+                    let _ = source.close().await;
+                }
+                return Err(invalid("source logical export is unavailable"));
+            }
+        };
+        sources.push(exported);
+        let stage = if let Some(stage) = imported_stages.remove(&source.domain) {
+            stage
+        } else {
             Arc::new(sql::Stage::new(
-                staged_databases[database.codec.domain()].clone(),
+                staged_databases[&source.domain].clone(),
                 prepared.destination_identity.clone(),
-                database.codec.clone(),
-            )),
-        );
+                codec(&source.domain)?,
+            ))
+        };
+        stages.insert(source.domain.clone(), stage);
     }
     let journals = if let Some(inputs) = session_inputs {
         let source = JournalSource::open(
@@ -833,12 +1269,22 @@ async fn assemble(
         None
     };
     let source = GroupSource::new(sources).await?;
-    let closure = Arc::new(
-        crate::storage::backends::migration_references::NativeReferenceClosure::new(
-            staged_databases.clone(),
-            journals,
-        ),
-    );
+    let closure: Arc<dyn crate::storage::migration::group::ReferenceClosure> = if portable {
+        Arc::new(
+            crate::storage::migration::references::PortableReferenceClosure {
+                stages: stages.clone(),
+                max_bytes: 64 * 1024 * 1024,
+            },
+        )
+    } else {
+        // Retain the existing streaming native verifier and its established limits.
+        Arc::new(
+            crate::storage::backends::migration_references::NativeReferenceClosure::new(
+                staged_databases.clone(),
+                journals,
+            ),
+        )
+    };
     match GroupStage::new(stages, closure) {
         Ok(stage) => Ok((source, stage)),
         Err(error) => {

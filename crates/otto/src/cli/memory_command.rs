@@ -90,6 +90,21 @@ fn parse_flags(args: &[String]) -> Result<Flags, ()> {
 }
 
 /// Runs `otto memory ...` and returns its exit code.
+pub(crate) fn startup_configuration(
+    args: &[String],
+    home: &str,
+) -> Result<otto_core::config::File, ()> {
+    let (command, mut rest) = args.split_first().ok_or(())?;
+    if matches!(command.as_str(), "forget" | "show") {
+        let (_, flags) = rest.split_first().ok_or(())?;
+        rest = flags;
+    }
+    let flags = parse_flags(rest)?;
+    super::run::load_config_for(&flags.config_path, flags.explicit_config, home)
+        .map(|(_, file)| file)
+        .map_err(|_| ())
+}
+
 pub fn run(
     args: &[String],
     stdout: &mut (dyn Write + Send),
@@ -249,11 +264,20 @@ fn status(
     };
     let redactor = otto_core::agent::redactor::Redactor::with_completeness(secret_values, true);
     let _ = writeln!(stdout, "enabled: {}", config.enabled);
-    let _ = writeln!(stdout, "backend: {}", config.backend);
+    let _ = writeln!(
+        stdout,
+        "backend: {}",
+        storage.memory_backend(&config.backend)
+    );
     let endpoint = storage
         .memory_endpoint(Path::new(&config.turso_path))
         .unwrap_or_else(|_| "unavailable".into());
-    let _ = writeln!(stdout, "path: {}", redactor.redact_string(&endpoint));
+    let label = if endpoint.starts_with("instance:") {
+        "endpoint"
+    } else {
+        "path"
+    };
+    let _ = writeln!(stdout, "{label}: {}", redactor.redact_string(&endpoint));
     let _ = writeln!(stdout, "usable: {usable}");
     if usable {
         // The scopes `/memory review` lists: the user and the current workspace.
@@ -710,6 +734,7 @@ mod tests {
             crate::storage::migration::StorageRoute {
                 backend: "sqlite".into(),
                 endpoint: selected_path.to_string_lossy().into_owned(),
+                namespace_identity: None,
             },
         )]);
         let storage = crate::runtime::storage::Storage::default()

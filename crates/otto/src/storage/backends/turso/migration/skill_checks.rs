@@ -6,21 +6,8 @@ use super::{
 use crate::storage::backends::turso::skill_checks::{self, Store};
 pub struct SkillChecksCodec;
 const KINDS: &[Kind] = &[Kind {
-    name: "skill_check_audit",
+    record: &crate::skill::check_migration::RECORDS[0],
     table: "skill_checks",
-    fields: &[
-        "id",
-        "content_sha256",
-        "questions_sha256",
-        "skill",
-        "path",
-        "source",
-        "model",
-        "checked_at",
-        "result",
-    ],
-    keys: &["id"],
-    revision: None,
 }];
 impl SqlDomainCodec for SkillChecksCodec {
     fn domain(&self) -> &'static str {

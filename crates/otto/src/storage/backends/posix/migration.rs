@@ -477,6 +477,34 @@ impl crate::storage::migration::contracts::FreezeGuard for LocalCutover {
 }
 
 impl LocalCutover {
+    /// Explicit fresh bootstrap, serialized with supported startup and migration.
+    pub async fn initialize_routes(
+        &self,
+        domains: BTreeMap<String, StorageRoute>,
+        stopped: Arc<dyn StoppedOwners>,
+    ) -> Result<()> {
+        validate_routes(&domains)?;
+        self.0
+            .run(move |dir| {
+                let permit = admission(dir)?;
+                crate::storage::drivers::posix::try_lock_exclusive(&permit)
+                    .map_err(|_| conflict("supported writer process is still active"))?;
+                let mut state = read_authority(dir)?;
+                if !state.active.domains.is_empty()
+                    || state.active.generation != "initial"
+                    || state.freeze.is_some()
+                    || !state.publications.is_empty()
+                    || !state.rollbacks.is_empty()
+                {
+                    return Err(conflict("storage bootstrap requires a fresh installation"));
+                }
+                stopped.verify_stopped()?;
+                state.active.domains = domains;
+                state.active.generation = "initialized".into();
+                publish(dir, AUTHORITY, &state)
+            })
+            .await
+    }
     /// Recovery must never bootstrap a missing or corrupt routing authority.
     pub fn open_existing(root: &Path) -> Result<Self> {
         let files = Files::open(root)?;
@@ -515,6 +543,22 @@ impl LocalCutover {
         tokio::task::spawn_blocking(move || read_authority(&files.0).map(|state| state.active))
             .await
             .map_err(unavailable)?
+    }
+
+    pub async fn published_routes(
+        &self,
+        migration_id: &str,
+    ) -> Result<Option<BTreeMap<String, StorageRoute>>> {
+        let files = self.0.clone();
+        let id = migration_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            Ok(read_authority(&files.0)?
+                .publications
+                .get(&id)
+                .map(|publication| publication.prepared.destination_routes.clone()))
+        })
+        .await
+        .map_err(unavailable)?
     }
 
     pub async fn freeze(
@@ -868,6 +912,7 @@ mod tests {
             StorageRoute {
                 backend: "posix".into(),
                 endpoint: endpoint.into(),
+                namespace_identity: None,
             },
         )])
     }

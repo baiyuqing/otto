@@ -22,7 +22,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The gates below always start, so a required status check always reports;
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Gitleaks 8.30.1
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output gitleaks.tar.gz
+          echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz' | sha256sum --check
+          tar -xzf gitleaks.tar.gz gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Verify staged and historical detection
+        env:
+          GITLEAKS_TEST_REQUIRED: '1'
+        run: node --test scripts/gitleaks.test.mjs
+      - name: Scan full Git history (including documentation)
+        run: gitleaks git --verbose --redact --ignore-gitleaks-allow
+
+  # The build gates below always start, so a required status check always reports;
   # this job decides whether they have any work to do. A change that touches
   # only Markdown, `docs/`, or `LICENSE` cannot affect the build or the tests,
   # so every step of every gate is skipped and they finish green without

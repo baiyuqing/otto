@@ -10,18 +10,21 @@
 //! update signal and runs an empty-text turn whenever a notification is
 //! pending, matching [`crate::cli::repl::Repl`]. There is no second scheduler.
 
-mod agents_view;
 mod app;
 pub(crate) mod attach;
+mod backend;
 mod commands;
-mod context_view;
 mod entries;
+mod features;
 pub(crate) mod gutter;
+mod input;
+mod interaction;
 mod layout;
 mod markdown;
 mod render;
 mod selection;
 mod transcript;
+mod widgets;
 
 use std::future::Future;
 use std::io;
@@ -46,7 +49,6 @@ use crate::app::Controller;
 use crate::cli::login;
 use crate::cli::repl::{Error as ReplError, is_fatal_persistence};
 use crate::cli::repl_commands;
-use crate::runtime::sandbox_config::SandboxChange;
 use crate::subagent::tasks::Tasks;
 
 use app::{Action, App};
@@ -57,7 +59,7 @@ use selection::{DragPhase, Selection};
 /// Enters the alternate screen, raw mode, and mouse capture, all restored on
 /// return and panic.
 pub(crate) async fn run(
-    controller: &Controller,
+    controller: &Arc<Controller>,
     cancel: &CancellationToken,
 ) -> Result<(), ReplError> {
     let mut terminal = ratatui::try_init().map_err(io_error)?;
@@ -292,12 +294,10 @@ fn draw_error<E: std::fmt::Display>(error: E) -> ReplError {
 enum IdleEvent {
     Input(Option<TuiEvent>),
     Registry(bool),
-    AgentsTick,
-    TasksTick,
-    /// Background reflection queued a notice.
+    Tick,
+    FeaturesTick,
+    Completion(Box<backend::Completion>),
     Notices,
-    /// A pending memory candidate was durably created; the signal itself has
-    /// no candidate content.
     MemoryReviewAvailable,
 }
 
@@ -319,209 +319,108 @@ fn redraw<B: Backend>(
 
 async fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
-    controller: &Controller,
+    controller: &Arc<Controller>,
     cancel: &CancellationToken,
     keys: &mut mpsc::Receiver<TuiEvent>,
 ) -> Result<(), ReplError> {
     let backend = app::Backend::Local(controller);
     let mut app = App::new(&backend);
-    let mut pending_image = None;
-    redraw(terminal, &mut app, controller)?;
-
+    app.driver = Some(backend::Driver::new(backend::Connection::Local(
+        Arc::clone(controller),
+    )));
     let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
-    // The `/agents` overlay's 2-second refresh (spec: "It refreshes every 2
-    // seconds while open."). `None` while the overlay is closed, so the loop
-    // spends no cycles on it otherwise. `reset()` right after creation moves
-    // the first tick 2 seconds out, since `open()`/`handle_key` already ran
-    // a fresh query and an immediate tick would just repeat it.
-    let mut agents_refresh: Option<tokio::time::Interval> = None;
-    // The sub-agent panel's 1-second refresh, so a queued/running task's
-    // elapsed time keeps advancing between registry changes. Exists only
-    // while the snapshot holds a queued or running task, matching
-    // `agents_refresh`'s open/closed lifecycle above.
-    let mut tasks_refresh: Option<tokio::time::Interval> = None;
     let mut notices = controller.notices_changed();
     let mut memory_review = controller.memory_review_available_changed();
-    let mut approval_refresh = tokio::time::interval(std::time::Duration::from_millis(500));
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    let mut feature_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    feature_tick.reset();
+    let mut actions = std::collections::VecDeque::new();
+    redraw(terminal, &mut app, controller)?;
     loop {
-        sync_shared_approval(&mut app, controller);
-        // Anything queued while a turn or command ran shows before the next wait.
-        let queued = controller.take_notices();
-        if !queued.is_empty() {
-            for line in queued {
-                app.push_system(line);
-            }
-            redraw(terminal, &mut app, controller)?;
+        for text in controller.take_notices() {
+            app.push_system(text);
         }
         if controller.take_bell() {
-            // The terminal backend writes to stdout.
             use std::io::Write as _;
             let mut stdout = io::stdout();
             let _ = stdout.write_all(b"\x07").and_then(|()| stdout.flush());
         }
         match controller.subagent_tasks() {
-            Some(tasks) => {
+            Some(tasks)
                 if updates
                     .as_ref()
-                    .is_none_or(|(held, _)| !Arc::ptr_eq(held, &tasks))
-                {
-                    let receiver = tasks.updates();
-                    updates = Some((tasks, receiver));
-                }
+                    .is_none_or(|(held, _)| !Arc::ptr_eq(held, &tasks)) =>
+            {
+                updates = Some((Arc::clone(&tasks), tasks.updates()));
             }
             None => updates = None,
-        }
-        match &app.agents {
-            Some(_) if agents_refresh.is_none() => {
-                let mut interval = tokio::time::interval(agents_view::REFRESH_INTERVAL);
-                interval.reset();
-                agents_refresh = Some(interval);
-            }
-            None => agents_refresh = None,
-            Some(_) => {}
-        }
-        if render::needs_task_clock(&app.tasks) {
-            if tasks_refresh.is_none() {
-                let mut interval = tokio::time::interval(render::TASKS_PANEL_REFRESH_INTERVAL);
-                interval.reset();
-                tasks_refresh = Some(interval);
-            }
-        } else {
-            tasks_refresh = None;
+            _ => {}
         }
         let event = {
-            let signal = async {
+            let registry = async {
                 match updates.as_mut() {
                     Some((_, receiver)) => receiver.changed().await.is_ok(),
                     None => std::future::pending().await,
                 }
             };
-            let tick = async {
-                match agents_refresh.as_mut() {
-                    Some(interval) => interval.tick().await,
-                    None => std::future::pending().await,
-                };
-            };
-            let tasks_tick = async {
-                match tasks_refresh.as_mut() {
-                    Some(interval) => interval.tick().await,
-                    None => std::future::pending().await,
-                };
-            };
             tokio::select! {
-                _ = cancel.cancelled() => return Err(ReplError::Cancelled),
-                event = keys.recv() => IdleEvent::Input(event),
-                open = signal => IdleEvent::Registry(open),
-                () = tick => IdleEvent::AgentsTick,
-                () = tasks_tick => IdleEvent::TasksTick,
-                _ = approval_refresh.tick()=> { redraw(terminal,&mut app,controller)?; IdleEvent::Notices },
-                changed = notices.changed() => {
-                    // The sender lives as long as the controller.
-                    let _ = changed;
-                    IdleEvent::Notices
-                }
-                changed = memory_review.changed() => {
-                    let _ = changed;
-                    IdleEvent::MemoryReviewAvailable
-                }
+                _=cancel.cancelled()=>return Err(ReplError::Cancelled),
+                input=keys.recv()=>IdleEvent::Input(input),
+                result=app.next_completion()=>IdleEvent::Completion(Box::new(result)),
+                open=registry=>IdleEvent::Registry(open),
+                _=tick.tick()=>IdleEvent::Tick,
+                _=feature_tick.tick()=>IdleEvent::FeaturesTick,
+                _=notices.changed()=>IdleEvent::Notices,
+                _=memory_review.changed()=>IdleEvent::MemoryReviewAvailable,
             }
         };
-        let event = match event {
-            IdleEvent::AgentsTick => {
-                if let Some(view) = &mut app.agents {
-                    view.tick(&backend);
+        match event {
+            IdleEvent::Input(None) => {
+                drain_writes(&mut app).await;
+                return Ok(());
+            }
+            IdleEvent::Input(Some(event)) => {
+                if let Some(action) = apply_input(&mut app, terminal, event, cancel, &backend)? {
+                    actions.push_back(action);
                 }
-                redraw(terminal, &mut app, controller)?;
-                continue;
             }
-            IdleEvent::TasksTick => {
-                redraw(terminal, &mut app, controller)?;
-                continue;
-            }
-            // The top of the loop drains and redraws.
-            IdleEvent::Notices => continue,
+            IdleEvent::Completion(completion) => app.apply_completion(*completion),
+            IdleEvent::Tick => app.request_approvals(),
+            IdleEvent::FeaturesTick => app.tick_features(),
             IdleEvent::MemoryReviewAvailable => {
                 app.push_system(crate::app::MEMORY_REVIEW_AVAILABLE);
                 app.open_memory_review(controller);
-                redraw(terminal, &mut app, controller)?;
-                continue;
             }
-            IdleEvent::Input(event) => event,
-            IdleEvent::Registry(false) => {
-                updates = None;
-                continue;
-            }
+            IdleEvent::Notices => {}
+            IdleEvent::Registry(false) => updates = None,
             IdleEvent::Registry(true) => {
                 if let Err(error) = run_wake(&mut app, terminal, keys, controller, cancel).await {
                     propagate_turn_error(error)?;
                 }
-                app.refresh_info(&backend);
-                redraw(terminal, &mut app, controller)?;
-                continue;
             }
-        };
-        let Some(event) = event else { return Ok(()) };
-        let key = match event {
-            TuiEvent::Key(key) => key,
-            TuiEvent::Paste(text) => {
-                app.insert_text(&text);
-                redraw(terminal, &mut app, controller)?;
-                continue;
-            }
-            TuiEvent::Wheel { up } => {
-                app.scroll_wheel(up);
-                redraw(terminal, &mut app, controller)?;
-                continue;
-            }
-            TuiEvent::Select { phase, col, row } => {
-                if let Some(text) = apply_selection(&mut app, terminal, phase, col, row)?
-                    && let Err(error) = selection::copy(&text)
-                {
-                    app.push_system(format!("copy: {error}"));
-                    redraw(terminal, &mut app, controller)?;
+        }
+        if !app.busy()
+            && !app.has_writes()
+            && let Some(queued) = app.submit_queued_input(&backend, cancel)
+        {
+            actions.push_back(queued);
+        }
+        actions.extend(app.drain_actions());
+        while let Some(action) = actions.pop_front() {
+            match action {
+                Action::Exit => {
+                    drain_writes(&mut app).await;
+                    return Ok(());
                 }
-                continue;
-            }
-            TuiEvent::Redraw => {
-                redraw(terminal, &mut app, controller)?;
-                continue;
-            }
-        };
-
-        // Any key moves the composer or the transcript under the highlight.
-        app.selection = None;
-        let mut action = app.handle_key(key, &backend, cancel);
-        while let Some(current_action) = action.take() {
-            match current_action {
-                Action::DecideApproval {
-                    id,
-                    allow,
-                    feedback,
-                } => {
-                    if let Err(error) =
-                        controller.decide_shared_approval(&id, allow, &feedback, "tui")
-                    {
-                        app.push_system(error.to_string());
-                    }
-                }
-                Action::Exit => return Ok(()),
+                Action::CancelTurn => {}
                 Action::Prompt(line) => {
-                    let result = run_turn(
-                        &mut app,
-                        terminal,
-                        keys,
-                        controller,
-                        cancel,
-                        line,
-                        pending_image.take(),
-                    )
-                    .await;
+                    let image = app.pending_image.take();
+                    let result =
+                        run_turn(&mut app, terminal, keys, controller, cancel, line, image).await;
                     if let Err(error) = result {
                         app.defer_queued_input(&backend);
                         propagate_turn_error(error)?;
-                        continue;
-                    }
-                    if app.queued_input_sent {
+                    } else if app.queued_input_sent {
                         if let Err(error) =
                             run_wake(&mut app, terminal, keys, controller, cancel).await
                         {
@@ -531,17 +430,10 @@ async fn run_app<B: Backend>(
                             app.defer_queued_input(&backend);
                         }
                     }
-                    if app.queued_input.is_some() {
-                        action = app.submit_queued_input(&backend, cancel);
+                    if let Some(action) = app.submit_queued_input(&backend, cancel) {
+                        actions.push_back(action);
                     }
                 }
-                Action::Image(path) => match image_block_from_path(&path) {
-                    Ok(image) => {
-                        pending_image = Some(image);
-                        app.push_system(format!("Attached image: {path}"));
-                    }
-                    Err(message) => app.push_system(format!("/image: {message}")),
-                },
                 Action::Compact(focus) => {
                     if let Err(error) =
                         run_compact(&mut app, terminal, keys, controller, cancel, focus).await
@@ -550,194 +442,101 @@ async fn run_app<B: Backend>(
                     }
                 }
                 Action::Reflect(focus) => {
-                    if let Some(text) =
-                        crate::cli::repl_commands::reflect_runs_report(controller, &focus)
-                    {
-                        app.push_system(text);
-                    } else if let Err(error) =
+                    if let Err(error) =
                         run_reflect(&mut app, terminal, keys, controller, cancel, focus).await
                     {
                         propagate_turn_error(error)?;
                     }
                 }
-                Action::NewSession => {
-                    pending_image = None;
-                    match controller.new_session().await {
-                        Ok(()) => {
-                            app.refresh(&backend);
-                            push_session_id(&mut app, controller);
-                        }
-                        Err(message) => app.push_system(format!("/new: {message}")),
-                    }
-                }
-                Action::SwitchProfile(profile) => {
-                    pending_image = None;
-                    switch_profile(&mut app, controller, &profile).await;
-                }
-                Action::SwitchProfileThinking {
-                    profile,
-                    thinking,
-                    save,
-                } => {
-                    pending_image = None;
-                    switch_profile(&mut app, controller, &profile).await;
-                    apply_thinking(&mut app, controller, &thinking, save).await;
-                }
-                Action::SetThinking { thinking, save } => {
-                    apply_thinking(&mut app, controller, &thinking, save).await;
-                }
-                Action::Resume(path) => {
-                    pending_image = None;
-                    match controller.resume_session(&path).await {
-                        Ok(result) => {
-                            app.refresh(&backend);
-                            app.push_system(format!("Resumed: {}", result.session_path));
-                            for warning in &result.warnings {
-                                app.push_system(warning.clone());
-                            }
-                            push_session_id(&mut app, controller);
-                        }
-                        Err(message) => app.push_system(format!("/resume: {message}")),
-                    }
-                }
-                Action::Archive(path) => {
-                    pending_image = None;
-                    match controller.archive_session(&path).await {
-                        Ok(result) => {
-                            app.refresh(&backend);
-                            app.push_system(format!("Archived: {}", result.path));
-                            push_session_id(&mut app, controller);
-                        }
-                        Err(message) => app.push_system(format!("/archive: {message}")),
-                    }
-                }
-                Action::AutoMode(args) => {
-                    match controller.auto_mode_command(&args) {
-                        Ok(line) => app.push_system(line),
-                        Err(message) => app.push_system(format!("/auto: {message}")),
-                    }
-                    app.info = controller.info();
-                }
-                Action::SandboxReload => match controller.reload_sandbox().await {
-                    Ok(info) => app.push_system(format!("Sandbox: {}", info.summary())),
-                    Err(message) => app.push_system(format!("/sandbox reload: {message}")),
-                },
-                Action::SandboxAllow(path) => {
-                    if let Err(error) = amend_sandbox(
-                        &mut app,
-                        terminal,
-                        keys,
-                        controller,
-                        cancel,
-                        SandboxChange::AllowReadPath(path),
-                    )
-                    .await
-                    {
-                        propagate_turn_error(error)?;
-                    }
-                }
-                Action::SandboxNetwork(mode) => {
-                    if let Err(error) = amend_sandbox(
-                        &mut app,
-                        terminal,
-                        keys,
-                        controller,
-                        cancel,
-                        SandboxChange::Network(mode),
-                    )
-                    .await
-                    {
-                        propagate_turn_error(error)?;
-                    }
-                }
-                Action::SandboxExclude(entry) => {
-                    if let Err(error) = amend_sandbox(
-                        &mut app,
-                        terminal,
-                        keys,
-                        controller,
-                        cancel,
-                        SandboxChange::ExcludeCommand(entry),
-                    )
-                    .await
-                    {
-                        propagate_turn_error(error)?;
-                    }
-                }
-                Action::ApproveAlways(id) => match controller.approve_bash_always(&id).await {
-                    Ok(prompt) => {
-                        app.push_system(format!("Approved {id}."));
-                        if let Err(error) =
-                            run_turn(&mut app, terminal, keys, controller, cancel, prompt, None)
-                                .await
-                        {
-                            propagate_turn_error(error)?;
-                        }
-                    }
-                    Err(message) => app.push_system(format!("/approve: {message}")),
-                },
-                Action::MemoryReview { id, accept } => {
-                    let decision = if accept { "accept" } else { "reject" };
-                    app.memory_review = None;
-                    app.dispatch_line(&format!("/memory review {id} {decision}"), &backend, cancel);
-                    app.open_memory_review(controller);
-                }
-                Action::Approve(id)
-                    if controller
-                        .approval_service()
-                        .get(
-                            &id,
-                            &controller.info().workspace,
-                            Some(&controller.info().session_id),
-                        )
-                        .is_ok() =>
-                {
-                    if let Err(error) = controller.decide_shared_approval(&id, true, "", "tui") {
-                        app.push_system(error.to_string());
-                    }
-                }
-                Action::Deny(id)
-                    if controller
-                        .approval_service()
-                        .get(
-                            &id,
-                            &controller.info().workspace,
-                            Some(&controller.info().session_id),
-                        )
-                        .is_ok() =>
-                {
-                    if let Err(error) = controller.decide_shared_approval(&id, false, "", "tui") {
-                        app.push_system(error.to_string());
-                    }
-                }
-                Action::Approve(id) => match controller.approve_tool(&id).await {
-                    Ok(prompt) => {
-                        app.push_system(format!("Approved {id}."));
-                        if let Err(error) =
-                            run_turn(&mut app, terminal, keys, controller, cancel, prompt, None)
-                                .await
-                        {
-                            propagate_turn_error(error)?;
-                        }
-                    }
-                    Err(message) => app.push_system(format!("/approve: {message}")),
-                },
-                Action::Deny(id) => {
-                    if let Err(message) = controller.deny_tool(&id) {
-                        app.push_system(format!("/deny: {message}"));
-                    }
-                }
                 Action::Login(args) => {
-                    login_dispatch(&mut app, controller, &args, cancel).await;
+                    login_dispatch(&mut app, terminal, keys, controller, &args, cancel).await
                 }
                 Action::McpLogin(name) => {
-                    mcp_login_dispatch(&mut app, controller, &name, cancel).await;
+                    mcp_login_dispatch(&mut app, terminal, keys, controller, &name, cancel).await
                 }
             }
+            actions.extend(app.drain_actions());
+            if !app.busy()
+                && let Some(queued) = app.submit_queued_input(&backend, cancel)
+            {
+                actions.push_back(queued);
+            }
         }
-
         app.refresh_info(&backend);
         redraw(terminal, &mut app, controller)?;
+    }
+}
+
+async fn drain_writes(app: &mut App) {
+    let completions = match &mut app.driver {
+        Some(driver) => driver.drain_pending_writes().await,
+        None => Vec::new(),
+    };
+    for completion in completions {
+        app.apply_completion(completion);
+    }
+}
+
+fn apply_input<B: Backend>(
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    event: TuiEvent,
+    cancel: &CancellationToken,
+    backend: &app::Backend<'_>,
+) -> Result<Option<Action>, ReplError> {
+    match event {
+        TuiEvent::Key(key) => {
+            app.selection = None;
+            Ok(app.handle_key(key, backend, cancel))
+        }
+        TuiEvent::Paste(text) => {
+            app.insert_text(&text);
+            Ok(None)
+        }
+        TuiEvent::Wheel { up } => {
+            app.scroll_wheel(up);
+            Ok(None)
+        }
+        TuiEvent::Select { phase, col, row } => {
+            if app.has_surface() {
+                if phase == DragPhase::Start {
+                    focus_surface(app, col, row);
+                }
+            } else if let Some(text) = apply_selection(app, terminal, phase, col, row)?
+                && let Err(error) = selection::copy(&text)
+            {
+                app.push_system(format!("copy: {error}"));
+            }
+            Ok(None)
+        }
+        TuiEvent::Redraw => Ok(None),
+    }
+}
+
+fn focus_surface(app: &mut App, col: u16, row: u16) {
+    use interaction::Focus;
+    let point = ratatui::layout::Position::new(col, row);
+    let geometry = app.geometry.borrow();
+    let Some(surface) = app.surfaces.top_mut() else {
+        return;
+    };
+    if geometry.rows.is_some_and(|rect| rect.contains(point)) {
+        surface.state.focus = Focus::Rows;
+    } else if geometry.document.is_some_and(|rect| rect.contains(point)) {
+        surface.state.focus = Focus::Document;
+    } else if let Some((id, _)) = geometry
+        .fields
+        .iter()
+        .find(|(_, rect)| rect.contains(point))
+    {
+        surface.state.focus = Focus::Field(id.clone());
+    } else if let Some((id, _)) = geometry
+        .actions
+        .iter()
+        .find(|(_, rect)| rect.contains(point))
+    {
+        surface.state.focus = Focus::Actions;
+        surface.state.selected_action = Some(id.clone());
     }
 }
 
@@ -763,7 +562,7 @@ fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
 /// applies it, letting the same loop also redraw on a key, a resize, and every
 /// [`render::SPINNER_FRAME`] so the thinking indicator animates while nothing
 /// is streaming. An open `/agents` overlay is also re-queried on
-/// [`agents_view::REFRESH_INTERVAL`], the same cadence the idle loop uses.
+/// the same cadence as idle feature refreshes.
 #[allow(clippy::too_many_arguments)]
 async fn drive_turn<B: Backend, T, E>(
     app: &mut App,
@@ -777,66 +576,24 @@ async fn drive_turn<B: Backend, T, E>(
 ) -> Result<T, E> {
     tokio::pin!(future);
     let mut frames = tokio::time::interval(render::SPINNER_FRAME);
-    // Mirrors `run_app`'s `agents_refresh`: `None` while the overlay is
-    // closed, and `reset()` right after creation so the first tick lands a
-    // full interval out rather than immediately (`open`/`handle_key` already
-    // ran a fresh query).
-    let mut agents_refresh: Option<tokio::time::Interval> = None;
+    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
-        match &app.agents {
-            Some(_) if agents_refresh.is_none() => {
-                let mut interval = tokio::time::interval(agents_view::REFRESH_INTERVAL);
-                interval.reset();
-                agents_refresh = Some(interval);
-            }
-            None => agents_refresh = None,
-            Some(_) => {}
-        }
-        let tick = async {
-            match agents_refresh.as_mut() {
-                Some(interval) => interval.tick().await,
-                None => std::future::pending().await,
-            };
-        };
         tokio::select! {
-            result = &mut future => {
-                // `select!` picks at random between ready branches, so the
-                // sink's last events can still be queued behind the call's
-                // own completion.
-                while let Ok(event) = events.try_recv() {
-                    apply(app, &event);
-                }
+            result=&mut future=>{
+                while let Ok(event)=events.try_recv(){apply(app,&event);}
                 return result;
             }
-            Some(event) = events.recv() => apply(app, &event),
-            Some(event) = keys.recv() => {
-                apply_turn_key(app, terminal, event, turn, backend);
-            }
-            () = tick => {
-                if let Some(view) = &mut app.agents {
-                    view.tick(backend);
-                }
-            }
-            _ = frames.tick() => {
-                if let app::Backend::Local(controller) = backend { sync_shared_approval(app,controller); }
-            }
+            Some(event)=events.recv()=>apply(app,&event),
+            Some(event)=keys.recv()=>apply_turn_key(app,terminal,event,turn,backend),
+            completion=app.next_completion()=>app.apply_completion(completion),
+            _=refresh.tick()=>{app.tick_features();app.request_approvals();}
+            _=frames.tick()=>{}
         }
         app.refresh_tasks(backend);
         let _ = terminal.draw(|frame| render::draw(frame, app));
     }
 }
 
-/// Handles one event delivered while a turn is running: Ctrl+C always cancels
-/// it; Esc cancels it too unless the `/agents` overlay is open, in which case
-/// [`App::handle_turn_key`] routes keys to the overlay instead (Esc there
-/// closes the overlay, or leaves its detail pane, without cancelling).
-/// Scroll/wheel/drag still navigate the transcript, and ordinary composer
-/// keys edit the single queued draft that will be submitted after a
-/// successful turn — except a draft that resolves to `/agents`, which
-/// `handle_turn_key` opens immediately instead of queuing.
-///
-/// Scrolling has to work here and not only between turns: a streaming turn
-/// is when there is most output to read back through.
 fn apply_turn_key<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
@@ -844,72 +601,15 @@ fn apply_turn_key<B: Backend>(
     turn: &CancellationToken,
     backend: &app::Backend<'_>,
 ) {
-    match event {
-        TuiEvent::Key(key) => {
-            app.selection = None;
-            if let app::Backend::Local(controller) = backend
-                && let Some(dialog) = &app.approval
-                && controller
-                    .approval_service()
-                    .get(
-                        &dialog.id,
-                        &controller.info().workspace,
-                        Some(&controller.info().session_id),
-                    )
-                    .is_ok()
-            {
-                if let Some(action) = app.handle_key(key, backend, turn) {
-                    let decision = match action {
-                        Action::DecideApproval {
-                            id,
-                            allow,
-                            feedback,
-                        } => Some((id, allow, feedback)),
-                        Action::Approve(id) => Some((id, true, String::new())),
-                        Action::Deny(id) => Some((id, false, String::new())),
-                        _ => None,
-                    };
-                    if let Some((id, allow, feedback)) = decision
-                        && let Err(error) =
-                            controller.decide_shared_approval(&id, allow, &feedback, "tui")
-                    {
-                        app.push_system(error.to_string());
-                    }
-                }
-                return;
-            }
-            if app.handle_turn_key(key, backend) {
+    match apply_input(app, terminal, event, turn, backend) {
+        Ok(Some(Action::CancelTurn)) => turn.cancel(),
+        Ok(Some(action)) => {
+            if matches!(action, Action::Exit) {
                 turn.cancel();
             }
+            app.outgoing.push(action);
         }
-        TuiEvent::Paste(text) => {
-            if let Some(dialog) = &mut app.approval
-                && dialog.feedback_mode
-            {
-                if dialog.feedback.len() + text.len() <= 8192 {
-                    dialog.feedback.push_str(&text);
-                }
-            } else {
-                app.insert_text(&text);
-            }
-        }
-        TuiEvent::Wheel { up } => app.scroll_wheel(up),
-        TuiEvent::Select { phase, col, row } => {
-            // The turn loop redraws on every tick anyway, so a failed draw
-            // here is not worth ending the turn over.
-            if let Ok(Some(text)) = apply_selection(app, terminal, phase, col, row)
-                && let Err(error) = selection::copy(&text)
-            {
-                app.push_system(format!("copy: {error}"));
-            }
-        }
-        TuiEvent::Redraw => {}
-    }
-}
-
-fn sync_shared_approval(app: &mut App, controller: &Controller) {
-    match controller.approval_snapshot() {
-        Ok(snapshot) => app.sync_approvals(&snapshot.requests),
+        Ok(None) => {}
         Err(error) => app.push_system(error.to_string()),
     }
 }
@@ -1006,11 +706,29 @@ fn wire_frame(event: &Event) -> WireEvent {
 }
 
 fn image_block_from_path(path: &str) -> Result<Block, String> {
-    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    use std::io::Read as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("image must be a regular file".into());
+    }
     if metadata.len() > MAX_IMAGE_BYTES as u64 {
         return Err(format!("image exceeds {MAX_IMAGE_BYTES} bytes"));
     }
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(format!("image exceeds {MAX_IMAGE_BYTES} bytes"));
+    }
     let mime_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "image/png"
     } else if bytes.starts_with(b"\xff\xd8\xff") {
@@ -1217,178 +935,103 @@ async fn run_reflect<B: Backend>(
     Ok(())
 }
 
-fn push_session_id(app: &mut App, controller: &Controller) {
-    let id = controller.info().session_id;
-    if !id.is_empty() {
-        app.push_system(format!("Session: {id}"));
+/// Streams ordinary command output through the same event/render loop as turns.
+struct ProgressWriter {
+    tx: mpsc::UnboundedSender<WireEvent>,
+}
+impl io::Write for ProgressWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let _ = self.tx.send(WireEvent {
+            event_type: "frontend_notice".into(),
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            ..Default::default()
+        });
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
-/// The `/model <name>` branch: switch, try to persist as the default profile,
-/// and report either way.
-/// Writes one `[sandbox]` change and reloads the sandbox with it.
-///
-/// A change that widens what commands may do is followed by a turn, since the
-/// user reaches this from a command the old configuration denied; narrowing
-/// the sandbox reports the new state and stops there.
-async fn amend_sandbox<B: Backend>(
+fn append_progress(app: &mut App, id: &str, event: &WireEvent) {
+    if event.event_type != "frontend_notice" {
+        return;
+    }
+    if let Some(entry) = app.entries.iter_mut().find(|e| e.id == id) {
+        entry.raw.push_str(&event.text);
+    } else {
+        app.entries.push(entries::Entry {
+            id: id.into(),
+            kind: Some(entries::EntryKind::System),
+            raw: event.text.clone(),
+            ..Default::default()
+        });
+    }
+}
+
+async fn login_dispatch<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
-    cancel: &CancellationToken,
-    change: SandboxChange,
-) -> Result<(), ReplError> {
-    let widens = match &change {
-        SandboxChange::AllowReadPath(_) => true,
-        SandboxChange::Network(mode) => mode == "allow",
-        // A listed command runs outside the sandbox.
-        SandboxChange::ExcludeCommand(_) => true,
-    };
-    let summary = change.summary();
-    let info = match controller.amend_sandbox(change).await {
-        Ok(info) => info,
-        Err(message) => {
-            app.push_system(format!("/sandbox: {message}"));
-            return Ok(());
-        }
-    };
-    app.push_system(format!("Sandbox: {} ({summary})", info.summary()));
-    if !widens {
-        return Ok(());
-    }
-    let line = format!(
-        "The user changed the sandbox configuration: {summary} is now allowed. \
-         Sandbox: {}. If a command failed because of the sandbox, retry it now.",
-        info.summary()
-    );
-    run_turn(app, terminal, keys, controller, cancel, line, None).await
-}
-
-async fn switch_profile(app: &mut App, controller: &Controller, profile: &str) {
-    if let Err(message) = controller.switch_profile(profile).await {
-        app.push_system(format!("/model: {message}"));
-        return;
-    }
-    app.refresh(&app::Backend::Local(controller));
-    let saved = controller.set_default_profile(profile);
-    let info = controller.info();
-    match saved {
-        Ok(()) => app.push_system(format!(
-            "Switched to profile {} (provider {}, model {}). Set as default profile.",
-            info.profile, info.provider, info.model
-        )),
-        Err(message) => app.push_system(format!(
-            "Switched to profile {} (provider {}, model {}), but the default profile was not saved: {message}",
-            info.profile, info.provider, info.model
-        )),
-    }
-    push_session_id(app, controller);
-}
-
-/// `/login` dispatch: `repl_login` writes its report to `stdout`/`stderr`
-/// buffers rather than the transcript directly, so capture both and push
-/// whatever they produced as one system entry, matching the `/logout` handling
-/// already in `App::dispatch_line`.
-async fn login_dispatch(
-    app: &mut App,
-    controller: &Controller,
     args: &str,
     cancel: &CancellationToken,
 ) {
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let result = login::repl_login(controller, &mut out, &mut err, args, cancel).await;
-    let mut text = String::from_utf8_lossy(&out).trim_end().to_string();
-    let err_text = String::from_utf8_lossy(&err);
-    let err_text = err_text.trim_end();
-    if !err_text.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(err_text);
-    }
-    match result {
-        Ok(()) => {
-            if !text.is_empty() {
-                app.push_system(text);
-            }
-        }
-        Err(error) => app.push_system(format!("/login: {error}")),
-    }
-}
-
-async fn apply_thinking(app: &mut App, controller: &Controller, thinking: &str, save: bool) {
-    if thinking.is_empty() {
-        let info = controller.info();
-        app.push_system(format!(
-            "Thinking: {}",
-            if info.thinking.is_empty() {
-                "default"
-            } else {
-                &info.thinking
-            }
-        ));
-        return;
-    }
-    match controller.set_thinking(thinking).await {
-        Ok(()) => {
-            app.refresh_info(&app::Backend::Local(controller));
-            let info = controller.info();
-            let display = if info.thinking.is_empty() {
-                "default"
-            } else {
-                &info.thinking
-            };
-            if save {
-                match controller.save_profile_thinking(thinking) {
-                    Ok(()) => app.push_system(format!("Thinking: {display}. Saved to profile.")),
-                    Err(message) => app.push_system(format!(
-                        "Thinking: {display}, but the profile was not saved: {message}"
-                    )),
-                }
-            } else {
-                app.push_system(format!("Thinking: {display}"));
-            }
-        }
-        Err(message) => app.push_system(format!("/thinking: {message}")),
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let mut stdout = ProgressWriter { tx: tx.clone() };
+    let mut stderr = ProgressWriter { tx };
+    let operation = cancel.child_token();
+    let id = format!("login-output-{}", app.entries.len());
+    app.start_operation("authentication");
+    let future = login::repl_login(controller, &mut stdout, &mut stderr, args, &operation);
+    let result = drive_turn(
+        app,
+        terminal,
+        keys,
+        &mut events,
+        &operation,
+        &app::Backend::Local(controller),
+        future,
+        |app, event| append_progress(app, &id, event),
+    )
+    .await;
+    app.end_turn();
+    if let Err(error) = result {
+        app.push_system(format!("/login: {error}"));
     }
 }
 
-/// `/mcp login <server>` dispatch: reuses [`repl_commands::repl_mcp_command`]
-/// against captured buffers, matching [`login_dispatch`] above.
-async fn mcp_login_dispatch(
+async fn mcp_login_dispatch<B: Backend>(
     app: &mut App,
+    terminal: &mut Terminal<B>,
+    keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     name: &str,
     cancel: &CancellationToken,
 ) {
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let result = repl_commands::repl_mcp_command(
-        controller,
-        &format!("login {name}"),
-        &mut out,
-        &mut err,
-        cancel,
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let mut stdout = ProgressWriter { tx: tx.clone() };
+    let mut stderr = ProgressWriter { tx };
+    let operation = cancel.child_token();
+    let args = format!("login {name}");
+    let id = format!("mcp-login-output-{}", app.entries.len());
+    app.start_operation("authentication");
+    let future =
+        repl_commands::repl_mcp_command(controller, &args, &mut stdout, &mut stderr, &operation);
+    let result = drive_turn(
+        app,
+        terminal,
+        keys,
+        &mut events,
+        &operation,
+        &app::Backend::Local(controller),
+        future,
+        |app, event| append_progress(app, &id, event),
     )
     .await;
-    let mut text = String::from_utf8_lossy(&out).trim_end().to_string();
-    let err_text = String::from_utf8_lossy(&err);
-    let err_text = err_text.trim_end();
-    if !err_text.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(err_text);
-    }
-    match result {
-        Ok(()) => {
-            if !text.is_empty() {
-                app.push_system(text);
-            }
-        }
-        Err(error) => app.push_system(format!("/mcp login: {error}")),
+    app.end_turn();
+    if let Err(error) = result {
+        app.push_system(format!("/mcp login: {error}"));
     }
 }
 
@@ -1813,6 +1456,7 @@ mod tests {
                 .expect("the pending notification did not trigger a wake turn");
             cancel.cancel();
         };
+        let controller = Arc::new(controller);
         let (result, ()) = tokio::join!(
             run_app(&mut terminal, &controller, &cancel, &mut keys),
             driver

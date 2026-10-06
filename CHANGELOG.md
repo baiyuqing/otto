@@ -100,6 +100,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Open versioned lifecycle hooks and custom command tools on installed plugin
+  snapshots, with sandbox execution, exact-argument authorization and
+  append-only rewrite auditing. ([#358](https://github.com/baiyuqing/otto/pull/358))
+
 - Let ACP clients attached to one `otto serve` select admitted workspaces per
   request. Route scheduled chat messages to each connector's declared chats;
   suspend ambiguous legacy delivery and recover when clients disconnect or

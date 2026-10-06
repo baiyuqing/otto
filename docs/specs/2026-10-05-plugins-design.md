@@ -1,5 +1,10 @@
 # Plugin packages
 
+Follow-up: [Otto hooks and custom tools](2026-10-06-plugins-and-hooks.md) extend
+the installed package contract; unsupported legacy host components below remain
+unsupported.
+
+
 Status: approved 2026-10-05 by the user; implementation in progress. Branch `feat/plugins`, worktree `.worktree/plugins`.
 
 ## Goal and scope

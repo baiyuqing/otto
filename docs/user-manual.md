@@ -511,7 +511,7 @@ allowlists constrain the executable, not its arguments. Credential-variable
 policies also deny MCP OAuth. `require_sandbox` constrains bash, prohibits
 excluded commands and elevated execution, and cannot provide confinement on
 Linux. MCP stdio remains a separate external process governed by MCP policy.
-No hooks or extension execution framework is added.
+Hooks and custom commands follow sandbox and executable trust boundaries; see [Hooks and custom tools](#hooks-and-custom-tools).
 
 A complete user configuration example:
 
@@ -4337,8 +4337,9 @@ shell command line. Working directories remain beneath the plugin root or its
 persistent data root.
 
 Legacy adapters support conventional/custom Skills paths and file/inline MCP
-configurations; package-root placeholders receive limited translation. Hooks,
-Commands, Agents, LSP, OpenAI Apps and Pi runtime code are not activated.
+configurations; package-root placeholders receive limited translation. Legacy
+Hooks, Commands, Agents, LSP, OpenAI Apps and Pi runtime code are not activated.
+Otto-specific hooks/tools use `extensions.dev.otto`, as described below.
 Recognized unsupported components and invalid independent components produce
 diagnostics while valid Skills/MCP remain usable. This is not full Claude,
 Codex or Pi plugin compatibility. Skill `allowed-tools` remains parsed without
@@ -4347,6 +4348,176 @@ permission enforcement.
 Session history records active package names, versions and content digests as
 append-only metadata. Resuming history does not install or authorize packages
 listed in old metadata; the current installation registry determines capability.
+
+## Hooks and custom tools
+
+A runnable [hook-demo example](../examples/plugins/hook-demo/README.md) includes
+a Python hook, a custom tool and an offline protocol check.
+
+Lifecycle hooks and external command tools are available in the Otto-specific
+`extensions.dev.otto` namespace of an installed `plugin.json`. Existing Skills,
+MCP formats, snapshot installation and content trust remain the package contract.
+Commands require `otto plugin trust <name>` for the installed digest. Untrusted
+packages still contribute Skills, but omit hooks/tools with a diagnostic.
+Enable/disable affects new runners; revoke/remove blocks existing command
+snapshots without replaying their effects.
+
+```json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "demo",
+  "version": "1.0.0",
+  "extensions": {
+    "dev.otto": {
+      "version": 1,
+      "hooks": {
+        "before_tool": [{
+          "matcher": ["bash", "mcp__github__*"],
+          "command": ["python3", "${PLUGIN_ROOT}/check.py"],
+          "timeout": "10s"
+        }]
+      },
+      "tools": [{
+        "name": "inspect",
+        "description": "Inspect project metadata",
+        "command": ["python3", "${PLUGIN_ROOT}/inspect.py"],
+        "input_schema": {
+          "type": "object",
+          "properties": {"path": {"type": "string"}},
+          "required": ["path"],
+          "additionalProperties": false
+        }
+      }]
+    }
+  }
+}
+```
+
+Commands are argv arrays, without implicit shell interpretation. Package
+arguments expand `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` using the installed
+snapshot and existing data directory. They always start in the selected
+workspace, run through the current sandbox and use its filtered environment.
+No additional filesystem grants or credential bindings are implied: write
+state inside the workspace unless the selected sandbox already permits its
+destination. Only explicit sandbox `off` is unconfined. A hook cannot request
+elevation or grant authorization. On Linux, commands need explicit sandbox
+`off`, as with Bash.
+
+Standalone hooks can also be configured in user or trusted project TOML:
+
+```toml
+[[hooks.before_tool]]
+matcher = ["bash"]
+command = ["python3", ".otto/hooks/check.py"]
+timeout = "10s"
+```
+
+Project declarations require `otto trust <workspace> --executables`. Hook
+configuration, `.otto/hooks` and explicitly referenced project hook files are
+bound to that grant. Standalone commands snapshot referenced workspace files
+and reject changes until a new runner is built. Standalone hook arrays follow
+ordinary configuration precedence; a higher layer replaces the array for that
+event. Standalone hooks run first, then packages sorted by name; entries run
+in declaration order.
+
+All native frontends (CLI, TUI, HTTP/Web and ACP), sub-agents and manual/automatic
+compaction use the shared hook path. Tool matchers use exact names or one `*`;
+omission matches every known tool invocation. For `mcp_call_tool`, matching
+uses the selected remote name returned by MCP search, and arguments remain the
+router's `{tool, arguments}` object. Child tool allowlists and write-path checks
+apply to rewritten arguments before dispatch.
+
+### Hook protocol v1
+
+One command receives a JSON object on stdin, followed by EOF:
+
+```json
+{
+  "version": 1,
+  "event": "before_tool",
+  "workspace": "/path/to/project",
+  "session": {"session_id": "s1", "parent_session_id": null, "task_id": "", "mode": "new"},
+  "data": {"turn_id": "op_...", "tool": "bash", "tool_call_id": "call1", "operation_id": "op_...", "attempt": 1, "arguments": {"command": "git status"}}
+}
+```
+
+Top-level fields are stable within v1; event data may gain fields. Consumers
+should ignore unknown input fields. Child lifecycle identifiers combine the
+parent session and task IDs; `parent_session_id` and `task_id` identify their
+owner. A standalone compaction or session event has an empty `turn_id`.
+`session_start` runs once when the native session's first runner is installed
+(or before a child's first turn), with `mode` `new` or `resume`. Runner rebuilds
+for model/MCP changes do not repeat it. `session_end` runs once on graceful
+session close, after child completion for children; crashes cannot guarantee it.
+Asynchronous shutdown awaits its bounded owner. Synchronous close starts
+cleanup in the background; a closed lease-managed session refuses late hooks.
+Startup commands keep an owner if a build waiter is dropped, and closing the
+session cancels that startup command.
+
+| Event | Data beyond turn ID | Accepted output fields |
+| --- | --- | --- |
+| `session_start` | Session metadata above | `decision`, `reason`, `context` |
+| `before_prompt` | `prompt` text, `followup` and `has_image` flags | `decision`, `reason`, `context` |
+| `before_tool` | Tool identity and arguments above | `decision`, `reason`, `arguments` |
+| `after_tool` | Tool identity/arguments, `content`, `is_error`, typed `outcome` | `content` |
+| `before_compaction` | `reason`, `focus` | `decision`, `reason`, `context` (retention hint) |
+| `after_compaction` | Committed `checkpoint_id`, `reason` | `{}` |
+| `turn_end` | `status`: `success`, `error` or `cancelled`; optional error and stop reason | `{}` |
+| `session_end` | Session metadata above | `{}` |
+
+Commands must exit zero and emit one JSON response on stdout, or empty output
+for a no-op. Diagnostic output belongs on stderr. Unknown response fields,
+unsupported fields for an event and malformed JSON are errors.
+
+```json
+{"decision":"deny","reason":"Use the approved deployment tool"}
+```
+
+`decision` is `allow` or `deny`; omission means continue. `arguments` replaces
+the entire argument object before the tool's own validation, child write
+policy and authorization. Rewritten arguments are audited as append-only
+`otto.hook.arguments` session entries. They cannot change the outer tool name.
+`content` replaces only model/display text; original persisted output and
+outcome are audited as `otto.hook.result`, and error/effect certainty remain
+unchanged. Context and retention hints are labeled as untrusted plugin text.
+Later hooks see earlier argument/content rewrites.
+
+Before-hook failure, denial, timeout or invalid output stops that operation.
+Tools refused before dispatch settle as `NotStarted`; `after_tool` only runs
+for dispatched calls. After-hook failure reports a warning and preserves the
+actual operation result; other after hooks still run. After-compaction runs
+only for a committed checkpoint, not a no-op. Cancellation/failure still
+triggers `turn_end`; after hooks use independent bounded command timeouts.
+
+Timeout defaults to 10 seconds and must be positive and at most 300 seconds.
+Before hooks also consume the remaining operation budget. Input is capped at
+1 MiB, stdout/stderr at 64 KiB. Known credentials are redacted before stdin
+and from responses/diagnostics. Timeout/cancellation kills and reaps the process
+group, including descendants. Running package commands check authorization and
+resource changes every 500 ms. Unknown effects and hooked calls are never
+replayed automatically after a process loss.
+
+### Custom tools
+
+A tool above is registered as `plugin__demo__inspect`; the complete name must
+fit 64 characters (package dots become underscores). Input uses standard JSON Schema, validated before process
+launch; local schema references work, external HTTP/file references are
+unavailable. A custom tool runs through the same authorization registry as
+other effectful tools, with the exact arguments, command and package version.
+It is never declared replayable.
+
+Its stdin is `{version: 1, event: "tool", workspace, tool, arguments, metadata}`.
+`metadata` contains tool-call/operation IDs, attempt and, for authorized native
+calls, session/task/workspace scope. It must emit JSON such as:
+
+```json
+{"content":"Inspection complete","is_error":false}
+```
+
+`content` is required; `is_error` defaults to false. Nonzero exit, timeout,
+cancellation or malformed output after dispatch produces an uncertain effect,
+without an automatic retry. Use the existing `otto plugin install` and `trust` commands; installation runs
+no hook or tool code.
 
 ## Troubleshooting
 

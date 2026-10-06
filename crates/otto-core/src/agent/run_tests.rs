@@ -3309,3 +3309,73 @@ async fn approval_barrier_settles_later_batch_calls_without_dispatch() {
     assert!(events.iter().any(|event|matches!(event,Event::ToolCallFinished{tool_call_id,outcome,..}
         if tool_call_id=="c2" && outcome.effect_certainty==crate::model::EffectCertainty::NotStarted)));
 }
+
+#[derive(Default)]
+struct CompactionHooks {
+    events: Mutex<Vec<String>>,
+    deny: bool,
+}
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch="wasm32",async_trait::async_trait(?Send))]
+impl super::hooks::Hooks for CompactionHooks {
+    async fn run(
+        &self,
+        event: &str,
+        _: serde_json::Value,
+        _: &dyn OperationControl,
+    ) -> Result<super::hooks::Response, String> {
+        self.events.lock().unwrap().push(event.into());
+        if event == "before_compaction" {
+            return Ok(super::hooks::Response {
+                decision: Some(if self.deny {
+                    super::hooks::Decision::Deny
+                } else {
+                    super::hooks::Decision::Allow
+                }),
+                context: Some("retain the parser contract".into()),
+                ..Default::default()
+            });
+        }
+        Ok(Default::default())
+    }
+}
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn compaction_hooks_gate_the_provider_and_observe_only_committed_checkpoints() {
+    for deny in [false, true] {
+        let hooks = Arc::new(CompactionHooks {
+            deny,
+            ..Default::default()
+        });
+        let mut opts = options();
+        opts.hooks = Some(hooks.clone());
+        let agent = Agent::new(
+            FakeProvider::new(vec![Turn::summary(&structured_summary())]),
+            EchoExecutor::default(),
+            seeded_session().await,
+            opts,
+        );
+        let result = agent
+            .compact("parser", &mut |_| {}, &CancellationToken::new())
+            .await;
+        if deny {
+            assert!(result.is_err());
+            assert!(agent.provider().summary_requests().is_empty());
+            assert_eq!(
+                *hooks.events.lock().unwrap(),
+                vec!["session_start", "before_compaction"]
+            );
+        } else {
+            assert!(result.is_ok());
+            assert!(
+                agent.provider().summary_requests()[0]
+                    .system_prompt
+                    .contains("retain the parser contract")
+            );
+            assert_eq!(
+                *hooks.events.lock().unwrap(),
+                vec!["session_start", "before_compaction", "after_compaction"]
+            );
+        }
+    }
+}

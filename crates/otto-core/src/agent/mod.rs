@@ -66,7 +66,7 @@ use crate::session::context::pending_tool_calls;
 use crate::session::operation::OperationFact;
 use crate::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
 
-use inbox::Inbox;
+use crate::mailbox::{InMemoryMailbox, Mailbox};
 use memory::{DEFAULT_RECALL_LIMIT, DEFAULT_RECALL_TOKEN_BUDGET, MemoryRecall};
 use overflow::{
     AUTOMATIC_COMPACTION_ATTEMPT_USED_MESSAGE, AUTOMATIC_COMPACTION_HARD_FAILURE_MESSAGE,
@@ -112,8 +112,8 @@ pub struct Options {
     /// How many tokens one recall may spend.
     pub memory_recall_token_budget: i64,
     /// Notifications waiting to be delivered as context messages. Shared with
-    /// whoever pushes into it, which is why it is behind an `Arc`.
-    pub inbox: Arc<Inbox>,
+    /// producers through the public mailbox port.
+    pub mailbox: Arc<dyn Mailbox>,
     /// Turn-bound guidance accepted by a frontend while a run is active.
     pub steering: Arc<steering::Steering>,
     /// The subagent task registry, closed by [`Agent::close`].
@@ -145,7 +145,7 @@ impl Default for Options {
             memory: None,
             memory_recall_limit: DEFAULT_RECALL_LIMIT,
             memory_recall_token_budget: DEFAULT_RECALL_TOKEN_BUDGET,
-            inbox: Arc::new(Inbox::default()),
+            mailbox: Arc::new(InMemoryMailbox::default()),
             steering: Arc::new(steering::Steering::default()),
             tasks: None,
         }
@@ -269,9 +269,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         self.options.tasks.as_ref()
     }
 
-    /// The inbox shared with producers that can add context to this agent.
-    pub fn inbox(&self) -> &Arc<Inbox> {
-        &self.options.inbox
+    /// The mailbox shared with producers that can add context to this agent.
+    pub fn mailbox(&self) -> &Arc<dyn Mailbox> {
+        &self.options.mailbox
     }
 
     /// Releases the memory binding and cancels every tracked task.
@@ -487,7 +487,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return self.run_with_incomplete_redactions(emit, control);
         }
         let text = trim_go_space(user_text);
-        if text.is_empty() && image.is_none() && self.options.inbox.is_empty() {
+        if text.is_empty() && image.is_none() && self.options.mailbox.is_empty() {
             return Err(self.fail(emit, AgentError::EmptyUserText));
         }
         let steering = self.options.steering.begin();
@@ -652,7 +652,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 if let Some(error) = stopped_provider_error(control) {
                     return Err(self.fail(emit, AgentError::Provider(error)));
                 }
-                if self.options.inbox.queued().iter().any(|entry| {
+                if self.options.mailbox.queued().iter().any(|entry| {
                     entry.notification.kind == Some(inbox::NotificationKind::UserMessage)
                 }) {
                     if let Err(error) = self.deliver_notifications(emit).await {
@@ -954,7 +954,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     /// is picked up by the next call, in order, rather than lost or
     /// reordered.
     async fn deliver_notifications(&self, emit: EventSink<'_>) -> Result<(), AgentError> {
-        for entry in self.options.inbox.queued() {
+        for entry in self.options.mailbox.queued() {
             let notification = entry.notification;
             let text = self.redactor.redact_string(&notification.text);
             let user_message = notification.kind == Some(inbox::NotificationKind::UserMessage);
@@ -989,7 +989,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     kind: "notification".into(),
                     source,
                 })?;
-            self.options.inbox.remove_seq(entry.seq);
+            self.options.mailbox.ack(entry.seq);
             emit(Event::Notification {
                 kind: notification.kind,
                 task_id: notification.task_id,

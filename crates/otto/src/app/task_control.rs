@@ -316,8 +316,14 @@ fn submit_error(error: SubmitError) -> String {
         SubmitError::Empty => "guidance must contain non-whitespace characters".into(),
         SubmitError::TooLong => format!("guidance must be at most {MAX_TEXT_BYTES} UTF-8 bytes"),
         SubmitError::Full => "the active task's guidance queue is full".into(),
+        SubmitError::NotPersisted => INPUT_NOT_PERSISTED.into(),
     }
 }
+
+/// The error text of guidance whose durable copy could not be saved. The
+/// guidance was not accepted; the HTTP API answers `503
+/// input_not_persisted`.
+pub(crate) const INPUT_NOT_PERSISTED: &str = "the input could not be saved and was not accepted";
 
 #[derive(Default)]
 pub(crate) struct ControlRoute(Mutex<Option<Route>>);

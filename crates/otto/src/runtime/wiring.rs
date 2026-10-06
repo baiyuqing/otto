@@ -685,6 +685,34 @@ impl Builder {
         })
     }
 
+    /// Gives `steering` its durable journal, `<id>.inputs.json` beside the
+    /// session file, so guidance accepted for a turn that process loss
+    /// interrupts reaches that turn's automatic resume. A no-op for
+    /// `--no-session`. The path is resolved at write time, as for the inbox,
+    /// because a new session has no file until its first write.
+    pub(crate) fn install_steering_journal(
+        &self,
+        steering: &otto_core::agent::steering::Steering,
+        session: &SharedSession,
+        stderr: &mut dyn Write,
+    ) {
+        if self.no_session {
+            return;
+        }
+        let journal = Arc::new(otto_core::mailbox::InMemoryMailbox::new(None));
+        let for_path = session.clone();
+        super::sidecar_mailbox::install(&journal, ".inputs.json", move || {
+            let path = for_path.path();
+            (!path.is_empty()).then(|| Path::new(&path).with_extension("inputs.json"))
+        });
+        if let Some(path) = self.sidecar_path(session, "inputs.json")
+            && let Some(warning) = super::sidecar_mailbox::load(&journal, &path)
+        {
+            let _ = writeln!(stderr, "warning: {warning}");
+        }
+        steering.set_journal(journal);
+    }
+
     /// Where a top-level session sidecar (`reminders.json`, `inbox.json`)
     /// lives: beside the session file, also when that file is in `archive/`
     /// and was resumed by path. Archiving removes the sidecars from there, and

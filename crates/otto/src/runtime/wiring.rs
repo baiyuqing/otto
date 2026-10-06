@@ -23,7 +23,6 @@ use otto_core::agent::redactor::Redactor;
 use otto_core::config::agents::AgentsRuntime;
 use otto_core::config::memory::MemoryRuntime;
 use otto_core::config::{McpAuth, McpTransport, Runtime, resolve_agents, resolve_skills};
-use otto_core::mailbox::Inbox;
 use otto_core::model::ToolDefinition;
 use otto_core::safetext::dynamic_redaction_marker;
 use tokio_util::sync::CancellationToken;
@@ -232,7 +231,7 @@ pub struct CatalogWiring {
 pub struct SubagentWiring {
     pub runner: Option<Arc<SubagentRunner>>,
     pub tasks: Option<Arc<Tasks>>,
-    pub inbox: Option<Arc<Inbox>>,
+    pub inbox: Option<Arc<dyn otto_core::mailbox::Mailbox>>,
     /// The session's timer registry, absent when the timer tools are not
     /// registered. `/timers` and archiving read the active runner's.
     pub reminders: Option<Arc<Reminders>>,
@@ -622,6 +621,7 @@ impl Builder {
                 session_for_children,
                 Arc::clone(&self.storage),
             )),
+            child_mailbox: (!self.no_session).then(child_mailbox),
             checker: self.skill_checker.clone(),
             lease: Some(Arc::new(move || session_for_lease.lease())),
             workspace_path: PathBuf::from(&self.workspace_path),
@@ -640,7 +640,7 @@ impl Builder {
         }
 
         let runner = Arc::new(runner);
-        let inbox = Arc::clone(tasks.notifications());
+        let inbox = Arc::clone(tasks.notifications_inbox());
         // The persist hook resolves the sidecar path at write time rather than
         // capturing `inbox_persist` here: a lazy session store's `path()` is
         // still empty at this point (nothing has been written to it yet), so
@@ -648,24 +648,20 @@ impl Builder {
         // persistence for a session that gets its first write only after this
         // function returns (see `Store::path`).
         let no_session = self.no_session;
-        inbox.set_persist(Box::new(move |entries| {
-            if no_session {
-                return;
-            }
+        super::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
             let path = session_for_inbox.path();
-            if path.is_empty() {
-                return;
-            }
-            write_inbox_file(&Path::new(&path).with_extension("inbox.json"), entries)
-        }));
+            (!no_session && !path.is_empty()).then(|| Path::new(&path).with_extension("inbox.json"))
+        });
         // A session with no persisted inbox path (`--no-session`, or nothing
         // written yet) never takes over a lease either, so it never has a
         // takeover to report; the recovery scan lives in this branch rather
         // than running unconditionally.
         if let Some(path) = inbox_persist {
-            load_inbox(&inbox, &path);
+            if let Some(warning) = super::sidecar_mailbox::load(&inbox, &path) {
+                let _ = writeln!(stderr, "warning: {warning}");
+            }
             let recovery_warnings = failover::recovery::notify(
-                &inbox,
+                inbox.as_ref(),
                 session_for_recovery.take_recovery(),
                 &children_dir,
                 runtime.max_output_bytes.max(0) as usize,
@@ -678,8 +674,8 @@ impl Builder {
         tools.extend(subagent::tools::tools(&runner));
         // Parent-only; the child registry drops the timer tools by name.
         let reminders = Arc::new(match persist {
-            Some(path) => Reminders::with_persist(Arc::clone(&inbox), path),
-            None => Reminders::new(Arc::clone(&inbox)),
+            Some(path) => Reminders::with_persist(inbox.clone(), path),
+            None => Reminders::new(inbox.clone()),
         });
         tools.extend(remind::tools(&reminders));
         Ok(SubagentWiring {
@@ -688,6 +684,34 @@ impl Builder {
             inbox: Some(inbox),
             reminders: Some(reminders),
         })
+    }
+
+    /// Gives `steering` its durable journal, `<id>.inputs.json` beside the
+    /// session file, so guidance accepted for a turn that process loss
+    /// interrupts reaches that turn's automatic resume. A no-op for
+    /// `--no-session`. The path is resolved at write time, as for the inbox,
+    /// because a new session has no file until its first write.
+    pub(crate) fn install_steering_journal(
+        &self,
+        steering: &otto_core::agent::steering::Steering,
+        session: &SharedSession,
+        stderr: &mut dyn Write,
+    ) {
+        if self.no_session {
+            return;
+        }
+        let journal = Arc::new(otto_core::mailbox::InMemoryMailbox::new(None));
+        let for_path = session.clone();
+        super::sidecar_mailbox::install(&journal, ".inputs.json", move || {
+            let path = for_path.path();
+            (!path.is_empty()).then(|| Path::new(&path).with_extension("inputs.json"))
+        });
+        if let Some(path) = self.sidecar_path(session, "inputs.json")
+            && let Some(warning) = super::sidecar_mailbox::load(&journal, &path)
+        {
+            let _ = writeln!(stderr, "warning: {warning}");
+        }
+        steering.set_journal(journal);
     }
 
     /// Where a top-level session sidecar (`reminders.json`, `inbox.json`)
@@ -1710,52 +1734,31 @@ fn child_sessions(parent: SharedSession, storage: Arc<super::storage::Storage>) 
     })
 }
 
-/// Loads `<id>.inbox.json` into `inbox`, if the file exists and decodes.
-/// Otherwise the inbox starts empty, exactly like a missing or corrupt
-/// `<id>.reminders.json`. Must run before the inbox is shared with any
-/// producer, so the loaded items are the ones a wake decision sees.
-fn load_inbox(inbox: &Inbox, path: &Path) {
-    let loaded: Vec<otto_core::agent::inbox::Entry> = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    inbox.load(loaded);
-}
-
-/// Mirrors the inbox's current entries to `path` via
-/// [`remind::replace_private`], the same temporary-file/`fsync`/rename/
-/// directory-`fsync` pattern `Reminders` uses for `<id>.reminders.json`,
-/// including removing the file once the inbox is empty. A write failure is
-/// dropped, the same as a reminder file write failure from a timer firing in
-/// the background (`Inner::fire`): there is no foreground caller to report it
-/// to.
-///
-/// Skips the write once the session's own file is gone
-/// ([`remind::session_file_exists`]): a notification pushed after this
-/// session is archived — a sub-agent finishing late, or a timer racing the
-/// archive on another thread — must not recreate the sidecar the archive
-/// already removed.
-fn write_inbox_file(path: &Path, entries: &[otto_core::agent::inbox::Entry]) {
-    if entries.is_empty() {
-        let _ = std::fs::remove_file(path);
-        return;
-    }
-    if !remind::session_file_exists(path, ".inbox.json") {
-        return;
-    }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Ok(body) = serde_json::to_vec_pretty(entries) else {
-        return;
-    };
-    let _ = remind::replace_private(path, &body);
+/// Builds a child's durable mailbox, `<child transcript>.inbox.json`, and
+/// restores the parent messages it had not read. An unreadable sidecar is
+/// moved aside and the child is told so in its first notification.
+pub(crate) fn child_mailbox() -> crate::subagent::runner::ChildMailbox {
+    Arc::new(|transcript: &str| {
+        let mailbox = Arc::new(otto_core::mailbox::InMemoryMailbox::new(None));
+        let sidecar = Path::new(transcript).with_extension("inbox.json");
+        let warning = super::sidecar_mailbox::load(&mailbox, &sidecar);
+        super::sidecar_mailbox::install(&mailbox, ".inbox.json", move || Some(sidecar.clone()));
+        if let Some(warning) = warning {
+            mailbox.push(otto_core::agent::inbox::Notification {
+                kind: Some(otto_core::agent::inbox::NotificationKind::Message),
+                text: format!("[parent-message] {warning}"),
+                ..Default::default()
+            });
+        }
+        mailbox as Arc<dyn otto_core::mailbox::Mailbox>
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memory::{NAMESPACE_USER, NAMESPACE_WORKSPACE, RememberRequest, SearchRequest};
+    use otto_core::agent::inbox::Inbox;
 
     #[test]
     fn children_of_an_in_memory_parent_stay_in_memory() {
@@ -1850,11 +1853,11 @@ mod tests {
         .expect("write sidecar");
 
         let inbox = Inbox::new(None);
-        load_inbox(&inbox, &path);
+        assert_eq!(super::super::sidecar_mailbox::load(&inbox, &path), None);
         let hook_path = path.clone();
-        inbox.set_persist(Box::new(move |entries| {
-            write_inbox_file(&hook_path, entries)
-        }));
+        super::super::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
+            Some(hook_path.clone())
+        });
 
         let queued = inbox.queued();
         assert_eq!(
@@ -2215,6 +2218,7 @@ mod tests {
                     kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
                     text: "already queued".to_string(),
                     usage: None,
+                    ..Default::default()
                 },
             }])
             .expect("encode inbox"),

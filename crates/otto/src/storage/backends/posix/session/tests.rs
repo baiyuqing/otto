@@ -3885,3 +3885,65 @@ fn malformed_capabilities_record_is_ignored_with_a_warning() {
     );
     store.close().expect("close");
 }
+
+// Input ids: delivery of a mailbox entry or a client request is recorded on
+// the message and survives a reopen, so it is never appended twice.
+
+#[test]
+fn append_input_if_absent_survives_a_reopen() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    assert!(
+        store
+            .append_input_if_absent("req:1", &user("do it"))
+            .expect("append")
+    );
+    let context = Message {
+        role: Role::Context,
+        context_type: "task_notification".into(),
+        display: true,
+        blocks: vec![Block::text("done")],
+        created_at: created_at(),
+        ..Message::default()
+    };
+    assert!(
+        store
+            .append_input_if_absent("in_2", &context)
+            .expect("append")
+    );
+    assert!(
+        !store
+            .append_input_if_absent("req:1", &user("do it"))
+            .expect("check")
+    );
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, _warnings) = Store::open(Path::new(&path)).expect("reopen");
+    assert!(reopened.has_input("req:1"));
+    assert!(reopened.has_input("in_2"));
+    assert!(
+        !reopened
+            .append_input_if_absent("in_2", &context)
+            .expect("check")
+    );
+    let (_entries, messages) = Store::read_entries(&path).expect("read");
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| !message.input_id.is_empty())
+            .count(),
+        2
+    );
+    reopened.close().expect("close");
+}
+
+#[test]
+fn an_input_id_is_rejected_on_an_assistant_message() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    let mut reply = assistant("hi");
+    reply.input_id = "in_1".into();
+    assert!(store.append_message(&reply).is_err());
+    store.close().expect("close");
+}

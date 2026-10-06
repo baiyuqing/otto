@@ -327,6 +327,7 @@ pub(crate) fn test_config(
         children_dir: None,
         lease: None,
         workspace_path: std::path::PathBuf::new(),
+        child_mailbox: None,
     }
 }
 

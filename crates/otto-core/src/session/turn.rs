@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 pub const TURN_CUSTOM_TYPE: &str = "otto.turn";
 pub const TURN_SCHEMA_VERSION: u32 = 1;
 
+/// How many times Otto resumes an interrupted turn on its own: a resumed
+/// turn that is itself interrupted is not resumed again, so a request or a
+/// tool that kills the process cannot loop.
+pub const MAX_AUTOMATIC_RESUMES: u32 = 1;
+
 /// One turn lifecycle record. Wire field names are pinned camelCase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -61,6 +66,13 @@ pub enum TurnOutcome {
 pub struct InterruptedTurn {
     pub turn_id: String,
     pub attempt: u32,
+}
+
+impl InterruptedTurn {
+    /// Whether this turn already used its automatic resume.
+    pub fn resume_exhausted(&self) -> bool {
+        self.attempt > MAX_AUTOMATIC_RESUMES
+    }
 }
 
 impl TurnRecord {

@@ -606,6 +606,21 @@ pub struct Message {
     pub display: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_metadata: Option<ContextMetadata>,
+    /// The stable id of the input this message delivers (a mailbox entry or
+    /// a client `request_id`); empty for every other message. Persisted as
+    /// the Otto detail `inputId` on user and context messages.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub input_id: String,
+}
+
+/// Whether `id` is a well-formed input id: 1 to 128 bytes of ASCII letters,
+/// digits, `.`, `_`, `:` and `-`.
+pub fn is_input_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
 impl Default for Message {
@@ -621,6 +636,7 @@ impl Default for Message {
             context_tokens_before: 0,
             display: false,
             context_metadata: None,
+            input_id: String::new(),
         }
     }
 }
@@ -652,6 +668,16 @@ impl Message {
         }
         if self.context_tokens_before < 0 {
             return Err(ValidationError("context tokens before must be nonnegative"));
+        }
+        if !self.input_id.is_empty() {
+            if !is_input_id(&self.input_id) {
+                return Err(ValidationError("input id is malformed"));
+            }
+            if !matches!(self.role, Role::User | Role::Context) {
+                return Err(ValidationError(
+                    "only user and context messages carry an input id",
+                ));
+            }
         }
         if self.role != Role::Context
             && (!self.context_type.is_empty()

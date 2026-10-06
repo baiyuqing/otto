@@ -36,6 +36,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Architecture and reliability
 
+- Make accepted inputs durable and deliver them once. Notifications carry
+  stable input ids, so one appended just before Otto stops is not delivered
+  again; guidance for a running turn is kept in `<id>.inputs.json` for that
+  turn's automatic resume after a crash; unread `agent_send` messages survive
+  until the sub-agent is resumed; and HTTP turns, inputs and steering accept
+  an `input_id` (ACP `_meta.otto.inputId`, sent by otto-connect for every chat
+  message) so client retries run once (`409 duplicate_input`). Inputs that
+  cannot be saved are rejected (`503 input_not_persisted`, tool errors) and
+  an unreadable inbox file is set aside with a warning instead of being
+  emptied. Consumers now depend on the `Mailbox` port
+  ([#376](https://github.com/baiyuqing/otto/pull/376),
+  [user manual](docs/user-manual.md#sessions)).
 - Recover sessions after a plain process crash the same way as after a lease
   takeover: read-only calls without results run again, a recovery notice lists
   what was interrupted, unfinished sub-agent tasks become resumable, and a

@@ -2712,7 +2712,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn busy_composer_moves_input_to_transcript_on_enter_without_history() {
+    async fn busy_composer_starts_a_fresh_prompt_when_the_active_turn_closed() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
@@ -2739,14 +2739,12 @@ mod tests {
         assert!(action.is_none());
         assert!(app.input.is_empty());
         assert_eq!(app.cursor, 0);
-        assert_eq!(app.queued_input.as_deref(), Some("hi"));
-        assert!(
-            app.history.previous("").is_none(),
-            "queued input is not prompt history until dispatch"
-        );
+        assert!(app.queued_input.is_none());
+        assert!(matches!(app.outgoing.as_slice(), [Action::Prompt(line)] if line == "hi"));
+        assert_eq!(app.history.previous(""), Some("hi".to_string()));
         assert!(
             app.entries.is_empty(),
-            "queued input is a pending transcript item, not persisted history"
+            "the new prompt is echoed by its turn"
         );
     }
 
@@ -2788,7 +2786,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn busy_composer_queues_user_input_for_the_running_turn() {
+    async fn busy_composer_starts_a_fresh_prompt_when_no_run_accepts_steering() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
@@ -2805,46 +2803,23 @@ mod tests {
         );
 
         assert!(action.is_none());
-        assert!(app.queued_input_sent);
-        assert_eq!(app.queued_input.as_deref(), Some("change course"));
-        assert!(controller.current_runner().is_some_and(|runner| {
-            runner.inbox().snapshot().iter().any(|notification| {
-                notification.kind == Some(otto_core::agent::inbox::NotificationKind::UserMessage)
-                    && notification.text == "change course"
-            })
-        }));
-
-        app.apply_event(&wire_frame(&Event::Notification {
-            kind: None,
-            task_id: String::new(),
-            text: "not the queued input".into(),
-            usage: Usage::default(),
-            present: false,
-        }));
-        assert!(
-            app.queued_input_sent,
-            "an untyped notification is not user input"
-        );
-        assert_eq!(app.queued_input.as_deref(), Some("change course"));
-
-        app.apply_event(&wire_frame(&Event::Notification {
-            kind: Some(NotificationKind::UserMessage),
-            task_id: String::new(),
-            text: "change course".into(),
-            usage: Usage::default(),
-            present: false,
-        }));
         assert!(!app.queued_input_sent);
         assert!(app.queued_input.is_none());
-        assert_eq!(
-            app.entries.last().expect("user entry").kind,
-            Some(EntryKind::User)
+        assert!(
+            matches!(app.outgoing.as_slice(), [Action::Prompt(line)] if line == "change course")
         );
+        assert!(controller.current_runner().is_some_and(|runner| {
+            runner
+                .inbox()
+                .snapshot()
+                .iter()
+                .all(|notification| notification.kind != Some(NotificationKind::UserMessage))
+        }));
         assert_eq!(app.history.previous(""), Some("change course".to_string()));
     }
 
     #[tokio::test]
-    async fn failed_turn_defers_queued_input_without_running_it() {
+    async fn busy_ordinary_input_does_not_leave_a_pending_draft_after_admission() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
@@ -2860,10 +2835,10 @@ mod tests {
         );
         drop(admission);
 
-        app.defer_queued_input(&Backend::Local(&controller));
-
+        assert!(app.input.is_empty());
+        assert!(app.queued_input.is_none());
         assert!(!app.queued_input_sent);
-        assert_eq!(app.queued_input.as_deref(), Some("follow up"));
+        assert!(matches!(app.outgoing.as_slice(), [Action::Prompt(line)] if line == "follow up"));
         assert!(controller.current_runner().is_some_and(|runner| {
             runner
                 .inbox()
@@ -2880,7 +2855,6 @@ mod tests {
             &Backend::Local(&controller),
             &cancel,
         );
-        slash.defer_queued_input(&Backend::Local(&controller));
         assert_eq!(slash.queued_input.as_deref(), Some("/memory search vim"));
         assert!(slash.entries.is_empty(), "the slash command did not run");
     }
@@ -2902,7 +2876,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn busy_composer_ctrl_u_withdraws_the_queued_draft() {
+    async fn busy_composer_ctrl_u_does_not_retract_admitted_input() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
@@ -2915,7 +2889,11 @@ mod tests {
             &Backend::Local(&controller),
             &cancel,
         );
-        assert_eq!(app.queued_input.as_deref(), Some("queued draft"));
+        assert!(app.queued_input.is_none());
+        assert!(
+            matches!(app.outgoing.as_slice(), [Action::Prompt(line)] if line == "queued draft")
+        );
+        assert_eq!(app.history.previous(""), Some("queued draft".to_string()));
 
         let action = app.handle_key(
             key(KeyCode::Char('u'), KeyModifiers::CONTROL),
@@ -2927,7 +2905,10 @@ mod tests {
         assert!(app.input.is_empty());
         assert!(app.queued_input.is_none());
         assert_eq!(app.cursor, 0);
-        assert!(app.history.previous("").is_none());
+        assert_eq!(app.history.previous(""), Some("queued draft".to_string()));
+        assert!(
+            matches!(app.outgoing.as_slice(), [Action::Prompt(line)] if line == "queued draft")
+        );
         assert!(app.entries.is_empty());
     }
 
@@ -2968,7 +2949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_draft_enters_history_only_when_submitted_after_turn() {
+    async fn busy_idle_race_enters_history_when_it_starts_a_new_prompt() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
@@ -2983,18 +2964,20 @@ mod tests {
             &cancel,
         );
         assert!(app.input.is_empty());
-        assert_eq!(app.queued_input.as_deref(), Some("next prompt"));
+        assert!(app.queued_input.is_none());
         assert!(app.entries.is_empty());
-        assert!(app.history.previous("").is_none());
+        assert!(matches!(app.outgoing.as_slice(), [Action::Prompt(line)] if line == "next prompt"));
+        assert_eq!(app.history.previous(""), Some("next prompt".to_string()));
 
         app.end_turn();
-        let action = app.submit_queued_input(&Backend::Local(&controller), &cancel);
-
-        assert!(matches!(action, Some(Action::Prompt(line)) if line == "next prompt"));
-        assert_eq!(app.entries.len(), 1);
-        assert_eq!(app.entries[0].kind, Some(EntryKind::User));
-        assert_eq!(app.entries[0].raw, "next prompt");
-        assert_eq!(app.history.previous(""), Some("next prompt".to_string()));
+        assert!(
+            app.submit_queued_input(&Backend::Local(&controller), &cancel)
+                .is_none()
+        );
+        assert!(
+            app.entries.is_empty(),
+            "the server/provider echoes a fresh prompt"
+        );
     }
 
     #[test]
@@ -4776,7 +4759,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn attached_text_typed_during_a_turn_is_sent_as_the_next_turn() {
+    async fn attached_text_during_a_turn_does_not_silently_queue_when_admission_is_unavailable() {
         let remote = Remote::offline(Vec::new());
         let backend = Backend::Attach(&remote);
         let cancel = CancellationToken::new();
@@ -4787,14 +4770,14 @@ mod tests {
         let action = app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &backend, &cancel);
 
         assert!(action.is_none());
-        assert!(matches!(app.outgoing.as_slice(), [Action::Prompt(line)] if line == "next"));
+        assert!(app.outgoing.is_empty());
         assert!(app.queued_input.is_none());
         assert!(
             app.entries
                 .last()
-                .expect("entry")
+                .expect("failure notice")
                 .raw
-                .starts_with("Queued as the next turn")
+                .starts_with("Could not steer the active task:"),
         );
     }
 

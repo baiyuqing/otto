@@ -490,6 +490,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Documentation
 
+- Add a mandatory contributor rule: a PR that adds, changes, removes or
+  renames a model-callable capability updates its tool description, schema
+  field descriptions, prompt policy section, sub-agent exclusion and user
+  manual. Descriptions are short and unambiguous and state the capability,
+  inputs and outputs. ([#373](https://github.com/baiyuqing/otto/pull/373))
+
 - Add and maintain English/Chinese README guidance, the user manual,
   architecture/development contracts, the code organization map, and historical
   design documents. Align instructions with implemented behavior, clarify

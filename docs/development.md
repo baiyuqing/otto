@@ -836,3 +836,58 @@ Apply these requirements to every feature, fix, and refactor:
 - Extend existing patterns with the smallest cohesive change. Add interfaces only at real consumer boundaries; do not add speculative frameworks, registries, or configuration for future implementations.
 - Turn important invariants into executable checks. Update architecture guards and contract tests when boundaries change; failures should identify the violated rule and where to fix it. Keep focused checks fast, offline, and deterministic, and preserve full acceptance coverage.
 - Keep code, schemas, tests, and canonical docs consistent in the same change. Remove stale instructions or mark superseded designs as historical; record durable rationale in the repository rather than relying on chat history.
+
+### Capability descriptions
+
+The model learns what Otto can do only from these sources. Do not add a
+separate capability catalog.
+
+- Written by hand: each tool's `description` and input-schema field
+  descriptions; the policy sections in `system_prompt_for`
+  (`crates/otto/src/runtime/prompt.rs`), each rendered only when its tool is
+  registered; the user manual, which `otto_help` serves to the model; and
+  `EXCLUDED_CHILD_TOOLS` (`crates/otto/src/subagent/runner.rs`).
+- Generated from the registry, never edited by hand: `<available_tools>`, the
+  `otto_help` `capabilities` topic, and `capability_update` notices.
+
+A description is short and has one reading. It states:
+
+- the capability: what the tool does, and when to use it instead of a related
+  tool;
+- inputs: each parameter's meaning, type, allowed values or range, default,
+  and whether it is required;
+- outputs: what a successful call returns and what a failed call returns;
+- limits and effects: counts, sizes, durations, persistence, and effects that
+  need approval.
+
+Use one term per concept and concrete values ("at most 8 timers, 1 to 3600
+seconds"), not adjectives ("a few", "short"). Leave out text that repeats the
+schema or does not change how the model calls the tool.
+
+Adding or changing a capability updates, in the same PR:
+
+1. the tool's description and schema field descriptions;
+2. its policy section in `system_prompt_for` when its use depends on other
+   tools, ordering, approval, or the session lifecycle, with a prompt test
+   that the section is present when the tool is registered and absent when it
+   is not;
+3. the descriptions and policy sections of related tools that should name it
+   (for example, `remind` names `schedule`);
+4. `EXCLUDED_CHILD_TOOLS`, when sub-agents must not have it;
+5. the user manual.
+
+The tool name must pass `otto_core::tool::safe_prompt_tool_name`; otherwise it
+is left out of `<available_tools>` and of `capability_update` notices.
+
+Removing a capability deletes, in the same PR, its policy section and every
+mention of its name in other tools' descriptions and schemas, other policy
+sections, `EXCLUDED_CHILD_TOOLS`, and the user manual, including its example
+agent definitions. A remaining mention directs the model to a tool that does
+not exist. Check with `git grep -w <name> -- crates docs`: each remaining
+match is a historical spec, a test that asserts the tool's absence, session
+compatibility code, or an unrelated use of the same word. Renaming is a
+removal plus an addition.
+
+The PR body lists the added, changed, and removed tool names and the updates
+made for each. A PR that changes a capability without these updates is not
+merged.

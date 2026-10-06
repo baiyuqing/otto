@@ -1,0 +1,30 @@
+# Reviewed historical false positives only; keep scanning every file and new commit.
+# See docs/development.md#secret-scanning.
+
+# Synthetic AWS key in redaction input and withheld-output assertion.
+a0d162b26aeee6dbeca786e2f3c90b441e70341a:crates/otto/src/reflection/runlog.rs:aws-access-token:268
+a0d162b26aeee6dbeca786e2f3c90b441e70341a:crates/otto/src/reflection/runlog.rs:aws-access-token:289
+
+# Synthetic search credentials and AWS key in controlled web-tool tests.
+b3c4f426b8fc65cd873bc405691276812f63a07b:crates/otto/src/tool/web/tests.rs:generic-api-key:466
+b3c4f426b8fc65cd873bc405691276812f63a07b:crates/otto/src/tool/web/tests.rs:generic-api-key:582
+b3c4f426b8fc65cd873bc405691276812f63a07b:crates/otto/src/tool/web/tests.rs:generic-api-key:596
+b3c4f426b8fc65cd873bc405691276812f63a07b:crates/otto/src/tool/web/tests.rs:aws-access-token:334
+
+# Prose "Bot API adapter" causes internal/feishu to be mistaken for an API key.
+c0fd7cf9cfd2c81812ef872afd7a970c81efe6e1:docs/development.md:generic-api-key:48
+
+# Synthetic AWS, JWT and Slack positive cases for secret rejection.
+95d923f5155feac45fd68e7fb92a7fd720b4ed66:crates/otto/src/reflection/guard.rs:aws-access-token:349
+95d923f5155feac45fd68e7fb92a7fd720b4ed66:crates/otto/src/reflection/guard.rs:jwt:359
+95d923f5155feac45fd68e7fb92a7fd720b4ed66:crates/otto/src/reflection/guard.rs:generic-api-key:355
+
+# Synthetic API key in sensitive-memory rejection tests (two historical commits).
+25c61222bc37a829549f7896d259946888100d39:crates/otto/src/memory/service.rs:generic-api-key:623
+3b4dce2a82136a7cf0afbedfc628be8df680d518:crates/otto/src/memory/service.rs:generic-api-key:623
+
+# INVALID_UTF8_KEY is an environment variable name in a historical Go test.
+b9a86c2bc78654e848a145bafcf39888ca9c4e2f:cmd/otto/runtime_builder_test.go:generic-api-key:376
+
+# Synthetic API key in the historical Go sensitive-memory rejection test.
+6ead19c1953cfbc04e76ba0177faccf836955613:internal/memory/service_test.go:generic-api-key:138

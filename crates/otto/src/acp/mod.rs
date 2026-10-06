@@ -1169,10 +1169,13 @@ impl Connection {
                     }
                     command::Command::Steer { guidance } => {
                         match session.controller.steer(guidance) {
-                            Ok(_) => {
+                            Ok(message) => {
                                 self.say(
                                     session_id,
-                                    "Guidance accepted for the active task; it will be delivered at the next safe boundary.",
+                                    &format!(
+                                        "Guidance queued (#{}): {}\nIt will be delivered at the next safe boundary.",
+                                        message.id, message.text
+                                    ),
                                 );
                                 end_turn()
                             }
@@ -1747,7 +1750,10 @@ impl Dispatcher {
                                 .client
                                 .steer(&input.session_id, &input.text)
                                 .await
-                                .map(|accepted| json!({"accepted": accepted}))
+                                .map(|message| {
+                                    serde_json::to_value(message)
+                                        .expect("steering message serializes")
+                                })
                                 .map_err(|failure| relay.task_control_error(failure)),
                         },
                     };

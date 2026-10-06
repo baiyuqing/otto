@@ -34,13 +34,20 @@ fn cancel_ends_a_running_prompt_with_cancelled() {
     assert!(steer_frames.iter().any(|frame| {
         frame["params"]["update"]["content"]["text"]
             .as_str()
-            .is_some_and(|text| text.contains("Guidance accepted"))
+            .is_some_and(|text| {
+                text.contains("Guidance queued (#2): finish the provider request first")
+            })
     }));
     let (_, extension) = client.call(
         "_otto/tasks/steer",
         json!({"sessionId":session_id,"text":"then inspect the result"}),
     );
-    assert_eq!(extension["result"]["accepted"], true, "{extension}");
+    assert_eq!(extension["result"]["id"], 3, "{extension}");
+    assert_eq!(
+        extension["result"]["text"], "then inspect the result",
+        "{extension}"
+    );
+    assert_eq!(extension["result"]["status"], "queued", "{extension}");
 
     let (queued_frames, queued) = client.call(
         "session/prompt",

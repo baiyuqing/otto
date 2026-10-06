@@ -13,36 +13,38 @@
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use chrono::Utc;
 use otto_core::config::{McpAuth, McpTransport};
 use tokio_util::sync::CancellationToken;
 
 use crate::mcp::{Era, ServerState};
-use crate::memory::{
-    CandidateRef, CandidateState, ForgetRequest, RecordRef, RememberRequest, ReviewDecision,
-    ReviewRequest, Scope, SearchRequest, SearchResult, Service,
-};
+#[cfg(test)]
+use crate::memory::{RememberRequest, Scope};
+use crate::memory::{ReviewDecision, SearchResult};
 use crate::skill;
 use crate::subagent::format::{first_runes, one_line, task_line, task_steps};
 use crate::subagent::record::{self, TaskRow};
-use crate::subagent::tasks::Tasks;
 use crate::tool::remind::{NO_TIMERS, timer_line};
 
 use super::controller::Controller;
 use super::login::{SharedWriter, browser_opener};
 use super::repl::{Error, Repl};
 
-const SEARCH_LIMIT: usize = 20;
-const SEARCH_TOKEN_BUDGET: usize = 4000;
+#[cfg(test)]
 const DEFAULT_KIND: &str = "note";
 /// `pub(crate)` so the TUI's `tui::app` dispatch can assert on the exact usage
 /// text it reuses via [`repl_memory_command`]/[`repl_remember_command`] instead
 /// of duplicating the literal.
+#[cfg(test)]
 pub(crate) const MEMORY_USAGE: &str = "usage: /memory list [--scope current|user|workspace|all] [--limit N] [--cursor CURSOR] | /memory show <id> | /memory search <query> | /memory forget <id> | /memory review <id> accept|reject";
+#[cfg(test)]
 pub(crate) const REMEMBER_USAGE: &str =
     "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>";
+#[cfg(test)]
 pub(crate) const MEMORY_UNAVAILABLE: &str = "memory is not available";
 /// The message printed when no runner carries a registry.
 const SUBAGENTS_UNAVAILABLE: &str = "sub-agents are not available";
@@ -50,37 +52,153 @@ const SUBAGENTS_UNAVAILABLE: &str = "sub-agents are not available";
 /// them. [`super::super::tui`] prints the same line for the same input.
 pub(crate) const TASK_USAGE: &str = "usage: /task <id|name> | /task cancel <id|name>";
 /// The `/timers` argument forms. Both frontends print it for anything else.
-pub(crate) const TIMERS_USAGE: &str = "usage: /timers [cancel <id>]";
 /// What `/timers` reports when the runner registers no timer tools, in the
 /// shape [`SUBAGENTS_UNAVAILABLE`] uses for `/tasks`.
-pub(crate) const TIMERS_UNAVAILABLE: &str = "timers are not available";
 pub(crate) const SKILL_USAGE: &str = "usage: /skill | /skill <name> | /skill set <name> enabled|disabled | /skill generated | /skill revert <name>";
 pub(crate) const MCP_USAGE: &str = "usage: /mcp | /mcp login <server>";
 
-impl Controller {
-    /// The bound service and its two scopes, or `None` when memory is unusable
-    /// or the redaction boundary is closed.
-    pub(crate) fn memory_manager(&self) -> Option<(Arc<Service>, Scope, Scope)> {
-        let wiring = self.memory_wiring();
-        match self.dynamic_content() && wiring.usable {
-            true => Some((
-                Arc::clone(&wiring.service),
-                wiring.user_scope.clone(),
-                self.workspace_memory_scope().clone(),
-            )),
-            false => None,
+/// Content-only rendering shared by the REPL and TUI management presenters.
+pub(crate) fn format_management_reply(reply: &crate::app::management::Reply) -> String {
+    use crate::app::management::Reply;
+    match reply {
+        Reply::Tasks(rows) => {
+            if rows.is_empty() {
+                "No tasks.".into()
+            } else {
+                rows.iter()
+                    .map(|t| format!("{} [{}] {}", t.id, t.status.as_str(), t.description))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
         }
-    }
+        Reply::Task(t) => format!(
+            "{} [{}] {}\nResult: {}\nError: {}\nTranscript: {}",
+            t.id,
+            t.status.as_str(),
+            t.description,
+            t.result,
+            t.error,
+            t.session_path
+        ),
+        Reply::TaskCancelled(id) => format!("Cancelled task: {id}"),
 
-    /// The active runner's task registry.
-    ///
-    /// The REPL reads the concrete registry rather than
-    /// [`crate::app::Controller::tasks`], because that view carries the
-    /// server's wire record: it omits `prompt`, which
-    /// [`crate::subagent::format::task_label`] falls back to when a task has no
-    /// description, and `wait`/`updates`, which the wake path needs.
-    pub(crate) fn subagent_tasks(&self) -> Option<Arc<Tasks>> {
-        self.current_runner()?.tasks.clone()
+        Reply::MemoryList(page) => render_list_result(&page.records, &page.next_cursor),
+        Reply::MemoryRecord(record) => render_list_result(std::slice::from_ref(record), ""),
+        Reply::MemorySearch(result) => render_search_result(result),
+        Reply::MemoryCandidates(rows) => render_pending_candidates(rows),
+        Reply::MemoryForgotten {
+            tombstone,
+            previous_revision,
+        } => format!("forgot {} (revision {})", tombstone.id, previous_revision),
+        Reply::MemoryReviewed(decision, result) => {
+            let id = &result.candidate.id;
+            match (decision, &result.record, &result.tombstone) {
+                (ReviewDecision::Reject, _, _) => format!("rejected {id}"),
+                (_, Some(r), _) => {
+                    format!("accepted {id} as record {} (revision {})", r.id, r.revision)
+                }
+                (_, None, Some(t)) => format!("accepted {id}: forgot {}", t.id),
+                _ => format!("accepted {id}"),
+            }
+        }
+        Reply::Remembered(record) => format!(
+            "remembered {} (scope={}/{} kind={})",
+            record.id, record.scope.namespace, record.scope.id, record.kind
+        ),
+        Reply::Skills(catalog) => {
+            if catalog.is_empty() {
+                "No skills found.".into()
+            } else {
+                let mut s = "Available skills:".to_string();
+                for item in catalog.skills() {
+                    s.push_str(&skill_list_line(item));
+                }
+                s
+            }
+        }
+        Reply::SkillSet(message) | Reply::Notice(message) | Reply::Usage(message) => {
+            message.clone()
+        }
+        Reply::SkillDetail {
+            skill: found,
+            body,
+            contract_check,
+            generated,
+        } => {
+            let contract = contract_check
+                .as_ref()
+                .map(|v| format!("\n{v}"))
+                .unwrap_or_default();
+            let provenance=generated.as_ref().map(|row|format!("\nGenerated by reflection: run {} (session {}) on {}: {}\nUndo with /skill revert {}",row.run_id,row.session_id,row.updated_at,brief(&row.reason,160),found.name)).unwrap_or_default();
+            format!(
+                "Skill: {}\nLocation: {}\nDescription: {}{}{}\n\n{}",
+                found.name,
+                found.directory.display(),
+                found.description,
+                contract,
+                provenance,
+                body.trim_end()
+            )
+        }
+        Reply::SkillGenerated(rows) => {
+            if rows.is_empty() {
+                "No skills generated by reflection.".into()
+            } else {
+                let mut s = "Skills generated by reflection:".to_string();
+                for status in rows {
+                    let row = &status.skill;
+                    let ownership = if status.still_owned {
+                        ""
+                    } else {
+                        " [edited or missing: reflection no longer owns it]"
+                    };
+                    s.push_str(&format!(
+                        "\n- {}{}: run {} (session {}) on {}: {}",
+                        row.name,
+                        ownership,
+                        row.run_id,
+                        row.session_id,
+                        row.updated_at,
+                        brief(&row.reason, 120)
+                    ));
+                }
+                s
+            }
+        }
+        Reply::SkillReverted {
+            name,
+            result: crate::reflection::skillwrite::Reverted::Restored,
+        } => format!(
+            "Reverted skill {name} to its previous version; the change applies to new sessions"
+        ),
+        Reply::SkillReverted {
+            name,
+            result: crate::reflection::skillwrite::Reverted::Removed,
+        } => format!(
+            "Removed skill {name}, which reflection created; the change applies to new sessions"
+        ),
+        Reply::McpStatus(rows) => format_mcp_report(rows),
+        Reply::Timers(items) => {
+            if items.is_empty() {
+                NO_TIMERS.into()
+            } else {
+                let now = Utc::now();
+                items
+                    .iter()
+                    .map(|i| timer_line(i, now))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        Reply::TimerCancelled(item) => format!("canceled {}: {}", item.id, item.message),
+        Reply::ReflectList(rows) => crate::reflection::runlog::list_text(rows),
+        Reply::ReflectShow {
+            id: _,
+            log: Some((path, content)),
+        } => format!("Run log: {}\n\n{}", path.display(), content.trim_end()),
+        Reply::ReflectShow { id, log: None } => {
+            format!("No reflection run {id}; /reflect list shows the recent ones.")
+        }
     }
 }
 
@@ -111,12 +229,10 @@ fn agent_row_line(row: &TaskRow) -> String {
 /// cancel. A free function, not a [`Repl`] method, so `tui::app` renders the
 /// same text from its own buffers.
 pub(crate) fn timers_report(controller: &Controller, args: &str) -> Result<String, String> {
-    let Some(reminders) = controller.reminders() else {
-        return Err(TIMERS_UNAVAILABLE.to_string());
-    };
-    match args.split_whitespace().collect::<Vec<_>>()[..] {
-        [] => {
-            let items = reminders.list();
+    use crate::app::management::{Reply, Request};
+    let request = Request::parse("timers", args)?;
+    match controller.management(request)? {
+        Reply::Timers(items) => {
             if items.is_empty() {
                 return Ok(NO_TIMERS.to_string());
             }
@@ -127,13 +243,12 @@ pub(crate) fn timers_report(controller: &Controller, args: &str) -> Result<Strin
                 .collect::<Vec<_>>()
                 .join("\n"))
         }
-        ["cancel", id] => reminders
-            .cancel(id)
-            .map(|item| format!("canceled {}: {}", item.id, item.message)),
-        _ => Err(TIMERS_USAGE.to_string()),
+        Reply::TimerCancelled(item) => Ok(format!("canceled {}: {}", item.id, item.message)),
+        _ => unreachable!("timer request returned a different management reply"),
     }
 }
 
+#[cfg(test)]
 fn split_first_token(value: &str) -> (&str, &str) {
     let value = value.trim();
     match value.find(char::is_whitespace) {
@@ -143,6 +258,7 @@ fn split_first_token(value: &str) -> (&str, &str) {
 }
 
 /// The `--scope`/`--kind`/`--key` flags and the trailing free text.
+#[cfg(test)]
 fn parse_remember_argument(argument: &str) -> (&str, &str, &str, &str) {
     let (mut scope, mut kind, mut key) = ("", DEFAULT_KIND, "");
     let mut remaining = argument;
@@ -207,50 +323,6 @@ fn render_list_result(records: &[crate::memory::Record], next_cursor: &str) -> S
     content.trim_end_matches('\n').to_string()
 }
 
-fn list_arguments(
-    rest: &[&str],
-    user: Scope,
-    workspace: Scope,
-) -> Option<(bool, Vec<Scope>, usize, String)> {
-    let (mut all_scopes, mut scopes, mut limit, mut cursor) = (
-        false,
-        vec![user.clone(), workspace.clone()],
-        20,
-        String::new(),
-    );
-    let mut index = 0;
-    while index < rest.len() {
-        let value = *rest.get(index)?;
-        index += 1;
-        match value {
-            "--scope" => match *rest.get(index)? {
-                "current" => {
-                    all_scopes = false;
-                    scopes = vec![user.clone(), workspace.clone()];
-                }
-                "user" => {
-                    all_scopes = false;
-                    scopes = vec![user.clone()];
-                }
-                "workspace" => {
-                    all_scopes = false;
-                    scopes = vec![workspace.clone()];
-                }
-                "all" => {
-                    all_scopes = true;
-                    scopes.clear();
-                }
-                _ => return None,
-            },
-            "--limit" => limit = rest.get(index)?.parse().ok()?,
-            "--cursor" => cursor = (*rest.get(index)?).to_string(),
-            _ => return None,
-        }
-        index += 1;
-    }
-    Some((all_scopes, scopes, limit, cursor))
-}
-
 /// Renders one compact catalog row. Bare `/skill` deliberately lists every
 /// available name, but leaves potentially long descriptions and the
 /// per-skill contract-check lookup to `/skill <name>` so the TUI does not
@@ -264,91 +336,16 @@ fn skill_list_line(skill: &skill::Skill) -> String {
     format!("\n- {}{}", skill.name, contract)
 }
 
-pub(crate) fn skills_report(controller: &Controller) -> String {
-    let catalog = controller.skills();
-    if catalog.is_empty() {
-        return "No skills found.".to_string();
-    }
-    let mut out = "Available skills:".to_string();
-    for skill in catalog.skills() {
-        out.push_str(&skill_list_line(skill));
-    }
-    out
-}
-
 pub(crate) fn skill_report(controller: &Controller, args: &str) -> String {
-    let fields: Vec<&str> = args.split_whitespace().collect();
-    if fields.is_empty() {
-        return skills_report(controller);
-    }
-    if let ["set", name, state] = fields.as_slice() {
-        if !matches!(*state, "enabled" | "disabled") {
-            return SKILL_USAGE.to_string();
-        }
-        return match crate::config::set_skill_disabled_file(
-            &controller.builder().config_path,
-            name,
-            *state == "disabled",
-        ) {
-            Ok(()) => format!("skill {name} is {state}; restart Otto to apply the active catalog"),
-            Err(error) => format!("skill {name}: {error}"),
-        };
-    }
-    if fields == ["generated"] {
-        return generated_skills_report(controller);
-    }
-    if let ["revert", name] = fields.as_slice() {
-        return revert_skill_report(controller, name);
-    }
-    if fields.len() != 1 {
-        return SKILL_USAGE.to_string();
-    }
-    let name = fields[0];
-    let catalog = controller.skills();
-    let Some(found) = catalog.lookup(name) else {
-        return format!("unknown skill: {name}");
+    use crate::app::management::Request;
+    let request = match Request::parse("skill", args) {
+        Ok(r) => r,
+        Err(_) => return SKILL_USAGE.to_string(),
     };
-    match skill::load(found) {
-        Ok(body) => {
-            let contract_check = found.contract.as_ref().and_then(|_| {
-                controller
-                    .skill_checker()
-                    .map(|checker| format!("\nContract check: {}", checker.display(found)))
-            });
-            format!(
-                "Skill: {}\nLocation: {}\nDescription: {}{}{}\n\n{}",
-                found.name,
-                found.directory.display(),
-                found.description,
-                contract_check.unwrap_or_default(),
-                generated_provenance(controller, &found.name),
-                body.trim_end()
-            )
-        }
-        Err(error) => format!("skill {name}: {error}"),
-    }
-}
-
-/// The "generated by reflection" lines for `/skill <name>`, when reflection
-/// still owns the skill.
-fn generated_provenance(controller: &Controller, name: &str) -> String {
-    let reflector = &controller.builder().reflector;
-    let (Some(row), Some(roots)) = (
-        reflector.generated_skill(name),
-        controller.reflection_skill_roots(),
-    ) else {
-        return String::new();
-    };
-    if !crate::reflection::skillwrite::still_owned(&roots, &row) {
-        return String::new();
-    }
-    format!(
-        "\nGenerated by reflection: run {} (session {}) on {}: {}\nUndo with /skill revert {name}",
-        row.run_id,
-        row.session_id,
-        row.updated_at,
-        brief(&row.reason, 160)
-    )
+    controller
+        .management(request)
+        .map(|reply| format_management_reply(&reply))
+        .unwrap_or_else(|e| e)
 }
 
 fn brief(text: &str, maximum_chars: usize) -> String {
@@ -417,75 +414,33 @@ pub(crate) fn reflection_show_report(
 pub(crate) fn reflect_runs_report(controller: &Controller, args: &str) -> Option<String> {
     match reflect_command(args) {
         ReflectCommand::Run { .. } => None,
-        ReflectCommand::List => Some(reflection_list_report(
-            controller
-                .reflection_runs()
-                .map_err(|error| error.to_string()),
-        )),
-        ReflectCommand::Show { id } => Some(reflection_show_report(
-            id,
-            if id.is_empty() {
-                Ok(None)
-            } else {
-                controller
-                    .reflection_run(id)
-                    .map_err(|error| error.to_string())
-            },
-        )),
+        ReflectCommand::List => Some(management_reflect_report(controller, "list", "")),
+        ReflectCommand::Show { id } => Some(management_reflect_report(controller, "show", id)),
     }
 }
 
-/// `/skill generated`: the skills reflection has written and not reverted.
-fn generated_skills_report(controller: &Controller) -> String {
-    let reflector = &controller.builder().reflector;
-    let rows = match reflector.generated_skills() {
-        Ok(rows) => rows,
-        Err(error) => return format!("skill generated: {error}"),
+fn management_reflect_report(controller: &Controller, command: &str, args: &str) -> String {
+    use crate::app::management::{Reply, Request};
+    let request = match Request::parse("reflect", &format!("{command} {args}")) {
+        Ok(r) => r,
+        Err(e) => return e,
     };
-    if rows.is_empty() {
-        return "No skills generated by reflection.".to_string();
-    }
-    let roots = controller.reflection_skill_roots();
-    let mut out = "Skills generated by reflection:".to_string();
-    for row in &rows {
-        let state = match &roots {
-            Some(roots) if !crate::reflection::skillwrite::still_owned(roots, row) => {
-                " [edited or missing: reflection no longer owns it]"
-            }
-            _ => "",
-        };
-        out.push_str(&format!(
-            "\n- {}{state}: run {} (session {}) on {}: {}",
-            row.name,
-            row.run_id,
-            row.session_id,
-            row.updated_at,
-            brief(&row.reason, 120)
-        ));
-    }
-    out
-}
-
-/// `/skill revert <name>`: restores the previous version of a skill
-/// reflection generated, or removes it if reflection created it.
-fn revert_skill_report(controller: &Controller, name: &str) -> String {
-    let Some(roots) = controller.reflection_skill_roots() else {
-        return "skill revert: skills are not available (check [skills].enabled)".to_string();
-    };
-    match controller.builder().reflector.revert_skill(&roots, name) {
-        Ok(crate::reflection::skillwrite::Reverted::Restored) => format!(
-            "Reverted skill {name} to its previous version; the change applies to new sessions"
-        ),
-        Ok(crate::reflection::skillwrite::Reverted::Removed) => format!(
-            "Removed skill {name}, which reflection created; the change applies to new sessions"
-        ),
-        Err(error) => format!("skill revert: {error}"),
+    match controller.management(request) {
+        Ok(Reply::ReflectList(rows)) => crate::reflection::runlog::list_text(&rows),
+        Ok(reply @ Reply::ReflectShow { .. }) => format_management_reply(&reply),
+        Err(error) => format!("/reflect {command}: {error}"),
+        _ => unreachable!("reflection request returned a different management reply"),
     }
 }
 
 /// One line per configured server, in configuration order.
 pub(crate) fn mcp_report(controller: &Controller) -> String {
-    format_mcp_report(&controller.mcp())
+    use crate::app::management::{Reply, Request};
+    match controller.management(Request::parse("mcp", "").expect("valid MCP status request")) {
+        Ok(Reply::McpStatus(rows)) => format_mcp_report(&rows),
+        Err(error) => format!("/mcp: {error}"),
+        _ => unreachable!("MCP status request returned a different management reply"),
+    }
 }
 
 /// The formatting `mcp_report` applies to `Controller::mcp`'s status rows.
@@ -625,176 +580,38 @@ pub(crate) fn repl_memory_command(
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
 ) -> Result<(), Error> {
-    let Some((service, user_scope, workspace_scope)) = controller.memory_manager() else {
-        return Err(command_error("/memory", MEMORY_UNAVAILABLE));
+    use crate::app::management::Request;
+    let request = match Request::parse("memory", args) {
+        Ok(r) => r,
+        Err(usage) => {
+            let _ = writeln!(stderr, "{usage}");
+            return Ok(());
+        }
     };
-    let fields: Vec<&str> = args.split_whitespace().collect();
-    let Some((subcommand, rest)) = fields.split_first() else {
-        let _ = writeln!(stderr, "{MEMORY_USAGE}");
-        return Ok(());
+    let command = if controller.memory_manager().is_none() {
+        "/memory"
+    } else {
+        match &request {
+            crate::app::management::Request::MemoryList { .. } => "/memory list",
+            crate::app::management::Request::MemoryShow { .. } => "/memory show",
+            crate::app::management::Request::MemorySearch { .. } => "/memory search",
+            crate::app::management::Request::MemoryForget { .. } => "/memory forget",
+            crate::app::management::Request::MemoryReviewList
+            | crate::app::management::Request::MemoryReview { .. } => "/memory review",
+            _ => "/memory",
+        }
     };
-    let scopes = vec![user_scope.clone(), workspace_scope.clone()];
-
-    match *subcommand {
-        "list" => {
-            let Some((all_scopes, scopes, limit, cursor)) =
-                list_arguments(rest, user_scope.clone(), workspace_scope.clone())
-            else {
-                let _ = writeln!(stderr, "{MEMORY_USAGE}");
-                return Ok(());
-            };
-            let page = service
-                .list(&crate::memory::ListRequest {
-                    all_scopes,
-                    scopes,
-                    kinds: Vec::new(),
-                    labels: Vec::new(),
-                    limit,
-                    cursor,
-                    now: Utc::now(),
-                    include_expired: true,
-                })
-                .map_err(|error| command_error("/memory list", error))?;
-            let _ = writeln!(
-                stdout,
-                "{}",
-                render_list_result(&page.records, &page.next_cursor)
-            );
+    match controller.management(request) {
+        Ok(crate::app::management::Reply::Usage(message)) => {
+            let _ = writeln!(stderr, "{message}");
+            Ok(())
         }
-        "show" if rest.len() == 1 => {
-            let id = rest[0];
-            let record = scopes.iter().find_map(|scope| {
-                service
-                    .get(&RecordRef {
-                        scope: scope.clone(),
-                        id: id.to_string(),
-                    })
-                    .ok()
-            });
-            match record {
-                Some(record) => {
-                    let _ = writeln!(stdout, "{}", render_list_result(&[record], ""));
-                }
-                None => {
-                    return Err(command_error(
-                        "/memory show",
-                        format!("record {id} not found"),
-                    ));
-                }
-            }
+        Ok(reply) => {
+            let _ = writeln!(stdout, "{}", format_management_reply(&reply));
+            Ok(())
         }
-        "search" => {
-            let result = service
-                .search(&SearchRequest {
-                    query: rest.join(" "),
-                    scopes,
-                    limit: SEARCH_LIMIT,
-                    token_budget: SEARCH_TOKEN_BUDGET,
-                    now: Utc::now(),
-                    ..SearchRequest::default()
-                })
-                .map_err(|error| command_error("/memory search", error))?;
-            let _ = writeln!(stdout, "{}", render_search_result(&result));
-        }
-        "forget" if rest.len() == 1 => {
-            let id = rest[0];
-            let mut last_error = None;
-            for scope in scopes {
-                let reference = RecordRef {
-                    scope,
-                    id: id.to_string(),
-                };
-                let record = match service.get(&reference) {
-                    Ok(record) => record,
-                    Err(error) => {
-                        last_error = Some(error);
-                        continue;
-                    }
-                };
-                let result = service
-                    .forget(&ForgetRequest {
-                        reference,
-                        expected_revision: record.revision,
-                        purge_backups: false,
-                        confirm_purge: false,
-                    })
-                    .map_err(|error| command_error("/memory forget", error))?;
-                let _ = writeln!(
-                    stdout,
-                    "forgot {} (revision {})",
-                    result.tombstone.id, record.revision
-                );
-                return Ok(());
-            }
-            let reason = last_error
-                .map(|error| error.to_string())
-                .unwrap_or_else(|| "not found".to_string());
-            return Err(command_error(
-                "/memory forget",
-                format!("record {id} not found: {reason}"),
-            ));
-        }
-        "review" if rest.is_empty() => {
-            let result = service
-                .search(&SearchRequest {
-                    scopes,
-                    include_candidates: true,
-                    candidate_states: vec![CandidateState::Pending],
-                    limit: SEARCH_LIMIT,
-                    token_budget: SEARCH_TOKEN_BUDGET,
-                    now: Utc::now(),
-                    ..SearchRequest::default()
-                })
-                .map_err(|error| command_error("/memory review", error))?;
-            let _ = writeln!(stdout, "{}", render_pending_candidates(&result.candidates));
-        }
-        "review" if rest.len() == 2 => {
-            let Some(decision) = ReviewDecision::parse(rest[1]) else {
-                let _ = writeln!(stderr, "{MEMORY_USAGE}");
-                return Ok(());
-            };
-            let id = rest[0];
-            let Some(reference) = scopes.iter().find_map(|scope| {
-                let reference = CandidateRef {
-                    scope: scope.clone(),
-                    id: id.to_string(),
-                };
-                service.get_candidate(&reference).ok().map(|_| reference)
-            }) else {
-                return Err(command_error(
-                    "/memory review",
-                    format!("candidate {id} not found"),
-                ));
-            };
-            let result = controller
-                .review_memory(
-                    &ReviewRequest {
-                        reference,
-                        decision,
-                        edited: None,
-                        target_revision: None,
-                    },
-                    "memory-command",
-                )
-                .map_err(|error| command_error("/memory review", error))?;
-            let line = match (decision, &result.record, &result.tombstone) {
-                (ReviewDecision::Reject, _, _) => format!("rejected {id}"),
-                (_, Some(record), _) => format!(
-                    "accepted {id} as record {} (revision {})",
-                    record.id, record.revision
-                ),
-                (_, None, Some(tombstone)) => {
-                    format!("accepted {id}: forgot {}", tombstone.id)
-                }
-                _ => format!("accepted {id}"),
-            };
-            let _ = writeln!(stdout, "{line}");
-        }
-        _ => {
-            let _ = writeln!(stderr, "{MEMORY_USAGE}");
-        }
+        Err(message) => Err(command_error(command, message)),
     }
-    Ok(())
 }
 
 fn render_pending_candidates(candidates: &[crate::memory::Candidate]) -> String {
@@ -833,37 +650,25 @@ pub(crate) fn repl_remember_command(
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
 ) -> Result<(), Error> {
-    let Some((service, user_scope, workspace_scope)) = controller.memory_manager() else {
-        return Err(command_error("/remember", MEMORY_UNAVAILABLE));
-    };
-    let (scope_flag, kind, key, text) = parse_remember_argument(args);
-    if text.is_empty() {
-        let _ = writeln!(stderr, "{REMEMBER_USAGE}");
-        return Ok(());
-    }
-    let scope = match scope_flag {
-        "" | "workspace" => workspace_scope,
-        "user" => user_scope,
-        other => {
-            let _ = writeln!(stderr, "unknown scope {other:?}, want user or workspace");
+    use crate::app::management::Request;
+    let request = match Request::parse("remember", args) {
+        Ok(r) => r,
+        Err(usage) => {
+            let _ = writeln!(stderr, "{usage}");
             return Ok(());
         }
     };
-    let record = service
-        .remember(&RememberRequest {
-            scope,
-            kind: kind.to_string(),
-            key: key.to_string(),
-            text: text.to_string(),
-            ..RememberRequest::default()
-        })
-        .map_err(|error| command_error("/remember", error))?;
-    let _ = writeln!(
-        stdout,
-        "remembered {} (scope={}/{} kind={})",
-        record.id, record.scope.namespace, record.scope.id, record.kind
-    );
-    Ok(())
+    match controller.management(request) {
+        Ok(crate::app::management::Reply::Usage(message)) => {
+            let _ = writeln!(stderr, "{message}");
+            Ok(())
+        }
+        Ok(reply) => {
+            let _ = writeln!(stdout, "{}", format_management_reply(&reply));
+            Ok(())
+        }
+        Err(message) => Err(command_error("/remember", message)),
+    }
 }
 
 impl Repl<'_> {

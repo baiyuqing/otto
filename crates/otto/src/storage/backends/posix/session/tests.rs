@@ -3947,3 +3947,46 @@ fn an_input_id_is_rejected_on_an_assistant_message() {
     assert!(store.append_message(&reply).is_err());
     store.close().expect("close");
 }
+
+// An input delivered before a compaction checkpoint stays delivered: the
+// checkpoint summarizes its message away from the context, but its entry is
+// still on the active path, in memory and after a reopen.
+#[test]
+fn an_input_before_a_compaction_checkpoint_stays_delivered() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    assert!(
+        store
+            .append_input_if_absent("in_old", &user("old"))
+            .expect("append")
+    );
+    store.append_message(&assistant("reply")).expect("append");
+    store.append_message(&user("new")).expect("append");
+    let path = store.path();
+    let anchor = message_entry_id(&path, 3);
+    store
+        .append_compaction(&checkpoint(&anchor))
+        .expect("append compaction");
+    assert!(
+        store
+            .messages()
+            .iter()
+            .all(|message| message.input_id != "in_old")
+    );
+    assert!(store.has_input("in_old"));
+    assert!(
+        !store
+            .append_input_if_absent("in_old", &user("old"))
+            .expect("check")
+    );
+    store.close().expect("close");
+
+    let (reopened, _warnings) = Store::open(Path::new(&path)).expect("reopen");
+    assert!(reopened.has_input("in_old"));
+    assert!(
+        !reopened
+            .append_input_if_absent("in_old", &user("old"))
+            .expect("check")
+    );
+    reopened.close().expect("close");
+}

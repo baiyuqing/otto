@@ -139,6 +139,34 @@ mod tests {
     }
 
     #[test]
+    fn the_sidecar_adapter_keeps_the_mailbox_contract_across_a_reload() {
+        let root = tempfile::tempdir().expect("dir");
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let last = std::sync::Mutex::new(PathBuf::new());
+        let fresh = || -> std::sync::Arc<dyn otto_core::mailbox::Mailbox> {
+            let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::fs::write(root.path().join(format!("s{n}.jsonl")), "").expect("session file");
+            let path = root.path().join(format!("s{n}.inbox.json"));
+            *last.lock().expect("path") = path.clone();
+            let inbox = Inbox::new(None);
+            install(&inbox, ".inbox.json", move || Some(path.clone()));
+            assert_eq!(load(&inbox, &last.lock().expect("path")), None);
+            std::sync::Arc::new(inbox)
+        };
+        let reopen = |old: std::sync::Arc<dyn otto_core::mailbox::Mailbox>| {
+            drop(old);
+            let path = last.lock().expect("path").clone();
+            let inbox = Inbox::new(None);
+            assert_eq!(load(&inbox, &path), None);
+            let hook = path.clone();
+            install(&inbox, ".inbox.json", move || Some(hook.clone()));
+            std::sync::Arc::new(inbox) as std::sync::Arc<dyn otto_core::mailbox::Mailbox>
+        };
+        otto_core::conformance::mailbox(&fresh, Some(&reopen))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    #[test]
     fn enqueued_notifications_get_an_id_and_reach_the_sidecar() {
         let (_dir, path) = session_dir();
         let inbox = Inbox::new(None);

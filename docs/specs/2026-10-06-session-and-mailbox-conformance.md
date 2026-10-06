@@ -1,7 +1,7 @@
 # Session and mailbox conformance checks
 
-Status: proposed 2026-10-06, awaiting approval. No production code or tests
-until approved.
+Status: approved 2026-10-06 with the recommended answers to both open
+questions; implemented.
 
 This design follows [crash recovery and interrupted-turn resume](2026-10-06-crash-recovery-and-turn-resume.md)
 and [durable inputs](2026-10-06-durable-inputs.md). It closes the
@@ -32,10 +32,9 @@ Two ports now carry Otto's crash-safety guarantees:
 
 Several things leave these guarantees unprotected:
 
-- **Many implementations.** `Session` has 6 production implementations:
-  `MemorySession`, POSIX `Store`, `SharedSession`, `MemoryHandle`,
-  `SharedTranscript`, and the CLI's `FixedPathSession`. It also has test
-  wrappers. `Mailbox` has `Inbox`, plus the durable sidecar adapter built on
+- **Many implementations.** `Session` has 5 production implementations:
+  `MemorySession`, POSIX `Store`, `SharedSession`, `MemoryHandle` and
+  `SharedTranscript`. It also has test wrappers, such as `FixedPathSession`. `Mailbox` has `Inbox`, plus the durable sidecar adapter built on
   it.
 - **Hand-written forwarding.** Every wrapper forwards each method by hand. The
   last two PRs added `interrupted_turn`, `append_input_if_absent` and
@@ -132,12 +131,14 @@ Each check starts from a fresh session.
 | `MemorySession` | otto-core tests | — |
 | POSIX `Store` | otto tests, temp dir | `Store::open` on the same file |
 | `SharedSession` over a `Store` and over memory | otto tests | over `Store` |
-| `MemoryHandle`, `SharedTranscript`, `FixedPathSession` | otto tests | where file-backed |
+| `MemoryHandle`, `SharedTranscript` | otto tests | — |
 | `Inbox` | otto-core tests | — |
 | sidecar adapter (`runtime::sidecar_mailbox`) | otto tests, temp dir | `load` from the same file |
 
-The test wrappers inside `otto-core/src/agent/run_tests.rs` are fixtures that
-inject failures on purpose, so they are not run.
+Test wrappers, such as those in `otto-core/src/agent/run_tests.rs` and the
+`FixedPathSession` in the builder tests, inject failures on purpose, so they
+are not run. `SharedTranscript` and the sidecar adapter are private to the
+`otto` crate, so their runs are unit tests in their own modules.
 
 ### Documentation
 
@@ -152,7 +153,8 @@ inject failures on purpose, so they are not run.
 | --- | --- |
 | `crates/otto-core/src/conformance.rs` (new), `Cargo.toml` feature | check functions |
 | `crates/otto-core` tests | memory session, `Inbox` |
-| `crates/otto/tests/session_conformance.rs` (new) | `Store`, every wrapper, sidecar adapter |
+| `crates/otto/tests/session_conformance.rs` (new) | `Store`, `SharedSession`, `MemoryHandle` |
+| `subagent/runner.rs`, `runtime/sidecar_mailbox.rs` tests | `SharedTranscript`, sidecar adapter |
 | `docs/development.md`, `CHANGELOG.md` | contract and entry |
 
 ## Acceptance
@@ -165,12 +167,28 @@ inject failures on purpose, so they are not run.
 - `make check-fast` passes; the checks also compile for `wasm32` (the
   `rust-wasm-check` target).
 
-## Open questions
+## Findings
 
-1. **Placement.** Put the checks in `otto-core` behind a default-on
-   `conformance` feature, or in `otto`'s existing `storage-conformance`
-   module? Recommended: `otto-core`, because both ports and the browser
-   runtime live there.
-2. **Wrapper findings.** If a wrapper turns out to break a check, may the fix
-   ride this PR? Recommended: yes for forwarding fixes; anything else is
-   reported first.
+The checks found two gaps, both fixed in the implementing PR.
+
+1. **Forwarding.** `MemoryHandle`, `SharedSession` and `SharedTranscript` did
+   not forward `operation_history` or `operation_ledger`, so they returned the
+   empty trait default. `Agent::replay_pending_calls` reads the ledger through
+   these wrappers, so crash recovery never saw a call's recorded retry safety
+   or attempt count. The fix adds the forwards.
+2. **Store input ids across compaction.** `Store::has_input` and
+   `append_input_if_absent` searched the context messages, which a compaction
+   checkpoint replaces with the summary and the retained tail. An input
+   delivered before the checkpoint was then no longer recognised. Its entry is
+   still on the active path, which the trait contract names, and
+   `MemorySession` keeps it. Context resolution now collects the input ids of
+   the whole active path, and `Store` keeps them as a set. The user approved
+   this non-forwarding fix in this PR on 2026-10-06.
+
+## Resolved questions
+
+1. **Placement.** The checks are in `otto-core` behind a default-on
+   `conformance` feature, because both ports and the browser runtime live
+   there.
+2. **Wrapper findings.** Forwarding fixes ride the implementing PR. Anything
+   else is reported first.

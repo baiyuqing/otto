@@ -222,7 +222,9 @@ impl Inner {
     /// Delivers the timer, unless it was cancelled while its sleep was
     /// waking. The notification is pushed into the inbox before the timer is
     /// removed from the sidecar file, so an exit between the two only risks
-    /// firing this timer again on the next resume, never losing it.
+    /// firing this timer again on the next resume, never losing it; its id,
+    /// derived from the timer id and fire time, keeps that second firing from
+    /// being queued or delivered twice.
     ///
     /// The `armed` lock is held across the find, the push, and the removal.
     /// `Reminders::cancel` also removes under this lock, so a cancel that
@@ -237,14 +239,23 @@ impl Inner {
         let Some(index) = armed.iter().position(|entry| entry.item.id == id) else {
             return;
         };
-        let message = armed[index].item.message.clone();
-        self.mailbox.enqueue(Notification {
-            task_id: "timer".into(),
-            text: format!("[timer] {message}"),
-            ..Notification::default()
-        });
+        let item = armed[index].item.clone();
+        let persisted = self
+            .mailbox
+            .enqueue(Notification {
+                task_id: "timer".into(),
+                text: format!("[timer] {}", item.message),
+                id: format!("remind:{}:{}", item.id, item.fire_at.timestamp_millis()),
+                ..Notification::default()
+            })
+            .is_ok();
         armed.remove(index);
-        let _ = self.save(&armed);
+        // A notification that did not reach the mailbox sidecar keeps its
+        // timer in the reminders file, so a restart fires it again; the
+        // stable id keeps that from delivering it twice.
+        if persisted {
+            let _ = self.save(&armed);
+        }
     }
 }
 

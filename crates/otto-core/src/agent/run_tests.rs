@@ -597,6 +597,7 @@ async fn pending_notifications_are_delivered_before_the_user_message() {
             output_tokens: 1,
             cached_input_tokens: 0,
         }),
+        ..Default::default()
     });
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -673,6 +674,7 @@ async fn the_inbox_is_drained_again_before_the_next_provider_request() {
         kind: Some(NotificationKind::Message),
         text: "from the parent".into(),
         usage: None,
+        ..Default::default()
     });
     agent
         .run("hello", &mut |_| {}, &CancellationToken::new())
@@ -777,6 +779,7 @@ async fn empty_text_with_a_notification_is_a_wake_turn() {
         kind: Some(NotificationKind::TaskReport),
         text: "report".into(),
         usage: None,
+        ..Default::default()
     });
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -806,12 +809,14 @@ async fn a_notification_without_a_generated_task_id_still_persists() {
         kind: Some(NotificationKind::Message),
         text: "[feishu] hello".into(),
         usage: None,
+        ..Default::default()
     });
     inbox.push(Notification {
         task_id: "timer".into(),
         text: "[timer] due".into(),
         usage: None,
         kind: None,
+        ..Default::default()
     });
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -2627,6 +2632,18 @@ impl Session for FailingSession {
         self.inner.interrupted_turn()
     }
 
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: crate::model::Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2702,6 +2719,18 @@ impl Session for OperationFailingSession {
         self.inner.interrupted_turn()
     }
 
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: crate::model::Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2769,6 +2798,18 @@ impl Session for AsyncOrderingSession {
 
     fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
         self.inner.interrupted_turn()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: crate::model::Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
     }
 
     async fn append_custom(
@@ -2952,12 +2993,14 @@ async fn a_failed_notification_append_leaves_it_and_later_ones_queued() {
         kind: Some(NotificationKind::TaskFinished),
         text: "first".into(),
         usage: None,
+        ..Default::default()
     });
     inbox.push(Notification {
         task_id: "t2".into(),
         kind: Some(NotificationKind::TaskFinished),
         text: "second".into(),
         usage: None,
+        ..Default::default()
     });
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("never sent")]),
@@ -3803,6 +3846,18 @@ impl Session for TurnRecordingSession {
     fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
         self.inner.interrupted_turn()
     }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: crate::model::Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -3959,4 +4014,76 @@ async fn a_prompt_after_an_interrupted_turn_starts_a_new_chain() {
         started_trigger(&agent.session().turns()[0]),
         (TurnTrigger::User, 1, None)
     );
+}
+
+// -- input ids --------------------------------------------------------------
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_notification_already_in_the_transcript_is_acknowledged_without_a_second_message() {
+    let session = MemorySession::new();
+    let delivered = Message {
+        role: Role::Context,
+        context_type: "task_notification".into(),
+        display: true,
+        blocks: vec![Block::text("done")],
+        ..Message::default()
+    };
+    session
+        .append_input_if_absent("in_1", delivered)
+        .await
+        .expect("first delivery");
+    let inbox = Arc::new(Inbox::default());
+    inbox.push(Notification {
+        text: "done".into(),
+        id: "in_1".into(),
+        ..Notification::default()
+    });
+    inbox.push(Notification {
+        text: "new".into(),
+        id: "in_2".into(),
+        ..Notification::default()
+    });
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("ok")]),
+        EchoExecutor::default(),
+        session,
+        Options {
+            mailbox: inbox.clone(),
+            ..options()
+        },
+    );
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("wake turn");
+    assert!(inbox.is_empty(), "both entries are acknowledged");
+    let ids: Vec<String> = agent
+        .session()
+        .messages()
+        .into_iter()
+        .filter(|message| !message.input_id.is_empty())
+        .map(|message| message.input_id)
+        .collect();
+    assert_eq!(ids, ["in_1", "in_2"]);
+}
+
+#[test]
+fn enqueue_skips_an_id_already_queued() {
+    let inbox = Inbox::default();
+    let first = inbox
+        .enqueue(Notification {
+            id: "in_1".into(),
+            ..Notification::default()
+        })
+        .expect("enqueue");
+    let again = inbox
+        .enqueue(Notification {
+            id: "in_1".into(),
+            text: "retry".into(),
+            ..Notification::default()
+        })
+        .expect("enqueue");
+    assert_eq!(first, again);
+    assert_eq!(inbox.len(), 1);
 }

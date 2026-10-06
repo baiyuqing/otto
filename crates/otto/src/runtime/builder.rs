@@ -173,6 +173,18 @@ impl Session for MemoryHandle {
         self.inner.interrupted_turn()
     }
 
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: otto_core::model::Message,
+    ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         self.inner.append_custom(custom_type, data).await
     }
@@ -349,6 +361,18 @@ impl Session for SharedSession {
 
     fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
         self.0.interrupted_turn()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: otto_core::model::Message,
+    ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+        self.0.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.0.has_input(input_id)
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
@@ -3268,6 +3292,18 @@ mod tests {
 
         fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
             self.inner.interrupted_turn()
+        }
+
+        async fn append_input_if_absent(
+            &self,
+            input_id: &str,
+            message: otto_core::model::Message,
+        ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+            self.inner.append_input_if_absent(input_id, message).await
+        }
+
+        fn has_input(&self, input_id: &str) -> bool {
+            self.inner.has_input(input_id)
         }
 
         async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {

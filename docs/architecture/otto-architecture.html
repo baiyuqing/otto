@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Otto — Code architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    :root { --color-paper: #f5f5f5; --color-ink: #2d3142; --color-muted: #4f5d75; --color-accent: #eb6c36; --font-sans: 'Geist', system-ui, sans-serif; --font-serif: 'Instrument Serif', Georgia, serif; --font-mono: 'Geist Mono', ui-monospace, monospace; }
+    body { margin: 0; padding: 24px; background: var(--color-paper); color: var(--color-ink); font-family: var(--font-sans); }
+    .frame { max-width: 1280px; margin: auto; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    svg { display: block; width: 100%; min-width: 1280px; }
+    svg text { fill: var(--color-ink); font-family: var(--font-sans); }
+    .diagram-title { font-family: var(--font-serif); font-size: 40px; font-weight: 400; }
+    .name { font-size: 16px; font-weight: 600; }
+    .detail { font-size: 12px; fill: var(--color-muted); }
+    .code { font-family: var(--font-mono); font-size: 10px; fill: var(--color-muted); }
+    .tag { font-family: var(--font-mono); font-size: 8px; letter-spacing: 1.4px; fill: var(--color-muted); }
+    .band { fill: #ececec; stroke: #bfc0c0; stroke-width: 1; }
+    .divider { stroke: #bfc0c0; stroke-width: 1; }
+    .connector { stroke: #4f5d75; stroke-width: 1.2; fill: none; marker-end: url(#arrow); }
+    @media print { body { padding: 0; } .diagram-container { overflow: visible; } svg { min-width: 0; } }
+  </style>
+</head>
+<body>
+<main class="frame">
+  <div class="diagram-container" tabindex="0" role="region" aria-label="Otto architecture diagram; scroll horizontally on narrow screens">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="otto-architecture-title otto-architecture-desc">
+      <title id="otto-architecture-title">Otto — Code architecture</title>
+      <desc id="otto-architecture-desc">Terminal, browser and chat clients enter Otto through native frontends, which share application lifecycle and runtime assembly, native capability services, and a WebAssembly-safe core, with storage and provider transports owned by the native crate.</desc>
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6Z" fill="#4f5d75"/></marker>
+      </defs>
+      <rect width="1280" height="720" fill="#f5f5f5"/>
+      <text x="40" y="40" class="tag">OTTO / CODE ARCHITECTURE</text>
+      <text x="40" y="84" class="diagram-title">One agent. Every surface.</text>
+      <text x="1240" y="76" text-anchor="end" class="detail">Local-first runtime · Rust + a portable core</text>
+
+      <!-- Connectors indicate access and shared dependency direction, not a turn sequence. -->
+      <line x1="372" y1="184" x2="372" y2="208" class="connector"/>
+      <line x1="720" y1="184" x2="720" y2="208" class="connector"/>
+      <line x1="1068" y1="184" x2="1068" y2="208" class="connector"/>
+      <line x1="720" y1="272" x2="720" y2="296" class="connector"/>
+      <line x1="720" y1="372" x2="720" y2="396" class="connector"/>
+      <line x1="720" y1="556" x2="720" y2="580" class="connector"/>
+
+      <text x="40" y="136" class="tag">01 / SURFACES</text>
+      <text x="40" y="160" class="name">Access</text>
+      <text x="40" y="180" class="code">Native + clients</text>
+      <rect x="200" y="120" width="1040" height="64" rx="6" class="band"/>
+      <line x1="548" y1="132" x2="548" y2="172" class="divider"/>
+      <line x1="896" y1="132" x2="896" y2="172" class="divider"/>
+      <text x="224" y="146" class="name">Terminal</text>
+      <text x="224" y="166" class="detail">TUI · REPL · Headless CLI</text>
+      <text x="572" y="146" class="name">Browser</text>
+      <text x="572" y="166" class="detail">otto-plus · React + WASM · Separate repo</text>
+      <text x="920" y="146" class="name">Telegram &amp; Feishu</text>
+      <text x="920" y="166" class="detail">otto-connect · Independent Go client</text>
+
+      <text x="40" y="224" class="tag">02 / ADAPTERS</text>
+      <text x="40" y="248" class="name">Frontends</text>
+      <text x="40" y="268" class="code">crates/otto</text>
+      <rect x="200" y="208" width="1040" height="64" rx="6" class="band"/>
+      <line x1="548" y1="220" x2="548" y2="260" class="divider"/>
+      <line x1="896" y1="220" x2="896" y2="260" class="divider"/>
+      <text x="224" y="234" class="name">CLI / TUI / Attach client</text>
+      <text x="224" y="254" class="code">cli/ · tui/ · client/</text>
+      <text x="572" y="234" class="name">HTTP API + SSE</text>
+      <text x="572" y="254" class="code">server/ · otto serve</text>
+      <text x="920" y="234" class="name">Agent Client Protocol</text>
+      <text x="920" y="254" class="code">acp/ · stdio / authenticated TCP</text>
+
+      <text x="40" y="312" class="tag">03 / APPLICATION</text>
+      <text x="40" y="336" class="name">Lifecycle &amp; wiring</text>
+      <text x="40" y="356" class="code">crates/otto</text>
+      <rect x="200" y="296" width="1040" height="76" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1.2"/>
+      <line x1="720" y1="308" x2="720" y2="360" stroke="#eb6c36" stroke-opacity="0.25"/>
+      <text x="224" y="322" class="name">Application controller</text>
+      <text x="224" y="342" class="detail">Shared sessions · Turn admission · Steering · Wake / delivery</text>
+      <text x="224" y="358" class="code">app/ · Controller</text>
+      <text x="744" y="322" class="name">Runtime assembly</text>
+      <text x="744" y="342" class="detail">Configuration · Prompt · Provider / tools / service injection</text>
+      <text x="744" y="358" class="code">runtime/ · Builder + Runner</text>
+
+      <text x="40" y="412" class="tag">04 / NATIVE</text>
+      <text x="40" y="436" class="name">Capability services</text>
+      <text x="40" y="456" class="code">crates/otto</text>
+      <text x="40" y="480" class="detail">Network · Files · Processes</text>
+      <rect x="200" y="396" width="1040" height="160" rx="6" class="band"/>
+      <line x1="460" y1="408" x2="460" y2="492" class="divider"/>
+      <line x1="720" y1="408" x2="720" y2="492" class="divider"/>
+      <line x1="980" y1="408" x2="980" y2="492" class="divider"/>
+      <text x="224" y="424" class="name">Tools &amp; extensions</text>
+      <text x="224" y="446" class="detail">Workspace files · Bash · Web</text>
+      <text x="224" y="466" class="detail">Skills · Plugins · MCP</text>
+      <text x="224" y="486" class="code">tool/ · skill/ · plugin/ · mcp/</text>
+      <text x="484" y="424" class="name">Memory &amp; learning</text>
+      <text x="484" y="446" class="detail">Reviewed memory · Reflection</text>
+      <text x="484" y="466" class="detail">Sessions · Usage accounting</text>
+      <text x="484" y="486" class="code">memory/ · reflection/ · session/</text>
+      <text x="744" y="424" class="name">Tasks &amp; automation</text>
+      <text x="744" y="446" class="detail">Sub-agents · Durable workflows</text>
+      <text x="744" y="466" class="detail">Schedules · Timers</text>
+      <text x="744" y="486" class="code">subagent/ · workflow/ · schedule/</text>
+      <text x="1004" y="424" class="name">Safety &amp; reliability</text>
+      <text x="1004" y="446" class="detail">Approvals · Sandbox · Trust</text>
+      <text x="1004" y="466" class="detail">Recovery · Logs · Metrics</text>
+      <text x="1004" y="486" class="code">approval/ · sandbox/ · failover/</text>
+      <line x1="216" y1="504" x2="1224" y2="504" class="divider"/>
+      <text x="224" y="525" class="detail">Local persistence</text>
+      <text x="224" y="543" class="code">storage/ · Turso SQL + POSIX session JSONL</text>
+      <text x="744" y="525" class="detail">Model connectivity &amp; authentication</text>
+      <text x="744" y="543" class="code">provider/ · auth/ · openai-compatible / chatgpt</text>
+
+      <text x="40" y="596" class="tag">05 / PORTABLE</text>
+      <text x="40" y="620" class="name">Shared core</text>
+      <text x="40" y="640" class="code">crates/otto-core</text>
+      <rect x="200" y="580" width="1040" height="64" rx="6" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+      <text x="224" y="606" class="name">Agent loop &amp; context</text>
+      <text x="224" y="626" class="code">agent/ · session/ · operation</text>
+      <text x="544" y="606" class="name">Shared domain contracts</text>
+      <text x="544" y="626" class="code">model · provider · tool · approval · config</text>
+      <text x="952" y="606" class="name">Wire &amp; stream codecs</text>
+      <text x="952" y="626" class="code">wire · openaicompat · openairesponses</text>
+
+      <line x1="40" y1="664" x2="1240" y2="664" class="divider"/>
+      <text x="40" y="684" class="code">Top → bottom: shared dependencies / capability binding · Core has no native I/O · Also consumed by otto-plus via WASM</text>
+      <text x="1240" y="684" class="code" text-anchor="end">Source: 9719b52</text>
+    </svg>
+  </div>
+</main>
+</body>
+</html>

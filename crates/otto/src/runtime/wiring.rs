@@ -33,8 +33,8 @@ use super::info::SandboxMode;
 use crate::failover;
 use crate::mcp;
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};
+use crate::memory::repository::MemoryOptions as StoreOptions;
 use crate::memory::scope::new_workspace_scope;
-use crate::memory::turso::{Options as StoreOptions, Store};
 use crate::memory::{
     BindOptions, Binding, ErrorKind, MAX_EXACT_GUARD_VALUE_BYTES, Scope, Service, new_id,
 };
@@ -76,7 +76,7 @@ pub struct MemoryWiring {
     pub recall_limit: i64,
     pub recall_token_budget: i64,
     /// The append-only advice audit log, absent when it could not be opened.
-    pub advice_audit: Option<Arc<crate::memory::advice::audit::Store>>,
+    pub advice_audit: Option<Arc<dyn crate::memory::advice::audit::AuditStore>>,
 }
 
 impl Default for MemoryWiring {
@@ -95,6 +95,20 @@ impl Default for MemoryWiring {
 /// Disabled config, or an open failure when `required` is false, degrades to a
 /// null service with a stderr warning rather than failing startup.
 pub fn open_memory_service(
+    config: &MemoryRuntime,
+    secret_values: &[String],
+    stderr: &mut dyn Write,
+) -> Result<(Arc<Service>, Scope, bool), String> {
+    open_memory_service_with_storage(
+        &super::storage::Storage::default(),
+        config,
+        secret_values,
+        stderr,
+    )
+}
+
+pub fn open_memory_service_with_storage(
+    storage: &super::storage::Storage,
     config: &MemoryRuntime,
     secret_values: &[String],
     stderr: &mut dyn Write,
@@ -127,7 +141,7 @@ pub fn open_memory_service(
             Box::new(exact),
         ])),
     };
-    let store = match Store::open(std::path::Path::new(&config.turso_path), options) {
+    let store = match storage.memory(std::path::Path::new(&config.turso_path), options) {
         Ok(store) => store,
         Err(error) => {
             if config.required {
@@ -146,9 +160,8 @@ pub fn open_memory_service(
     };
 
     // require_encryption is a security requirement, not an availability
-    // preference: the Turso backend never encrypts at rest, so this fails
-    // startup regardless of `required`.
-    if config.require_encryption {
+    // preference: reject adapters that cannot make that guarantee.
+    if config.require_encryption && !store.encryption_at_rest() {
         let _ = store.close();
         return Err(format!(
             "memory backend {:?} does not support encryption at rest, but require_encryption is set",
@@ -174,7 +187,7 @@ pub fn open_memory_service(
             ));
         }
     };
-    let service = Service::new(store, crate::memory::decide_default_policy);
+    let service = Service::from_store(store, crate::memory::decide_default_policy);
     Ok((Arc::new(service), identity.user_scope, true))
 }
 
@@ -403,7 +416,7 @@ impl Builder {
                 key,
             ))
         };
-        Some(Arc::new(crate::memory::advice::Advisor::new(
+        Some(Arc::new(crate::memory::advice::Advisor::new_with_audit(
             backend,
             self.memory.advice_audit.clone(),
         )))
@@ -605,7 +618,10 @@ impl Builder {
             max_parallel: catalogs.agents.max_parallel.max(0) as usize,
             max_output_bytes: runtime.max_output_bytes.max(0) as usize,
             usage,
-            child_session: Some(child_sessions(session_for_children)),
+            child_session: Some(child_sessions(
+                session_for_children,
+                Arc::clone(&self.storage),
+            )),
             checker: self.skill_checker.clone(),
             lease: Some(Arc::new(move || session_for_lease.lease())),
             workspace_path: PathBuf::from(&self.workspace_path),
@@ -1674,7 +1690,7 @@ done"#,
 /// Persists each sub-agent transcript beside the parent session file, as
 /// `<parent without .jsonl>/<task id>-<child id>.jsonl`. A parent with no file
 /// (`--no-session`, or nothing written yet) keeps its children in memory.
-fn child_sessions(parent: SharedSession) -> ChildSession {
+fn child_sessions(parent: SharedSession, storage: Arc<super::storage::Storage>) -> ChildSession {
     Arc::new(move |task_id: &str| {
         let parent_path = parent.path();
         if parent_path.is_empty() {
@@ -1685,16 +1701,12 @@ fn child_sessions(parent: SharedSession) -> ChildSession {
             .map_err(|error| format!("create sub-agent session id: {error}"))?;
         header.created_at = chrono::Utc::now();
         let name = format!("{task_id}-{}", header.id);
-        let store = crate::session::Store::create_child_lazy(&parent_path, &name, header)
-            .map_err(|error| error.to_string())?;
-        if let Some(lease) = parent.lease() {
-            store.set_lease_check(lease);
-        }
-        let path = crate::session::Store::child_path(&parent_path, &name);
-        Ok(Some((
-            Arc::new(store) as Transcript,
-            path.to_string_lossy().into_owned(),
-        )))
+        let (store, path) =
+            storage
+                .sessions()?
+                .create_child_lazy(&parent_path, &name, header, parent.lease())?;
+        let transcript: Transcript = store;
+        Ok(Some((transcript, path)))
     })
 }
 
@@ -1747,7 +1759,10 @@ mod tests {
 
     #[test]
     fn children_of_an_in_memory_parent_stay_in_memory() {
-        let build = child_sessions(SharedSession::memory(otto_core::session::Header::default()));
+        let build = child_sessions(
+            SharedSession::memory(otto_core::session::Header::default()),
+            Arc::new(Default::default()),
+        );
         assert!(build("t1").expect("build").is_none());
     }
 
@@ -1768,8 +1783,11 @@ mod tests {
             },
         )
         .expect("parent");
-        store.set_lease_check(Arc::clone(&lease));
-        let build = child_sessions(SharedSession::new(Arc::new(store)));
+        store.set_lease_check(Arc::clone(&lease) as Arc<dyn crate::session::WriterOwnership>);
+        let build = child_sessions(
+            SharedSession::new(Arc::new(store)),
+            Arc::new(Default::default()),
+        );
 
         let (child, _path) = build("t1").expect("build").expect("persisted");
 
@@ -1804,7 +1822,10 @@ mod tests {
         )
         .expect("parent");
         let parent_path = store.path();
-        let build = child_sessions(SharedSession::new(Arc::new(store)));
+        let build = child_sessions(
+            SharedSession::new(Arc::new(store)),
+            Arc::new(Default::default()),
+        );
 
         let (_, path) = build("t1").expect("build").expect("persisted");
 

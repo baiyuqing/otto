@@ -1,7 +1,7 @@
 //! Durable skill review artifacts. The guard still constructs every Vetted;
 //! only reflection::skillwrite mutates skill files.
 use super::{Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
-use crate::reflection::{guard, skillwrite, store, transcript};
+use crate::reflection::{guard, repository::ReflectionStore, skillwrite, transcript};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -19,7 +19,7 @@ struct Artifact {
     base_hash: Option<String>,
 }
 pub struct Adapter {
-    pub store: Arc<store::Store>,
+    pub store: Arc<dyn ReflectionStore>,
     pub roots: skillwrite::Roots,
     pub maximum: usize,
     pub require_review: bool,
@@ -87,7 +87,7 @@ impl Domain for Adapter {
             return Ok(());
         }
         let current = skillwrite::precheck(
-            &self.store,
+            self.store.as_ref(),
             &self.roots,
             vetted.action(),
             vetted.name(),
@@ -98,7 +98,7 @@ impl Domain for Adapter {
             return Err(Error::Conflict);
         }
         skillwrite::apply_on_base(
-            &self.store,
+            self.store.as_ref(),
             &self.roots,
             &vetted,
             &artifact.run_id,
@@ -114,7 +114,7 @@ impl Domain for Adapter {
 #[allow(clippy::too_many_arguments)]
 pub fn publish(
     service: &Arc<Service>,
-    store: Arc<store::Store>,
+    store: Arc<dyn ReflectionStore>,
     roots: &skillwrite::Roots,
     maximum: usize,
     workspace: &str,
@@ -124,8 +124,14 @@ pub fn publish(
     vetted: &guard::Vetted,
     reviewed: bool,
 ) -> Result<Request> {
-    let base_hash = skillwrite::precheck(&store, roots, vetted.action(), vetted.name(), maximum)
-        .map_err(|_| Error::Conflict)?;
+    let base_hash = skillwrite::precheck(
+        store.as_ref(),
+        roots,
+        vetted.action(),
+        vetted.name(),
+        maximum,
+    )
+    .map_err(|_| Error::Conflict)?;
     service.register_domain(
         workspace,
         "reflection_skill",

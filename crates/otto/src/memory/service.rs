@@ -5,9 +5,8 @@
 //! category error it was constructed from, while a binding on it recalls
 //! nothing instead of failing.
 //!
-//! Ownership and concurrency: the service owns the store and closes it in
-//! [`Service::close`]. Every operation takes `&self` and serializes on the
-//! store's connection mutex, so the service adds no lock of its own.
+//! The service owns a repository port and closes it in [`Service::close`].
+//! Backend concurrency is enforced by the repository implementation.
 //!
 //! Deliberate absences:
 //!
@@ -15,10 +14,9 @@
 //!   automatic extraction through a binding is out of scope. The `reflection`
 //!   module queues extractor candidates on demand through [`Service::propose`];
 //!   the store still guards written content.
-//! - The store is the concrete Turso store and the policy a function, so
-//!   there is no missing-dependency case to reject.
-//! - `close` waits on the store's connection mutex, which an in-flight
-//!   operation already holds; a call that arrives after it sees `Closed`.
+//! - The policy is a function, so it cannot fail.
+//! - `close` rejects later service operations; each adapter owns its in-flight
+//!   operation lifecycle.
 //! - The synchronous methods cannot be cancelled; only the async
 //!   [`MemoryRecall`] adapter checks a token.
 
@@ -30,7 +28,7 @@ use otto_core::agent::memory as core_memory;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::turso::Store;
+use super::MemoryStore;
 use super::validate::{
     provenance_zero, validate_bind_scopes, validate_forget_request, validate_propose_request,
     validate_recall_request, validate_remember_request, validate_search_request,
@@ -86,7 +84,7 @@ fn normalize_query(query: &str) -> String {
 type ReviewPublisher = Arc<dyn Fn(&[Candidate]) -> Result<()> + Send + Sync>;
 
 pub struct Service {
-    store: Option<Store>,
+    store: Option<Arc<dyn MemoryStore>>,
     policy: Policy,
     /// What a store-less service answers operations with.
     category: ErrorKind,
@@ -102,7 +100,12 @@ impl Service {
     /// Composes a store and a policy: human-authorized writes land directly,
     /// model, extractor and import writes land as pending candidates through
     /// [`Service::propose`].
-    pub fn new(store: Store, policy: Policy) -> Self {
+    pub fn new(store: impl MemoryStore + 'static, policy: Policy) -> Self {
+        Self::from_store(Arc::new(store), policy)
+    }
+
+    /// Builds a service over a shared repository selected by runtime wiring.
+    pub fn from_store(store: Arc<dyn MemoryStore>, policy: Policy) -> Self {
         Self {
             store: Some(store),
             policy,
@@ -153,11 +156,13 @@ impl Service {
 
     /// The operation error and the store lookup in one: the closed check wins
     /// over the category.
-    fn ready(&self) -> Result<&Store> {
+    fn ready(&self) -> Result<&dyn MemoryStore> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::new(ErrorKind::Closed));
         }
-        self.store.as_ref().ok_or_else(|| Error::new(self.category))
+        self.store
+            .as_deref()
+            .ok_or_else(|| Error::new(self.category))
     }
 
     pub fn get(&self, reference: &RecordRef) -> Result<Record> {
@@ -561,7 +566,7 @@ impl Binding {
     /// failing, so a disabled memory never fails a turn.
     pub fn recall(&self, request: &RecallRequest) -> Result<RecallResult> {
         self.check_open()?;
-        let Some(store) = self.service.store.as_ref() else {
+        let Some(store) = self.service.store.as_deref() else {
             return Ok(RecallResult::default());
         };
         let query = normalize_query(&request.query);
@@ -683,6 +688,77 @@ mod tests {
             directory,
             Arc::new(Service::new(store, decide_default_policy)),
         )
+    }
+
+    struct AlternateStore(crate::memory::turso::Store);
+
+    fn unsupported<T>() -> Result<T> {
+        Err(Error::new(ErrorKind::Unsupported))
+    }
+
+    impl MemoryStore for AlternateStore {
+        fn identity(&self) -> Result<crate::memory::StoreIdentity> {
+            self.0.identity()
+        }
+        fn close(&self) -> Result<()> {
+            self.0.close()
+        }
+        fn get(&self, reference: &RecordRef) -> Result<Record> {
+            self.0.get(reference)
+        }
+        fn get_by_key(&self, _: &RecordKey) -> Result<Record> {
+            unsupported()
+        }
+        fn list(&self, _: &ListRequest) -> Result<super::super::RecordPage> {
+            unsupported()
+        }
+        fn get_tombstone(&self, _: &RecordRef) -> Result<Tombstone> {
+            unsupported()
+        }
+        fn get_candidate(&self, _: &super::super::CandidateRef) -> Result<Candidate> {
+            unsupported()
+        }
+        fn list_candidates(&self, _: &CandidateListRequest) -> Result<super::super::CandidatePage> {
+            unsupported()
+        }
+        fn retrieve(&self, _: &RetrievalRequest) -> Result<super::super::RetrievalResult> {
+            unsupported()
+        }
+        fn upsert_within_standing_budget(&self, _: &UpsertRequest) -> Result<Record> {
+            unsupported()
+        }
+        fn standing_usage(&self, _: &Scope, _: DateTime<Utc>) -> Result<StandingUsage> {
+            unsupported()
+        }
+        fn standing_records(&self, _: &Scope, _: DateTime<Utc>) -> Result<Vec<Record>> {
+            unsupported()
+        }
+        fn forget(&self, _: &StoreForgetRequest) -> Result<Tombstone> {
+            unsupported()
+        }
+        fn review_within_standing_budget(&self, _: &StoreReviewRequest) -> Result<ReviewResult> {
+            unsupported()
+        }
+        fn propose(&self, _: &[Candidate]) -> Result<Vec<Candidate>> {
+            unsupported()
+        }
+        fn check_proposals(&self, _: &[Candidate]) -> Result<()> {
+            unsupported()
+        }
+    }
+
+    #[test]
+    fn service_uses_injected_store_and_preserves_not_found_error() {
+        let (_directory, store) = open_temp();
+        let service = Service::from_store(Arc::new(AlternateStore(store)), decide_default_policy);
+
+        let error = service
+            .get(&RecordRef {
+                scope: user_scope(),
+                id: "missing".into(),
+            })
+            .expect_err("missing record");
+        assert!(error.is(ErrorKind::NotFound));
     }
 
     fn user_scope() -> Scope {
@@ -1275,9 +1351,10 @@ mod tests {
     #[tokio::test]
     async fn legacy_over_budget_data_is_injected_oldest_first_and_counted_as_omitted() {
         use crate::memory::turso::records::testsupport::{at, sample_record};
-        let (_directory, service) = service();
+        let (_directory, store) = open_temp();
+        let store = Arc::new(store);
+        let service = Arc::new(Service::from_store(store.clone(), decide_default_policy));
         let scope = user_scope();
-        let store = service.store.as_ref().expect("store");
         let mut costs = Vec::new();
         // Inserted newest first, so only created_at can put "a" first.
         for (id, second) in [("c", 3), ("b", 2), ("a", 1)] {

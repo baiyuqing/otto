@@ -3462,12 +3462,47 @@ rebuilds the search index. Set `[memory.turso].path` to the destination after
 success. Otto does not automatically migrate a legacy FTS5 memory database.
 
 The same command supports `usage.db`, `tasks.db`, `reflection.db`,
-`skill-checks.db`, `memory-advice.db`, and workspace workflow databases. Their ordinary tables
-can also be opened directly by Turso when compatible; use offline migration
-when making a separate copy. For stores with fixed paths, keep the old file
-as a backup and move the migrated file into place while Otto is stopped.
-Do not let an older SQLite-backed Otto and this version access a database
-at the same time.
+`skill-checks.db`, `memory-advice.db`, and workspace workflow databases. Their
+recognized legacy tables import into local Turso databases. For stores with
+fixed paths, keep the old file as a backup and move the migrated file into
+place while Otto is stopped. Do not let an older SQLite-backed Otto and this
+version access a database at the same time.
+
+To transfer a stopped local Otto installation to a separate local root, use
+`storage transfer`:
+
+```bash
+otto storage transfer "$HOME" /Volumes/otto-state-new migration-20261006
+```
+
+Use an existing destination parent on a local volume outside the source home;
+the destination root itself may be new. The source and destination roots must
+not overlap. Repeating the same source, destination, and migration ID resumes
+an interrupted transfer. If the source
+memory database is outside the path resolved from its configuration, provide
+`--memory-db <path>` after the migration ID. On success, the source home's
+route authority points to the new root; restart Otto using the same home to use
+the transferred state. Original databases and session files stay in place.
+Keep them until the restarted Otto has opened the destination successfully;
+cleanup is manual. The transfer requires local paths and does not offer a
+remote/cloud destination.
+
+If transfer fails before route publication, explicitly restore source admission:
+
+```bash
+otto storage abort "$HOME" migration-20261006
+```
+
+Abort retains the source, staged bytes and checkpoints. It also works after
+partial staging imports; it refuses a published destination or an uncertain
+publication that cannot be reconciled. After publication, returning to the old
+root requires another verified transfer so new destination writes are preserved.
+Stop all source processes, including older Otto versions, and prevent them from
+restarting throughout transfer; local locks cannot fence an uncooperating binary.
+
+This build keeps SQL state in local Turso databases and session files in the
+confined POSIX store. Backend route registration is internal, not a user-facing
+backend selector; the transfer command targets another local filesystem root.
 
 To inspect usage windows without opening the file with SQLite:
 

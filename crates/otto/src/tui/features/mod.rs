@@ -1,0 +1,82 @@
+//! Domain projections and semantic feature transitions. No terminal events.
+
+mod approval;
+mod choice;
+mod collection;
+mod commands;
+mod review;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use approval::Approval;
+pub(crate) use commands::Catalog;
+
+use super::backend::{Reply, Request};
+use super::interaction::{Activation, View};
+
+pub(crate) trait Presenter: Send {
+    fn key(&self) -> String;
+    fn view(&self) -> View;
+    fn activate(&mut self, activation: Activation) -> Transition;
+    fn receive(&mut self, reply: Reply) -> Transition;
+    fn start(&mut self) -> Option<Request> {
+        self.refresh()
+    }
+    fn refresh(&self) -> Option<Request> {
+        None
+    }
+    fn retry(&self) -> Option<Request> {
+        self.refresh()
+    }
+    fn periodic(&self) -> bool {
+        false
+    }
+    fn covers_approval(&self, _: &crate::approval::Request) -> bool {
+        false
+    }
+}
+
+pub(crate) enum Transition {
+    Stay,
+    Close,
+    Push(Box<dyn Presenter>),
+    Request(Request),
+    Run(Run),
+}
+
+pub(crate) enum Run {
+    Prompt(String),
+    Compact(String),
+    Reflect(String),
+    Login(String),
+    McpLogin(String),
+    Exit,
+}
+
+pub(crate) struct Document {
+    pub key: String,
+    pub title: String,
+    pub text: String,
+}
+
+impl Presenter for Document {
+    fn key(&self) -> String {
+        self.key.clone()
+    }
+
+    fn view(&self) -> View {
+        View {
+            title: self.title.clone(),
+            document: self.text.clone(),
+            ..Default::default()
+        }
+    }
+
+    fn activate(&mut self, _: Activation) -> Transition {
+        Transition::Stay
+    }
+
+    fn receive(&mut self, _: Reply) -> Transition {
+        Transition::Stay
+    }
+}

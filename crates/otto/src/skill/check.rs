@@ -12,16 +12,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use crate::storage::{Connection, params};
 use chrono::{SecondsFormat, Utc};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::skill::check_repository::{CheckStore, NewRow, ResultJson, Row};
 use crate::skill::frontmatter;
 use crate::tool::root::Root;
 use crate::typesafe::{self, AnswerMap, Client, Error as CheckError, Reply, WireQuestion};
@@ -307,190 +304,6 @@ async fn check(client: &Client, state: &str) -> Result<Answers, CheckError> {
 }
 
 // ---------------------------------------------------------------------------
-// Storage
-// ---------------------------------------------------------------------------
-
-/// The schema version this build writes and expects. Bumping it makes an
-/// older database's rows unreadable to this build; [`Store::open`] then
-/// leaves the file untouched and reports [`StoreError::UnknownVersion`].
-const SCHEMA_VERSION: i64 = 1;
-
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS skill_checks (
-    id INTEGER PRIMARY KEY,
-    content_sha256 TEXT NOT NULL,
-    questions_sha256 TEXT NOT NULL,
-    skill TEXT NOT NULL,
-    path TEXT NOT NULL,
-    source TEXT NOT NULL CHECK (source IN ('rules','typesafe')),
-    model TEXT NOT NULL,
-    checked_at TEXT NOT NULL,
-    result TEXT NOT NULL
-) STRICT;
-CREATE INDEX IF NOT EXISTS skill_checks_key
-ON skill_checks(content_sha256, questions_sha256, id);
-"#;
-
-/// A storage failure carries no database text, paths, or row values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StoreError {
-    Io,
-    /// `PRAGMA user_version` did not match [`SCHEMA_VERSION`]: an older or
-    /// newer build's database. The feature disables itself for the process
-    /// rather than reading or writing rows it cannot interpret.
-    UnknownVersion,
-}
-
-impl fmt::Display for StoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io => formatter.write_str("skill check store unavailable"),
-            Self::UnknownVersion => {
-                formatter.write_str("skill check database has an unrecognized schema version")
-            }
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-type StoreResult<T> = std::result::Result<T, StoreError>;
-
-/// The four TypeSafe answers, or the fired rule ids. This is exactly what
-/// the `result` column stores as JSON.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-enum ResultJson {
-    Rules { rules: Vec<String> },
-    Answers { answers: AnswerMap },
-}
-
-/// One stored row, as read back for display.
-#[derive(Debug, Clone, PartialEq)]
-struct Row {
-    source: String,
-    model: String,
-    checked_at: String,
-    result: ResultJson,
-}
-
-struct NewRow<'a> {
-    content_sha256: &'a str,
-    questions_sha256: &'a str,
-    skill: &'a str,
-    path: &'a str,
-    source: &'static str,
-    model: &'a str,
-    checked_at: &'a str,
-    result: &'a ResultJson,
-}
-
-/// The append-only skill-check database, `~/.otto/skill-checks.db`.
-#[derive(Debug)]
-struct Store {
-    connection: Mutex<Connection>,
-}
-
-impl Store {
-    fn open(filename: &Path) -> StoreResult<Self> {
-        if let Some(parent) = filename.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|_| StoreError::Io)?;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .map_err(|_| StoreError::Io)?;
-        }
-        let connection = Connection::open(filename).map_err(|_| StoreError::Io)?;
-        std::fs::set_permissions(filename, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| StoreError::Io)?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(|_| StoreError::Io)?;
-        connection
-            .pragma_update("journal_mode", "WAL")
-            .map_err(|_| StoreError::Io)?;
-        Self::initialize(connection)
-    }
-
-    #[cfg(test)]
-    fn open_in_memory() -> StoreResult<Self> {
-        Self::initialize(Connection::open_in_memory().map_err(|_| StoreError::Io)?)
-    }
-
-    fn initialize(connection: Connection) -> StoreResult<Self> {
-        let version: i64 = connection
-            .query_row("PRAGMA user_version", (), |row| row.get(0))
-            .map_err(|_| StoreError::Io)?;
-        if version == 0 {
-            connection
-                .execute_batch(SCHEMA)
-                .map_err(|_| StoreError::Io)?;
-            connection
-                .pragma_update("user_version", SCHEMA_VERSION)
-                .map_err(|_| StoreError::Io)?;
-        } else if version != SCHEMA_VERSION {
-            return Err(StoreError::UnknownVersion);
-        }
-        Ok(Self {
-            connection: Mutex::new(connection),
-        })
-    }
-
-    fn append(&self, row: &NewRow) -> StoreResult<()> {
-        let result = serde_json::to_string(row.result).map_err(|_| StoreError::Io)?;
-        self.connection
-            .lock()
-            .map_err(|_| StoreError::Io)?
-            .execute(
-                "INSERT INTO skill_checks (
-                    content_sha256, questions_sha256, skill, path, source, model, checked_at, result
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    row.content_sha256,
-                    row.questions_sha256,
-                    row.skill,
-                    row.path,
-                    row.source,
-                    row.model,
-                    row.checked_at,
-                    result,
-                ],
-            )
-            .map_err(|_| StoreError::Io)?;
-        Ok(())
-    }
-
-    /// The row with the largest id for this key, if any.
-    fn latest(&self, content_sha256: &str, questions_sha256: &str) -> StoreResult<Option<Row>> {
-        let connection = self.connection.lock().map_err(|_| StoreError::Io)?;
-        let mut statement = connection
-            .prepare(
-                "SELECT source, model, checked_at, result FROM skill_checks
-                 WHERE content_sha256 = ?1 AND questions_sha256 = ?2
-                 ORDER BY id DESC LIMIT 1",
-            )
-            .map_err(|_| StoreError::Io)?;
-        let mut rows = statement
-            .query(params![content_sha256, questions_sha256])
-            .map_err(|_| StoreError::Io)?;
-        let Some(row) = rows.next().map_err(|_| StoreError::Io)? else {
-            return Ok(None);
-        };
-        let source: String = row.get(0).map_err(|_| StoreError::Io)?;
-        let model: String = row.get(1).map_err(|_| StoreError::Io)?;
-        let checked_at: String = row.get(2).map_err(|_| StoreError::Io)?;
-        let result_text: String = row.get(3).map_err(|_| StoreError::Io)?;
-        let result: ResultJson = serde_json::from_str(&result_text).map_err(|_| StoreError::Io)?;
-        Ok(Some(Row {
-            source,
-            model,
-            checked_at,
-            result,
-        }))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Verdicts
 // ---------------------------------------------------------------------------
 
@@ -606,38 +419,34 @@ fn read_skill_md(skill_directory: &Path) -> Option<Vec<u8>> {
 /// the spec hold; `AgentTool::execute` triggers a check only for
 /// skill-derived definitions.
 pub struct Checker {
-    store: Store,
+    store: Arc<dyn CheckStore>,
     client: Client,
     in_flight: Mutex<HashSet<String>>,
     failures: Mutex<HashMap<String, String>>,
 }
 
 impl Checker {
-    /// Opens `db_path` (creating it, `~/.otto/skill-checks.db` in
-    /// production) and builds a client for `base_url`/`api_key`. Returns
-    /// [`StoreError`]'s text on an unrecognized schema version or an
-    /// unwritable path; the caller prints that once at startup and runs
-    /// without a checker.
-    pub fn open(db_path: &Path, base_url: &str, api_key: &str) -> Result<Self, String> {
-        Ok(Self {
-            store: Store::open(db_path).map_err(|error| error.to_string())?,
-            client: Client::new(base_url, api_key),
-            in_flight: Mutex::new(HashSet::new()),
-            failures: Mutex::new(HashMap::new()),
-        })
-    }
-
     /// An in-memory checker for tests: no filesystem database, and a
     /// zero-delay backoff so a stub 429 does not sleep.
     #[cfg(test)]
     pub(crate) fn open_in_memory(base_url: &str, api_key: &str) -> Self {
-        Self {
-            store: Store::open_in_memory().expect("in-memory store"),
-            client: Client::new(base_url, api_key).with_backoff(vec![
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
+        Self::with_store(
+            Arc::new(
+                crate::storage::backends::turso::skill_checks::Store::open_in_memory()
+                    .expect("in-memory store"),
+            ),
+            Client::new(base_url, api_key).with_backoff(vec![
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
             ]),
+        )
+    }
+
+    pub fn with_store(store: Arc<dyn CheckStore>, client: Client) -> Self {
+        Self {
+            store,
+            client,
             in_flight: Mutex::new(HashSet::new()),
             failures: Mutex::new(HashMap::new()),
         }

@@ -96,6 +96,23 @@ pub fn run(
     stderr: &mut (dyn Write + Send),
     lookup: &HashMap<String, String>,
 ) -> i32 {
+    run_with_storage(
+        args,
+        stdout,
+        stderr,
+        lookup,
+        &crate::runtime::storage::Storage::default(),
+    )
+}
+
+/// Runs the memory command using the process-wide storage routes.
+pub fn run_with_storage(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    lookup: &HashMap<String, String>,
+    storage: &crate::runtime::storage::Storage,
+) -> i32 {
     let Some(subcommand) = args.first().cloned() else {
         return fail(
             stderr,
@@ -162,8 +179,16 @@ pub fn run(
     }
 
     match subcommand.as_str() {
-        "status" => status(&memory_config, &secret_values, &flags.cwd, stdout, stderr),
+        "status" => status(
+            storage,
+            &memory_config,
+            &secret_values,
+            &flags.cwd,
+            stdout,
+            stderr,
+        ),
         "list" => list(ListInput {
+            storage,
             config: &memory_config,
             secret_values: &secret_values,
             cwd: &flags.cwd,
@@ -174,6 +199,7 @@ pub fn run(
             stderr,
         }),
         "show" => show(
+            storage,
             &memory_config,
             &secret_values,
             &flags.cwd,
@@ -189,6 +215,7 @@ pub fn run(
                 return fail(stderr, &format!("resolve cwd: {WORKING_DIRECTORY_INVALID}"));
             };
             forget(
+                storage,
                 &memory_config,
                 &secret_values,
                 &workspace.to_string_lossy(),
@@ -202,6 +229,7 @@ pub fn run(
 }
 
 fn status(
+    storage: &crate::runtime::storage::Storage,
     config: &MemoryRuntime,
     secret_values: &[String],
     cwd: &str,
@@ -210,18 +238,22 @@ fn status(
 ) -> i32 {
     let mut warning = Vec::new();
     let Ok((service, user_scope, usable)) =
-        crate::runtime::wiring::open_memory_service(config, secret_values, &mut warning)
+        crate::runtime::wiring::open_memory_service_with_storage(
+            storage,
+            config,
+            secret_values,
+            &mut warning,
+        )
     else {
         return fail(stderr, BACKEND_UNAVAILABLE);
     };
     let redactor = otto_core::agent::redactor::Redactor::with_completeness(secret_values, true);
     let _ = writeln!(stdout, "enabled: {}", config.enabled);
     let _ = writeln!(stdout, "backend: {}", config.backend);
-    let _ = writeln!(
-        stdout,
-        "path: {}",
-        redactor.redact_string(&config.turso_path)
-    );
+    let endpoint = storage
+        .memory_endpoint(Path::new(&config.turso_path))
+        .unwrap_or_else(|_| "unavailable".into());
+    let _ = writeln!(stdout, "path: {}", redactor.redact_string(&endpoint));
     let _ = writeln!(stdout, "usable: {usable}");
     if usable {
         // The scopes `/memory review` lists: the user and the current workspace.
@@ -268,6 +300,7 @@ fn status(
 }
 
 struct ListInput<'a> {
+    storage: &'a crate::runtime::storage::Storage,
     config: &'a MemoryRuntime,
     secret_values: &'a [String],
     cwd: &'a str,
@@ -280,6 +313,7 @@ struct ListInput<'a> {
 
 fn list(input: ListInput<'_>) -> i32 {
     let ListInput {
+        storage,
         config,
         secret_values,
         cwd,
@@ -294,7 +328,12 @@ fn list(input: ListInput<'_>) -> i32 {
     };
     let mut warning = Vec::new();
     let Ok((service, user_scope, usable)) =
-        crate::runtime::wiring::open_memory_service(config, secret_values, &mut warning)
+        crate::runtime::wiring::open_memory_service_with_storage(
+            storage,
+            config,
+            secret_values,
+            &mut warning,
+        )
     else {
         return fail(stderr, BACKEND_UNAVAILABLE);
     };
@@ -356,7 +395,9 @@ fn list(input: ListInput<'_>) -> i32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show(
+    storage: &crate::runtime::storage::Storage,
     config: &MemoryRuntime,
     secret_values: &[String],
     cwd: &str,
@@ -373,7 +414,12 @@ fn show(
     };
     let mut warning = Vec::new();
     let Ok((service, user_scope, usable)) =
-        crate::runtime::wiring::open_memory_service(config, secret_values, &mut warning)
+        crate::runtime::wiring::open_memory_service_with_storage(
+            storage,
+            config,
+            secret_values,
+            &mut warning,
+        )
     else {
         return fail(stderr, BACKEND_UNAVAILABLE);
     };
@@ -425,6 +471,7 @@ fn show(
 }
 
 fn forget(
+    storage: &crate::runtime::storage::Storage,
     config: &MemoryRuntime,
     secret_values: &[String],
     workspace_path: &str,
@@ -434,7 +481,12 @@ fn forget(
 ) -> i32 {
     let mut warning = Vec::new();
     let Ok((service, user_scope, usable)) =
-        crate::runtime::wiring::open_memory_service(config, secret_values, &mut warning)
+        crate::runtime::wiring::open_memory_service_with_storage(
+            storage,
+            config,
+            secret_values,
+            &mut warning,
+        )
     else {
         return fail(stderr, BACKEND_UNAVAILABLE);
     };
@@ -642,6 +694,53 @@ mod tests {
         for want in ["enabled: true", "backend: turso", &db_path, "usable: true"] {
             assert!(stdout.contains(want), "stdout = {stdout:?}, want {want:?}");
         }
+    }
+
+    #[test]
+    fn status_reports_the_selected_storage_endpoint() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let old = tempfile::tempdir().expect("old store");
+        let selected = tempfile::tempdir().expect("selected store");
+        let configured_path = old.path().join("memory.db");
+        let selected_path = selected.path().join("memory.db");
+        let config = memory_config(home.path(), &configured_path.to_string_lossy());
+        let routes = std::collections::BTreeMap::from([(
+            "memory".into(),
+            crate::storage::migration::StorageRoute {
+                backend: "sqlite".into(),
+                endpoint: selected_path.to_string_lossy().into_owned(),
+            },
+        )]);
+        let storage = crate::runtime::storage::Storage::default()
+            .with_routes(routes)
+            .expect("route");
+        let args = [
+            "status",
+            "--config",
+            &config,
+            "--cwd",
+            &workspace.path().to_string_lossy(),
+        ]
+        .map(str::to_owned);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        assert_eq!(
+            run_with_storage(
+                &args,
+                &mut stdout,
+                &mut stderr,
+                &lookup(home.path()),
+                &storage
+            ),
+            0,
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        let output = String::from_utf8_lossy(&stdout);
+        assert!(output.contains(&selected_path.to_string_lossy().to_string()));
+        assert!(!output.contains(&configured_path.to_string_lossy().to_string()));
     }
 
     /// A captured token must not survive into the status output.
@@ -953,6 +1052,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = status(
+            &crate::runtime::storage::Storage::default(),
             &runtime,
             std::slice::from_ref(&secret),
             ".",

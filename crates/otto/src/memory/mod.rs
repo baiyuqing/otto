@@ -1,13 +1,15 @@
-//! Durable memory contracts, policy, guards, local Turso storage, and service.
+//! Durable memory contracts, policy, guards, repository port, and service.
 
 pub mod advice;
 pub mod contracts;
 pub mod guard;
 pub mod json;
+pub mod repository;
 pub mod scope;
 pub mod service;
 pub mod turso;
 pub mod validate;
 
 pub use contracts::*;
+pub use repository::MemoryStore;
 pub use service::{Binding, Policy, Service};

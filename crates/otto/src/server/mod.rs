@@ -260,7 +260,7 @@ pub struct Options {
     pub workflows: Option<Arc<crate::workflow::Controller>>,
     /// The scheduled-delivery store shared by every workspace; `None` when
     /// `~/.otto/schedule.db` could not be opened.
-    pub schedule: Option<Arc<crate::schedule::Store>>,
+    pub schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
 }
 
 // ---- registry ----
@@ -454,7 +454,7 @@ pub struct Server {
     wake_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cancel: CancellationToken,
     workflows: Option<Arc<crate::workflow::Controller>>,
-    schedule: Option<Arc<crate::schedule::Store>>,
+    schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     /// Bumped whenever a `GET /v1/status` snapshot could change: a session
     /// opened or closed, a turn started or finished, a task registry update,
     /// or a granted Bash approval. See [`Server::status_snapshot`].
@@ -510,7 +510,7 @@ impl Server {
 
     /// The scheduled-delivery store, for the ACP TCP listener's delivery
     /// workers.
-    pub fn schedule_store(&self) -> Option<Arc<crate::schedule::Store>> {
+    pub fn schedule_store(&self) -> Option<Arc<dyn crate::schedule::ScheduleStore>> {
         self.schedule.clone()
     }
 
@@ -2961,7 +2961,7 @@ mod tests {
         /// directory as its home, so `~/.otto/skills` is `<home>/.otto/skills`.
         reflection: Option<(Arc<crate::reflection::Store>, std::path::PathBuf)>,
         /// The scheduled-delivery store behind `/v1/schedule/*`.
-        schedule: Option<Arc<crate::schedule::Store>>,
+        schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     }
 
     struct Harness {
@@ -4121,7 +4121,7 @@ mod tests {
     async fn a_turn_origin_defaults_to_web_and_is_validated() {
         let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
         let harness = Harness::with(HarnessOptions {
-            schedule: Some(Arc::clone(&store)),
+            schedule: Some(store.clone()),
             ..HarnessOptions::default()
         });
         let id = harness.create().await;
@@ -4165,7 +4165,7 @@ mod tests {
     async fn a_queued_turn_keeps_its_own_origin() {
         let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
         let (gate, mut options) = gated();
-        options.schedule = Some(Arc::clone(&store));
+        options.schedule = Some(store.clone());
         let harness = Harness::with(options);
         let id = harness.create().await;
         let chat = crate::schedule::Origin::parse("chat:feishu:c1").expect("origin");
@@ -4187,7 +4187,7 @@ mod tests {
     fn schedule_harness() -> (Harness, Arc<crate::schedule::Store>) {
         let store = Arc::new(crate::schedule::Store::open_in_memory().expect("store"));
         let harness = Harness::with(HarnessOptions {
-            schedule: Some(Arc::clone(&store)),
+            schedule: Some(store.clone()),
             ..HarnessOptions::default()
         });
         (harness, store)
@@ -4554,6 +4554,7 @@ mod tests {
                 prompt: "first".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -5444,7 +5445,7 @@ mod tests {
             guard::check(candidate, &entries, &|text: &str| text.to_owned()).expect("check");
         let vetted = guard::approve(checked, Verdict::NotRequested);
         crate::reflection::skillwrite::apply(
-            &home.store,
+            home.store.as_ref(),
             &home.roots,
             &vetted,
             "run-7",
@@ -6759,7 +6760,7 @@ mod tests {
         );
 
         let harness = Harness::with(HarnessOptions {
-            task_recorder: Some(Arc::clone(&store)),
+            task_recorder: Some(store.clone()),
             ..HarnessOptions::default()
         });
 
@@ -6810,7 +6811,7 @@ mod tests {
             );
         }
         let harness = Harness::with(HarnessOptions {
-            task_recorder: Some(Arc::clone(&store)),
+            task_recorder: Some(store.clone()),
             ..HarnessOptions::default()
         });
 
@@ -6850,7 +6851,7 @@ mod tests {
 
         let store = Arc::new(Store::open_in_memory().expect("store"));
         let harness = Harness::with(HarnessOptions {
-            task_recorder: Some(Arc::clone(&store)),
+            task_recorder: Some(store.clone()),
             ..HarnessOptions::default()
         });
         let owned_session = harness.create().await;
@@ -6906,7 +6907,7 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let store = Arc::new(Store::open_in_memory().expect("store"));
         let harness = Harness::with(HarnessOptions {
-            task_recorder: Some(Arc::clone(&store)),
+            task_recorder: Some(store.clone()),
             ..HarnessOptions::default()
         });
 

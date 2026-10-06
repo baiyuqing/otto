@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::store::{CreateError, Item, NewItem};
 use super::time::{format_duration, format_local, next_occurrence, resolve_at};
-use super::{Kind, Origin, Repeat, State, Store};
+use super::{Kind, Origin, Repeat, ScheduleStore, State};
 use crate::tool::result::decode_strict_json;
 use crate::tool::{
     ApprovalSpec, CONTEXT_CANCELED, Tool, definition, error_result, preflight_error, text_result,
@@ -56,14 +56,14 @@ impl TurnOrigin {
 #[derive(Clone)]
 pub struct Context {
     /// `None` when `schedule.db` could not be opened.
-    pub store: Option<Arc<Store>>,
+    pub store: Option<Arc<dyn ScheduleStore>>,
     pub origin: Arc<TurnOrigin>,
     pub session_id: String,
     pub workspace: String,
 }
 
 impl Context {
-    fn available(&self) -> Result<(Arc<Store>, Origin), ToolResult> {
+    fn available(&self) -> Result<(Arc<dyn ScheduleStore>, Origin), ToolResult> {
         let Some(origin) = self.origin.get() else {
             return Err(preflight_error(NO_ORIGIN));
         };
@@ -416,6 +416,7 @@ mod tests {
     use otto_core::model::EffectCertainty;
 
     use super::*;
+    use crate::schedule::Store;
     use crate::tool::testutil::{run, run_cancelled};
 
     fn context(origin: Option<Origin>) -> Context {

@@ -20,6 +20,7 @@
 //! decision; see the README for the features that are deliberately absent.
 
 pub mod check;
+pub mod check_repository;
 pub mod frontmatter;
 pub mod prompt;
 

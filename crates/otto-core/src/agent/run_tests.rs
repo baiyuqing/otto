@@ -2,8 +2,9 @@
 //! tasks.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
@@ -2611,12 +2612,19 @@ impl Session for FailingSession {
         self.inner.append_compaction(checkpoint).await
     }
 
-    fn append_custom(
+    async fn append_operation_fact(
+        &self,
+        fact: crate::session::OperationFact,
+    ) -> Result<(), crate::session::SessionError> {
+        self.inner.append_operation_fact(fact).await
+    }
+
+    async fn append_custom(
         &self,
         custom_type: &str,
         data: &str,
     ) -> Result<(), crate::session::SessionError> {
-        self.inner.append_custom(custom_type, data)
+        self.inner.append_custom(custom_type, data).await
     }
 }
 
@@ -2658,7 +2666,7 @@ impl Session for OperationFailingSession {
         self.inner.append_compaction(checkpoint).await
     }
 
-    fn append_operation_fact(
+    async fn append_operation_fact(
         &self,
         fact: crate::session::OperationFact,
     ) -> Result<(), crate::session::SessionError> {
@@ -2667,7 +2675,7 @@ impl Session for OperationFailingSession {
                 "operation disk full".into(),
             ));
         }
-        self.inner.append_operation_fact(fact)
+        self.inner.append_operation_fact(fact).await
     }
 
     fn operation_history(&self) -> Vec<crate::session::OperationFact> {
@@ -2678,17 +2686,98 @@ impl Session for OperationFailingSession {
         self.inner.operation_ledger()
     }
 
-    fn append_custom(
+    async fn append_custom(
         &self,
         custom_type: &str,
         data: &str,
     ) -> Result<(), crate::session::SessionError> {
-        self.inner.append_custom(custom_type, data)
+        self.inner.append_custom(custom_type, data).await
     }
 }
 
 struct CountingExecutor {
     calls: Arc<AtomicUsize>,
+}
+
+struct AsyncOrderingSession {
+    inner: MemorySession,
+    attempt_persisted: Arc<AtomicBool>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Session for AsyncOrderingSession {
+    fn messages(&self) -> Vec<Message> {
+        self.inner.messages()
+    }
+    async fn append(&self, message: Message) -> Result<(), crate::session::SessionError> {
+        self.inner.append(message).await
+    }
+    fn latest_compaction(&self) -> Option<crate::session::CompactionMetadata> {
+        self.inner.latest_compaction()
+    }
+    async fn append_compaction(
+        &self,
+        checkpoint: crate::session::CompactionCheckpoint,
+    ) -> Result<crate::session::CompactionMetadata, crate::session::SessionError> {
+        self.inner.append_compaction(checkpoint).await
+    }
+    async fn append_operation_fact(
+        &self,
+        fact: crate::session::OperationFact,
+    ) -> Result<(), crate::session::SessionError> {
+        let mut yielded = false;
+        std::future::poll_fn(|cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+        self.inner.append_operation_fact(fact).await?;
+        self.attempt_persisted.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    fn operation_history(&self) -> Vec<crate::session::OperationFact> {
+        self.inner.operation_history()
+    }
+    fn operation_ledger(&self) -> crate::session::OperationLedger {
+        self.inner.operation_ledger()
+    }
+    async fn append_custom(
+        &self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), crate::session::SessionError> {
+        self.inner.append_custom(custom_type, data).await
+    }
+}
+
+struct DispatchAfterFactExecutor(Arc<AtomicBool>);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl ToolExecutor for DispatchAfterFactExecutor {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        EchoExecutor::default().definitions()
+    }
+    async fn execute(
+        &self,
+        call: crate::tool::ToolCall<'_>,
+        _control: &dyn OperationControl,
+    ) -> crate::tool::ToolExecution {
+        assert!(
+            self.0.load(Ordering::SeqCst),
+            "tool ran before its attempt fact was durable"
+        );
+        crate::tool::ToolExecution::completed(ToolResult {
+            content: call.arguments.get().to_owned(),
+            ..ToolResult::default()
+        })
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -2731,6 +2820,31 @@ async fn a_failed_attempt_fact_stops_before_tool_dispatch() {
     assert!(error.to_string().contains("operation attempt"), "{error}");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(agent.session().operation_history().is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn async_operation_fact_is_durable_before_tool_dispatch() {
+    let attempt_persisted = Arc::new(AtomicBool::new(false));
+    let agent = Agent::new(
+        FakeProvider::new(vec![
+            Turn::tool_call("c1", r#"{"value":1}"#),
+            Turn::text("done"),
+        ]),
+        DispatchAfterFactExecutor(Arc::clone(&attempt_persisted)),
+        AsyncOrderingSession {
+            inner: MemorySession::new(),
+            attempt_persisted: Arc::clone(&attempt_persisted),
+        },
+        options(),
+    );
+
+    agent
+        .run("hello", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+    assert!(attempt_persisted.load(Ordering::SeqCst));
+    assert_eq!(agent.session().operation_history().len(), 2);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

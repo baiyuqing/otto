@@ -10,8 +10,8 @@
 //! Ownership: [`serve`] owns the connection until stdin ends or the process
 //! token is cancelled. It then cancels every running prompt, waits for the
 //! request tasks, and returns the session controllers; the caller closes them
-//! (see `cli/acp.rs`). One workspace per process: `cwd` in every request must
-//! canonicalize to the configured workspace.
+//! (see `cli/acp.rs`). Local ACP stays in one workspace. Attached ACP forwards
+//! each request's workspace to serve for canonicalization and admission.
 //!
 //! Concurrency: the read loop handles `initialize` and `session/cancel`
 //! inline and runs every other method as a task, so a long prompt never
@@ -30,11 +30,11 @@ mod shared_approval;
 pub mod tcp;
 pub mod update;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use agent_client_protocol_schema::ProtocolVersion;
 use agent_client_protocol_schema::v1::{
@@ -418,9 +418,15 @@ enum Backend {
 }
 
 /// State shared by the read loop and its request tasks.
+struct NoticeWatch {
+    controller: Weak<Controller>,
+    stop: CancellationToken,
+}
+
 struct Connection {
     client_capabilities: Mutex<Value>,
-    /// The canonical workspace every request's `cwd` must match.
+    /// Local requests must match this startup workspace; attached lists use
+    /// it only when their request omits `cwd`.
     workspace: PathBuf,
     backend: Backend,
     out: mpsc::UnboundedSender<Value>,
@@ -429,7 +435,7 @@ struct Connection {
     next_request_id: AtomicU64,
     task_stop: CancellationToken,
     notice_stop: CancellationToken,
-    watching_notices: Mutex<HashSet<String>>,
+    watching_notices: Mutex<HashMap<String, NoticeWatch>>,
     notice_ready: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
     /// One wake loop per local session; awaited before `serve` returns.
     wake_loops: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
@@ -486,14 +492,17 @@ impl Connection {
         }
     }
 
-    /// Accepts `cwd` only when it canonicalizes to the process workspace.
-    fn check_cwd(&self, cwd: Option<&str>) -> Result<(), Error> {
+    /// Local ACP stays pinned to its workspace; serve owns attach admission.
+    fn request_workspace(&self, cwd: Option<&str>) -> Result<PathBuf, Error> {
         let cwd = cwd.ok_or_else(|| invalid_params("cwd is required"))?;
         if !Path::new(cwd).is_absolute() {
             return Err(invalid_params("cwd must be an absolute path"));
         }
+        if matches!(&self.backend, Backend::Attach(_)) {
+            return Ok(PathBuf::from(cwd));
+        }
         match crate::runtime::sandbox_runtime::canonical_directory(Path::new(cwd)) {
-            Ok(canonical) if canonical == self.workspace => Ok(()),
+            Ok(canonical) if canonical == self.workspace => Ok(canonical),
             _ => Err(invalid_params(format!(
                 "cwd must be the workspace {}",
                 self.workspace.display()
@@ -503,11 +512,11 @@ impl Connection {
 
     async fn new_session(self: &Arc<Self>, params: Value) -> Reply {
         let params = SessionParams::parse(params)?;
-        self.check_cwd(params.cwd.as_deref())?;
+        let workspace = self.request_workspace(params.cwd.as_deref())?;
         params.check_mcp_servers()?;
         let reply = match &self.backend {
             Backend::Local(local) => local.new_session().await,
-            Backend::Attach(relay) => relay.new_session(&self.workspace).await,
+            Backend::Attach(relay) => relay.new_session(&workspace).await,
         }?;
         let id = reply
             .get("sessionId")
@@ -520,7 +529,7 @@ impl Connection {
 
     async fn load_session(self: &Arc<Self>, params: Value) -> Reply {
         let params = SessionParams::parse(params)?;
-        self.check_cwd(params.cwd.as_deref())?;
+        let workspace = self.request_workspace(params.cwd.as_deref())?;
         params.check_mcp_servers()?;
         let id = params.session_id.unwrap_or_default();
         if !is_session_id(&id) {
@@ -529,8 +538,8 @@ impl Connection {
             ));
         }
         let history = match &self.backend {
-            Backend::Local(local) => local.load_session(&id, &self.workspace).await?,
-            Backend::Attach(relay) => relay.load_session(&id, &self.workspace).await?,
+            Backend::Local(local) => local.load_session(&id, &workspace).await?,
+            Backend::Attach(relay) => relay.load_session(&id, &workspace).await?,
         };
         for update in update::history_updates(&history) {
             self.update(&id, update);
@@ -589,28 +598,49 @@ impl Connection {
     /// its controller was built. An attached session starts at the current
     /// cursor, so a reconnect does not replay old outcomes.
     async fn start_notice_watcher(self: &Arc<Self>, session_id: &str) {
-        if !self
-            .watching_notices
-            .lock()
-            .expect("notice watcher set")
-            .insert(session_id.into())
-        {
-            return;
-        }
         let id = session_id.to_string();
+        let controller = match &self.backend {
+            Backend::Local(local) => local
+                .session(&id)
+                .map(|session| Arc::clone(&session.controller)),
+            Backend::Attach(relay) => relay
+                .server
+                .as_ref()
+                .and_then(|server| server.controller(&id)),
+        };
         let connection = Arc::clone(self);
         let stop = self.notice_stop.child_token();
+        {
+            let mut watchers = self.watching_notices.lock().expect("notice watchers");
+            if let Some(current) = &controller
+                && watchers
+                    .get(&id)
+                    .and_then(|watch| watch.controller.upgrade())
+                    .is_some_and(|watched| Arc::ptr_eq(&watched, current))
+            {
+                return;
+            }
+            // A different client may have closed and reopened this session id.
+            if let Some(previous) = watchers.insert(
+                id.clone(),
+                NoticeWatch {
+                    controller: controller.as_ref().map(Arc::downgrade).unwrap_or_default(),
+                    stop: stop.clone(),
+                },
+            ) {
+                previous.stop.cancel();
+            }
+        }
         let (ready, start) = tokio::sync::watch::channel(false);
         self.notice_ready
             .lock()
             .expect("notice ready map")
             .insert(id.clone(), ready);
         match &self.backend {
-            Backend::Local(local) => {
-                let Some(session) = local.session(&id) else {
+            Backend::Local(_) => {
+                let Some(controller) = controller else {
                     return;
                 };
-                let controller = Arc::clone(&session.controller);
                 let changed = controller.notices_changed();
                 // This session owns the controller, so every notice it holds,
                 // including one queued when it was built, is new to this client.
@@ -642,8 +672,8 @@ impl Connection {
                 });
             }
             Backend::Attach(relay) => {
-                if let Some(server) = &relay.server {
-                    let Some(controller) = server.controller(&id) else {
+                if relay.server.is_some() {
+                    let Some(controller) = controller else {
                         return;
                     };
                     let changed = controller.notices_changed();
@@ -811,10 +841,13 @@ impl Connection {
     }
 
     async fn list_sessions(&self, params: Value) -> Reply {
-        self.check_cwd(params.get("cwd").and_then(Value::as_str))?;
+        let workspace = match params.get("cwd") {
+            None | Some(Value::Null) => self.workspace.clone(),
+            Some(value) => self.request_workspace(value.as_str())?,
+        };
         let sessions = match &self.backend {
             Backend::Local(local) => local.list_sessions().await?,
-            Backend::Attach(relay) => relay.list_sessions(&self.workspace).await?,
+            Backend::Attach(relay) => relay.list_sessions(&workspace).await?,
         };
         result(ListSessionsResponse::new(sessions))
     }
@@ -1253,6 +1286,9 @@ async fn watch_controller_notices(
     // A receiver subscribed before a line was queued does not fire for it
     // again, so read what is already queued before the first wait.
     loop {
+        if stop.is_cancelled() {
+            return;
+        }
         let (notices, last) = if wake_replies {
             controller.wake_replies_since(after)
         } else {
@@ -1522,11 +1558,11 @@ fn initialize_result(local: bool) -> Reply {
     let capabilities = match local {
         true => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
+            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "scheduleDeliveryChats": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
         )])),
         false => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
+            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "scheduleDeliveryChats": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
         )])),
     };
     result(
@@ -1611,19 +1647,22 @@ impl Dispatcher {
                     Backend::Local(_) => true,
                     Backend::Attach(relay) => relay.server.is_some(),
                 };
+                let platforms = schedule::delivery_platforms(&params);
+                if let Err(message) = schedule::delivery_chats(&params, &platforms) {
+                    return connection.reply(id, Err(invalid_params(message)));
+                }
                 *connection
                     .client_capabilities
                     .lock()
                     .expect("ACP capabilities") = params.clone();
-                connection.reply(id, initialize_result(local));
-                if !self.scheduling {
-                    let platforms = schedule::delivery_platforms(&params);
-                    if let Some(worker) = schedule::worker(&connection, platforms) {
-                        self.scheduling = true;
-                        let stop = self.stop.clone();
-                        self.tasks.spawn(worker.run(stop));
-                    }
+                if !self.scheduling
+                    && let Some(worker) = schedule::worker(&connection, platforms)
+                {
+                    self.scheduling = true;
+                    let stop = self.stop.clone();
+                    self.tasks.spawn(worker.run(stop));
                 }
+                connection.reply(id, initialize_result(local));
             }
             "session/new" => {
                 self.tasks.spawn(async move {
@@ -2059,7 +2098,7 @@ async fn drive<T>(
         task_stop: task_stop.clone(),
         notice_ready: Mutex::new(HashMap::new()),
         notice_stop: notice_stop.clone(),
-        watching_notices: Mutex::new(HashSet::new()),
+        watching_notices: Mutex::new(HashMap::new()),
         wake_loops: Mutex::new(HashMap::new()),
     });
     let mut lines = read_lines(stdin);
@@ -2156,6 +2195,103 @@ mod channel_tests {
         assert_eq!(session, "s1");
         assert_eq!(text, "plain user text");
         assert_eq!(channel, Some(Channel::Telegram));
+    }
+
+    #[tokio::test]
+    async fn reloading_a_session_rebinds_notices_to_the_current_controller() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let first =
+            Arc::new(crate::cli::testutil::controller(workspace.path(), sessions.path()).await);
+        let second =
+            Arc::new(crate::cli::testutil::controller(workspace.path(), sessions.path()).await);
+        let id = first.info().session_id;
+        let builder = Arc::clone(first.builder());
+        let (out, mut frames) = mpsc::unbounded_channel();
+        let connection = Arc::new(Connection {
+            workspace: workspace.path().to_path_buf(),
+            backend: Backend::Local(Box::new(Local {
+                config: Config {
+                    runtime: crate::cli::testutil::initial_runtime(&builder),
+                    builder,
+                    workspace: workspace.path().to_path_buf(),
+                    sandbox: None,
+                },
+                sessions: Mutex::new(HashMap::from([(
+                    id.clone(),
+                    Arc::new(Session {
+                        controller: Arc::clone(&first),
+                        prompt: Arc::new(PromptSlot::default()),
+                    }),
+                )])),
+            })),
+            out,
+            pending: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(1),
+            client_capabilities: Mutex::new(Value::Null),
+            task_stop: CancellationToken::new(),
+            notice_stop: CancellationToken::new(),
+            watching_notices: Mutex::new(HashMap::new()),
+            notice_ready: Mutex::new(HashMap::new()),
+            wake_loops: Mutex::new(HashMap::new()),
+        });
+        connection.start_notice_watcher(&id).await;
+        connection.notices_ready(&Ok(json!({"sessionId": id})));
+        first.push_notice("before close");
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            frame
+                .pointer("/params/update/content/text")
+                .and_then(Value::as_str),
+            Some("before close")
+        );
+        let previous = connection
+            .watching_notices
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .stop
+            .clone();
+        connection.start_notice_watcher(&id).await;
+        assert!(
+            !previous.is_cancelled(),
+            "same controller keeps its subscription"
+        );
+        let Backend::Local(local) = &connection.backend else {
+            unreachable!()
+        };
+        local.sessions.lock().unwrap().insert(
+            id.clone(),
+            Arc::new(Session {
+                controller: Arc::clone(&second),
+                prompt: Arc::new(PromptSlot::default()),
+            }),
+        );
+        connection.start_notice_watcher(&id).await;
+        connection.notices_ready(&Ok(json!({"sessionId": id})));
+        assert!(
+            previous.is_cancelled(),
+            "retired controller subscription must stop"
+        );
+        first.push_notice("old controller");
+        second.push_notice("new controller");
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            frame
+                .pointer("/params/update/content/text")
+                .and_then(Value::as_str),
+            Some("new controller")
+        );
+        connection.notice_stop.cancel();
+        first.close().unwrap();
+        second.close().unwrap();
     }
 
     #[tokio::test]

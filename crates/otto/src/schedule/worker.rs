@@ -1,6 +1,6 @@
 //! The loops that run scheduled prompts and deliver ready items.
 //!
-//! One [`Worker`] runs in each long-lived process. The run role and the
+//! A [`Worker`] runs per process role or ACP connection. The run role and the
 //! delivery role are separate loops joined in one task: a run takes minutes
 //! and must not delay deliveries. A store error is written as
 //! `schedule_store_error` to the worker's [`Logger`] (a discard logger in the
@@ -118,7 +118,38 @@ impl Worker {
                 deliver_loop(&store, role, &telemetry, &cancel).await;
             }
         };
-        tokio::join!(runs, deliveries);
+        let heartbeats = async {
+            if let Some(role) = &deliver
+                && let Scope::DeliveryClient(id) = &role.scope
+            {
+                let mut ticker = tokio::time::interval(Duration::from_secs(15));
+                let mut previous = Vec::new();
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        _ = ticker.tick() => match store.refresh_delivery_client(id, Utc::now()) {
+                            Ok(conflicts) => {
+                                if conflicts != previous {
+                                    if !conflicts.is_empty() {
+                                        telemetry.logger.warn("schedule_delivery_conflict", &[("platforms", conflicts.join(",")), ("reason", "multiple clients offer this platform; legacy delivery suspended".into())]);
+                                    }
+                                    previous = conflicts;
+                                }
+                            }
+                            Err(error) => telemetry.store_error("refresh_delivery_client", error),
+                        }
+                    }
+                }
+            }
+        };
+        tokio::join!(runs, deliveries, heartbeats);
+        if let Some(role) = &deliver
+            && let Scope::DeliveryClient(id) = &role.scope
+            && let Err(error) = store.unregister_delivery_client(id)
+        {
+            telemetry.store_error("unregister_delivery_client", error);
+        }
     }
 }
 
@@ -293,7 +324,9 @@ where
         }
         let now = Utc::now();
         let wait = match store.next_due(now) {
-            Ok(Some(at)) => (at - now).clamp(TimeDelta::zero(), TimeDelta::MAX),
+            // Overdue but unclaimable rows belong to another scope or an
+            // ambiguous legacy destination; they must not drive a busy loop.
+            Ok(Some(at)) if at > now => (at - now).clamp(TimeDelta::zero(), TimeDelta::MAX),
             _ => TimeDelta::MAX,
         }
         .to_std()
@@ -314,6 +347,45 @@ mod tests {
 
     use super::*;
     use crate::schedule::{Kind, NewItem, State};
+
+    #[tokio::test(start_paused = true)]
+    async fn overdue_unclaimable_items_wait_instead_of_polling_at_minimum_idle() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let now = Utc::now();
+        store
+            .create(
+                NewItem {
+                    origin: Origin::web(),
+                    session_id: "s".into(),
+                    workspace: "/work".into(),
+                    kind: Kind::Text,
+                    body: "another client's item".into(),
+                    repeat: None,
+                    local_time: None,
+                    due_at: now - TimeDelta::seconds(1),
+                },
+                now,
+            )
+            .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&calls);
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let worker = tokio::spawn(async move {
+            idle_loop(&store, &stop, |_| {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::future::ready(false)
+            })
+            .await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        cancel.cancel();
+        worker.await.unwrap();
+    }
 
     fn telegram() -> Origin {
         Origin::chat("telegram", "42").unwrap()

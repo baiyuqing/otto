@@ -117,6 +117,10 @@ pub enum Scope {
     Web,
     /// Chat platforms, as in [`Origin::chat_platform`].
     Chats(Vec<String>),
+    /// Explicit admitted destinations.
+    Origins(Vec<Origin>),
+    /// Resolved against live client registrations by the store before claiming.
+    DeliveryClient(String),
 }
 
 impl Scope {
@@ -125,6 +129,8 @@ impl Scope {
             Self::Any => true,
             Self::Terminal => origin.as_str() == "terminal",
             Self::Web => origin.as_str() == "web",
+            Self::Origins(origins) => origins.contains(origin),
+            Self::DeliveryClient(_) => false,
             Self::Chats(platforms) => origin
                 .chat_platform()
                 .is_some_and(|platform| platforms.iter().any(|p| p == platform)),

@@ -293,6 +293,10 @@ impl Session for SharedTranscript {
         self.0.append_operation_fact(fact).await
     }
 
+    fn observed_tools(&self) -> Option<Vec<String>> {
+        self.0.observed_tools()
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2681,6 +2685,10 @@ mod tests {
             self.inner.append_operation_fact(fact).await
         }
 
+        fn observed_tools(&self) -> Option<Vec<String>> {
+            self.inner.observed_tools()
+        }
+
         async fn append_custom(
             &self,
             custom_type: &str,
@@ -3305,7 +3313,7 @@ mod tests {
         let provider = FakeProvider::new();
         provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
         let tasks = Arc::new(Tasks::new());
-        let mut config = test_config(&provider, &tasks, Vec::new());
+        let mut config = test_config(&provider, &tasks, vec![stub("write"), stub("grep")]);
         let source = parent.clone();
         config.parent_session = Some(Arc::new(move || source.clone()));
         let (runner, _) = runner(config);
@@ -3322,9 +3330,30 @@ mod tests {
         wait_final(&tasks, &task.id).await;
 
         let messages = provider.requests()[0].messages.clone();
-        assert_eq!(messages.len(), want_snapshot.len() + 1, "{messages:#?}");
+        // The child has history and no tool-set record, so its first run adds
+        // the legacy tool-set notice between the snapshot and the prompt.
+        assert_eq!(messages.len(), want_snapshot.len() + 2, "{messages:#?}");
         assert_eq!(&messages[..want_snapshot.len()], want_snapshot.as_slice());
-        let last = &messages[want_snapshot.len()];
+        let notice = &messages[want_snapshot.len()];
+        assert_eq!(notice.role, Role::Context);
+        assert_eq!(notice.context_type, "capability_update");
+        let mut names: Vec<String> = provider.requests()[0]
+            .tools
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
+        assert!(!names.is_empty());
+        names.sort();
+        let text = notice.text();
+        assert!(text.contains("was not recorded"), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line == format!("Current tools: {}", names.join(", "))),
+            "{text}"
+        );
+        assert!(!text.contains("Added:"), "{text}");
+        assert!(!text.contains("Removed:"), "{text}");
+        let last = &messages[want_snapshot.len() + 1];
         assert_eq!(last.role, Role::User);
         assert_eq!(last.text(), "delegated task");
     }
@@ -3802,6 +3831,24 @@ mod tests {
         dangling: bool,
         status: &str,
     ) -> PathBuf {
+        interrupted_fixture_with_capabilities(
+            parent, task_id, prompt, definition, started, dangling, status, None,
+        )
+    }
+
+    /// [`interrupted_fixture`] that also records `capabilities` as the child's
+    /// `otto.capabilities` entry when set.
+    #[allow(clippy::too_many_arguments)]
+    fn interrupted_fixture_with_capabilities(
+        parent: &std::path::Path,
+        task_id: &str,
+        prompt: &str,
+        definition: Option<TaskSpecDefinition>,
+        started: bool,
+        dangling: bool,
+        status: &str,
+        capabilities: Option<&[String]>,
+    ) -> PathBuf {
         let name = format!("{task_id}-child");
         let store = crate::session::Store::create_child_lazy(
             parent,
@@ -3844,6 +3891,14 @@ mod tests {
             store
                 .append_message(&dangling_call())
                 .expect("append dangling call");
+        }
+        if let Some(names) = capabilities {
+            store
+                .append_custom_entry(
+                    otto_core::session::CAPABILITIES_CUSTOM_TYPE,
+                    &otto_core::session::encode_capabilities(names),
+                )
+                .expect("append capabilities");
         }
 
         let result = serde_json::to_string(&TaskResultData { status, error: "" })
@@ -3982,6 +4037,88 @@ mod tests {
         assert_eq!(requests[0].messages.len(), 1, "{:?}", requests[0].messages);
         assert_eq!(requests[0].messages[0].role, Role::User);
         assert_eq!(requests[0].messages[0].text(), "start now");
+    }
+
+    /// Resumes a started, dangling child whose recorded tool set is
+    /// `recorded`, with a runner that offers `stub("read")`, `stub("grep")` and
+    /// the child-only `agent_report`. Returns the first provider request.
+    async fn resume_with_recorded_tools(recorded: &[&str]) -> otto_core::provider::Request {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        let recorded: Vec<String> = recorded.iter().map(|name| (*name).to_string()).collect();
+        interrupted_fixture_with_capabilities(
+            &parent_path,
+            "t1",
+            "look at this",
+            None,
+            true,
+            true,
+            interrupted::INTERRUPTED_STATUS,
+            Some(&recorded),
+        );
+
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let mut config = config_with_children_dir(&provider, &tasks, children_dir);
+        config.tools = vec![stub("read"), stub("grep")];
+        let (runner, _) = runner(config);
+
+        runner
+            .resume("t1", "continue please".to_string())
+            .await
+            .expect("resume succeeds");
+        wait_final(&tasks, "t1").await;
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        requests[0].clone()
+    }
+
+    #[tokio::test]
+    async fn resume_announces_a_changed_tool_set_once_before_the_prompt() {
+        let request = resume_with_recorded_tools(&["agent_report", "grep", "retired_tool"]).await;
+
+        let notices: Vec<usize> = request
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.context_type == "capability_update")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(notices.len(), 1, "{:#?}", request.messages);
+        let index = notices[0];
+        let notice = &request.messages[index];
+        assert_eq!(notice.role, Role::Context);
+        let text = notice.text();
+        assert!(text.lines().any(|line| line == "Added: read"), "{text}");
+        assert!(
+            text.lines().any(|line| line == "Removed: retired_tool"),
+            "{text}"
+        );
+        assert!(!text.contains("was not recorded"), "{text}");
+        // After the stored history (prompt, dangling call and its result),
+        // immediately before the resume prompt.
+        assert!(index >= 3, "{:#?}", request.messages);
+        assert_eq!(index, request.messages.len() - 2, "{:#?}", request.messages);
+        let last = request.messages.last().expect("messages");
+        assert_eq!(last.role, Role::User);
+        assert_eq!(last.text(), "continue please");
+    }
+
+    #[tokio::test]
+    async fn resume_with_an_unchanged_tool_set_adds_no_notice() {
+        let request = resume_with_recorded_tools(&["agent_report", "grep", "read"]).await;
+
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| message.context_type != "capability_update"),
+            "{:#?}",
+            request.messages
+        );
+        assert_eq!(last_user_text(&request), "continue please");
     }
 
     #[tokio::test]

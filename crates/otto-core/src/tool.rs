@@ -184,9 +184,30 @@ pub trait ToolExecutor {
     async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution;
 }
 
+/// Whether a tool name is safe to write into a prompt verbatim: ASCII
+/// letters, digits, `_` and `-`, at most 64 bytes.
+pub fn safe_prompt_tool_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    name.bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_names_are_screened() {
+        assert!(safe_prompt_tool_name("agent_wait"));
+        assert!(safe_prompt_tool_name("alpha-2"));
+        assert!(!safe_prompt_tool_name(""));
+        assert!(!safe_prompt_tool_name("a b"));
+        assert!(!safe_prompt_tool_name("é"));
+        assert!(safe_prompt_tool_name(&"x".repeat(64)));
+        assert!(!safe_prompt_tool_name(&"x".repeat(65)));
+    }
 
     #[test]
     fn unknown_tool_result_names_the_tool() {

@@ -155,6 +155,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Tell the model when a resumed session's tool set differs from the tool set
+  recorded for it. At run start Otto appends a `capability_update` message,
+  shown in the transcript, before the user message. It lists added and removed
+  tools, or the current tools for sessions written before the record. Otto
+  stores the tool names in an `otto.capabilities` session entry. Compaction
+  carries summarized notices verbatim in a `<capability-updates>` block.
+  ([#373](https://github.com/baiyuqing/otto/pull/373))
+
 - Open versioned lifecycle hooks and custom command tools on installed plugin
   snapshots, with sandbox execution, exact-argument authorization and
   append-only rewrite auditing. ([#358](https://github.com/baiyuqing/otto/pull/358))
@@ -481,6 +489,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([#341](https://github.com/baiyuqing/otto/pull/341))
 
 ### Documentation
+
+- Add a mandatory contributor rule: a PR that adds, changes, removes or
+  renames a model-callable capability updates its tool description, schema
+  field descriptions, prompt policy section, sub-agent exclusion and user
+  manual. Descriptions are short and unambiguous and state the capability,
+  inputs and outputs. ([#373](https://github.com/baiyuqing/otto/pull/373))
 
 - Add and maintain English/Chinese README guidance, the user manual,
   architecture/development contracts, the code organization map, and historical

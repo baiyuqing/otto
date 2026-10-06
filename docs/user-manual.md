@@ -751,6 +751,16 @@ thinking effort, and ignores
 the process's provider/model/profile/base-URL overrides; its stored profile
 selects the endpoint and key environment.
 
+A resumed session always receives the tools of the current configuration. When
+that tool set differs from the one recorded for the session, or the session has
+history and was written before Otto recorded tool sets, Otto appends one
+`capability_update` message before the run's user message. It is shown in the
+transcript and stays in the session history, so every later request contains
+it. It lists the added and removed tool names, or the current tool names when
+the earlier tool set was not recorded: sessions written by older Otto versions,
+and sub-agents started with `context: inherit`. A new session gets no such
+message.
+
 UI mode precedence:
 
 1. `--ui`
@@ -1389,6 +1399,10 @@ What a checkpoint keeps:
   block carries forward across later compactions. When it would exceed 16 KiB,
   the oldest messages are dropped. A message longer than 2,000 characters is
   cut and marked `[user message truncated for compaction]`.
+- The text of every summarized `capability_update` message is appended the same
+  way in a `<capability-updates>` block after `<user-messages>`. When it would
+  exceed 16 KiB, the oldest notices are dropped. A notice longer than 8,000
+  characters is cut and marked `[capability update truncated for compaction]`.
 - The paths the summarized tool calls read and modified are appended in
   `<read-files>` and `<modified-files>` blocks.
 

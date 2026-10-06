@@ -543,6 +543,16 @@ docker build --secret id=proxy_ca,src=/path/to/ca-bundle.pem -t otto:local .
 The build uses this optional secret only during networked
 toolchain and dependency installation; it is not copied into the image.
 
+## Secret scanning
+
+Run `gitleaks git -v --redact` from the repository root to scan Git history.
+The root `.gitleaksignore` lists reviewed historical false positives by exact
+fingerprint, with a reason for each group. These cover synthetic test inputs,
+assertions, an environment variable name, and a documentation path. All files
+and new commits remain scanned. Before adding an entry, inspect the finding
+in its original commit and confirm its provenance; do not ignore whole test
+directories, rules, or commits.
+
 ## Changelog
 
 [CHANGELOG.md](../CHANGELOG.md) is the curated record of notable user and

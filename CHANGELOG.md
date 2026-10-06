@@ -17,6 +17,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Exclude 14 reviewed historical Gitleaks false positives by exact fingerprint;
+  keep all files and new commits scanned.
+
 - Move the browser UI and WASM bindings to [otto-plus](https://github.com/baiyuqing/otto-plus).
   Otto builds without a frontend bundle and serves only APIs; `/` and `/assets/`
   now return `404`, and `serve --open` is removed. Run the standalone frontend

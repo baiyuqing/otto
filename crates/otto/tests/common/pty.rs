@@ -3,8 +3,10 @@
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthChar;
 
 pub const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const WIDE_CONTINUATION: char = '\0';
 
 /// A minimal terminal screen, built only for the ANSI vocabulary ratatui's
 /// crossterm backend can emit (see the module doc). Fragmentation-tolerant:
@@ -173,7 +175,11 @@ impl Screen {
 
     fn write_text(&mut self, text: &str) {
         for ch in text.chars() {
-            if self.x >= self.width {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width == 0 {
+                continue;
+            }
+            if self.x + width > self.width {
                 self.x = 0;
                 self.y += 1;
             }
@@ -184,24 +190,43 @@ impl Screen {
                 // scroll off a fixed-size screen.
                 break;
             }
+            for x in self.x..(self.x + width) {
+                self.clear_cell(x);
+            }
             self.cells[self.y][self.x] = ch;
-            self.x += 1;
+            if width == 2 {
+                self.cells[self.y][self.x + 1] = WIDE_CONTINUATION;
+            }
+            self.x += width;
         }
+    }
+
+    fn clear_cell(&mut self, x: usize) {
+        if self.cells[self.y][x] == WIDE_CONTINUATION {
+            self.cells[self.y][x - 1] = ' ';
+        } else if x + 1 < self.width && self.cells[self.y][x + 1] == WIDE_CONTINUATION {
+            self.cells[self.y][x + 1] = ' ';
+        }
+        self.cells[self.y][x] = ' ';
     }
 
     pub fn contains(&self, needle: &str) -> bool {
         self.cells
             .iter()
-            .any(|row| row.iter().collect::<String>().contains(needle))
+            .any(|row| visible_text(row).contains(needle))
     }
 
     pub fn dump(&self) -> String {
         self.cells
             .iter()
-            .map(|row| row.iter().collect::<String>())
+            .map(|row| visible_text(row))
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+fn visible_text(row: &[char]) -> String {
+    row.iter().filter(|&&ch| ch != WIDE_CONTINUATION).collect()
 }
 
 /// State shared between the test body and the background reader thread.
@@ -308,4 +333,28 @@ pub fn spawn(
         }
     });
     (master, child, shared)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Screen;
+
+    #[test]
+    fn screen_positions_and_clears_wide_unicode_cells() {
+        let mut screen = Screen::new(8, 1);
+        screen.feed("中".as_bytes()).expect("wide glyph");
+        screen
+            .feed(b"\x1b[1;3H")
+            .expect("move past both terminal columns");
+        screen.feed(b"X").expect("write after wide glyph");
+        assert!(screen.contains("中X"), "{}", screen.dump());
+
+        screen
+            .feed(b"\x1b[1;2H")
+            .expect("move into the wide glyph's second column");
+        screen.feed(b"A").expect("overwrite wide glyph");
+        assert!(!screen.contains("中"), "{}", screen.dump());
+        assert!(screen.contains("A"), "{}", screen.dump());
+        assert!(screen.contains("X"), "{}", screen.dump());
+    }
 }

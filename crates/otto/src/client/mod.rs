@@ -60,6 +60,16 @@ pub enum Error {
     },
 }
 
+/// The server-side detail for one recorded sub-agent task.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TaskDetail {
+    pub task: TaskRow,
+    #[serde(default)]
+    pub history: Vec<Message>,
+    #[serde(default)]
+    pub transcript_missing: bool,
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -679,6 +689,19 @@ impl Client {
         parent_session: &str,
         task_id: &str,
     ) -> Result<Option<TaskRow>, Error> {
+        Ok(self
+            .task_detail(parent_session, task_id)
+            .await?
+            .map(|detail| detail.task))
+    }
+
+    /// `GET /v1/tasks/{parent_session}/{task_id}`, including its server-read
+    /// child transcript. `None` means the task row is not found.
+    pub async fn task_detail(
+        &self,
+        parent_session: &str,
+        task_id: &str,
+    ) -> Result<Option<TaskDetail>, Error> {
         let result = self
             .send(
                 self.http
@@ -690,11 +713,31 @@ impl Client {
             Err(Error::Http { status: 404, .. }) => return Ok(None),
             Err(error) => return Err(error),
         };
-        #[derive(Deserialize)]
-        struct Detail {
-            task: TaskRow,
+        Ok(Some(decode(response).await?))
+    }
+
+    /// The server-read transcript for a recorded sub-agent task.
+    /// A missing task or transcript is returned as a 404 error.
+    pub async fn task_history(
+        &self,
+        parent_session: &str,
+        task_id: &str,
+    ) -> Result<Vec<Message>, Error> {
+        let Some(detail) = self.task_detail(parent_session, task_id).await? else {
+            return Err(Error::Http {
+                status: 404,
+                code: "not_found".into(),
+                message: "task not found".into(),
+            });
+        };
+        if detail.transcript_missing {
+            return Err(Error::Http {
+                status: 404,
+                code: "transcript_missing".into(),
+                message: "task transcript is missing or unavailable".into(),
+            });
         }
-        Ok(Some(decode::<Detail>(response).await?.task))
+        Ok(detail.history)
     }
 
     /// `POST /v1/sandbox/reload`; returns the sandbox summary line.
@@ -1564,6 +1607,52 @@ mod tests {
         assert_eq!(client.task("s1", "a1").await.unwrap(), Some(sample_row()));
         assert_eq!(client.task("s1", "zz").await.unwrap(), None);
         assert_eq!(request(&seen, 0).0, "GET /v1/tasks/s1/a1");
+    }
+
+    #[tokio::test]
+    async fn task_detail_keeps_server_history_and_missing_transcript_diagnostic() {
+        let history = vec![Message {
+            role: otto_core::model::Role::User,
+            blocks: vec![Block::text("child transcript")],
+            ..Message::default()
+        }];
+        let mut row = serde_json::to_value(sample_row()).unwrap();
+        row["cancelable"] = json!(false);
+        let body = json!({
+            "task": row,
+            "history": history,
+            "transcript_missing": false
+        })
+        .to_string();
+        let (client, seen, _dir) = stub(move |_, _| json_body(StatusCode::OK, &body));
+        let detail = client
+            .task_detail("s1", "a1")
+            .await
+            .unwrap()
+            .expect("task detail");
+        assert_eq!(detail.task, sample_row());
+        assert_eq!(detail.history[0].text(), "child transcript");
+        assert!(!detail.transcript_missing);
+        assert_eq!(request(&seen, 0).0, "GET /v1/tasks/s1/a1");
+
+        let body = json!({
+            "task": serde_json::to_value(sample_row()).unwrap(),
+            "history": [],
+            "transcript_missing": true
+        })
+        .to_string();
+        let (client, _, _dir) = stub(move |_, _| json_body(StatusCode::OK, &body));
+        let detail = client
+            .task_detail("s1", "a1")
+            .await
+            .unwrap()
+            .expect("task row remains available");
+        assert!(detail.history.is_empty());
+        assert!(detail.transcript_missing);
+        assert!(matches!(
+            client.task_history("s1", "a1").await,
+            Err(Error::Http { status: 404, code, .. }) if code == "transcript_missing"
+        ));
     }
 
     #[tokio::test]

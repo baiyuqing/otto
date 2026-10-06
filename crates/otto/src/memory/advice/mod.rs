@@ -35,6 +35,7 @@ use super::{
     Result, Scope, Service,
 };
 
+#[path = "audit_contracts.rs"]
 pub mod audit;
 pub mod jev;
 pub mod session;
@@ -419,12 +420,21 @@ struct Asked {
 /// Asks a [`Backend`] for advice and queues candidates with it.
 pub struct Advisor {
     backend: Box<dyn Backend>,
-    audit: Option<Arc<audit::Store>>,
+    audit: Option<Arc<dyn audit::AuditStore>>,
     limit: Duration,
 }
 
 impl Advisor {
-    pub fn new(backend: Box<dyn Backend>, audit: Option<Arc<audit::Store>>) -> Self {
+    /// Compatibility constructor for callers using the current Turso store.
+    pub fn new(backend: Box<dyn Backend>, audit: Option<Arc<dyn audit::AuditStore>>) -> Self {
+        Self::new_with_audit(backend, audit)
+    }
+
+    /// Builds an advisor with an injected typed audit repository.
+    pub fn new_with_audit(
+        backend: Box<dyn Backend>,
+        audit: Option<Arc<dyn audit::AuditStore>>,
+    ) -> Self {
         Self {
             backend,
             audit,

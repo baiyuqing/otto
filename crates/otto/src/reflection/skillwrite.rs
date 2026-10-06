@@ -27,7 +27,10 @@ use sha2::{Digest, Sha256};
 
 use super::guard::{self, Vetted};
 use super::output::SkillAction;
-use super::store::{SkillWrite, Store};
+use super::repository::ReflectionStore;
+use super::store::SkillWrite;
+#[cfg(test)]
+use super::store::Store;
 
 // Description limits are in characters; account for their full UTF-8 width.
 const MAXIMUM_MARKDOWN_BYTES: usize = guard::MAXIMUM_BODY_BYTES
@@ -113,7 +116,7 @@ fn history_file(roots: &Roots, name: &str, hash: &str) -> PathBuf {
 ///
 /// Called before the model review, so a doomed proposal does not cost a call.
 pub fn precheck(
-    store: &Store,
+    store: &dyn ReflectionStore,
     roots: &Roots,
     action: SkillAction,
     name: &str,
@@ -154,7 +157,7 @@ pub fn precheck(
 ///
 /// `maximum_generated` bounds how many skills reflection may own in total.
 pub fn apply(
-    store: &Store,
+    store: &dyn ReflectionStore,
     roots: &Roots,
     vetted: &Vetted,
     run_id: &str,
@@ -184,7 +187,7 @@ pub fn apply(
 /// Recheck the exact approved version while holding the root lock.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_on_base(
-    store: &Store,
+    store: &dyn ReflectionStore,
     roots: &Roots,
     vetted: &Vetted,
     run_id: &str,
@@ -295,7 +298,12 @@ impl std::error::Error for RevertError {}
 
 /// Restores the previous version of a reflection-owned skill, or removes it
 /// when reflection created it.
-pub fn revert(store: &Store, roots: &Roots, name: &str, at: &str) -> Result<Reverted, RevertError> {
+pub fn revert(
+    store: &dyn ReflectionStore,
+    roots: &Roots,
+    name: &str,
+    at: &str,
+) -> Result<Reverted, RevertError> {
     let failed = |message: String| RevertError::Failed(message);
     if !crate::skill::is_valid_skill_name(name) {
         return Err(RevertError::InvalidName(name.to_owned()));

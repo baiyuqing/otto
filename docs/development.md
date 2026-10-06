@@ -479,6 +479,28 @@ tui_attach_pty` for `tui`. Use `--workspace` in focused Cargo commands too:
 `CARGO_BUILD_JOBS` in the environment; the script passes the environment to
 every command.
 
+### ACP integration-test navigation
+
+`crates/otto/tests/acp_stdio.rs` and `acp_attach.rs` retain the two ACP test
+binaries and their process/JSON-RPC harnesses. Their scenario modules keep the
+suite navigable without changing the focused command:
+
+```bash
+cargo test --workspace --test acp_stdio --test acp_attach
+```
+
+- `acp_stdio/{protocol,memory,approval,commands,tasks}.rs` covers the local
+  stdio server's wire contract, memory review, permission dialogue, commands,
+  cancellation, task queueing, signals, and wake turns.
+- `acp_attach/{relay,approval,commands}.rs` covers the relay through
+  `otto serve`: session parity/queueing/failure, relay permissions, and
+  commands, reflection cancellation, and wake turns.
+
+When changing one scenario, use its fully qualified libtest name to narrow the
+existing target, for example `cargo test --workspace --test acp_stdio
+memory::` or `cargo test --workspace --test acp_attach relay::`. Run both
+targets after shared ACP protocol, session, approval, or serve changes.
+
 ## Web UI workflow
 
 The browser frontend and WASM bindings live in

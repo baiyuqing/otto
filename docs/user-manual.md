@@ -1484,7 +1484,12 @@ canonical workspace, even when `--sandbox off` is selected:
 - `write` writes a complete file atomically and syncs the file and its
   directory to disk before it reports success.
 - `edit` replaces one or more unique text matches and shares the 64 MiB size
-  limit with `read`. When `old_text` has no exact match, `edit` retries with a
+  limit with `read`. Choose one argument form: `path`, `old_text`, and
+  `new_text` for a single replacement (omit `edits`), or `path` and `edits`
+  for a batch (omit top-level `old_text` and `new_text`). Put every batch
+  replacement inside `edits`; each entry has its own `old_text` and `new_text`
+  and matches against the original file. An empty `new_text` deletes the match.
+  When `old_text` has no exact match, `edit` retries with a
   match that ignores trailing whitespace and treats curly quotes, dashes, and
   non-breaking spaces as ASCII, and it rewrites only the part of `old_text`
   that `new_text` changes.

@@ -161,6 +161,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   tools, or the current tools for sessions written before the record. Otto
   stores the tool names in an `otto.capabilities` session entry. Compaction
   carries summarized notices verbatim in a `<capability-updates>` block.
+  ([#373](https://github.com/baiyuqing/otto/pull/373))
 
 - Open versioned lifecycle hooks and custom command tools on installed plugin
   snapshots, with sandbox execution, exact-argument authorization and

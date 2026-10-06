@@ -289,6 +289,16 @@ tests are additional requirements. Passing the independent JSON acceptance
 adapter proves the extension boundary, not MySQL/PostgreSQL support or a live
 service's durability. Actual backend extensions require those integration gates.
 
+Run the public `otto_core::conformance::session` and
+`otto_core::conformance::mailbox` checks (default-on `conformance` feature in
+`otto-core`) against every `Session` and `Mailbox` implementation, wrappers
+included, passing a `reopen` function where the state is durable. A new
+implementation or wrapper adds such a test; a failure names the broken check,
+such as `session.input_id` or `mailbox.fifo`. Existing runs:
+`crates/otto/tests/session_conformance.rs` (POSIX `Store`, `SharedSession`,
+`MemoryHandle`), the `SharedTranscript` and sidecar mailbox unit tests, and
+the `otto-core` tests for `MemorySession` and `Inbox`.
+
 `storage/migration/` contains versioned snapshot, bounded chunk, stage import,
 verification, journal and cutover contracts. Domain codecs and backend staging
 implementations live under `storage/backends/`. The generic coordinator

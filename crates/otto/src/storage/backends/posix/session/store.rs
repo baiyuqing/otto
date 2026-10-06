@@ -138,6 +138,9 @@ pub(crate) struct StoreState {
     pub(crate) header: Header,
     pub(crate) root: PathBuf,
     pub(crate) messages: Vec<Message>,
+    /// Input ids delivered on the active path, kept across compaction; see
+    /// [`otto_core::session::context::ResolvedContext::input_ids`].
+    pub(crate) input_ids: HashSet<String>,
     pub(crate) operation_ledger: OperationLedger,
     pub(crate) aggregate_usage: Usage,
     pub(crate) usage_present: bool,
@@ -262,6 +265,7 @@ impl Store {
                 header,
                 root: root.as_ref().to_path_buf(),
                 messages: Vec::new(),
+                input_ids: HashSet::new(),
                 operation_ledger: OperationLedger::default(),
                 aggregate_usage: Usage::default(),
                 usage_present: false,
@@ -403,6 +407,7 @@ impl Store {
                 header: state.header,
                 root: PathBuf::new(),
                 messages: state.messages,
+                input_ids: state.input_ids,
                 operation_ledger: state.operation_ledger,
                 aggregate_usage: state.aggregate_usage,
                 usage_present: state.usage_present,
@@ -732,11 +737,7 @@ impl Store {
         message: &Message,
     ) -> Result<bool, PiError> {
         let mut state = self.lock()?;
-        if state
-            .messages
-            .iter()
-            .any(|existing| existing.input_id == input_id)
-        {
+        if state.input_ids.contains(input_id) {
             return Ok(false);
         }
         let mut message = message.clone();
@@ -748,12 +749,7 @@ impl Store {
     /// Whether a message with input id `input_id` is on the active path.
     pub fn has_input(&self, input_id: &str) -> bool {
         self.lock()
-            .map(|state| {
-                state
-                    .messages
-                    .iter()
-                    .any(|existing| existing.input_id == input_id)
-            })
+            .map(|state| state.input_ids.contains(input_id))
             .unwrap_or(false)
     }
 }
@@ -785,6 +781,9 @@ impl StoreState {
             && compaction.first_post_checkpoint_message_id.is_empty()
         {
             compaction.first_post_checkpoint_message_id = persisted.id.clone();
+        }
+        if !persisted.input_id.is_empty() {
+            state.input_ids.insert(persisted.input_id.clone());
         }
         state.messages.push(persisted);
         Ok(())
@@ -853,6 +852,7 @@ impl Store {
         state.entry_ids.insert(entry_id.clone());
         state.leaf_id = Some(entry_id);
         state.messages = resolved.messages;
+        state.input_ids = resolved.input_ids;
         state.operation_ledger = resolved.operation_ledger;
         state.aggregate_usage = resolved.usage;
         state.usage_present = resolved.usage_present;
@@ -1449,6 +1449,7 @@ pub(crate) fn validate_domain_header(header: &Header) -> Result<String, PiError>
 pub(crate) struct ResolvedStoreState {
     pub(crate) header: Header,
     pub(crate) messages: Vec<Message>,
+    pub(crate) input_ids: HashSet<String>,
     pub(crate) aggregate_usage: Usage,
     pub(crate) usage_present: bool,
     pub(crate) latest_compaction: Option<CompactionMetadata>,
@@ -1488,6 +1489,7 @@ pub(crate) fn resolve_pi_store_state(decoded: &PiFile) -> Result<ResolvedStoreSt
             created_at,
         },
         messages: resolved.messages,
+        input_ids: resolved.input_ids,
         aggregate_usage: resolved.usage,
         usage_present: resolved.usage_present,
         latest_compaction,

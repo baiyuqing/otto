@@ -56,7 +56,7 @@ use crate::runtime::info::SandboxInfo;
 #[cfg(test)]
 use crate::runtime::info::{SandboxMode, SandboxNetwork, SandboxReason};
 use otto_core::wire::events::WireEvent;
-use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
+use turn::{TRIGGER_RECOVERY, TRIGGER_TASK, TRIGGER_USER, Turn};
 
 /// A [`Factory::open`] that answers with exactly this text produces 404
 /// `not_found` instead of 500.
@@ -1018,12 +1018,17 @@ impl Server {
             if state.busy() {
                 None
             } else {
+                let trigger = if session.ctrl.resumes_interrupted_turn() {
+                    TRIGGER_RECOVERY
+                } else {
+                    TRIGGER_TASK
+                };
                 match session.ctrl.prepare_wake() {
                     Ok(None) => None,
                     Ok(Some(wake)) => match new_id() {
                         Ok(id) => {
                             let turn = Arc::new(
-                                Turn::new(id, TRIGGER_TASK, self.cancel.child_token()).with_log(
+                                Turn::new(id, trigger, self.cancel.child_token()).with_log(
                                     Arc::clone(&self.log),
                                     &session.ctrl.info().session_id,
                                     "",
@@ -1031,7 +1036,7 @@ impl Server {
                             );
                             turn.start_running(session.ctrl.history().len());
                             state.turn = Some(Arc::clone(&turn));
-                            Some(Ok((turn, wake)))
+                            Some(Ok((turn, wake, trigger)))
                         }
                         Err(error) => Some(Err(error)),
                     },
@@ -1042,7 +1047,7 @@ impl Server {
                 }
             }
         };
-        let (turn, wake) = match prepared {
+        let (turn, wake, trigger) = match prepared {
             None => return,
             Some(Err(message)) => {
                 self.log.error("wake_turn_error", &[("error", message)]);
@@ -1054,7 +1059,7 @@ impl Server {
 
         self.metrics.turn_started();
         let mut fields = turn.log_ids();
-        fields.push(("trigger", TRIGGER_TASK.to_string()));
+        fields.push(("trigger", trigger.to_string()));
         if let Some(kind) = session.ctrl.subagent_tasks().and_then(|tasks| {
             tasks
                 .notifications()
@@ -1065,7 +1070,7 @@ impl Server {
             fields.push(("inbox_kind", kind.as_str().to_string()));
         }
         self.log.info("turn_started", &fields);
-        self.run_turn(session, &turn, Step::Wake(wake), TRIGGER_TASK, None, None)
+        self.run_turn(session, &turn, Step::Wake(wake), trigger, None, None)
             .await;
         // Queued turns that arrived during the wake turn start now.
         self.start_next(session);
@@ -7126,6 +7131,46 @@ mod tests {
         assert_eq!(done["trigger"], turn::TRIGGER_TASK);
     }
 
+    /// A wake turn on a session whose last turn never ended resumes it and
+    /// is reported with trigger `recovery`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_wake_turn_resuming_an_interrupted_turn_reports_trigger_recovery() {
+        let (harness, tasks) = wake_harness(Script {
+            deltas: vec!["ok".to_string()],
+            ..Script::default()
+        });
+        let id = harness.create().await;
+        let session = harness.server.lookup(&id).expect("session");
+        let runner = session.ctrl.current_runner().expect("runner");
+        otto_core::session::Session::append_custom(
+            runner.session(),
+            otto_core::session::TURN_CUSTOM_TYPE,
+            &otto_core::session::encode_turn_record(&otto_core::session::TurnRecord::started(
+                "op_lost",
+                otto_core::session::TurnTrigger::User,
+                1,
+                None,
+            )),
+        )
+        .await
+        .expect("seed an interrupted turn");
+
+        tasks.notifications().push(notification());
+
+        tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+            .await
+            .expect("the notification did not start a wake turn");
+        let reply = harness
+            .send("GET", &format!("/v1/sessions/{id}"), None)
+            .await;
+        let turn = reply.json()["turn"].clone();
+        assert_eq!(turn["trigger"], turn::TRIGGER_RECOVERY, "{}", reply.body);
+        let turn_id = turn["id"].as_str().expect("turn id").to_string();
+        let done = harness.wait_turn_done(&id, &turn_id).await;
+        assert_eq!(done["trigger"], turn::TRIGGER_RECOVERY);
+        assert!(!session.ctrl.resumes_interrupted_turn());
+    }
+
     /// R13: `failover::recovery::notify` pushes through the same
     /// `tasks.notifications()` inbox `build_subagents` wires the recovery
     /// push into, so it starts a wake turn the same way any other pending
@@ -7138,14 +7183,15 @@ mod tests {
         });
         harness.create().await;
 
-        let takeover = crate::session::Takeover {
-            holder: crate::failover::lease::Holder {
+        let takeover = crate::session::Recovery {
+            cause: crate::session::RecoveryCause::TakenOver(crate::failover::lease::Holder {
                 epoch: 1,
                 host: "stopped-host".to_string(),
                 pid: 4242,
-            },
+            }),
             repaired: Vec::new(),
             replayable: Vec::new(),
+            interrupted_turn: None,
         };
         crate::failover::recovery::notify(
             tasks.notifications(),

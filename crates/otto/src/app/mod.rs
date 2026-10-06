@@ -68,6 +68,21 @@ pub const CLOSED: &str = "controller is closed";
 pub const SESSION_RENAME_UNAVAILABLE: &str = "session rename is unavailable";
 pub const INVALID_SESSION_NAME: &str = "session is invalid: session name is required";
 
+/// The deterministic result of submitting ordinary human text while a session
+/// may have an active turn. It never silently turns steering into a queued
+/// future turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveInputAdmission {
+    /// The text is bound to the current run and will arrive at its next safe
+    /// provider boundary.
+    Steered,
+    /// There is no active run. The caller may explicitly start a new turn.
+    Idle,
+    /// A pending approval owns natural-language input until it is resolved.
+    ApprovalPending,
+}
+
 /// One configured profile row a frontend can display.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProfileSummary {
@@ -1586,17 +1601,37 @@ impl Controller {
     /// Accepts guidance for the exact active run, at its next safe provider
     /// boundary. The acceptance is transient and never wakes a later run.
     pub fn steer(&self, text: &str) -> Result<(), String> {
+        match self.admit_active_input(text)? {
+            ActiveInputAdmission::Steered => Ok(()),
+            ActiveInputAdmission::Idle => {
+                Err("there is no active task accepting guidance".to_string())
+            }
+            ActiveInputAdmission::ApprovalPending => {
+                Err("the task is waiting for approval; guidance is not accepted yet".into())
+            }
+        }
+    }
+
+    /// Deterministically admits ordinary human text while this session is
+    /// active. It never queues a later turn: callers explicitly choose that
+    /// separate operation after receiving [`ActiveInputAdmission::Idle`].
+    pub fn admit_active_input(&self, text: &str) -> Result<ActiveInputAdmission, String> {
         let text = task_control::checked_text(text)?;
         if self.pending_approval().is_some() {
-            return Err("the task is waiting for approval; guidance is not accepted yet".into());
+            return Ok(ActiveInputAdmission::ApprovalPending);
         }
         let runner = self.runner()?;
-        let ticket = runner
-            .steering()
-            .ticket()
-            .ok_or_else(|| "there is no active task accepting guidance".to_string())?;
+        let Some(ticket) = runner.steering().ticket() else {
+            return Ok(ActiveInputAdmission::Idle);
+        };
         let session_id = runner.session().header().id.clone();
-        runner.task_control().steer(&session_id, ticket, text)
+        match runner.task_control().steer(&session_id, ticket, text) {
+            Ok(()) => Ok(ActiveInputAdmission::Steered),
+            // The active run can close after observing its ticket. This text
+            // was not accepted and must not be silently queued elsewhere.
+            Err(error) if error.contains("active task") => Ok(ActiveInputAdmission::Idle),
+            Err(error) => Err(error),
+        }
     }
 
     /// Routes natural input during an active turn through a restricted control

@@ -80,6 +80,8 @@ pub(crate) enum Command {
         id: String,
         accept: bool,
     },
+    /// Admit ordinary input to the active turn rather than creating a queued turn.
+    AdmitInput(String),
     WithdrawQueued,
     Management(crate::app::management::Request),
     Logout,
@@ -503,6 +505,19 @@ async fn local_command(c: Arc<Controller>, command: Command) -> Result<Reply, St
             prompt = Some(c.approve_bash_always(&id).await?);
             format!("Approved {id}.")
         }
+        Command::AdmitInput(text) => match c.admit_active_input(&text)? {
+            crate::app::ActiveInputAdmission::Steered => {
+                "Steering the active task; it will apply at the next safe boundary.".into()
+            }
+            crate::app::ActiveInputAdmission::Idle => {
+                prompt = Some(text);
+                String::new()
+            }
+            crate::app::ActiveInputAdmission::ApprovalPending => {
+                "The task is waiting for approval; respond to that approval before steering it."
+                    .into()
+            }
+        },
         Command::MemoryReview { id, accept } => {
             blocking(c.clone(), move |c| {
                 let (service, user, workspace) = c
@@ -722,6 +737,7 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
             }
 
             let mut history = false;
+            let mut prompt = None;
             let message = match command {
                 Command::NewSession => {
                     remote
@@ -804,6 +820,22 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                 Command::Management(request) => {
                     return remote_management(remote, session, request).await;
                 }
+                Command::AdmitInput(text) => match client
+                    .admit_input(session, &text)
+                    .await
+                    .map_err(mutation_error)?
+                {
+                    crate::app::ActiveInputAdmission::Steered => {
+                        "Steering the active task; it will apply at the next safe boundary.".into()
+                    }
+                    crate::app::ActiveInputAdmission::Idle => {
+                        prompt = Some(text);
+                        String::new()
+                    }
+                    crate::app::ActiveInputAdmission::ApprovalPending => {
+                        "The task is waiting for approval; respond to that approval before steering it.".into()
+                    }
+                },
                 Command::WithdrawQueued => {
                     if !remote.withdraw_queued_turn_async().await.map_err(|error| {
                         format!("{error}; outcome unknown, reconcile state before retrying")
@@ -822,7 +854,7 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                 message,
                 info: remote.info(),
                 history: history.then(|| remote.history()),
-                prompt: None,
+                prompt,
             })
         }
         _ => Err("not available with --attach".into()),

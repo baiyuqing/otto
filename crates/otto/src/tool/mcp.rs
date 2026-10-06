@@ -34,7 +34,7 @@ use crate::mcp::{BearerSource, CallError, CallOutcome, ContentBlock, ToolInfo, T
 
 /// Every registered MCP tool name starts with this.
 pub const NAME_PREFIX: &str = "mcp__";
-/// `safe_prompt_tool_name` in `crate::runtime::prompt` rejects anything longer.
+/// `otto_core::tool::safe_prompt_tool_name` rejects anything longer.
 pub const MAX_TOOL_NAME_BYTES: usize = 64;
 /// The advertised description is cut to this many bytes, on a char boundary.
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;

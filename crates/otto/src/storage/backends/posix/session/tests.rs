@@ -2442,7 +2442,7 @@ fn open_rejects_old_otto_v1_without_mutation() {
 
 #[test]
 fn store_round_trips_role_context_as_custom_message() {
-    for context_type in ["task_notification", "parent_message"] {
+    for context_type in ["task_notification", "parent_message", "capability_update"] {
         let temp = TempDir::new();
         let (store, _) = new_store(&temp);
         store.append_message(&user("hello")).expect("append");
@@ -3594,4 +3594,94 @@ fn workspace_identity_adopts_legacy_sessions_and_preserves_listing_resume_and_ar
         )
         .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// otto.capabilities
+// ---------------------------------------------------------------------------
+
+fn raw_capabilities_entry(id: &str, parent: &str, data: &str) -> String {
+    format!(
+        "{{\"type\":\"custom\",\"id\":\"{id}\",\"parentId\":\"{parent}\",\"timestamp\":\"1970-01-01T00:00:01Z\",\"customType\":\"otto.capabilities\",\"data\":{data}}}\n"
+    )
+}
+
+fn last_entry_id(path: &str) -> String {
+    json_lines(Path::new(path))
+        .last()
+        .and_then(|line| line["id"].as_str())
+        .expect("leaf id")
+        .to_owned()
+}
+
+#[test]
+fn capabilities_record_survives_reopen_and_the_latest_applies() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    assert_eq!(Session::observed_tools(&store), None);
+    store.append_message(&user("hello")).expect("append");
+    store
+        .append_custom_entry("otto.capabilities", r#"{"tools":["a","b"]}"#)
+        .expect("first record");
+    store
+        .append_custom_entry("otto.capabilities", r#"{"tools":["c","b","c"]}"#)
+        .expect("second record");
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, warnings) = Store::open(&path).expect("open");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        Session::observed_tools(&reopened),
+        Some(vec!["b".to_owned(), "c".to_owned()])
+    );
+    assert_eq!(reopened.messages().len(), 1, "the record is not a message");
+    reopened.close().expect("close");
+}
+
+#[test]
+fn capabilities_record_on_another_branch_does_not_apply() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let user_id = last_entry_id(&path);
+    append_raw(
+        &path,
+        raw_capabilities_entry("deadbee1", &user_id, r#"{"tools":["side"]}"#).as_bytes(),
+    );
+    append_raw(
+        &path,
+        raw_capabilities_entry("deadbee2", &user_id, r#"{"tools":["main"]}"#).as_bytes(),
+    );
+
+    let (store, warnings) = Store::open(&path).expect("open");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        Session::observed_tools(&store),
+        Some(vec!["main".to_owned()])
+    );
+    store.close().expect("close");
+}
+
+#[test]
+fn malformed_capabilities_record_is_ignored_with_a_warning() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let user_id = last_entry_id(&path);
+    append_raw(
+        &path,
+        raw_capabilities_entry("deadbee1", &user_id, r#"{"tools":"read"}"#).as_bytes(),
+    );
+
+    let (store, warnings) = Store::open(&path).expect("a malformed record does not block open");
+    assert_eq!(Session::observed_tools(&store), None);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.message.contains("malformed otto.capabilities")),
+        "{warnings:?}"
+    );
+    store.close().expect("close");
 }

@@ -165,6 +165,10 @@ impl Session for MemoryHandle {
         self.inner.append_operation_fact(fact).await
     }
 
+    fn observed_tools(&self) -> Option<Vec<String>> {
+        self.inner.observed_tools()
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         self.inner.append_custom(custom_type, data).await
     }
@@ -333,6 +337,10 @@ impl Session for SharedSession {
         fact: otto_core::session::OperationFact,
     ) -> Result<(), SessionError> {
         self.0.append_operation_fact(fact).await
+    }
+
+    fn observed_tools(&self) -> Option<Vec<String>> {
+        self.0.observed_tools()
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
@@ -3243,6 +3251,10 @@ mod tests {
             fact: otto_core::session::OperationFact,
         ) -> Result<(), SessionError> {
             self.inner.append_operation_fact(fact).await
+        }
+
+        fn observed_tools(&self) -> Option<Vec<String>> {
+            self.inner.observed_tools()
         }
 
         async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {

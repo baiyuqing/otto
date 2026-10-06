@@ -40,7 +40,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `<id>.followups.json`, run in order after the turn that automatically
   resumes their task (a step that already ran is skipped), and are otherwise
   discarded with a visible notice. A follow-up that cannot be saved is
-  rejected ([user manual](docs/user-manual.md#sessions)).
+  rejected ([#377](https://github.com/baiyuqing/otto/pull/377),
+  [user manual](docs/user-manual.md#sessions)).
 - Make accepted inputs durable and deliver them once. Notifications carry
   stable input ids, so one appended just before Otto stops is not delivered
   again; guidance for a running turn is kept in `<id>.inputs.json` for that

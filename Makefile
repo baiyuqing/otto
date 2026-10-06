@@ -7,11 +7,11 @@ SKILLS_INSTALL_DIR ?= $(HOME)/.otto/skills
 
 CONNECT_DIR := connect
 
-.PHONY: all build install check-fast check check-tests check-linux ui-deps ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
+.PHONY: all build install check-fast check check-tests check-linux rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
 
 all: build
 
-build: ui ## build the Web UI and compile the Rust binary (release) to ./$(BINARY)
+build: ## compile the Rust binary (release) to ./$(BINARY)
 	cargo build --release
 	cp target/release/$(BINARY) ./$(BINARY)
 
@@ -31,18 +31,16 @@ rust-lint: ## run clippy across the Rust workspace with warnings as errors
 rust-test: ## run the full native Rust test suite
 	cargo test --workspace
 
-rust-wasm-check: ## verify otto-core and otto-web still build for wasm32
+rust-wasm-check: ## verify otto-core still builds for wasm32
 	cargo check -p otto-core --target wasm32-unknown-unknown
-	cargo check -p otto-web --target wasm32-unknown-unknown
 
 rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
 	wasm-pack test --node crates/otto-core
-	wasm-pack test --node crates/otto-web
 
 scripts-test: ## run the Node tests beside scripts/ (offline, no build needed)
 	node --test scripts/*.test.mjs
 
-license-check: ## fail if a shipped Rust crate or web UI npm package uses a license outside the allowlist in scripts/license-check.mjs
+license-check: ## fail if a shipped Rust crate uses a license outside the allowlist in scripts/license-check.mjs
 	node scripts/license-check.mjs
 
 bump: ## set a new release version in every manifest and lockfile (VERSION=X.Y.Z)
@@ -84,26 +82,15 @@ check-fast: ## local gate: only the checks for paths changed since origin/main, 
 	@echo "check-fast: taking $(CHECK_LOCK); waits while another worktree's check-fast holds it"
 	@$(CHECK_LOCKED) node scripts/check-changed.mjs
 
-check: rust-fmt rust-lint check-tests ## full macOS acceptance: format, lint, web UI build, all Rust tests (PTY tests included), host integration and web UI tests (no release build; see `build`)
+check: rust-fmt rust-lint check-tests ## full macOS acceptance: format, lint, all Rust tests (PTY tests included), host integration (no release build; see `build`)
 
 # CI's macOS acceptance job runs this, and a separate job runs rust-fmt and
 # rust-lint at the same time.
-check-tests: ui rust-test connect-check rust-wasm-test scripts-test ui-test ## `check` without rust-fmt and rust-lint
+check-tests: rust-test connect-check rust-wasm-test scripts-test ## `check` without rust-fmt and rust-lint
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
-check-linux: rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test license-check ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
+check-linux: rust-fmt rust-lint rust-test connect-check rust-wasm-check scripts-test license-check ## Linux gate: no Seatbelt, so no sandbox conformance
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
-
-ui-deps: ## build the wasm package and install web UI dependencies (needs Node 24+ and wasm-pack)
-	wasm-pack build --target web crates/otto-web
-	cd ui && npm ci
-
-ui: ui-deps ## build the web UI into ui/dist (needs Node 24+ and wasm-pack)
-	rm -rf ui/dist/assets ui/dist/index.html
-	cd ui && npm run build
-
-ui-test: ui-deps ## run the web UI unit tests (needs Node 24+ and wasm-pack)
-	cd ui && npm test
 
 clean: ## remove the built binary and all Cargo build outputs in target/
 	rm -f ./$(BINARY)

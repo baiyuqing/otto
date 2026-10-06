@@ -11,9 +11,8 @@ points and the [development guide](docs/development.md) for detailed contracts.
 | --- | --- |
 | Shared domain/config/wire logic | [otto-core rules](crates/otto-core/AGENTS.md), `crates/otto-core/src/` |
 | Native runtime, tools and frontends | [otto rules](crates/otto/AGENTS.md), `crates/otto/src/cli/` |
-| Browser WASM bindings | [otto-web rules](crates/otto-web/AGENTS.md), `crates/otto-web/src/` |
 | Documentation | [documentation rules](docs/AGENTS.md), `docs/user-manual.md` |
-| Browser frontend | `ui/`; client of native HTTP APIs and WASM exports |
+| Browser frontend | [otto-plus](https://github.com/baiyuqing/otto-plus); separate client of Otto HTTP APIs |
 | Chat connector | `connect/`; independent Go ACP client; [design](docs/specs/2026-10-02-otto-connect.md) |
 
 Otto supports only `openai-compatible` and `chatgpt`. Do not implement or

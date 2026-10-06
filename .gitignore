@@ -4,10 +4,6 @@
 .superpowers/
 /otto
 /dist/
-# Built web UI: `make ui` writes here; only the placeholder is tracked.
-ui/dist/*
-!ui/dist/.gitkeep
-ui/node_modules/
 .DS_Store
 .otto/
 !.otto/
@@ -16,9 +12,8 @@ ui/node_modules/
 !.otto/skills/sandbox-setup/SKILL.md
 *.test
 
-# Rust build artifacts and the generated wasm package.
+# Rust build artifacts.
 target/
-crates/otto-web/pkg/
 
 # Secrets — never commit credentials or config that may hold them.
 # Defensive/broad on purpose: better to ignore too much than leak one file.

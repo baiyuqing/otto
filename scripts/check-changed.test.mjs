@@ -8,7 +8,6 @@ const FMT = 'cargo fmt --all -- --check';
 const CLIPPY = 'cargo clippy --workspace --all-targets -- -D warnings';
 const FULL = 'cargo test --workspace';
 const WASM = 'make rust-wasm-check';
-const UI = 'make ui ui-test';
 const LICENSE = 'make license-check';
 
 test('two modules share one --lib step, no full test', () => {
@@ -43,15 +42,6 @@ test('root Cargo files select clippy, wasm check and full tests, no fmt', () => 
   assert.deepEqual(plan(['Cargo.lock']).steps, [CLIPPY, WASM, FULL, LICENSE]);
 });
 
-test('ui-only change runs only ui build and tests', () => {
-  assert.deepEqual(plan(['ui/src/App.tsx']).steps, [UI]);
-});
-
-test('otto-web runs wasm tests and the ui, not the native tests', () => {
-  const { steps } = plan(['crates/otto-web/src/lib.rs']);
-  assert.deepEqual(steps, [FMT, CLIPPY, WASM, 'wasm-pack test --node crates/otto-web', UI]);
-});
-
 test('documentation needs no step and is not unchecked', () => {
   assert.deepEqual(plan(['docs/x.md', 'README.md', 'LICENSE']), { steps: [], unchecked: [] });
 });
@@ -73,15 +63,15 @@ test('connect and scripts paths', () => {
 });
 
 test('license check runs for manifests and lock files only', () => {
-  for (const p of ['Cargo.lock', 'Cargo.toml', 'crates/otto/Cargo.toml', 'ui/package.json', 'ui/package-lock.json', 'scripts/license-check.mjs']) {
+  for (const p of ['Cargo.lock', 'Cargo.toml', 'crates/otto/Cargo.toml', 'scripts/license-check.mjs']) {
     assert.ok(plan([p]).steps.includes(LICENSE), p);
   }
-  for (const p of ['crates/otto/src/tool/x.rs', 'ui/src/App.tsx', 'scripts/a.mjs']) assert.ok(!plan([p]).steps.includes(LICENSE), p);
+  for (const p of ['crates/otto/src/tool/x.rs', 'scripts/a.mjs']) assert.ok(!plan([p]).steps.includes(LICENSE), p);
 });
 
 test('mixed change keeps the documented order', () => {
-  const { steps } = plan(['scripts/a.mjs', 'connect/a.go', 'ui/a.ts', 'crates/otto-web/a.rs', 'crates/otto/src/cli/a.rs']);
-  assert.deepEqual(steps, [FMT, CLIPPY, WASM, 'cargo test --workspace --lib -- cli::', 'wasm-pack test --node crates/otto-web', UI, 'make connect-check', 'make scripts-test']);
+  const { steps } = plan(['scripts/a.mjs', 'connect/a.go', 'crates/otto/src/cli/a.rs']);
+  assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- cli::', 'make connect-check', 'make scripts-test']);
 });
 
 test('every crates/otto/tests/*.rs file maps to --test <name>', () => {

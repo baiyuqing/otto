@@ -45,7 +45,6 @@ pub struct CliOptions {
     pub socket: String,
     pub listen: String,
     pub acp_listen: String,
-    pub open: bool,
 
     pub explicit_config: bool,
     pub shell_time_set: bool,
@@ -134,7 +133,6 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     options.listen = set.string("listen");
     options.acp_listen = set.string("acp-listen");
     options.attach = set.bool_value("attach");
-    options.open = set.bool_value("open");
 
     options.explicit_config = set.visited("config");
     options.shell_time_set = set.visited("shell-timeout");
@@ -243,12 +241,6 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
     if options.listen_set && !options.serve {
         return Err(reject("otto: --listen requires the serve subcommand"));
     }
-    if options.open && !options.serve {
-        return Err(reject("otto: --open requires the serve subcommand"));
-    }
-    if options.open && options.socket_set && !options.listen_set {
-        return Err(reject("otto: --open cannot be used with --socket"));
-    }
     if options.shell_time_set && options.shell_timeout.is_zero() {
         return Err(reject("otto: --shell-timeout must be greater than zero"));
     }
@@ -278,7 +270,7 @@ pub fn print_usage(output: &mut dyn Write) {
 }
 
 const USAGE: &str = r"Usage: otto [options]
-       otto serve [options] [--socket PATH] [--listen HOST:PORT [--open]]
+       otto serve [options] [--socket PATH] [--listen HOST:PORT]
        otto acp [options]      Agent Client Protocol server on stdin/stdout
        otto acp --attach [--socket PATH]   relay Agent Client Protocol to a running otto serve
        otto --attach [--socket PATH] [--resume ID | --continue]   terminal UI on a running otto serve
@@ -324,7 +316,6 @@ Options:
   --attach               use the otto serve on the socket instead of running the agent (terminal UI, or acp: relay)
   --listen HOST:PORT     loopback TCP address for the serve subcommand (prints a URL with the access token)
   --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)
-  --open                 open the serve URL in the default browser (TCP listener only)
 ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -368,7 +359,6 @@ const DECLARED: &[(&str, Kind)] = &[
     ("attach", Kind::Bool),
     ("listen", Kind::Str),
     ("acp-listen", Kind::Str),
-    ("open", Kind::Bool),
 ];
 
 impl FlagSet {
@@ -672,12 +662,9 @@ mod tests {
     }
 
     #[test]
-    fn open_is_serve_only_and_needs_a_tcp_listener() {
-        let got = options(&["serve", "--listen", "127.0.0.1:0", "--open"]);
-        assert!(got.serve);
-        assert!(got.open);
-        assert!(got.listen_set);
-        assert!(!options(&["serve", "--listen", "127.0.0.1:0"]).open);
+    fn browser_launch_flag_is_no_longer_supported() {
+        let mut stdout = Vec::new();
+        assert!(parse_flags(&["serve".into(), "--open".into()], &mut stdout).is_err());
     }
 
     #[test]
@@ -714,8 +701,7 @@ mod tests {
                 "  --sandbox MODE         sandbox mode: auto, seatbelt, or off (off is unsafe)\n"
             ));
             assert!(text.contains(
-                "  --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)
-  --open                 open the serve URL in the default browser (TCP listener only)\n"
+                "  --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)\n"
             ));
         }
     }
@@ -828,11 +814,6 @@ mod tests {
                 &["--listen", "127.0.0.1:0"],
                 "otto: --listen requires the serve subcommand\n",
             ),
-            (&["--open"], "otto: --open requires the serve subcommand\n"),
-            (
-                &["serve", "--open", "--socket", "/tmp/otto.sock"],
-                "otto: --open cannot be used with --socket\n",
-            ),
             (
                 &["acp", "--ui", "repl"],
                 "otto: acp cannot be combined with --ui\n",
@@ -892,10 +873,6 @@ mod tests {
             (
                 &["acp", "--attach", "--prompt", "x"],
                 "otto: acp cannot be combined with --prompt\n",
-            ),
-            (
-                &["acp", "--open"],
-                "otto: --open requires the serve subcommand\n",
             ),
             (
                 &["--shell-timeout", "0s"],

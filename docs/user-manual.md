@@ -1899,6 +1899,15 @@ the request asks for it, and otherwise returns `409` (see
 [Turn queue](#turn-queue)). It listens on a Unix domain socket (the default),
 a loopback TCP port, or both.
 
+Clients authenticated by the server token or Unix-socket permissions share
+one user's authority over the server; there is no per-client session ACL.
+Different sessions have separate histories, turn queues and event streams.
+Clients loading the same session intentionally share its conversation and
+approval state. A resume request naming a workspace must match the session's
+workspace, including when the session is already open, or it returns `404`.
+New sessions use the selected workspace's resolved profile/model settings
+and sandbox; a loaded workspace has its own sandbox reload and read grants.
+
 ```bash
 otto serve [--socket PATH] [--listen HOST:PORT [--open]]
 ```
@@ -2573,7 +2582,7 @@ otto acp [--config PATH] [--cwd PATH] [--profile NAME] ...
 `--continue`, `--no-session`, `--archive`, and the `serve`-only flags;
 `--socket` is accepted only with `--attach`.
 
-One process serves one workspace: `--cwd`, else the process working
+Local `otto acp` serves one workspace: `--cwd`, else the process working
 directory. A request whose `cwd` resolves to another directory is rejected.
 The workspace's sandbox and memory are set up at startup as for `otto serve`;
 MCP servers start when a session is created or loaded. A process may hold
@@ -2602,7 +2611,21 @@ Otto as in the other frontends.
 ### Scheduled items are sent with `_otto/schedule/deliver`
 
 When the client lists platforms in `clientCapabilities._meta.otto.scheduleDelivery`,
-Otto sends each due item created in a chat of those platforms as the request
+the client may also declare `clientCapabilities._meta.otto.scheduleDeliveryChats`
+as an array of `<platform>:<chat-id>` destinations. Each destination must
+belong to an advertised platform. `otto-connect` supplies its admitted chats
+by default; an empty array disables chat delivery. Otto advertises this
+support as `agentCapabilities._meta.otto.scheduleDeliveryChats: true`.
+Claims are limited to these destinations before acquiring a delivery lease.
+Without the destination field, platform delivery works only while that
+connection is the sole live offer for the platform. Overlapping legacy offers
+remain pending and log `schedule_delivery_conflict`; no message body is sent
+to an ambiguous client. Disconnect removes the offer; a crashed connection's
+offer expires after 90 s, refreshed every 15 s independently of slow sends.
+The schedule database upgrades v1 to v2 without removing items. Restart Otto
+and its attach relays together when upgrading.
+
+Otto sends each eligible due item as the request
 `_otto/schedule/deliver` with params `{"chat": "telegram:123", "text": "..."}`
 and waits up to 60 s. A `result` with any value (`otto-connect` answers
 `{}`) marks the item delivered; an error or no answer is a failed attempt
@@ -2711,8 +2734,12 @@ in the web UI, in another `otto acp --attach` process, and in `otto serve`'s
 other clients at the same time. It runs no model or tool and reads no
 provider credentials. The socket defaults to `[server].socket`, then
 `~/.otto/otto.sock`; TCP is not supported. The `initialize` response, the
-workspace rule and the `cwd` checks are those of `otto acp`, and `otto serve`
-must admit the workspace (see [Workspaces](#workspaces)).
+memory-review capabilities are those of attach mode. Unlike local ACP,
+`session/new` and `session/load` select an admitted workspace using each
+request's absolute `cwd`. `session/list` filters by its `cwd`, or uses the
+connection's startup workspace when omitted. Direct ACP TCP follows the same
+workspace rules. Admission stays in `otto serve`; ACP does not implicitly
+trust directories (see [Workspaces](#workspaces)).
 
 At startup it requests `GET /healthz`. If `otto serve` does not answer, it
 prints `otto serve is not reachable at <path>: <error>` to stderr and exits
@@ -2734,7 +2761,9 @@ with status `1`.
   `GET /v1/sessions/{id}/wake-replies` once a second, starting after the
   newest reply that existed when the session was opened, so earlier replies
   are not sent again. Over [ACP TCP](#direct-acp-tcp-connection), `otto serve`
-  sends the same update without polling.
+  sends the same update without polling. Loading the session again replaces
+  its notification subscription, including after another client closes and
+  reopens that session.
 - A turn that ends with an error answers the prompt with a JSON-RPC error
   carrying the redacted message.
 - An elevated `bash` command sends `session/request_permission` while the
@@ -2983,6 +3012,8 @@ a log line.
   [Active-task guidance and model follow-ups](#active-task-guidance-and-model-follow-ups)).
   Waiting input uses a bounded queue of at most 10. A message beyond that gets "Queue is full (10 messages); the
   message was not queued." Chats on different sessions run concurrently.
+  Persisted chat bindings outside the current chats/senders allowlists are not
+  restored, and background replies recheck admission before sending.
   Chats bound to the same session (with `/use`) take turns: one prompt runs
   on a session at a time, and when three or more chats wait for the same
   session, the order in which they run is not guaranteed.

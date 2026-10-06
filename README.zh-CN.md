@@ -16,6 +16,12 @@
 - **持续协作：** 持久化会话、需人工审核的记忆候选、可复用 Skills、按需或自动反思、有边界的子代理、定时器和可恢复的持久化 workflow。
 - **限定访问范围：** 文件工具限制在工作区内；macOS 默认通过 Seatbelt 沙箱执行 Shell 命令。
 
+## 代码架构
+
+[![Otto 代码架构：接入端、前端适配、应用运行时、原生功能服务与可移植核心](docs/architecture/otto-architecture.png)](docs/architecture/otto-architecture.svg)
+
+[代码组织（英文）](docs/code-organization.md) · [SVG 矢量图](docs/architecture/otto-architecture.svg) · [可编辑 HTML](docs/architecture/otto-architecture.html)
+
 ## 从源码安装
 
 需要由 `rust-toolchain.toml` 锁定的 **Rust 1.98** 工具链

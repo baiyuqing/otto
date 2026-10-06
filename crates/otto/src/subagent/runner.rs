@@ -1295,7 +1295,7 @@ impl Runner {
             // this private queue with agent_send.
             memory: None,
             tasks: None,
-            inbox: child_inbox,
+            mailbox: child_inbox,
             ..Options::default()
         };
 

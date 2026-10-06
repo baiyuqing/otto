@@ -1,6 +1,7 @@
 //! Native plugin snapshots, registry and content-bound execution authorization.
 //! Installation never executes package code. Runners retain immutable snapshots;
 //! removal leaves snapshots/data intact so existing sessions keep pinned files.
+pub mod hooks;
 pub mod package;
 mod runtime;
 use crate::{

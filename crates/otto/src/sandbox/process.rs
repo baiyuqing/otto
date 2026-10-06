@@ -25,7 +25,7 @@ use std::time::Duration;
 use nix::errno::Errno;
 use nix::sys::signal::Signal;
 use nix::unistd::{AccessFlags, Pid};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -55,6 +55,7 @@ pub(crate) struct Spec {
     pub(crate) args: Vec<String>,
     pub(crate) directory: PathBuf,
     pub(crate) environment: Vec<String>,
+    pub(crate) stdin: Option<Vec<u8>>,
 }
 
 /// How the child finished. `code` is `-1` and `signal` is the signal
@@ -296,7 +297,11 @@ impl Manager {
             let (name, value) = entry.split_once('=').unwrap_or((entry.as_str(), ""));
             command.env(name, value);
         }
-        command.stdin(Stdio::null());
+        command.stdin(if spec.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         command.process_group(0);
@@ -336,7 +341,18 @@ impl Manager {
         };
         let (entry, mut child) = entry;
 
-        let (outcome, failure) = drain(&mut child, streams, cancel, &entry).await;
+        // Drive writes with draining: a child may produce output before reading input.
+        let input = child.stdin.take();
+        let write_input = async move {
+            if let (Some(mut pipe), Some(bytes)) = (input, spec.stdin) {
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = async { let _ = pipe.write_all(&bytes).await; let _ = pipe.shutdown().await; } => {},
+                }
+            }
+        };
+        let ((outcome, failure), ()) =
+            tokio::join!(drain(&mut child, streams, cancel, &entry), write_input);
 
         {
             let mut state = self.state.lock().expect("process state");
@@ -592,6 +608,7 @@ mod tests {
 
     fn spec(path: &str, args: &[&str], directory: &std::path::Path, env: &[&str]) -> Spec {
         Spec {
+            stdin: None,
             path: path.to_string(),
             args: args.iter().map(|arg| (*arg).to_string()).collect(),
             directory: directory.to_path_buf(),

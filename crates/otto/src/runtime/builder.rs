@@ -301,16 +301,16 @@ impl SessionHandle for MemoryHandle {
 /// Both need `&self` access to the same transcript for the whole run, which
 /// is what `Arc` buys; every [`SessionHandle`] method already takes `&self`.
 #[derive(Clone)]
-pub struct SharedSession(Arc<dyn SessionHandle>);
+pub struct SharedSession(Arc<dyn SessionHandle>, Arc<otto_core::agent::hooks::State>);
 
 impl SharedSession {
     pub fn new(handle: Arc<dyn SessionHandle>) -> Self {
-        Self(handle)
+        Self(handle, Arc::default())
     }
 
     /// A `--no-session` transcript.
     pub fn memory(header: Header) -> Self {
-        Self(Arc::new(MemoryHandle::new(header)))
+        Self(Arc::new(MemoryHandle::new(header)), Arc::default())
     }
 
     pub fn handle(&self) -> &Arc<dyn SessionHandle> {
@@ -346,6 +346,7 @@ impl SharedSession {
     }
 
     pub fn close(&self) -> Result<(), String> {
+        self.1.closed.cancel();
         self.0.close()
     }
 
@@ -614,6 +615,15 @@ pub struct Runner {
 pub type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
 
 impl Runner {
+    pub async fn end_session_hooks(self: &Arc<Self>) {
+        if self.agent.claim_end_hooks() {
+            let runner = self.clone();
+            tokio::spawn(async move {
+                runner.agent.end_hooks().await;
+            });
+        }
+        self.agent.wait_end_hooks().await;
+    }
     /// Runs one turn.
     pub async fn run(
         &self,
@@ -1471,6 +1481,30 @@ impl Builder {
         info
     }
 
+    pub(crate) fn plugin_runtime(
+        &self,
+        snapshot: &crate::plugin::Snapshot,
+        secrets: &[String],
+    ) -> Result<Arc<crate::plugin::hooks::Runtime>, String> {
+        crate::plugin::hooks::Runtime::new(
+            snapshot,
+            Path::new(&self.home),
+            &self.config.hooks,
+            crate::plugin::hooks::Execution {
+                executor: self.command_executor.clone(),
+                environment: self.sandbox_environment.clone().unwrap_or_default(),
+                workspace: self.workspace.root().into(),
+                guard: crate::tool::project_guard::Guard::for_config(
+                    &self.config,
+                    &self.home,
+                    &self.workspace_path,
+                ),
+                secrets: secrets.to_vec(),
+                logger: self.logger.clone(),
+            },
+        )
+    }
+
     pub(crate) fn builtin_file_tools(&self, max_output: usize) -> Vec<Box<dyn Tool + Send + Sync>> {
         vec![
             Box::new(read::ReadTool::new(self.workspace, max_output)),
@@ -1709,6 +1743,21 @@ impl Builder {
         mark_build_trace(&mut trace, "runner/setup");
         let plugins =
             crate::plugin::Snapshot::load(Path::new(&self.home), &self.config, &self.environment);
+        let extensions = self.plugin_runtime(&plugins, &redaction_values)?;
+        let hook_guard = crate::plugin::hooks::session_guard(
+            {
+                let session = session.clone();
+                Arc::new(move || session.lease())
+            },
+            PathBuf::from(&self.workspace_path),
+            session.1.closed.clone(),
+            otto_core::config::resolve_failover(&self.config)
+                .map_err(|e| e.to_string())?
+                .enabled,
+        );
+        if redactor.allows_dynamic_content() {
+            tools.extend(extensions.tools());
+        }
         let catalogs =
             self.build_catalogs_with_plugins(&mut tools, max_output, warnings, &plugins)?;
         mark_build_trace(&mut trace, "runner/catalogs");
@@ -1766,6 +1815,9 @@ impl Builder {
         let mut child_tools =
             self.child_tools(runtime, max_output, &redaction_values, &catalogs.skills)?;
         child_tools.extend(super::wiring::mcp_child_tools(&mcp_connected, max_output));
+        if redactor.allows_dynamic_content() {
+            child_tools.extend(extensions.tools());
+        }
         if let Some(guard) = crate::tool::project_guard::Guard::for_config(
             &self.config,
             &self.home,
@@ -1783,6 +1835,8 @@ impl Builder {
             session,
             self.child_prompt_for(runtime, &endpoint_host, &prompt_tail),
             child_tools,
+            Some(extensions.clone()),
+            Some(hook_guard.clone()),
             warnings,
         )?;
         mark_build_trace(&mut trace, "runner/subagents");
@@ -1901,6 +1955,20 @@ impl Builder {
             ProviderClient::Scripted(_) => None,
         };
         let options = Options {
+            hooks: (extensions.has_hooks() && redactor.allows_dynamic_content()).then(|| {
+                extensions.bind(
+                    session.header().id,
+                    None,
+                    String::new(),
+                    if session.path().is_empty() {
+                        "new"
+                    } else {
+                        "resume"
+                    },
+                    Some(hook_guard),
+                )
+            }),
+            hook_state: session.1.clone(),
             model: runtime.model.clone(),
             provider_name: runtime.provider.clone(),
             system_prompt: system_prompt.clone(),
@@ -1930,6 +1998,8 @@ impl Builder {
             steering: task_control.steering(),
             ..Options::default()
         };
+        let hook_port = options.hooks.clone();
+        let hook_state = options.hook_state.clone();
         mark_build_trace(&mut trace, "runner/registry-and-options");
         if !plugins.packages.is_empty() {
             session
@@ -1937,35 +2007,81 @@ impl Builder {
                 .map_err(|e| e.to_string())?;
         }
         let trace_entries = trace.map(|trace| trace.entries).unwrap_or_default();
-        Ok((
-            Runner {
-                approvals: Some((
-                    self.approvals.clone(),
-                    crate::approval::Scope {
-                        workspace: self.workspace_path.clone(),
-                        session_id: session.header().id,
-                        task_id: String::new(),
-                        run_id: String::new(),
-                    },
-                )),
-                agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
-                turn_timeout: runtime.resilience.deadlines.turn_timeout,
-                system_prompt,
-                definitions,
-                usage: self.usage_collector(session, runtime),
-                tasks: subagents.tasks,
-                subagents: subagents.runner,
-                reminders: subagents.reminders,
-                skills: catalogs.skills.clone(),
-                agents: catalogs.agent_catalog.clone(),
-                mcp: mcp_servers,
-                task_control,
-                advisor,
-                schedule_origin,
-                reflection,
-            },
-            trace_entries,
-        ))
+        let runner = Runner {
+            approvals: Some((
+                self.approvals.clone(),
+                crate::approval::Scope {
+                    workspace: self.workspace_path.clone(),
+                    session_id: session.header().id,
+                    task_id: String::new(),
+                    run_id: String::new(),
+                },
+            )),
+            agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
+            turn_timeout: runtime.resilience.deadlines.turn_timeout,
+            system_prompt,
+            definitions,
+            usage: self.usage_collector(session, runtime),
+            tasks: subagents.tasks,
+            subagents: subagents.runner,
+            reminders: subagents.reminders,
+            skills: catalogs.skills.clone(),
+            agents: catalogs.agent_catalog.clone(),
+            mcp: mcp_servers,
+            task_control,
+            advisor,
+            schedule_origin,
+            reflection,
+        };
+        if extensions.has_hooks() && runner.allows_dynamic_content() {
+            if hook_state.claim_start() {
+                let state = hook_state.clone();
+                let port = hook_port.expect("enabled hooks have a port");
+                tokio::spawn(async move {
+                    let result = port
+                        .run(
+                            "session_start",
+                            serde_json::json!({"turn_id":""}),
+                            &state.closed.child_token(),
+                        )
+                        .await;
+                    state.complete_start(result);
+                    if state.closed.is_cancelled()
+                        && !state
+                            .end_requested
+                            .swap(true, std::sync::atomic::Ordering::SeqCst)
+                        && !state.ended.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let _ = port
+                            .run(
+                                "session_end",
+                                serde_json::json!({"turn_id":""}),
+                                &CancellationToken::new(),
+                            )
+                            .await;
+                        state.end_done.cancel();
+                    }
+                });
+            }
+            let response = match hook_state.wait_start().await {
+                Ok(r) => r,
+                Err(message) => {
+                    runner.agent.end_hooks().await;
+                    runner.close();
+                    runner.close_mcp().await;
+                    return Err(message);
+                }
+            };
+            if response.decision == Some(otto_core::agent::hooks::Decision::Deny) {
+                runner.agent.end_hooks().await;
+                runner.close();
+                runner.close_mcp().await;
+                return Err(response
+                    .reason
+                    .unwrap_or_else(|| "Hook denied session".into()));
+            }
+        }
+        Ok((runner, trace_entries))
     }
 
     /// The text a caller may print for `message`.
@@ -3462,5 +3578,117 @@ mod tests {
             Some(crate::auth::AuthError::CredentialsUnavailable.to_string())
         );
         assert!(chatgpt_client("/tmp/x.json", &stored, true).is_ok());
+    }
+    #[tokio::test]
+    async fn plugin_packages_register_skills_tools_and_lifecycle_once_across_runner_rebuilds() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("source-demo");
+        std::fs::create_dir_all(package.join("skills/example")).unwrap();
+        std::fs::write(
+            package.join("skills/example/SKILL.md"),
+            "---\nname: example\ndescription: Example skill\n---\nDo the example task.\n",
+        )
+        .unwrap();
+        let components = serde_json::json!({"version":1,"hooks":{"session_start":[{"command":["/bin/sh","-c","read input; echo start >> lifecycle.log"]}],"session_end":[{"command":["/bin/sh","-c","read input; sleep 0.05; echo end >> lifecycle.log"]}]},"tools":[{"name":"echo","description":"Echo a value","command":["/bin/sh","-c","read input; printf '{}'"],"input_schema":{"type":"object"}}]});
+        std::fs::write(package.join("plugin.json"),serde_json::json!({"$schema":crate::plugin::package::PLUGIN_SCHEMA,"name":"demo","extensions":{"dev.otto":components}}).to_string()).unwrap();
+        let service = crate::plugin::Service::new(temp.path());
+        let installed = service.install(package.to_str().unwrap(), None).unwrap();
+        service.change("demo", "trust").unwrap();
+        let mut builder = builder(temp.path());
+        let root = builder.workspace.root();
+        builder.command_executor = Some(Arc::new(
+            Executor::new(
+                Arc::new(DirectDriver::new()),
+                Policy {
+                    filesystem: FilesystemMode::Unconfined,
+                    network: NetworkMode::Allow,
+                },
+                root,
+            )
+            .unwrap(),
+        ));
+        builder.sandbox_environment = Some(vec!["PATH=/usr/bin:/bin".into()]);
+        let session = SharedSession::memory(Header {
+            id: "session-plugins".into(),
+            ..Default::default()
+        });
+        let first = Arc::new(builder.build_runner(&session, &runtime()).await.unwrap());
+        assert!(tool_names(&first).contains(&"plugin__demo__echo".into()));
+        assert!(first.system_prompt.contains("Example skill"));
+        let second = Arc::new(builder.build_runner(&session, &runtime()).await.unwrap());
+        first.close();
+        let ((), ()) = tokio::join!(second.end_session_hooks(), second.end_session_hooks());
+        assert_eq!(
+            std::fs::read_to_string(root.join("lifecycle.log")).unwrap(),
+            "start\nend\n"
+        );
+        second.close();
+        service.change("demo", "disable").unwrap();
+        let disabled = builder
+            .build_runner(&SharedSession::memory(Header::default()), &runtime())
+            .await
+            .unwrap();
+        assert!(!tool_names(&disabled).contains(&"plugin__demo__echo".into()));
+        assert!(!disabled.system_prompt.contains("Example skill"));
+        disabled.close();
+        use std::os::unix::fs::PermissionsExt;
+        let snapshot = service.package_path(&installed.digest);
+        for path in [
+            snapshot.clone(),
+            snapshot.join("skills"),
+            snapshot.join("skills/example"),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn closing_a_session_cancels_the_owned_startup_hook_after_build_waiter_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut builder = builder(temp.path());
+        let root = builder.workspace.root();
+        builder.command_executor = Some(Arc::new(
+            Executor::new(
+                Arc::new(DirectDriver::new()),
+                Policy {
+                    filesystem: FilesystemMode::Unconfined,
+                    network: NetworkMode::Allow,
+                },
+                root,
+            )
+            .unwrap(),
+        ));
+        builder.sandbox_environment = Some(vec!["PATH=/usr/bin:/bin".into()]);
+        builder
+            .shared_mut()
+            .config
+            .hooks
+            .session_start
+            .push(otto_core::config::plugins::Hook {
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "read input; touch started; sleep 20; touch should-not-finish".into(),
+                ],
+                timeout: "10s".into(),
+                matcher: Vec::new(),
+            });
+        let session = SharedSession::memory(Header::default());
+        let policy = runtime();
+        {
+            let build = builder.build_runner(&session, &policy);
+            tokio::pin!(build);
+            let started = async {
+                while !root.join("started").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {result=&mut build=>panic!("startup returned unexpectedly: {}",result.is_ok()),result=tokio::time::timeout(Duration::from_secs(5),started)=>result.unwrap()}
+        }
+        session.close().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), session.1.start_done.cancelled())
+            .await
+            .unwrap();
+        assert!(session.1.start.get().unwrap().is_err());
+        assert!(!root.join("should-not-finish").exists());
     }
 }

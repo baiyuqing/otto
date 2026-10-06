@@ -63,6 +63,7 @@ impl Driver for DirectDriver {
             return (ExitStatus::default(), Err(Error::InvalidRequest));
         };
         let spec = Spec {
+            stdin: request.stdin,
             path: path.clone(),
             args: args.to_vec(),
             directory: request.dir,

@@ -1527,7 +1527,7 @@ pub(crate) fn resolve_sandbox_settings(
     )?;
     let agent_roots =
         crate::config::layered::catalog_roots(file, home, workspace, &agents.roots, "agents")?;
-    let plugin_roots = if file.skills.enabled != Some(false) {
+    let plugin_roots = if file.plugins.enabled != Some(false) {
         let mut discovery = file.clone();
         discovery.mcp.enabled = Some(false);
         let service = crate::plugin::Service::new(home);

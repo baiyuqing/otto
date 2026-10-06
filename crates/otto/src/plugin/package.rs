@@ -21,6 +21,11 @@ pub struct Package {
     pub skills: Vec<PathBuf>,
     pub servers: Vec<(String, Server)>,
     pub diagnostics: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "otto_core::config::plugins::Components::is_default"
+    )]
+    pub otto: otto_core::config::plugins::Components,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -133,7 +138,13 @@ pub fn discover(path: &Path) -> Result<Package, String> {
         skills: Vec::new(),
         servers: Vec::new(),
         diagnostics: Vec::new(),
+        otto: Default::default(),
     };
+    if let Some(value) = manifest.pointer("/extensions/dev.otto") {
+        package.otto =
+            serde_json::from_value(value.clone()).map_err(|_| "invalid dev.otto extension")?;
+        super::hooks::validate_components(&package.name, &package.otto)?;
+    }
     if portable {
         for key in object.keys() {
             if ![

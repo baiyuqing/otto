@@ -538,6 +538,8 @@ impl ToolExecutor for ChildTools {
 /// The turn settings every child copies from the parent, and the two injected
 /// capabilities [`Options`] needs.
 pub struct OptionsTemplate {
+    pub plugins: Option<Arc<crate::plugin::hooks::Runtime>>,
+    pub hook_guard: Option<Arc<crate::plugin::hooks::SessionGuard>>,
     pub model: String,
     pub provider_name: String,
     pub thinking: String,
@@ -556,6 +558,8 @@ pub struct OptionsTemplate {
 impl Default for OptionsTemplate {
     fn default() -> Self {
         Self {
+            plugins: None,
+            hook_guard: None,
             model: String::new(),
             provider_name: String::new(),
             thinking: String::new(),
@@ -1178,6 +1182,33 @@ impl Runner {
             .child_inbox(&task.id)
             .unwrap_or_else(|| Arc::new(Inbox::new(None)));
         let options = Options {
+            hooks: template
+                .plugins
+                .as_ref()
+                .filter(|p| p.has_hooks())
+                .map(|p| {
+                    p.bind(
+                        format!(
+                            "{}:{}",
+                            self.config
+                                .approval
+                                .as_ref()
+                                .map_or("child", |(_, s)| s.session_id.as_str()),
+                            task.id
+                        ),
+                        self.config
+                            .approval
+                            .as_ref()
+                            .map(|(_, s)| s.session_id.clone()),
+                        task.id.clone(),
+                        if transcript.messages().is_empty() {
+                            "new"
+                        } else {
+                            "resume"
+                        },
+                        template.hook_guard.clone(),
+                    )
+                }),
             model: redactor.redact_string(&model),
             provider_name: template.provider_name.clone(),
             system_prompt,
@@ -1318,6 +1349,7 @@ impl Runner {
             }
         };
         drop(permit);
+        child.end_hooks().await;
         let _ = child.close();
 
         let status = match &outcome {
@@ -4044,5 +4076,69 @@ mod tests {
             panic!("expected ResumeFailed, got {error:?}");
         };
         assert!(message.contains("bogus"), "{message}");
+    }
+    #[tokio::test]
+    async fn plugin_argument_rewrites_obey_child_owned_path_policy() {
+        use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy, direct::DirectDriver};
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(temp.path()).unwrap();
+        let executor = Executor::new(
+            Arc::new(DirectDriver::new()),
+            Policy {
+                filesystem: FilesystemMode::Unconfined,
+                network: NetworkMode::Allow,
+            },
+            &workspace,
+        )
+        .unwrap();
+        let hooks=otto_core::config::plugins::Hooks{before_tool:vec![otto_core::config::plugins::Hook{command:vec!["/bin/sh".into(),"-c".into(),r#"read input; case "$input" in *'"task_id":"t1"'*) printf '%s' '{"arguments":{"path":"outside.txt","content":"wrong"}}';; *) exit 1;; esac"#.into()],timeout:"1s".into(),matcher:vec!["write".into()]}],..Default::default()};
+        let runtime = crate::plugin::hooks::Runtime::new(
+            &crate::plugin::Snapshot::default(),
+            temp.path(),
+            &hooks,
+            crate::plugin::hooks::Execution {
+                executor: Some(Arc::new(executor)),
+                workspace,
+                environment: vec!["PATH=/usr/bin:/bin".into()],
+                guard: None,
+                secrets: Vec::new(),
+                logger: Arc::new(crate::log::Logger::discard()),
+            },
+        )
+        .unwrap();
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![
+                assistant_tool_call(
+                    "call-write",
+                    "write",
+                    r#"{"path":"owned/file.txt","content":"ok"}"#,
+                    Usage::default(),
+                ),
+                assistant_text("done", Usage::default()),
+            ],
+        );
+        let tool = StubTool::new("write", text_result("wrote"));
+        let count = tool.counter();
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, vec![tool.boxed()]);
+        config.template.plugins = Some(runtime);
+        config.catalog = catalog(vec![Definition {
+            name: "writer".into(),
+            write_policy: WritePolicy::OwnedPaths,
+            write_paths: vec!["owned/**".into()],
+            ..Definition::default()
+        }]);
+        let (runner, _) = runner(config);
+        runner
+            .start(StartRequest {
+                agent: "writer".into(),
+                prompt: "write".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        wait_final(&tasks, "t1").await;
+        assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 }

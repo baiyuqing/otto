@@ -39,7 +39,7 @@ pub async fn admit_input(
     };
     match session.ctrl.admit_active_input(&input.text) {
         Ok(disposition) => json_response(StatusCode::OK, &disposition),
-        Err(message) => error_response(StatusCode::CONFLICT, "input_admission_failed", &message),
+        Err(message) => input_error(&message, "input_admission_failed"),
     }
 }
 
@@ -92,7 +92,21 @@ pub async fn steer(
     };
     match session.ctrl.steer(&input.text) {
         Ok(message) => json_response(StatusCode::OK, &message),
-        Err(message) => error_response(StatusCode::CONFLICT, "task_steer_failed", &message),
+        Err(message) => input_error(&message, "task_steer_failed"),
+    }
+}
+
+/// `503 input_not_persisted` when the input's durable copy could not be
+/// saved, otherwise `409` with `code`.
+fn input_error(message: &str, code: &str) -> Response {
+    if message == crate::app::task_control::INPUT_NOT_PERSISTED {
+        error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "input_not_persisted",
+            message,
+        )
+    } else {
+        error_response(StatusCode::CONFLICT, code, message)
     }
 }
 
@@ -142,5 +156,21 @@ fn invalid_text(text: &str) -> Option<&'static str> {
         Some("text must be at most 32000 UTF-8 bytes")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unsaved_input_answers_503_and_other_failures_409() {
+        let unsaved = input_error(
+            crate::app::task_control::INPUT_NOT_PERSISTED,
+            "input_admission_failed",
+        );
+        assert_eq!(unsaved.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let other = input_error("the active task changed", "input_admission_failed");
+        assert_eq!(other.status(), StatusCode::CONFLICT);
     }
 }

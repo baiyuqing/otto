@@ -121,17 +121,14 @@ pub struct Recovery {
     pub interrupted_turn: Option<InterruptedTurn>,
 }
 
-/// How many times Otto resumes an interrupted turn on its own: a resumed
-/// turn that is itself interrupted is not resumed again, so a request or a
-/// tool that kills the process cannot loop.
-pub const MAX_AUTOMATIC_RESUMES: u32 = 1;
+pub use otto_core::session::turn::MAX_AUTOMATIC_RESUMES;
 
 impl Recovery {
     /// Whether the interrupted turn already used its automatic resume.
     pub fn resume_exhausted(&self) -> bool {
         self.interrupted_turn
             .as_ref()
-            .is_some_and(|turn| turn.attempt > MAX_AUTOMATIC_RESUMES)
+            .is_some_and(InterruptedTurn::resume_exhausted)
     }
 }
 

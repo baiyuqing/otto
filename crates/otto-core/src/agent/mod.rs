@@ -499,12 +499,20 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(self.fail(emit, AgentError::EmptyUserText));
         }
         let wake = text.is_empty() && image.is_none();
-        let turn_id = self
+        let (turn_id, resumes) = self
             .start_turn(wake)
             .await
             .map_err(|error| self.fail(emit, error))?;
         let result = self
-            .run_turn(user_text, image, system_context, emit, control, followup)
+            .run_turn(
+                user_text,
+                image,
+                system_context,
+                emit,
+                control,
+                followup,
+                (&turn_id, resumes.as_deref()),
+            )
             .await;
         self.end_turn(turn_id, &result, control).await;
         result
@@ -512,12 +520,20 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
     /// Appends the `otto.turn` start record, the turn's first durable write.
     /// A wake turn that follows a turn process loss interrupted is recorded
-    /// as that turn's recovery; every other turn starts a new chain.
-    async fn start_turn(&self, wake: bool) -> Result<String, AgentError> {
+    /// as that turn's recovery; every other turn starts a new chain. Returns
+    /// the turn id and, when this turn follows an interrupted turn that has
+    /// not used its automatic resume, that turn's id: its journaled steering
+    /// is delivered by this turn.
+    async fn start_turn(&self, wake: bool) -> Result<(String, Option<String>), AgentError> {
         let turn_id = (self.options.new_operation_id)()
             .map_err(|message| AgentError::OperationIdentity { message })?
             .to_string();
-        let record = match self.session.interrupted_turn() {
+        let interrupted = self.session.interrupted_turn();
+        let resumes = interrupted
+            .as_ref()
+            .filter(|prior| !prior.resume_exhausted())
+            .map(|prior| prior.turn_id.clone());
+        let record = match interrupted {
             Some(prior) if wake => TurnRecord::started(
                 turn_id.clone(),
                 TurnTrigger::Recovery,
@@ -542,7 +558,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 kind: "turn start".into(),
                 source,
             })?;
-        Ok(turn_id)
+        Ok((turn_id, resumes))
     }
 
     /// Appends the `otto.turn` end record. A failed append is not reported:
@@ -569,6 +585,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     }
 
     /// The body of one admitted turn, between its `otto.turn` records.
+    /// `turn` is this turn's id and the interrupted turn it resumes, if any.
+    #[allow(clippy::too_many_arguments)]
     async fn run_turn(
         &self,
         user_text: &str,
@@ -577,9 +595,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
         followup: bool,
+        turn: (&str, Option<&str>),
     ) -> Result<(), AgentError> {
         let text = trim_go_space(user_text);
-        let steering = self.options.steering.begin();
+        let steering = self.options.steering.begin_turn(turn.0, turn.1);
         emit(Event::AgentStarted);
         if let Some(error) = stopped_provider_error(control) {
             let operation_id = match (self.options.new_operation_id)() {
@@ -1172,13 +1191,22 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 blocks: vec![Block::text(text.clone())],
                 ..Message::default()
             };
-            self.session
-                .append(message)
-                .await
-                .map_err(|source| AgentError::Persist {
-                    kind: "steering message".into(),
-                    source,
-                })?;
+            let appended = if steering.input_id.is_empty() {
+                self.session.append(message).await.map(|()| true)
+            } else {
+                self.session
+                    .append_input_if_absent(&steering.input_id, message)
+                    .await
+                    .map(|outcome| outcome == crate::session::AppendOutcome::Appended)
+            }
+            .map_err(|source| AgentError::Persist {
+                kind: "steering message".into(),
+                source,
+            })?;
+            self.options.steering.delivered(&steering);
+            if !appended {
+                continue;
+            }
             emit(Event::Notification {
                 kind: Some(inbox::NotificationKind::UserMessage),
                 task_id: String::new(),

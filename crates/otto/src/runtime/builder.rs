@@ -38,6 +38,8 @@ use crate::deadline::{Control, Deadline};
 use crate::failover;
 use crate::provider::openaicompat::Client;
 use crate::sandbox::CommandExecutor;
+pub use crate::session::SessionHandle;
+#[cfg(test)]
 use crate::session::Store;
 use crate::skill::Catalog;
 use crate::tool::registry::Registry;
@@ -91,106 +93,13 @@ pub struct RuntimeInfo {
     pub sandbox: SandboxInfo,
 }
 
-/// The session operations a frontend needs beyond the transcript itself.
-pub trait SessionHandle: Session + Send + Sync {
-    fn header(&self) -> Header;
-    fn name(&self) -> String;
-    fn path(&self) -> String;
-    fn rename(&self, name: &str) -> Result<(), String>;
-    fn thinking_level(&self) -> String;
-    fn update_thinking_level(&self, thinking: &str) -> Result<(), String>;
-    fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String>;
-    fn close(&self) -> Result<(), String>;
-
-    fn archive(
-        &self,
-        _root: &Path,
-        _workspace: &str,
-    ) -> Result<crate::session::ArchiveResult, String> {
-        Err("session persistence is disabled".to_string())
-    }
-
-    /// The usage and context-window counters a frontend displays. A transcript
-    /// that keeps no counters reports zeroes.
-    fn snapshot(&self) -> Snapshot {
-        Snapshot::default()
-    }
-
-    /// The lease backing this session, when it is lease-managed. A
-    /// transcript that is never lease-managed (e.g. [`MemoryHandle`])
-    /// keeps the default.
-    fn lease(&self) -> Option<Arc<crate::failover::lease::Lease>> {
-        None
-    }
-
-    /// The takeover recorded when this session was opened by taking over
-    /// another holder's lease epoch, taken once. A transcript that is
-    /// never lease-managed keeps the default.
-    fn take_takeover(&self) -> Option<crate::session::Takeover> {
-        None
-    }
-}
-
-impl SessionHandle for Store {
-    fn header(&self) -> Header {
-        Store::header(self)
-    }
-
-    fn name(&self) -> String {
-        Store::name(self)
-    }
-
-    fn path(&self) -> String {
-        Store::path(self)
-    }
-
-    fn rename(&self, name: &str) -> Result<(), String> {
-        Store::rename(self, name).map_err(|error| error.to_string())
-    }
-
-    fn thinking_level(&self) -> String {
-        Store::thinking_level(self)
-    }
-
-    fn update_thinking_level(&self, thinking: &str) -> Result<(), String> {
-        Store::update_thinking_level(self, thinking).map_err(|error| error.to_string())
-    }
-
-    fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String> {
-        Store::update_runtime(self, runtime).map_err(|error| error.to_string())
-    }
-
-    fn close(&self) -> Result<(), String> {
-        Store::close(self).map_err(|error| error.to_string())
-    }
-
-    fn archive(
-        &self,
-        root: &Path,
-        workspace: &str,
-    ) -> Result<crate::session::ArchiveResult, String> {
-        Store::archive(self, root, workspace).map_err(|error| error.to_string())
-    }
-
-    fn snapshot(&self) -> Snapshot {
-        Store::snapshot(self)
-    }
-
-    fn lease(&self) -> Option<Arc<crate::failover::lease::Lease>> {
-        Store::lease(self)
-    }
-
-    fn take_takeover(&self) -> Option<crate::session::Takeover> {
-        Store::take_takeover(self)
-    }
-}
-
 /// A transcript that is never written to disk. It is what `--no-session`
 /// selects; `otto_core::session::MemorySession` carries the transcript and this
 /// wrapper carries the header and the name.
 pub struct MemoryHandle {
     inner: MemorySession,
     state: Mutex<MemoryState>,
+    writer_ownership: Option<Arc<dyn crate::session::WriterOwnership>>,
 }
 
 struct MemoryState {
@@ -209,7 +118,18 @@ impl MemoryHandle {
                 name: String::new(),
                 thinking_level: String::new(),
             }),
+            writer_ownership: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_writer_ownership(
+        header: Header,
+        writer_ownership: Arc<dyn crate::session::WriterOwnership>,
+    ) -> Self {
+        let mut handle = Self::new(header);
+        handle.writer_ownership = Some(writer_ownership);
+        handle
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, MemoryState> {
@@ -238,8 +158,15 @@ impl Session for MemoryHandle {
         self.inner.append_compaction(checkpoint).await
     }
 
-    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
-        self.inner.append_custom(custom_type, data)
+    async fn append_operation_fact(
+        &self,
+        fact: otto_core::session::OperationFact,
+    ) -> Result<(), SessionError> {
+        self.inner.append_operation_fact(fact).await
+    }
+
+    async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        self.inner.append_custom(custom_type, data).await
     }
 }
 
@@ -294,6 +221,10 @@ impl SessionHandle for MemoryHandle {
     fn close(&self) -> Result<(), String> {
         Ok(())
     }
+
+    fn lease(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
+        self.writer_ownership.clone()
+    }
 }
 
 /// A session shared by the agent and the frontend.
@@ -305,6 +236,7 @@ pub struct SharedSession(Arc<dyn SessionHandle>, Arc<otto_core::agent::hooks::St
 
 impl SharedSession {
     pub fn new(handle: Arc<dyn SessionHandle>) -> Self {
+        crate::failover::ownership::register_writer_session(&handle);
         Self(handle, Arc::default())
     }
 
@@ -362,7 +294,7 @@ impl SharedSession {
         self.0.snapshot()
     }
 
-    pub fn lease(&self) -> Option<Arc<crate::failover::lease::Lease>> {
+    pub fn lease(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
         self.0.lease()
     }
 
@@ -396,8 +328,15 @@ impl Session for SharedSession {
         self.0.append_compaction(checkpoint).await
     }
 
-    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
-        self.0.append_custom(custom_type, data)
+    async fn append_operation_fact(
+        &self,
+        fact: otto_core::session::OperationFact,
+    ) -> Result<(), SessionError> {
+        self.0.append_operation_fact(fact).await
+    }
+
+    async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        self.0.append_custom(custom_type, data).await
     }
 }
 
@@ -1097,6 +1036,7 @@ impl Runner {
 /// [`Builder::for_workspace`] once per workspace.
 #[derive(Clone)]
 pub struct Shared {
+    pub storage: Arc<super::storage::Storage>,
     pub approvals: Arc<crate::approval::Service>,
     pub config_path: PathBuf,
     pub config: File,
@@ -1138,15 +1078,15 @@ pub struct Shared {
     pub auth_credentials_loaded: bool,
     /// Process-wide append-only token usage storage. `None` keeps usage
     /// collection from affecting an otherwise usable runtime.
-    pub usage: Option<Arc<crate::usage::Store>>,
+    pub usage: Option<Arc<dyn crate::usage::repository::UsageRepository>>,
     /// Process-wide sub-agent task recorder (`~/.otto/tasks.db`). `None` keeps
     /// `build_subagents` from recording task history, matching today's
     /// behaviour; `build_subagents` injects it into every `Tasks` registry it
     /// builds.
-    pub task_recorder: Option<Arc<crate::subagent::record::Store>>,
+    pub task_recorder: Option<Arc<dyn crate::subagent::record::TaskRepository>>,
     /// The scheduled-delivery store (`~/.otto/schedule.db`). `None` when it
     /// could not be opened; the schedule tools then report it as unavailable.
-    pub schedule: Option<Arc<crate::schedule::Store>>,
+    pub schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     /// The automatic skill contract check (experimental). `None` when the
     /// feature is disabled or its database could not be opened; either way
     /// `build_subagents` wires no checker in and delegation is unaffected.
@@ -1326,8 +1266,8 @@ impl Builder {
     ) -> Option<crate::usage::Collector> {
         self.usage.as_ref().map(|store| {
             let header = session.header();
-            crate::usage::Collector::new(
-                Arc::clone(store),
+            crate::usage::Collector::from_sink(
+                Arc::clone(store) as Arc<dyn crate::usage::Sink>,
                 crate::usage::Context {
                     workspace: header.workspace,
                     session_id: header.id,
@@ -2004,6 +1944,7 @@ impl Builder {
         if !plugins.packages.is_empty() {
             session
                 .append_custom("otto.plugins", &plugins.provenance())
+                .await
                 .map_err(|e| e.to_string())?;
         }
         let trace_entries = trace.map(|trace| trace.entries).unwrap_or_default();
@@ -2166,17 +2107,19 @@ impl Builder {
         if self.no_session {
             return Ok(SharedSession::memory(header));
         }
-        let store = Store::create_lazy(&self.session_root, header)
-            .map_err(|error| self.redact_error(&error.to_string(), Some(runtime)))?;
-        if let Some(lease_seconds) = self
+        let failover_seconds = self
             .create_lease()
-            .map_err(|error| self.redact_error(&error, Some(runtime)))?
-        {
-            store
-                .enable_failover(lease_seconds)
-                .map_err(|error| self.redact_error(&error.to_string(), Some(runtime)))?;
-        }
-        Ok(SharedSession::new(Arc::new(store)))
+            .map_err(|error| self.redact_error(&error, Some(runtime)))?;
+        let session_root = self
+            .storage
+            .session_root(&self.session_root)
+            .map_err(|error| self.redact_error(&error, Some(runtime)))?;
+        let handle = self
+            .storage
+            .sessions()
+            .and_then(|repository| repository.create_lazy(&session_root, header, failover_seconds))
+            .map_err(|error| self.redact_error(&error, Some(runtime)))?;
+        Ok(SharedSession::new(handle))
     }
 }
 
@@ -2517,6 +2460,7 @@ mod tests {
 
     fn shared(root: &Path) -> Arc<Shared> {
         Arc::new(Shared {
+            storage: Arc::new(Default::default()),
             approvals: Arc::new(crate::approval::Service::in_memory().expect("approval store")),
             config_path: root.join("config.toml"),
             config: File::default(),
@@ -2741,7 +2685,7 @@ mod tests {
             ..Header::default()
         };
         let store = Store::create_lazy(tmp.path().join("sessions"), header).expect("store");
-        store.set_lease_check(Arc::clone(&lease));
+        store.set_lease_check(Arc::clone(&lease) as Arc<dyn crate::session::WriterOwnership>);
         let session = SharedSession::new(Arc::new(store));
 
         let stub = crate::subagent::testsupport::StubTool::new(
@@ -3185,7 +3129,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut builder = builder(dir.path());
         let store = Arc::new(crate::usage::Store::open_in_memory().expect("usage store"));
-        builder.shared_mut().usage = Some(Arc::clone(&store));
+        builder.shared_mut().usage = Some(store.clone());
         let runtime = runtime();
         let session = SharedSession::memory(Header {
             id: "session-1".into(),
@@ -3293,8 +3237,15 @@ mod tests {
             self.inner.append_compaction(checkpoint).await
         }
 
-        fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
-            self.inner.append_custom(custom_type, data)
+        async fn append_operation_fact(
+            &self,
+            fact: otto_core::session::OperationFact,
+        ) -> Result<(), SessionError> {
+            self.inner.append_operation_fact(fact).await
+        }
+
+        async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+            self.inner.append_custom(custom_type, data).await
         }
     }
 
@@ -3411,6 +3362,7 @@ mod tests {
                 prompt: "first".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -3419,6 +3371,7 @@ mod tests {
                 prompt: "second".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         assert_eq!(
             tasks.get("t2").expect("t2 exists").status,

@@ -18,7 +18,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use tokio_util::sync::CancellationToken;
 
 use super::store::{Item, delivery_text, run_text};
-use super::{Origin, RunOutcome, Scope, Store};
+use super::{Origin, RunOutcome, ScheduleStore, Scope};
 use crate::log::Logger;
 use crate::metrics::Metrics;
 
@@ -59,7 +59,7 @@ pub struct DeliverRole {
 }
 
 pub struct Worker {
-    pub store: Arc<Store>,
+    pub store: Arc<dyn ScheduleStore>,
     pub run: Option<RunRole>,
     pub deliver: Option<DeliverRole>,
     pub logger: Arc<Logger>,
@@ -110,12 +110,12 @@ impl Worker {
         let telemetry = Telemetry { logger, metrics };
         let runs = async {
             if let Some(role) = &run {
-                run_loop(&store, role, &telemetry, &cancel).await;
+                run_loop(store.as_ref(), role, &telemetry, &cancel).await;
             }
         };
         let deliveries = async {
             if let Some(role) = &deliver {
-                deliver_loop(&store, role, &telemetry, &cancel).await;
+                deliver_loop(store.as_ref(), role, &telemetry, &cancel).await;
             }
         };
         let heartbeats = async {
@@ -154,7 +154,7 @@ impl Worker {
 }
 
 async fn run_loop(
-    store: &Store,
+    store: &dyn ScheduleStore,
     role: &RunRole,
     telemetry: &Telemetry,
     cancel: &CancellationToken,
@@ -181,7 +181,7 @@ async fn run_loop(
 }
 
 async fn run_one(
-    store: &Store,
+    store: &dyn ScheduleStore,
     role: &RunRole,
     telemetry: &Telemetry,
     item: Item,
@@ -236,7 +236,7 @@ async fn run_one(
 }
 
 async fn deliver_loop(
-    store: &Store,
+    store: &dyn ScheduleStore,
     role: &DeliverRole,
     telemetry: &Telemetry,
     cancel: &CancellationToken,
@@ -307,7 +307,7 @@ async fn deliver_loop(
 
 /// Calls `step` until it reports no progress, then sleeps. The notifier wait
 /// is armed before `step` so a wake-up during the step is not lost.
-async fn idle_loop<F, Fut>(store: &Store, cancel: &CancellationToken, mut step: F)
+async fn idle_loop<F, Fut>(store: &dyn ScheduleStore, cancel: &CancellationToken, mut step: F)
 where
     F: FnMut(DateTime<Utc>) -> Fut,
     Fut: std::future::Future<Output = bool>,
@@ -346,7 +346,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::schedule::{Kind, NewItem, State};
+    use crate::schedule::{Kind, NewItem, State, Store};
 
     #[tokio::test(start_paused = true)]
     async fn overdue_unclaimable_items_wait_instead_of_polling_at_minimum_idle() {
@@ -372,7 +372,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let worker = tokio::spawn(async move {
-            idle_loop(&store, &stop, |_| {
+            idle_loop(store.as_ref(), &stop, |_| {
                 count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 std::future::ready(false)
             })
@@ -503,8 +503,9 @@ mod tests {
         let cancel = CancellationToken::new();
         let log = Capture::default();
         let metrics = Arc::new(Metrics::new());
+        let store_port: Arc<dyn ScheduleStore> = store.clone();
         let worker = Worker {
-            store: Arc::clone(&store),
+            store: store_port,
             run: Some(RunRole {
                 scope: Scope::Any,
                 workspace: run_workspace.map(str::to_owned),

@@ -286,12 +286,19 @@ impl Session for SharedTranscript {
         self.0.append_compaction(checkpoint).await
     }
 
-    fn append_custom(
+    async fn append_operation_fact(
+        &self,
+        fact: otto_core::session::OperationFact,
+    ) -> Result<(), otto_core::session::SessionError> {
+        self.0.append_operation_fact(fact).await
+    }
+
+    async fn append_custom(
         &self,
         custom_type: &str,
         data: &str,
     ) -> Result<(), otto_core::session::SessionError> {
-        self.0.append_custom(custom_type, data)
+        self.0.append_custom(custom_type, data).await
     }
 }
 
@@ -670,6 +677,35 @@ struct ChildRun {
     deadline: Deadline,
 }
 
+struct StartGuard {
+    runner: Arc<Runner>,
+    task_id: String,
+    now: DateTime<Utc>,
+    cancel: CancellationToken,
+    armed: bool,
+}
+
+impl StartGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel.cancel();
+            self.runner.finish_without_transcript(
+                &self.task_id,
+                TaskStatus::Canceled,
+                self.now,
+                &[],
+                Some("task start was canceled before child execution"),
+            );
+        }
+    }
+}
+
 impl Runner {
     /// Validates `config`, builds the child tool registry, and resolves each
     /// definition's allowlist. The returned warnings name every definition
@@ -795,30 +831,31 @@ impl Runner {
     /// [`Config::max_parallel`] children are already running. An unknown agent
     /// name, an invalid context, or `inherit` with no parent session is
     /// rejected before any task is created.
-    pub fn start(self: &Arc<Self>, request: StartRequest) -> Result<Task, StartError> {
-        self.start_resolved(request, None, None)
+    pub async fn start(self: &Arc<Self>, request: StartRequest) -> Result<Task, StartError> {
+        self.start_resolved(request, None, None).await
     }
 
     /// Starts one child with a caller-owned session. Durable workflows use
     /// this path so the child transcript survives the process.
-    pub fn start_with_session(
+    pub async fn start_with_session(
         self: &Arc<Self>,
         request: StartRequest,
         transcript: Transcript,
     ) -> Result<Task, StartError> {
-        self.start_resolved(request, Some(transcript), None)
+        self.start_resolved(request, Some(transcript), None).await
     }
 
-    fn start_resolved(
+    async fn start_resolved(
         self: &Arc<Self>,
         request: StartRequest,
         transcript: Option<Transcript>,
         inline_definition: Option<Definition>,
     ) -> Result<Task, StartError> {
         self.start_resolved_with_deadline(request, transcript, inline_definition, None)
+            .await
     }
 
-    fn start_resolved_with_deadline(
+    async fn start_resolved_with_deadline(
         self: &Arc<Self>,
         request: StartRequest,
         transcript: Option<Transcript>,
@@ -863,18 +900,20 @@ impl Runner {
             if context == "inherit" {
                 return Err(StartError::InheritUnavailable);
             }
-            return self.spawn(
-                request,
-                definition,
-                description,
-                model,
-                context,
-                now,
-                Vec::new(),
-                transcript,
-                None,
-                self.task_deadline(parent_deadline),
-            );
+            return self
+                .spawn(
+                    request,
+                    definition,
+                    description,
+                    model,
+                    context,
+                    now,
+                    Vec::new(),
+                    transcript,
+                    None,
+                    self.task_deadline(parent_deadline),
+                )
+                .await;
         };
         let snapshot = if context == "inherit" {
             inherit_snapshot(&parent_session()).unwrap_or_default()
@@ -893,6 +932,7 @@ impl Runner {
             None,
             self.task_deadline(parent_deadline),
         )
+        .await
     }
 
     fn task_deadline(&self, parent: Option<Deadline>) -> Deadline {
@@ -908,7 +948,11 @@ impl Runner {
     /// current session's children. `prompt` becomes the task's next user
     /// message; the run replays no inherited snapshot, since the existing
     /// transcript already holds the task's history.
-    pub fn resume(self: &Arc<Self>, target: &str, prompt: String) -> Result<Task, StartError> {
+    pub async fn resume(
+        self: &Arc<Self>,
+        target: &str,
+        prompt: String,
+    ) -> Result<Task, StartError> {
         let locate = self
             .config
             .children_dir
@@ -960,6 +1004,7 @@ impl Runner {
             Some(record.task_id.clone()),
             self.task_deadline(None),
         )
+        .await
     }
 
     /// Runs one child to a terminal state using `transcript` and returns its
@@ -1016,6 +1061,7 @@ impl Runner {
     ) -> Result<Task, String> {
         let task = self
             .start_resolved_with_deadline(request, Some(transcript), definition, parent_deadline)
+            .await
             .map_err(|error| error.to_string())?;
         let id = task.id.clone();
         let result = match self.config.tasks.wait(&id, cancel).await {
@@ -1045,7 +1091,7 @@ impl Runner {
     /// `otto.task_spec` entry is written, since the transcript already has
     /// one from the task's original run.
     #[allow(clippy::too_many_arguments)]
-    fn spawn(
+    async fn spawn(
         self: &Arc<Self>,
         request: StartRequest,
         definition: Option<Definition>,
@@ -1092,6 +1138,13 @@ impl Runner {
                 .tasks
                 .add(task_template, Some(cancel.clone()), history)?,
         };
+        let mut start_guard = StartGuard {
+            runner: Arc::clone(self),
+            task_id: task.id.clone(),
+            now,
+            cancel: cancel.clone(),
+            armed: true,
+        };
         let transcript = match (transcript, &self.config.child_session) {
             (Some(transcript), _) => transcript,
             (None, None) => Arc::new(MemorySession::new()),
@@ -1104,37 +1157,55 @@ impl Runner {
                 Err(error) => {
                     // No transcript was built, so there is nothing to append
                     // otto.task_result to.
-                    self.finish(&task.id, TaskStatus::Failed, now, &[], Some(&error), None);
+                    self.finish_without_transcript(
+                        &task.id,
+                        TaskStatus::Failed,
+                        now,
+                        &[],
+                        Some(&error),
+                    );
+                    start_guard.disarm();
                     return Ok(self.config.tasks.get(&task.id).unwrap_or(task));
                 }
             },
         };
         let _ = slot.set(Arc::clone(&transcript));
 
-        // Written before the child runs, so a queued task that never starts
-        // still has a transcript recording what it was asked to do. Skipped
-        // when resuming: the transcript already has this entry from the
-        // task's original run.
+        // Durable custom entries are awaited before `start` returns, so even
+        // a task that remains queued has its complete specification on disk.
         if resume_id.is_none() {
-            append_task_custom(
-                &transcript,
-                TASK_SPEC_CUSTOM_TYPE,
-                &TaskSpecData {
-                    id: task.id.clone(),
-                    name: task.name.clone(),
-                    description: task.description.clone(),
-                    model: task.model.clone(),
-                    context: task.context.clone(),
-                    prompt: task.prompt.clone(),
-                    definition: definition.as_ref().map(|definition| TaskSpecDefinition {
-                        name: definition.name.clone(),
-                        body: definition.body.clone(),
-                        tools: definition.tools.clone(),
-                        write_policy: definition.write_policy.as_str().to_string(),
-                        write_paths: definition.write_paths.clone(),
-                    }),
-                },
-            );
+            let task_spec = TaskSpecData {
+                id: task.id.clone(),
+                name: task.name.clone(),
+                description: task.description.clone(),
+                model: task.model.clone(),
+                context: task.context.clone(),
+                prompt: task.prompt.clone(),
+                definition: definition.as_ref().map(|definition| TaskSpecDefinition {
+                    name: definition.name.clone(),
+                    body: definition.body.clone(),
+                    tools: definition.tools.clone(),
+                    write_policy: definition.write_policy.as_str().to_string(),
+                    write_paths: definition.write_paths.clone(),
+                }),
+            };
+            if let Err(error) =
+                append_task_custom(&transcript, TASK_SPEC_CUSTOM_TYPE, &task_spec).await
+            {
+                cancel.cancel();
+                let messages = transcript.messages();
+                self.finish(
+                    &task.id,
+                    TaskStatus::Failed,
+                    now,
+                    &messages,
+                    Some(&error.to_string()),
+                    Some(&transcript),
+                )
+                .await;
+                start_guard.disarm();
+                return Ok(self.config.tasks.get(&task.id).unwrap_or(task));
+            }
         }
 
         let tools = ChildTools {
@@ -1256,6 +1327,7 @@ impl Runner {
                 })
                 .await;
         });
+        start_guard.disarm();
 
         Ok(task)
     }
@@ -1291,7 +1363,8 @@ impl Runner {
                     &messages,
                     Some(&error.to_string()),
                     Some(&transcript),
-                );
+                )
+                .await;
                 return;
             }
         }
@@ -1300,13 +1373,13 @@ impl Runner {
             biased;
             () = deadline.expired() => {
                 let messages = transcript.messages();
-                self.finish(&task_id, TaskStatus::Interrupted, self.now(), &messages, Some("task deadline exceeded"), Some(&transcript));
+                self.finish(&task_id, TaskStatus::Interrupted, self.now(), &messages, Some("task deadline exceeded"), Some(&transcript)).await;
                 return;
             }
             permit = Arc::clone(&self.semaphore).acquire_owned() => permit,
             () = cancel.cancelled() => {
                 let messages = transcript.messages();
-                self.finish(&task_id, TaskStatus::Canceled, self.now(), &messages, None, Some(&transcript));
+                self.finish(&task_id, TaskStatus::Canceled, self.now(), &messages, None, Some(&transcript)).await;
                 return;
             }
         };
@@ -1373,7 +1446,8 @@ impl Runner {
             &messages,
             error.as_deref(),
             Some(&transcript),
-        );
+        )
+        .await;
     }
 
     /// Marks a task final and pushes its completion notification. The
@@ -1382,7 +1456,7 @@ impl Runner {
     /// child-session builder itself failed), and before the registry update
     /// that releases [`Tasks::wait`], so a caller unblocked by a wait always
     /// finds the notification already in the inbox.
-    fn finish(
+    async fn finish(
         &self,
         task_id: &str,
         status: TaskStatus,
@@ -1391,6 +1465,53 @@ impl Runner {
         run_error: Option<&str>,
         transcript: Option<&Transcript>,
     ) {
+        let (result, error_text, migrating) =
+            self.prepare_finish(task_id, status, finished_at, messages, run_error);
+
+        if let Some(transcript) = transcript {
+            let result_status = if migrating {
+                crate::subagent::interrupted::INTERRUPTED_STATUS
+            } else {
+                status.as_str()
+            };
+            let _ = append_task_custom(
+                transcript,
+                TASK_RESULT_CUSTOM_TYPE,
+                &TaskResultData {
+                    status: result_status,
+                    error: &error_text,
+                },
+            )
+            .await;
+        }
+        self.config
+            .tasks
+            .finish(task_id, status, finished_at, &result, &error_text);
+    }
+
+    fn finish_without_transcript(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        finished_at: DateTime<Utc>,
+        messages: &[Message],
+        run_error: Option<&str>,
+    ) {
+        let (result, error_text, _) =
+            self.prepare_finish(task_id, status, finished_at, messages, run_error);
+        self.config
+            .tasks
+            .finish(task_id, status, finished_at, &result, &error_text);
+    }
+
+    fn prepare_finish(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        finished_at: DateTime<Utc>,
+        messages: &[Message],
+        run_error: Option<&str>,
+    ) -> (String, String, bool) {
         let mut result = last_assistant_text(messages);
         if result.is_empty() {
             result = "(sub-agent returned no final text)".to_string();
@@ -1421,24 +1542,7 @@ impl Runner {
                 usage: final_task.usage_present.then_some(final_task.usage),
             });
         }
-        if let Some(transcript) = transcript {
-            let result_status = if migrating {
-                crate::subagent::interrupted::INTERRUPTED_STATUS
-            } else {
-                status.as_str()
-            };
-            append_task_custom(
-                transcript,
-                TASK_RESULT_CUSTOM_TYPE,
-                &TaskResultData {
-                    status: result_status,
-                    error: &error_text,
-                },
-            );
-        }
-        self.config
-            .tasks
-            .finish(task_id, status, finished_at, &result, &error_text);
+        (result, error_text, migrating)
     }
 }
 
@@ -1448,11 +1552,14 @@ impl Runner {
 /// task record write failure: in TUI mode a stderr write from a background
 /// task is drawn over the screen. The task's completion notification to the
 /// parent does not depend on these entries.
-fn append_task_custom(transcript: &Transcript, custom_type: &str, data: &impl Serialize) {
-    let Ok(json) = serde_json::to_string(data) else {
-        return;
-    };
-    let _ = transcript.append_custom(custom_type, &json);
+async fn append_task_custom(
+    transcript: &Transcript,
+    custom_type: &str,
+    data: &impl Serialize,
+) -> Result<(), otto_core::session::SessionError> {
+    let json = serde_json::to_string(data)
+        .map_err(|error| otto_core::session::SessionError::Persist(error.to_string()))?;
+    transcript.append_custom(custom_type, &json).await
 }
 
 /// Why [`Runner::start`] refused a request. Every variant is reported before a
@@ -1794,6 +1901,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start");
         wait_final(&tasks, "t1").await;
 
@@ -1825,6 +1933,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
 
         wait_final(&tasks, "t1").await;
@@ -2122,6 +2231,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
 
@@ -2169,6 +2279,7 @@ mod tests {
                     },
                     ..StartRequest::default()
                 })
+                .await
                 .expect("start succeeds");
 
             let final_task = wait_final(&tasks, "t1").await;
@@ -2224,6 +2335,7 @@ mod tests {
                     prompt: format!("task {index}"),
                     ..StartRequest::default()
                 })
+                .await
                 .expect("start succeeds");
         }
         wait_status(&tasks, "t1", TaskStatus::Running).await;
@@ -2234,6 +2346,7 @@ mod tests {
                 prompt: "task 2".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         assert_eq!(
             tasks.get("t3").expect("t3 exists").status,
@@ -2276,6 +2389,7 @@ mod tests {
                 prompt: "occupy the slot".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start blocker");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -2321,6 +2435,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -2347,6 +2462,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
 
         wait_status(&tasks, "t1", TaskStatus::Running).await;
@@ -2380,6 +2496,7 @@ mod tests {
                 prompt: "first".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -2388,6 +2505,7 @@ mod tests {
                 prompt: "second".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         assert_eq!(
             tasks.get("t2").expect("t2 exists").status,
@@ -2418,6 +2536,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
 
         let final_task = wait_final(&tasks, "t1").await;
@@ -2468,6 +2587,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -2478,6 +2598,7 @@ mod tests {
                 prompt: "look at this".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         assert_eq!(
             tasks.get("t2").expect("t2 exists").status,
@@ -2553,7 +2674,14 @@ mod tests {
             self.inner.append_compaction(checkpoint).await
         }
 
-        fn append_custom(
+        async fn append_operation_fact(
+            &self,
+            fact: otto_core::session::OperationFact,
+        ) -> Result<(), otto_core::session::SessionError> {
+            self.inner.append_operation_fact(fact).await
+        }
+
+        async fn append_custom(
             &self,
             custom_type: &str,
             data: &str,
@@ -2574,7 +2702,7 @@ mod tests {
                     self.task_id
                 );
             }
-            self.inner.append_custom(custom_type, data)
+            self.inner.append_custom(custom_type, data).await
         }
     }
 
@@ -2605,6 +2733,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         let done = wait_final(&tasks, "t1").await;
         assert_eq!(done.status, TaskStatus::Succeeded, "{}", done.error);
@@ -2646,6 +2775,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         let done = wait_final(&tasks, "t1").await;
         assert_eq!(done.status, TaskStatus::Failed);
@@ -2695,6 +2825,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
         tasks.cancel("t1").expect("cancel succeeds");
@@ -2735,6 +2866,7 @@ mod tests {
                 prompt: "first".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -2743,6 +2875,7 @@ mod tests {
                 prompt: "second".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         assert_eq!(
             tasks.get("t2").expect("t2 exists").status,
@@ -2824,6 +2957,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
 
         let final_task = wait_final(&tasks, "t1").await;
@@ -2867,13 +3001,16 @@ mod tests {
 
         let tasks = Arc::new(Tasks::new());
         let mut config = test_config(&provider, &tasks, vec![write.boxed()]);
-        config.lease = Some(Arc::new(move || Some(Arc::clone(&lease))));
+        config.lease = Some(Arc::new(move || {
+            Some(Arc::clone(&lease) as Arc<dyn crate::session::WriterOwnership>)
+        }));
         let (runner, _) = runner(config);
         runner
             .start(StartRequest {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
 
         wait_final(&tasks, "t1").await;
@@ -2913,6 +3050,7 @@ mod tests {
                 agent: "nope".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect_err("an unknown agent is rejected");
         assert_eq!(error.to_string(), r#"unknown agent "nope""#);
         assert!(tasks.list().is_empty());
@@ -2933,6 +3071,7 @@ mod tests {
                 agent: "reviewer".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         assert_eq!(task.agent, "reviewer");
         assert_eq!(wait_final(&tasks, &task.id).await.agent, "reviewer");
@@ -2964,6 +3103,7 @@ mod tests {
                     model: call_model.into(),
                     ..StartRequest::default()
                 })
+                .await
                 .expect("start succeeds");
             wait_final(&tasks, "t1").await;
 
@@ -3001,6 +3141,7 @@ mod tests {
                 agent: "reviewer".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
 
@@ -3040,6 +3181,7 @@ mod tests {
                     agent: "reviewer".into(),
                     ..StartRequest::default()
                 })
+                .await
                 .expect("start succeeds");
             wait_final(&tasks, "t1").await;
             assert!(
@@ -3070,6 +3212,7 @@ mod tests {
                 agent: "reviewer".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
 
@@ -3095,6 +3238,7 @@ mod tests {
                 agent: "reviewer".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
 
@@ -3172,6 +3316,7 @@ mod tests {
                 context: "inherit".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         assert_eq!(task.context, "inherit");
         wait_final(&tasks, &task.id).await;
@@ -3261,6 +3406,7 @@ mod tests {
                 context: "inherit".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         let done = wait_final(&tasks, &task.id).await;
 
@@ -3296,6 +3442,7 @@ mod tests {
                 prompt: "delegated task".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         let done = wait_final(&tasks, &task.id).await;
 
@@ -3323,6 +3470,7 @@ mod tests {
                 context: "fresh".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         assert_eq!(task.context, "fresh");
         wait_final(&tasks, &task.id).await;
@@ -3366,6 +3514,7 @@ mod tests {
                     context: request_context.into(),
                     ..StartRequest::default()
                 })
+                .await
                 .expect("start succeeds");
             assert_eq!(task.context, want_context);
             wait_final(&tasks, &task.id).await;
@@ -3385,6 +3534,7 @@ mod tests {
                 context: "inherit".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect_err("inherit without a parent session is rejected");
         assert_eq!(
             error.to_string(),
@@ -3405,6 +3555,7 @@ mod tests {
                 context: "bogus".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect_err("an invalid context is rejected");
         assert_eq!(error.to_string(), r#"context must be "fresh" or "inherit""#);
         assert!(tasks.list().is_empty());
@@ -3822,6 +3973,7 @@ mod tests {
 
         runner
             .resume("t1", "start now".to_string())
+            .await
             .expect("resume succeeds");
         wait_final(&tasks, "t1").await;
 
@@ -4040,6 +4192,7 @@ mod tests {
         let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
         let error = runner
             .resume("t1", "again".to_string())
+            .await
             .expect_err("resume must reject a task that is running again");
         assert_eq!(error, StartError::ResumeNotInterrupted("t1".to_string()));
     }
@@ -4071,6 +4224,7 @@ mod tests {
 
         let error = runner
             .resume("t1", "continue".to_string())
+            .await
             .expect_err("resume must reject an unrecognized write_policy");
         let StartError::ResumeFailed(message) = error else {
             panic!("expected ResumeFailed, got {error:?}");
@@ -4137,6 +4291,7 @@ mod tests {
                 prompt: "write".into(),
                 ..Default::default()
             })
+            .await
             .unwrap();
         wait_final(&tasks, "t1").await;
         assert_eq!(count.load(Ordering::SeqCst), 0);

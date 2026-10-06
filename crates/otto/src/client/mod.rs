@@ -258,12 +258,14 @@ impl Client {
         &self,
         session_id: &str,
         text: &str,
+        input_id: Option<&str>,
     ) -> Result<ActiveInputAdmission, Error> {
+        let mut body = json!({"text": text});
+        if let Some(input_id) = input_id {
+            body["input_id"] = json!(input_id);
+        }
         let response = self
-            .send(self.post(
-                &format!("{BASE}/v1/sessions/{session_id}/inputs"),
-                &json!({"text": text}),
-            ))
+            .send(self.post(&format!("{BASE}/v1/sessions/{session_id}/inputs"), &body))
             .await?;
         decode(response).await
     }
@@ -419,13 +421,16 @@ impl Client {
             None,
             Some(&Origin::terminal()),
             None,
+            None,
         )
         .await
     }
 
     /// Starts a queued turn with optional per-turn chat channel metadata and
     /// origin. Without an origin the server records the turn as `web`.
-    /// `request_id` is sent as `X-Request-Id` for log correlation.
+    /// `request_id` is sent as `X-Request-Id` for log correlation;
+    /// `input_id` is the body's idempotency key, so a retry is not run twice.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_turn_with_channel(
         &self,
         session_id: &str,
@@ -434,8 +439,12 @@ impl Client {
         channel: Option<Channel>,
         origin: Option<&Origin>,
         request_id: Option<&str>,
+        input_id: Option<&str>,
     ) -> Result<TurnStream, Error> {
         let mut body = json!({ "text": text, "queue": true });
+        if let Some(input_id) = input_id {
+            body["input_id"] = json!(input_id);
+        }
         if let Some(channel) = channel {
             body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
         }
@@ -1217,6 +1226,7 @@ mod tests {
                 Some(Channel::Feishu),
                 Some(&Origin::chat("feishu", "oc_1").unwrap()),
                 None,
+                Some("chat:feishu:oc_1:m1"),
             )
             .await
             .unwrap();
@@ -1242,7 +1252,8 @@ mod tests {
                 "text": "chat text",
                 "queue": true,
                 "channel": "feishu",
-                "origin": "chat:feishu:oc_1"
+                "origin": "chat:feishu:oc_1",
+                "input_id": "chat:feishu:oc_1:m1"
             })
         );
     }
@@ -1273,7 +1284,7 @@ mod tests {
         });
         let client = Client::new(&socket).expect("client");
         client
-            .start_turn_with_channel("s1", "a", None, None, None, Some("req-1"))
+            .start_turn_with_channel("s1", "a", None, None, None, Some("req-1"), None)
             .await
             .unwrap();
         client.start_turn("s1", "b", None).await.unwrap();

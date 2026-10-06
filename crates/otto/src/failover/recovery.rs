@@ -17,7 +17,8 @@
 
 use std::path::Path;
 
-use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
+use otto_core::agent::inbox::{Notification, NotificationKind};
+use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, Role};
 
 use crate::failover::lease;
@@ -49,7 +50,7 @@ const PROMPT_PREVIEW_BYTES: usize = 500;
 /// interrupted is rejected, and the caller is the only place that can report
 /// why.
 pub fn notify(
-    inbox: &Inbox,
+    inbox: &dyn Mailbox,
     recovery: Option<Recovery>,
     children_dir: &Path,
     max_output_bytes: usize,
@@ -121,7 +122,7 @@ pub fn notify(
 /// the migration cancelled it, or its transcript write failed) is reported
 /// as one warning instead of being included in the notification.
 pub fn notify_moved(
-    inbox: &Inbox,
+    inbox: &dyn Mailbox,
     children_dir: &Path,
     task_ids: &[String],
     max_output_bytes: usize,
@@ -293,6 +294,7 @@ mod tests {
     use super::*;
     use crate::failover::lease;
     use crate::session::MAX_AUTOMATIC_RESUMES;
+    use otto_core::agent::inbox::Inbox;
     use otto_core::model::{Block, FinishReason};
 
     fn takeover(repaired: Vec<UnansweredCall>) -> Recovery {

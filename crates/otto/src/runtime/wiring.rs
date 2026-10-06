@@ -23,7 +23,6 @@ use otto_core::agent::redactor::Redactor;
 use otto_core::config::agents::AgentsRuntime;
 use otto_core::config::memory::MemoryRuntime;
 use otto_core::config::{McpAuth, McpTransport, Runtime, resolve_agents, resolve_skills};
-use otto_core::mailbox::Inbox;
 use otto_core::model::ToolDefinition;
 use otto_core::safetext::dynamic_redaction_marker;
 use tokio_util::sync::CancellationToken;
@@ -232,7 +231,7 @@ pub struct CatalogWiring {
 pub struct SubagentWiring {
     pub runner: Option<Arc<SubagentRunner>>,
     pub tasks: Option<Arc<Tasks>>,
-    pub inbox: Option<Arc<Inbox>>,
+    pub inbox: Option<Arc<dyn otto_core::mailbox::Mailbox>>,
     /// The session's timer registry, absent when the timer tools are not
     /// registered. `/timers` and archiving read the active runner's.
     pub reminders: Option<Arc<Reminders>>,
@@ -640,7 +639,7 @@ impl Builder {
         }
 
         let runner = Arc::new(runner);
-        let inbox = Arc::clone(tasks.notifications());
+        let inbox = Arc::clone(tasks.notifications_inbox());
         // The persist hook resolves the sidecar path at write time rather than
         // capturing `inbox_persist` here: a lazy session store's `path()` is
         // still empty at this point (nothing has been written to it yet), so
@@ -661,7 +660,7 @@ impl Builder {
                 let _ = writeln!(stderr, "warning: {warning}");
             }
             let recovery_warnings = failover::recovery::notify(
-                &inbox,
+                inbox.as_ref(),
                 session_for_recovery.take_recovery(),
                 &children_dir,
                 runtime.max_output_bytes.max(0) as usize,
@@ -674,8 +673,8 @@ impl Builder {
         tools.extend(subagent::tools::tools(&runner));
         // Parent-only; the child registry drops the timer tools by name.
         let reminders = Arc::new(match persist {
-            Some(path) => Reminders::with_persist(Arc::clone(&inbox), path),
-            None => Reminders::new(Arc::clone(&inbox)),
+            Some(path) => Reminders::with_persist(inbox.clone(), path),
+            None => Reminders::new(inbox.clone()),
         });
         tools.extend(remind::tools(&reminders));
         Ok(SubagentWiring {
@@ -1710,6 +1709,7 @@ fn child_sessions(parent: SharedSession, storage: Arc<super::storage::Storage>) 
 mod tests {
     use super::*;
     use crate::memory::{NAMESPACE_USER, NAMESPACE_WORKSPACE, RememberRequest, SearchRequest};
+    use otto_core::agent::inbox::Inbox;
 
     #[test]
     fn children_of_an_in_memory_parent_stay_in_memory() {

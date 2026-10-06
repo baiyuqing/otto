@@ -47,6 +47,7 @@ use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
 use otto_core::agent::redactor::Redactor;
 use otto_core::agent::{Agent, CompactionSettings, Event, EventSink, Options};
+use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, OperationStopReason, Role, ToolDefinition};
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
@@ -329,7 +330,7 @@ pub struct ChildTools {
     allowed: Option<BTreeSet<String>>,
     write_policy: WritePolicy,
     write_paths: Vec<String>,
-    parent_inbox: Arc<Inbox>,
+    parent_inbox: Arc<dyn Mailbox>,
     task_id: String,
     max_output_bytes: usize,
     /// Remaining `agent_report` calls; see [`REPORT_BUDGET`] and
@@ -378,7 +379,7 @@ impl ChildTools {
     /// [`ChildTools::report`].
     fn agent_report_definition() -> ToolDefinition {
         let description = format!(
-            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, or interim findings; put those in your final report. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent."
+            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, or interim findings; put those in your final report. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent. A report that cannot be saved to the parent's pending-notification file also returns an error and does not reach the parent."
         );
         definition(
             "agent_report",
@@ -406,13 +407,18 @@ impl ChildTools {
             self.max_output_bytes,
         )
         .content;
-        self.parent_inbox.push(Notification {
-            task_id: self.task_id.clone(),
-            kind: Some(NotificationKind::TaskReport),
-            text,
-            usage: None,
-            ..Default::default()
-        });
+        if let Err(otto_core::agent::inbox::MailboxError::NotPersisted { seq, reason }) =
+            self.parent_inbox.enqueue(Notification {
+                task_id: self.task_id.clone(),
+                kind: Some(NotificationKind::TaskReport),
+                text,
+                usage: None,
+                ..Default::default()
+            })
+        {
+            self.parent_inbox.ack(seq);
+            return error_result(format!("report not sent: {reason}"));
+        }
         text_result("report sent to parent")
     }
 }
@@ -1272,7 +1278,7 @@ impl Runner {
             .config
             .tasks
             .child_inbox(&task.id)
-            .unwrap_or_else(|| Arc::new(Inbox::new(None)));
+            .unwrap_or_else(|| Arc::new(Inbox::new(None)) as Arc<dyn Mailbox>);
         let options = Options {
             hooks: template
                 .plugins
@@ -1971,7 +1977,7 @@ mod tests {
         registry: Arc<Registry>,
         write_policy: WritePolicy,
         write_paths: Vec<String>,
-        parent_inbox: Arc<Inbox>,
+        parent_inbox: Arc<dyn Mailbox>,
     ) -> ChildTools {
         child_tools_with_budget(
             registry,
@@ -1986,7 +1992,7 @@ mod tests {
         registry: Arc<Registry>,
         write_policy: WritePolicy,
         write_paths: Vec<String>,
-        parent_inbox: Arc<Inbox>,
+        parent_inbox: Arc<dyn Mailbox>,
         budget: usize,
     ) -> ChildTools {
         ChildTools {
@@ -2070,7 +2076,7 @@ mod tests {
             registry,
             WritePolicy::SingleWriter,
             Vec::new(),
-            Arc::clone(&parent_inbox),
+            parent_inbox.clone(),
         );
         assert!(
             tool_names(&tools.definitions()).contains(&"agent_report".to_string()),
@@ -2103,7 +2109,7 @@ mod tests {
             registry,
             WritePolicy::SingleWriter,
             Vec::new(),
-            Arc::clone(&parent_inbox),
+            parent_inbox.clone(),
             REPORT_BUDGET,
         );
 
@@ -2144,7 +2150,7 @@ mod tests {
             registry,
             WritePolicy::SingleWriter,
             Vec::new(),
-            Arc::clone(&parent_inbox),
+            parent_inbox.clone(),
             1,
         );
 
@@ -2176,7 +2182,7 @@ mod tests {
             allowed: None,
             write_policy: WritePolicy::SingleWriter,
             write_paths: Vec::new(),
-            parent_inbox: Arc::clone(&parent_inbox),
+            parent_inbox: parent_inbox.clone(),
             task_id: task.id.clone(),
             max_output_bytes: 16384,
             reports_left,

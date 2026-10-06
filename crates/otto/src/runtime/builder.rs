@@ -977,7 +977,7 @@ impl Runner {
             .map(|subagents| subagents.max_output_bytes())
             .unwrap_or(0);
         crate::failover::recovery::notify_moved(
-            tasks.notifications(),
+            tasks.notifications().as_ref(),
             &children_dir,
             &ids,
             max_output_bytes,
@@ -1975,7 +1975,9 @@ impl Builder {
                 .tasks
                 .clone()
                 .map(|tasks| tasks as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
-            mailbox: subagents.inbox.unwrap_or_default(),
+            mailbox: subagents
+                .inbox
+                .unwrap_or_else(|| Arc::new(otto_core::mailbox::InMemoryMailbox::default())),
             steering: task_control.steering(),
             version: env!("CARGO_PKG_VERSION").into(),
             ..Options::default()

@@ -23,14 +23,12 @@ struct TextInput {
 }
 
 impl TextInput {
-    /// `input_id`, or the `400` answer when it is malformed.
-    fn input_id(&self) -> Result<Option<&str>, Response> {
-        match self.input_id.as_deref() {
-            Some(id) if !otto_core::model::is_input_id(id) => {
-                Err(bad_request(super::INVALID_INPUT_ID))
-            }
-            id => Ok(id),
-        }
+    /// The `400` answer when `input_id` is present and malformed.
+    fn invalid_input_id(&self) -> Option<Response> {
+        self.input_id
+            .as_deref()
+            .filter(|id| !otto_core::model::is_input_id(id))
+            .map(|_| bad_request(super::INVALID_INPUT_ID))
     }
 }
 
@@ -52,10 +50,10 @@ pub async fn admit_input(
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    let input_id = match input.input_id() {
-        Ok(id) => id,
-        Err(response) => return response,
-    };
+    if let Some(response) = input.invalid_input_id() {
+        return response;
+    }
+    let input_id = input.input_id.as_deref();
     match session.ctrl.admit_active_input_with(&input.text, input_id) {
         Ok(disposition) => json_response(StatusCode::OK, &disposition),
         Err(message) => input_error(&message, "input_admission_failed"),
@@ -109,10 +107,10 @@ pub async fn steer(
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    let input_id = match input.input_id() {
-        Ok(id) => id,
-        Err(response) => return response,
-    };
+    if let Some(response) = input.invalid_input_id() {
+        return response;
+    }
+    let input_id = input.input_id.as_deref();
     match session.ctrl.steer_input(&input.text, input_id) {
         Ok(message) => json_response(StatusCode::OK, &message),
         Err(message) => input_error(&message, "task_steer_failed"),

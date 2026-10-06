@@ -1,8 +1,10 @@
 # Durable inputs
 
-Status: proposed 2026-10-06, awaiting approval. No production code or tests
-until approved. This design changes two approved contracts; see
-[Changes to approved contracts](#changes-to-approved-contracts).
+Status: approved 2026-10-06 with both contract changes below; open questions
+resolved as recommended. Sections 1 to 4, 6 and 7 ship together; section 5
+(model follow-ups) ships in a separate PR under this design. See
+[Implementation decisions](#implementation-decisions) for the details the
+implementation settled.
 
 It is the next slice after
 [crash recovery and interrupted-turn resume](2026-10-06-crash-recovery-and-turn-resume.md).
@@ -391,6 +393,41 @@ Offline, deterministic tests that fail if the behaviour breaks:
 Docs: user manual (sessions, server API, ACP), `docs/development.md`, OpenAPI
 document, CHANGELOG; capability descriptions for `agent_send`, `task_queue`
 and `agent_report` (new error outcomes).
+
+## Implementation decisions
+
+Recorded 2026-10-06 while implementing sections 1 to 4, 6 and 7; they refine
+the design above without changing its guarantees.
+
+- **`input_id`, not `request_id`.** Otto already uses "request id" for log
+  correlation (`X-Request-Id`, ACP `_meta.otto.requestId`), and
+  chat-connector fills it with a random value per message. The idempotency
+  key is therefore `input_id` in HTTP bodies and `_meta.otto.inputId` in ACP,
+  and a retry of a delivered input answers `409 duplicate_input`.
+- **Steering has its own mailbox instance**, `<id>.inputs.json` (open question
+  1). Because it is a separate queue, no new `NotificationKind` and no
+  `wakes()` filter are needed: the notification mailbox never holds steering,
+  so steering cannot wake a turn. Entries use kind `user_message` and carry
+  the turn id in `scope`.
+- **Child mailboxes keep kind `message`** and the file name `inbox.json`
+  beside the child transcript; old Otto reads them. No `ParentMessage` kind.
+- **The durable adapter** is `runtime::sidecar_mailbox` (`install`, `load`)
+  over the in-memory `Inbox`, not a separate struct. `Inbox::enqueue` returns
+  `Result<u64, MailboxError>`; acknowledgement failures stay unreported,
+  because an entry acknowledged in memory but still on disk is recognised by
+  its input id on reopen.
+- **Where `Inbox` is named.** Consumers take `dyn Mailbox`; the in-memory
+  adapter is constructed only in `runtime`, `subagent::tasks` (the parent and
+  child queues it owns) and the runner's fallback. A test enforces this.
+- **Stale steering** from a turn that will not resume is removed when the
+  next turn starts, not when the session opens, and without a warning.
+- **Ids.** Reminder firings use `remind:<id>:<fire_at ms>`, recovery notices
+  `recovery:<turn id>` or `takeover:<epoch>`; every other entry gets
+  `in_<32 hex>` from the durable adapter. Sub-agent completions use a
+  generated id, because a resumed task finishes again under the same task id.
+- **Turn prompts.** The input id reaches the agent through
+  `Agent::set_next_input_id`, which the next run always consumes. The server
+  remembers the last 256 input ids per session.
 
 ## Open questions
 

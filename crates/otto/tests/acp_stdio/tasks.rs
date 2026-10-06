@@ -16,10 +16,15 @@ fn cancel_ends_a_running_prompt_with_cancelled() {
 
     let id = client.start("session/prompt", prompt(&session_id, "wait"));
     wait_for_count(&accepted, 1);
-    // A second prompt on the busy session is refused.
-    let (_, busy) = client.call("session/prompt", prompt(&session_id, "again"));
-    assert_eq!(busy["error"]["code"], -32603);
-    assert_eq!(busy["error"]["message"], "a prompt is already running");
+    // Ordinary text on a busy session steers the active prompt rather than
+    // creating a hidden later turn or failing with "prompt already running".
+    let (busy_frames, busy) = client.call("session/prompt", prompt(&session_id, "again"));
+    assert_eq!(busy["result"]["stopReason"], "end_turn", "{busy}");
+    assert!(busy_frames.iter().any(|frame| {
+        frame["params"]["update"]["content"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Guidance accepted"))
+    }));
 
     let (steer_frames, steered) = client.call(
         "session/prompt",
@@ -257,7 +262,7 @@ fn a_timer_wake_turn_reply_reaches_the_client_outside_any_prompt() {
 }
 
 #[test]
-fn a_prompt_sent_during_a_wake_turn_waits_and_then_runs() {
+fn ordinary_input_during_a_wake_turn_steers_the_wake_turn() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     // Request 2 is the wake turn's provider call.
@@ -278,14 +283,20 @@ fn a_prompt_sent_during_a_wake_turn_waits_and_then_runs() {
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     wait_for_count(&served, 3);
 
-    let id = client.start("session/prompt", prompt(&session_id, "meanwhile"));
-    release.send(()).unwrap();
-    let (frames, response) = client.finish(id, &mut |frame| panic!("unexpected request: {frame}"));
+    let (frames, response) = client.call("session/prompt", prompt(&session_id, "meanwhile"));
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert!(
-        message_text(&frames).contains("second answer"),
+        message_text(&frames).contains("Guidance accepted for the active task"),
         "{frames:?}"
     );
+
+    release.send(()).unwrap();
+    let wake_reply = next_wake_reply(&mut client);
+    assert!(wake_reply.contains("the timer fired"), "{wake_reply}");
+    // Guidance is consumed by the wake turn at its next provider boundary.
+    // It may require a follow-up provider request, but never creates an
+    // independently queued ACP prompt.
+    assert!(wake_reply.contains("second answer"), "{wake_reply}");
     assert_eq!(served.load(Ordering::SeqCst), 4);
     assert_eq!(client.close(), Some(0));
 }

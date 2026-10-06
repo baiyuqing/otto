@@ -568,6 +568,23 @@ impl Controller {
         }
     }
 
+    /// Whether the current session's transcript holds a message delivering
+    /// input `input_id` (a client retry of an input already delivered).
+    pub fn has_input(&self, input_id: &str) -> bool {
+        let state = self.lock();
+        state.current.as_ref().is_some_and(|current| {
+            otto_core::session::Session::has_input(&current.session, input_id)
+        })
+    }
+
+    /// Records the client's input id for the next turn's user message; see
+    /// `Agent::set_next_input_id`.
+    pub fn set_next_input_id(&self, input_id: Option<String>) {
+        if let Some(runner) = self.current_runner() {
+            runner.set_next_input_id(input_id);
+        }
+    }
+
     /// Whether the session's last turn was interrupted by process loss, so
     /// the next wake turn resumes it (see `otto_core::session::turn`).
     pub fn resumes_interrupted_turn(&self) -> bool {
@@ -1610,7 +1627,21 @@ impl Controller {
     /// Accepts guidance for the exact active run, at its next safe provider
     /// boundary. The acceptance is transient and never wakes a later run.
     pub fn steer(&self, text: &str) -> Result<otto_core::agent::steering::Message, String> {
+        self.steer_input(text, None)
+    }
+
+    /// [`Self::steer`] with the client's `input_id`: a retry while the
+    /// guidance is queued returns the same message, and one after it was
+    /// delivered fails with [`task_control::DUPLICATE_INPUT`].
+    pub fn steer_input(
+        &self,
+        text: &str,
+        input_id: Option<&str>,
+    ) -> Result<otto_core::agent::steering::Message, String> {
         let text = task_control::checked_text(text)?;
+        if input_id.is_some_and(|id| self.has_input(id)) {
+            return Err(task_control::DUPLICATE_INPUT.into());
+        }
         if self.pending_approval().is_some() {
             return Err("the task is waiting for approval; guidance is not accepted yet".into());
         }
@@ -1619,7 +1650,9 @@ impl Controller {
             return Err("there is no active task accepting guidance".to_string());
         };
         let session_id = runner.session().header().id.clone();
-        runner.task_control().steer(&session_id, ticket, text)
+        runner
+            .task_control()
+            .steer(&session_id, ticket, text, input_id)
     }
 
     /// Lists the transient steering lifecycle for the current active run.
@@ -1642,7 +1675,20 @@ impl Controller {
     /// active. It never queues a later turn: callers explicitly choose that
     /// separate operation after receiving [`ActiveInputAdmission::Idle`].
     pub fn admit_active_input(&self, text: &str) -> Result<ActiveInputAdmission, String> {
+        self.admit_active_input_with(text, None)
+    }
+
+    /// [`Self::admit_active_input`] with the client's `input_id`; see
+    /// [`Self::steer_input`].
+    pub fn admit_active_input_with(
+        &self,
+        text: &str,
+        input_id: Option<&str>,
+    ) -> Result<ActiveInputAdmission, String> {
         let text = task_control::checked_text(text)?;
+        if input_id.is_some_and(|id| self.has_input(id)) {
+            return Err(task_control::DUPLICATE_INPUT.into());
+        }
         if self.pending_approval().is_some() {
             return Ok(ActiveInputAdmission::ApprovalPending);
         }
@@ -1651,7 +1697,10 @@ impl Controller {
             return Ok(ActiveInputAdmission::Idle);
         };
         let session_id = runner.session().header().id.clone();
-        match runner.task_control().steer(&session_id, ticket, text) {
+        match runner
+            .task_control()
+            .steer(&session_id, ticket, text, input_id)
+        {
             Ok(_) => Ok(ActiveInputAdmission::Steered),
             // The active run can close after observing its ticket. This text
             // was not accepted and must not be silently queued elsewhere.

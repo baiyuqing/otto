@@ -17,7 +17,8 @@
 
 use std::path::Path;
 
-use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
+use otto_core::agent::inbox::{Notification, NotificationKind};
+use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, Role};
 
 use crate::failover::lease;
@@ -49,7 +50,7 @@ const PROMPT_PREVIEW_BYTES: usize = 500;
 /// interrupted is rejected, and the caller is the only place that can report
 /// why.
 pub fn notify(
-    inbox: &Inbox,
+    inbox: &dyn Mailbox,
     recovery: Option<Recovery>,
     children_dir: &Path,
     max_output_bytes: usize,
@@ -77,12 +78,23 @@ pub fn notify(
         || !ends_with_a_finished_assistant_turn(parent_messages)
     {
         let text = render(&recovery, &interrupted_children, max_output_bytes);
-        inbox.push(Notification {
+        // A stable id keeps a notice that was queued before another
+        // interruption from being queued or delivered twice.
+        let id = match (&recovery.interrupted_turn, &recovery.cause) {
+            (Some(turn), _) => format!("recovery:{}", turn.turn_id),
+            (None, RecoveryCause::TakenOver(holder)) => format!("takeover:{}", holder.epoch),
+            (None, RecoveryCause::ProcessLost) => String::new(),
+        };
+        if let Err(error) = inbox.enqueue(Notification {
             task_id: String::new(),
             kind: Some(NotificationKind::Message),
             text,
             usage: None,
-        });
+            id,
+            ..Default::default()
+        }) {
+            warnings.push(format!("recovery: {error}"));
+        }
     }
 
     for child in &interrupted_children {
@@ -110,7 +122,7 @@ pub fn notify(
 /// the migration cancelled it, or its transcript write failed) is reported
 /// as one warning instead of being included in the notification.
 pub fn notify_moved(
-    inbox: &Inbox,
+    inbox: &dyn Mailbox,
     children_dir: &Path,
     task_ids: &[String],
     max_output_bytes: usize,
@@ -144,6 +156,7 @@ pub fn notify_moved(
         kind: Some(NotificationKind::Message),
         text,
         usage: None,
+        ..Default::default()
     });
     warnings
 }
@@ -231,6 +244,12 @@ fn render_body(
             truncate_bytes(&child.prompt, PROMPT_PREVIEW_BYTES)
         ));
         text.push_str(&format!("started: {}\n", child.started));
+        let pending = pending_parent_messages(&child.path);
+        if pending > 0 {
+            text.push_str(&format!(
+                "parent messages not yet read: {pending} (delivered when the task is resumed)\n"
+            ));
+        }
         if !child.unanswered.is_empty() {
             text.push_str("calls left unanswered:\n");
             for call in &child.unanswered {
@@ -248,6 +267,15 @@ fn render_body(
          prompt. A task not continued this way stays interrupted.\n",
     );
     text
+}
+
+/// How many `agent_send` messages the child at `transcript` had not read,
+/// from its mailbox sidecar; 0 when there is none or it cannot be read.
+fn pending_parent_messages(transcript: &Path) -> usize {
+    std::fs::read_to_string(transcript.with_extension("inbox.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(&raw).ok())
+        .map_or(0, |entries| entries.len())
 }
 
 fn render_call(call: &UnansweredCall) -> String {
@@ -281,6 +309,7 @@ mod tests {
     use super::*;
     use crate::failover::lease;
     use crate::session::MAX_AUTOMATIC_RESUMES;
+    use otto_core::agent::inbox::Inbox;
     use otto_core::model::{Block, FinishReason};
 
     fn takeover(repaired: Vec<UnansweredCall>) -> Recovery {
@@ -690,5 +719,19 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("op_turn"), "{warnings:?}");
         assert!(warnings[0].contains("not resuming"), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_notice_counts_parent_messages_an_interrupted_child_had_not_read() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut child = interrupted_child("t1");
+        child.path = dir.path().join("t1-child.jsonl");
+        std::fs::write(
+            child.path.with_extension("inbox.json"),
+            r#"[{"seq":0,"text":"a"},{"seq":1,"text":"b"}]"#,
+        )
+        .expect("sidecar");
+        let text = render(&takeover(Vec::new()), std::slice::from_ref(&child), 100);
+        assert!(text.contains("parent messages not yet read: 2"), "{text}");
     }
 }

@@ -173,6 +173,18 @@ impl Session for MemoryHandle {
         self.inner.interrupted_turn()
     }
 
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: otto_core::model::Message,
+    ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         self.inner.append_custom(custom_type, data).await
     }
@@ -349,6 +361,18 @@ impl Session for SharedSession {
 
     fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
         self.0.interrupted_turn()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: otto_core::model::Message,
+    ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+        self.0.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.0.has_input(input_id)
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
@@ -860,6 +884,11 @@ impl Runner {
         &self.system_prompt
     }
 
+    /// Records the client's input id for the next run's user message.
+    pub fn set_next_input_id(&self, input_id: Option<String>) {
+        self.agent.set_next_input_id(input_id);
+    }
+
     pub(crate) fn task_control(&self) -> Arc<crate::app::task_control::TaskControl> {
         Arc::clone(&self.task_control)
     }
@@ -953,7 +982,7 @@ impl Runner {
             .map(|subagents| subagents.max_output_bytes())
             .unwrap_or(0);
         crate::failover::recovery::notify_moved(
-            tasks.notifications(),
+            tasks.notifications().as_ref(),
             &children_dir,
             &ids,
             max_output_bytes,
@@ -1799,6 +1828,7 @@ impl Builder {
         mark_build_trace(&mut trace, "runner/subagents");
 
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
+        self.install_steering_journal(&task_control.steering(), session, warnings);
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let reflection = Arc::new(crate::tool::reflect::Handle::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
@@ -1951,7 +1981,9 @@ impl Builder {
                 .tasks
                 .clone()
                 .map(|tasks| tasks as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
-            mailbox: subagents.inbox.unwrap_or_default(),
+            mailbox: subagents
+                .inbox
+                .unwrap_or_else(|| Arc::new(otto_core::mailbox::InMemoryMailbox::default())),
             steering: task_control.steering(),
             version: env!("CARGO_PKG_VERSION").into(),
             ..Options::default()
@@ -3268,6 +3300,18 @@ mod tests {
 
         fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
             self.inner.interrupted_turn()
+        }
+
+        async fn append_input_if_absent(
+            &self,
+            input_id: &str,
+            message: otto_core::model::Message,
+        ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+            self.inner.append_input_if_absent(input_id, message).await
+        }
+
+        fn has_input(&self, input_id: &str) -> bool {
+            self.inner.has_input(input_id)
         }
 
         async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {

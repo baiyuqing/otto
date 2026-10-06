@@ -17,6 +17,19 @@ const MAX_TEXT_BYTES: usize = 32_000;
 #[serde(deny_unknown_fields)]
 struct TextInput {
     text: String,
+    /// The client's stable id for this input, so a retry is admitted once.
+    #[serde(default)]
+    input_id: Option<String>,
+}
+
+impl TextInput {
+    /// The `400` answer when `input_id` is present and malformed.
+    fn invalid_input_id(&self) -> Option<Response> {
+        self.input_id
+            .as_deref()
+            .filter(|id| !otto_core::model::is_input_id(id))
+            .map(|_| bad_request(super::INVALID_INPUT_ID))
+    }
 }
 
 /// `POST /v1/sessions/{id}/inputs` deterministically admits ordinary human
@@ -37,9 +50,13 @@ pub async fn admit_input(
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    match session.ctrl.admit_active_input(&input.text) {
+    if let Some(response) = input.invalid_input_id() {
+        return response;
+    }
+    let input_id = input.input_id.as_deref();
+    match session.ctrl.admit_active_input_with(&input.text, input_id) {
         Ok(disposition) => json_response(StatusCode::OK, &disposition),
-        Err(message) => error_response(StatusCode::CONFLICT, "input_admission_failed", &message),
+        Err(message) => input_error(&message, "input_admission_failed"),
     }
 }
 
@@ -90,9 +107,30 @@ pub async fn steer(
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    match session.ctrl.steer(&input.text) {
+    if let Some(response) = input.invalid_input_id() {
+        return response;
+    }
+    let input_id = input.input_id.as_deref();
+    match session.ctrl.steer_input(&input.text, input_id) {
         Ok(message) => json_response(StatusCode::OK, &message),
-        Err(message) => error_response(StatusCode::CONFLICT, "task_steer_failed", &message),
+        Err(message) => input_error(&message, "task_steer_failed"),
+    }
+}
+
+/// `503 input_not_persisted` when the input's durable copy could not be
+/// saved, `409 duplicate_input` for a retry of a delivered input, otherwise
+/// `409` with `code`.
+fn input_error(message: &str, code: &str) -> Response {
+    if message == crate::app::task_control::INPUT_NOT_PERSISTED {
+        error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "input_not_persisted",
+            message,
+        )
+    } else if message == crate::app::task_control::DUPLICATE_INPUT {
+        error_response(StatusCode::CONFLICT, "duplicate_input", message)
+    } else {
+        error_response(StatusCode::CONFLICT, code, message)
     }
 }
 
@@ -142,5 +180,21 @@ fn invalid_text(text: &str) -> Option<&'static str> {
         Some("text must be at most 32000 UTF-8 bytes")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unsaved_input_answers_503_and_other_failures_409() {
+        let unsaved = input_error(
+            crate::app::task_control::INPUT_NOT_PERSISTED,
+            "input_admission_failed",
+        );
+        assert_eq!(unsaved.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let other = input_error("the active task changed", "input_admission_failed");
+        assert_eq!(other.status(), StatusCode::CONFLICT);
     }
 }

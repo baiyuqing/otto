@@ -103,6 +103,7 @@ impl TaskControl {
         session_id: &str,
         ticket: u64,
         text: &str,
+        input_id: Option<&str>,
     ) -> Result<otto_core::agent::steering::Message, String> {
         let state = self.lock();
         if !state
@@ -112,7 +113,9 @@ impl TaskControl {
         {
             return Err("the active task changed before guidance was accepted".into());
         }
-        self.steering.submit_for(ticket, text).map_err(submit_error)
+        self.steering
+            .submit_input(ticket, text, input_id)
+            .map_err(submit_error)
     }
 
     pub(crate) fn queue_followup(&self, text: &str) -> Result<(), String> {
@@ -316,8 +319,19 @@ fn submit_error(error: SubmitError) -> String {
         SubmitError::Empty => "guidance must contain non-whitespace characters".into(),
         SubmitError::TooLong => format!("guidance must be at most {MAX_TEXT_BYTES} UTF-8 bytes"),
         SubmitError::Full => "the active task's guidance queue is full".into(),
+        SubmitError::NotPersisted => INPUT_NOT_PERSISTED.into(),
     }
 }
+
+/// The error text of guidance whose durable copy could not be saved. The
+/// guidance was not accepted; the HTTP API answers `503
+/// input_not_persisted`.
+pub(crate) const INPUT_NOT_PERSISTED: &str = "the input could not be saved and was not accepted";
+
+/// The error text of an input whose `input_id` the session transcript
+/// already holds: a client retry after the input was delivered. The HTTP API
+/// answers `409 duplicate_input`.
+pub(crate) const DUPLICATE_INPUT: &str = "an input with this input_id was already delivered";
 
 #[derive(Default)]
 pub(crate) struct ControlRoute(Mutex<Option<Route>>);
@@ -342,7 +356,7 @@ impl ControlRoute {
         if route.is_some() {
             return Ok(false);
         }
-        match control.steer(session_id, ticket, text) {
+        match control.steer(session_id, ticket, text, None) {
             Ok(_) => {
                 *route = Some(Route::Steered);
                 Ok(true)

@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, NotificationKind};
 use otto_core::agent::tasks::TaskRegistry;
+use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, Usage};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
@@ -131,6 +132,8 @@ pub enum TaskError {
     Invalid(String),
     #[error("context canceled")]
     Canceled,
+    #[error("message not sent: {0}")]
+    NotPersisted(String),
 }
 
 /// How many `agent_report` calls a child may make on its own initiative over
@@ -144,7 +147,7 @@ struct Entry {
     cancel: Option<CancellationToken>,
     #[allow(clippy::type_complexity)]
     history: Option<Arc<dyn Fn() -> Vec<Message> + Send + Sync>>,
-    inbox: Arc<Inbox>,
+    inbox: Arc<dyn Mailbox>,
     /// Remaining `agent_report` calls, shared with the child's `ChildTools`.
     /// Starts at [`REPORT_BUDGET`] and gains one for each parent message
     /// delivered through [`Tasks::send_message`].
@@ -189,6 +192,8 @@ impl Updates {
 pub struct Tasks {
     state: Mutex<State>,
     inbox: Arc<Inbox>,
+    /// `inbox` as the port every consumer uses.
+    mailbox: Arc<dyn Mailbox>,
     updates: Arc<Updates>,
     updates_receiver: watch::Receiver<u64>,
     recorder: Option<(Arc<dyn Recorder>, TaskContext)>,
@@ -259,6 +264,7 @@ impl Tasks {
                 counter: starting_counter,
                 ..State::default()
             }),
+            mailbox: Arc::clone(&inbox) as Arc<dyn Mailbox>,
             inbox,
             updates,
             updates_receiver: receiver,
@@ -372,7 +378,7 @@ impl Tasks {
                     task,
                     cancel,
                     history,
-                    inbox: Arc::new(Inbox::new(None)),
+                    inbox: Arc::new(Inbox::new(None)) as Arc<dyn Mailbox>,
                     reports_left: Arc::new(AtomicUsize::new(REPORT_BUDGET)),
                     done: Arc::new(Notify::new()),
                 },
@@ -557,10 +563,30 @@ impl Tasks {
 
     /// The task's private inbox, used to deliver parent messages into the
     /// child at its next agent-loop notification checkpoint.
-    pub fn child_inbox(&self, reference: &str) -> Option<Arc<Inbox>> {
+    pub fn child_inbox(&self, reference: &str) -> Option<Arc<dyn Mailbox>> {
         let state = self.lock();
         let entry = Self::entry(&state, reference)?;
         Some(Arc::clone(&entry.inbox))
+    }
+
+    /// Replaces the task's mailbox with `mailbox` (a durable one, built once
+    /// the child's transcript path is known). Messages already queued in the
+    /// old mailbox move after the ones `mailbox` restored, in order.
+    pub fn replace_child_inbox(&self, reference: &str, mailbox: Arc<dyn Mailbox>) {
+        let old = {
+            let mut state = self.lock();
+            let Some(id) = Self::entry(&state, reference).map(|entry| entry.task.id.clone()) else {
+                return;
+            };
+            let Some(entry) = state.entries.get_mut(&id) else {
+                return;
+            };
+            std::mem::replace(&mut entry.inbox, Arc::clone(&mailbox))
+        };
+        for entry in old.queued() {
+            mailbox.push(entry.notification);
+            old.ack(entry.seq);
+        }
     }
 
     /// The task's `agent_report` budget counter, shared with the running
@@ -590,12 +616,20 @@ impl Tasks {
                 Arc::clone(&entry.reports_left),
             )
         };
-        inbox.push(otto_core::agent::inbox::Notification {
-            task_id: id.clone(),
-            kind: Some(NotificationKind::Message),
-            text: format!("[parent-message] {message}"),
-            usage: None,
-        });
+        if let Err(otto_core::agent::inbox::MailboxError::NotPersisted { seq, reason }) = inbox
+            .enqueue(otto_core::agent::inbox::Notification {
+                task_id: id.clone(),
+                kind: Some(NotificationKind::Message),
+                text: format!("[parent-message] {message}"),
+                usage: None,
+                ..Default::default()
+            })
+        {
+            // Not admitted: a message the caller is told was not sent must
+            // not reach the child anyway.
+            inbox.ack(seq);
+            return Err(TaskError::NotPersisted(reason));
+        }
         reports_left.fetch_add(1, Ordering::SeqCst);
         self.signal();
         Ok(id)
@@ -701,8 +735,14 @@ impl Tasks {
         self.inbox.len()
     }
 
-    /// The parent's notification inbox.
-    pub fn notifications(&self) -> &Arc<Inbox> {
+    /// The parent's notification mailbox.
+    pub fn notifications(&self) -> &Arc<dyn Mailbox> {
+        &self.mailbox
+    }
+
+    /// The in-memory adapter behind [`Self::notifications`], for the runtime
+    /// composition root that makes it durable before sharing it.
+    pub(crate) fn notifications_inbox(&self) -> &Arc<Inbox> {
         &self.inbox
     }
 
@@ -858,6 +898,7 @@ mod tests {
                     kind: Some(NotificationKind::Message),
                     text: "queued while the session was closed".into(),
                     usage: None,
+                    ..Default::default()
                 },
             }]);
 
@@ -950,6 +991,7 @@ mod tests {
                 kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
                 text: "x".into(),
                 usage: None,
+                ..Default::default()
             });
         assert_eq!(tasks.pending(), 1);
 
@@ -1416,5 +1458,42 @@ mod tests {
         let tasks = Tasks::new_from(7);
         let task = tasks.add(Task::default(), None, None).expect("valid");
         assert_eq!(task.id, "t8");
+    }
+
+    #[test]
+    fn replacing_a_child_mailbox_keeps_restored_messages_first() {
+        let tasks = Tasks::new();
+        let task = tasks.add(Task::default(), None, None).expect("add");
+        tasks.send_message(&task.id, "queued early").expect("send");
+        let durable = Arc::new(Inbox::default());
+        durable.push(otto_core::agent::inbox::Notification {
+            text: "[parent-message] restored".into(),
+            ..Default::default()
+        });
+        tasks.replace_child_inbox(&task.id, durable.clone());
+        let texts: Vec<String> = durable
+            .snapshot()
+            .into_iter()
+            .map(|notification| notification.text)
+            .collect();
+        assert_eq!(
+            texts,
+            ["[parent-message] restored", "[parent-message] queued early"]
+        );
+        assert!(tasks.child_inbox(&task.id).expect("mailbox").len() == 2);
+    }
+
+    #[test]
+    fn a_parent_message_that_cannot_be_saved_is_not_sent() {
+        let tasks = Tasks::new();
+        let task = tasks.add(Task::default(), None, None).expect("add");
+        let failing = Arc::new(Inbox::default());
+        failing.set_persist(Box::new(|_| Err("disk full".into())));
+        tasks.replace_child_inbox(&task.id, failing.clone());
+        let error = tasks
+            .send_message(&task.id, "hello")
+            .expect_err("not persisted");
+        assert!(matches!(error, TaskError::NotPersisted(_)), "{error}");
+        assert!(failing.is_empty());
     }
 }

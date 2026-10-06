@@ -47,6 +47,7 @@ use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
 use otto_core::agent::redactor::Redactor;
 use otto_core::agent::{Agent, CompactionSettings, Event, EventSink, Options};
+use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, OperationStopReason, Role, ToolDefinition};
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
@@ -259,6 +260,10 @@ pub type Transcript = Arc<dyn Session + Send + Sync>;
 pub type ChildSession =
     Arc<dyn Fn(&str) -> Result<Option<(Transcript, String)>, String> + Send + Sync>;
 
+/// Builds the durable mailbox for the child whose transcript is at the given
+/// path, restoring the parent messages it had not read when it stopped.
+pub type ChildMailbox = Arc<dyn Fn(&str) -> Arc<dyn Mailbox> + Send + Sync>;
+
 struct SharedTranscript(Transcript);
 
 #[async_trait::async_trait]
@@ -301,6 +306,18 @@ impl Session for SharedTranscript {
         self.0.interrupted_turn()
     }
 
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: otto_core::model::Message,
+    ) -> Result<otto_core::session::AppendOutcome, otto_core::session::SessionError> {
+        self.0.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.0.has_input(input_id)
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -317,7 +334,7 @@ pub struct ChildTools {
     allowed: Option<BTreeSet<String>>,
     write_policy: WritePolicy,
     write_paths: Vec<String>,
-    parent_inbox: Arc<Inbox>,
+    parent_inbox: Arc<dyn Mailbox>,
     task_id: String,
     max_output_bytes: usize,
     /// Remaining `agent_report` calls; see [`REPORT_BUDGET`] and
@@ -366,7 +383,7 @@ impl ChildTools {
     /// [`ChildTools::report`].
     fn agent_report_definition() -> ToolDefinition {
         let description = format!(
-            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, or interim findings; put those in your final report. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent."
+            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, or interim findings; put those in your final report. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent. A report that cannot be saved to the parent's pending-notification file also returns an error and does not reach the parent."
         );
         definition(
             "agent_report",
@@ -394,12 +411,18 @@ impl ChildTools {
             self.max_output_bytes,
         )
         .content;
-        self.parent_inbox.push(Notification {
-            task_id: self.task_id.clone(),
-            kind: Some(NotificationKind::TaskReport),
-            text,
-            usage: None,
-        });
+        if let Err(otto_core::agent::inbox::MailboxError::NotPersisted { seq, reason }) =
+            self.parent_inbox.enqueue(Notification {
+                task_id: self.task_id.clone(),
+                kind: Some(NotificationKind::TaskReport),
+                text,
+                usage: None,
+                ..Default::default()
+            })
+        {
+            self.parent_inbox.ack(seq);
+            return error_result(format!("report not sent: {reason}"));
+        }
         text_result("report sent to parent")
     }
 }
@@ -648,6 +671,10 @@ pub struct Config {
     /// The workspace the commit guard syncs to disk after a child tool call
     /// finishes. Ignored when `lease` is `None`.
     pub workspace_path: PathBuf,
+    /// Makes a file-backed child's mailbox durable beside its transcript, so
+    /// `agent_send` messages it has not read survive a restart and reach it
+    /// when it is resumed. `None` keeps child mailboxes in memory.
+    pub child_mailbox: Option<ChildMailbox>,
 }
 
 /// One delegation request.
@@ -917,7 +944,7 @@ impl Runner {
                     context,
                     now,
                     Vec::new(),
-                    transcript,
+                    transcript.map(|transcript| (transcript, String::new())),
                     None,
                     self.task_deadline(parent_deadline),
                 )
@@ -936,7 +963,7 @@ impl Runner {
             context,
             now,
             snapshot,
-            transcript,
+            transcript.map(|transcript| (transcript, String::new())),
             None,
             self.task_deadline(parent_deadline),
         )
@@ -1008,7 +1035,7 @@ impl Runner {
             record.context.clone(),
             now,
             Vec::new(),
-            Some(transcript),
+            Some((transcript, record.path.to_string_lossy().into_owned())),
             Some(record.task_id.clone()),
             self.task_deadline(None),
         )
@@ -1108,7 +1135,7 @@ impl Runner {
         context: String,
         now: DateTime<Utc>,
         snapshot: Vec<Message>,
-        transcript: Option<Transcript>,
+        transcript: Option<(Transcript, String)>,
         resume_id: Option<String>,
         deadline: Deadline,
     ) -> Result<Task, StartError> {
@@ -1154,7 +1181,12 @@ impl Runner {
             armed: true,
         };
         let transcript = match (transcript, &self.config.child_session) {
-            (Some(transcript), _) => transcript,
+            (Some((transcript, path)), _) => {
+                if !path.is_empty() {
+                    self.config.tasks.set_session_path(&task.id, &path);
+                }
+                transcript
+            }
             (None, None) => Arc::new(MemorySession::new()),
             (None, Some(build)) => match build(&task.id) {
                 Ok(Some((transcript, path))) => {
@@ -1178,6 +1210,18 @@ impl Runner {
             },
         };
         let _ = slot.set(Arc::clone(&transcript));
+        if let Some(build) = &self.config.child_mailbox
+            && let Some(path) = self
+                .config
+                .tasks
+                .get(&task.id)
+                .map(|task| task.session_path)
+                .filter(|path| !path.is_empty())
+        {
+            self.config
+                .tasks
+                .replace_child_inbox(&task.id, build(&path));
+        }
 
         // Durable custom entries are awaited before `start` returns, so even
         // a task that remains queued has its complete specification on disk.
@@ -1259,7 +1303,7 @@ impl Runner {
             .config
             .tasks
             .child_inbox(&task.id)
-            .unwrap_or_else(|| Arc::new(Inbox::new(None)));
+            .unwrap_or_else(|| Arc::new(Inbox::new(None)) as Arc<dyn Mailbox>);
         let options = Options {
             hooks: template
                 .plugins
@@ -1549,6 +1593,7 @@ impl Runner {
                 kind: Some(NotificationKind::TaskFinished),
                 text: completion_text(&final_task, self.config.max_output_bytes),
                 usage: final_task.usage_present.then_some(final_task.usage),
+                ..Default::default()
             });
         }
         (result, error_text, migrating)
@@ -1957,7 +2002,7 @@ mod tests {
         registry: Arc<Registry>,
         write_policy: WritePolicy,
         write_paths: Vec<String>,
-        parent_inbox: Arc<Inbox>,
+        parent_inbox: Arc<dyn Mailbox>,
     ) -> ChildTools {
         child_tools_with_budget(
             registry,
@@ -1972,7 +2017,7 @@ mod tests {
         registry: Arc<Registry>,
         write_policy: WritePolicy,
         write_paths: Vec<String>,
-        parent_inbox: Arc<Inbox>,
+        parent_inbox: Arc<dyn Mailbox>,
         budget: usize,
     ) -> ChildTools {
         ChildTools {
@@ -2056,7 +2101,7 @@ mod tests {
             registry,
             WritePolicy::SingleWriter,
             Vec::new(),
-            Arc::clone(&parent_inbox),
+            parent_inbox.clone(),
         );
         assert!(
             tool_names(&tools.definitions()).contains(&"agent_report".to_string()),
@@ -2089,7 +2134,7 @@ mod tests {
             registry,
             WritePolicy::SingleWriter,
             Vec::new(),
-            Arc::clone(&parent_inbox),
+            parent_inbox.clone(),
             REPORT_BUDGET,
         );
 
@@ -2130,7 +2175,7 @@ mod tests {
             registry,
             WritePolicy::SingleWriter,
             Vec::new(),
-            Arc::clone(&parent_inbox),
+            parent_inbox.clone(),
             1,
         );
 
@@ -2162,7 +2207,7 @@ mod tests {
             allowed: None,
             write_policy: WritePolicy::SingleWriter,
             write_paths: Vec::new(),
-            parent_inbox: Arc::clone(&parent_inbox),
+            parent_inbox: parent_inbox.clone(),
             task_id: task.id.clone(),
             max_output_bytes: 16384,
             reports_left,
@@ -2696,6 +2741,18 @@ mod tests {
 
         fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
             self.inner.interrupted_turn()
+        }
+
+        async fn append_input_if_absent(
+            &self,
+            input_id: &str,
+            message: otto_core::model::Message,
+        ) -> Result<otto_core::session::AppendOutcome, otto_core::session::SessionError> {
+            self.inner.append_input_if_absent(input_id, message).await
+        }
+
+        fn has_input(&self, input_id: &str) -> bool {
+            self.inner.has_input(input_id)
         }
 
         async fn append_custom(
@@ -3933,6 +3990,56 @@ mod tests {
         let mut config = test_config(provider, tasks, Vec::new());
         config.children_dir = Some(Arc::new(move || Some(dir.clone())));
         config
+    }
+
+    #[tokio::test]
+    async fn resume_delivers_parent_messages_the_child_had_not_read() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        let path = interrupted_fixture(
+            &parent_path,
+            "t1",
+            "look at this",
+            None,
+            true,
+            true,
+            interrupted::INTERRUPTED_STATUS,
+        );
+        let sidecar = path.with_extension("inbox.json");
+        std::fs::write(
+            &sidecar,
+            r#"[{"seq":0,"task_id":"t1","kind":"message","text":"[parent-message] use the v2 API","usage":null,"id":"in_1"}]"#,
+        )
+        .expect("pending parent message");
+
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![assistant_text("all done", Usage::default())],
+        );
+        let tasks = Arc::new(Tasks::new());
+        let mut config = config_with_children_dir(&provider, &tasks, children_dir);
+        config.child_mailbox = Some(crate::runtime::wiring::child_mailbox());
+        let (runner, _) = runner(config);
+        runner
+            .resume("t1", "continue please".to_string())
+            .await
+            .expect("resume");
+        let final_task = wait_final(&tasks, "t1").await;
+        assert_eq!(final_task.status, TaskStatus::Succeeded);
+
+        let requests = provider.requests();
+        let request = &requests[0];
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message.text().contains("use the v2 API")),
+            "the unread parent message reaches the resumed child: {:?}",
+            request.messages
+        );
+        assert!(!sidecar.exists(), "delivered messages leave the sidecar");
     }
 
     #[tokio::test]

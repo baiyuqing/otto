@@ -165,8 +165,8 @@ impl Session for MemoryHandle {
         self.inner.append_operation_fact(fact).await
     }
 
-    fn observed_tools(&self) -> Option<Vec<String>> {
-        self.inner.observed_tools()
+    fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+        self.inner.observed_capabilities()
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
@@ -339,8 +339,8 @@ impl Session for SharedSession {
         self.0.append_operation_fact(fact).await
     }
 
-    fn observed_tools(&self) -> Option<Vec<String>> {
-        self.0.observed_tools()
+    fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+        self.0.observed_capabilities()
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
@@ -1945,6 +1945,7 @@ impl Builder {
                 .map(|tasks| tasks as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
             mailbox: subagents.inbox.unwrap_or_default(),
             steering: task_control.steering(),
+            version: env!("CARGO_PKG_VERSION").into(),
             ..Options::default()
         };
         let hook_port = options.hooks.clone();
@@ -3253,8 +3254,8 @@ mod tests {
             self.inner.append_operation_fact(fact).await
         }
 
-        fn observed_tools(&self) -> Option<Vec<String>> {
-            self.inner.observed_tools()
+        fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+            self.inner.observed_capabilities()
         }
 
         async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {

@@ -133,6 +133,12 @@ streamed output, at most three times with 1/2/4-second backoff. It repeats only
 the borrowed provider request, never tools or the agent turn. HTTP, auth, and
 stream-codec errors are terminal; retries preserve cancellation, the original
 deadline, actual send-attempt counts, and unknown effect certainty on failure.
+The OpenAI-compatible transport retries only a send whose connection could not
+be established (`reqwest::Error::is_connect`), with the same policy (4
+attempts, 1/2/4 s, `Retry` reason `connection failed`): such a request was
+never dispatched, which the resilience design permits, and the settlement is
+`NotStarted`. Any failure after connecting, every HTTP status, and stream
+errors stay single-attempt.
 Retry progress uses the existing provider event; core owns countdown formatting
 and native/browser frontends supply elapsed time.
 The fixed race rule is completion-first only after the owner has obtained and

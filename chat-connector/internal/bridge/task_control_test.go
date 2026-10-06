@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/baiyuqing/otto/connect/internal/agent/fake"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent/fake"
 )
 
 func TestNaturalTaskControlStaysSeparateAndQueuesFollowups(t *testing.T) {

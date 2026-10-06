@@ -267,7 +267,7 @@ a file, which the safety rules forbid; the service change has to solve that
 ## Layout
 
 ```text
-connect/                     Go module github.com/baiyuqing/otto/connect
+chat-connector/              Go module github.com/baiyuqing/otto/chat-connector
   go.mod                     go 1.26; acp-go-sdk, channel-sdk-go, BurntSushi/toml
   cmd/otto-connect/          flags, config, signal handling, wiring
   internal/config/           connect.toml parsing and validation
@@ -298,9 +298,9 @@ four Bot API calls it needs (`getUpdates`, `sendMessage`,
 
 - `make connect-check`: `cargo build -p otto` (for the end-to-end test),
   then `gofmt -l` (must be empty), `go vet ./...` and `go test -race ./...`
-  in `connect/`. `make check` and `make check-linux` run it.
+  in `chat-connector/`. `make check` and `make check-linux` run it.
 - `make connect-build` writes `target/otto-connect`.
-- CI installs Go with `actions/setup-go` from `connect/go.mod`.
+- CI installs Go with `actions/setup-go` from `chat-connector/go.mod`.
 
 ## Tests
 
@@ -344,9 +344,9 @@ one direct chat and one group each: prompt, tool call, `/allow`, `/deny`,
 `/stop`, `/new`, connector restart with resume, and a message sent while the
 connector was stopped.
 
-## Changes outside `connect/`
+## Changes outside `chat-connector/`
 
-- `AGENTS.md`: task map entry for `connect/`; the safety rule names the bot
+- `AGENTS.md`: task map entry for `chat-connector/`; the safety rule names the bot
   token and app secret as environment-only secrets.
 - `docs/development.md`: Go toolchain and the `connect-check` gate.
 - `docs/user-manual.md`: a "Chat connector" section; the "ACP agent server"
@@ -358,14 +358,14 @@ connector was stopped.
 
 ## Delivery in three changes
 
-1. `connect/` with the agent, bridge, config, state and Telegram, the gates
+1. `chat-connector/` with the agent, bridge, config, state and Telegram, the gates
    and CI, the end-to-end test, docs for Telegram.
 2. Feishu adapter and its docs.
 3. Removal of `[inbound.feishu]` (decision D5) and its docs.
 
 ## Decisions
 
-- D1. `otto-connect` is a Go module at `connect/` in this repository, built
+- D1. `otto-connect` is a Go module at `chat-connector/` in this repository, built
   and tested by `make check` and `make check-linux`. The alternative is a
   separate repository with its own CI.
 - D2. The ACP client is `coder/acp-go-sdk` v0.13.5. The alternative is a

@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/baiyuqing/otto/connect/internal/metrics"
+	"github.com/baiyuqing/otto/chat-connector/internal/metrics"
 	"github.com/coder/acp-go-sdk"
 )
 

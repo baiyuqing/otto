@@ -34,13 +34,13 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers
   - `provider`: native HTTP transports for the two provider implementations
   - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
-  - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the Turso/FTS store and retriever. `memory::advice` holds the advisory review hints: a `Backend` trait (`Advisor` runs it for a batch of candidates), the `session` prompt/parser, the `jev` backend, and the append-only audit store `~/.otto/memory-advice.db` (`PRAGMA user_version` 1). `Advisor::propose` calls `Service::check_proposal` first and queues the candidate without advice on timeout (20 s), error or invalid answer; the session-model backend (`runtime::advice`) is built in `runtime::wiring`, and `TYPESAFE_API_KEY` selects the Jev backend. Advice is stored as `advice.*` candidate metadata and rendered only by `memory::advice::advice_line`
+  - `memory`: domain contracts, validation/secret guards, conservative policy, repository ports and the `Service` implementation. Turso schemas, FTS search and advice audit SQL live under `storage/backends/turso/`. `memory::advice` owns advisory review contracts and orchestration (`Advisor` runs a typed audit port), the `session` prompt/parser and the `jev` backend. `Advisor::propose` calls `Service::check_proposal` first and queues the candidate without advice on timeout (20 s), error or invalid answer; the session-model backend (`runtime::advice`) is built in `runtime::wiring`, and `TYPESAFE_API_KEY` selects the Jev backend. Advice is stored as `advice.*` candidate metadata and rendered only by `memory::advice::advice_line`
   - `typesafe`: the HTTP client of the TypeSafe auxiliary model (`jev-latest`), shared by `skill::check` and `memory::advice::jev`
-  - `reflection`: the `/reflect` use case, also started by the model's `reflect` tool (`tool::reflect` is the port; `app::requested_reflection` binds it to each installed runner and runs it beside the turn with trigger `requested`, sharing the background single-flight flag): it reads the part of a session no earlier run covered (from the session file, so compacted entries stay reachable), classifies entries as local or external (`taint`), builds one tool-less request (`prompt`), parses and validates the answer (`output`), verifies quoted evidence in code (`evidence`), writes a per-run Markdown log, opening with the model's retrospective and listing every proposal and its outcome, to `~/.otto/reflection/runs` (`runlog`, which also lists and reads those logs for `/reflect list|show` by matching directory entry names), and queues survivors as memory candidates through `Service::propose` with `Origin::Extractor`. `store` keeps run rows, per-session watermarks, and skill ownership in `~/.otto/reflection.db`. Skills pass `guard` (structure and the rule table), `review` (a fail-closed second-model call), and Python syntax validation in `skillwrite`, the only file that mutates skill files; it accepts only a `guard::Vetted`, versions the complete Markdown/Python file set, and publishes staged directories atomically through `fsops::publish_directory`; which only `guard::approve` builds. `crates/otto/tests/reflection_boundary.rs` fails if this module ever writes, forgets, or reviews a memory record directly, if a file other than `skillwrite.rs` mutates the filesystem (except `runlog.rs`, which creates each run log with `OpenOptions` and `create_new`), or if `Vetted` is built outside `guard.rs`. A new scan rule goes in the `RULES` table in `guard.rs` with a positive and a negative test case
-  - `usage`: native collection of parent, sub-agent, and compaction token events; append-only Turso storage; and total/daily aggregate queries consumed by the server
+  - `reflection`: the `/reflect` use case, also started by the model's `reflect` tool (`tool::reflect` is the port; `app::requested_reflection` binds it to each installed runner and runs it beside the turn with trigger `requested`, sharing the background single-flight flag): it reads the part of a session no earlier run covered (from the session file, so compacted entries stay reachable), classifies entries as local or external (`taint`), builds one tool-less request (`prompt`), parses and validates the answer (`output`), verifies quoted evidence in code (`evidence`), writes a per-run Markdown log, opening with the model's retrospective and listing every proposal and its outcome, to `~/.otto/reflection/runs` (`runlog`, which also lists and reads those logs for `/reflect list|show` by matching directory entry names), and queues survivors as memory candidates through `Service::propose` with `Origin::Extractor`. `repository.rs` owns reflection records/ports; the Turso adapter owns `~/.otto/reflection.db` SQL. Skills pass `guard` (structure and the rule table), `review` (a fail-closed second-model call), and Python syntax validation in `skillwrite`, the only file that mutates skill files; it accepts only a `guard::Vetted`, versions the complete Markdown/Python file set, and publishes staged directories atomically through `fsops::publish_directory`; which only `guard::approve` builds. `crates/otto/tests/reflection_boundary.rs` fails if this module ever writes, forgets, or reviews a memory record directly, if a file other than `skillwrite.rs` mutates the filesystem (except `runlog.rs`, which creates each run log with `OpenOptions` and `create_new`), or if `Vetted` is built outside `guard.rs`. A new scan rule goes in the `RULES` table in `guard.rs` with a positive and a negative test case
+  - `usage`: native collection of parent, sub-agent, and compaction token events; a typed repository port; and total/daily aggregate queries consumed by the server. Turso SQL lives in its backend adapter
   - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
   - `subagent`: child agent construction (`Runner`), task lifecycle, the parent-facing `agent`/`agent_wait`/`agent_status`/`agent_send` tools, the child-only `agent_report` tool, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
-  - `workflow`: workspace-scoped TOML DAG discovery, Turso run/step/attempt/approval/event state, committed-boundary recovery, and the shared CLI/server workflow controller
+  - `workflow`: workspace-scoped TOML DAG discovery, typed run/step/attempt/approval/event records and repository port, committed-boundary recovery, and the shared CLI/server controller. Turso persistence lives in its backend adapter
   - `acp`: the Agent Client Protocol v1 agent server behind `otto acp`: newline-delimited JSON-RPC on stdin/stdout with a single stdout writer, per-session `Controller`s on one `Builder`, the mapping from agent events and stored history to `session/update`, and the after-turn `session/request_permission` round trip for elevated `bash` and persistent sandbox read grants. `acp::tcp` is the opt-in `otto serve --acp-listen` transport; it uses the existing serve router in process and shares controllers, turn queues and approvals. Its authentication/lifecycle contract is [ACP TCP](specs/2026-10-03-acp-tcp.md). `acp::attach` is the `otto acp --attach` relay: the same transport and dispatcher with every session operation sent to `otto serve` through `client`. Message types come from the `agent-client-protocol-schema` crate; the designs are `docs/specs/2026-10-02-acp-agent-server.md` and `docs/specs/2026-10-02-shared-session.md`
   - `client`: the HTTP client of `otto serve` over its Unix socket, used by `acp::attach` and `tui::attach` (sessions, history, queued turns and their SSE streams, the `/v1/status` stream, turn cancel, approval decisions, compaction, context, sub-agent tasks, sandbox reload); it maps a failed connection to `Error::Unreachable` and a non-2xx answer to `Error::Http`
   - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`
@@ -203,22 +203,48 @@ workspace boundary. Forking changes workspace ownership, leaves old state
 untouched, and must be performed with workspace processes stopped. No new
 storage engine, per-workspace database, or cloud synchronization is involved.
 
-## Native database storage
+## Native storage contracts
 
-`crates/otto::storage` owns the synchronous boundary to the pinned Turso Rust
-SDK. Local I/O is polled on a grown native stack because the engine's debug SQL
-compiler can exceed the default worker stack. Services own connection mutexes and transaction lifetimes; the adapter
-drives local I/O with a thread waker without nesting a Tokio runtime. Rows
-remain streaming, dropped transactions roll back, and native diagnostics
-stay inside each service boundary. Turso FTS and multi-process WAL are
-explicitly enabled. The latter is experimental upstream: keep the process
-contention and crash/reopen tests in `tests/turso_storage.rs` as acceptance
-checks. `otto-core` remains independent of the native engine.
+`crates/otto/src/storage/` keeps backend concerns below domain-owned typed
+ports. `contracts.rs`, `sql.rs`, and `files.rs` describe capability guarantees;
+`drivers/{turso,posix}.rs` implement local I/O; `backends/turso/` owns SQL
+schemas and codecs, while `backends/posix/` owns confined file repositories.
+`runtime/storage.rs` is the composition boundary: it validates routes and
+driver capabilities before opening repositories and injects only domain ports.
+The shipped defaults are local Turso-compatible SQL storage and confined POSIX
+session files. No remote or cloud storage service is implemented or selected
+by user configuration.
 
-Use `otto storage migrate <legacy.db> <new.db>` for offline legacy import;
-see the user manual for the procedure. Python 3 reads the old SQLite file
-only during that command; Otto links no SQLite engine. The importer validates
-row counts and memory identity/schema/index consistency before publishing.
+Domain services own validation, state transitions and recovery policy.
+Repositories expose typed domain operations and own atomicity, revision/claim
+checks, codecs and schemas. The shared SQL driver checks dialect, immediate
+serializable transactions, commit durability, multi-process writer behavior,
+and the memory FTS profile before a repository receives a connection. Session
+message, compaction, operation-fact, and custom-entry writes cross async
+interfaces; the POSIX implementation retains Pi v3 encoding and append-only
+history. `otto-core` remains independent of native storage engines.
+
+`storage/migration/` contains versioned snapshot, bounded chunk, stage import,
+verification, journal and cutover contracts. Domain codecs and backend staging
+implementations live under `storage/backends/`. The generic coordinator
+sequences an offline resumable migration, reconciles receipts, verifies the
+staged snapshot, and publishes a new local route group through the route
+authority; it never executes pending tools. `otto storage transfer <source-home> <destination-root>
+<migration-id> [--memory-db <path>]` composes these ports for a stopped local
+installation. On success it publishes the destination as the active route group
+for the source home; restart Otto from that same home to use it. Repeating the
+same command and ID resumes its manifest. Use `otto storage abort <source-home>
+<migration-id>` to restore source admission before publication; abort retains
+isolated staging bytes and marks that ID unusable. It refuses if publication is
+committed or uncertain. The source and destination roots must not overlap.
+Original database/session files remain in place; no cleanup is automatic. This
+command does not provide a remote/cloud backend.
+
+The existing `otto storage migrate <legacy.db> <new.db>` command remains a
+separate Python-assisted importer for recognized legacy SQLite databases into
+a new local Turso database. It keeps the source untouched and validates
+recognized rows/schema before success; it does not invoke the logical transfer
+coordinator. See the user manual for both command forms and source details.
 
 ## Core contracts
 

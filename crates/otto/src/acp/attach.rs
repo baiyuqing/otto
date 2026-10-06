@@ -59,7 +59,7 @@ pub(super) struct Relay {
     pub(super) client: Client,
     pub(super) server: Option<Arc<crate::server::Server>>,
     /// The store this connection delivers scheduled items from.
-    pub(super) schedule: Option<Arc<crate::schedule::Store>>,
+    pub(super) schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     /// The process log, for the connection's schedule worker.
     pub(super) logger: Arc<crate::log::Logger>,
     /// Sessions this connection opened, with their prompt slots.
@@ -83,7 +83,7 @@ impl Relay {
 
     /// A relay to no server, for tests of connection-level behavior.
     #[cfg(test)]
-    pub(super) fn unreachable(schedule: Option<Arc<crate::schedule::Store>>) -> Self {
+    pub(super) fn unreachable(schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>) -> Self {
         Self {
             client: Client::new(Path::new("/nonexistent/otto.sock")).expect("client"),
             server: None,
@@ -599,7 +599,7 @@ fn turn_end_reply(event: &WireEvent) -> Reply {
 pub async fn run(
     socket: &Path,
     workspace: PathBuf,
-    schedule: Option<Arc<crate::schedule::Store>>,
+    schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     logger: Arc<crate::log::Logger>,
     stdin: Box<dyn BufRead + Send + 'static>,
     stdout: &mut (dyn Write + Send),

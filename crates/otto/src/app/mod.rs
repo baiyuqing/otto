@@ -1430,13 +1430,23 @@ impl Controller {
             .as_ref()
             .map(|current| current.session.path())
             .unwrap_or_default();
-        sessionfs::list(
-            &self.builder.session_root,
-            &self.builder.workspace_path,
-            &current_path,
-            limit,
-        )
-        .map_err(|error| self.builder.redact_error(&error.to_string(), None))
+        let session_root = self
+            .builder
+            .storage
+            .session_root(&self.builder.session_root)
+            .map_err(|error| self.builder.redact_error(&error, None))?;
+        self.builder
+            .storage
+            .sessions()
+            .and_then(|repository| {
+                repository.list(
+                    &session_root,
+                    &self.builder.workspace_path,
+                    &current_path,
+                    limit,
+                )
+            })
+            .map_err(|error| self.builder.redact_error(&error.to_string(), None))
     }
 
     /// Resuming the session already in force is a no-op that reports its path.
@@ -1504,12 +1514,18 @@ impl Controller {
         if is_current {
             return self.archive_current_session().await;
         }
-        sessionfs::archive(
-            &self.builder.session_root,
-            &self.builder.workspace_path,
-            Path::new(path),
-        )
-        .map_err(|error| self.builder.redact_error(&error.to_string(), None))
+        let session_root = self
+            .builder
+            .storage
+            .session_root(&self.builder.session_root)
+            .map_err(|error| self.builder.redact_error(&error, None))?;
+        self.builder
+            .storage
+            .sessions()
+            .and_then(|repository| {
+                repository.archive(&session_root, &self.builder.workspace_path, path)
+            })
+            .map_err(|error| self.builder.redact_error(&error.to_string(), None))
     }
 
     /// The replacement is built before the archive move, so every failure path
@@ -2056,13 +2072,18 @@ async fn open_current(
     // A lease-managed open can block up to 7*lease_seconds/6 (35s at the
     // default 30s lease) waiting out another host's holder; run it on a
     // blocking thread so it does not stall this async task's runtime worker.
-    let blocking_builder = Arc::clone(builder);
+    let session_root = builder
+        .storage
+        .session_root(&builder.session_root)
+        .map_err(|error| builder.redact_error(&error, None))?;
+    let storage = Arc::clone(&builder.storage);
+    let workspace = builder.workspace_path.clone();
     let blocking_path = path.to_path_buf();
     let prepared = tokio::task::spawn_blocking(move || {
-        sessionfs::Prepared::prepare_listed(
-            &blocking_builder.session_root,
-            &blocking_builder.workspace_path,
-            &blocking_path,
+        storage.sessions()?.prepare_listed(
+            &session_root,
+            &workspace,
+            &blocking_path.to_string_lossy(),
             create_lease,
         )
     })
@@ -2086,15 +2107,16 @@ async fn open_current(
     if !session_thinking.is_empty() {
         runtime.thinking = session_thinking;
     }
-    let (store, warnings) = prepared
-        .with_replayable(crate::tool::safety::is_replayable)
-        .activate()
-        .map_err(|error| builder.redact_error(&error.to_string(), Some(&runtime)))?;
+    let prepared = prepared.with_replayable(crate::tool::safety::is_replayable);
+    let (session, warnings) = tokio::task::spawn_blocking(move || prepared.activate())
+        .await
+        .map_err(|error| format!("session activation task panicked: {error}"))?
+        .map_err(|error| builder.redact_error(&error, Some(&runtime)))?;
     let warnings = warnings
         .into_iter()
         .map(|warning| builder.redact_error(&warning.message, Some(&runtime)))
         .collect();
-    let session = SharedSession::new(Arc::new(store));
+    let session = SharedSession::new(session);
     let current = attach_runner(builder, session, &runtime).await?;
     Ok((current, warnings))
 }
@@ -2155,7 +2177,7 @@ pub(crate) async fn controller_with_approvals(
 pub(crate) async fn controller_with_approvals_and_schedule(
     workspace: &std::path::Path,
     sessions: &std::path::Path,
-    schedule: Option<Arc<crate::schedule::Store>>,
+    schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
 ) -> (
     Controller,
     Arc<crate::tool::bash::BashApprovals>,
@@ -3117,7 +3139,7 @@ mod tests {
     /// closes MCP, requests a close, and releases the session's lease when
     /// its admission is dropped.
     ///
-    /// Drives the sub-agent registry directly with `subagents.start(...)`
+    /// Drives the sub-agent registry directly with `subagents.start(...).await`
     /// rather than a real top-level "agent" tool call from a scripted
     /// provider: `Controller::migrate` calls `Runner::migrate`, already
     /// covered end to end by
@@ -3167,6 +3189,7 @@ mod tests {
                 prompt: "first".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
         subagents
@@ -3174,6 +3197,7 @@ mod tests {
                 prompt: "second".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         assert_eq!(
             tasks.get("t2").expect("t2 exists").status,

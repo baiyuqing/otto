@@ -19,6 +19,7 @@ guide rather than being copied into those instruction files.
 | `connect/` | Independent Go Telegram and Feishu connector that communicates with Otto through ACP | `connect/README.md` and `connect/internal/` |
 | `crates/otto/src/fsops.rs` | Shared pinned filesystem descriptors and atomic operations | Native session and workspace callers |
 | `crates/otto/src/workspace.rs` | Persistent workspace identity, move history and state ownership | `initialize`, `read`, `fork` |
+| `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories and logical migration ports | `runtime/storage.rs` composition and route registry |
 | `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
 | `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check` | `Makefile`, `.github/workflows/checks.yml` |
@@ -87,8 +88,9 @@ frontends.
 
 The frontends (`cli/`, `tui/`, `acp/`, `server/` and `client/`) build on every
 other module, and no other module may import a frontend:
-`crates/otto/tests/runtime_boundary.rs` fails when one does. See the
-[crate split design](specs/2026-10-05-otto-crate-split.md).
+`crates/otto/tests/runtime_boundary.rs` fails when one does.
+`crates/otto/tests/storage_boundary.rs` checks storage ownership and dependency
+direction. See the [crate split design](specs/2026-10-05-otto-crate-split.md).
 
 The other modules group native responsibilities:
 
@@ -96,8 +98,8 @@ The other modules group native responsibilities:
 - **Remote and external integrations:** `provider/`, `mcp/`, `plugin/`, `auth/`, and
   `client/` (the client for a running `otto serve`).
 - **Local state and reliability:** `approval/` (shared authority and domain adapters), `session/`, `config/`, `memory/`,
-  `reflection/`, `typesafe/`, `storage.rs` (native Turso I/O), `usage.rs`, `failover/`, `workflow.rs`,
-  and `schedule/` (scheduled deliveries: store, tools, worker).
+  `reflection/`, `typesafe/`, `storage/` (drivers, backend repositories, and migration ports),
+  `usage/`, `failover/`, `workflow/`, and `schedule/` (typed store port, tools, worker).
 - **Plugin packages:** `plugin/` owns snapshot installation, the user registry,
   package validation and Skills/MCP adaptation with content-bound trust.
   `plugin/hooks.rs` adapts authorized `dev.otto` hooks/tools through the native
@@ -111,6 +113,29 @@ The other modules group native responsibilities:
   `urlprivacy.rs`, and `log.rs` (the process logger: one instance built at the
   composition root and passed to its consumers; event names and fields are in
   [observability](specs/2026-10-04-observability.md)).
+
+### Persistent state and storage ownership
+
+Domain directories own typed repository ports and state semantics. Concrete
+schema, row codecs, SQL and file operations live under
+`crates/otto/src/storage/backends/`; the small capability contracts and
+Turso/POSIX drivers live beside them in `storage/`. `runtime/storage.rs`
+validates routes and capabilities, opens concrete repositories, and injects
+domain ports into consumers.
+
+| State | Domain owner | Current adapter |
+| --- | --- | --- |
+| Approval authority | `approval/{contracts,repository,service}.rs` | `storage/backends/turso/approval.rs` |
+| Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `storage/backends/turso/memory/` and `memory_advice.rs` |
+| Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `storage/backends/posix/session/` |
+| Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `storage/backends/turso/{schedule,workflow}.rs` |
+| Tasks, reflection, usage, skill checks | Their domain repository modules | `storage/backends/turso/{tasks,reflection,usage,skill_checks}.rs` |
+
+The default registry uses the local Turso-compatible SQL driver for SQL-backed
+state and the confined POSIX file driver for sessions. The repository registry
+is an internal composition API; this build exposes no cloud storage provider
+selection. See the [storage contract](development.md#native-storage-contracts)
+for capability, migration, and compatibility boundaries.
 
 Place native tool execution and workspace enforcement in `tool/`; `bash`
 execution goes through `sandbox/`. Keep session persistence append-only.

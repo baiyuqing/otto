@@ -257,12 +257,21 @@ fn session_cancel_ends_a_running_prompt_and_a_queued_one() {
         prompt(&session_id, "/steer finish the provider request first"),
     );
     assert_eq!(steered["result"]["stopReason"], "end_turn", "{steered}");
-    assert!(agent_text(&steer_frames).contains("Guidance accepted"));
+    assert!(
+        agent_text(&steer_frames)
+            .contains("Guidance queued (#2): finish the provider request first"),
+        "{steer_frames:?}"
+    );
     let (_, extension) = first.call(
         "_otto/tasks/steer",
         json!({"sessionId":session_id,"text":"then inspect the result"}),
     );
-    assert_eq!(extension["result"]["accepted"], true, "{extension}");
+    assert_eq!(extension["result"]["id"], 3, "{extension}");
+    assert_eq!(
+        extension["result"]["text"], "then inspect the result",
+        "{extension}"
+    );
+    assert_eq!(extension["result"]["status"], "queued", "{extension}");
 
     // `/queue` acknowledges separately and the server FIFO owns its turn.
     let second_id = second.start(

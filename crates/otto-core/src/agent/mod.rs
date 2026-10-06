@@ -1011,11 +1011,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
     async fn append_steering(
         &self,
-        messages: Vec<String>,
+        messages: Vec<steering::Message>,
         emit: EventSink<'_>,
     ) -> Result<(), AgentError> {
-        for text in messages {
-            let text = self.redactor.redact_string(&text);
+        for steering in messages {
+            let text = self.redactor.redact_string(&steering.text);
             let message = Message {
                 id: (self.options.new_id)(),
                 role: Role::User,

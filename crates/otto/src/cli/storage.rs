@@ -51,8 +51,42 @@ pub async fn run_async(
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
 ) -> i32 {
+    run_async_with_backends(
+        args,
+        stdout,
+        stderr,
+        &Default::default(),
+        &Default::default(),
+    )
+    .await
+}
+
+pub async fn run_async_with_backends(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    backends: &crate::runtime::storage::BackendRegistry,
+    environment: &std::collections::HashMap<String, String>,
+) -> i32 {
+    if args.first().is_some_and(|arg| arg == "init") {
+        return super::storage_transfer::initialize(
+            &args[1..],
+            stdout,
+            stderr,
+            backends,
+            environment,
+        )
+        .await;
+    }
     if args.first().is_some_and(|arg| arg == "transfer") {
-        return super::storage_transfer::run(&args[1..], stdout, stderr).await;
+        return super::storage_transfer::run_with_backends(
+            &args[1..],
+            stdout,
+            stderr,
+            backends,
+            environment,
+        )
+        .await;
     }
     if args.first().is_some_and(|arg| arg == "abort") {
         return super::storage_transfer::abort(&args[1..], stdout, stderr).await;

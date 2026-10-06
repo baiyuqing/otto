@@ -117,11 +117,14 @@ The other modules group native responsibilities:
 ### Persistent state and storage ownership
 
 Domain directories own typed repository ports and state semantics. Concrete
-schema, row codecs, SQL and file operations live under
+schema, physical row mappings, SQL and file operations live under
 `crates/otto/src/storage/backends/`; the small capability contracts and
 Turso/POSIX drivers live beside them in `storage/`. `runtime/storage.rs`
 validates routes and capabilities, opens concrete repositories, and injects
-domain ports into consumers.
+domain ports into consumers. Portable migration record definitions live beside
+their domain owners in `migration.rs` (`skill/check_migration.rs` for skill
+audits); approval envelopes and canonical memory codecs also belong to their
+domains. Backend packages retain their physical mappings and I/O.
 
 | State | Domain owner | Current adapter |
 | --- | --- | --- |
@@ -133,8 +136,13 @@ domain ports into consumers.
 
 The default registry uses the local Turso-compatible SQL driver for SQL-backed
 state and the confined POSIX file driver for sessions. The repository registry
-is an internal composition API; this build exposes no cloud storage provider
-selection. See the [storage contract](development.md#native-storage-contracts)
+has a public extension entry point in `runtime/storage/backend.rs` and
+`cli::run::run_with_backends`. Linked extensions implement `RepositoryFactory`;
+`config/storage.rs` in core supplies pure configuration. The shipped binary
+includes only its existing local backends. `storage/worker.rs` owns optional
+async adapter I/O, `storage/conformance.rs` exposes contract checks, and
+`tests/external_storage_backend.rs` is an independently compiled acceptance
+crate using a different JSON repository. See the [storage contract](development.md#native-storage-contracts)
 for capability, migration, and compatibility boundaries.
 
 Place native tool execution and workspace enforcement in `tool/`; `bash`

@@ -34,6 +34,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Storage and migration
 
+- Expose registered external repository factories, environment-bound endpoints,
+  namespace validation, portable migration codecs and contract checks. Keep
+  local defaults and domain interfaces compatible; linked extension binaries
+  can initialize fresh state or use verified offline transfer without reusing
+  SQLite/Turso-specific SQL. No MySQL/PostgreSQL implementation is bundled.
 - Separate native state semantics from SQL and POSIX persistence with typed
   domain ports, capability drivers, backend repositories, and runtime
   injection. Keep local Turso and confined POSIX storage as the defaults.

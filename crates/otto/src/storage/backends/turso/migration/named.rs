@@ -2,46 +2,16 @@
 use super::*;
 use crate::storage::{Params, Value};
 
+pub(super) use crate::storage::migration::record::LogicalRecord as NamedRecord;
+
 pub(super) struct Kind {
-    pub name: &'static str,
+    pub record: &'static crate::storage::migration::record::RecordSchema,
     pub table: &'static str,
-    pub fields: &'static [&'static str],
-    pub keys: &'static [&'static str],
-    pub revision: Option<&'static str>,
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct NamedRecord {
-    pub version: u32,
-    pub kind: String,
-    pub fields: BTreeMap<String, serde_json::Value>,
-}
-impl NamedRecord {
-    fn metadata(&self, kind: &Kind) -> Result<(String, String)> {
-        let keys = kind
-            .keys
-            .iter()
-            .map(|key| {
-                self.fields
-                    .get(*key)
-                    .cloned()
-                    .ok_or_else(|| Error::Invalid("missing domain identity field".into()))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let revision = kind
-            .revision
-            .and_then(|field| self.fields.get(field))
-            .filter(|value| !value.is_null())
-            .map(serde_json::Value::to_string)
-            .unwrap_or_else(|| "1".into());
-        Ok((
-            format!(
-                "{}:{}",
-                kind.name,
-                serde_json::to_string(&keys).map_err(json_error)?
-            ),
-            revision,
-        ))
+impl std::ops::Deref for Kind {
+    type Target = crate::storage::migration::record::RecordSchema;
+    fn deref(&self) -> &Self::Target {
+        self.record
     }
 }
 pub(super) fn next(

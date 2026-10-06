@@ -30,6 +30,7 @@ pub mod sandbox;
 pub mod sandbox_setup;
 pub mod server;
 pub mod skills;
+pub mod storage;
 pub mod ui;
 
 use std::collections::HashMap;
@@ -96,6 +97,8 @@ pub struct File {
     pub agent: Agent,
     #[serde(default)]
     pub memory: Memory,
+    #[serde(default, skip_serializing_if = "storage::Storage::is_default")]
+    pub storage: storage::Storage,
     #[serde(default)]
     pub mcp: Mcp,
     #[serde(default)]

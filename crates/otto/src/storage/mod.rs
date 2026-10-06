@@ -1,10 +1,15 @@
-//! Driver-neutral SQL boundary. Repositories own SQL and schema; drivers own I/O.
+//! Storage capability families and portable migration contracts.
+//! SQL compatibility remains SQLite/Turso-specific. External dialects implement
+//! the domain repositories through the runtime factory boundary.
 pub mod backends;
+#[cfg(feature = "storage-conformance")]
+pub mod conformance;
 pub mod contracts;
 pub mod drivers;
 pub mod files;
 pub mod migration;
 pub mod sql;
+pub mod worker;
 pub use contracts::*;
 pub use sql::*;
 

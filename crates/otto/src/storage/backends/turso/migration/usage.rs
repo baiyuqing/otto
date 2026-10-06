@@ -6,25 +6,8 @@ use super::{
 use crate::storage::backends::turso::usage::{self, Store};
 pub struct UsageCodec;
 const KINDS: &[Kind] = &[Kind {
-    name: "usage_event",
+    record: &crate::usage::migration::RECORDS[0],
     table: "usage_events",
-    fields: &[
-        "id",
-        "occurred_at",
-        "workspace",
-        "session_id",
-        "task_id",
-        "provider",
-        "profile",
-        "model",
-        "kind",
-        "input_tokens",
-        "output_tokens",
-        "cached_input_tokens",
-        "usage_present",
-    ],
-    keys: &["id"],
-    revision: None,
 }];
 impl SqlDomainCodec for UsageCodec {
     fn domain(&self) -> &'static str {

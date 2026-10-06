@@ -212,8 +212,9 @@ schemas and codecs, while `backends/posix/` owns confined file repositories.
 `runtime/storage.rs` is the composition boundary: it validates routes and
 driver capabilities before opening repositories and injects only domain ports.
 The shipped defaults are local Turso-compatible SQL storage and confined POSIX
-session files. No remote or cloud storage service is implemented or selected
-by user configuration.
+session files. No MySQL, PostgreSQL or cloud service implementation is shipped.
+Statically linked extension binaries can register their own factories and
+select validated domain routes through user/managed storage configuration.
 
 Domain services own validation, state transitions and recovery policy.
 Repositories expose typed domain operations and own atomicity, revision/claim
@@ -223,6 +224,64 @@ and the memory FTS profile before a repository receives a connection. Session
 message, compaction, operation-fact, and custom-entry writes cross async
 interfaces; the POSIX implementation retains Pi v3 encoding and append-only
 history. `otto-core` remains independent of native storage engines.
+
+### External storage backends
+
+`runtime::storage::BackendRegistry` registers external `RepositoryFactory`
+implementations before persisted routes are validated. Extension binaries call
+`cli::run::run_with_backends`; the ordinary `run` and `Storage::open_home`
+retain the existing defaults. Memory commands, including `--config`, and
+storage init/transfer commands use the same registry. Core/browser consumers
+have no native SDK dependency.
+
+`StorageEndpoint` distinguishes an absolute local path from an opaque service
+descriptor resolved from a named environment variable. Its debug output and
+`Endpoint` debug output redact the address. Persisted routes carry instance
+references and verified namespace identities, never resolved service descriptors.
+Factories bind immutable non-secret options with `configured`, then validate
+each actual namespace against `RepositoryRequirements` before writer admission.
+Version-one profiles mean the existing domain port's complete atomic mutation,
+snapshot/revision/claim, durability, query and recovery semantics; they are not
+a SQL dialect declaration. Unsupported options/profiles and namespace changes
+fail closed. Project configuration cannot supply storage preferences, even with
+executable trust. Credential names and values enter the existing redaction
+boundary and stay withheld from tools.
+
+The SQL compatibility driver and `SqlRepositories` remain SQLite/Turso profile
+interfaces. A MySQL/PostgreSQL extension supplies its own schemas, migrations,
+queries, error mapping and domain repository implementations. It does not
+implement fictitious SQLite PRAGMAs or reuse Turso FTS queries.
+
+Keep existing synchronous domain ports compatible. A network adapter can own
+`storage::worker::Worker<T>` and await client futures on its real Tokio runtime.
+`call().await` supports async callers; `call_blocking` yields Otto's multi-thread
+executor with `block_in_place`. Single-thread hosts must use the async entry
+point or a blocking thread. The queue is bounded, cancellation never withdraws
+an accepted operation, and close/drop drain owned work. Preserve each domain's
+existing command/receipt and unknown-effect recovery rules; never translate a
+lost commit acknowledgement into rollback or retry an external tool.
+
+`RepositoryFactory::prepare_import` and `export` compose external migration
+adapters with the existing coordinator. Preparation is read-only and returns
+an isolated stage's stable namespace identity. Domain-owned version-one record
+schemas, approval envelopes and canonical memory codecs are public; table/SQL
+mappings remain backend-owned. `migration::record` supplies canonical ordering
+and digests. The existing transfer encoding and legacy local routes remain
+readable. `StageImport::verification_chunk` returns actual staged logical data;
+`PortableReferenceClosure` checks cross-domain provenance, session aliases,
+pending approvals and receipts without querying destination SQL. The portable verifier
+fails above its declared 64 MiB materialization bound; choose another bounded
+validation strategy before supporting larger external reference sets. Transfers
+using only the default local backends retain their existing streaming verifier
+and limits.
+
+Run public `storage::conformance` checks in isolated backend test namespaces.
+The `storage-conformance` Cargo feature is enabled by default and can be disabled
+in deployment builds. Helpers cover existing port behavior and staged command
+receipts; backend-specific process/host loss, concurrency and transport fault
+tests are additional requirements. Passing the independent JSON acceptance
+adapter proves the extension boundary, not MySQL/PostgreSQL support or a live
+service's durability. Actual backend extensions require those integration gates.
 
 `storage/migration/` contains versioned snapshot, bounded chunk, stage import,
 verification, journal and cutover contracts. Domain codecs and backend staging

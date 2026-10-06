@@ -6,23 +6,8 @@ use super::{
 use crate::storage::backends::turso::memory_advice::{self, Store};
 pub struct MemoryAdviceCodec;
 const KINDS: &[Kind] = &[Kind {
-    name: "memory_advice_audit",
+    record: &crate::memory::advice::migration::RECORDS[0],
     table: "memory_advice",
-    fields: &[
-        "id",
-        "created_at",
-        "model",
-        "auxiliary",
-        "candidate_id",
-        "scope",
-        "request",
-        "response",
-        "outcome",
-        "error",
-        "latency_ms",
-    ],
-    keys: &["id"],
-    revision: None,
 }];
 impl SqlDomainCodec for MemoryAdviceCodec {
     fn domain(&self) -> &'static str {

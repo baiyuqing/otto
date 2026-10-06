@@ -1,4 +1,6 @@
 //! The composition boundary for storage backends. Services receive domain ports.
+pub mod backend;
+pub use backend::{BackendRegistry, NamespaceIdentity, RepositoryRequirements, StorageEndpoint};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
@@ -18,40 +20,134 @@ use crate::usage::repository::UsageRepository;
 use crate::workflow::WorkflowStore;
 
 /// Namespace opening intent selected by routing, consumed by each backend.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Endpoint<'a> {
     pub address: &'a str,
     pub policy: OpenPolicy,
 }
 
+impl std::fmt::Debug for Endpoint<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("address", &"<redacted>")
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
 /// A backend extension implements domain repositories, not application behavior.
 /// Endpoint interpretation and dialect/schema compatibility belong to the factory.
+#[async_trait::async_trait]
 pub trait RepositoryFactory: Send + Sync {
+    /// Bind immutable per-instance options. None reuses this factory only when
+    /// no options are supplied; options must never be silently ignored.
+    async fn configured(
+        &self,
+        _endpoint: &StorageEndpoint,
+        options: &BTreeMap<String, String>,
+    ) -> crate::storage::Result<Option<Arc<dyn RepositoryFactory>>> {
+        if options.is_empty() {
+            Ok(None)
+        } else {
+            Err(crate::storage::Error::UnsupportedCapability(
+                "backend instance options",
+            ))
+        }
+    }
+    /// Read-only deployment/profile validation. Never create a missing namespace.
+    /// Provider diagnostics must be mapped to the detail-free storage categories.
+    async fn validate(
+        &self,
+        _endpoint: &StorageEndpoint,
+        _requirements: &RepositoryRequirements,
+        _options: &BTreeMap<String, String>,
+    ) -> crate::storage::Result<NamespaceIdentity> {
+        Err(crate::storage::Error::UnsupportedCapability(
+            "external domain profile",
+        ))
+    }
+    /// Explicit fresh namespace initialization; normal opening never invokes this.
+    async fn initialize(
+        &self,
+        _endpoint: &StorageEndpoint,
+        _domains: &[RepositoryRequirements],
+        _options: &BTreeMap<String, String>,
+    ) -> crate::storage::Result<NamespaceIdentity> {
+        Err(crate::storage::Error::UnsupportedCapability(
+            "namespace initialization",
+        ))
+    }
+    /// Read-only preparation of an isolated import, including resumable identity.
+    async fn prepare_import(
+        &self,
+        _endpoint: &StorageEndpoint,
+        _requirements: &RepositoryRequirements,
+        _options: &BTreeMap<String, String>,
+        _context: &backend::MigrationContext,
+    ) -> crate::storage::migration::Result<backend::PreparedImport> {
+        Err(crate::storage::migration::Error::Invalid(
+            "backend does not support logical import".into(),
+        ))
+    }
+    async fn export(
+        &self,
+        _endpoint: &StorageEndpoint,
+        _requirements: &RepositoryRequirements,
+        _options: &BTreeMap<String, String>,
+        _context: &backend::MigrationContext,
+    ) -> crate::storage::migration::Result<Arc<dyn crate::storage::migration::SnapshotExport>> {
+        Err(crate::storage::migration::Error::Invalid(
+            "backend does not support logical export".into(),
+        ))
+    }
     fn memory(
         &self,
-        endpoint: Endpoint<'_>,
-        options: MemoryOptions,
-    ) -> crate::memory::Result<Arc<dyn MemoryStore>>;
-    fn approvals(&self, endpoint: Endpoint<'_>) -> crate::approval::Result<Arc<dyn ApprovalStore>>;
-    fn schedule(&self, endpoint: Endpoint<'_>) -> crate::schedule::Result<Arc<dyn ScheduleStore>>;
-    fn workflow(&self, endpoint: Endpoint<'_>) -> Result<Arc<dyn WorkflowStore>, String>;
-    fn usage(&self, endpoint: Endpoint<'_>) -> crate::usage::Result<Arc<dyn UsageRepository>>;
+        _endpoint: Endpoint<'_>,
+        _options: MemoryOptions,
+    ) -> crate::memory::Result<Arc<dyn MemoryStore>> {
+        Err(crate::memory::Error::new(
+            crate::memory::ErrorKind::Unavailable,
+        ))
+    }
+    fn approvals(
+        &self,
+        _endpoint: Endpoint<'_>,
+    ) -> crate::approval::Result<Arc<dyn ApprovalStore>> {
+        Err(crate::approval::Error::Unavailable)
+    }
+    fn schedule(&self, _endpoint: Endpoint<'_>) -> crate::schedule::Result<Arc<dyn ScheduleStore>> {
+        Err(crate::schedule::Error)
+    }
+    fn workflow(&self, _endpoint: Endpoint<'_>) -> Result<Arc<dyn WorkflowStore>, String> {
+        Err("workflow storage is unavailable".into())
+    }
+    fn usage(&self, _endpoint: Endpoint<'_>) -> crate::usage::Result<Arc<dyn UsageRepository>> {
+        Err(crate::usage::Error)
+    }
     fn tasks(
         &self,
-        endpoint: Endpoint<'_>,
-    ) -> crate::subagent::record::Result<Arc<dyn TaskRepository>>;
+        _endpoint: Endpoint<'_>,
+    ) -> crate::subagent::record::Result<Arc<dyn TaskRepository>> {
+        Err(crate::subagent::record::Error)
+    }
     fn reflection(
         &self,
-        endpoint: Endpoint<'_>,
-    ) -> crate::reflection::store::Result<Arc<dyn ReflectionStore>>;
+        _endpoint: Endpoint<'_>,
+    ) -> crate::reflection::store::Result<Arc<dyn ReflectionStore>> {
+        Err(crate::reflection::store::Error::Io)
+    }
     fn skill_checks(
         &self,
-        endpoint: Endpoint<'_>,
-    ) -> crate::skill::check_repository::StoreResult<Arc<dyn CheckStore>>;
+        _endpoint: Endpoint<'_>,
+    ) -> crate::skill::check_repository::StoreResult<Arc<dyn CheckStore>> {
+        Err(crate::skill::check_repository::StoreError::Io)
+    }
     fn memory_advice(
         &self,
-        endpoint: Endpoint<'_>,
-    ) -> crate::memory::advice::audit::Result<Arc<dyn AuditStore>>;
+        _endpoint: Endpoint<'_>,
+    ) -> crate::memory::advice::audit::Result<Arc<dyn AuditStore>> {
+        Err(crate::memory::advice::audit::Error::Io)
+    }
 }
 
 /// Reuses the current repository schemas with any conforming SQLite-profile driver.
@@ -233,6 +329,8 @@ pub struct Storage {
     routes: BTreeMap<String, StorageRoute>,
     session_backends: HashMap<String, Arc<dyn SessionRepository>>,
     _writer: Option<WriterPermit>,
+    configured: BTreeMap<String, backend::ConfiguredEndpoint>,
+    configured_factories: BTreeMap<String, Arc<dyn RepositoryFactory>>,
 }
 
 impl Default for Storage {
@@ -255,6 +353,8 @@ impl Default for Storage {
                 ) as Arc<dyn SessionRepository>,
             )]),
             _writer: None,
+            configured: BTreeMap::new(),
+            configured_factories: BTreeMap::new(),
         }
     }
 }
@@ -262,6 +362,41 @@ impl Default for Storage {
 impl Storage {
     /// Hold writer admission for the runtime lifetime so migration cannot race startup.
     pub async fn open_home(home: &Path) -> Result<Self, String> {
+        Self::open_home_with(
+            home,
+            &BackendRegistry::default(),
+            &Default::default(),
+            &HashMap::new(),
+        )
+        .await
+    }
+
+    /// Extensions are registered before persisted routes are validated or writers admitted.
+    pub async fn open_home_with(
+        home: &Path,
+        registry: &BackendRegistry,
+        configuration: &otto_core::config::storage::Storage,
+        environment: &HashMap<String, String>,
+    ) -> Result<Self, String> {
+        let mut storage = Self::default();
+        for (name, factory) in &registry.factories {
+            storage.register(name.clone(), factory.clone())?;
+        }
+        storage.configured = backend::resolve(configuration, environment, home)?;
+        for (instance, binding) in &storage.configured {
+            let factory = storage
+                .factories
+                .get(&binding.factory)
+                .ok_or("storage backend is unavailable")?;
+            let configured = factory
+                .configured(&binding.endpoint, &binding.options)
+                .await
+                .map_err(|_| "storage backend options are unsupported or invalid")?;
+            storage.configured_factories.insert(
+                instance.clone(),
+                configured.unwrap_or_else(|| factory.clone()),
+            );
+        }
         let canonical_home = home
             .canonicalize()
             .map_err(|_| "storage home is unavailable")?;
@@ -298,13 +433,62 @@ impl Storage {
             .routes()
             .await
             .map_err(|_| "storage routing authority is unavailable")?;
+        let configured_routes = backend::configured_routes(configuration);
+        if configured_routes.iter().any(|(domain, route)| {
+            group.domains.get(domain).is_none_or(|published| {
+                published.backend != route.backend || published.endpoint != route.endpoint
+            })
+        }) {
+            return Err("configured storage differs from published routes; initialize a fresh installation or transfer existing state first".into());
+        }
+        storage = storage.with_routes(group.domains)?;
+        storage.validate_configured().await?;
         let writer = authority
             .acquire_writer(&group.identity, &group.generation)
             .await
             .map_err(|_| "storage is frozen for migration or its route changed")?;
-        let mut storage = Self::default().with_routes(group.domains)?;
         storage._writer = Some(writer);
         Ok(storage)
+    }
+
+    async fn validate_configured(&self) -> Result<(), String> {
+        for (domain, route) in &self.routes {
+            let Some(instance) = route.endpoint.strip_prefix("instance:") else {
+                if !matches!(route.backend.as_str(), "sqlite" | "posix") {
+                    return Err(
+                        "external storage routes require a configured backend instance".into(),
+                    );
+                }
+                continue;
+            };
+            let binding = self
+                .configured
+                .get(instance)
+                .ok_or("published storage instance is not configured")?;
+            let factory = self
+                .configured_factories
+                .get(instance)
+                .ok_or("storage backend is unavailable")?;
+            let identity = factory
+                .validate(
+                    &binding.endpoint,
+                    &RepositoryRequirements::for_domain(domain)?,
+                    &binding.options,
+                )
+                .await
+                .map_err(
+                    |_| "storage namespace or domain profile is incompatible or unavailable",
+                )?;
+            identity
+                .validate()
+                .map_err(|_| "storage namespace identity is invalid")?;
+            if identity.0.is_empty()
+                || route.namespace_identity.as_deref() != Some(identity.0.as_str())
+            {
+                return Err("storage namespace differs from the published identity".into());
+            }
+        }
+        Ok(())
     }
     pub fn register(
         &mut self,
@@ -388,27 +572,35 @@ impl Storage {
         domain: &str,
         default: &'a Path,
     ) -> Result<(&'a dyn RepositoryFactory, Endpoint<'a>), String> {
-        let (backend, endpoint, policy) = match self.routes.get(domain) {
+        let (backend, endpoint) = match self.routes.get(domain) {
             Some(route) => (
                 route.backend.as_str(),
-                route.endpoint.as_str(),
-                OpenPolicy::Existing,
+                if route.endpoint.starts_with("instance:") {
+                    backend::endpoint(route, &self.configured)?
+                } else {
+                    Endpoint {
+                        address: &route.endpoint,
+                        policy: OpenPolicy::Existing,
+                    }
+                },
             ),
             None => (
                 "sqlite",
-                default.to_str().ok_or("storage endpoint is not UTF-8")?,
-                OpenPolicy::CreateIfMissing,
+                Endpoint {
+                    address: default.to_str().ok_or("storage endpoint is not UTF-8")?,
+                    policy: OpenPolicy::CreateIfMissing,
+                },
             ),
         };
         Ok((
-            self.factories
-                .get(backend)
+            self.routes
+                .get(domain)
+                .and_then(|route| route.endpoint.strip_prefix("instance:"))
+                .and_then(|instance| self.configured_factories.get(instance))
+                .or_else(|| self.factories.get(backend))
                 .ok_or("storage backend is unavailable")?
                 .as_ref(),
-            Endpoint {
-                address: endpoint,
-                policy,
-            },
+            endpoint,
         ))
     }
 
@@ -424,8 +616,19 @@ impl Storage {
     }
 
     pub fn memory_endpoint(&self, default: &Path) -> Result<String, String> {
-        self.route("memory", default)
-            .map(|(_, endpoint)| endpoint.address.to_owned())
+        match self.routes.get("memory") {
+            Some(route) => Ok(route.endpoint.clone()),
+            None => Ok(default
+                .to_str()
+                .ok_or("storage endpoint is not UTF-8")?
+                .to_owned()),
+        }
+    }
+    pub fn memory_backend<'a>(&'a self, default: &'a str) -> &'a str {
+        self.routes
+            .get("memory")
+            .filter(|route| route.backend != "sqlite")
+            .map_or(default, |route| route.backend.as_str())
     }
     pub fn approvals(&self, default: &Path) -> crate::approval::Result<Arc<dyn ApprovalStore>> {
         let (factory, endpoint) = self
@@ -574,6 +777,7 @@ mod tests {
             StorageRoute {
                 backend: backend.into(),
                 endpoint: endpoint.into(),
+                namespace_identity: None,
             },
         )])
     }
@@ -691,6 +895,7 @@ mod tests {
                         .to_str()
                         .unwrap()
                         .into(),
+                    namespace_identity: None,
                 },
             )
         })
@@ -866,6 +1071,7 @@ mod tests {
                 StorageRoute {
                     backend: "posix".into(),
                     endpoint: path.to_str().unwrap().into(),
+                    namespace_identity: None,
                 },
             )]))
             .unwrap();
@@ -880,6 +1086,7 @@ mod tests {
                 StorageRoute {
                     backend: "posix".into(),
                     endpoint: empty.to_str().unwrap().into(),
+                    namespace_identity: None,
                 },
             )]))
             .unwrap();

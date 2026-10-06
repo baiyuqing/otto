@@ -12,6 +12,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct StorageRoute {
     pub backend: String,
     pub endpoint: String,
+    /// Verified backend namespace; absent only for legacy local routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_identity: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +85,13 @@ pub struct ChunkReceipt {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JournalReferences {
+    pub migration_id: String,
+    pub aliases: BTreeMap<String, String>,
+    pub session_ids: BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub cursor: String,
@@ -137,6 +147,23 @@ pub trait SnapshotExport: Send + Sync {
 /// Owns an isolated namespace; ordinary readers cannot see it before cutover.
 #[async_trait]
 pub trait StageImport: Send + Sync {
+    /// Read actual staged logical records for cross-domain verification, not an
+    /// echoed source digest. Cursor and encoded-memory bounds match export.
+    async fn verification_chunk(
+        &self,
+        _domain: &str,
+        _cursor: &str,
+        _max_bytes: usize,
+    ) -> Result<Chunk> {
+        Err(Error::Invalid(
+            "stage does not expose logical verification records".into(),
+        ))
+    }
+    async fn journal_references(&self, _manifest: &Manifest) -> Result<JournalReferences> {
+        Err(Error::Invalid(
+            "stage does not expose journal references".into(),
+        ))
+    }
     /// Read-only compatibility/quota/profile check before copying or writes.
     async fn validate_plan(&self, manifest: &Manifest) -> Result<()>;
     /// Idempotently create/validate staging identity and supported domain codecs.

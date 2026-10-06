@@ -6910,9 +6910,11 @@ mod tests {
             ..HarnessOptions::default()
         });
 
-        // A task whose child transcript file exists.
-        let child_store = crate::session::Store::create(
-            sessions.path(),
+        // A task whose child transcript file exists beside its parent.
+        let parent_path = sessions.path().join("s1.jsonl");
+        let child_store = crate::session::Store::create_child_lazy(
+            &parent_path,
+            "with-transcript-child",
             Header {
                 version: CURRENT_VERSION,
                 id: "t1-child".to_string(),
@@ -6929,7 +6931,7 @@ mod tests {
             .expect("append");
         let child_path = child_store.path();
         let mut context = agents_context("s1");
-        context.parent_session_path = "/home/me/.otto/sessions/s1.jsonl".to_string();
+        context.parent_session_path = parent_path.to_string_lossy().into_owned();
         let mut task = agents_task(
             "with-transcript",
             TaskStatus::Succeeded,
@@ -6947,6 +6949,10 @@ mod tests {
                 "2026-09-25T10:01:00Z",
             ),
         );
+        let mut unsafe_path =
+            agents_task("unsafe-path", TaskStatus::Succeeded, "2026-09-25T10:02:00Z");
+        unsafe_path.session_path = "/etc/passwd".to_string();
+        store.upsert(&context, &unsafe_path);
 
         let found = harness
             .send("GET", "/v1/tasks/s1/with-transcript", None)
@@ -6967,6 +6973,16 @@ mod tests {
             .json();
         assert_eq!(missing["transcript_missing"], true);
         assert_eq!(missing["history"].as_array().expect("history").len(), 0);
+
+        let unsafe_detail = harness
+            .send("GET", "/v1/tasks/s1/unsafe-path", None)
+            .await
+            .json();
+        assert_eq!(unsafe_detail["transcript_missing"], true);
+        assert_eq!(
+            unsafe_detail["history"].as_array().expect("history").len(),
+            0
+        );
 
         let not_found = harness.send("GET", "/v1/tasks/s1/nope", None).await;
         assert_eq!(not_found.status, StatusCode::NOT_FOUND);

@@ -29,6 +29,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Rebuild TUI feature interaction around injected presenters, a command catalog,
+  shared controls and an asynchronous local/attach driver. Navigation, focus,
+  loading, errors and submission use one host; slow queries keep terminal input
+  and live output responsive. `Esc` dismisses approvals without deciding, and
+  bare `/approve` reopens them. Permission choices default to Deny; memory and
+  reflection reviews default to Accept and support arrows plus Enter. Attached
+  agent details consume the server's transcript rather than client filesystem
+  paths.
+
 - Add a native Gitleaks pre-commit hook and an independent CI history scan,
   including documentation changes, with redacted output and a pinned scanner.
   Exclude only 14 reviewed historical false positives by exact fingerprint.

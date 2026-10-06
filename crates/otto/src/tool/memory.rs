@@ -2,7 +2,9 @@
 //!
 //! `memory_search` reads; `remember` and `forget` only ever queue a candidate
 //! for human review, because the model's origin never carries write authority
-//! through [`crate::memory::Service::propose`].
+//! through [`crate::memory::Service::propose`]. A direct human `/remember`
+//! command is a separate trusted entry point and applies immediately; a model
+//! must never claim that authority by creating a generic confirmation.
 //!
 //! Ownership: each tool holds an `Arc` of the shared service, which stays open
 //! for the life of the session. Concurrency and cancellation follow the tool

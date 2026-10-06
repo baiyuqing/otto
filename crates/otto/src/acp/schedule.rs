@@ -735,8 +735,14 @@ mod tests {
     async fn relayed_turn(prompt_text: &str, meta: Value) -> (Value, Option<String>) {
         let bodies = Arc::new(Mutex::new(Vec::<(Value, Option<String>)>::new()));
         let recorded = Arc::clone(&bodies);
-        let router =
-            axum::Router::new().fallback(move |headers: axum::http::HeaderMap, body: String| {
+        let router = axum::Router::new()
+            // Ordinary prompt admission sees no active turn in this fixture,
+            // then the normal prompt request below preserves its metadata.
+            .route(
+                "/v1/sessions/s1/inputs",
+                axum::routing::post(|| async { axum::Json("idle") }),
+            )
+            .fallback(move |headers: axum::http::HeaderMap, body: String| {
                 let recorded = Arc::clone(&recorded);
                 async move {
                     let id = headers

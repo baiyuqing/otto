@@ -1486,6 +1486,43 @@ paths:
           description: Unknown session
         "409":
           description: Restricted dialogue unavailable or failed
+  /v1/sessions/{id}/inputs:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Admit ordinary human input to the active task
+      description: >
+        Deterministically steers the current task at its next safe provider
+        boundary. It never invokes model routing and never silently creates a
+        queued turn. An idle disposition requires the caller to explicitly
+        start a new turn; approval_pending preserves the approval dialogue.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                  maxLength: 32000
+      responses:
+        "200":
+          description: Deterministic admission disposition
+          content:
+            application/json:
+              schema:
+                type: string
+                enum: [steered, idle, approval_pending]
+        "400":
+          description: Invalid JSON or text
+        "404":
+          description: Unknown session
+        "409":
+          description: Admission failed before a disposition could be determined
   /v1/sessions/{id}/tasks/steer:
     parameters:
       - $ref: "#/components/parameters/sessionID"

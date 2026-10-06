@@ -145,6 +145,16 @@ impl Remote {
         self.block(self.client.context(&self.session()))
     }
 
+    /// Deterministically deliver natural text to the active server turn.
+    /// `Idle` tells the caller it may explicitly start a new turn instead.
+    pub(crate) fn admit_active_input(
+        &self,
+        text: &str,
+    ) -> Result<crate::app::ActiveInputAdmission, String> {
+        let session = self.session();
+        self.block(self.client.admit_input(&session, text))
+    }
+
     pub(crate) fn rename_session(&self, name: &str) -> Result<(), String> {
         let session = self.session();
         self.block(self.client.rename_session(&session, name))?;

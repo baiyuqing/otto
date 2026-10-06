@@ -956,10 +956,12 @@ Turns:
   prompt appears in the transcript when serve's `user_message` frame for the
   turn arrives. An image attached with `/image` is sent with the prompt; the
   transcript shows only the prompt text.
-- Text submitted while a turn runs is sent at once as the next turn, and the
-  transcript shows `Queued as the next turn (Ctrl+U withdraws it).`
-  `Ctrl+U` cancels the newest such turn that has not started. A slash command
-  submitted while a turn runs runs after that turn ends.
+- Ordinary text submitted while a turn runs steers that active task. Otto
+  accepts it for the next safe provider boundary without interrupting a tool or
+  silently creating a later turn. If the turn has just ended, the text becomes
+  a new turn; when an approval is pending, resolve that approval first. Use an
+  explicit `/queue` command when the text is a separate follow-up task. Slash
+  commands submitted while a turn runs retain their command-specific behavior.
 - A turn started by another client of the session (the web UI, a chat, or
   another terminal) is shown while it runs: the transcript is reloaded up to
   that turn, then its prompt and events follow. A turn that started and
@@ -2201,7 +2203,8 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/notices` | The lines background reflection queued for this session, `{"notices":[{"id":1,"text":"..."}],"last":1}`; pass `?after=<last>` to read only newer ones. They are not removed by reading, so every client sees each one, and only the 20 newest are kept. |
 | `GET /v1/sessions/{id}/wake-replies` | The assistant text of this session's finished wake turns, in the shape and with the rules of `.../notices`. `otto acp --attach` reads it to send wake replies to its ACP client. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn runs or is queued, or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
-| `POST /v1/sessions/{id}/tasks/steer` | Accept `{"text":"..."}` as guidance for the active run and return `{"accepted":true}`. Nonblank text, at most 32,000 UTF-8 bytes; `409 task_steer_failed` when idle, awaiting approval, or no longer accepting guidance. |
+| `POST /v1/sessions/{id}/inputs` | Admit ordinary `{"text":"..."}` without model routing or implicit queuing. Returns `"steered"` when bound to the active run's next safe boundary, `"idle"` when the caller may explicitly start a new turn, or `"approval_pending"` while an approval owns input. Nonblank text is limited to 32,000 UTF-8 bytes. |
+| `POST /v1/sessions/{id}/tasks/steer` | Explicit strict steering compatibility endpoint: accept `{"text":"..."}` as guidance for the active run and return `{"accepted":true}`. Nonblank text, at most 32,000 UTF-8 bytes; `409 task_steer_failed` when idle, awaiting approval, or no longer accepting guidance. |
 | `POST /v1/sessions/{id}/tasks/control` | Interpret `{"text":"...","channel":"telegram"}` (`channel` optional, `telegram` or `feishu`) using the restricted control dialogue. Returns null if no active dialogue applies, otherwise `{"text","queued"}`. `queued:true` means the caller must submit the original message as a queued turn; this route does not itself admit a follow-up. `409 task_control_failed` reports routing failure. |
 | `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |

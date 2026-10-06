@@ -49,21 +49,8 @@ try {
   assert.equal((await request('/v1/sessions')).status, 401);
   assert.equal((await request('/v1/sessions', 'invalid-token')).status, 401);
   assert.equal((await request('/v1/sessions', token)).status, 200);
-  const page = await request('/');
-  assert.equal(page.status, 200);
-  const html = await page.text();
-  const asset = html.match(/(?:src|href)="([^"]+\.js)"/)?.[1];
-  assert.ok(asset, 'Web UI must contain a compiled JavaScript asset');
-  const js = await request(asset);
-  assert.equal(js.status, 200);
-  const jsText = await js.text();
-  assert.ok(jsText.length > 1000, 'Embedded UI asset must not be a placeholder');
-  const wasmAsset = jsText.match(/["'`](\/assets\/[^"'`]+\.wasm)["'`]/)?.[1];
-  assert.ok(wasmAsset, 'Web UI must reference its WASM bindings');
-  const wasm = await request(wasmAsset);
-  assert.equal(wasm.status, 200);
-  assert.equal(wasm.headers.get('content-type'), 'application/wasm');
-  assert.deepEqual([...new Uint8Array(await wasm.arrayBuffer()).slice(0, 4)], [0, 97, 115, 109]);
+  assert.equal((await request('/')).status, 404);
+  assert.equal((await request('/assets/app.js')).status, 404);
   const created = await request('/v1/sessions', token, { method: 'POST', body: '{}' });
   assert.equal(created.status, 201);
   const { id } = await created.json();
@@ -90,7 +77,7 @@ try {
   const persisted = (await listing.json()).sessions.find((session) => session.id === id);
   assert.equal(persisted?.name, 'docker-smoke-session', 'Session must survive recreation');
   assert.equal(readFileSync(join(workspace, 'marker'), 'utf8'), 'docker-smoke');
-  console.log('Docker smoke passed: non-root CLI, setup persistence, UI, token gating, sessions, workspace writes and shutdown.');
+  console.log('Docker smoke passed: non-root CLI, setup persistence, API-only routes, token gating, sessions, workspace writes and shutdown.');
 } finally {
   try { compose('down', '-v', '--remove-orphans'); }
   finally { rmSync(workspace, { recursive: true, force: true }); }

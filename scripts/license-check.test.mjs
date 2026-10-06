@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { allowed, npmPackages, rustPackages, violations } from './license-check.mjs';
+import { allowed, rustPackages, violations } from './license-check.mjs';
 
 test('allowed evaluates SPDX expressions', () => {
   const yes = ['MIT', 'MIT-0', 'MIT OR GPL-3.0', 'GPL-3.0 OR MIT AND Apache-2.0', '(MIT OR Apache-2.0) AND Unicode-3.0', 'Apache-2.0 WITH LLVM-exception OR MIT', 'MIT/Apache-2.0', 'Apache-2.0 / MIT / MPL-2.0', 'MIT or Apache-2.0'];
@@ -41,26 +41,6 @@ test('rustPackages keeps a crate that is a dev dep of one package and a normal d
 test('rustPackages counts an edge with both dev and normal kinds', () => {
   const m = meta({ W: [dep('X', 'dev', null)], X: [] });
   assert.deepEqual(rustPackages(m).map((p) => p.name), ['x']);
-});
-
-test('npmPackages selects shipped packages and parses names', () => {
-  const lock = {
-    packages: {
-      '': { name: 'ui', version: '0.0.0' },
-      'node_modules/a': { version: '1.0.0', license: 'MIT' },
-      'node_modules/dev': { version: '1.0.0', license: 'MIT', dev: true },
-      'node_modules/ln': { resolved: '../x', link: true },
-      'node_modules/@iconify/types': { version: '2.0.0', license: 'MIT' },
-      'node_modules/a/node_modules/b': { version: '3.0.0' },
-      'node_modules/opt': { version: '1.0.0', license: 'ISC', optional: true },
-    },
-  };
-  assert.deepEqual(npmPackages(lock), [
-    { name: 'a', version: '1.0.0', license: 'MIT' },
-    { name: '@iconify/types', version: '2.0.0', license: 'MIT' },
-    { name: 'b', version: '3.0.0', license: null },
-    { name: 'opt', version: '1.0.0', license: 'ISC' },
-  ]);
 });
 
 test('violations applies CLARIFIED by exact version and reports disallowed licenses', () => {

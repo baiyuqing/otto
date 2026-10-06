@@ -2619,8 +2619,8 @@ impl Session for FailingSession {
         self.inner.append_operation_fact(fact).await
     }
 
-    fn observed_tools(&self) -> Option<Vec<String>> {
-        self.inner.observed_tools()
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.inner.observed_capabilities()
     }
 
     async fn append_custom(
@@ -2690,8 +2690,8 @@ impl Session for OperationFailingSession {
         self.inner.operation_ledger()
     }
 
-    fn observed_tools(&self) -> Option<Vec<String>> {
-        self.inner.observed_tools()
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.inner.observed_capabilities()
     }
 
     async fn append_custom(
@@ -2755,8 +2755,8 @@ impl Session for AsyncOrderingSession {
     fn operation_ledger(&self) -> crate::session::OperationLedger {
         self.inner.operation_ledger()
     }
-    fn observed_tools(&self) -> Option<Vec<String>> {
-        self.inner.observed_tools()
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.inner.observed_capabilities()
     }
 
     async fn append_custom(
@@ -3510,8 +3510,8 @@ async fn compaction_hooks_gate_the_provider_and_observe_only_committed_checkpoin
 
 const NOTICE_OPEN: &str = "<runtime_capability_update>";
 
-fn echo_only() -> Option<Vec<String>> {
-    Some(vec!["echo".to_owned()])
+fn recorded_tools(session: &MemorySession) -> Vec<String> {
+    session.observed_capabilities().expect("record").tools
 }
 
 async fn session_with_record(tools: &str) -> MemorySession {
@@ -3547,7 +3547,7 @@ async fn a_new_session_gets_a_record_and_no_notice() {
         .await
         .expect("run");
     assert!(notices(&agent.session().messages()).is_empty());
-    assert_eq!(agent.session().observed_tools(), echo_only());
+    assert_eq!(recorded_tools(agent.session()), vec!["echo".to_owned()]);
     assert_eq!(
         agent.provider().normal_requests()[0].system_prompt,
         "be brief"
@@ -3574,7 +3574,7 @@ async fn a_differing_record_appends_one_notice_before_the_user_message() {
     let notice = messages[0].text();
     assert!(notice.starts_with(NOTICE_OPEN));
     assert!(notice.contains("\nAdded: echo\nRemoved: web_search\n"));
-    assert_eq!(agent.session().observed_tools(), echo_only());
+    assert_eq!(recorded_tools(agent.session()), vec!["echo".to_owned()]);
 
     agent
         .run("again", &mut |_| {}, &CancellationToken::new())
@@ -3586,6 +3586,32 @@ async fn a_differing_record_appends_one_notice_before_the_user_message() {
         assert_eq!(request.system_prompt, "be brief");
         assert_eq!(request.messages[0].text(), notice);
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_changed_definition_digest_appends_one_notice() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("one"), Turn::text("two")]),
+        EchoExecutor::default(),
+        session_with_record(r#"["echo"],"definitions":{"echo":"0000000000000000"}"#).await,
+        options(),
+    );
+    for prompt in ["hi", "again"] {
+        agent
+            .run(prompt, &mut |_| {}, &CancellationToken::new())
+            .await
+            .expect("run");
+    }
+    let messages = agent.session().messages();
+    let found = notices(&messages);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].text().contains("\nChanged definitions: echo\n"));
+    let recorded = agent.session().observed_capabilities().expect("record");
+    assert_ne!(
+        recorded.definitions.expect("digests")["echo"],
+        "0000000000000000"
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

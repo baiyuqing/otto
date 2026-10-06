@@ -35,12 +35,13 @@ pub(crate) fn new_input_id() -> String {
 /// write once the owning transcript is archived.
 pub(crate) fn install(
     inbox: &Inbox,
-    suffix: &'static str,
+    suffix: &str,
     sidecar: impl Fn() -> Option<PathBuf> + Send + Sync + 'static,
 ) {
+    let suffix = suffix.to_owned();
     inbox.set_id_source(Box::new(new_input_id));
     inbox.set_persist(Box::new(move |entries| match sidecar() {
-        Some(path) => write(&path, suffix, entries),
+        Some(path) => write(&path, &suffix, entries),
         None => Ok(()),
     }));
 }

@@ -9,6 +9,8 @@
 pub mod agent;
 pub mod approval;
 pub mod config;
+#[cfg(feature = "conformance")]
+pub mod conformance;
 pub mod mailbox;
 pub mod model;
 pub mod openaicompat;

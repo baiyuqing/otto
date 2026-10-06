@@ -1600,16 +1600,33 @@ impl Controller {
 
     /// Accepts guidance for the exact active run, at its next safe provider
     /// boundary. The acceptance is transient and never wakes a later run.
-    pub fn steer(&self, text: &str) -> Result<(), String> {
-        match self.admit_active_input(text)? {
-            ActiveInputAdmission::Steered => Ok(()),
-            ActiveInputAdmission::Idle => {
-                Err("there is no active task accepting guidance".to_string())
-            }
-            ActiveInputAdmission::ApprovalPending => {
-                Err("the task is waiting for approval; guidance is not accepted yet".into())
-            }
+    pub fn steer(&self, text: &str) -> Result<otto_core::agent::steering::Message, String> {
+        let text = task_control::checked_text(text)?;
+        if self.pending_approval().is_some() {
+            return Err("the task is waiting for approval; guidance is not accepted yet".into());
         }
+        let runner = self.runner()?;
+        let Some(ticket) = runner.steering().ticket() else {
+            return Err("there is no active task accepting guidance".to_string());
+        };
+        let session_id = runner.session().header().id.clone();
+        runner.task_control().steer(&session_id, ticket, text)
+    }
+
+    /// Lists the transient steering lifecycle for the current active run.
+    pub fn steering_messages(&self) -> Result<Vec<otto_core::agent::steering::Message>, String> {
+        Ok(self.runner()?.steering().messages())
+    }
+
+    /// Withdraws one queued steering message before its safe-point delivery.
+    pub fn withdraw_steering(
+        &self,
+        id: u64,
+    ) -> Result<otto_core::agent::steering::Message, String> {
+        self.runner()?
+            .steering()
+            .withdraw(id)
+            .ok_or_else(|| "steering message is not queued for the active task".to_string())
     }
 
     /// Deterministically admits ordinary human text while this session is
@@ -1626,7 +1643,7 @@ impl Controller {
         };
         let session_id = runner.session().header().id.clone();
         match runner.task_control().steer(&session_id, ticket, text) {
-            Ok(()) => Ok(ActiveInputAdmission::Steered),
+            Ok(_) => Ok(ActiveInputAdmission::Steered),
             // The active run can close after observing its ticket. This text
             // was not accepted and must not be silently queued elsewhere.
             Err(error) if error.contains("active task") => Ok(ActiveInputAdmission::Idle),

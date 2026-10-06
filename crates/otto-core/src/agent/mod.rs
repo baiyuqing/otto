@@ -64,7 +64,10 @@ use crate::provider::{
 };
 use crate::session::Session;
 use crate::session::context::pending_tool_calls;
-use crate::session::operation::OperationFact;
+use crate::session::operation::{OperationFact, replay_allowed};
+use crate::session::turn::{
+    TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, encode_turn_record,
+};
 use crate::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
 
 use crate::mailbox::{InMemoryMailbox, Mailbox};
@@ -495,6 +498,87 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         if text.is_empty() && image.is_none() && self.options.mailbox.is_empty() {
             return Err(self.fail(emit, AgentError::EmptyUserText));
         }
+        let wake = text.is_empty() && image.is_none();
+        let turn_id = self
+            .start_turn(wake)
+            .await
+            .map_err(|error| self.fail(emit, error))?;
+        let result = self
+            .run_turn(user_text, image, system_context, emit, control, followup)
+            .await;
+        self.end_turn(turn_id, &result, control).await;
+        result
+    }
+
+    /// Appends the `otto.turn` start record, the turn's first durable write.
+    /// A wake turn that follows a turn process loss interrupted is recorded
+    /// as that turn's recovery; every other turn starts a new chain.
+    async fn start_turn(&self, wake: bool) -> Result<String, AgentError> {
+        let turn_id = (self.options.new_operation_id)()
+            .map_err(|message| AgentError::OperationIdentity { message })?
+            .to_string();
+        let record = match self.session.interrupted_turn() {
+            Some(prior) if wake => TurnRecord::started(
+                turn_id.clone(),
+                TurnTrigger::Recovery,
+                prior.attempt.saturating_add(1),
+                Some(prior.turn_id),
+            ),
+            _ => TurnRecord::started(
+                turn_id.clone(),
+                if wake {
+                    TurnTrigger::Wake
+                } else {
+                    TurnTrigger::User
+                },
+                1,
+                None,
+            ),
+        };
+        self.session
+            .append_custom(TURN_CUSTOM_TYPE, &encode_turn_record(&record))
+            .await
+            .map_err(|source| AgentError::Persist {
+                kind: "turn start".into(),
+                source,
+            })?;
+        Ok(turn_id)
+    }
+
+    /// Appends the `otto.turn` end record. A failed append is not reported:
+    /// the turn keeps its own result, and a store whose write failed rejects
+    /// every later write anyway.
+    async fn end_turn(
+        &self,
+        turn_id: String,
+        result: &Result<(), AgentError>,
+        control: &dyn OperationControl,
+    ) {
+        let outcome = match result {
+            Ok(()) => TurnOutcome::Completed,
+            Err(_) if control.stop_reason().is_some() => TurnOutcome::Cancelled,
+            Err(_) => TurnOutcome::Failed,
+        };
+        let _ = self
+            .session
+            .append_custom(
+                TURN_CUSTOM_TYPE,
+                &encode_turn_record(&TurnRecord::ended(turn_id, outcome)),
+            )
+            .await;
+    }
+
+    /// The body of one admitted turn, between its `otto.turn` records.
+    async fn run_turn(
+        &self,
+        user_text: &str,
+        image: Option<Block>,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+        followup: bool,
+    ) -> Result<(), AgentError> {
+        let text = trim_go_space(user_text);
         let steering = self.options.steering.begin();
         emit(Event::AgentStarted);
         if let Some(error) = stopped_provider_error(control) {
@@ -719,7 +803,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             attempt,
             block.tool_call_id.clone(),
             block.tool_name.clone(),
-        );
+        )
+        .with_retry_safety(self.tools.retry_safety(&block.tool_name));
         if let Err(source) = self.session.append_operation_fact(attempt_fact).await {
             return Err(self.fail(
                 emit,
@@ -935,15 +1020,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let ledger = self.session.operation_ledger();
         let mut priors = Vec::with_capacity(pending.len());
         for call in &pending {
-            match ledger.operation_for_tool_call(&call.tool_call_id) {
-                None => priors.push(None),
-                Some(record)
-                    if !record.corrupt && record.terminal.is_none() && record.attempts <= 1 =>
-                {
-                    priors.push(Some((record.operation_id.clone(), record.attempts)));
-                }
-                Some(_) => return Ok(()),
+            let record = ledger.operation_for_tool_call(&call.tool_call_id);
+            if !replay_allowed(record, true) {
+                return Ok(());
             }
+            priors.push(record.map(|record| (record.operation_id.clone(), record.attempts)));
         }
         for (call, prior) in pending.iter().zip(priors) {
             self.run_tool_call(emit, state, control, call, prior, false)
@@ -1783,8 +1864,12 @@ mod tests {
             EchoExecutor.definitions()
         }
 
-        fn replayable(&self, name: &str) -> bool {
-            self.replayable.contains(&name)
+        fn retry_safety(&self, name: &str) -> crate::model::RetrySafety {
+            if self.replayable.contains(&name) {
+                crate::model::RetrySafety::ReadOnly
+            } else {
+                crate::model::RetrySafety::NonIdempotent
+            }
         }
 
         async fn execute(
@@ -1903,6 +1988,7 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn run_executes_a_tool_turn_then_a_text_turn() {
+        // op_1 is the turn id of the `otto.turn` records.
         let provider = ScriptedProvider::new(vec![
             (Vec::new(), assistant_tool_call()),
             (
@@ -1924,7 +2010,7 @@ mod tests {
             .expect("run");
 
         let api_call = Event::ProviderApiCall {
-            operation_id: OperationId::new("op_1").expect("operation id"),
+            operation_id: OperationId::new("op_2").expect("operation id"),
             provider: "fake".into(),
             model: "test-model".into(),
             duration: std::time::Duration::ZERO,
@@ -1937,7 +2023,7 @@ mod tests {
             },
         };
         let second_api_call = Event::ProviderApiCall {
-            operation_id: OperationId::new("op_3").expect("operation id"),
+            operation_id: OperationId::new("op_4").expect("operation id"),
             provider: "fake".into(),
             model: "test-model".into(),
             duration: std::time::Duration::ZERO,
@@ -1963,14 +2049,14 @@ mod tests {
                     present: true,
                 },
                 Event::ToolCallStarted {
-                    operation_id: OperationId::new("op_2").expect("operation id"),
+                    operation_id: OperationId::new("op_3").expect("operation id"),
                     attempt: 1,
                     tool_name: "echo".into(),
                     tool_call_id: "call-1".into(),
                     arguments: r#"{"value":1}"#.into(),
                 },
                 Event::ToolCallFinished {
-                    operation_id: OperationId::new("op_2").expect("operation id"),
+                    operation_id: OperationId::new("op_3").expect("operation id"),
                     attempt: 1,
                     tool_name: "echo".into(),
                     tool_call_id: "call-1".into(),
@@ -2170,7 +2256,7 @@ mod tests {
             vec![
                 Event::AgentStarted,
                 Event::ProviderApiCall {
-                    operation_id: OperationId::new("op_1").expect("operation id"),
+                    operation_id: OperationId::new("op_2").expect("operation id"),
                     provider: "fake".into(),
                     model: "test-model".into(),
                     duration: std::time::Duration::ZERO,

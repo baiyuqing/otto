@@ -666,7 +666,7 @@ impl Builder {
             load_inbox(&inbox, &path);
             let recovery_warnings = failover::recovery::notify(
                 &inbox,
-                session_for_recovery.take_takeover(),
+                session_for_recovery.take_recovery(),
                 &children_dir,
                 runtime.max_output_bytes.max(0) as usize,
                 &otto_core::session::Session::messages(&session_for_recovery),
@@ -2049,7 +2049,7 @@ mod tests {
     // A takeover is simulated the same way `session::tests` does: a lease
     // directory is written by hand (no live `Lease` of this process's own),
     // with `lease_seconds` = 6. `Prepared::prepare`/`activate` then performs
-    // a real takeover, populating the returned store's `take_takeover()` and
+    // a real takeover, populating the returned store's `take_recovery()` and
     // handing this process a live `Keeper::global` lease. `L` must stay at
     // or above 6: the watchdog fences a live global-keeper lease at 5L/6
     // staleness, and the renewal thread ticks every 1s, so L < 6 leaves no
@@ -2306,6 +2306,89 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_reopen_after_process_loss_notifies_and_marks_children_interrupted() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let session_root = root.path().join("sessions");
+        std::fs::create_dir_all(&session_root).expect("create session root");
+
+        let parent = crate::session::Store::create(&session_root, recovery_test_header(&workspace))
+            .expect("create parent");
+        parent
+            .append_custom_entry(
+                otto_core::session::TURN_CUSTOM_TYPE,
+                &otto_core::session::encode_turn_record(&otto_core::session::TurnRecord::started(
+                    "op_lost",
+                    otto_core::session::TurnTrigger::User,
+                    1,
+                    None,
+                )),
+            )
+            .expect("turn start");
+        parent
+            .append_message(&recovery_dangling_call("call-1", "bash"))
+            .expect("append dangling call");
+        let parent_path = parent.path();
+        let child = crate::session::Store::create_child_lazy(
+            &parent_path,
+            "t1-child",
+            otto_core::session::Header {
+                id: "child".into(),
+                workspace: workspace.to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: chrono::Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("create child");
+        child
+            .append_custom_entry(
+                crate::subagent::runner::TASK_SPEC_CUSTOM_TYPE,
+                &serde_json::json!({
+                    "id": "t1",
+                    "name": "worker",
+                    "description": "",
+                    "model": "test-model",
+                    "context": "fresh",
+                    "prompt": "do it",
+                    "definition": null,
+                })
+                .to_string(),
+            )
+            .expect("append task_spec");
+        child.close().expect("close child");
+        // The process stops: the parent is closed without ending its turn,
+        // and no lease directory exists.
+        parent.close().expect("close without ending the turn");
+        let children_dir = Path::new(&parent_path).with_extension("");
+
+        let (activated, _warnings) =
+            crate::session::Store::open(Path::new(&parent_path)).expect("reopen");
+        let session = SharedSession::new(Arc::new(activated));
+        let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
+        let wiring =
+            recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+
+        let queued = wiring.inbox.expect("inbox").queued();
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        let text = &queued[0].notification.text;
+        assert!(text.contains("previous Otto process"), "{text}");
+        assert!(text.contains("Continue the interrupted turn"), "{text}");
+        assert!(text.contains("bash"), "{text}");
+        assert!(text.contains("t1"), "{text}");
+        let record = crate::subagent::interrupted::scan(&children_dir)
+            .into_iter()
+            .find(|record| record.task_id == "t1")
+            .expect("the child transcript was scanned");
+        assert_eq!(
+            record.final_status,
+            Some(crate::subagent::interrupted::INTERRUPTED_STATUS.to_string()),
+        );
+    }
+
+    #[test]
     fn a_takeover_with_no_dangling_state_and_no_children_pushes_nothing() {
         let root = tempfile::tempdir().expect("root");
         let workspace = root.path().join("workspace");
@@ -2330,10 +2413,10 @@ mod tests {
         .activate()
         .expect("activate");
         assert!(
-            activated.take_takeover().is_some(),
+            activated.take_recovery().is_some(),
             "sanity: the parent must actually have been taken over"
         );
-        // Re-open to get an un-taken `take_takeover()` back for the build,
+        // Re-open to get an un-taken `take_recovery()` back for the build,
         // since the sanity check above just consumed it.
         activated.close().expect("close");
         let (activated, _warnings) = crate::session::Store::open(Path::new(&parent_path))
@@ -2382,13 +2465,13 @@ mod tests {
         // sidecar the first call persisted, so it still shows that one
         // entry; the assertion is that the count does not grow to 2, which
         // it would if `notify` pushed again from a takeover that
-        // `take_takeover()` had already consumed on the first call.
+        // `take_recovery()` had already consumed on the first call.
         let second =
             recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
         assert_eq!(
             second.inbox.expect("inbox").len(),
             1,
-            "take_takeover() already consumed the record on the first call, so the second call must not push again"
+            "take_recovery() already consumed the record on the first call, so the second call must not push again"
         );
     }
 }

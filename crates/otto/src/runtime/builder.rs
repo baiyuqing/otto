@@ -169,6 +169,10 @@ impl Session for MemoryHandle {
         self.inner.observed_capabilities()
     }
 
+    fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         self.inner.append_custom(custom_type, data).await
     }
@@ -302,8 +306,8 @@ impl SharedSession {
         self.0.lease()
     }
 
-    pub fn take_takeover(&self) -> Option<crate::session::Takeover> {
-        self.0.take_takeover()
+    pub fn take_recovery(&self) -> Option<crate::session::Recovery> {
+        self.0.take_recovery()
     }
 }
 
@@ -341,6 +345,10 @@ impl Session for SharedSession {
 
     fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
         self.0.observed_capabilities()
+    }
+
+    fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+        self.0.interrupted_turn()
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
@@ -3256,6 +3264,10 @@ mod tests {
 
         fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
             self.inner.observed_capabilities()
+        }
+
+        fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+            self.inner.interrupted_turn()
         }
 
         async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {

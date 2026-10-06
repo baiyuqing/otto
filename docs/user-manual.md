@@ -4320,6 +4320,9 @@ listed in old metadata; the current installation registry determines capability.
 
 ## Hooks and custom tools
 
+A runnable [hook-demo example](../examples/plugins/hook-demo/README.md) includes
+a Python hook, a custom tool and an offline protocol check.
+
 Lifecycle hooks and external command tools are available in the Otto-specific
 `extensions.dev.otto` namespace of an installed `plugin.json`. Existing Skills,
 MCP formats, snapshot installation and content trust remain the package contract.

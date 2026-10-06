@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/baiyuqing/otto/connect/internal/agent"
-	"github.com/baiyuqing/otto/connect/internal/agent/fake"
-	"github.com/baiyuqing/otto/connect/internal/manage"
-	"github.com/baiyuqing/otto/connect/internal/state"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent/fake"
+	"github.com/baiyuqing/otto/chat-connector/internal/manage"
+	"github.com/baiyuqing/otto/chat-connector/internal/state"
 )
 
 func TestMain(m *testing.M) {

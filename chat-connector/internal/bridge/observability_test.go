@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/baiyuqing/otto/connect/internal/metrics"
+	"github.com/baiyuqing/otto/chat-connector/internal/metrics"
 )
 
 type syncBuffer struct {

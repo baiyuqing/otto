@@ -44,7 +44,7 @@ export function plan(paths) {
     if (modules.size) steps.push(`cargo test --workspace --lib -- ${[...modules].sort().map((m) => `${m}::`).join(' ')}`);
     if (tests.size) steps.push(`cargo test --workspace ${[...tests].sort().map((t) => `--test ${t}`).join(' ')}`);
   }
-  if (under('connect/')) steps.push('make connect-check');
+  if (under('chat-connector/')) steps.push('make connect-check');
   if (under('scripts/')) steps.push('make scripts-test');
   if (has((p) => LICENSE_INPUTS.test(p))) steps.push('make license-check');
   return { steps, unchecked: unchecked.sort() };

@@ -110,7 +110,7 @@ ACP and the connector:
   `src/v1/protocol_level.rs`). `coder/acp-go-sdk` v0.13.5 cancels the
   handler's context when it receives one (`connection.go:388-415`,
   `542-560`). `otto-connect`'s permission wait returns when that context ends
-  and does not tell the chat (`connect/internal/bridge/bridge.go:533-544`).
+  and does not tell the chat (`chat-connector/internal/bridge/bridge.go:533-544`).
 - `otto-connect` sends `session/load` when a chat's session is not open in
   the current agent process, and starts the agent again on the next message
   after it exits.
@@ -343,7 +343,7 @@ history. Input while disconnected is refused with that message.
 ## Restart and upgrade
 
 1. `git pull --ff-only && make install` (`make connect-build` as well when
-   `connect/` changed).
+   `chat-connector/` changed).
 2. Stop `otto serve` with SIGTERM. Running and queued turns end `canceled`,
    with a `turn_end` frame; waiting approvals end with them.
 3. Start `otto serve` with the same flags.

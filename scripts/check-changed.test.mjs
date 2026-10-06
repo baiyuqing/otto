@@ -58,7 +58,7 @@ test('markdown fixture under crates follows the module rule', () => {
 });
 
 test('connect and scripts paths', () => {
-  assert.deepEqual(plan(['connect/main.go']).steps, ['make connect-check']);
+  assert.deepEqual(plan(['chat-connector/main.go']).steps, ['make connect-check']);
   assert.deepEqual(plan(['scripts/a.mjs']).steps, ['make scripts-test']);
 });
 
@@ -70,7 +70,7 @@ test('license check runs for manifests and lock files only', () => {
 });
 
 test('mixed change keeps the documented order', () => {
-  const { steps } = plan(['scripts/a.mjs', 'connect/a.go', 'crates/otto/src/cli/a.rs']);
+  const { steps } = plan(['scripts/a.mjs', 'chat-connector/a.go', 'crates/otto/src/cli/a.rs']);
   assert.deepEqual(steps, [FMT, CLIPPY, 'cargo test --workspace --lib -- cli::', 'make connect-check', 'make scripts-test']);
 });
 

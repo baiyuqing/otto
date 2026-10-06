@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/baiyuqing/otto/connect/internal/agent"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 )
 
 type memoryCard struct {

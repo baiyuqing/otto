@@ -16,8 +16,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/baiyuqing/otto/connect/internal/bridge"
-	"github.com/baiyuqing/otto/connect/internal/state"
+	"github.com/baiyuqing/otto/chat-connector/internal/bridge"
+	"github.com/baiyuqing/otto/chat-connector/internal/state"
 )
 
 const testToken = "123456:TEST-token-VALUE"

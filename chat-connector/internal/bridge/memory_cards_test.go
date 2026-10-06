@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/baiyuqing/otto/connect/internal/agent"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 )
 
 func memoryClick(h *harness, chat, sender, token, text string) {

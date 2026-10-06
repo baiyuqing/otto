@@ -4,10 +4,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use otto_core::session::{
-    Header, ListResult, RuntimeMetadata, Session, SessionInfo, Snapshot, Warning,
+    ForkError, ForkPoint, ForkRecord, Header, ListResult, RuntimeMetadata, Session, SessionInfo,
+    Snapshot, Warning,
 };
 
-use super::{ArchiveResult, Recovery};
+use super::{ArchiveResult, Forked, Recovery};
 
 /// The current session writer authority, independent of its storage protocol.
 pub trait WriterOwnership: std::fmt::Debug + Send + Sync {
@@ -39,6 +40,11 @@ pub trait SessionHandle: Session + Send + Sync {
     }
 
     fn take_recovery(&self) -> Option<Recovery> {
+        None
+    }
+
+    /// Where this session was forked from, when it is a fork.
+    fn forked_from(&self) -> Option<ForkRecord> {
         None
     }
 }
@@ -100,4 +106,15 @@ pub trait SessionRepository: Send + Sync {
         workspace: &str,
         reference: &str,
     ) -> Result<ArchiveResult, String>;
+    /// Writes a new session `new_id` beside `reference` whose history is
+    /// `reference`'s up to the turn the user message `before` opens, or up to
+    /// the last turn boundary without `before`. `reference` is only read.
+    fn fork(
+        &self,
+        reference: &str,
+        before: Option<&str>,
+        new_id: &str,
+    ) -> Result<Forked, ForkError>;
+    /// The places `reference` can be forked, oldest first.
+    fn fork_points(&self, reference: &str) -> Result<Vec<ForkPoint>, String>;
 }

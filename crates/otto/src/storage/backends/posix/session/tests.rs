@@ -3990,3 +3990,234 @@ fn an_input_before_a_compaction_checkpoint_stays_delivered() {
     );
     reopened.close().expect("close");
 }
+
+// ---------------------------------------------------------------------------
+// fork
+// ---------------------------------------------------------------------------
+
+const FORK_ID: &str = "0123456789abcdef0123456789abcdef";
+
+fn write_turn(store: &Store, record: &otto_core::session::TurnRecord) {
+    store
+        .append_custom_entry(
+            otto_core::session::TURN_CUSTOM_TYPE,
+            &otto_core::session::encode_turn_record(record),
+        )
+        .expect("turn record");
+}
+
+/// Appends one completed user turn and returns its prompt's entry id.
+fn completed_turn(store: &Store, turn: &str, prompt: &str) -> String {
+    use otto_core::session::{TurnOutcome, TurnRecord, TurnTrigger};
+    write_turn(
+        store,
+        &TurnRecord::started(turn, TurnTrigger::User, 1, None),
+    );
+    store.append_message(&user(prompt)).expect("prompt");
+    let id = json_lines(Path::new(&store.path()))
+        .last()
+        .and_then(|line| line["id"].as_str().map(str::to_owned))
+        .expect("prompt id");
+    store.append_message(&assistant("reply")).expect("reply");
+    write_turn(store, &TurnRecord::ended(turn, TurnOutcome::Completed));
+    id
+}
+
+fn session_files(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .expect("read session directory")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_fork_copies_the_history_before_a_turn_and_leaves_the_source_alone() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    let kept_messages = store.messages();
+    let second = completed_turn(&store, "t2", "second");
+    store.rename("dev").expect("rename");
+    let source = PathBuf::from(store.path());
+    let before = fs::read(&source).expect("read source");
+
+    let forked = super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        &source,
+        Some(&second),
+        FORK_ID,
+    )
+    .expect("fork");
+    assert_eq!(fs::read(&source).expect("read source"), before);
+    assert_eq!(
+        forked.path,
+        source.with_file_name(format!("{FORK_ID}.jsonl"))
+    );
+    assert_eq!(forked.point.as_ref().expect("point").prompt, "second");
+
+    let lines = json_lines(&forked.path);
+    assert_eq!(lines[0]["id"], FORK_ID);
+    assert_eq!(lines[0]["parentSession"], source.to_string_lossy().as_ref());
+
+    let (fork, warnings) = Store::open(&forked.path).expect("open fork");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(fork.take_recovery().is_none());
+    assert_eq!(fork.interrupted_turn(), None);
+    assert_eq!(fork.messages(), kept_messages);
+    assert_eq!(fork.name(), "dev (fork)");
+    let origin = fork.forked_from().expect("fork record");
+    assert_eq!(origin.source_session_id, store.header().id);
+    assert_eq!(origin.source_entry_id.as_deref(), Some(second.as_str()));
+    assert_eq!(origin.prompt.as_deref(), Some("second"));
+    assert!(store.forked_from().is_none());
+    fork.close().expect("close fork");
+    store.close().expect("close");
+}
+
+#[test]
+fn a_fork_keeps_a_compaction_before_the_cut() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "one");
+    let anchor = completed_turn(&store, "t2", "two");
+    store
+        .append_compaction(&checkpoint(&anchor))
+        .expect("compact");
+    let model_messages = store.model_messages();
+    let third = completed_turn(&store, "t3", "three");
+
+    let forked = super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        Path::new(&store.path()),
+        Some(&third),
+        FORK_ID,
+    )
+    .expect("fork");
+    let (fork, warnings) = Store::open(&forked.path).expect("open fork");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(fork.model_messages(), model_messages);
+    assert!(fork.latest_compaction().is_some());
+    fork.close().expect("close fork");
+    store.close().expect("close");
+}
+
+#[test]
+fn a_whole_fork_leaves_out_an_interrupted_turn() {
+    use otto_core::session::{Session, TurnRecord, TurnTrigger};
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    let kept_messages = store.messages();
+    write_turn(
+        &store,
+        &TurnRecord::started("t2", TurnTrigger::User, 1, None),
+    );
+    store.append_message(&user("lost")).expect("prompt");
+    store
+        .append_message(&tool_call("call-1", "bash"))
+        .expect("call");
+    assert!(store.interrupted_turn().is_some());
+
+    let forked = super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        Path::new(&store.path()),
+        None,
+        FORK_ID,
+    )
+    .expect("fork");
+    assert!(forked.point.is_none());
+    let (fork, _) = Store::open(&forked.path).expect("open fork");
+    assert!(fork.take_recovery().is_none());
+    assert_eq!(fork.interrupted_turn(), None);
+    assert_eq!(fork.messages(), kept_messages);
+    let origin = fork.forked_from().expect("fork record");
+    assert_eq!(origin.source_entry_id, None);
+    assert_eq!(origin.prompt, None);
+    fork.close().expect("close fork");
+    store.close().expect("close");
+}
+
+#[test]
+fn an_invalid_fork_point_or_a_taken_id_writes_nothing() {
+    use otto_core::session::{ForkError, TurnRecord, TurnTrigger};
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    write_turn(
+        &store,
+        &TurnRecord::started("t2", TurnTrigger::User, 1, None),
+    );
+    store.append_message(&user("prompt")).expect("prompt");
+    store
+        .append_message(&tool_call("call-1", "bash"))
+        .expect("call");
+    store
+        .append_message(&tool_result("call-1", "bash", "ok"))
+        .expect("result");
+    store.append_message(&user("steer")).expect("steer");
+    let steer = message_entry_id(&store.path(), 5);
+    let source = PathBuf::from(store.path());
+    let directory = source.parent().expect("directory").to_path_buf();
+    let files = session_files(&directory);
+
+    for before in [steer.as_str(), "ffffffff"] {
+        let error = super::fork::fork(
+            &crate::storage::drivers::posix::PosixDriver,
+            &source,
+            Some(before),
+            FORK_ID,
+        )
+        .expect_err("invalid fork point");
+        assert!(matches!(error, ForkError::InvalidPoint(_)), "{error}");
+        assert_eq!(session_files(&directory), files);
+    }
+
+    // The destination is never replaced, and the temporary file is removed.
+    let taken = store.header().id;
+    let taken_path = directory.join(format!("{taken}.jsonl"));
+    fs::copy(&source, &taken_path).expect("occupy id");
+    let files = session_files(&directory);
+    super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        &source,
+        None,
+        &taken,
+    )
+    .expect_err("taken id");
+    assert_eq!(session_files(&directory), files);
+    store.close().expect("close");
+}
+
+#[test]
+fn listing_shows_a_fork_and_ignores_a_leftover_temporary_file() {
+    let temp = TempDir::new();
+    let (store, root) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    let source = PathBuf::from(store.path());
+    fs::write(
+        source.with_file_name(format!("{FORK_ID}.jsonl.fork-tmp")),
+        "partial",
+    )
+    .expect("leftover");
+    super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        &source,
+        None,
+        "fedcba9876543210fedcba9876543210",
+    )
+    .expect("fork");
+    let listed = list::list(&root, &store.header().workspace, "", 10).expect("list");
+    assert_eq!(listed.sessions.len(), 2, "{listed:?}");
+    assert_eq!(listed.skipped, 0);
+    store.close().expect("close");
+}

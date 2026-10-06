@@ -147,6 +147,9 @@ pub(crate) struct StoreState {
     pub(crate) latest_compaction: Option<CompactionMetadata>,
     pub(crate) thinking_level: String,
     pub(crate) session_name: Option<String>,
+    /// The `otto.fork` record, read once on open: only a fork's creation
+    /// writes one.
+    pub(crate) forked_from: Option<otto_core::session::ForkRecord>,
     pub(crate) entries: Vec<PiEntry>,
     pub(crate) entry_ids: HashSet<String>,
     pub(crate) leaf_id: Option<String>,
@@ -209,7 +212,7 @@ impl std::fmt::Debug for KeeperRef {
     }
 }
 
-fn open_path_journal(
+pub(super) fn open_path_journal(
     driver: &dyn FileDriver,
     path: &Path,
     mode: JournalOpen,
@@ -272,6 +275,7 @@ impl Store {
                 latest_compaction: None,
                 thinking_level: String::new(),
                 session_name: None,
+                forked_from: None,
                 entries: Vec::new(),
                 entry_ids: HashSet::new(),
                 leaf_id: None,
@@ -414,6 +418,7 @@ impl Store {
                 latest_compaction: state.latest_compaction,
                 thinking_level: state.thinking_level,
                 session_name: state.session_name,
+                forked_from: otto_core::session::fork_origin(&decoded.entries),
                 entries: decoded.entries.clone(),
                 entry_ids: state.entry_ids,
                 leaf_id: state.leaf_id,
@@ -492,6 +497,11 @@ impl Store {
     /// Takes the recovery record left by [`Store::from_file`] when this
     /// store was opened from a session left mid-turn or by taking over
     /// another holder's lease epoch. `None` on every call after the first.
+    /// The `otto.fork` record naming where this session was forked from.
+    pub fn forked_from(&self) -> Option<otto_core::session::ForkRecord> {
+        self.lock().ok()?.forked_from.clone()
+    }
+
     pub fn take_recovery(&self) -> Option<Recovery> {
         self.lock().expect("session mutex").recovery.take()
     }

@@ -64,6 +64,7 @@ pub const SANDBOX_RELOAD_UNAVAILABLE: &str = "sandbox reload is not available";
 pub const SESSION_OPERATION_UNAVAILABLE: &str = "session operation is unavailable";
 /// The server answers it with 409 `turn_active`.
 pub const PROMPT_ACTIVE: &str = "a prompt is already active";
+pub const NOTHING_TO_FORK: &str = "the session has no history to fork yet";
 pub const CLOSED: &str = "controller is closed";
 pub const SESSION_RENAME_UNAVAILABLE: &str = "session rename is unavailable";
 pub const INVALID_SESSION_NAME: &str = "session is invalid: session name is required";
@@ -111,6 +112,42 @@ pub struct Info {
     pub context_input_tokens_pending: bool,
     pub sandbox: SandboxInfo,
     pub auto_mode: bool,
+    /// Where this session was forked from, when it is a fork.
+    pub forked_from: Option<ForkedFrom>,
+}
+
+/// The session and prompt a fork was taken from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForkedFrom {
+    pub session_id: String,
+    /// The user message the fork stops before; absent for a whole fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
+}
+
+impl From<otto_core::session::ForkRecord> for ForkedFrom {
+    fn from(record: otto_core::session::ForkRecord) -> Self {
+        Self {
+            session_id: record.source_session_id,
+            entry_id: record.source_entry_id,
+        }
+    }
+}
+
+/// Why a fork was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkFailure {
+    /// The id names no user prompt that starts a turn on the history.
+    InvalidPoint(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for ForkFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPoint(message) | Self::Failed(message) => f.write_str(message),
+        }
+    }
 }
 
 /// What a completed session replacement reports.
@@ -565,6 +602,7 @@ impl Controller {
             context_input_tokens_pending: snapshot.context_input_tokens_pending,
             sandbox,
             auto_mode,
+            forked_from: current.session.forked_from().map(ForkedFrom::from),
         }
     }
 
@@ -1608,6 +1646,79 @@ impl Controller {
         })
     }
 
+    /// The places the current session can be forked, oldest first. A session
+    /// with no file yet has none.
+    pub fn fork_points(&self) -> Result<Vec<otto_core::session::ForkPoint>, String> {
+        let path = {
+            let state = self.lock();
+            if state.closed {
+                return Err(CLOSED.to_string());
+            }
+            if !self.dynamic_content {
+                return Err(PERSISTENCE_DISABLED.to_string());
+            }
+            state
+                .current
+                .as_ref()
+                .map(|current| current.session.path())
+                .unwrap_or_default()
+        };
+        if path.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.builder
+            .session_fork_points(&path)
+            .map_err(|error| self.builder.redact_error(&error, None))
+    }
+
+    /// Writes a new session forked from the current one, stopping before the
+    /// turn the user message `before` opens, or at the last turn boundary
+    /// without `before`. The current session is unchanged and stays open.
+    pub fn fork_file(&self, before: Option<&str>) -> Result<crate::session::Forked, ForkFailure> {
+        let path = {
+            let state = self.lock();
+            if state.closed {
+                return Err(ForkFailure::Failed(CLOSED.to_string()));
+            }
+            if !self.dynamic_content {
+                return Err(ForkFailure::Failed(PERSISTENCE_DISABLED.to_string()));
+            }
+            state
+                .current
+                .as_ref()
+                .map(|current| current.session.path())
+                .unwrap_or_default()
+        };
+        if path.is_empty() {
+            return Err(ForkFailure::Failed(NOTHING_TO_FORK.to_string()));
+        }
+        self.builder
+            .fork_session_file(&path, before)
+            .map_err(|error| match error {
+                otto_core::session::ForkError::InvalidPoint(_) => {
+                    ForkFailure::InvalidPoint(error.to_string())
+                }
+                otto_core::session::ForkError::Session(error) => {
+                    ForkFailure::Failed(self.builder.redact_error(&error.to_string(), None))
+                }
+            })
+    }
+
+    /// Forks the current session (see [`Controller::fork_file`]) and switches
+    /// to the fork. Returns the switch result and the prompt the fork stops
+    /// before, for the editor.
+    pub async fn fork_session(
+        &self,
+        before: Option<&str>,
+    ) -> Result<(ResumeResult, Option<String>), String> {
+        if self.lock().busy {
+            return Err(PROMPT_ACTIVE.to_string());
+        }
+        let forked = self.fork_file(before).map_err(|error| error.to_string())?;
+        let result = self.resume_session(&forked.path.to_string_lossy()).await?;
+        Ok((result, forked.point.map(|point| point.prompt)))
+    }
+
     /// Archiving the current session delegates so a picker row behaves like
     /// `/archive`.
     pub async fn archive_session(&self, path: &str) -> Result<ArchiveResult, String> {
@@ -2440,6 +2551,75 @@ mod tests {
             .await
             .unwrap();
         assert!(!controller.info().auto_mode);
+    }
+
+    #[tokio::test]
+    async fn forking_switches_to_a_copy_before_the_chosen_prompt() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        assert!(controller.fork_points().expect("fork points").is_empty());
+        assert_eq!(
+            controller.fork_file(None).expect_err("no file yet"),
+            ForkFailure::Failed(NOTHING_TO_FORK.to_string())
+        );
+
+        let reply = |text: &str| Message {
+            role: otto_core::model::Role::Assistant,
+            blocks: vec![otto_core::model::Block::text(text)],
+            finish_reason: Some(otto_core::model::FinishReason::Stop),
+            created_at: chrono::Utc::now(),
+            ..Message::default()
+        };
+        let session = controller.current_session();
+        session.append(user("first")).await.expect("append");
+        session.append(reply("one")).await.expect("append");
+        session.append(user("second")).await.expect("append");
+        session.append(reply("two")).await.expect("append");
+        let source = controller.info();
+        let source_bytes = std::fs::read(&source.session_path).expect("read source");
+
+        let points = controller.fork_points().expect("fork points");
+        assert_eq!(
+            points
+                .iter()
+                .map(|point| point.prompt.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert!(matches!(
+            controller.fork_file(Some("ffffffff")),
+            Err(ForkFailure::InvalidPoint(_))
+        ));
+
+        let (result, draft) = controller
+            .fork_session(Some(&points[1].entry_id))
+            .await
+            .expect("fork");
+        assert_eq!(draft.as_deref(), Some("second"));
+        let info = controller.info();
+        assert_eq!(info.session_path, result.session_path);
+        assert_ne!(info.session_id, source.session_id);
+        assert_eq!(
+            info.forked_from,
+            Some(ForkedFrom {
+                session_id: source.session_id.clone(),
+                entry_id: Some(points[1].entry_id.clone()),
+            })
+        );
+        assert_eq!(
+            controller
+                .history()
+                .iter()
+                .map(Message::text)
+                .collect::<Vec<_>>(),
+            ["first", "one"]
+        );
+        assert_eq!(
+            std::fs::read(&source.session_path).expect("read source"),
+            source_bytes
+        );
+        assert_eq!(source.forked_from, None);
     }
 
     #[tokio::test]

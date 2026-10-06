@@ -40,7 +40,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   established, up to three times 1, 2 and 4 seconds apart within the turn
   deadline. Such a request never reached the endpoint, so it cannot run
   twice; failures after connecting remain single-attempt
-  ([user manual](docs/user-manual.md#configuration)).
+  ([#378](https://github.com/baiyuqing/otto/pull/378),
+  [user manual](docs/user-manual.md#configuration)).
 - Keep `task_queue` follow-ups across a crash: they are saved in
   `<id>.followups.json`, run in order after the turn that automatically
   resumes their task (a step that already ran is skipped), and are otherwise

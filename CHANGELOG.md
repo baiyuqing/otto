@@ -155,6 +155,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Tell the model when a resumed session's tool set differs from the tool set
+  recorded for it. At run start Otto appends a `capability_update` message,
+  shown in the transcript, before the user message. It lists added and removed
+  tools, or the current tools for sessions written before the record. Otto
+  stores the tool names in an `otto.capabilities` session entry. Compaction
+  carries summarized notices verbatim in a `<capability-updates>` block.
+
 - Open versioned lifecycle hooks and custom command tools on installed plugin
   snapshots, with sandbox execution, exact-argument authorization and
   append-only rewrite auditing. ([#358](https://github.com/baiyuqing/otto/pull/358))

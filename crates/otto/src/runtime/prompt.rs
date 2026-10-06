@@ -11,6 +11,7 @@
 //! host path or an environment name.
 
 use otto_core::model::ToolDefinition;
+use otto_core::tool::safe_prompt_tool_name;
 
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
@@ -155,15 +156,6 @@ fn escape_xml_attribute(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('\'', "&#39;")
         .replace('"', "&#34;")
-}
-
-/// Whether a tool name is safe to write into the prompt verbatim.
-pub fn safe_prompt_tool_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 64 {
-        return false;
-    }
-    name.bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[cfg(test)]
@@ -471,16 +463,5 @@ mod tests {
         let prompt = system_prompt_for(&definitions(&["read"]), off(), "", "", "");
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">\n<identity>"));
         assert!(!prompt.contains("</otto_system_prompt>"));
-    }
-
-    #[test]
-    fn tool_names_are_screened() {
-        assert!(safe_prompt_tool_name("agent_wait"));
-        assert!(safe_prompt_tool_name("alpha-2"));
-        assert!(!safe_prompt_tool_name(""));
-        assert!(!safe_prompt_tool_name("a b"));
-        assert!(!safe_prompt_tool_name("é"));
-        assert!(safe_prompt_tool_name(&"x".repeat(64)));
-        assert!(!safe_prompt_tool_name(&"x".repeat(65)));
     }
 }

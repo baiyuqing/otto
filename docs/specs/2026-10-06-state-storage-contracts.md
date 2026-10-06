@@ -1,7 +1,9 @@
 # State contracts and replaceable storage
 
-Status: approved for implementation on 2026-10-06; native implementation added,
-verification in progress.
+Status: approved and native stages 1 to 3 implemented on 2026-10-06.
+Verification: `make check-fast` passed after rebasing onto `8039e03`;
+validated implementation head `afe4063` (2551 native and 605 core unit tests,
+integration suites, formatting, Clippy and WASM compatibility).
 No alternative live cloud service has been selected or approved yet.
 Base: `10c60cc`.
 

@@ -174,8 +174,9 @@ The selected model and OpenAI-compatible endpoint must support image input.
   message or the reply of a prompt run at a later time, once or daily, to the
   chat, terminal or browser UI that asked for it. A prompt run needs the
   user's approval when it is created.
-- [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
-  socket or a loopback TCP port, with an embedded browser UI.
+- [Local server](docs/user-manual.md#agent-server): `otto serve` exposes an
+  authenticated API over a Unix socket or a loopback TCP port. The browser UI
+  lives in [otto-plus](https://github.com/baiyuqing/otto-plus).
   [`otto --attach`](docs/user-manual.md#the-tui-attached-to-otto-serve) runs
   the TUI on the same sessions.
 - [ACP agent](docs/user-manual.md#acp-agent-server): `otto acp` speaks the

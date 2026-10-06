@@ -53,7 +53,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{
-    ApprovalDecision, CLOSED, Channel, Controller, PROMPT_ACTIVE, SandboxControl, Step, Stop,
+    ActiveInputAdmission, ApprovalDecision, CLOSED, Channel, Controller, PROMPT_ACTIVE,
+    SandboxControl, Step, Stop,
 };
 use crate::runtime::builder::Builder;
 use crate::schedule::Origin;
@@ -980,6 +981,28 @@ impl Connection {
                     )
                     .await
             }
+        }
+    }
+
+    /// Deterministically admits an ordinary prompt to the exact active run.
+    /// It intentionally does not use the model-backed control dialogue.
+    async fn admit_prompt(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<ActiveInputAdmission, agent_client_protocol_schema::v1::Error> {
+        match &self.backend {
+            Backend::Local(local) => local
+                .session(session_id)
+                .ok_or_else(unknown_session)?
+                .controller
+                .admit_active_input(text)
+                .map_err(|message| error(INTERNAL_ERROR, message)),
+            Backend::Attach(relay) => relay
+                .client
+                .admit_input(session_id, text)
+                .await
+                .map_err(|failure| relay.task_control_error(failure)),
         }
     }
 
@@ -1948,10 +1971,35 @@ impl Dispatcher {
             }
             _ => {}
         }
-        let Some(token) = slot.begin(&self.stop) else {
-            // A wake turn is not a prompt: wait for it, then run.
-            if let Some(token) = slot.wait_for_wake(&self.stop) {
-                self.tasks.spawn(async move {
+        let stop = self.stop.clone();
+        self.tasks.spawn(async move {
+            match connection.admit_prompt(&session_id, &text).await {
+                Ok(ActiveInputAdmission::Steered) => {
+                    connection.say(
+                        &session_id,
+                        "Guidance accepted for the active task; it will be delivered at the next safe boundary.",
+                    );
+                    connection.reply(id, result(PromptResponse::new(StopReason::EndTurn)));
+                    return;
+                }
+                Ok(ActiveInputAdmission::ApprovalPending) => {
+                    connection.say(
+                        &session_id,
+                        "The active task is waiting for approval; resolve that approval before sending task guidance.",
+                    );
+                    connection.reply(id, result(PromptResponse::new(StopReason::EndTurn)));
+                    return;
+                }
+                Ok(ActiveInputAdmission::Idle) => {}
+                Err(failure) => {
+                    connection.reply(id, Err(failure));
+                    return;
+                }
+            }
+
+            let Some(token) = slot.begin(&stop) else {
+                // A wake turn is not a prompt: wait for it, then run.
+                if let Some(token) = slot.wait_for_wake(&stop) {
                     if !slot.claim_after_wake(&token).await {
                         return connection
                             .reply(id, result(PromptResponse::new(StopReason::Cancelled)));
@@ -1966,19 +2014,15 @@ impl Dispatcher {
                             &token,
                         )
                         .await;
-                    // A prompt response is an admission boundary for an ACP client:
-                    // release the slot before the writer can expose the response.
                     slot.end();
                     connection.reply(id, reply);
-                });
-                return;
-            }
-            return connection.reply(
-                id,
-                Err(error(INTERNAL_ERROR, "a prompt is already running")),
-            );
-        };
-        self.tasks.spawn(async move {
+                    return;
+                }
+                return connection.reply(
+                    id,
+                    Err(error(INTERNAL_ERROR, "a prompt is already running")),
+                );
+            };
             let reply = connection
                 .prompt(
                     &session_id,
@@ -1989,8 +2033,6 @@ impl Dispatcher {
                     &token,
                 )
                 .await;
-            // A prompt response is an admission boundary for an ACP client:
-            // release the slot before the writer can expose the response.
             slot.end();
             connection.reply(id, reply);
         });

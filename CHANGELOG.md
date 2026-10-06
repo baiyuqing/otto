@@ -15,6 +15,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### User experience
+
+- Make ordinary input during an active task steer that task at its next safe
+  boundary across the local TUI, attached TUI, HTTP and ACP. Queueing an
+  independent follow-up is now explicit; the new HTTP input-admission endpoint
+  reports `steered`, `idle`, or `approval_pending` rather than silently queuing.
+- Unify memory/reflection review with approval-style keyboard selection:
+  memory review defaults to Accept, arrows select Accept or Reject, and Enter
+  confirms; permission grants remain default Deny.
+- Prevent a generic conversational confirmation from being requested before the
+  exact memory review for the same model-originated `remember` proposal.
+
 ### Storage and migration
 
 - Separate native state semantics from SQL and POSIX persistence with typed

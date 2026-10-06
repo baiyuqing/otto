@@ -89,18 +89,25 @@ a configuration switch. Denial also clears remaining model follow-ups.
 
 ## Scope
 
-Add `/steer <guidance>` and `/queue <prompt>` to ACP and Telegram/Feishu,
-and ensure ACP tool calls reach a terminal display state when a turn ends.
-Structured plans/usage, session fork/resume, and pagination are deferred.
+Ordinary text received while a session has an active turn steers that turn by
+default; `/queue <prompt>` remains the explicit operation for an independent
+follow-up. `/steer <guidance>` remains a strict compatibility command. Apply
+that contract to the TUI, HTTP, ACP and Telegram/Feishu, and ensure ACP tool
+calls reach a terminal display state when a turn ends. Structured plans/usage,
+session fork/resume, and pagination are deferred.
 
 ## User contract
 
-- `/steer` accepts text only for an active user turn. Idle, closing, and
-  approval-waiting sessions reject it with a clear explanation. It does not
-  interrupt an in-flight provider request or tool, undo effects, or grant
-  permission. The next safe provider boundary consumes guidance in FIFO order
-  as a user message. Multiple tools already requested by one provider response
-  finish before that boundary. Acknowledgement means accepted, not applied.
+- Ordinary active-session input is deterministically admitted to the exact
+  active user turn. It does not interrupt an in-flight provider request or
+  tool, undo effects, or grant permission. The next safe provider boundary
+  consumes it in FIFO order as a user message. Multiple tools already requested
+  by one provider response finish before that boundary. Acknowledgement means
+  accepted, not applied. The admission result is `steered`, `idle`, or
+  `approval_pending`; it never silently becomes a queued turn.
+- `/steer` accepts text only for an active user turn and remains an explicit,
+  strict compatibility interface. Idle, closing, and approval-waiting sessions
+  reject it with a clear explanation.
 - Guidance belongs to the exact active turn. Turn completion and acceptance
   must be synchronized: guidance accepted before completion is consumed before
   successful completion; acceptance after completion is rejected. Cancellation
@@ -155,18 +162,20 @@ restricted approval dialogue for ordinary messages.
   ordinary prompt, and respect the returned route. Keep replies from control
   dialogue separate from the running task's streamed reply.
 
-Wire entry points: HTTP `POST /v1/sessions/{id}/tasks/steer` (`{text}` ->
-`{accepted:true}`) and `/tasks/control` (`{text,channel?}` -> nullable
-`{text,queued}`). ACP exposes `_otto/tasks/steer` and `_otto/tasks/control` with
-the same bodies plus `sessionId`, negotiated with `_meta.otto.taskControl:true`.
+Wire entry points: HTTP `POST /v1/sessions/{id}/inputs` (`{text}` ->
+`steered|idle|approval_pending`) is the atomic ordinary-input admission boundary;
+it does not invoke model routing or queue. `POST /v1/sessions/{id}/tasks/steer`
+remains the strict explicit compatibility endpoint, and `/tasks/control` remains
+only for the restricted approval dialogue. ACP ordinary `session/prompt` uses the
+same admission first; `_otto/tasks/steer` remains available for explicit callers.
 Extension replies are JSON-only; they must not pollute the running prompt's
 stream. Adapters validate text size, channel enum, and session access.
 
 Local ACP's explicit `/queue` needs a small bounded FIFO around its existing
 prompt slot (16 waiting prompts); drain through the same prompt runner. Normal
-concurrent prompt refusal stays compatible, `/steer` bypasses the occupied slot,
-and session cancellation clears queued local prompts. Attached ACP uses the
-existing server FIFO rather than duplicating it.
+active input is admitted before that slot is claimed, while `/queue` remains the
+only path that creates a follow-up. Attached ACP uses the existing server FIFO
+for explicit queues rather than duplicating it.
 
 Existing persistent Inbox is insufficient for exact-turn guidance: accepted
 input can race final completion and wake a subsequent turn, or arrive before

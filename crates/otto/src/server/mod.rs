@@ -633,6 +633,7 @@ impl Server {
                 "/v1/sessions/{id}/approvals/message",
                 post(approvals::message),
             )
+            .route("/v1/sessions/{id}/inputs", post(task_control::admit_input))
             .route("/v1/sessions/{id}/tasks/steer", post(task_control::steer))
             .route(
                 "/v1/sessions/{id}/tasks/control",
@@ -5007,6 +5008,7 @@ mod tests {
         "/v1/sessions/{id}/history",
         "/v1/sessions/{id}/context",
         "/v1/sessions/{id}/approvals/{approval_id}",
+        "/v1/sessions/{id}/inputs",
         "/v1/sessions/{id}/tasks/steer",
         "/v1/sessions/{id}/tasks/control",
         "/v1/sessions/{id}/turns",
@@ -5122,6 +5124,16 @@ mod tests {
         let harness = Harness::with(options);
         let id = harness.create().await;
 
+        let input_idle = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/inputs"),
+                Some(r#"{"text":"change direction"}"#),
+            )
+            .await;
+        assert_eq!(input_idle.status, StatusCode::OK);
+        assert_eq!(input_idle.json(), serde_json::json!("idle"));
+
         let idle = harness
             .send(
                 "POST",
@@ -5143,15 +5155,15 @@ mod tests {
 
         let (_stream, _) = start_stream(&harness, &id).await;
         harness.provider.wait_started(1).await;
-        let accepted = harness
+        let admitted = harness
             .send(
                 "POST",
-                &format!("/v1/sessions/{id}/tasks/steer"),
+                &format!("/v1/sessions/{id}/inputs"),
                 Some(r#"{"text":"finish this provider response, then inspect the failure"}"#),
             )
             .await;
-        assert_eq!(accepted.status, StatusCode::OK);
-        assert_eq!(accepted.json()["accepted"], true);
+        assert_eq!(admitted.status, StatusCode::OK);
+        assert_eq!(admitted.json(), serde_json::json!("steered"));
 
         let empty = harness
             .send(

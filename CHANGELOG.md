@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Move the browser UI and WASM bindings to [otto-plus](https://github.com/baiyuqing/otto-plus).
+  Otto builds without a frontend bundle and serves only APIs; `/` and `/assets/`
+  now return `404`, and `serve --open` is removed. Run the standalone frontend
+  with its same-origin proxy and Otto's startup token.
+
 - Install versioned plugin packages from local directories or pinned Git commits.
   Load portable Skills and stdio/Streamable HTTP MCP, with limited Claude/Codex
   manifest adapters, namespaced components and explicit content-bound MCP trust.

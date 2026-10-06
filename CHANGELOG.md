@@ -172,6 +172,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   such lines. The duplicate `Shutdown` and `Configuration` manual headings
   under the agent server, ACP agent server and chat connector are renamed so
   `otto_help` can return each section.
+  ([#374](https://github.com/baiyuqing/otto/pull/374))
 
 - Open versioned lifecycle hooks and custom command tools on installed plugin
   snapshots, with sandbox execution, exact-argument authorization and

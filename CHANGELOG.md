@@ -17,6 +17,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Add a native Gitleaks pre-commit hook and an independent CI history scan,
+  including documentation changes, with redacted output and a pinned scanner.
+  Exclude only 14 reviewed historical false positives by exact fingerprint.
+
 - Move the browser UI and WASM bindings to [otto-plus](https://github.com/baiyuqing/otto-plus).
   Otto builds without a frontend bundle and serves only APIs; `/` and `/assets/`
   now return `404`, and `serve --open` is removed. Run the standalone frontend

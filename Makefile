@@ -7,7 +7,7 @@ SKILLS_INSTALL_DIR ?= $(HOME)/.otto/skills
 
 CONNECT_DIR := connect
 
-.PHONY: all build install check-fast check check-tests check-linux rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
+.PHONY: setup-git-hooks all build install check-fast check check-tests check-linux rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
 
 all: build
 
@@ -21,6 +21,14 @@ install: build connect-build ## install Otto, otto-connect and bundled skills
 	install -m 0755 target/otto-connect "$(INSTALL_DIR)/otto-connect"
 	install -d "$(SKILLS_INSTALL_DIR)/sandbox-setup"
 	install -m 0644 .otto/skills/sandbox-setup/SKILL.md "$(SKILLS_INSTALL_DIR)/sandbox-setup/SKILL.md"
+
+setup-git-hooks: ## install the Gitleaks pre-commit hook for this clone and its worktrees
+	@command -v gitleaks >/dev/null || { echo "Install gitleaks first (macOS: brew install gitleaks)"; exit 1; }
+	@hooks="$$(git rev-parse --git-path hooks)"; \
+	if [ -L "$$hooks/pre-commit" ] || { [ -e "$$hooks/pre-commit" ] && ! cmp -s scripts/pre-commit "$$hooks/pre-commit"; }; then \
+	  echo "Existing pre-commit hook differs; integrate scripts/pre-commit without overwriting it"; exit 1; \
+	fi; \
+	mkdir -p "$$hooks" && install -m 0755 scripts/pre-commit "$$hooks/pre-commit"
 
 rust-fmt: ## fail if any Rust file is not rustfmt-formatted
 	cargo fmt --all -- --check

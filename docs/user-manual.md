@@ -41,8 +41,9 @@ what the CLI actually does today.
 - macOS, the supported platform: it is the only one with a sandbox, and the
   only one the acceptance gate runs on. Otto also builds and runs on Linux;
   see [platform support](#platform-support).
-- The pinned Rust 1.98 toolchain, Node 24+, and `wasm-pack` 0.15 to build from
-  source (see [Install from source](../README.md#install-from-source)).
+- The pinned Rust 1.98 toolchain and Go to build and install from source (see
+  [Install from source](../README.md#install-from-source)). Node and `wasm-pack`
+  are needed only for optional browser/WASM development and related checks.
 - One of:
   - a reachable OpenAI-compatible endpoint with SSE chat-completions streaming, plus an API key exposed through an environment variable, or
   - a ChatGPT Plus/Pro/Team/Enterprise subscription (see [ChatGPT subscription](#chatgpt-subscription)).

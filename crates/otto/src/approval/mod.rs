@@ -1,7 +1,9 @@
 //! Durable approval authority and domain persistence port.
+pub mod codec;
 pub mod config;
 mod contracts;
 pub mod memory;
+pub mod migration;
 pub mod reflection;
 pub mod repository;
 mod service;

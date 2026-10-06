@@ -2,6 +2,8 @@
 //! journal CAS and enforceable writer exclusion; this module owns sequencing.
 pub mod contracts;
 pub mod group;
+pub mod record;
+pub mod references;
 pub use contracts::*;
 
 use std::io::Write;

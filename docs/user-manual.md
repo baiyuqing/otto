@@ -819,6 +819,17 @@ OTTO_UI=repl otto
 
 ### TUI behavior
 
+- Feature screens share navigation, focus, loading, error and submission
+  behavior. `Tab`/`Shift+Tab` move focus between lists, details, fields and
+  actions; arrows navigate the focused control, and `Enter` activates it.
+  Queries run independently of terminal input and live turn output. Returning
+  from a detail screen restores the previous selection and draft.
+- `Esc` returns or dismisses a feature screen without making a decision.
+  Dismissing an approval leaves it pending; `/approve` with no arguments opens
+  pending approvals again. Permission decisions start on **Deny**;
+  memory/reflection reviews start on **Accept**. Neither default submits itself.
+  A submitted action displays its pending state and prevents duplicate clicks;
+  failures preserve input, and safe read failures offer a Retry action.
 - Uses the terminal alternate screen buffer.
 - Every transcript entry is one block under a marker in the left gutter, so a
   turn reads as prompt, tool calls, reply. The marker opens the block and an
@@ -909,16 +920,16 @@ OTTO_UI=repl otto
 | Key | Action |
 | --- | --- |
 | `Enter` | Submit the current prompt, or run the highlighted slash-command suggestion |
-| `Tab` | Complete the selected slash-command suggestion |
+| `Tab` / `Shift+Tab` | Complete a composer suggestion, or move focus within a feature screen |
 | `↑` / `↓` | Recall the previous or next submitted prompt, or select a slash-command suggestion |
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
 | `Ctrl+O` | Toggle a tool call between its folded summary and full arguments/output |
 | Left-button drag | Select visible text and copy it to the clipboard on release |
-| Mouse wheel, `PgUp` / `PgDn` | Scroll the transcript |
+| Mouse wheel, `PgUp` / `PgDn` | Navigate the focused screen control, or scroll the transcript |
 | `Home` / `End` | Move the cursor to the start or end of the composer |
 | `Ctrl+A` / `Ctrl+E` | Move the cursor to the start or end of the current composer line |
-| `Esc` | Cancel the active turn or close the current overlay |
+| `Esc` | Return or dismiss the active screen; at the composer, cancel the active turn |
 | `Ctrl+C` | Cancel; a second press within one second clears and quits |
 
 ### The TUI attached to `otto serve`
@@ -967,8 +978,8 @@ Turns:
 - `Esc` cancels the turn being shown, including a turn another client
   started.
 - An elevated `bash` command opens the approval dialog when serve reports it
-  (see [Approvals inside a turn](#approvals-inside-a-turn)). **Yes** allows
-  it and **No** denies it. If another client decides first, the dialog
+  (see [Approvals inside a turn](#approvals-inside-a-turn)). **Allow** allows
+  it and **Deny** denies it. `Esc` dismisses without deciding. If another client decides first, the dialog
   closes and the transcript shows `Approval <id> decided elsewhere:
   <decision>`.
 - The footer, `/session`, and `/sandbox` show the serve process's session,
@@ -978,7 +989,7 @@ Turns:
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/rename`, `/compact`,
 `/image`, `/context`, `/agents`, `/auto [on|off]`, `/sandbox`, `/sandbox reload`,
-`/approve <id>`, and `/exit`. Every other command prints
+`/approve [<id>]`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/reflect`, `/memory`, `/remember`, `/skill`,
 `/tasks`, `/task`, `/timers`, `/mcp`, `/login`, `/logout`,
@@ -1039,8 +1050,8 @@ Shared commands:
   command that the sandbox denied can read it. The path is resolved to an
   absolute, symlink-free path first and must exist; it is written to
   `[sandbox].read_paths` in the config file, so it also applies to later
-  sessions. In the TUI the resolved path is shown in a confirmation picker
-  whose selected row is `Cancel`; applying it also asks Otto to retry the
+  sessions. In the TUI the resolved path is loaded before a confirmation screen
+  whose selected action is `Cancel`; applying it also asks Otto to retry the
   command that failed. The model can also request the same persistent read
   grant through Bash's `sandbox_read_path` argument. Otto shows an approval
   dialog in the TUI or an Allow/Deny card in Telegram and Feishu, including
@@ -1119,7 +1130,7 @@ TUI-only commands:
   input tokens, and the automatic compaction threshold. Token numbers are
   estimates (about 3 bytes per token), not tokenizer counts. `↑`/`↓` select,
   `Enter` expands a section or opens an item's full text (`↑`/`↓`/`PgUp`/`PgDn`
-  scroll it), and `Esc` goes back one level. The report is taken when the modal
+  scroll it), and `Esc` returns from details or closes the collection. The report is taken when the modal
   opens. The memory section is the previous turn's recall; the next turn
   recalls again with its own prompt.
 - `/agents` opens a modal of recorded sub-agent tasks, newest first, with

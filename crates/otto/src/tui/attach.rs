@@ -25,24 +25,20 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crossterm::event::KeyEvent;
-use otto_core::agent::context_report::ContextReport;
-use otto_core::model::{Block, Message};
+use otto_core::model::Message;
 use otto_core::wire::events::{TURN_END, WireCompaction, WireEvent};
 use ratatui::Terminal;
 use ratatui::backend::Backend as TerminalBackend;
-use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::app::{Action, App, Backend, PickerRow, compaction_line};
-use super::{TerminalInput, TuiEvent, agents_view, render, selection, spawn_key_reader};
+use super::app::{Action, App, Backend, compaction_line};
+use super::{TerminalInput, TuiEvent, render, spawn_key_reader};
 use crate::app::Info;
 use crate::cli::repl::Error as ReplError;
 use crate::client::{Client, Error, StatusRow, StatusStream, TurnStream};
 use crate::schedule::worker::{DeliverRole, Sink, Worker};
 use crate::schedule::{Origin, Scope};
-use crate::subagent::record::{ListQuery, ListResult, TaskRow};
 
 /// Bound on one request. A long call (`/compact`) runs as a future in the
 /// loop instead.
@@ -79,10 +75,9 @@ struct State {
 
 /// The serve connection [`Backend::Attach`] reaches. The loop owns the
 /// asynchronous calls; the synchronous methods below answer the [`App`]'s
-/// handlers from cached state or one bounded blocking request.
+/// handlers from cached state. Queries and operations use the async driver.
 pub(crate) struct Remote {
-    client: Client,
-    handle: Handle,
+    pub(crate) client: Client,
     workspace: String,
     state: Mutex<State>,
 }
@@ -91,7 +86,6 @@ impl Remote {
     fn new(client: Client, workspace: &str) -> Self {
         Self {
             client,
-            handle: Handle::current(),
             workspace: workspace.to_string(),
             state: Mutex::new(State::default()),
         }
@@ -113,49 +107,11 @@ impl Remote {
         &self.workspace
     }
 
-    fn session(&self) -> String {
+    pub(crate) fn session(&self) -> String {
         self.state().session.clone()
     }
 
-    /// Runs one request to completion from synchronous code. The request runs
-    /// on the runtime from a helper thread, because the caller is inside the
-    /// runtime's `block_on` and cannot start another.
-    fn block<T: Send>(
-        &self,
-        call: impl Future<Output = Result<T, Error>> + Send,
-    ) -> Result<T, String> {
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| self.handle.block_on(within(call)))
-                .join()
-                .unwrap_or_else(|_| Err(Error::Unreachable("request panicked".to_string())))
-        })
-        .map_err(|error| error.to_string())
-    }
-
-    pub(crate) fn tasks_list(&self, query: &ListQuery) -> Result<ListResult, String> {
-        self.block(self.client.tasks(query))
-    }
-
-    pub(crate) fn tasks_get(&self, parent: &str, id: &str) -> Result<Option<TaskRow>, String> {
-        self.block(self.client.task(parent, id))
-    }
-
-    pub(crate) fn context_report(&self) -> Result<ContextReport, String> {
-        self.block(self.client.context(&self.session()))
-    }
-
-    pub(crate) fn rename_session(&self, name: &str) -> Result<(), String> {
-        let session = self.session();
-        self.block(self.client.rename_session(&session, name))?;
-        let info = self.block(self.client.session(&session))?;
-        self.state().info = info;
-        Ok(())
-    }
-
-    /// Cancels the newest turn this process queued that has not started
-    /// running. `false` when there is none.
-    pub(crate) fn withdraw_queued_turn(&self) -> bool {
+    pub(crate) async fn withdraw_queued_turn_async(&self) -> Result<bool, String> {
         let (session, turn) = {
             let state = self.state();
             let turn = state
@@ -166,37 +122,15 @@ impl Remote {
                 .cloned();
             (state.session.clone(), turn)
         };
-        let Some(turn) = turn else { return false };
-        if self
-            .block(self.client.cancel_turn(&session, &turn))
-            .is_err()
-        {
-            return false;
+        let Some(turn) = turn else { return Ok(false) };
+        within(self.client.cancel_turn(&session, &turn))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut state = self.state();
+        if state.session == session {
+            state.own.retain(|id| *id != turn);
         }
-        self.state().own.retain(|id| *id != turn);
-        true
-    }
-
-    /// The `/resume` rows of this workspace; the value is the session id.
-    pub(crate) fn session_rows(&self, limit: usize) -> Result<Vec<PickerRow>, String> {
-        let rows = self.block(self.client.list_sessions(&self.workspace))?;
-        let current = self.session();
-        Ok(rows
-            .into_iter()
-            .take(limit)
-            .map(|row| {
-                let label = if row.name.is_empty() {
-                    &row.id
-                } else {
-                    &row.name
-                };
-                let marker = if row.id == current { " (current)" } else { "" };
-                PickerRow {
-                    label: format!("{label}{marker}"),
-                    value: row.id,
-                }
-            })
-            .collect())
+        Ok(true)
     }
 
     /// Replaces the cached session, history and info.
@@ -211,7 +145,11 @@ impl Remote {
     }
 
     /// Opens a session on serve and makes it the current one.
-    async fn open(&self, workspace: Option<&str>, resume: Option<&str>) -> Result<(), Error> {
+    pub(crate) async fn open(
+        &self,
+        workspace: Option<&str>,
+        resume: Option<&str>,
+    ) -> Result<(), Error> {
         let id = within(self.client.open_session(workspace, resume)).await?;
         self.load(&id, None).await?;
         let mut state = self.state();
@@ -220,7 +158,7 @@ impl Remote {
         Ok(())
     }
 
-    async fn refresh_info(&self) -> Result<(), Error> {
+    pub(crate) async fn refresh_info(&self) -> Result<(), Error> {
         let session = self.session();
         let info = within(self.client.session(&session)).await?;
         self.state().info = info;
@@ -291,6 +229,7 @@ pub(crate) async fn run(
             return 1;
         }
     };
+    let remote = Arc::new(remote);
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(error) => {
@@ -416,6 +355,41 @@ impl Sink for ChannelSink {
 type CompactCall<'a> =
     Pin<Box<dyn Future<Output = Result<Option<WireCompaction>, Error>> + Send + 'a>>;
 
+type TransportCall<'a> = Pin<Box<dyn Future<Output = Result<TransportResult, Error>> + Send + 'a>>;
+
+struct PendingTransport<'a> {
+    session: String,
+    epoch: u64,
+    transcript: u64,
+    mutation: bool,
+    call: TransportCall<'a>,
+}
+
+struct Snapshot {
+    info: Option<Info>,
+    tasks: Option<Vec<crate::subagent::tasks::Task>>,
+    history: Option<Vec<Message>>,
+    stream: Option<TurnStream>,
+    done: Option<String>,
+    row: Option<StatusRow>,
+}
+
+// The HTTP results stay owned here until their original scope is checked.
+#[allow(clippy::large_enum_variant)]
+enum TransportResult {
+    Sync(Snapshot),
+    Reconnect {
+        snapshot: Snapshot,
+        status: StatusStream,
+    },
+    Prompt {
+        reply: Option<String>,
+        stream: Option<TurnStream>,
+    },
+    Cancel,
+}
+
+/// Network work is polled beside terminal input, stream frames and driver results.
 /// The attach loop's states: connected or not (`connected`), idle or
 /// following one turn (`followed`), and optionally a `/compact` in flight
 /// (`compacting`). Keys, the followed turn's frames, status snapshots, the
@@ -436,7 +410,11 @@ struct Ui<'a> {
     fresh: bool,
     compacting: Option<CompactCall<'a>>,
     connected: bool,
-    pending_image: Option<Block>,
+    pending: Option<PendingTransport<'a>>,
+    epoch: u64,
+    transcript: u64,
+    needs_sync: bool,
+    cancel_after_send: bool,
     actions: VecDeque<Action>,
 }
 
@@ -447,22 +425,27 @@ enum Ev {
     Frame(Result<Option<WireEvent>, Error>),
     Status(Result<Option<Vec<StatusRow>>, Error>),
     Compact(Result<Option<WireCompaction>, Error>),
+    Transport(Result<TransportResult, Error>),
     Scheduled(Option<String>),
     Retry,
-    AgentsTick,
+    Completion(super::backend::Completion),
+    FeaturesTick,
     ApprovalsTick,
     Tick,
 }
 
 async fn run_loop<B: TerminalBackend>(
     terminal: &mut Terminal<B>,
-    remote: &Remote,
+    remote: &Arc<Remote>,
     status: StatusStream,
     cancel: &CancellationToken,
     keys: &mut mpsc::Receiver<TuiEvent>,
     deliveries: &mut mpsc::Receiver<String>,
 ) -> Result<(), ReplError> {
-    let app = App::new(&Backend::Attach(remote));
+    let mut app = App::new(&Backend::Attach(remote));
+    app.driver = Some(super::backend::Driver::new(
+        super::backend::Connection::Attach(Arc::clone(remote)),
+    ));
     let mut ui = Ui {
         remote,
         app,
@@ -475,11 +458,15 @@ async fn run_loop<B: TerminalBackend>(
         fresh: true,
         compacting: None,
         connected: true,
-        pending_image: None,
+        pending: None,
+        epoch: 0,
+        transcript: 0,
+        needs_sync: false,
+        cancel_after_send: false,
         actions: VecDeque::new(),
     };
     let mut retry = tokio::time::interval(RETRY_INTERVAL);
-    let mut agents = tokio::time::interval(agents_view::REFRESH_INTERVAL);
+    let mut agents = tokio::time::interval(Duration::from_secs(2));
     let mut approvals = tokio::time::interval(Duration::from_millis(500));
     let mut frames = tokio::time::interval(render::SPINNER_FRAME);
     draw(terminal, &mut ui.app)?;
@@ -488,6 +475,7 @@ async fn run_loop<B: TerminalBackend>(
             let followed = ui.followed.as_mut();
             let status = ui.status.as_mut();
             let compacting = ui.compacting.as_mut();
+            let pending = ui.pending.as_mut();
             let connected = ui.connected;
             let frame = async {
                 match followed {
@@ -507,6 +495,12 @@ async fn run_loop<B: TerminalBackend>(
                     None => std::future::pending().await,
                 }
             };
+            let transport = async {
+                match pending {
+                    Some(pending) => pending.call.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            };
             let reconnect = async {
                 if connected {
                     std::future::pending::<()>().await;
@@ -516,72 +510,90 @@ async fn run_loop<B: TerminalBackend>(
             tokio::select! {
                 _ = cancel.cancelled() => return Err(ReplError::Cancelled),
                 event = keys.recv() => Ev::Input(event),
+                completion = ui.app.next_completion() => Ev::Completion(completion),
                 result = frame => Ev::Frame(result),
                 result = snapshot => Ev::Status(result),
                 result = compaction => Ev::Compact(result),
+                result = transport => Ev::Transport(result),
                 text = deliveries.recv() => Ev::Scheduled(text),
                 () = reconnect => Ev::Retry,
-                _ = agents.tick() => Ev::AgentsTick,
+                _ = agents.tick() => Ev::FeaturesTick,
                 _ = approvals.tick(), if connected => Ev::ApprovalsTick,
                 _ = frames.tick() => Ev::Tick,
             }
         };
         match event {
-            Ev::Input(None) => return Ok(()),
-            Ev::Input(Some(event)) => ui.on_input(terminal, event).await?,
-            Ev::Frame(result) => ui.on_frame(result).await,
-            Ev::Status(result) => ui.on_status(result).await,
-            Ev::Compact(result) => ui.on_compact(result).await,
+            Ev::Input(None) => {
+                ui.drain_transport().await;
+                super::drain_writes(&mut ui.app).await;
+                return Ok(());
+            }
+            Ev::Input(Some(event)) => ui.on_input(terminal, event)?,
+            Ev::Frame(result) => ui.on_frame(result),
+            Ev::Status(result) => ui.on_status(result),
+            Ev::Compact(result) => ui.on_compact(result),
+            Ev::Transport(result) => ui.on_transport(result),
             Ev::Scheduled(text) => {
                 if let Some(text) = text {
+                    ui.transcript = ui.transcript.wrapping_add(1);
                     ui.app.push_system(text);
                     // The terminal backend writes to stdout.
                     let mut stdout = std::io::stdout();
                     let _ = stdout.write_all(b"\x07").and_then(|()| stdout.flush());
                 }
             }
-            Ev::Retry => ui.reconnect().await,
-            Ev::AgentsTick => {
-                if let Some(view) = &mut ui.app.agents {
-                    view.tick(&Backend::Attach(remote));
+            Ev::Retry => ui.reconnect(),
+            Ev::Completion(completion) => {
+                let previous = ui.app.info.session_id.clone();
+                let entries = ui.app.entries.len();
+                let mutation = completion.mutation;
+                ui.app.apply_completion(completion);
+                if mutation && ui.pending.as_ref().is_some_and(|pending| !pending.mutation) {
+                    ui.pending = None;
+                    ui.needs_sync = true;
+                }
+                if ui.app.entries.len() != entries {
+                    ui.transcript = ui.transcript.wrapping_add(1);
+                }
+                if ui.app.info.session_id != previous {
+                    ui.epoch = ui.epoch.wrapping_add(1);
+                    if ui.pending.as_ref().is_some_and(|pending| !pending.mutation) {
+                        ui.pending = None;
+                    }
+                    ui.needs_sync = true;
+                    ui.followed = None;
+                    ui.last_done = None;
+                    ui.last_row = None;
+                    ui.fresh = true;
+                    ui.app.pending_image = None;
+                    ui.app.end_turn();
                 }
             }
-            Ev::ApprovalsTick => {
-                let session = remote.session();
-                match within(remote.client.shared_approval(
-                    "_otto/approvals/list",
-                    &session,
-                    "",
-                    0,
-                    "",
-                    "",
-                    0,
-                ))
-                .await
-                {
-                    Ok(value) => match serde_json::from_value::<crate::approval::Snapshot>(value) {
-                        Ok(snapshot) => ui.app.sync_approvals(&snapshot.requests),
-                        Err(_) => ui.report(
-                            "approval",
-                            Error::Unreachable("invalid approval snapshot".into()),
-                        ),
-                    },
-                    Err(error) => ui.report("approval", error),
-                }
-            }
+            Ev::FeaturesTick => ui.app.tick_features(),
+            Ev::ApprovalsTick => ui.app.request_approvals(),
             Ev::Tick => {
                 // Idle frames need no redraw unless something on screen moves.
                 if !ui.app.busy()
-                    && ui.app.agents.is_none()
+                    && !ui.app.has_surface()
                     && !render::needs_task_clock(&ui.app.tasks)
                 {
                     continue;
                 }
             }
         }
-        if ui.run_actions().await {
+        if !ui.app.busy()
+            && !ui.app.has_writes()
+            && let Some(action) = ui.app.submit_queued_input(&Backend::Attach(remote), cancel)
+        {
+            ui.actions.push_back(action);
+        }
+        ui.actions.extend(ui.app.drain_actions());
+        if ui.run_actions() {
+            ui.drain_transport().await;
+            super::drain_writes(&mut ui.app).await;
             return Ok(());
         }
+        ui.sync();
         draw(terminal, &mut ui.app)?;
     }
 }
@@ -607,87 +619,126 @@ impl<'a> Ui<'a> {
             return;
         }
         self.connected = false;
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| !pending.mutation)
+        {
+            self.pending = None;
+        }
         self.followed = None;
         self.status = None;
         self.compacting = None;
         self.rows.clear();
         self.last_row = None;
         self.app.end_turn();
-        self.app.approval = None;
+        self.app.connected = false;
         self.app.push_system(DISCONNECTED);
+        self.transcript = self.transcript.wrapping_add(1);
     }
 
-    /// Resumes the same session on serve, reloads it and follows what runs.
-    async fn reconnect(&mut self) {
-        let Ok(status) = within(self.remote.client.status()).await else {
-            return;
-        };
-        let session = self.remote.session();
-        if self.remote.open(None, Some(&session)).await.is_err() {
+    fn pending_call(&mut self, mutation: bool, call: TransportCall<'a>) {
+        self.pending = Some(PendingTransport {
+            session: self.remote.session(),
+            epoch: self.epoch,
+            transcript: self.transcript,
+            mutation,
+            call,
+        });
+    }
+
+    /// Reconnect commits nothing until the same session has been authoritatively reloaded.
+    fn reconnect(&mut self) {
+        if self.pending.is_some() {
             return;
         }
-        self.app.refresh(&Backend::Attach(self.remote));
-        self.app.push_system("reconnected to otto serve");
-        self.status = Some(status);
-        self.connected = true;
-        self.last_done = None;
-        self.fresh = true;
-        self.refresh_tasks().await;
+        let remote = self.remote;
+        let session = remote.session();
+        self.pending_call(
+            false,
+            Box::pin(async move {
+                let status = within(remote.client.status()).await?;
+                let id = within(remote.client.open_session(None, Some(&session))).await?;
+                if id != session {
+                    return Err(Error::Unreachable("reconnect changed session".into()));
+                }
+                let (info, history, tasks) = tokio::try_join!(
+                    within(remote.client.session(&session)),
+                    within(remote.client.history(&session, None)),
+                    within(remote.client.session_tasks(&session)),
+                )?;
+                Ok(TransportResult::Reconnect {
+                    snapshot: Snapshot {
+                        info: Some(info),
+                        tasks: Some(tasks),
+                        history: Some(history),
+                        stream: None,
+                        done: None,
+                        row: None,
+                    },
+                    status,
+                })
+            }),
+        );
     }
 
-    async fn on_input<B: TerminalBackend>(
+    fn on_input<B: TerminalBackend>(
         &mut self,
         terminal: &mut Terminal<B>,
         event: TuiEvent,
     ) -> Result<(), ReplError> {
-        match event {
-            TuiEvent::Key(key) => self.on_key(key).await,
-            TuiEvent::Paste(text) => self.app.insert_text(&text),
-            TuiEvent::Wheel { up } => self.app.scroll_wheel(up),
-            TuiEvent::Select { phase, col, row } => {
-                if let Some(text) =
-                    super::apply_selection(&mut self.app, terminal, phase, col, row)?
-                    && let Err(error) = selection::copy(&text)
-                {
-                    self.app.push_system(format!("copy: {error}"));
-                }
+        let entries = self.app.entries.len();
+        if let Some(action) = super::apply_input(
+            &mut self.app,
+            terminal,
+            event,
+            self.cancel,
+            &Backend::Attach(self.remote),
+        )? {
+            match action {
+                Action::CancelTurn => self.cancel_followed(),
+                _ => self.actions.push_back(action),
             }
-            TuiEvent::Redraw => {}
+        }
+        if self.app.entries.len() != entries {
+            self.transcript = self.transcript.wrapping_add(1);
         }
         Ok(())
     }
 
-    async fn on_key(&mut self, key: KeyEvent) {
-        let backend = Backend::Attach(self.remote);
-        self.app.selection = None;
-        let dialog = self.app.approval.is_some()
-            || self.app.picker.is_some()
-            || self.app.context.is_some()
-            || self.app.show_help;
-        if self.app.busy() && !dialog {
-            if self.app.handle_turn_key(key, &backend) {
-                self.cancel_followed().await;
-            }
-        } else if let Some(action) = self.app.handle_key(key, &backend, self.cancel) {
-            self.actions.push_back(action);
-        }
-        self.actions.extend(self.app.outgoing.drain(..));
-    }
-
     /// Esc: cancels the followed turn. A `/compact` has no turn to cancel.
-    async fn cancel_followed(&mut self) {
+    fn cancel_followed(&mut self) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.mutation)
+        {
+            self.cancel_after_send = true;
+            return;
+        }
         let Some(turn) = self.followed.as_ref().map(|f| f.stream.turn_id.clone()) else {
             return;
         };
-        let session = self.remote.session();
-        if let Err(error) = within(self.remote.client.cancel_turn(&session, &turn)).await {
-            self.report("cancel", error);
-        }
+        self.cancel_turn(turn);
     }
 
-    async fn on_frame(&mut self, result: Result<Option<WireEvent>, Error>) {
+    fn cancel_turn(&mut self, turn: String) {
+        self.pending = None;
+        let remote = self.remote;
+        let session = remote.session();
+        self.pending_call(
+            true,
+            Box::pin(async move {
+                within(remote.client.cancel_turn(&session, &turn)).await?;
+                Ok(TransportResult::Cancel)
+            }),
+        );
+    }
+
+    fn on_frame(&mut self, result: Result<Option<WireEvent>, Error>) {
+        self.transcript = self.transcript.wrapping_add(1);
         match result {
-            Ok(Some(event)) if event.event_type == TURN_END => self.end_turn(&event).await,
+            Ok(Some(event)) if event.event_type == TURN_END => self.end_turn(&event),
             Ok(Some(event)) => {
                 if self.app.apply_event(&event)
                     && let Some(followed) = &mut self.followed
@@ -699,7 +750,7 @@ impl<'a> Ui<'a> {
         }
     }
 
-    async fn end_turn(&mut self, event: &WireEvent) {
+    fn end_turn(&mut self, event: &WireEvent) {
         let Some(followed) = self.followed.take() else {
             return;
         };
@@ -709,183 +760,326 @@ impl<'a> Ui<'a> {
         self.app.end_turn();
         match event.status.as_str() {
             "error" if !followed.error_rendered => {
-                let message = if event.error.is_empty() {
+                self.app.push_system(if event.error.is_empty() {
                     "turn failed"
                 } else {
                     &event.error
-                };
-                self.app.push_system(message);
+                })
             }
             "canceled" => self.app.push_system("turn canceled"),
             _ => {}
         }
-        self.refresh_info().await;
-        if self.app.queued_input.is_some() {
-            let backend = Backend::Attach(self.remote);
-            if let Some(action) = self.app.submit_queued_input(&backend, self.cancel) {
-                self.actions.push_back(action);
-            }
-        }
-        self.sync().await;
-    }
-
-    async fn refresh_info(&mut self) {
-        match self.remote.refresh_info().await {
-            Ok(()) => self.app.refresh_info(&Backend::Attach(self.remote)),
-            Err(error) => self.report("session", error),
+        self.needs_sync = true;
+        if self.app.queued_input.is_some()
+            && let Some(action) = self
+                .app
+                .submit_queued_input(&Backend::Attach(self.remote), self.cancel)
+        {
+            self.actions.push_back(action);
         }
     }
 
-    async fn refresh_tasks(&mut self) {
-        let session = self.remote.session();
-        match within(self.remote.client.session_tasks(&session)).await {
-            Ok(tasks) => self.app.tasks = tasks,
-            Err(error @ Error::Unreachable(_)) => self.report("tasks", error),
-            Err(_) => {}
-        }
-    }
-
-    async fn on_status(&mut self, result: Result<Option<Vec<StatusRow>>, Error>) {
+    fn on_status(&mut self, result: Result<Option<Vec<StatusRow>>, Error>) {
         match result {
-            Ok(Some(rows)) => {
-                self.rows = rows;
-                self.sync().await;
-            }
+            Ok(Some(rows)) => self.rows = rows,
             Ok(None) | Err(_) => self.disconnect(),
         }
     }
 
-    /// Applies the current status row of this session: refreshes the
-    /// sub-agent panel when the row changed and follows a newly running turn.
-    async fn sync(&mut self) {
+    /// Coalesces status changes while a snapshot or admitted operation is pending.
+    fn sync(&mut self) {
+        if !self.connected || self.pending.is_some() {
+            return;
+        }
         let session = self.remote.session();
         let row = self.rows.iter().find(|row| row.id == session).cloned();
-        let Some(row) = row else { return };
-        if self.last_row.as_ref() != Some(&row) {
-            self.last_row = Some(row.clone());
-            self.refresh_info().await;
-            self.refresh_tasks().await;
+        let decision = row.as_ref().and_then(|row| {
+            follow_decision(
+                row,
+                self.followed.as_ref().map(|f| f.stream.turn_id.as_str()),
+                &self.remote.own(),
+                self.last_done.as_deref(),
+            )
+        });
+        if !self.needs_sync && self.last_row == row && decision.is_none() {
+            return;
         }
-        let followed = self.followed.as_ref().map(|f| f.stream.turn_id.as_str());
-        match follow_decision(
-            &row,
-            followed,
-            &self.remote.own(),
-            self.last_done.as_deref(),
-        ) {
-            Some(Follow::Own(id)) => self.follow(&id, false).await,
-            Some(Follow::Foreign(id)) => self.follow(&id, true).await,
-            Some(Follow::Reload(id)) => {
-                self.last_done = Some(id.clone());
-                self.remote.finish(&id);
-                if !self.fresh {
-                    match self.remote.load(&session, None).await {
-                        Ok(()) => self.app.refresh(&Backend::Attach(self.remote)),
-                        Err(error) => self.report("history", error),
+        let fresh = self.fresh;
+        let remote = self.remote;
+        self.needs_sync = false;
+        self.pending_call(
+            false,
+            Box::pin(async move {
+                let (before, done, follow) = match decision {
+                    Some(Follow::Own(id)) => (None, None, Some(id)),
+                    Some(Follow::Foreign(id)) => (Some(id.clone()), None, Some(id)),
+                    Some(Follow::Reload(id)) => (None, Some(id), None),
+                    None => (None, None, None),
+                };
+                let reload = before.is_some() || done.is_some() && !fresh;
+                let history = async {
+                    if reload {
+                        within(remote.client.history(&session, before.as_deref()))
+                            .await
+                            .map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                };
+                let following = follow.is_some();
+                let stream = async {
+                    match follow {
+                        Some(id) => within(remote.client.turn_events(&session, &id, None))
+                            .await
+                            .map(Some),
+                        None => Ok(None),
+                    }
+                };
+                let metadata = async {
+                    if following {
+                        return Ok((None, None));
+                    }
+                    let tasks = async {
+                        match within(remote.client.session_tasks(&session)).await {
+                            Ok(tasks) => Ok(Some(tasks)),
+                            Err(Error::Http { .. }) => Ok(None),
+                            Err(error) => Err(error),
+                        }
+                    };
+                    let (info, tasks) =
+                        tokio::try_join!(within(remote.client.session(&session)), tasks)?;
+                    Ok::<_, Error>((Some(info), tasks))
+                };
+                let ((info, tasks), history, stream) = tokio::try_join!(metadata, history, stream)?;
+                Ok(TransportResult::Sync(Snapshot {
+                    info,
+                    tasks,
+                    history,
+                    stream,
+                    done,
+                    row,
+                }))
+            }),
+        );
+    }
+
+    fn on_transport(&mut self, result: Result<TransportResult, Error>) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        if pending.session != self.remote.session() || pending.epoch != self.epoch {
+            self.cancel_after_send = false;
+            return;
+        }
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.cancel_after_send = false;
+                if pending.mutation && matches!(error, Error::Unreachable(_)) {
+                    self.app.push_system(format!(
+                        "{error}; outcome unknown, reconcile before retrying"
+                    ));
+                }
+                if !self.connected {
+                    return;
+                }
+                if !pending.mutation && !matches!(error, Error::Unreachable(_)) {
+                    self.last_row = self
+                        .rows
+                        .iter()
+                        .find(|row| row.id == pending.session)
+                        .cloned();
+                    self.last_done = self.last_row.as_ref().and_then(|row| row.turn_id.clone());
+                }
+                if self.followed.is_none() && self.compacting.is_none() {
+                    self.app.end_turn();
+                }
+                self.report("serve", error);
+                return;
+            }
+        };
+        match result {
+            TransportResult::Sync(snapshot) => {
+                if snapshot.history.is_some() && pending.transcript != self.transcript {
+                    self.needs_sync = true;
+                    return;
+                }
+                self.commit_snapshot(snapshot);
+            }
+            TransportResult::Reconnect { snapshot, status } => {
+                if pending.transcript != self.transcript {
+                    return;
+                }
+                self.commit_snapshot(snapshot);
+                self.status = Some(status);
+                self.connected = true;
+                self.app.connected = true;
+                self.app.push_system("reconnected to otto serve");
+                self.transcript = self.transcript.wrapping_add(1);
+                self.app.tick_features();
+                self.app.request_approvals();
+                self.last_done = None;
+                self.fresh = true;
+            }
+            TransportResult::Prompt { reply, stream } => {
+                let sent_turn = stream.as_ref().map(|stream| stream.turn_id.clone());
+                if let Some(reply) = reply {
+                    self.app.push_system(reply);
+                    self.transcript = self.transcript.wrapping_add(1);
+                }
+                if let Some(stream) = stream {
+                    let turn = stream.turn_id.clone();
+                    self.remote.state().own.push(turn);
+                    if self.connected && self.followed.is_none() {
+                        self.adopt_stream(stream);
+                    }
+                } else if self.followed.is_none() && self.compacting.is_none() {
+                    self.app.end_turn();
+                }
+                if self.cancel_after_send {
+                    self.cancel_after_send = false;
+                    if let Some(turn) = self
+                        .followed
+                        .as_ref()
+                        .map(|followed| followed.stream.turn_id.clone())
+                        .or(sent_turn)
+                    {
+                        self.cancel_turn(turn);
                     }
                 }
             }
-            None => {}
+            TransportResult::Cancel => {
+                self.cancel_after_send = false;
+            }
         }
-        self.fresh = false;
     }
 
-    /// Starts following `turn`. A turn another client started is preceded by
-    /// the history that existed when it began, so its prompt is not shown
-    /// twice.
-    async fn follow(&mut self, turn: &str, foreign: bool) {
-        let session = self.remote.session();
-        if foreign {
-            if let Err(error) = self.remote.load(&session, Some(turn)).await {
-                self.last_done = Some(turn.to_string());
-                return self.report("history", error);
+    fn commit_snapshot(&mut self, snapshot: Snapshot) {
+        let reload = snapshot.history.is_some();
+        {
+            let mut state = self.remote.state();
+            if let Some(info) = snapshot.info {
+                state.info = info;
             }
+            if let Some(history) = snapshot.history {
+                state.history = history;
+            }
+        }
+        if reload {
             self.app.refresh(&Backend::Attach(self.remote));
+            self.transcript = self.transcript.wrapping_add(1);
+        } else {
+            self.app.refresh_info(&Backend::Attach(self.remote));
         }
-        match within(self.remote.client.turn_events(&session, turn, None)).await {
-            Ok(stream) => {
-                self.remote.state().running = Some(turn.to_string());
-                self.followed = Some(Followed {
-                    stream,
-                    error_rendered: false,
-                });
-                self.app.start_turn();
-            }
-            Err(error) => {
-                self.last_done = Some(turn.to_string());
-                self.report("turn", error);
-            }
+        if let Some(tasks) = snapshot.tasks {
+            self.app.tasks = tasks;
+        }
+        self.last_row = snapshot.row;
+        self.fresh = false;
+        if let Some(id) = snapshot.done {
+            self.remote.finish(&id);
+            self.last_done = Some(id);
+        }
+        if let Some(stream) = snapshot.stream {
+            self.adopt_stream(stream);
+            self.needs_sync = true;
         }
     }
 
-    async fn on_compact(&mut self, result: Result<Option<WireCompaction>, Error>) {
+    fn adopt_stream(&mut self, stream: TurnStream) {
+        self.remote.state().running = Some(stream.turn_id.clone());
+        self.followed = Some(Followed {
+            stream,
+            error_rendered: false,
+        });
+        self.app.start_turn();
+    }
+
+    async fn drain_transport(&mut self) {
+        if let Some(pending) = self.pending.as_mut()
+            && pending.mutation
+        {
+            let result = pending.call.as_mut().await;
+            self.on_transport(result);
+        }
+    }
+
+    fn on_compact(&mut self, result: Result<Option<WireCompaction>, Error>) {
         self.compacting = None;
         self.app.end_turn();
+        self.transcript = self.transcript.wrapping_add(1);
         match result {
             Ok(Some(compaction)) => self.app.push_system(compaction_line(&compaction)),
             Ok(None) => self.app.push_system("/compact: canceled"),
             Err(error) => return self.report("/compact", error),
         }
-        self.refresh_info().await;
+        self.needs_sync = true;
     }
 
     /// Runs the queued actions; `true` when one asked to exit.
-    async fn run_actions(&mut self) -> bool {
+    fn run_actions(&mut self) -> bool {
         while let Some(action) = self.actions.pop_front() {
             if matches!(action, Action::Exit) {
                 return true;
+            }
+            if self.app.busy() && matches!(action, Action::Compact(_) | Action::Reflect(_)) {
+                self.actions.push_front(action);
+                break;
             }
             if !self.connected {
                 self.app.push_system(DISCONNECTED);
                 continue;
             }
-            self.act(action).await;
+            if self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.mutation)
+            {
+                self.actions.push_front(action);
+                break;
+            }
+            self.act(action);
         }
         false
     }
 
-    async fn act(&mut self, action: Action) {
+    fn act(&mut self, action: Action) {
+        self.transcript = self.transcript.wrapping_add(1);
         let remote = self.remote;
         let session = remote.session();
         match action {
             Action::Prompt(line) => {
-                let image = self.pending_image.take();
-                if image.is_none() {
-                    match within(remote.client.approval_message(&session, &line)).await {
-                        Ok(Some(reply)) => {
-                            self.app.push_system(reply.text);
-                            if !reply.queued {
-                                return;
+                let image = self.app.pending_image.take();
+                self.pending = None;
+                if self.followed.is_none() && self.compacting.is_none() {
+                    self.app.start_turn();
+                }
+                self.pending_call(
+                    true,
+                    Box::pin(async move {
+                        let mut reply = None;
+                        if image.is_none()
+                            && let Some(control) =
+                                within(remote.client.approval_message(&session, &line)).await?
+                        {
+                            reply = Some(control.text);
+                            if !control.queued {
+                                return Ok(TransportResult::Prompt {
+                                    reply,
+                                    stream: None,
+                                });
                             }
                         }
-                        Ok(None) => {}
-                        Err(error) => {
-                            self.report("approval", error);
-                            return;
-                        }
-                    }
-                }
-                match within(remote.client.start_turn(&session, &line, image.as_ref())).await {
-                    Ok(stream) => {
-                        // Dropping the response does not cancel the turn; its
-                        // events are read with `turn_events`.
-                        let turn = stream.turn_id.clone();
-                        drop(stream);
-                        remote.state().own.push(turn.clone());
-                        if self.followed.is_none() {
-                            self.follow(&turn, false).await;
-                        }
-                    }
-                    Err(error) => self.report("prompt", error),
-                }
+                        let stream =
+                            within(remote.client.start_turn(&session, &line, image.as_ref()))
+                                .await?;
+                        Ok(TransportResult::Prompt {
+                            reply,
+                            stream: Some(stream),
+                        })
+                    }),
+                );
             }
-            Action::Image(path) => match super::image_block_from_path(&path) {
-                Ok(image) => {
-                    self.pending_image = Some(image);
-                    self.app.push_system(format!("Attached image: {path}"));
-                }
-                Err(message) => self.app.push_system(format!("/image: {message}")),
-            },
             Action::Compact(focus) => {
                 if self.compacting.is_some() {
                     self.app.push_system("/compact: already running");
@@ -897,96 +1091,144 @@ impl<'a> Ui<'a> {
                     async move { client.compact(&session, &focus).await },
                 ));
             }
-            Action::NewSession => {
-                self.switch(Some(&remote.workspace), None, "/new").await;
+            Action::CancelTurn => self.cancel_followed(),
+            Action::Exit => {}
+            Action::Reflect(_) | Action::Login(_) | Action::McpLogin(_) => {
+                self.app.push_system("not available with --attach")
             }
-            Action::Resume(id) => self.switch(None, Some(&id), "/resume").await,
-            Action::AutoMode(args) => {
-                match crate::app::parse_auto_mode(&args) {
-                    Ok(automatic) => {
-                        match within(remote.client.approval_mode(&session, automatic)).await {
-                            Ok(automatic) => self.app.push_system(format!(
-                                "Approval mode: {}",
-                                if automatic { "AUTO" } else { "MANUAL" }
-                            )),
-                            Err(error) => self.report("/auto", error),
-                        }
-                    }
-                    Err(message) => self.app.push_system(message),
-                }
-                self.refresh_info().await;
-            }
-            Action::SandboxReload => match within(remote.client.reload_sandbox()).await {
-                Ok(summary) => {
-                    self.app.push_system(format!("Sandbox: {summary}"));
-                    self.refresh_info().await;
-                }
-                Err(error) => self.report("/sandbox reload", error),
-            },
-            Action::DecideApproval {
-                id,
-                allow,
-                feedback,
-            } => {
-                let session = self.remote.session();
-                let result = async {
-                    let request = self
-                        .remote
-                        .client
-                        .shared_approval("_otto/approvals/get", &session, &id, 0, "", "", 0)
-                        .await?;
-                    self.remote
-                        .client
-                        .shared_approval(
-                            "_otto/approvals/decide",
-                            &session,
-                            &id,
-                            request["revision"].as_u64().unwrap_or(0),
-                            if allow { "approve" } else { "reject" },
-                            &feedback,
-                            0,
-                        )
-                        .await
-                }
-                .await;
-                if let Err(error) = result {
-                    self.report("approval", error);
-                }
-            }
-            Action::Approve(id) => self.decide(&session, &id, true).await,
-            Action::Deny(id) => self.decide(&session, &id, false).await,
-            // The other actions come from commands that print
-            // `not available with --attach` instead of raising them.
-            _ => {}
         }
-    }
-
-    async fn decide(&mut self, session: &str, id: &str, allow: bool) {
-        if let Err(error) = within(self.remote.client.decide_approval(session, id, allow)).await {
-            self.report("/approve", error);
-        }
-    }
-
-    async fn switch(&mut self, workspace: Option<&str>, resume: Option<&str>, what: &str) {
-        if let Err(error) = self.remote.open(workspace, resume).await {
-            return self.report(what, error);
-        }
-        self.pending_image = None;
-        self.followed = None;
-        self.last_done = None;
-        self.fresh = true;
-        self.last_row = None;
-        self.app.end_turn();
-        self.app.refresh(&Backend::Attach(self.remote));
-        self.app
-            .push_system(format!("Session: {}", self.remote.session()));
-        self.sync().await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn delayed_session_snapshot_keeps_input_and_stream_live_and_cannot_erase_deltas() {
+        use axum::response::IntoResponse;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let router = axum::Router::new().fallback({
+            let started = started.clone();
+            let release = release.clone();
+            move |uri: axum::http::Uri| {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    match uri.path() {
+                        "/v1/sessions/s1" => {
+                            started.notify_one();
+                            release.notified().await;
+                            axum::Json(serde_json::json!({"id":"s1", "workspace":"/work"}))
+                                .into_response()
+                        }
+                        "/v1/sessions/s1/tasks" => {
+                            axum::Json(serde_json::json!({"tasks":[]})).into_response()
+                        }
+                        "/v1/sessions/s1/history" => {
+                            axum::Json(serde_json::json!([])).into_response()
+                        }
+                        "/v1/sessions/s1/turns/t1/events" => {
+                            let event = WireEvent {
+                                event_type: "text_delta".into(),
+                                text: "live ".into(),
+                                ..WireEvent::default()
+                            };
+                            let data = serde_json::to_string(&event).unwrap();
+                            axum::response::Response::builder()
+                                .header("content-type", "text/event-stream")
+                                .body(axum::body::Body::from(format!(
+                                    "data: {data}\n\ndata: {data}\n\n"
+                                )))
+                                .unwrap()
+                        }
+                        _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+                    }
+                }
+            }
+        });
+        let remote = Remote::new(Client::in_process(router), "/work");
+        {
+            let mut state = remote.state();
+            state.session = "s1".into();
+            state.info = Info {
+                session_id: "s1".into(),
+                workspace: "/work".into(),
+                ..Info::default()
+            };
+        }
+        let cancel = CancellationToken::new();
+        let mut ui = Ui {
+            remote: &remote,
+            app: App::new(&Backend::Attach(&remote)),
+            cancel: &cancel,
+            followed: None,
+            status: None,
+            rows: vec![row(Some("ok"), Some("old"))],
+            last_row: None,
+            last_done: None,
+            fresh: false,
+            compacting: None,
+            connected: true,
+            pending: None,
+            epoch: 0,
+            transcript: 0,
+            needs_sync: false,
+            cancel_after_send: false,
+            actions: VecDeque::new(),
+        };
+        ui.sync();
+        tokio::select! {
+            result = ui.pending.as_mut().unwrap().call.as_mut() => panic!("snapshot completed before release: {}", result.is_ok()),
+            _ = started.notified() => {}
+        }
+        let stream = remote.client.turn_events("s1", "t1", None).await.unwrap();
+        ui.adopt_stream(stream);
+        let (keys, mut received) = mpsc::channel(1);
+        keys.send(TuiEvent::Paste("draft".into())).await.unwrap();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut input = false;
+        let mut frames = 0;
+        while !input || frames < 2 {
+            let event = tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::select! {
+                    result = ui.pending.as_mut().unwrap().call.as_mut() => Ev::Transport(result),
+                    event = received.recv(), if !input => Ev::Input(event),
+                    frame = ui.followed.as_mut().unwrap().stream.next(), if frames < 2 => Ev::Frame(frame),
+                }
+            }).await.expect("input and frames must not await the session query");
+            match event {
+                Ev::Input(Some(event)) => {
+                    ui.on_input(&mut terminal, event).unwrap();
+                    input = true;
+                }
+                Ev::Frame(frame) => {
+                    let entries = ui.app.entries.len();
+                    ui.on_frame(frame);
+                    frames += 1;
+                    if frames == 2 {
+                        assert_eq!(
+                            ui.app.entries.len(),
+                            entries,
+                            "a delta updates an existing entry"
+                        );
+                    }
+                }
+                _ => panic!("blocked query completed unexpectedly"),
+            }
+        }
+        assert_eq!(ui.app.composer.input.iter().collect::<String>(), "draft");
+        assert!(ui.app.entries.iter().any(|entry| entry.raw == "live live "));
+        release.notify_one();
+        let result = ui.pending.as_mut().unwrap().call.as_mut().await;
+        ui.on_transport(result);
+        assert!(
+            ui.app.entries.iter().any(|entry| entry.raw == "live live "),
+            "stale history must not overwrite received deltas"
+        );
+        assert!(ui.needs_sync);
+    }
 
     #[tokio::test]
     async fn the_channel_sink_forwards_text_and_fails_when_the_ui_is_gone() {
@@ -1056,13 +1298,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn withdraw_without_a_queued_own_turn_is_false() {
         let remote = Remote::offline(Vec::new());
-        assert!(!remote.withdraw_queued_turn());
+        assert!(!remote.withdraw_queued_turn_async().await.expect("withdraw"));
         // The running turn is not withdrawable; only a queued one is.
         {
             let mut state = remote.state();
             state.own.push("t1".into());
             state.running = Some("t1".into());
         }
-        assert!(!remote.withdraw_queued_turn());
+        assert!(!remote.withdraw_queued_turn_async().await.expect("withdraw"));
     }
 }

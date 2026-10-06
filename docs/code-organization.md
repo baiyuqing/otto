@@ -115,6 +115,16 @@ The other modules group native responsibilities:
 Place native tool execution and workspace enforcement in `tool/`; `bash`
 execution goes through `sandbox/`. Keep session persistence append-only.
 
+The TUI separates terminal interaction from feature behavior. `tui/features/`
+contains injected presenters and the command catalog; `tui/interaction.rs`
+and its composer submodule hold shared terminal-independent controls;
+`tui/backend.rs` owns asynchronous requests and scope tickets;
+`tui/widgets.rs` and `tui/render.rs` draw views and application snapshots.
+Add an interactive feature by implementing a presenter and registering it in
+the catalog. Keep local and `--attach` input on the same composer, and return
+scoped replies through the backend contract. `crates/otto/tests/tui_boundary.rs`
+guards these dependency directions.
+
 ### Browser and chat clients
 
 - [otto-plus](https://github.com/baiyuqing/otto-plus) owns the browser UI and

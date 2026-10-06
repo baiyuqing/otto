@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### User experience
 
+- Make active-task steering observable and reversible before delivery: explicit
+  steer responses now show the exact message and a transient id/status; clients
+  can list and withdraw a still-queued steer. Delivered guidance remains
+  append-only session history, while withdrawn or discarded guidance is never
+  delivered to the agent.
 - Make ordinary input during an active task steer that task at its next safe
   boundary across the local TUI, attached TUI, HTTP and ACP. Queueing an
   independent follow-up is now explicit; the new HTTP input-admission endpoint

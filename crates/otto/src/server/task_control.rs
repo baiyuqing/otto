@@ -6,7 +6,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::{Server, bad_request, error_response, json_response, not_found};
 use crate::app::Channel;
@@ -17,11 +17,6 @@ const MAX_TEXT_BYTES: usize = 32_000;
 #[serde(deny_unknown_fields)]
 struct TextInput {
     text: String,
-}
-
-#[derive(Serialize)]
-struct Accepted {
-    accepted: bool,
 }
 
 /// `POST /v1/sessions/{id}/inputs` deterministically admits ordinary human
@@ -48,6 +43,37 @@ pub async fn admit_input(
     }
 }
 
+/// `GET /v1/sessions/{id}/tasks/steer`: current transient lifecycle items.
+pub async fn steering_messages(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session.ctrl.steering_messages() {
+        Ok(messages) => json_response(StatusCode::OK, &messages),
+        Err(message) => error_response(StatusCode::CONFLICT, "task_steer_failed", &message),
+    }
+}
+
+/// `DELETE /v1/sessions/{id}/tasks/steer/{message_id}` withdraws one
+/// undelivered steer. Delivered messages are append-only session history.
+pub async fn withdraw_steering(
+    State(server): State<Arc<Server>>,
+    Path((id, message_id)): Path<(String, u64)>,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session.ctrl.withdraw_steering(message_id) {
+        Ok(message) => json_response(StatusCode::OK, &message),
+        Err(message) => {
+            error_response(StatusCode::CONFLICT, "task_steer_withdraw_failed", &message)
+        }
+    }
+}
+
 /// `POST /v1/sessions/{id}/tasks/steer`.
 pub async fn steer(
     State(server): State<Arc<Server>>,
@@ -65,7 +91,7 @@ pub async fn steer(
         return not_found("session not found");
     };
     match session.ctrl.steer(&input.text) {
-        Ok(()) => json_response(StatusCode::OK, &Accepted { accepted: true }),
+        Ok(message) => json_response(StatusCode::OK, &message),
         Err(message) => error_response(StatusCode::CONFLICT, "task_steer_failed", &message),
     }
 }

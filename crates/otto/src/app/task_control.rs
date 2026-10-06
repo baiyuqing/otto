@@ -98,7 +98,12 @@ impl TaskControl {
             .map(|active| active.current_task.clone())
     }
 
-    pub(crate) fn steer(&self, session_id: &str, ticket: u64, text: &str) -> Result<(), String> {
+    pub(crate) fn steer(
+        &self,
+        session_id: &str,
+        ticket: u64,
+        text: &str,
+    ) -> Result<otto_core::agent::steering::Message, String> {
         let state = self.lock();
         if !state
             .active
@@ -338,7 +343,7 @@ impl ControlRoute {
             return Ok(false);
         }
         match control.steer(session_id, ticket, text) {
-            Ok(()) => {
+            Ok(_) => {
                 *route = Some(Route::Steered);
                 Ok(true)
             }

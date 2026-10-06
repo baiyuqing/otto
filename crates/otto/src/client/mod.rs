@@ -271,18 +271,49 @@ impl Client {
     /// `POST /v1/sessions/{id}/tasks/steer`. Accepts guidance only for the
     /// active task in this session. This explicit compatibility endpoint is
     /// intentionally stricter than [`Self::admit_input`].
-    pub async fn steer(&self, session_id: &str, text: &str) -> Result<bool, Error> {
-        #[derive(Deserialize)]
-        struct Accepted {
-            accepted: bool,
-        }
+    pub async fn steer(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<otto_core::agent::steering::Message, Error> {
         let response = self
             .send(self.post(
                 &format!("{BASE}/v1/sessions/{session_id}/tasks/steer"),
                 &json!({"text": text}),
             ))
             .await?;
-        Ok(decode::<Accepted>(response).await?.accepted)
+        decode(response).await
+    }
+
+    /// `GET /v1/sessions/{id}/tasks/steer`: transient statuses for guidance
+    /// accepted by the active run. These records disappear after the run ends.
+    pub async fn steering_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<otto_core::agent::steering::Message>, Error> {
+        decode(
+            self.send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/tasks/steer")),
+            )
+            .await?,
+        )
+        .await
+    }
+
+    /// Withdraw one queued steer before delivery at the next safe boundary.
+    pub async fn withdraw_steering(
+        &self,
+        session_id: &str,
+        message_id: u64,
+    ) -> Result<otto_core::agent::steering::Message, Error> {
+        decode(
+            self.send(self.http.delete(format!(
+                "{BASE}/v1/sessions/{session_id}/tasks/steer/{message_id}"
+            )))
+            .await?,
+        )
+        .await
     }
 
     /// `POST /v1/sessions/{id}/tasks/control`. `None` means the caller should
@@ -1462,7 +1493,10 @@ mod tests {
     #[tokio::test]
     async fn task_control_client_uses_session_routes_and_transient_channel() {
         let (client, seen, _dir) = stub(|_, path| match path {
-            "/v1/sessions/s1/tasks/steer" => json_body(StatusCode::OK, r#"{"accepted":true}"#),
+            "/v1/sessions/s1/tasks/steer" => json_body(
+                StatusCode::OK,
+                r#"{"id":7,"text":"inspect the result","status":"queued"}"#,
+            ),
             "/v1/sessions/s1/tasks/control" => json_body(
                 StatusCode::OK,
                 r#"{"text":"I can guide the task","queued":false}"#,
@@ -1470,7 +1504,10 @@ mod tests {
             _ => json_body(StatusCode::NOT_FOUND, ""),
         });
 
-        assert!(client.steer("s1", "inspect the result").await.unwrap());
+        let steer = client.steer("s1", "inspect the result").await.unwrap();
+        assert_eq!(steer.id, 7);
+        assert_eq!(steer.text, "inspect the result");
+        assert_eq!(steer.status, otto_core::agent::steering::Status::Queued);
         let reply = client
             .control_message_with_channel("s1", "what can you do?", Some(Channel::Telegram))
             .await

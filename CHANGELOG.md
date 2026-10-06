@@ -36,6 +36,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Architecture and reliability
 
+- Recover sessions after a plain process crash the same way as after a lease
+  takeover: read-only calls without results run again, a recovery notice lists
+  what was interrupted, unfinished sub-agent tasks become resumable, and a
+  wake turn continues the interrupted turn once. New `otto.turn` session
+  entries tell an interrupted turn apart from a failed or cancelled one, each
+  tool attempt records its retry safety so a reclassified tool is not replayed,
+  `agent_status`, `remind_status` and `list_models` are now replayable, and
+  `otto serve` reports resuming turns with trigger `recovery`
+  ([#375](https://github.com/baiyuqing/otto/pull/375), [user manual](docs/user-manual.md#sessions)).
 - Introduce a shared, WASM-safe `Mailbox` contract for agent notifications. Agent execution and runner-facing producers now depend on ordered snapshot and acknowledgement semantics instead of a concrete queue; the bundled in-memory mailbox remains the default, while native composition retains session-sidecar persistence and provides the extension boundary for alternative durable adapters.
 
 ### Storage and migration

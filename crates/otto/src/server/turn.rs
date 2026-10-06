@@ -35,6 +35,8 @@ pub const TURN_CANCELED: &str = "canceled";
 /// Why a turn started.
 pub const TRIGGER_USER: &str = "user";
 pub const TRIGGER_TASK: &str = "task";
+/// A wake turn that resumes a turn process loss interrupted.
+pub const TRIGGER_RECOVERY: &str = "recovery";
 
 #[derive(Debug)]
 struct TurnState {

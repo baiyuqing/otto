@@ -3046,7 +3046,7 @@ fn prepared_close_of_a_lease_managed_session_releases_the_lease_for_the_next_ope
     );
     let (store2, _warnings) = prepared2.activate().expect("activate");
     assert!(
-        store2.take_takeover().is_none(),
+        store2.take_recovery().is_none(),
         "a fresh acquire records no takeover"
     );
     store2.close().expect("close");
@@ -3157,9 +3157,12 @@ fn takeover_through_prepare_records_the_holder_and_repairs_the_dangling_calls() 
             .expect("prepare takes over");
     let (activated, _warnings) = prepared.activate().expect("activate");
 
-    let takeover = activated.take_takeover().expect("takeover recorded");
-    assert_eq!(takeover.holder.host, "stopped-host");
-    assert_eq!(takeover.holder.pid, 9001);
+    let takeover = activated.take_recovery().expect("takeover recorded");
+    let crate::session::RecoveryCause::TakenOver(holder) = &takeover.cause else {
+        panic!("takeover cause");
+    };
+    assert_eq!(holder.host, "stopped-host");
+    assert_eq!(holder.pid, 9001);
     assert_eq!(takeover.repaired.len(), 2);
     assert_eq!(takeover.repaired[0].name, "read");
     assert!(takeover.repaired[0].may_have_run);
@@ -3246,7 +3249,7 @@ fn takeover_leaves_all_replayable_dangling_calls_unanswered() {
         &[("call-1", "read", 1)],
         read_only_tools,
     );
-    let takeover = store.take_takeover().expect("takeover recorded");
+    let takeover = store.take_recovery().expect("takeover recorded");
     assert!(takeover.repaired.is_empty());
     assert_eq!(takeover.replayable.len(), 2);
     assert_eq!(takeover.replayable[0].name, "read");
@@ -3275,7 +3278,7 @@ fn takeover_repairs_every_call_when_one_is_not_replayable() {
         &[],
         read_only_tools,
     );
-    let takeover = store.take_takeover().expect("takeover recorded");
+    let takeover = store.take_recovery().expect("takeover recorded");
     assert_eq!(takeover.repaired.len(), 2);
     assert!(takeover.replayable.is_empty());
     assert_eq!(tool_result_count(&path), 2);
@@ -3289,7 +3292,7 @@ fn takeover_repairs_a_call_that_was_already_replayed_once() {
         &[("call-1", "read", 2)],
         read_only_tools,
     );
-    let takeover = store.take_takeover().expect("takeover recorded");
+    let takeover = store.take_recovery().expect("takeover recorded");
     assert_eq!(takeover.repaired.len(), 1);
     assert!(takeover.replayable.is_empty());
     assert_eq!(
@@ -3298,6 +3301,181 @@ fn takeover_repairs_a_call_that_was_already_replayed_once() {
         "a second interruption falls back to the interrupted result"
     );
     store.close().expect("close");
+}
+
+// Process loss: a plain reopen (no lease) recovers a session the previous
+// writer left mid-turn the same way a takeover does.
+
+fn turn_record(record: &otto_core::session::TurnRecord) -> String {
+    otto_core::session::encode_turn_record(record)
+}
+
+/// Reopens `path` without a lease, as the next process would after a crash.
+fn reopen_plain(path: &str, replayable: fn(&str) -> bool) -> Store {
+    let prepared = Prepared::prepare(Path::new(path), None)
+        .expect("prepare")
+        .with_replayable(replayable);
+    prepared.activate().expect("activate").0
+}
+
+#[test]
+fn a_plain_reopen_replays_read_only_calls_and_records_process_loss() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_custom_entry(
+            otto_core::session::TURN_CUSTOM_TYPE,
+            &turn_record(&otto_core::session::TurnRecord::started(
+                "op_turn",
+                otto_core::session::TurnTrigger::User,
+                1,
+                None,
+            )),
+        )
+        .expect("turn start");
+    store
+        .append_message(&tool_calls(&[("call-1", "read")]))
+        .expect("append dangling call");
+    let path = store.path();
+    store.close().expect("close without ending the turn");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    let recovery = reopened.take_recovery().expect("process loss recorded");
+    assert_eq!(recovery.cause, crate::session::RecoveryCause::ProcessLost);
+    assert!(recovery.repaired.is_empty());
+    assert_eq!(recovery.replayable.len(), 1);
+    assert_eq!(
+        recovery.interrupted_turn,
+        Some(otto_core::session::InterruptedTurn {
+            turn_id: "op_turn".into(),
+            attempt: 1
+        })
+    );
+    assert!(!recovery.resume_exhausted());
+    assert_eq!(tool_result_count(&path), 0);
+    reopened.close().expect("close");
+}
+
+#[test]
+fn a_plain_reopen_of_a_turn_interrupted_mid_stream_records_it() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_custom_entry(
+            otto_core::session::TURN_CUSTOM_TYPE,
+            &turn_record(&otto_core::session::TurnRecord::started(
+                "op_turn",
+                otto_core::session::TurnTrigger::User,
+                1,
+                None,
+            )),
+        )
+        .expect("turn start");
+    store
+        .append_message(&user("do it"))
+        .expect("append user message");
+    let path = store.path();
+    store.close().expect("close");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    let recovery = reopened.take_recovery().expect("process loss recorded");
+    assert_eq!(recovery.cause, crate::session::RecoveryCause::ProcessLost);
+    assert!(recovery.repaired.is_empty() && recovery.replayable.is_empty());
+    assert_eq!(
+        otto_core::session::Session::interrupted_turn(&reopened).map(|turn| turn.turn_id),
+        Some("op_turn".to_string())
+    );
+    reopened.close().expect("close");
+}
+
+#[test]
+fn a_plain_reopen_after_an_ended_turn_records_no_recovery() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    for record in [
+        otto_core::session::TurnRecord::started(
+            "op_turn",
+            otto_core::session::TurnTrigger::User,
+            1,
+            None,
+        ),
+        otto_core::session::TurnRecord::ended("op_turn", otto_core::session::TurnOutcome::Failed),
+    ] {
+        store
+            .append_custom_entry(otto_core::session::TURN_CUSTOM_TYPE, &turn_record(&record))
+            .expect("turn record");
+    }
+    store
+        .append_message(&user("do it"))
+        .expect("append user message");
+    let path = store.path();
+    store.close().expect("close");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    assert_eq!(reopened.take_recovery(), None);
+    reopened.close().expect("close");
+}
+
+#[test]
+fn a_resumed_turn_interrupted_again_is_repaired_and_not_resumed() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_custom_entry(
+            otto_core::session::TURN_CUSTOM_TYPE,
+            &turn_record(&otto_core::session::TurnRecord::started(
+                "op_second",
+                otto_core::session::TurnTrigger::Recovery,
+                2,
+                Some("op_first".into()),
+            )),
+        )
+        .expect("turn start");
+    store
+        .append_message(&tool_calls(&[("call-1", "read")]))
+        .expect("append dangling call");
+    let path = store.path();
+    store.close().expect("close");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    let recovery = reopened.take_recovery().expect("process loss recorded");
+    assert!(recovery.resume_exhausted());
+    assert_eq!(recovery.repaired.len(), 1);
+    assert!(recovery.replayable.is_empty());
+    assert_eq!(tool_result_count(&path), 1);
+    reopened.close().expect("close");
+}
+
+#[test]
+fn a_call_attempted_under_another_safety_is_not_replayed() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_message(&tool_calls(&[("call-1", "read")]))
+        .expect("append dangling call");
+    store
+        .append_operation_fact(
+            otto_core::session::operation::OperationFact::attempt(
+                otto_core::model::OperationId::new("op-1").expect("operation id"),
+                1,
+                "call-1".to_string(),
+                "read".to_string(),
+            )
+            .with_retry_safety(otto_core::model::RetrySafety::NonIdempotent),
+        )
+        .expect("append attempt");
+    let path = store.path();
+    store.close().expect("close");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    let recovery = reopened.take_recovery().expect("process loss recorded");
+    assert_eq!(recovery.repaired.len(), 1);
+    assert!(recovery.replayable.is_empty());
+    assert_eq!(
+        recovery.interrupted_turn, None,
+        "a pre-change session has no turn records"
+    );
+    reopened.close().expect("close");
 }
 
 // R6: new sessions.

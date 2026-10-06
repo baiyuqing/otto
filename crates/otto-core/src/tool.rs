@@ -162,12 +162,17 @@ pub trait ToolExecutor {
     /// The schemas advertised to the provider, in a stable order.
     fn definitions(&self) -> Vec<ToolDefinition>;
 
-    /// Whether a call to `name` that a session takeover left without a result
-    /// may be run again by the agent instead of being settled as interrupted.
-    /// True only for a tool declared `RetrySafety::ReadOnly`; the default is
-    /// false, so an executor opts in per tool.
-    fn replayable(&self, _name: &str) -> bool {
-        false
+    /// The declared base retry safety of `name`, recorded with each attempt.
+    /// The default is `NonIdempotent`, so an executor opts in per tool.
+    fn retry_safety(&self, _name: &str) -> crate::model::RetrySafety {
+        crate::model::RetrySafety::NonIdempotent
+    }
+
+    /// Whether a call to `name` that process loss left without a result may
+    /// be run again by the agent instead of being settled as interrupted:
+    /// the tool is declared `RetrySafety::ReadOnly`.
+    fn replayable(&self, name: &str) -> bool {
+        self.retry_safety(name) == crate::model::RetrySafety::ReadOnly
     }
 
     /// Whether this tool forces a new provider step before later batch calls.

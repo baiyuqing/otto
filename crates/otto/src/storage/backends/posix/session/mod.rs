@@ -12,7 +12,7 @@ pub(crate) use crate::session::fsops;
 pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
 pub use prepared::{ArchiveResult, Prepared};
 pub(crate) use store::unanswered_calls_from;
-pub use store::{Store, Takeover, UnansweredCall};
+pub use store::{MAX_AUTOMATIC_RESUMES, Recovery, RecoveryCause, Store, UnansweredCall};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -58,8 +58,8 @@ impl SessionHandle for Store {
     fn lease(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
         Store::lease(self)
     }
-    fn take_takeover(&self) -> Option<Takeover> {
-        Store::take_takeover(self)
+    fn take_recovery(&self) -> Option<Recovery> {
+        Store::take_recovery(self)
     }
 }
 

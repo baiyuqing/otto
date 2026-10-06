@@ -31,6 +31,7 @@ use super::pi::{
     PiContentBlock, PiContextEdit, PiCustomMessage, PiEntry, PiMessage, PiOttoDetails, PiUsage,
     decode_pi_otto_details, encode_pi_otto_details,
 };
+use super::turn::{InterruptedTurn, TURN_CUSTOM_TYPE, apply_turn_record, decode_turn_record};
 use super::types::{Header, RuntimeMetadata, Snapshot, Warning};
 use super::{PiError, PiErrorKind};
 
@@ -81,6 +82,9 @@ pub struct ResolvedContext {
     /// The latest `otto.capabilities` entry on the active path, or `None`
     /// when there is none or it is malformed.
     pub observed_capabilities: Option<Capabilities>,
+    /// The newest `otto.turn` start on the active path without a matching
+    /// end; see [`crate::session::turn`].
+    pub interrupted_turn: Option<InterruptedTurn>,
 }
 
 impl Default for ResolvedContext {
@@ -95,6 +99,7 @@ impl Default for ResolvedContext {
             thinking_level: "off".into(),
             operation_ledger: OperationLedger::default(),
             observed_capabilities: None,
+            interrupted_turn: None,
         }
     }
 }
@@ -227,6 +232,15 @@ pub fn build_context(
                             "ignored malformed {CAPABILITIES_CUSTOM_TYPE} entry {}",
                             entry.id
                         ));
+                    }
+                } else if custom.custom_type == TURN_CUSTOM_TYPE {
+                    let raw = custom.data.as_deref().map(RawValue::get);
+                    match decode_turn_record(raw.unwrap_or_default()) {
+                        Some(record) => apply_turn_record(&mut resolved.interrupted_turn, &record),
+                        None => collector.add(format!(
+                            "ignored malformed {TURN_CUSTOM_TYPE} entry {}",
+                            entry.id
+                        )),
                     }
                 } else if custom.custom_type == OPERATION_CUSTOM_TYPE {
                     match decode_operation_raw(custom.data.as_deref()).map_err(|error| {

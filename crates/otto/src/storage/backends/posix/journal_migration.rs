@@ -1049,6 +1049,17 @@ fn reconstruct(dir: &fsops::Dir, domain: Domain, manifest: &Manifest) -> Result<
 
 #[async_trait]
 impl StageImport for JournalStage {
+    async fn journal_references(
+        &self,
+        manifest: &Manifest,
+    ) -> Result<crate::storage::migration::JournalReferences> {
+        let dataset = self.reference_dataset(manifest).await?;
+        Ok(crate::storage::migration::JournalReferences {
+            migration_id: dataset.migration_id,
+            aliases: dataset.aliases,
+            session_ids: dataset.session_ids,
+        })
+    }
     async fn validate_plan(&self, manifest: &Manifest) -> Result<()> {
         self.compatibility(manifest)?;
         let domain = self.domain;
@@ -1688,6 +1699,7 @@ mod tests {
                 StorageRoute {
                     backend: "posix".into(),
                     endpoint: root.to_string_lossy().into_owned(),
+                    namespace_identity: None,
                 },
             )])
         };

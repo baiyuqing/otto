@@ -211,6 +211,32 @@ fn skill_checker(
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     args: &[String],
+    stdin: Box<dyn BufRead + Send + 'static>,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    environment_entries: Vec<Vec<u8>>,
+    terminal: bool,
+    cancel: &CancellationToken,
+    terminate: &super::terminate::Terminate,
+) -> i32 {
+    run_with_backends(
+        args,
+        stdin,
+        stdout,
+        stderr,
+        environment_entries,
+        terminal,
+        cancel,
+        terminate,
+        &crate::runtime::storage::BackendRegistry::default(),
+    )
+    .await
+}
+
+/// Process entry point for statically linked storage extensions.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_backends(
+    args: &[String],
     mut stdin: Box<dyn BufRead + Send + 'static>,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
@@ -218,6 +244,7 @@ pub async fn run(
     terminal: bool,
     cancel: &CancellationToken,
     terminate: &super::terminate::Terminate,
+    backends: &crate::runtime::storage::BackendRegistry,
 ) -> i32 {
     if args
         .first()
@@ -240,7 +267,29 @@ pub async fn run(
         return super::workspace_command::run(&args[1..], stdout, stderr);
     }
     if args.first().is_some_and(|command| command == "storage") {
-        return super::storage::run_async(&args[1..], stdout, stderr).await;
+        if backends.is_empty()
+            && args.get(1).is_none_or(|command| command != "init")
+            && !args.iter().any(|argument| argument == "--to-config")
+        {
+            // Preserve legacy storage commands' environment-independent dispatch.
+            return super::storage::run_async(&args[1..], stdout, stderr).await;
+        }
+        let entries = match capture_environment(environment_entries) {
+            Ok(entries) => entries,
+            Err(message) => return fail(stderr, &message),
+        };
+        let lookup = match environment_lookup(&entries) {
+            Ok(lookup) => lookup,
+            Err(message) => return fail(stderr, &message),
+        };
+        return super::storage::run_async_with_backends(
+            &args[1..],
+            stdout,
+            stderr,
+            backends,
+            &lookup,
+        )
+        .await;
     }
     let startup_started = Instant::now();
     let mut startup_trace: StartupTrace;
@@ -262,7 +311,25 @@ pub async fn run(
                 Ok(home) => home,
                 Err(message) => return fail(stderr, &message),
             };
-            let storage = match crate::runtime::storage::Storage::open_home(Path::new(&home)).await
+            let config = match super::memory_command::startup_configuration(&args[1..], &home) {
+                Ok(config) => config,
+                Err(()) => {
+                    return super::memory_command::run_with_storage(
+                        &args[1..],
+                        stdout,
+                        stderr,
+                        &lookup,
+                        &Default::default(),
+                    );
+                }
+            };
+            let storage = match crate::runtime::storage::Storage::open_home_with(
+                Path::new(&home),
+                backends,
+                &config.storage,
+                &lookup,
+            )
+            .await
             {
                 Ok(storage) => storage,
                 Err(message) => return fail(stderr, &message),
@@ -404,7 +471,14 @@ pub async fn run(
         Err(message) => return fail(stderr, &format!("load config: {message}")),
     };
     startup_trace.mark("config/load");
-    let storage = match crate::runtime::storage::Storage::open_home(Path::new(&home)).await {
+    let storage = match crate::runtime::storage::Storage::open_home_with(
+        Path::new(&home),
+        backends,
+        &config_file.storage,
+        &lookup,
+    )
+    .await
+    {
         Ok(storage) => Arc::new(storage),
         Err(error) => return fail(stderr, &startup.redact(&error)),
     };
@@ -1527,6 +1601,7 @@ fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<String
     }
     let credential_variables = file.plugins.credential_variables();
     keys.extend(credential_variables.iter().map(String::as_str));
+    keys.extend(file.storage.credential_variables());
     keys.extend(["PATH", "TMPDIR", "LANG", "TERM"]);
     keys.into_iter()
         .map(|key| {
@@ -1552,6 +1627,7 @@ pub(super) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
         }
     }
     names.extend(file.plugins.credential_variables());
+    names.extend(file.storage.credential_variables().map(str::to_owned));
     names.into_iter().collect()
 }
 

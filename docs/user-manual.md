@@ -3506,9 +3506,68 @@ root requires another verified transfer so new destination writes are preserved.
 Stop all source processes, including older Otto versions, and prevent them from
 restarting throughout transfer; local locks cannot fence an uncooperating binary.
 
-This build keeps SQL state in local Turso databases and session files in the
-confined POSIX store. Backend route registration is internal, not a user-facing
-backend selector; the transfer command targets another local filesystem root.
+The ordinary binary keeps its local Turso and confined POSIX defaults. It does
+not include MySQL, PostgreSQL or cloud backend implementations. Extension
+binaries can link and register additional domain repository factories; their
+backend names and supported domains are supplied by those extensions.
+
+For a linked extension, user or managed configuration can name backend
+instances and route domains to them. Project configuration cannot redirect
+storage, even in a trusted workspace. A service endpoint is an environment
+binding rather than an inline DSN; credentials belong only in that environment
+value. Driver-specific `options` must be non-secret and supported by the factory.
+
+```toml
+# Example for a binary that actually registers a backend called "postgres".
+# The ordinary Otto binary rejects this unregistered backend.
+[storage.backends.primary]
+backend = "postgres"
+endpoint_env = "OTTO_POSTGRES_DSN"
+
+[storage.routes]
+memory = "primary"
+approvals = "primary"
+workflows = "primary"
+schedule = "primary"
+usage = "primary"
+tasks = "primary"
+reflection = "primary"
+skill_checks = "primary"
+memory_advice = "primary"
+```
+
+Normal startup opens existing published namespaces. Changing this configuration
+does not create an empty replacement database or activate a new endpoint. A
+fresh installation can explicitly initialize an extension's namespace with
+`otto storage init <home> <config-path>`; initialization refuses existing local
+authority state or an existing published route group. Namespace identities are
+checked again on restart. Keep the same captured environment bindings available.
+
+For existing data, a linked extension that implements logical import/export can
+select configured destination domains:
+
+```bash
+otto storage transfer "$HOME" /Volumes/otto-state-new migration-20261006 \
+  --to-config /absolute/path/to/destination.toml
+```
+
+The filesystem destination still retains isolated local state, session journals
+and transfer ownership metadata. Domains selected by the destination config
+use the extension's isolated namespace; remaining domains use their normal
+local destination. Every selected domain must exist in the source snapshot.
+The transfer validates all linked state, copies bounded chunks, verifies actual
+staged records and receipts, then publishes one route generation. Install the
+matching user/managed configuration before restarting; its preferences must
+agree with the publication. Repeating the same command resumes or reconciles
+the original receipt and refuses a changed namespace. Source and staging data
+remain until explicit cleanup. The existing `storage abort` and stopped-process
+rules apply. A reverse transfer can return state to local Turso/POSIX storage;
+remove the old route preferences only after that transfer publishes.
+
+Extensions need the declared domain profiles, migrations and conformance gates.
+Sessions, workspace files and executable trust retain their existing local
+boundaries. This is an offline procedure for coordinated processes on one host;
+local admission locks do not establish distributed writer fencing.
 
 To inspect usage windows without opening the file with SQLite:
 

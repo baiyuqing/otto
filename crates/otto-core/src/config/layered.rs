@@ -227,6 +227,7 @@ fn redact_table(table: &mut Table, path: &[String]) {
             || matches!(
                 key.as_str(),
                 "bindings"
+                    | "storage"
                     | "env"
                     | "headers"
                     | "api_key_env"

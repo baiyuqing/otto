@@ -31,6 +31,7 @@
 
 pub mod evidence;
 pub mod guard;
+pub mod migration;
 pub mod output;
 pub mod prompt;
 pub mod repository;

@@ -8,6 +8,7 @@
 //! layer sets [`tools::TurnOrigin`], the composition roots build a
 //! [`worker::Worker`] with a [`worker::PromptRunner`] and a [`worker::Sink`].
 
+pub mod migration;
 pub mod store;
 pub mod time;
 pub mod tools;

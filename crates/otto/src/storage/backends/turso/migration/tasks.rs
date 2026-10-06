@@ -6,37 +6,8 @@ use super::{
 use crate::storage::backends::turso::tasks::{self, Store};
 pub struct TaskCodec;
 const KINDS: &[Kind] = &[Kind {
-    name: "subagent_task",
+    record: &crate::subagent::migration::RECORDS[0],
     table: "tasks",
-    fields: &[
-        "parent_session",
-        "task_id",
-        "workspace",
-        "parent_session_path",
-        "name",
-        "agent",
-        "description",
-        "model",
-        "context",
-        "prompt",
-        "status",
-        "created_at",
-        "started_at",
-        "finished_at",
-        "steps",
-        "tool_calls",
-        "last_tool",
-        "input_tokens",
-        "output_tokens",
-        "cached_tokens",
-        "result",
-        "error",
-        "session_path",
-        "pid",
-        "process_started_at",
-    ],
-    keys: &["parent_session", "task_id"],
-    revision: Some("finished_at"),
 }];
 fn interrupted(record: &mut NamedRecord) -> Result<()> {
     if matches!(record.fields["status"].as_str(), Some("queued" | "running")) {

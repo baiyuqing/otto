@@ -1,0 +1,616 @@
+#[cfg(feature = "storage-conformance")]
+#[path = "external_storage/support.rs"]
+mod support;
+
+#[cfg(feature = "storage-conformance")]
+mod tests {
+    use super::support;
+    use otto::approval::{self, Kind, Proposal, Scope, Subject};
+    use otto::runtime::storage::{BackendRegistry, Storage};
+    use std::collections::HashMap;
+    use std::sync::{Arc, atomic::Ordering};
+    use support::JsonBackend;
+
+    fn config() -> otto_core::config::File {
+        otto_core::config::parse("[storage.backends.primary]\nbackend='probe'\nendpoint_env='PROBE_ENDPOINT'\n[storage.routes]\napprovals='primary'\n").unwrap()
+    }
+    fn environment() -> HashMap<String, String> {
+        HashMap::from([("PROBE_ENDPOINT".into(), "opaque-service-descriptor".into())])
+    }
+    fn make_registry(backend: Arc<JsonBackend>) -> BackendRegistry {
+        let mut registry = BackendRegistry::default();
+        registry.register("probe".into(), backend).unwrap();
+        registry
+    }
+    fn proposal() -> Proposal {
+        Proposal {
+            kind: Kind::Confirmation,
+            scope: Scope {
+                workspace: "/contract".into(),
+                session_id: "memory:contract".into(),
+                task_id: String::new(),
+                run_id: String::new(),
+            },
+            subject: Subject {
+                tool_call_id: String::new(),
+                source: "conversation".into(),
+                id: "operation".into(),
+                version: "1".into(),
+                details: "contract".into(),
+            },
+            title: "Review".into(),
+            reason: "test".into(),
+            persistent: false,
+            blocking: true,
+            expires_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_storage_dispatch_does_not_require_a_process_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let command = vec![
+            "window-peaks".into(),
+            temp.path().join("missing.db").display().to_string(),
+            "s".into(),
+        ];
+        let mut expected_out = Vec::new();
+        let mut expected_err = Vec::new();
+        let expected =
+            otto::cli::storage::run_async(&command, &mut expected_out, &mut expected_err).await;
+        let mut args = vec!["storage".into()];
+        args.extend(command);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = otto::cli::run::run(
+            &args,
+            Box::new(std::io::Cursor::new(Vec::<u8>::new())),
+            &mut out,
+            &mut err,
+            vec![vec![255]],
+            false,
+            &Default::default(),
+            &Default::default(),
+        )
+        .await;
+        assert_eq!((code, out, err), (expected, expected_out, expected_err));
+    }
+
+    #[test]
+    fn public_conformance_checks_run_against_native_and_independent_ports() {
+        use otto::storage::conformance;
+        let temp = tempfile::tempdir().unwrap();
+        let native = Storage::default();
+        let service = approval::Service::in_memory().unwrap();
+        service.set_auto_mode(&proposal().scope, false).unwrap();
+        let expected = service.create(proposal()).unwrap();
+        let mut next = expected.clone();
+        next.state = approval::State::Withdrawn;
+        conformance::approvals(
+            native
+                .approvals(&temp.path().join("approvals.db"))
+                .unwrap()
+                .as_ref(),
+            "contract",
+            &expected,
+            &next,
+        )
+        .unwrap();
+        let independent = JsonBackend::new(temp.path().join("independent.json"), "probe:contract");
+        conformance::approvals(independent.store.as_ref(), "contract", &expected, &next).unwrap();
+        let now = chrono::Utc::now();
+        let memory = native
+            .memory(&temp.path().join("memory.db"), Default::default())
+            .unwrap();
+        let record = conformance::memory(
+            memory.as_ref(),
+            &otto::memory::UpsertRequest {
+                record: otto::memory::Record {
+                    id: "record".into(),
+                    created_at: now,
+                    updated_at: now,
+                    source: otto::memory::Provenance {
+                        origin: Some(otto::memory::Origin::Human),
+                        ..Default::default()
+                    },
+                    scope: otto::memory::Scope::new("workspace", "contract"),
+                    kind: "fact".into(),
+                    key: "key".into(),
+                    text: "contract record".into(),
+                    confidence: 1.0,
+                    ..Default::default()
+                },
+                expected_revision: None,
+            },
+        )
+        .expect("memory contract");
+        conformance::memory_queries(memory.as_ref(), &record, "contract").unwrap();
+        let first = native.approvals(&temp.path().join("race.db")).unwrap();
+        let second = native.approvals(&temp.path().join("race.db")).unwrap();
+        conformance::approval_race(first, second, &expected, &next).unwrap();
+        let independent = JsonBackend::new(temp.path().join("race.json"), "probe:race");
+        conformance::approval_race(
+            independent.store.clone(),
+            independent.store.clone(),
+            &expected,
+            &next,
+        )
+        .unwrap();
+        conformance::schedule(
+            native
+                .schedule(&temp.path().join("schedule.db"))
+                .unwrap()
+                .as_ref(),
+            otto::schedule::store::NewItem {
+                origin: otto::schedule::Origin::terminal(),
+                session_id: "memory:contract".into(),
+                workspace: "/contract".into(),
+                kind: otto::schedule::Kind::Text,
+                body: "contract".into(),
+                repeat: None,
+                local_time: None,
+                due_at: now,
+            },
+            now,
+        )
+        .expect("schedule contract");
+        let definition = otto::workflow::Definition {
+            name: "contract".into(),
+            description: String::new(),
+            steps: vec![otto::workflow::Step {
+                id: "one".into(),
+                kind: otto::workflow::StepKind::Agent,
+                agent: "worker".into(),
+                prompt: "contract".into(),
+                needs: Vec::new(),
+            }],
+            agents: Vec::new(),
+            hash: "hash".into(),
+        };
+        conformance::workflow(
+            native
+                .workflow(&temp.path().join("workflows.db"))
+                .unwrap()
+                .as_ref(),
+            "run",
+            &definition,
+        )
+        .expect("workflow contract");
+        conformance::tasks(
+            native
+                .tasks(&temp.path().join("tasks.db"))
+                .unwrap()
+                .as_ref(),
+            &otto::subagent::record::TaskContext {
+                parent_session: "memory:contract".into(),
+                workspace: "/contract".into(),
+                ..Default::default()
+            },
+            &otto::subagent::tasks::Task {
+                id: "task".into(),
+                status: otto::subagent::tasks::TaskStatus::Succeeded,
+                created_at: Some(now),
+                finished_at: Some(now),
+                ..Default::default()
+            },
+        )
+        .expect("task contract");
+        conformance::usage(
+            native
+                .usage(&temp.path().join("usage.db"))
+                .unwrap()
+                .as_ref(),
+            &otto::usage::UsageRecord {
+                occurred_at: now.to_rfc3339(),
+                context: otto::usage::Context {
+                    session_id: "memory:contract".into(),
+                    ..Default::default()
+                },
+                kind: "provider",
+                usage: Default::default(),
+                usage_present: true,
+            },
+        )
+        .expect("usage contract");
+        conformance::reflection(
+            native
+                .reflection(&temp.path().join("reflection.db"))
+                .unwrap()
+                .as_ref(),
+            &otto::reflection::store::RunRow {
+                id: "run".into(),
+                session_id: "memory:contract".into(),
+                trigger: "manual".into(),
+                started_at: now.to_rfc3339(),
+                finished_at: now.to_rfc3339(),
+                status: otto::reflection::store::Status::Ok,
+                from_entry: String::new(),
+                to_entry: "entry".into(),
+                input_bytes: 0,
+                truncated: false,
+                memories_proposed: 0,
+                memories_dropped: 0,
+                skills_written: 0,
+                detail: String::new(),
+            },
+        )
+        .expect("reflection contract");
+        let result = otto::skill::check_repository::ResultJson::Rules { rules: Vec::new() };
+        conformance::skill_checks(
+            native
+                .skill_checks(&temp.path().join("checks.db"))
+                .unwrap()
+                .as_ref(),
+            &otto::skill::check_repository::NewRow {
+                content_sha256: &"a".repeat(64),
+                questions_sha256: &"b".repeat(64),
+                skill: "contract",
+                path: "/contract",
+                source: "rules",
+                model: "m",
+                checked_at: &now.to_rfc3339(),
+                result: &result,
+            },
+        )
+        .expect("skill audit contract");
+        conformance::memory_advice(
+            native
+                .memory_advice(&temp.path().join("advice.db"))
+                .unwrap()
+                .as_ref(),
+            &otto::memory::advice::audit::NewRow {
+                model: "m".into(),
+                auxiliary: false,
+                scope: "workspace".into(),
+                request: "{}".into(),
+                response: None,
+                outcome: "ok",
+                error: None,
+                latency_ms: 0,
+            },
+        )
+        .expect("advice audit contract");
+    }
+
+    #[tokio::test]
+    async fn storage_credentials_and_project_preferences_stay_below_public_boundaries() {
+        use otto::runtime::boundary::{BoundaryInputs, boundary_secret_values};
+        let file = config();
+        let values = HashMap::from([(
+            "PROBE_ENDPOINT".into(),
+            "postgres://fixture-user:fixture-value@localhost/fixture".into(),
+        )]);
+        let (secrets, complete) = boundary_secret_values(
+            &BoundaryInputs {
+                config: &file,
+                environment: &values,
+                sandbox_secrets: &[],
+                sandbox_secrets_complete: true,
+                overrides_base_url: "",
+            },
+            None,
+        );
+        assert!(complete);
+        assert!(secrets.iter().any(|value| value == "fixture-value"));
+        let snapshot = otto::sandbox::environment::resolve_environment(
+            &otto::sandbox::environment::EnvironmentOptions {
+                host_entries: vec![b"PROBE_ENDPOINT=opaque-service-descriptor".to_vec()],
+                provider_names: vec!["PROBE_ENDPOINT".into()],
+                allow_names: vec!["PROBE_ENDPOINT".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            snapshot
+                .entries()
+                .unwrap()
+                .iter()
+                .all(|entry| !entry.starts_with("PROBE_ENDPOINT="))
+        );
+        let endpoint = otto::runtime::storage::StorageEndpoint::Service(Arc::from(
+            "opaque-service-descriptor",
+        ));
+        assert!(!format!("{endpoint:?}").contains("opaque-service-descriptor"));
+        use otto_core::config::layered::{Layer, Merged};
+        let mut merged = Merged::default();
+        merged
+            .add(&toml::to_string(&file).unwrap(), "user", Layer::User, false)
+            .unwrap();
+        let mut changed = file.clone();
+        changed
+            .storage
+            .backends
+            .get_mut("primary")
+            .unwrap()
+            .endpoint_env = Some("OTHER_ENDPOINT".into());
+        merged
+            .add(
+                &toml::to_string(&changed).unwrap(),
+                "project",
+                Layer::Shared,
+                true,
+            )
+            .unwrap();
+        assert_eq!(merged.file().unwrap().storage, file.storage);
+        assert!(
+            !toml::to_string(&merged.explained().values)
+                .unwrap()
+                .contains("PROBE_ENDPOINT")
+        );
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let backend = Arc::new(JsonBackend::new(
+            temp.path().join("state.json"),
+            "probe:startup",
+        ));
+        let registry = make_registry(backend);
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, toml::to_string(&file).unwrap()).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let init = vec![
+            "init".into(),
+            home.display().to_string(),
+            path.display().to_string(),
+        ];
+        assert_eq!(
+            otto::cli::storage::run_async_with_backends(
+                &init,
+                &mut out,
+                &mut err,
+                &registry,
+                &environment()
+            )
+            .await,
+            0
+        );
+        let args = vec![
+            "memory".into(),
+            "status".into(),
+            "--config".into(),
+            path.display().to_string(),
+        ];
+        let entries = vec![
+            format!("HOME={}", home.display()).into_bytes(),
+            b"PROBE_ENDPOINT=opaque-service-descriptor".to_vec(),
+        ];
+        out.clear();
+        err.clear();
+        assert_eq!(
+            otto::cli::run::run_with_backends(
+                &args,
+                Box::new(std::io::Cursor::new(Vec::<u8>::new())),
+                &mut out,
+                &mut err,
+                entries,
+                false,
+                &Default::default(),
+                &Default::default(),
+                &registry
+            )
+            .await,
+            0,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        assert!(!String::from_utf8_lossy(&out).contains("opaque-service-descriptor"));
+    }
+
+    #[tokio::test]
+    async fn external_registration_bootstrap_restart_and_namespace_guard() {
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let path = temp.path().join("external.json");
+        let backend = Arc::new(JsonBackend::new(path.clone(), "probe:one"));
+        let registry = make_registry(backend);
+        let configuration = config();
+        assert!(
+            Storage::open_home_with(&home, &registry, &configuration.storage, &environment())
+                .await
+                .is_err()
+        );
+        let config_path = temp.path().join("target.toml");
+        std::fs::write(&config_path, toml::to_string(&configuration).unwrap()).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let args = vec![
+            "init".into(),
+            home.display().to_string(),
+            config_path.display().to_string(),
+        ];
+        assert_eq!(
+            otto::cli::storage::run_async_with_backends(
+                &args,
+                &mut out,
+                &mut err,
+                &registry,
+                &environment()
+            )
+            .await,
+            0,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        let storage =
+            Storage::open_home_with(&home, &registry, &configuration.storage, &environment())
+                .await
+                .unwrap();
+        let service =
+            approval::Service::from_store(storage.approvals(&home.join("unused.db")).unwrap())
+                .unwrap();
+        service.set_auto_mode(&proposal().scope, false).unwrap();
+        let request = service.create(proposal()).unwrap();
+        let events = service
+            .events("/contract", Some("memory:contract"), 0)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(!home.join("unused.db").exists());
+        drop(service);
+        drop(storage);
+        let reopened = make_registry(Arc::new(JsonBackend::new(path.clone(), "probe:one")));
+        let storage =
+            Storage::open_home_with(&home, &reopened, &configuration.storage, &environment())
+                .await
+                .unwrap();
+        assert_eq!(
+            storage
+                .approvals(&home.join("unused.db"))
+                .unwrap()
+                .load(&request.id)
+                .unwrap(),
+            request
+        );
+        drop(storage);
+        let wrong = make_registry(Arc::new(JsonBackend::new(path, "probe:other")));
+        assert!(
+            Storage::open_home_with(&home, &wrong, &configuration.storage, &environment())
+                .await
+                .is_err()
+        );
+        assert!(
+            Storage::open_home_with(
+                &home,
+                &Default::default(),
+                &configuration.storage,
+                &environment()
+            )
+            .await
+            .is_err()
+        );
+        let bytes = std::fs::read_to_string(home.join(".otto/storage/authority.json")).unwrap();
+        assert!(!bytes.contains("opaque-service-descriptor"));
+        err.clear();
+        assert_eq!(
+            otto::cli::storage::run_async_with_backends(
+                &args,
+                &mut out,
+                &mut err,
+                &reopened,
+                &environment()
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_to_independent_json_and_reverse_preserve_authority_and_receipts() {
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let service = approval::Service::open(&home.join(".otto/approvals.db")).unwrap();
+        service.set_auto_mode(&proposal().scope, false).unwrap();
+        let expected = service.create(proposal()).unwrap();
+        let events = service.events("/contract", None, 0).unwrap();
+        drop(service);
+        let backend = Arc::new(JsonBackend::new(
+            temp.path().join("external.json"),
+            "probe:migrated",
+        ));
+        backend.lose_import_ack.store(true, Ordering::SeqCst);
+        let registry = make_registry(backend.clone());
+        let target = temp.path().join("target.toml");
+        std::fs::write(&target, toml::to_string(&config()).unwrap()).unwrap();
+        let staging = temp.path().join("stage");
+        let args = vec![
+            "transfer".into(),
+            home.display().to_string(),
+            staging.display().to_string(),
+            "first".into(),
+            "--to-config".into(),
+            target.display().to_string(),
+        ];
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(
+            otto::cli::storage::run_async_with_backends(
+                &args,
+                &mut out,
+                &mut err,
+                &registry,
+                &environment()
+            )
+            .await,
+            0,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        assert_eq!(
+            otto::cli::storage::run_async_with_backends(
+                &args,
+                &mut out,
+                &mut err,
+                &registry,
+                &environment()
+            )
+            .await,
+            0
+        );
+        backend.check_import_receipts().await.unwrap();
+        let wrong = make_registry(Arc::new(JsonBackend::new(
+            temp.path().join("external.json"),
+            "probe:other",
+        )));
+        assert_eq!(
+            otto::cli::storage::run_async_with_backends(
+                &args,
+                &mut out,
+                &mut err,
+                &wrong,
+                &environment()
+            )
+            .await,
+            1
+        );
+        let config_dir = home.join(".config/otto");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::copy(&target, config_dir.join("config.toml")).unwrap();
+        let storage = Storage::open_home_with(&home, &registry, &config().storage, &environment())
+            .await
+            .unwrap();
+        let repository = storage.approvals(&home.join("unused.db")).unwrap();
+        assert_eq!(repository.load(&expected.id).unwrap(), expected);
+        assert_eq!(repository.events("/contract", None, 0).unwrap(), events);
+        drop(repository);
+        drop(storage);
+        let destination = temp.path().join("reverse");
+        let args = vec![
+            "transfer".into(),
+            home.display().to_string(),
+            destination.display().to_string(),
+            "reverse".into(),
+        ];
+        err.clear();
+        assert_eq!(
+            otto::cli::storage::run_async_with_backends(
+                &args,
+                &mut out,
+                &mut err,
+                &registry,
+                &environment()
+            )
+            .await,
+            0,
+            "{}",
+            String::from_utf8_lossy(&err)
+        );
+        // Explicit preference changes cannot bypass route publication in either direction.
+        assert!(
+            Storage::open_home_with(&home, &registry, &config().storage, &environment())
+                .await
+                .is_err()
+        );
+        let storage = Storage::open_home(&home).await.unwrap();
+        assert_eq!(
+            storage
+                .approvals(&home.join("unused.db"))
+                .unwrap()
+                .load(&expected.id)
+                .unwrap(),
+            expected
+        );
+    }
+}

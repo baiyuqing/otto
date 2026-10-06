@@ -23,6 +23,7 @@ pub mod compaction;
 pub mod context;
 pub mod operation;
 pub mod pi;
+pub mod turn;
 pub mod types;
 
 pub use codec::{PiRecord, decode_pi_entry, decode_pi_file, decode_pi_header, encode_pi_record};
@@ -42,6 +43,10 @@ pub use pi::{
     PiCompaction, PiContentBlock, PiContextEdit, PiCost, PiCustom, PiCustomMessage, PiEntry,
     PiFile, PiHeader, PiLabel, PiMessage, PiModelChange, PiOttoDetails, PiSessionInfo,
     PiThinkingLevelChange, PiUsage, decode_pi_otto_details, encode_pi_otto_details,
+};
+pub use turn::{
+    InterruptedTurn, TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, decode_turn_record,
+    encode_turn_record,
 };
 pub use types::{
     CURRENT_VERSION, CompactionCheckpoint, CompactionDetails, CompactionMetadata, Header,
@@ -232,6 +237,12 @@ pub trait Session {
     /// when there is none. Like `append_custom`, it has no
     /// default body: every implementation forwards or states its behavior.
     fn observed_capabilities(&self) -> Option<Capabilities>;
+
+    /// The newest `otto.turn` start on the active path with no matching end:
+    /// a turn process loss interrupted. `None` when every recorded turn
+    /// ended or none was recorded. No default body, like
+    /// [`Self::observed_capabilities`].
+    fn interrupted_turn(&self) -> Option<InterruptedTurn>;
 }
 
 /// Tool calls from the most recent assistant message that have no result yet.
@@ -252,6 +263,7 @@ struct State {
     operation_facts: Vec<OperationFact>,
     operation_ledger: OperationLedger,
     observed_capabilities: Option<Capabilities>,
+    interrupted_turn: Option<InterruptedTurn>,
 }
 
 impl State {
@@ -498,7 +510,24 @@ impl Session for MemorySession {
             .clone()
     }
 
+    fn interrupted_turn(&self) -> Option<InterruptedTurn> {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .interrupted_turn
+            .clone()
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        if custom_type == TURN_CUSTOM_TYPE {
+            let record = decode_turn_record(data)
+                .ok_or_else(|| SessionError::Persist("malformed otto.turn data".into()))?;
+            turn::apply_turn_record(
+                &mut self.state.lock().expect("session mutex").interrupted_turn,
+                &record,
+            );
+            return Ok(());
+        }
         if custom_type == CAPABILITIES_CUSTOM_TYPE {
             let capabilities = decode_capabilities(data)
                 .ok_or_else(|| SessionError::Persist("malformed otto.capabilities data".into()))?;

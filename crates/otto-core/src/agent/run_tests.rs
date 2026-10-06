@@ -2623,6 +2623,10 @@ impl Session for FailingSession {
         self.inner.observed_capabilities()
     }
 
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2694,6 +2698,10 @@ impl Session for OperationFailingSession {
         self.inner.observed_capabilities()
     }
 
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2757,6 +2765,10 @@ impl Session for AsyncOrderingSession {
     }
     fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
         self.inner.observed_capabilities()
+    }
+
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
     }
 
     async fn append_custom(
@@ -3740,5 +3752,211 @@ async fn a_summarized_notice_is_carried_in_the_capability_updates_block() {
     assert!(
         !second_request.contains("capability-updates"),
         "the carried block reached the summarizer: {second_request}"
+    );
+}
+
+// -- turn records ----------------------------------------------------------
+
+/// A [`MemorySession`] that also keeps every `otto.turn` record it is given.
+#[derive(Default)]
+struct TurnRecordingSession {
+    inner: MemorySession,
+    turns: Mutex<Vec<crate::session::TurnRecord>>,
+}
+
+impl TurnRecordingSession {
+    fn turns(&self) -> Vec<crate::session::TurnRecord> {
+        self.turns.lock().expect("turns").clone()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Session for TurnRecordingSession {
+    fn messages(&self) -> Vec<Message> {
+        self.inner.messages()
+    }
+    async fn append(&self, message: Message) -> Result<(), crate::session::SessionError> {
+        self.inner.append(message).await
+    }
+    fn latest_compaction(&self) -> Option<crate::session::CompactionMetadata> {
+        self.inner.latest_compaction()
+    }
+    async fn append_compaction(
+        &self,
+        checkpoint: crate::session::CompactionCheckpoint,
+    ) -> Result<crate::session::CompactionMetadata, crate::session::SessionError> {
+        self.inner.append_compaction(checkpoint).await
+    }
+    async fn append_operation_fact(
+        &self,
+        fact: crate::session::OperationFact,
+    ) -> Result<(), crate::session::SessionError> {
+        self.inner.append_operation_fact(fact).await
+    }
+    fn operation_ledger(&self) -> crate::session::OperationLedger {
+        self.inner.operation_ledger()
+    }
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.inner.observed_capabilities()
+    }
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
+    }
+    async fn append_custom(
+        &self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), crate::session::SessionError> {
+        if custom_type == crate::session::TURN_CUSTOM_TYPE {
+            self.turns
+                .lock()
+                .expect("turns")
+                .push(crate::session::decode_turn_record(data).expect("valid turn record"));
+        }
+        self.inner.append_custom(custom_type, data).await
+    }
+}
+
+fn started_trigger(
+    record: &crate::session::TurnRecord,
+) -> (crate::session::TurnTrigger, u32, Option<String>) {
+    match record {
+        crate::session::TurnRecord::Started {
+            trigger,
+            attempt,
+            resumes,
+            ..
+        } => (*trigger, *attempt, resumes.clone()),
+        other => panic!("expected a start record, got {other:?}"),
+    }
+}
+
+fn ended_outcome(record: &crate::session::TurnRecord) -> crate::session::TurnOutcome {
+    match record {
+        crate::session::TurnRecord::Ended { outcome, .. } => *outcome,
+        other => panic!("expected an end record, got {other:?}"),
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn every_turn_writes_a_start_and_a_matching_end() {
+    use crate::session::{TurnOutcome, TurnTrigger};
+    let provider = FakeProvider::new(vec![
+        Turn::text("ok"),
+        Turn {
+            events: Vec::new(),
+            outcome: Err(ProviderError::Other("boom".into())),
+        },
+    ]);
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        TurnRecordingSession::default(),
+        options(),
+    );
+    agent
+        .run("first", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("completed turn");
+    agent
+        .run("second", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect_err("failed turn");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    agent
+        .run("third", &mut |_| {}, &cancel)
+        .await
+        .expect_err("cancelled turn");
+
+    let turns = agent.session().turns();
+    assert_eq!(turns.len(), 6, "{turns:?}");
+    for (index, outcome) in [
+        TurnOutcome::Completed,
+        TurnOutcome::Failed,
+        TurnOutcome::Cancelled,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            started_trigger(&turns[index * 2]),
+            (TurnTrigger::User, 1, None)
+        );
+        assert_eq!(ended_outcome(&turns[index * 2 + 1]), outcome);
+    }
+    assert_eq!(agent.session().interrupted_turn(), None);
+}
+
+/// A session whose last turn started and never ended, as process loss
+/// leaves it.
+async fn interrupted_session() -> TurnRecordingSession {
+    let session = TurnRecordingSession::default();
+    session
+        .inner
+        .append_custom(
+            crate::session::TURN_CUSTOM_TYPE,
+            &crate::session::encode_turn_record(&crate::session::TurnRecord::started(
+                "op_old",
+                crate::session::TurnTrigger::User,
+                1,
+                None,
+            )),
+        )
+        .await
+        .expect("seed start record");
+    session
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_wake_turn_after_an_interrupted_turn_is_its_recovery() {
+    use crate::session::TurnTrigger;
+    let inbox = Arc::new(Inbox::default());
+    inbox.push(Notification {
+        kind: Some(NotificationKind::Message),
+        text: "The previous Otto process stopped".into(),
+        ..Notification::default()
+    });
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("resumed")]),
+        EchoExecutor::default(),
+        interrupted_session().await,
+        Options {
+            mailbox: inbox,
+            ..options()
+        },
+    );
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("recovery turn");
+    let turns = agent.session().turns();
+    assert_eq!(
+        started_trigger(&turns[0]),
+        (TurnTrigger::Recovery, 2, Some("op_old".to_string()))
+    );
+    assert_eq!(agent.session().interrupted_turn(), None);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_prompt_after_an_interrupted_turn_starts_a_new_chain() {
+    use crate::session::TurnTrigger;
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("ok")]),
+        EchoExecutor::default(),
+        interrupted_session().await,
+        options(),
+    );
+    agent
+        .run("go on", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("prompt turn");
+    assert_eq!(
+        started_trigger(&agent.session().turns()[0]),
+        (TurnTrigger::User, 1, None)
     );
 }

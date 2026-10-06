@@ -1267,10 +1267,37 @@ Notes:
   before Otto exits can be delivered again after the session is reopened.
   Archiving the session deletes the file. A write failure is not reported.
   `--no-session` keeps notifications in memory only.
-- When a session is reopened after an exit in the middle of a tool call, the
-  first call in the last assistant message that has no result is recorded as
-  an error result saying the call may have run; the calls after it are
-  recorded as not executed. The model sees these results on its next turn.
+- Each turn writes an `otto.turn` start entry before anything else and an end
+  entry (`completed`, `failed`, or `cancelled`) when it returns. Neither
+  reaches the model.
+- When a session is reopened after its Otto process stopped in the middle of a
+  turn (killed, out of memory, crashed, or the host lost power), Otto
+  recovers it:
+  - Tool calls in the last assistant message without results are run again
+    when every one of them names `read`, `ls`, `grep`, `find`,
+    `memory_search`, `agent_status`, `remind_status`, or `list_models`, the
+    tool had the same read-only declaration when the call started, and the
+    call was not already run again once. Otherwise the first such call is
+    recorded as an error result saying the call may have run, and the calls
+    after it as not executed.
+  - Otto queues one notification saying the previous process stopped,
+    listing the calls run again, the calls without results, and each
+    sub-agent task that had not finished. Each listed task is recorded as
+    `interrupted`, so the model can continue it with `agent` `resume`.
+  - The notification starts a wake turn in the REPL, the TUI, `otto serve`,
+    and `otto acp`, which continues the interrupted turn from the transcript.
+    The resumed request is a new provider request; partial model output from
+    before the stop is not kept. With `--prompt`, the notification is
+    delivered before the prompt.
+  - Otto resumes a turn on its own at most once. When the resumed turn is
+    itself interrupted, the next open records error results for its calls
+    without results, queues no notification, and prints
+    `recovery: turn <id> was interrupted again after its automatic resume; not resuming`
+    to standard error; the next prompt continues normally.
+  - A turn that ended with an error or was cancelled is not resumed. Sessions
+    written before `otto.turn` entries existed are recovered only when they
+    end with calls without results. Nothing is resumed until a frontend opens
+    the session; `otto serve` does not reopen sessions on start.
 - Manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
   bounded file metadata.
@@ -1301,17 +1328,13 @@ lease in `<session-id>.lease/` beside the session file.
 - On a takeover Otto moves the old log to
   `<session-id>.lease/fenced-<n>.jsonl` and continues from a copy that holds
   only its complete records, so a write from the stopped host after that point
-  does not reach the session. Tool calls without results get the error results
-  described above, except when every such call names `read`, `ls`, `grep`,
-  `find`, or `memory_search`: Otto then runs them again itself, before the
-  next model request, as the next attempt of the same operation, and lists
-  them in the notification as run again. A call that was already run again
-  once and was interrupted again gets the error result instead. Otto then queues one notification to the model that names
-  the stopped host and pid, the calls without results (marked "may have run"
-  or "not executed"), and each sub-agent task that had not finished, and starts
-  a wake turn in the REPL, the TUI, `otto serve`, and `otto acp`. With `--prompt`, the
-  notification is delivered before the prompt. Each listed task is recorded as
-  `interrupted`; a task that cannot be recorded is reported as a warning on
+  does not reach the session. The session is then recovered as after a
+  stopped process (see the session file description above): read-only calls
+  without results are run again, other calls get error results, and one
+  notification names the stopped host and pid, the calls without results
+  (marked "may have run" or "not executed"), and each sub-agent task that had
+  not finished, and starts a wake turn that continues the interrupted turn.
+  A task that cannot be recorded as `interrupted` is reported as a warning on
   standard error. No notification is queued when there is nothing to report
   (no call without a result, no unfinished task, and the session ends on a
   finished assistant reply), or when sub-agents are disabled or no provider is
@@ -2100,7 +2123,7 @@ ends. A session queues at most 16 turns; the 17th request returns
 A queued turn has an id and can be read, followed and cancelled through the
 turn routes. Its event stream sends nothing until it starts. Cancelling it
 removes it from the queue and ends it `canceled`. A server-started wake turn
-(`trigger` `task`) starts only when no turn is running or queued.
+(`trigger` `task` or `recovery`) starts only when no turn is running or queued.
 `POST .../compact` returns `409 turn_active` while a turn runs or is queued.
 On shutdown, queued turns end `canceled` without starting.
 
@@ -2304,8 +2327,10 @@ only way to stop it.
 ```
 
 `turn` is `null` when no turn has run yet on this session. `trigger` is
-`user` for a turn started by `POST .../turns` and `task` for one the server
-started to deliver a finished sub-agent task. The session object
+`user` for a turn started by `POST .../turns`, `task` for one the server
+started to deliver a finished sub-agent task or another notification, and
+`recovery` for one that resumes a turn interrupted when the previous Otto
+process stopped. The session object
 never includes the session's file path; the session ID is the handle used by
 every endpoint.
 

@@ -297,6 +297,10 @@ impl Session for SharedTranscript {
         self.0.observed_capabilities()
     }
 
+    fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+        self.0.interrupted_turn()
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2688,6 +2692,10 @@ mod tests {
 
         fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
             self.inner.observed_capabilities()
+        }
+
+        fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+            self.inner.interrupted_turn()
         }
 
         async fn append_custom(

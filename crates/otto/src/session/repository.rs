@@ -7,7 +7,7 @@ use otto_core::session::{
     Header, ListResult, RuntimeMetadata, Session, SessionInfo, Snapshot, Warning,
 };
 
-use super::{ArchiveResult, Takeover};
+use super::{ArchiveResult, Recovery};
 
 /// The current session writer authority, independent of its storage protocol.
 pub trait WriterOwnership: std::fmt::Debug + Send + Sync {
@@ -38,7 +38,7 @@ pub trait SessionHandle: Session + Send + Sync {
         None
     }
 
-    fn take_takeover(&self) -> Option<Takeover> {
+    fn take_recovery(&self) -> Option<Recovery> {
         None
     }
 }

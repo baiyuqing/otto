@@ -1,13 +1,4 @@
-//! Turns [`super::app::App`] state into ratatui widgets.
-//!
-//! ponytail: only `/resume`, `/archive`, and `/model`'s profile choice are
-//! genuinely a *selection*; the rest are a fixed block of text with no
-//! interaction, so those render as ordinary transcript entries (see
-//! [`super::app`]'s module doc) drawn by the same transcript paragraph as
-//! everything else. `/resume`, `/archive`, and `/model` share one
-//! [`super::app::Picker`] overlay rather than three near-identical dedicated
-//! screens. Upgrade path: give any of these a dedicated layout if a user
-//! reports the shared one as confusing.
+//! Terminal shell composition; shared widgets render feature surfaces.
 
 use std::time::Duration;
 
@@ -15,17 +6,14 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Row, Table, TableState,
-    Wrap,
-};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, ApprovalDialog, MemoryReviewDialog, TurnStatus};
-use super::commands::{Completion, SLASH_COMMANDS};
+use super::app::{App, TurnStatus};
+use super::commands::Completion;
 use super::entries::Entry;
 use super::layout::{
-    INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN, escape_plain_text,
+    INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN,
     escape_single_line_text, footer_workspace, format_context_percentage, format_token_count,
 };
 use super::transcript;
@@ -35,14 +23,25 @@ use crate::subagent::tasks::{Task, TaskStatus};
 /// Draws one frame.
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
-        let message = format!(
-            "Terminal too small: resize to at least {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}."
-        );
-        frame.render_widget(Paragraph::new(message).alignment(Alignment::Center), area);
+    if let Some(view) = app.active_view() {
+        let Some(surface) = app.surfaces.top() else {
+            return;
+        };
+        frame.render_widget(Clear, area);
+        let geometry = super::widgets::draw_surface(frame, area, &view, &surface.state);
+        *app.geometry.borrow_mut() = geometry;
         return;
     }
-
+    if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Terminal too small: resize to at least {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}."
+            ))
+            .alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
     let content_area = side_margin(area);
     let panel_tasks = visible_panel_tasks(&app.tasks);
     let (composer_height, panel_height) = composer_and_panel_height(
@@ -51,21 +50,8 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
         content_area.height,
         panel_row_count(panel_tasks.len()),
     );
-    // A pending approval sits directly above the composer, where the eyes are,
-    // in the slot the suggestion list would use.
-    let approval = app.approval.as_ref();
-    let suggestions = if approval.is_some() {
-        Vec::new()
-    } else {
-        app.suggestions()
-    };
-    // The suggestion list or approval panel may take every row the composer,
-    // the panel, and the status line leave, except the one the transcript keeps.
-    let slot_rows = match approval {
-        Some(approval) => approval_lines(approval, content_area.width).len() as u16 + 2,
-        None => suggestions.len() as u16,
-    };
-    let suggestion_height = slot_rows.min(
+    let suggestions = app.suggestions();
+    let suggestion_height = (suggestions.len() as u16).min(
         content_area
             .height
             .saturating_sub(composer_height + panel_height + 2),
@@ -80,31 +66,11 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
             Constraint::Length(1),
         ])
         .split(content_area);
-
     draw_transcript(frame, app, chunks[0]);
-    match approval {
-        Some(approval) => draw_approval(frame, chunks[1], approval),
-        None => draw_suggestions(frame, app, &suggestions, chunks[1]),
-    }
+    draw_suggestions(frame, app, &suggestions, chunks[1]);
     draw_composer(frame, app, chunks[2]);
     draw_panel(frame, &panel_tasks, chunks[3]);
     draw_footer(frame, app, chunks[4]);
-
-    if app.show_help {
-        draw_help(frame, area);
-    } else if let Some(view) = &app.context {
-        draw_context(frame, area, view);
-    } else if let Some(view) = &app.agents {
-        draw_agents(frame, area, view);
-    } else if let Some(picker) = &app.picker {
-        draw_picker(frame, area, picker);
-    }
-    if let Some(dialog) = &app.memory_review {
-        draw_memory_review(frame, area, dialog);
-    }
-
-    // Last, over whatever ended up on screen: the selection is a property of
-    // the drawn cells, not of any one widget.
     if let Some(selection) = &app.selection {
         selection.highlight(frame.buffer_mut());
     }
@@ -217,12 +183,6 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// How long one [`SPINNER_FRAMES`] frame is held. [`super::drive_turn`]
 /// redraws on this interval for as long as a turn runs.
 pub(super) const SPINNER_FRAME: Duration = Duration::from_millis(100);
-
-/// How often the idle loop (`super::run_app`) redraws just to keep the
-/// sub-agent panel's elapsed times current. Only runs while
-/// [`needs_task_clock`] is true; during a turn `drive_turn`'s existing
-/// [`SPINNER_FRAME`] cadence already covers it.
-pub(super) const TASKS_PANEL_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The line shown under the transcript while a turn is in flight: the phase
 /// (waiting for the model, reasoning, running a tool, a provider retry) and
@@ -556,7 +516,7 @@ fn panel_marker(task: &Task, now: chrono::DateTime<chrono::Utc>) -> &'static str
 }
 
 /// `now - started_at` for a running task, `now - created_at` for a queued
-/// one, rounded the same way [`super::agents_view`]'s duration column is.
+/// one, using the shared duration rounding policy.
 fn panel_elapsed(task: &Task, now: chrono::DateTime<chrono::Utc>) -> String {
     let start = match task.status {
         TaskStatus::Running => task.started_at,
@@ -594,444 +554,6 @@ fn fit_column(value: &str, width: usize, alignment: Alignment) -> String {
     }
 }
 
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(70, 70, area);
-    let items: Vec<ListItem> = SLASH_COMMANDS
-        .iter()
-        .map(|command| ListItem::new(format!("{:<12} {}", command.name, command.description)))
-        .collect();
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Help (Esc to close)"),
-    );
-    frame.render_widget(list, popup);
-}
-
-fn draw_memory_review(frame: &mut Frame, area: Rect, dialog: &MemoryReviewDialog) {
-    let popup = centered_rect(80, 60, area);
-    let choice = if dialog.accept_selected {
-        "❯ Accept\n  Reject"
-    } else {
-        "  Accept\n❯ Reject"
-    };
-    let items: Vec<ListItem> = dialog
-        .rows
-        .iter()
-        .map(|row| {
-            ListItem::new(format!(
-                "{} {}/{}\n{}\nReason: {}\n{}{}\n{}",
-                row.action,
-                row.kind,
-                row.key,
-                row.text,
-                row.reason,
-                row.advice
-                    .as_ref()
-                    .map_or_else(String::new, |line| format!("{line}\n")),
-                choice,
-                "↑/↓ or j/k select · Enter confirm · Tab switch candidate · Esc close"
-            ))
-        })
-        .collect();
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Memory review (Accept selected by default)"),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut state = ListState::default().with_selected(Some(dialog.selected));
-    frame.render_widget(Clear, popup);
-    frame.render_stateful_widget(list, popup, &mut state);
-}
-
-fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
-    let popup = centered_rect(80, 70, area);
-    let items: Vec<ListItem> = picker
-        .rows
-        .iter()
-        .map(|row| ListItem::new(row.label.clone()))
-        .collect();
-    // Stateful so that ratatui windows the list around the selection: a picker
-    // lists up to `PICKER_LIST_LIMIT` sessions, more than the popup can show.
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .padding(Padding::horizontal(1))
-                .title(picker.kind.title()),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut state = ListState::default().with_selected(Some(picker.selected));
-    frame.render_widget(Clear, popup);
-    frame.render_stateful_widget(list, popup, &mut state);
-}
-
-/// Longest `Command:` / `Reason:` value the approval dialog shows, in lines.
-const APPROVAL_COMMAND_LINES: usize = 3;
-const APPROVAL_REASON_LINES: usize = 2;
-
-/// Content rows of the approval panel for a panel `width` columns wide.
-fn approval_lines(approval: &ApprovalDialog, width: u16) -> Vec<Line<'static>> {
-    // Border (1) + padding (1) on each side.
-    let inner_width = width.saturating_sub(4) as usize;
-    let accent = Style::default().fg(Color::Yellow);
-    let mut lines = vec![Line::from(Span::styled(
-        if !approval.title.is_empty() {
-            approval.title.as_str()
-        } else if approval.read_path.is_empty() {
-            "Run Bash outside the sandbox?"
-        } else {
-            "Permanently allow sandbox read access?"
-        }
-        .to_owned(),
-        Style::default().add_modifier(Modifier::BOLD),
-    ))];
-    if !approval.read_path.is_empty() {
-        lines.extend(label_value_lines(
-            "Read path: ",
-            &approval.read_path,
-            inner_width,
-            2,
-        ));
-        lines.push(Line::from("Saved to read_paths; commands stay sandboxed."));
-    }
-    if !approval.command.is_empty() {
-        lines.extend(label_value_lines(
-            if approval.title.is_empty() {
-                "Command: "
-            } else {
-                "Details: "
-            },
-            &approval.command,
-            inner_width,
-            if approval.read_path.is_empty() {
-                APPROVAL_COMMAND_LINES
-            } else {
-                1
-            },
-        ));
-    }
-    if !approval.justification.is_empty() {
-        lines.extend(label_value_lines(
-            "Reason:  ",
-            &approval.justification,
-            inner_width,
-            if approval.read_path.is_empty() {
-                APPROVAL_REASON_LINES
-            } else {
-                1
-            },
-        ));
-    }
-    if !approval.title.is_empty() {
-        lines.extend(label_value_lines(
-            if approval.feedback_mode {
-                "Feedback (Enter finishes): "
-            } else {
-                "Feedback (f to edit): "
-            },
-            &approval.feedback,
-            inner_width,
-            2,
-        ));
-    }
-    lines.push(Line::default());
-    for (label, is_yes) in [
-        (
-            if !approval.title.is_empty() {
-                "Approve"
-            } else if approval.read_path.is_empty() {
-                "Yes, run it outside the sandbox"
-            } else {
-                "Yes, save read access"
-            },
-            true,
-        ),
-        ("No, cancel", false),
-    ] {
-        let selected = approval.approve_selected == is_yes;
-        lines.push(if selected {
-            Line::from(Span::styled(
-                format!("❯ {label}"),
-                accent.add_modifier(Modifier::BOLD),
-            ))
-        } else {
-            Line::from(format!("  {label}"))
-        });
-    }
-    lines.push(Line::from(Span::styled(
-        "↑/↓ select · Enter confirm · Esc cancel · c chat",
-        Style::default().add_modifier(Modifier::DIM),
-    )));
-    lines
-}
-
-/// The approval prompt, drawn in `area` just above the composer.
-fn draw_approval(frame: &mut Frame, area: Rect, approval: &ApprovalDialog) {
-    let accent = Style::default().fg(Color::Yellow);
-    frame.render_widget(Clear, area);
-    let paragraph = Paragraph::new(approval_lines(approval, area.width)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(accent)
-            .padding(Padding::horizontal(1))
-            .title(Span::styled(
-                " Approval ",
-                accent.add_modifier(Modifier::BOLD),
-            )),
-    );
-    frame.render_widget(paragraph, area);
-}
-
-/// `label` followed by `value` wrapped to `width` columns over at most
-/// `max_lines` lines. Continuation lines align under the value; when the value
-/// does not fit, the last line ends in `...`.
-fn label_value_lines<'a>(
-    label: &'static str,
-    value: &str,
-    width: usize,
-    max_lines: usize,
-) -> Vec<Line<'a>> {
-    let label_width = UnicodeWidthStr::width(label);
-    let value_width = width.saturating_sub(label_width).max(1);
-    let escaped = escape_single_line_text(value);
-    let mut chunks: Vec<String> = Vec::new();
-    let mut rest = escaped.as_str();
-    while !rest.is_empty() {
-        if chunks.len() + 1 == max_lines {
-            chunks.push(ellipsis_single_line(rest, value_width));
-            break;
-        }
-        let mut end = 0;
-        let mut used = 0;
-        for ch in rest.chars() {
-            let ch_width = ch.width().unwrap_or(0);
-            if used + ch_width > value_width {
-                break;
-            }
-            used += ch_width;
-            end += ch.len_utf8();
-        }
-        if end == 0 {
-            // A single character wider than the column: take it anyway.
-            end = rest.chars().next().map_or(0, char::len_utf8);
-        }
-        chunks.push(rest[..end].to_string());
-        rest = &rest[end..];
-    }
-    chunks
-        .into_iter()
-        .enumerate()
-        .map(|(index, chunk)| {
-            let lead = if index == 0 {
-                Span::styled(label, Style::default().add_modifier(Modifier::BOLD))
-            } else {
-                Span::raw(" ".repeat(label_width))
-            };
-            Line::from(vec![lead, Span::raw(chunk)])
-        })
-        .collect()
-}
-
-fn ellipsis_single_line(value: &str, max_width: usize) -> String {
-    let escaped = escape_single_line_text(value);
-    if UnicodeWidthStr::width(escaped.as_str()) <= max_width {
-        return escaped;
-    }
-    if max_width <= 3 {
-        return ".".repeat(max_width);
-    }
-    let keep = max_width - 3;
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in escaped.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width > keep {
-            break;
-        }
-        out.push(ch);
-        width += ch_width;
-    }
-    out.push_str("...");
-    out
-}
-
-/// The `/context` overlay: the section list, or one item's full text over it.
-fn draw_context(frame: &mut Frame, area: Rect, view: &super::context_view::ContextView) {
-    let popup = centered_rect(80, 70, area);
-    frame.render_widget(Clear, popup);
-    if let Some(text) = &view.text {
-        let paragraph = Paragraph::new(text.text.as_str())
-            .wrap(Wrap { trim: false })
-            .scroll((text.scroll, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("{} (esc to go back)", text.title)),
-            );
-        frame.render_widget(paragraph, popup);
-        return;
-    }
-    let items: Vec<ListItem> = view
-        .rows()
-        .into_iter()
-        .map(|row| ListItem::new(view.row_label(row)))
-        .collect();
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(view.header()))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut state = ListState::default().with_selected(Some(view.selected));
-    frame.render_stateful_widget(list, popup, &mut state);
-}
-
-/// The `/agents` overlay: the task list, narrowed to the terminal width by
-/// `Table`'s own percentage columns, or one task's detail pane over it.
-fn draw_agents(frame: &mut Frame, area: Rect, view: &super::agents_view::AgentsView) {
-    let popup = centered_rect(96, 90, area);
-    frame.render_widget(Clear, popup);
-    match &view.detail {
-        Some(detail) => draw_agent_detail(frame, popup, detail),
-        None => draw_agent_list(frame, popup, view),
-    }
-}
-
-fn draw_agent_list(frame: &mut Frame, area: Rect, view: &super::agents_view::AgentsView) {
-    use super::agents_view::{COLUMN_HEADERS, columns};
-
-    let now = chrono::Utc::now();
-    let header =
-        Row::new(COLUMN_HEADERS.to_vec()).style(Style::default().add_modifier(Modifier::BOLD));
-    let rows: Vec<Row> = view
-        .rows
-        .iter()
-        .map(|row| Row::new(columns(row, now).to_vec()))
-        .collect();
-    let widths = [
-        Constraint::Percentage(9),
-        Constraint::Percentage(9),
-        Constraint::Percentage(22),
-        Constraint::Percentage(9),
-        Constraint::Percentage(9),
-        Constraint::Percentage(13),
-        Constraint::Percentage(7),
-        Constraint::Percentage(6),
-        Constraint::Percentage(6),
-        Constraint::Percentage(10),
-    ];
-    let title = format!(
-        "{}  (up/down move, s status, w workspace, enter open, esc close)",
-        view.header()
-    );
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut state =
-        TableState::default().with_selected((!view.rows.is_empty()).then_some(view.selected));
-    frame.render_stateful_widget(table, area, &mut state);
-}
-
-/// The prompt, result or error, and the child transcript (reusing
-/// [`transcript::lines`], the same renderer the main transcript pane uses),
-/// as one scrollable paragraph.
-fn draw_agent_detail(frame: &mut Frame, area: Rect, detail: &super::agents_view::Detail) {
-    let row = &detail.row;
-    let agent = if row.agent.is_empty() {
-        "default"
-    } else {
-        &row.agent
-    };
-    let mut lines: Vec<Line<'static>> = vec![Line::from(format!(
-        "{} · {agent} · {}",
-        row.task_id, row.status
-    ))];
-    if !row.description.is_empty() {
-        lines.push(Line::from(format!(
-            "Description: {}",
-            escape_plain_text(&row.description)
-        )));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from("Prompt:"));
-    lines.extend(
-        escape_plain_text(&row.prompt)
-            .split('\n')
-            .map(|line| Line::from(line.to_string()))
-            .collect::<Vec<_>>(),
-    );
-    if !row.error.is_empty() {
-        lines.push(Line::default());
-        lines.push(Line::from("Error:"));
-        lines.extend(
-            escape_plain_text(&row.error)
-                .split('\n')
-                .map(|line| Line::from(line.to_string()))
-                .collect::<Vec<_>>(),
-        );
-    } else if !row.result.is_empty() {
-        lines.push(Line::default());
-        lines.push(Line::from("Result:"));
-        lines.extend(
-            escape_plain_text(&row.result)
-                .split('\n')
-                .map(|line| Line::from(line.to_string()))
-                .collect::<Vec<_>>(),
-        );
-    }
-    lines.push(Line::default());
-    if detail.transcript_missing {
-        lines.push(Line::from("(no child transcript)"));
-    } else {
-        lines.extend(transcript::lines(
-            &detail.entries,
-            false,
-            area.width.saturating_sub(2) as usize,
-        ));
-    }
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((detail.scroll, 0))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("{} (esc to go back)", row.task_id)),
-        );
-    frame.render_widget(paragraph, area);
-}
-
-/// A centered `percent_x` by `percent_y` rectangle within `area`. Standard
-/// ratatui popup-centering helper, from the project's own examples.
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
-}
-
-/// Terminal-size and wrapping cases, against ratatui's own render loop.
-///
-/// Ratatui renders each widget into a `Rect`/`Buffer` that the framework itself
-/// always clips to (see this module's own doc comment above [`draw`], and
-/// `layout.rs`'s: "ratatui's own `Paragraph::wrap` and `Layout` constraints
-/// already do line-wrapping and area-fitting").
-///
-/// What is left to test is the one static guard
-/// ([`MIN_TERMINAL_WIDTH`]/[`MIN_TERMINAL_HEIGHT`], below) and a no-panic
-/// guarantee at extreme sizes.
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyCode;
@@ -1041,7 +563,6 @@ mod tests {
 
     use super::*;
     use crate::cli::testutil;
-    use crate::tui::app::{Picker, PickerKind, PickerRow};
     use crate::tui::entries::{Entry, EntryKind};
     use crate::tui::wire_frame;
 
@@ -1080,43 +601,6 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
-    }
-
-    #[tokio::test]
-    async fn the_memory_review_modal_shows_the_advice_line_only_when_there_is_one() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        let row = |advice: Option<&str>| crate::tui::app::MemoryReviewRow {
-            id: "c1".into(),
-            action: "create".into(),
-            kind: "preference".into(),
-            key: "editor".into(),
-            text: "prefers vim".into(),
-            reason: "said so".into(),
-            advice: advice.map(str::to_owned),
-        };
-        app.memory_review = Some(crate::tui::app::MemoryReviewDialog {
-            rows: vec![row(Some("Advice (session model gpt-test): new"))],
-            selected: 0,
-            accept_selected: true,
-        });
-        let with = screen_rows(&app, 120, 40).join("\n");
-        assert!(with.contains("❯ Accept"), "{with}");
-        assert!(with.contains("Enter confirm"), "{with}");
-        assert!(!with.contains("a accept"), "{with}");
-        assert!(
-            with.contains("Advice (session model gpt-test): new"),
-            "{with}"
-        );
-
-        app.memory_review = Some(crate::tui::app::MemoryReviewDialog {
-            rows: vec![row(None)],
-            selected: 0,
-            accept_selected: false,
-        });
-        let without = screen_rows(&app, 120, 40).join("\n");
-        assert!(without.contains("❯ Reject"), "{without}");
-        assert!(without.contains("Reason: said so"), "{without}");
-        assert!(!without.contains("Advice"), "{without}");
     }
 
     #[tokio::test]
@@ -1400,286 +884,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn approval_dialog_is_drawn_with_clear_choices_and_truncates_long_commands() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        let long_command = format!("git push {}", "very-long-ref-name-".repeat(12));
-        app.approval = Some(ApprovalDialog {
-            feedback: String::new(),
-            feedback_mode: false,
-            title: String::new(),
-            id: "approval-1".to_string(),
-            command: long_command.clone(),
-            justification: "publish the reviewed branch".to_string(),
-            ..Default::default()
-        });
-
-        let screen = rendered(&app, 80, 16);
-
-        assert!(screen.contains("Run Bash outside the sandbox?"), "{screen}");
-        assert!(screen.contains("Command:"), "{screen}");
-        assert!(screen.contains("git push"), "{screen}");
-        assert!(screen.contains("..."), "{screen}");
-        assert!(!screen.contains(&long_command), "{screen}");
-        assert!(
-            screen.contains("Reason:  publish the reviewed branch"),
-            "{screen}"
-        );
-        assert!(screen.contains("❯ No, cancel"), "{screen}");
-        assert!(screen.contains("  Yes, run it"), "{screen}");
-        assert!(screen.contains("Enter confirm"), "{screen}");
-    }
-
-    #[tokio::test]
-    async fn read_approval_panel_discloses_persistence_and_keeps_choices_visible() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.approval = Some(ApprovalDialog {
-            feedback: String::new(),
-            feedback_mode: false,
-            title: String::new(),
-            id: "approval-read".to_string(),
-            read_path: "/fixture".to_string(),
-            command: "cat fixture".to_string(),
-            justification: "read fixture".to_string(),
-            ..Default::default()
-        });
-        let screen = rendered(&app, 80, 16);
-        assert!(
-            screen.contains("Permanently allow sandbox read access?"),
-            "{screen}"
-        );
-        assert!(screen.contains("Read path: /fixture"), "{screen}");
-        assert!(screen.contains("Saved to read_paths"), "{screen}");
-        assert!(screen.contains("Yes, save read access"), "{screen}");
-        assert!(screen.contains("❯ No, cancel"), "{screen}");
-        assert!(!screen.contains("outside the sandbox"), "{screen}");
-    }
-
-    #[tokio::test]
-    async fn approval_panel_sits_above_the_composer_and_wraps_a_long_reason() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.approval = Some(ApprovalDialog {
-            feedback: String::new(),
-            feedback_mode: false,
-            title: String::new(),
-            id: "approval-1".to_string(),
-            command: "git fetch origin main".to_string(),
-            justification:
-                "needs network access to verify the merged pull request and remove the worktree"
-                    .to_string(),
-            ..Default::default()
-        });
-
-        let rows = screen_rows(&app, 60, 20);
-        let at = |needle: &str| {
-            rows.iter()
-                .position(|row| row.contains(needle))
-                .unwrap_or_else(|| panic!("{needle} not drawn:\n{}", rows.join("\n")))
-        };
-
-        // The long reason wraps instead of being cut off.
-        assert!(rows.join("\n").contains("remove the worktree"), "{rows:?}");
-        assert_ne!(at("needs network"), at("remove the worktree"));
-        // The key hint is the last thing above the composer's top border,
-        // below the panel's own border, and the composer follows directly.
-        let choices = at("Enter confirm");
-        assert!(rows[choices + 1].contains('└'), "{rows:?}");
-        assert!(rows[choices + 2].contains('┌'), "{rows:?}");
-        assert!(at("Approval") < at("Command:"));
-    }
-
-    #[tokio::test]
-    async fn picker_clears_the_transcript_beneath_it() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.push_system(
-            (0..40)
-                .map(|_| "X".repeat(100))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-        app.picker = Some(Picker {
-            kind: PickerKind::Resume,
-            rows: vec![PickerRow {
-                label: "session".to_string(),
-                value: "path".to_string(),
-            }],
-            selected: 0,
-        });
-
-        let width = 100;
-        let height = 30;
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal.draw(|frame| draw(frame, &app)).expect("draw");
-        let popup = centered_rect(80, 70, Rect::new(0, 0, width, height));
-
-        assert_eq!(
-            terminal
-                .backend()
-                .buffer()
-                .cell((popup.x + 1, popup.y + 2))
-                .expect("popup cell")
-                .symbol(),
-            " "
-        );
-    }
-
-    #[tokio::test]
-    async fn picker_text_has_horizontal_padding_inside_its_border() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.picker = Some(Picker {
-            kind: PickerKind::Profile,
-            rows: vec![PickerRow {
-                label: "model [workspace]".to_string(),
-                value: "profile".to_string(),
-            }],
-            selected: 0,
-        });
-
-        let width = 100;
-        let height = 30;
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal.draw(|frame| draw(frame, &app)).expect("draw");
-        let popup = centered_rect(80, 70, Rect::new(0, 0, width, height));
-        let buffer = terminal.backend().buffer();
-
-        assert_eq!(
-            buffer
-                .cell((popup.x + 1, popup.y + 1))
-                .expect("left inner padding")
-                .symbol(),
-            " "
-        );
-        assert_eq!(
-            buffer
-                .cell((popup.x + 2, popup.y + 1))
-                .expect("picker label")
-                .symbol(),
-            "m"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_context_overlay_shows_the_header_sections_and_item_text() {
-        use crate::tui::context_view::ContextView;
-        use otto_core::agent::context_report::{
-            ContextItem, ContextReport, ContextSection, SectionKind,
-        };
-
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        let mut view = ContextView::new(ContextReport {
-            model: "gpt-5".into(),
-            context_window: 0,
-            compaction_threshold: 0,
-            estimated_total: 1_200,
-            reported_input_tokens: None,
-            sections: vec![ContextSection {
-                kind: SectionKind::SystemPrompt,
-                tokens: 1_200,
-                items: vec![ContextItem {
-                    label: "Base".into(),
-                    tokens: 1_200,
-                    text: "You are Otto.\nsecond line".into(),
-                }],
-            }],
-        });
-        app.context = Some(view.clone());
-
-        let screen = screen_rows(&app, 120, 30).join("\n");
-        assert!(
-            screen.contains("Context  gpt-5 · ~1.2k tokens (estimate)"),
-            "{screen}"
-        );
-        assert!(screen.contains("System prompt"), "{screen}");
-
-        view.handle_key(KeyCode::Enter);
-        view.handle_key(KeyCode::Down);
-        view.handle_key(KeyCode::Enter);
-        app.context = Some(view);
-        let screen = screen_rows(&app, 120, 30).join("\n");
-        assert!(screen.contains("Base · ~1.2k tokens"), "{screen}");
-        assert!(screen.contains("You are Otto."), "{screen}");
-        assert!(screen.contains("second line"), "{screen}");
-    }
-
-    /// A controller whose builder carries a task recorder, mirroring
-    /// `cli::repl_commands::tests::controller_with_task_recorder`.
-    async fn controller_with_task_recorder(
-        workspace: &std::path::Path,
-        sessions: &std::path::Path,
-        store: std::sync::Arc<crate::subagent::record::Store>,
-    ) -> crate::app::Controller {
-        let mut builder = testutil::builder(workspace, sessions);
-        builder.shared_mut().task_recorder = Some(store);
-        let runtime = testutil::initial_runtime(&builder);
-        let session = builder.create_session(&runtime).expect("session");
-        let runner = builder
-            .build_runner(&session, &runtime)
-            .await
-            .expect("runner");
-        let info = builder.runtime_info(&runtime);
-        crate::app::Controller::new(builder, true, session, runner, info)
-    }
-
-    /// The spec's TUI acceptance case: the modal lists rows, narrowed to an
-    /// 80-column terminal, and opening a row shows its detail pane.
-    #[tokio::test]
-    async fn the_agents_overlay_lists_rows_and_fits_eighty_columns() {
-        use crate::subagent::record::{self, TaskContext};
-        use crate::subagent::tasks::{Task, TaskStatus};
-        use crate::tui::agents_view::AgentsView;
-
-        let workspace = tempfile::tempdir().expect("workspace");
-        let sessions = tempfile::tempdir().expect("sessions");
-        let store = std::sync::Arc::new(record::Store::open_in_memory().expect("store"));
-        let workspace_path = workspace.path().to_str().expect("utf8 path").to_string();
-        record::Recorder::upsert(
-            &*store,
-            &TaskContext {
-                parent_session: "s1".into(),
-                parent_session_path: "/sessions/s1.jsonl".into(),
-                workspace: workspace_path,
-                pid: 4_294_967_294,
-                process_started_at: "2026-09-25T10:00:00Z".into(),
-            },
-            &Task {
-                id: "t1".into(),
-                description: "review the diff".into(),
-                status: TaskStatus::Succeeded,
-                created_at: Some(chrono::Utc::now()),
-                ..Task::default()
-            },
-        );
-        let controller = controller_with_task_recorder(
-            workspace.path(),
-            sessions.path(),
-            std::sync::Arc::clone(&store),
-        )
-        .await;
-        let mut app = App::new(&crate::tui::app::Backend::Local(&controller));
-        app.agents = Some(AgentsView::open(&crate::tui::app::Backend::Local(
-            &controller,
-        )));
-
-        // At 80 columns the description column is narrower than the full
-        // text; `Table` truncates it rather than panicking or overflowing.
-        let screen = screen_rows(&app, 80, 24).join("\n");
-        assert!(screen.contains("succeed"), "{screen}");
-        assert!(screen.contains("review t"), "{screen}");
-
-        app.agents.as_mut().expect("open").handle_key(
-            KeyCode::Enter,
-            &crate::tui::app::Backend::Local(&controller),
-        );
-        let screen = screen_rows(&app, 80, 24).join("\n");
-        assert!(screen.contains("t1"), "{screen}");
-        assert!(screen.contains("no child transcript"), "{screen}");
-    }
-
-    /// Below the static minimum on either axis, the frame is just the resize
-    /// message; this layout is purely static (see [`composer_height`]), so
-    /// there is no second, dynamic guard.
     #[tokio::test]
     async fn narrower_or_shorter_than_the_minimum_shows_the_resize_message() {
         let (_workspace, _sessions, app) = app_fixture().await;
@@ -2042,39 +1246,6 @@ mod tests {
     /// The view half of command completion: a `/` prefix lists the matching
     /// commands with their descriptions and leaves the others out.
     #[tokio::test]
-    async fn a_slash_prefix_lists_matching_commands_with_descriptions() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.input = "/s".chars().collect();
-        app.cursor = app.input.len();
-
-        let content = rendered(&app, 100, 20);
-
-        assert!(content.contains("show session details"), "{content}");
-        assert!(content.contains("/sandbox"), "{content}");
-        assert!(!content.contains("show help"), "{content}");
-    }
-
-    /// Every row holding at least one reversed-video cell, as text: the rows
-    /// a list is marking as selected.
-    fn highlighted_rows(app: &App, width: u16, height: u16) -> Vec<String> {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal.draw(|frame| draw(frame, app)).expect("draw");
-        let buffer = terminal.backend().buffer();
-        (0..height)
-            .filter_map(|y| {
-                let row: Vec<&ratatui::buffer::Cell> =
-                    (0..width).filter_map(|x| buffer.cell((x, y))).collect();
-                row.iter()
-                    .any(|cell| cell.style().add_modifier.contains(Modifier::REVERSED))
-                    .then(|| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            })
-            .collect()
-    }
-
-    /// The panel marks which row Tab or Enter would take, the way
-    /// [`draw_picker`] marks its own selection.
-    #[tokio::test]
     async fn the_selected_suggestion_row_is_highlighted() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
         app.input = "/s".chars().collect();
@@ -2092,59 +1263,6 @@ mod tests {
 
     /// A picker holds up to `PICKER_LIST_LIMIT` (50) rows, more than a popup
     /// ever shows, so a selection below the fold has to scroll into view.
-    #[tokio::test]
-    async fn a_picker_scrolls_a_selection_below_the_fold_into_view() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.picker = Some(Picker {
-            kind: PickerKind::Resume,
-            rows: (0..50)
-                .map(|index| PickerRow {
-                    label: format!("session {index:02}"),
-                    value: format!("path-{index}"),
-                })
-                .collect(),
-            selected: 40,
-        });
-
-        let highlighted = highlighted_rows(&app, 100, 30);
-
-        assert_eq!(highlighted.len(), 1, "{highlighted:?}");
-        assert!(highlighted[0].contains("session 40"), "{highlighted:?}");
-    }
-
-    #[tokio::test]
-    async fn ordinary_input_and_an_open_overlay_show_no_suggestions() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.input = "hello".chars().collect();
-        app.cursor = app.input.len();
-        let ordinary = rendered(&app, 100, 20);
-        assert!(!ordinary.contains("show session details"), "{ordinary}");
-
-        app.input = "/s".chars().collect();
-        app.cursor = app.input.len();
-        app.picker = Some(Picker {
-            kind: PickerKind::Resume,
-            rows: Vec::new(),
-            selected: 0,
-        });
-        let overlaid = rendered(&app, 100, 20);
-        assert!(!overlaid.contains("show session details"), "{overlaid}");
-    }
-
-    /// Where the terminal caret ends up after one frame.
-    fn cursor(app: &App, width: u16, height: u16) -> (u16, u16) {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal.draw(|frame| draw(frame, app)).expect("draw");
-        let position = terminal
-            .backend_mut()
-            .get_cursor_position()
-            .expect("cursor position");
-        (position.x, position.y)
-    }
-
-    /// The caret sits after the last *column* the value occupies, not after
-    /// its last `char`: a CJK character takes two cells.
     #[tokio::test]
     async fn the_caret_follows_the_display_width_of_wide_characters() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
@@ -2194,5 +1312,32 @@ mod tests {
         // status line (the frame's last row), so its last text row is 3 rows
         // above the bottom of the frame.
         assert_eq!((x, y), (SIDE_MARGIN + 1 + 3, height - 3));
+    }
+
+    fn highlighted_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .filter_map(|y| {
+                let row: Vec<&ratatui::buffer::Cell> =
+                    (0..width).filter_map(|x| buffer.cell((x, y))).collect();
+                row.iter()
+                    .any(|cell| cell.style().add_modifier.contains(Modifier::REVERSED))
+                    .then(|| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            })
+            .collect()
+    }
+
+    fn cursor(app: &App, width: u16, height: u16) -> (u16, u16) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
+        let position = terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("cursor position");
+        (position.x, position.y)
     }
 }

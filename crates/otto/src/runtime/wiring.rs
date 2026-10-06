@@ -19,11 +19,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::join_all;
-use otto_core::agent::inbox::Inbox;
 use otto_core::agent::redactor::Redactor;
 use otto_core::config::agents::AgentsRuntime;
 use otto_core::config::memory::MemoryRuntime;
 use otto_core::config::{McpAuth, McpTransport, Runtime, resolve_agents, resolve_skills};
+use otto_core::mailbox::Inbox;
 use otto_core::model::ToolDefinition;
 use otto_core::safetext::dynamic_redaction_marker;
 use tokio_util::sync::CancellationToken;

@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod approval;
 pub mod config;
+pub mod mailbox;
 pub mod model;
 pub mod openaicompat;
 pub mod openairesponses;

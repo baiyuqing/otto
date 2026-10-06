@@ -63,6 +63,7 @@ modules are:
 - `tool`: model-visible tool definitions and schema assembly.
 - `session`: Pi v3 session codec, compaction, and context association types.
 - `agent`: provider/tool turn orchestration and emitted events.
+- `mailbox`: WASM-safe FIFO notification contract, delivery acknowledgement semantics, and the default in-memory adapter. Native runtime code composes persistence or external implementations.
 - `config`, `wire`, and `safetext`: shared configuration resolution, frontend
   DTOs, and secret-safe text handling.
 

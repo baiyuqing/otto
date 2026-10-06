@@ -821,7 +821,7 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                     return remote_management(remote, session, request).await;
                 }
                 Command::AdmitInput(text) => match client
-                    .admit_input(session, &text)
+                    .admit_input(session, &text, None)
                     .await
                     .map_err(mutation_error)?
                 {

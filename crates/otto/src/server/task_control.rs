@@ -17,6 +17,21 @@ const MAX_TEXT_BYTES: usize = 32_000;
 #[serde(deny_unknown_fields)]
 struct TextInput {
     text: String,
+    /// The client's stable id for this input, so a retry is admitted once.
+    #[serde(default)]
+    input_id: Option<String>,
+}
+
+impl TextInput {
+    /// `input_id`, or the `400` answer when it is malformed.
+    fn input_id(&self) -> Result<Option<&str>, Response> {
+        match self.input_id.as_deref() {
+            Some(id) if !otto_core::model::is_input_id(id) => {
+                Err(bad_request(super::INVALID_INPUT_ID))
+            }
+            id => Ok(id),
+        }
+    }
 }
 
 /// `POST /v1/sessions/{id}/inputs` deterministically admits ordinary human
@@ -37,7 +52,11 @@ pub async fn admit_input(
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    match session.ctrl.admit_active_input(&input.text) {
+    let input_id = match input.input_id() {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    match session.ctrl.admit_active_input_with(&input.text, input_id) {
         Ok(disposition) => json_response(StatusCode::OK, &disposition),
         Err(message) => input_error(&message, "input_admission_failed"),
     }
@@ -90,14 +109,19 @@ pub async fn steer(
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    match session.ctrl.steer(&input.text) {
+    let input_id = match input.input_id() {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    match session.ctrl.steer_input(&input.text, input_id) {
         Ok(message) => json_response(StatusCode::OK, &message),
         Err(message) => input_error(&message, "task_steer_failed"),
     }
 }
 
 /// `503 input_not_persisted` when the input's durable copy could not be
-/// saved, otherwise `409` with `code`.
+/// saved, `409 duplicate_input` for a retry of a delivered input, otherwise
+/// `409` with `code`.
 fn input_error(message: &str, code: &str) -> Response {
     if message == crate::app::task_control::INPUT_NOT_PERSISTED {
         error_response(
@@ -105,6 +129,8 @@ fn input_error(message: &str, code: &str) -> Response {
             "input_not_persisted",
             message,
         )
+    } else if message == crate::app::task_control::DUPLICATE_INPUT {
+        error_response(StatusCode::CONFLICT, "duplicate_input", message)
     } else {
         error_response(StatusCode::CONFLICT, code, message)
     }

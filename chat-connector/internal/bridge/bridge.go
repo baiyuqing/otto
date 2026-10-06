@@ -958,7 +958,7 @@ func (c *chat) turn(m Message) {
 
 		c.startApprovalWatch(sid)
 		slog.Info("turn_started", "request_id", m.RequestID, "platform", m.Platform, "chat_id", m.ChatID, "session_id", sid)
-		stop, err = c.b.opts.Agent.PromptWithChannel(ctx, sid, m.Text, m.Platform, m.Platform+":"+m.ChatID, m.RequestID, chatPrompt(m))
+		stop, err = c.b.opts.Agent.PromptWithChannel(ctx, sid, m.Text, m.Platform, m.Platform+":"+m.ChatID, m.RequestID, chatInputID(m), chatPrompt(m))
 
 		c.b.mu.Lock()
 		delete(c.b.bySession, sid)
@@ -1632,4 +1632,28 @@ func (c *chat) findCandidate(ctx context.Context, sid, arg string) (string, erro
 		return "", nil
 	}
 	return matches[0], nil
+}
+
+// chatInputID is the idempotency key Otto receives for a chat message:
+// chat:<platform>:<chat id>:<message id>, so a platform redelivery or a
+// connector retry after a restart runs the message once. Characters outside
+// Otto's input-id alphabet become '_'; it is empty without a message id or
+// when longer than 128 bytes.
+func chatInputID(m Message) string {
+	if m.MessageID == "" {
+		return ""
+	}
+	raw := "chat:" + m.Platform + ":" + m.ChatID + ":" + m.MessageID
+	if len(raw) > 128 {
+		return ""
+	}
+	out := []byte(raw)
+	for i, c := range out {
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '.' || c == '_' || c == ':' || c == '-'
+		if !ok {
+			out[i] = '_'
+		}
+	}
+	return string(out)
 }

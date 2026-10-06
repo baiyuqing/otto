@@ -4132,3 +4132,38 @@ async fn a_recovery_turn_delivers_the_interrupted_turns_steering_once() {
     assert_eq!(steered[0].input_id, "steer:op_old:1");
     assert!(journal.is_empty());
 }
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn the_next_input_id_marks_one_runs_user_message() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("one"), Turn::text("two")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent.set_next_input_id(Some("req-1".into()));
+    agent
+        .run("first", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("first run");
+    agent
+        .run("second", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("second run");
+    let users: Vec<(String, String)> = agent
+        .session()
+        .messages()
+        .into_iter()
+        .filter(|message| message.role == Role::User)
+        .map(|message| (message.text(), message.input_id))
+        .collect();
+    assert_eq!(
+        users,
+        [
+            ("first".to_string(), "req-1".to_string()),
+            ("second".to_string(), String::new())
+        ]
+    );
+    assert!(agent.session().has_input("req-1"));
+}

@@ -87,8 +87,11 @@ impl EditRequest {
             .any(|text| text.as_deref().is_some_and(|text| !text.is_empty()));
         if self.edits.is_some() && single {
             return Err(
-                "invalid arguments: pass either old_text and new_text or edits, not both"
-                    .to_owned(),
+                concat!(
+                    "invalid arguments: edits cannot be combined with non-empty top-level old_text/new_text; ",
+                    "move every replacement into edits and omit top-level old_text/new_text"
+                )
+                .to_owned(),
             );
         }
         // `empty_as_none` has already folded an empty list into `None`, so a
@@ -187,8 +190,12 @@ pub fn edit_definition() -> ToolDefinition {
     definition(
         "edit",
         concat!(
-            "Replace unique text fragments in a workspace file. Pass old_text and new_text for one ",
-            "replacement, or edits for several applied together against the original file. When old_text has ",
+            "Replace unique text fragments in a workspace file. Choose exactly one argument form: ",
+            "single replacement: {\"path\":\"file.txt\",\"old_text\":\"before\",\"new_text\":\"after\"}; ",
+            "batch: {\"path\":\"file.txt\",\"edits\":[{\"old_text\":\"before\",\"new_text\":\"after\"}]}. ",
+            "For a single replacement, omit edits. For a batch, put EVERY replacement in edits and omit ",
+            "top-level old_text/new_text; never split replacements between the two forms. ",
+            "An empty new_text deletes the matched text. Batch edits apply together against the original file. When old_text has ",
             "no exact match, a match that ignores trailing whitespace and treats curly quotes, dashes, and ",
             "non-breaking spaces as ASCII is used, and only the part of old_text that new_text changes is rewritten.",
         ),
@@ -200,11 +207,17 @@ pub fn edit_definition() -> ToolDefinition {
                     "type": "string",
                     "description": "Workspace-relative file path to edit"
                 },
-                "old_text": old_text,
-                "new_text": new_text,
+                "old_text": {
+                    "type": "string",
+                    "description": "Single replacement only: existing text that must occur exactly once. Omit when using edits."
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "Single replacement only: replacement text; an empty string deletes the match. Omit when using edits."
+                },
                 "edits": {
                     "type": "array",
-                    "description": "Non-overlapping replacements, each matched against the original file",
+                    "description": "Batch replacements: put every replacement here and omit top-level old_text/new_text. Omit for a single top-level replacement. Entries must not overlap and each matches against the original file.",
                     "items": {
                         "type": "object",
                         "additionalProperties": false,
@@ -1073,6 +1086,38 @@ mod tests {
             assert!(result.is_error, "{name}: expected an error, got {result:?}");
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a b c\n");
+    }
+
+    #[tokio::test]
+    async fn mixed_argument_forms_explain_how_to_retry_without_writing() {
+        let (root, path) = sample("a b c\n");
+        let workspace = workspace(root.path());
+        let tool = EditTool::new(&workspace);
+        let result = run(
+            &tool,
+            r#"{"path":"sample.txt","old_text":"a","new_text":"A","edits":[{"old_text":"c","new_text":"C"}]}"#,
+        )
+        .await;
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result
+                .content
+                .contains("move every replacement into edits and omit top-level old_text/new_text"),
+            "{result:?}"
+        );
+        assert_eq!(
+            result.outcome_override.unwrap().effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a b c\n");
+
+        let retry = run(
+            &tool,
+            r#"{"path":"sample.txt","edits":[{"old_text":"a","new_text":"A"},{"old_text":"c","new_text":"C"}]}"#,
+        )
+        .await;
+        assert!(!retry.is_error, "{retry:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "A b C\n");
     }
 
     /// A null `edits` array with a single replacement, and the empty array

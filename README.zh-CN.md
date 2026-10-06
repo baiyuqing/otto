@@ -12,14 +12,14 @@
 支持通过 API key 连接 OpenAI-compatible 接口，或通过 `otto login` 登录使用 ChatGPT provider。
 模型请求会发送给所选服务；“本地优先”指运行时、会话历史和默认记忆存储位于本地，并不表示模型在本地运行。
 
-- **多种入口：** 终端中的全屏 TUI、REPL 和脚本模式，浏览器 Web UI，以及通过 `otto-connect` 接入的 Telegram、飞书。
+- **多种入口：** 终端中的全屏 TUI、REPL 和脚本模式，独立的 [otto-plus](https://github.com/baiyuqing/otto-plus) Web UI，以及通过 `otto-connect` 接入的 Telegram、飞书。
 - **持续协作：** 持久化会话、需人工审核的记忆候选、可复用 Skills、按需或自动反思、有边界的子代理、定时器和可恢复的持久化 workflow。
 - **限定访问范围：** 文件工具限制在工作区内；macOS 默认通过 Seatbelt 沙箱执行 Shell 命令。
 
 ## 从源码安装
 
 需要由 `rust-toolchain.toml` 锁定的 **Rust 1.98** 工具链
-（`rustup toolchain install` 会自动安装）、**Node 24+**、`wasm-pack` 0.15，
+（`rustup toolchain install` 会自动安装）、`connect/go.mod` 指定的 **Go**，
 以及受支持服务的访问权限。**macOS** 是受支持的平台：只有它有沙箱，
 也只有它跑验收门禁。Otto 同样可以在 **Linux** 上编译和运行，限制见下方
 [安全与限制](#安全与限制)。
@@ -31,10 +31,10 @@ make install
 otto --help
 ```
 
-`make install` 会先刷新并嵌入 Web UI，构建 Otto 和 `otto-connect`，将两者安装到
-`~/.local/bin/`，并将随附 skills 安装到 `~/.otto/skills/`。请确认
-`~/.local/bin` 已在 `PATH` 中。若直接运行 `cargo build` 且此前未执行
-`make ui`，二进制中只会嵌入一行占位文本。
+`make install` 构建 Otto 和 `otto-connect`，将两者安装到 `~/.local/bin/`，
+并将随附 skills 安装到 `~/.otto/skills/`。请确认 `~/.local/bin` 已在 `PATH` 中。
+Web UI 与 WASM 绑定已迁到 [otto-plus](https://github.com/baiyuqing/otto-plus)，
+Otto 构建不再依赖 npm 或前端产物。
 
 如果只想在当前 checkout 中保留本地二进制，可运行 `make build`，然后执行
 `./otto --help`。
@@ -164,11 +164,11 @@ Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏�
 
 ## 参与贡献
 
-代码是一个包含三个 crate 的 Cargo workspace：
+代码是一个包含两个 crate 的 Cargo workspace：
 
 - `crates/otto-core`：provider 契约、wire 编解码、会话编解码、agent 循环和配置，可编译到 `wasm32-unknown-unknown`。
 - `crates/otto`：原生二进制，包含 CLI、REPL、TUI、工具、沙箱、记忆、Skills、子代理、`otto serve` 和 `otto acp`。
-- `crates/otto-web`：把 `otto-core` 编译为 WebAssembly 供 `ui/` 中的浏览器前端使用，前端与二进制共用同一份实现。
+- [otto-plus](https://github.com/baiyuqing/otto-plus) 独立维护浏览器前端和 WASM 绑定，通过固定 revision 复用共享 core。
 
 开发约定和检查命令见 [AGENTS.md](AGENTS.md)，包契约见[开发指南（英文）](docs/development.md)。
 `make check` 需要 `wasm-pack` 0.15 和 Node 24+。Go 实现的替换原因见

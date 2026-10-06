@@ -285,8 +285,8 @@ jobs:
           go-version-file: connect/go.mod
           cache-dependency-path: connect/go.sum
       # Linux has no Seatbelt, so this is the Rust gate without the sandbox
-      # conformance suite; the web UI is platform independent and stays on
-      # the macOS job, which is the one that ships a binary.
+      # conformance suite; core WASM compatibility remains
+      # checked here. Browser build/tests live in otto-plus.
       - name: Run make check-linux
         id: gate
         if: needs.changes.outputs.docs_only != 'true'

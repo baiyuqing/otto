@@ -904,7 +904,6 @@ pub async fn run(
                 acp_token: lookup.get("OTTO_ACP_TOKEN").cloned().unwrap_or_default(),
                 control,
                 reloader,
-                open: options.open,
                 terminate,
             },
             stdout,

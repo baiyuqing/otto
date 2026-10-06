@@ -49,11 +49,6 @@ fn build_metadata() -> String {
 }
 
 fn main() {
-    // `src/server/ui.rs` embeds `ui/dist` with `include_dir!`, which does not
-    // register the directory as a compiler input. Without this, `cargo build`
-    // treats the `otto` binary as fresh after `ui/dist` changes and keeps
-    // serving whatever was embedded at the last incidental recompile.
-    println!("cargo:rerun-if-changed=../../ui/dist");
     // The `.dirty` marker depends on the working tree, so rerun after any
     // source edit.
     println!("cargo:rerun-if-changed=../../crates");

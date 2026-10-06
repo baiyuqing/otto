@@ -68,7 +68,7 @@ habit.
 Three host affordances differ. The clipboard behind the TUI's drag-copy is
 `pbcopy` on macOS and the first of `wl-copy`, `xclip`, or `xsel` that is
 installed on Linux; with none of them, copying reports that no helper was
-found. The browser that `otto serve --open` and `otto login` launch is
+found. The browser that `otto login` launches is
 `/usr/bin/open` on macOS and `xdg-open` on Linux; a launch that fails is never
 fatal, because the URL is printed either way. A `bash` command runs under a
 login shell (`sh -lc`) on macOS, so it sees the `PATH` `path_helper` assembles
@@ -120,8 +120,8 @@ docker compose run --rm --no-deps otto login --status
 The imported file is private authentication state, never part of an image
 or build context. Native and container logouts affect their own copies.
 
-Open the startup URL printed by `docker compose logs otto` on your Mac:
-`http://127.0.0.1:8787/?token=...`. Otto generates a new token each time the
+Use the host/port and token printed by `docker compose logs otto` with an
+API client or [otto-plus](https://github.com/baiyuqing/otto-plus). Otto generates a new token each time the
 server starts. A separate TCP relay shares its network namespace and
 forwards container port 8788 to Otto's loopback listener on port 8787.
 Only Mac loopback port 8787 is published; the API retains its bearer-token
@@ -332,7 +332,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto mcp login <server>` | Run the OAuth sign-in flow for one configured MCP server. See [MCP servers](#mcp-servers). |
 | `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
 | `otto trust <dir> [--config PATH] [--executables \| --revoke-executables]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
-| `otto serve [--socket PATH] [--listen HOST:PORT [--open]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket, a loopback TCP port, or both, instead of an interactive frontend. See [Agent server](#agent-server). |
+| `otto serve [--socket PATH] [--listen HOST:PORT]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket, a loopback TCP port, or both, instead of an interactive frontend. See [Agent server](#agent-server). |
 | `otto acp [--attach [--socket PATH]]` | Run Otto as an Agent Client Protocol v1 agent on stdin and stdout, for ACP clients such as `otto-connect`. With `--attach`, forward each request to a running `otto serve` instead of opening sessions in this process. See [ACP agent server](#acp-agent-server). |
 | `otto --attach [--socket PATH] [--resume ID \| --continue]` | Run the TUI as a client of a running `otto serve`, on a session that the web UI and other clients can use at the same time. See [The TUI attached to `otto serve`](#the-tui-attached-to-otto-serve). |
 
@@ -359,7 +359,6 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--acp-listen HOST:PORT` | `serve` only. Additional authenticated ACP v1 TCP listener on loopback. Requires `OTTO_ACP_TOKEN` in the environment; see [Direct ACP TCP connection](#direct-acp-tcp-connection). |
 | `--socket PATH` | `serve`, `acp --attach`, or `--attach`. Unix domain socket path of `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. For `serve` with `--listen`, both listeners are opened. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. With `--socket`, both listeners are opened. |
-| `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). A failed launch is not fatal: the URL is still printed. |
 
 ## Environment variables
 
@@ -1909,15 +1908,14 @@ New sessions use the selected workspace's resolved profile/model settings
 and sandbox; a loaded workspace has its own sandbox reload and read grants.
 
 ```bash
-otto serve [--socket PATH] [--listen HOST:PORT [--open]]
+otto serve [--socket PATH] [--listen HOST:PORT]
 ```
 
 `serve` accepts the same startup flags as the interactive frontends
 (`--config`, `--cwd`, `--profile`, `--provider`, `--base-url`, `--model`,
 `--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus
-`--socket` and `--listen`, and `--open` to launch the printed TCP URL in the
-default browser. It rejects `--ui`, `--prompt`, `--resume`, `--continue`,
-`--archive`, and `--no-session`. `--open` requires a TCP listener.
+`--socket` and `--listen`. It rejects `--ui`, `--prompt`, `--resume`, `--continue`,
+`--archive`, and `--no-session`.
 
 ### Listener
 
@@ -1946,14 +1944,12 @@ line to stdout before serving:
 otto serve: http://127.0.0.1:PORT/?token=<token>
 ```
 
-`--open` then launches that URL with `/usr/bin/open` on macOS and `xdg-open`
-on Linux. A failed launch is not fatal. `--open` without a TCP listener exits
-with `otto: --open requires a TCP listener`.
+Use the printed host/port and token to connect API clients or the separate
+otto-plus frontend. The printed URL itself no longer serves a page.
 
 Every `/v1/` request must then carry `Authorization: Bearer <token>`; a
 missing or wrong token returns `401` with `WWW-Authenticate: Bearer`. The
-token is accepted from that header only, never from a query parameter. `/`,
-`/assets/`, `/healthz`, and `/metrics` need no token. The token is never
+token is accepted from that header only, never from a query parameter. `/healthz` and `/metrics` need no token; `/` and `/assets/` are not served. The token is never
 logged and is not persisted; restarting the process issues a new one. There
 is no TLS and no CORS: the port is meant for a browser or client on the same
 machine.
@@ -2157,161 +2153,14 @@ the operation succeeded.
 
 ### Web UI
 
-`GET /` serves the browser UI built by `make ui` and embedded into the
-binary, and `GET /assets/` its static files. `make build` refreshes the UI
-first; a direct `cargo build` without running `make ui` answers `/` with the
-plain-text line `Web UI not built; run make ui`.
-`--open` opens that URL in the default browser; otherwise open the printed
-URL yourself. The page moves the token from the query string into the tab's
-`sessionStorage`, removes it from the address bar, and sends it as the
-`Authorization` header on every API call. Closing the tab discards it; open
-the printed URL again to get back in.
-
-In the Chat view the page has a sessions sidebar, the transcript, and a
-composer:
-
-- The sidebar groups sessions (`GET /v1/sessions`) by working directory,
-  the session's `workspace`. Groups are the loaded workspaces
-  (`GET /v1/workspaces`) plus any directory a listed session reports; the
-  startup workspace comes first, the rest by path. A group header shows the
-  directory basename, with the full path in a tooltip. Each row shows the
-  session name, `●` when the session is open on the server, and the model;
-  the current session is highlighted.
-- The sidebar reads `GET /v1/status` and marks open sessions with badges:
-  `running` while a turn runs, `approval` while an elevated Bash command
-  waits for approval, `error` when the last turn failed, and `N tasks` while
-  sub-agent tasks are queued or running. A group header shows how many of its
-  sessions are running. The page reconnects 1s after the stream ends or
-  fails, except after a `401`, which it shows as an error; it
-  re-reads the session list when a status names a session it does not list.
-- Selecting a session opens it with `POST /v1/sessions {"resume": id}` and
-  renders its history. The session id is kept in the URL fragment, so a reload
-  reopens the same session.
-- Each group's **New session** button creates a session in that directory;
-  `"workspace"` is sent only for a non-startup directory. `/new` keeps
-  creating in the currently open session's workspace.
-- Each group's **Changes** button opens the Changes view for that directory
-  (`GET /v1/workspaces/diff`): the branch, then one collapsible entry per
-  changed file with its status and patch. It fetches again on **Refresh** and
-  when a session in that directory finishes a turn. It is read-only.
-- Each group other than the startup workspace has a **Remove** button, which
-  calls `DELETE /v1/workspaces`; a `409` message is shown next to the
-  **Add workspace…** button.
-- **Add workspace…** at the bottom of the sidebar opens a folder picker that
-  browses the server's directories through `GET /v1/fs/dirs`. The chosen folder is registered with `POST /v1/workspaces` and appears as a
-  group. If the server answers `403 WORKSPACE_NOT_ADMITTED`, a **Trust this
-  folder?** dialog shows the path; **Trust and add** repeats the request with
-  `"trust": true`, and **Cancel** adds nothing. **Enter a path** below the
-  button expands a field for typing an absolute path, handled the same way.
-  Other `400`/`500` errors are shown below the button.
-- While the page is open it calls `POST /v1/schedule/claim` every 15 s and
-  shows each due [`schedule`](#schedule) item created from the browser UI as
-  a notice below the top bar, with a dismiss button, then confirms it with
-  `POST /v1/schedule/{id}/delivered`. With several tabs open, each item
-  appears in one of them.
-- Below 720px wide the sidebar is hidden; the **Sessions** button in the top
-  bar shows it as an overlay, and opening a session hides it again.
-- Typing `/` in the composer shows local suggestions for supported Web slash
-  commands; Tab or click completes the highlighted command. Supported commands
-  are `/help`, `/init`, `/session`, `/new`, `/clear`, `/resume`, `/model`,
-  `/rename <name>`, `/compact [focus]`, `/reflect [focus]`, `/reflect list`,
-  `/reflect show <id>`,
-  `/skill generated`, `/skill revert <name>`, `/sandbox`, `/sandbox reload`,
-  `/approve <id>`, `/deny <id>`, `/tasks`, `/task <id|name>`,
-  `/task cancel <id|name>`,
-  `/mcp`, and `/exit`. Commands backed by existing server APIs run locally
-  instead of starting a provider turn. `/init` submits the same built-in
-  `AGENTS.md` contributor-guide task as the terminal frontends. `/resume` asks
-  you to choose a session from the sidebar; `/exit` asks you to close the
-  browser tab because a page cannot reliably close a tab it did not open.
-  `/approve <id>` and `/deny <id>` decide an elevated Bash command the
-  running turn waits for, through
-  `POST /v1/sessions/{id}/approvals/{approval_id}`; the turn continues with
-  the decision. Both run immediately while a turn runs. The transcript shows
-  each request with its id and each decision, including decisions made by
-  another client.
-  `/mcp` shows each configured server's connection state only; signing in
-  runs on the host with `otto mcp login <server>`, since the OAuth flow opens
-  a browser there, not in the page.
-- Enter sends the composer text as a turn or Web command; Shift+Enter inserts
-  a newline. Assistant text renders as GitHub-Flavored Markdown, with KaTeX
-  math for `$...$` and `$$...$$`, plus Mermaid diagrams in fenced
-  `mermaid` code blocks. Each tool call is a collapsible block with its
-  arguments and result. The page is served with
-  `Content-Security-Policy: img-src 'self' data: blob:`, so a Markdown image
-  that points to another host is not loaded: model output such as
-  `![](https://host/?q=<text>)` cannot make the browser send a request.
-- **Image** selects one PNG, JPEG, or WebP image; pasting a screenshot selects
-  it too. The composer shows a preview, and the image can be sent without text.
-  Sending stores the original image with the prompt in session history and
-  shows it in the transcript, including after resume. The provider receives it
-  with `detail: high`.
-- While a turn runs, Enter holds the composer text as the next input and
-  sends it when the turn ends; Enter again replaces it, and Ctrl+U or
-  **Withdraw** removes it. **Cancel turn** calls
-  `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
-- The page starts turns with `"queue": true`. When another client's turn
-  starts first, the footer shows `queued` until this turn starts, and the
-  transcript shows the prompt when it starts.
-- Reloading the page during a turn re-attaches to the running turn's event
-  stream and continues rendering it; if the stream drops, the page re-reads
-  it from the last sequence number it saw.
-- While a session is open and idle, the page polls `GET /v1/sessions/{id}`
-  about once a second. A server-started wake (`trigger` `task`, such as a
-  `remind` timer) is attached if it is still running; if it
-  already finished, the page reloads history.
-
-- **Compact** calls `POST /v1/sessions/{id}/compact`; any text in the
-  composer is sent as the `focus`. The result appears as a notice in the
-  transcript (`Nothing to compact` when the server reports a no-op).
-- `/reflect [focus]` calls `POST /v1/sessions/{id}/reflect` and shows the one-line
-  report and the retrospective as a notice; `/reflect list` and `/reflect show <id>` read
-  `GET /v1/sessions/{id}/reflection/runs[/{run}]`; the composer is held while it runs, as for a compaction.
-  `/skill generated` lists the skills reflection wrote
-  (`GET /v1/sessions/{id}/reflection/skills`) and `/skill revert <name>` undoes
-  one. Lines that background reflection queues after a compaction appear in the
-  transcript within a couple of seconds (the page polls
-  `GET /v1/sessions/{id}/notices`); lines queued before the page opened are not
-  replayed. The Web UI has no memory review: candidates queued from the browser
-  are reviewed in a terminal with `/memory review`.
-- A **Tasks** panel appears above the composer when the session has sub-agent
-  tasks (`GET /v1/sessions/{id}/tasks`). It re-reads on `notification` events
-  and at turn end, polls every 3 seconds while a task is queued or running,
-  and offers **Cancel** for those. The model-facing `agent_send` tool can send
-  task updates to a queued or running child from a parent turn; child agents can
-  use `agent_report` to send the parent an answer to a question or a blocker
-  needing its decision, limited to 10 calls on the child's own initiative per
-  task plus one more per `agent_send` message received. The Web UI has no
-  separate task-send button.
-- **Context** in the session bar opens a side panel with the same report as
-  the TUI `/context` modal (`GET /v1/sessions/{id}/context`): one bar per
-  section, and each section and item expands to show its text. It re-reads
-  when opened and at turn end.
-- The footer shows `GET /v1/info` (provider, model, sandbox), the session's
-  context size and cumulative usage from `GET /v1/sessions/{id}`, and persisted
-  all-session token totals and cache hit rate from `GET /v1/usage`; during a
-  turn it also totals that turn's `provider_usage` events and shows the same
-  phase status line as the TUI. Reasoning summaries render as a collapsed
-  block whose first line is the summary.
-- The top bar switches between **Chat**, **Usage**, **Workflows**, and
-  **Agents**. Usage
-  shows persisted totals, a Mermaid token-volume chart for the last 7, 30, or
-  90 UTC days, and an exact daily table. It reads `GET /v1/usage/daily` and
-  does not expose the Turso database to the browser.
-- **Workflows** lists this workspace's durable runs (`GET /v1/workflows`) and
-  starts one from a name and input. Selecting a run shows its steps and
-  approval requests and offers **Resume**, **Cancel**, per-step **Retry** and
-  **Fork**, and **Approve**/**Reject** for a pending gate, over the
-  `/v1/workflows` routes below. See [Durable workflows](#durable-workflows).
-- **Agents** lists sub-agent tasks from every session of every Otto process
-  (`GET /v1/tasks`), newest first, with status, agent, description,
-  workspace, parent session, created time, duration, steps, tool calls, and
-  tokens. The status and workspace filters map to the query parameters, and
-  **Load more** fetches older rows. It polls every 3 seconds while a listed
-  task is queued or running. Selecting a row shows the prompt, the result or
-  error, and the child transcript; **Cancel** appears for a queued or running
-  task whose parent session this server has open, and the parent session
-  opens in Chat when this server lists it.
+The browser frontend and its WASM bindings now live in
+[otto-plus](https://github.com/baiyuqing/otto-plus). Follow its README for
+setup, building, and hosting; the [UI guide](https://github.com/baiyuqing/otto-plus/blob/main/docs/web-ui.md)
+describes the migrated features. Otto retains the authenticated HTTP API.
+It no longer embeds static files: `/` and `/assets/` return `404`, and
+`serve --open` is removed. Start `otto serve --listen 127.0.0.1:8787`, then
+open the separate frontend URL with the token from Otto's startup output.
+The frontend's same-origin proxy forwards `/v1` with bearer authentication.
 
 ### HTTP API
 

@@ -29,7 +29,7 @@ the runtime, session history, and default memory storage.
 ## Install from source
 
 Requires the pinned **Rust 1.98** toolchain (`rustup toolchain install` picks
-it up from `rust-toolchain.toml`), **Node 24+**, `wasm-pack` 0.15, and access
+it up from `rust-toolchain.toml`), **Go** (version pinned in `connect/go.mod`), and access
 to one of the two providers. **macOS** is the supported platform: it is the
 only one with a sandbox, and the only one the acceptance gate runs on. Otto
 also builds and runs on **Linux**, with the limits under
@@ -43,14 +43,14 @@ otto --help
 otto --version   # otto 0.1.0+a1b2c3d4e5f6; `.dirty` is appended for uncommitted changes
 ```
 
-`make install` refreshes and embeds the Web UI, builds Otto and otto-connect, installs both to `~/.local/bin/`, and installs bundled skills under `~/.otto/skills/`. Make sure `~/.local/bin` is on your `PATH`. A direct `cargo build` without a prior `make ui` embeds a one-line placeholder instead.
+`make install` builds Otto and otto-connect, installs both to `~/.local/bin/`, and installs bundled skills under `~/.otto/skills/`. Make sure that directory is on your `PATH`. Browser UI development and hosting live in [otto-plus](https://github.com/baiyuqing/otto-plus); building Otto needs no npm or WASM frontend bundle.
 
 If you only want a local copy in the checkout, run `make build` and then
 `./otto --help`.
 
 ## Docker Desktop on Mac
 
-With Docker Desktop running, build and start the Web UI from this checkout:
+With Docker Desktop running, build and start the Otto API from this checkout:
 
 ```bash
 docker compose build
@@ -59,9 +59,9 @@ docker compose up -d
 docker compose logs otto
 ```
 
-Open the printed `http://127.0.0.1:8787/?token=...` URL in your Mac browser.
-The image builds natively on Apple Silicon and Intel Macs and includes the
-complete Web UI. Configuration and sessions persist in a named volume;
+Use the printed host/port and token with an API client or the separate
+[otto-plus](https://github.com/baiyuqing/otto-plus) frontend.
+The image builds natively on Apple Silicon and Intel Macs and serves the API. Configuration and sessions persist in a named volume;
 `OTTO_WORKSPACE` selects the directory mounted into the container.
 For API-key profiles, select `OTTO_API_KEY` during setup and export it before
 starting Compose. See [Docker on Mac](docs/user-manual.md#docker-on-mac) for
@@ -347,14 +347,14 @@ access to a workspace.
 
 ## Contributing
 
-The code is a Cargo workspace of three crates:
+The code is a Cargo workspace of two crates:
 
 - `crates/otto-core` holds the provider contract, wire codecs, session codec,
   agent loop, and config. It builds for `wasm32-unknown-unknown`.
 - `crates/otto` is the native binary: CLI, REPL, TUI, tools, sandbox, memory,
   skills, sub-agents, the `otto serve` server, and `otto acp`.
-- `crates/otto-web` compiles `otto-core` to WebAssembly for the browser UI in
-  `ui/`, so the web frontend and the binary share one implementation.
+- [otto-plus](https://github.com/baiyuqing/otto-plus) owns the browser UI and
+  WASM bindings, consuming this repository's shared core at a pinned revision.
 
 See the [code organization map](docs/code-organization.md) for a quick
 repository and ownership overview, [AGENTS.md](AGENTS.md) for the task map,

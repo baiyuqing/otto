@@ -234,14 +234,18 @@ impl Tool for AgentTool {
         }
 
         let running_before = count_running(self.runner.tasks());
-        let task = match self.runner.start(StartRequest {
-            prompt: args.prompt,
-            description: args.description,
-            model: args.model,
-            agent: args.agent,
-            context: args.context,
-            name: args.name,
-        }) {
+        let task = match self
+            .runner
+            .start(StartRequest {
+                prompt: args.prompt,
+                description: args.description,
+                model: args.model,
+                agent: args.agent,
+                context: args.context,
+                name: args.name,
+            })
+            .await
+        {
             Ok(task) => task,
             Err(error) => return error_result(error),
         };
@@ -313,7 +317,7 @@ impl AgentTool {
             }
         }
 
-        let task = match self.runner.resume(target, args.prompt) {
+        let task = match self.runner.resume(target, args.prompt).await {
             Ok(task) => task,
             Err(error) => return error_result(error),
         };
@@ -819,6 +823,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
 
         let wait_tool = tool_named(&runner, "agent_wait");
@@ -854,6 +859,7 @@ mod tests {
                     prompt: prompt.into(),
                     ..StartRequest::default()
                 })
+                .await
                 .expect("start succeeds");
         }
         wait_status(&tasks, "t1", TaskStatus::Running).await;
@@ -923,6 +929,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -949,6 +956,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -978,6 +986,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -1052,6 +1061,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
 
         let result = run(
@@ -1078,6 +1088,7 @@ mod tests {
                 description: "explore".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
         runner
@@ -1085,6 +1096,7 @@ mod tests {
                 prompt: "review the diff".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
 
         let result = run(tool_named(&runner, "agent_status").as_ref(), "{}").await;
@@ -1133,6 +1145,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
 
@@ -1164,6 +1177,7 @@ mod tests {
                 model: "gpt-test-model".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
 
@@ -1188,6 +1202,7 @@ mod tests {
                 prompt: "go".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
 
@@ -1403,6 +1418,7 @@ mod tests {
                 name: "lint-check".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
 
         let result = run(
@@ -1438,6 +1454,7 @@ mod tests {
                 prompt: "start".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_status(&tasks, "t1", TaskStatus::Running).await;
 
@@ -1487,6 +1504,7 @@ mod tests {
                 prompt: "finish".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
         let finished = run(send.as_ref(), r#"{"task_id":"t1","message":"too late"}"#).await;
@@ -1514,6 +1532,7 @@ mod tests {
                     name: name.into(),
                     ..StartRequest::default()
                 })
+                .await
                 .expect("start succeeds");
         }
         wait_status(&tasks, "t1", TaskStatus::Running).await;
@@ -1566,6 +1585,7 @@ mod tests {
                 name: "lint-check".into(),
                 ..StartRequest::default()
             })
+            .await
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
 

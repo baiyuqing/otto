@@ -208,7 +208,7 @@ pub(crate) async fn run(
     socket: &Path,
     workspace: &str,
     start: Start,
-    schedule: Option<Arc<crate::schedule::Store>>,
+    schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),
 ) -> i32 {

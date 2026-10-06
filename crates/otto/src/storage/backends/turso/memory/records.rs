@@ -343,7 +343,7 @@ fn require_fts_row_count(connection: &Connection, record_id: &str, expected: usi
     Ok(())
 }
 
-fn insert_fts(connection: &Connection, record: &Record) -> Result<()> {
+pub(crate) fn insert_fts(connection: &Connection, record: &Record) -> Result<()> {
     connection
         .execute(
             "INSERT INTO memory_records_fts(record_id,text_value,kind,semantic_key,labels) VALUES(?,?,?,?,?)",

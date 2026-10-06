@@ -8,10 +8,10 @@
 #![allow(unsafe_code)]
 
 use std::fs;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::session::archive;
 use chrono::{DateTime, TimeZone, Utc};
 use otto_core::model::{
     Block, BlockType, EffectCertainty, FinishReason, Message, OperationDisposition, OperationId,
@@ -25,7 +25,7 @@ use otto_core::session::{
 
 use super::fsops;
 use super::list::{self, MAX_LIST_SESSIONS};
-use super::prepared::{Prepared, archive};
+use super::prepared::Prepared;
 use super::store::Store;
 
 // ---------------------------------------------------------------------------
@@ -212,9 +212,7 @@ fn mode(path: &Path) -> u32 {
 fn assert_close_on_exec(store: &Store) {
     let guard = store.lock().expect("lock store");
     let file = guard.file.as_ref().expect("open session file");
-    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
-    assert!(flags >= 0, "fcntl(F_GETFD) failed");
-    assert_ne!(flags & libc::FD_CLOEXEC, 0, "session fd must be CLOEXEC");
+    assert!(file.is_close_on_exec().expect("check CLOEXEC"));
 }
 
 // ---------------------------------------------------------------------------
@@ -3013,8 +3011,13 @@ fn prepare_honors_lease_seconds_already_recorded_in_an_existing_lease_directory(
 
     let prepared = Prepared::prepare(session_path, Some(40)).expect("prepare");
     let (store, _warnings) = prepared.activate().expect("activate");
-    let lease = store.lease().expect("lease-managed store");
-    assert_eq!(lease.duration(), std::time::Duration::from_secs(30));
+    assert!(store.lease().is_some(), "lease-managed store");
+    let lease_metadata: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(session_path.with_extension("lease").join("lease.json"))
+            .expect("read lease metadata"),
+    )
+    .expect("parse lease metadata");
+    assert_eq!(lease_metadata["lease_seconds"], 30);
 
     store.close().expect("close");
 }

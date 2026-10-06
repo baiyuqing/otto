@@ -1,6 +1,8 @@
 # State contracts and replaceable storage
 
-Status: proposed; awaiting explicit design approval. No implementation approved.
+Status: approved for implementation on 2026-10-06; native implementation added,
+verification in progress.
+No alternative live cloud service has been selected or approved yet.
 Base: `10c60cc`.
 
 ## Requirements
@@ -15,6 +17,8 @@ User requirements, 2026-10-06:
 - Be open for extension and closed for modification: adding a backend must not
   change existing business services, state machines or frontend behavior.
 - Organize code/directories around these owners, with enforceable dependency rules.
+- Use inversion of control at composition boundaries: services declare ports;
+  runtime injects implementations. No additional IoC framework is needed.
 
 This proposal covers Otto-owned persistent state. Working files edited by tools,
 provider credentials and executable trust remain under their existing local
@@ -23,7 +27,7 @@ local execution workspace. Transient turn queues, steering, cancellation tokens
 and live process handles remain in memory; persisting them would require an
 explicit domain recovery contract.
 
-## Current boundaries
+## Starting boundaries
 
 | Area | Existing boundary | Coupling to remove |
 | --- | --- | --- |
@@ -255,7 +259,8 @@ not sufficient. Durability against local process/host loss is distinct from
 regional loss; the selected deployment must meet the requested failure model.
 
 SQL and POSIX are useful driver families, not interchangeable guarantees.
-SQLite dialect/FTS, `BEGIN IMMEDIATE`, `PRAGMA`, placeholders and schema
+SQLite-profile STRICT tables and JSON functions, the exact Turso memory
+FTS/`json_value` profile, `BEGIN IMMEDIATE`, `PRAGMA`, placeholders and schema
 migrations stay inside their adapter/driver package. A new SQL dialect supplies
 its query/schema/search adapters; a SQL transport alone does not make it
 compatible. No universal SQL translator or ORM is proposed.
@@ -369,8 +374,9 @@ silently change behavior under an unchanged port.
 
 ## Backend migration and cutover
 
-Use an offline, resumable migration first. This is a recommended design
-decision awaiting approval, not a shipped command. No zero-downtime dual write
+The implementation uses offline, resumable migration first. Native
+`storage transfer` targets a separate local root through these ports;
+alternative live services are not selected yet. No zero-downtime dual write
 or replication protocol is included.
 
 Each domain provides a versioned `SnapshotExport` (manifest, bounded record/blob
@@ -418,9 +424,12 @@ credentials or automatically granting destination trust.
    recovery without granting execution authority. Keep source and manifest
    until explicit cleanup.
 
-Before destination writes begin, rollback can restore the source route under
-exclusive ownership. After any destination write, changing the address back
-would lose data; rollback requires another verified migration. Migration
+Before publication, explicit abort can restore the source route under exclusive
+ownership, including after isolated staging imports. Staging is not the active
+destination and never replaces source authority. After publication, changing
+the address back could lose new destination data; rollback requires another
+verified migration. Unknown publication acknowledgements must be reconciled
+before deciding whether abort is safe. Migration
 crashes before publication leave the source authoritative; publication uses
 a recoverable manifest/route generation so restart can distinguish staged
 data from an active destination. Artifacts, hashes and manifests containing
@@ -433,7 +442,9 @@ switching an endpoint never implicitly creates/migrates authority state.
 
 ## Implementation sequence and acceptance
 
-The following stages are proposed; approval must name the agreed scope.
+Stages 1 to 3 were approved for implementation. The current code supplies
+native domain ports, SQLite/POSIX drivers, and logical local transfer/abort;
+the following sequence also records the acceptance requirements.
 
 1. Extract typed ports and persistence contracts for all existing durable state
    owners. Separate authority/state services from their concrete stores; keep
@@ -460,7 +471,8 @@ Offline local tests use controlled stores and fault injection; real-service
 checks are separate explicit integration gates. Follow repository verification:
 focused behavioral tests, then `make check-fast`; full gates remain in CI.
 
-This document is the proposed architecture contract. After implementation,
+This document records the approved architecture contract. Current implemented
+ownership and behavior belong in the canonical guides. After implementation,
 current module ownership belongs in `docs/code-organization.md`, invariants
 in `docs/development.md`, and shipped configuration/migration behavior in
 `docs/user-manual.md`. Do not mark these capabilities implemented early.

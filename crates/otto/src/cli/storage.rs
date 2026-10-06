@@ -46,6 +46,20 @@ impl From<Cell> for Value {
     }
 }
 
+pub async fn run_async(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+) -> i32 {
+    if args.first().is_some_and(|arg| arg == "transfer") {
+        return super::storage_transfer::run(&args[1..], stdout, stderr).await;
+    }
+    if args.first().is_some_and(|arg| arg == "abort") {
+        return super::storage_transfer::abort(&args[1..], stdout, stderr).await;
+    }
+    run(args, stdout, stderr)
+}
+
 pub fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let result = match args {
         [command, source, destination] if command == "migrate" => {

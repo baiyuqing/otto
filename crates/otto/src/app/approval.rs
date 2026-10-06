@@ -185,10 +185,13 @@ impl Controller {
             Step::Image(text, _) => runner.redact_text(text),
             Step::Wake(_) => String::new(),
         };
+        let resumes = matches!(first, Step::Wake(_)) && self.resumable_interrupted_turn();
         let task_run = runner
             .task_control()
-            .begin(&session_id, &original_task)
+            .begin_resuming(&session_id, &original_task, resumes)
             .map_err(AgentError::Other)?;
+        self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
+            .await?;
         let stop = self
             .run_approved_step(
                 first,
@@ -208,14 +211,20 @@ impl Controller {
             task_run.clear_followups();
             return Ok(stop);
         }
-        while let Some(text) = task_run.next_followup() {
+        while let Some(followup) = task_run.next_followup() {
             if self.pending_approval().is_some() {
                 task_run.clear_followups();
                 return Ok(stop);
             }
+            if otto_core::session::Session::has_input(runner.session(), &followup.input_id) {
+                // Its step ran before an interruption kept it journaled.
+                task_run.followup_done(&followup);
+                continue;
+            }
+            runner.set_next_input_id(Some(followup.input_id.clone()));
             let followup_stop = self
                 .run_approved_step(
-                    Step::Followup(&text),
+                    Step::Followup(&followup.text),
                     &runner,
                     system_context,
                     &task_run,
@@ -228,6 +237,7 @@ impl Controller {
             if followup_stop == Stop::Cancelled {
                 return Ok(followup_stop);
             }
+            task_run.followup_done(&followup);
         }
         Ok(stop)
     }

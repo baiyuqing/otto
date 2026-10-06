@@ -429,6 +429,20 @@ the design above without changing its guarantees.
   `Agent::set_next_input_id`, which the next run always consumes. The server
   remembers the last 256 input ids per session.
 
+### Section 5 (model follow-ups), implemented 2026-10-06
+
+- The journal is its own mailbox, `<id>.followups.json`, like steering's.
+  Entries carry the logical task's random scope and the id
+  `followup:<scope>:<n>`, which the step's `agent_followup` message records.
+- `TaskControl::begin_resuming` adopts journaled entries when the run is a
+  wake turn that resumes an interrupted turn whose automatic resume is not
+  used (`Controller::resumable_interrupted_turn`); `begin` discards them and
+  the caller stores the "not run" notice with their count. Server and ACP
+  wakes adopt them in `run_with_channel`; the terminal wake
+  (`WakeOperation::run`) runs them itself when no task is active.
+- A crash between two steps leaves no interrupted turn, so those follow-ups
+  are discarded with the notice rather than resumed, as the design states.
+
 ## Open questions
 
 1. **New kinds in a second file `inputs.json`**, or in `inbox.json` with a

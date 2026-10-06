@@ -235,9 +235,9 @@ impl Prepared {
         }
     }
 
-    /// Lets a takeover leave calls of the tools `replayable` accepts without a
+    /// Lets recovery leave calls of the tools `replayable` accepts without a
     /// result, for the agent to run again, instead of settling them as
-    /// interrupted. See [`Takeover::replayable`](super::Takeover).
+    /// interrupted. See [`Recovery::replayable`](super::Recovery).
     pub fn with_replayable(mut self, replayable: fn(&str) -> bool) -> Self {
         self.replayable = replayable;
         self

@@ -1,10 +1,12 @@
 //! Base retry safety of the built-in tools.
 //!
 //! The declaration belongs to the tool implementation, never to model-supplied
-//! arguments or configuration. Only [`RetrySafety::ReadOnly`] has a consumer
-//! today: after a session takeover, a call left without a result is run again
-//! by the agent when its tool is `ReadOnly` (see
-//! `docs/specs/2026-10-02-replay-readonly-on-takeover.md`). Every other
+//! arguments or configuration. Each attempt records it, and only
+//! [`RetrySafety::ReadOnly`] has a consumer today: after process loss or a
+//! session takeover, a call left without a result is run again by the agent
+//! when its tool is `ReadOnly` now and was when the attempt started (see
+//! `docs/specs/2026-10-02-replay-readonly-on-takeover.md` and
+//! `docs/specs/2026-10-06-crash-recovery-and-turn-resume.md`). Every other
 //! built-in is listed as `NonIdempotent` on purpose, so adding a tool without
 //! classifying it fails `every_builtin_tool_is_classified`.
 
@@ -34,15 +36,15 @@ const BASE_SAFETY: &[(&str, RetrySafety)] = &[
     ("forget", RetrySafety::NonIdempotent),
     ("reflect", RetrySafety::NonIdempotent),
     ("remind", RetrySafety::NonIdempotent),
-    ("remind_status", RetrySafety::NonIdempotent),
+    ("remind_status", RetrySafety::ReadOnly),
     ("remind_cancel", RetrySafety::NonIdempotent),
     ("schedule", RetrySafety::NonIdempotent),
     ("schedule_list", RetrySafety::ReadOnly),
     ("schedule_cancel", RetrySafety::NonIdempotent),
-    ("list_models", RetrySafety::NonIdempotent),
+    ("list_models", RetrySafety::ReadOnly),
     ("agent", RetrySafety::NonIdempotent),
     ("agent_wait", RetrySafety::NonIdempotent),
-    ("agent_status", RetrySafety::NonIdempotent),
+    ("agent_status", RetrySafety::ReadOnly),
     ("agent_send", RetrySafety::NonIdempotent),
     ("agent_report", RetrySafety::NonIdempotent),
 ];
@@ -56,8 +58,8 @@ pub fn declared_safety(name: &str) -> Option<RetrySafety> {
         .map(|(_, safety)| *safety)
 }
 
-/// Whether a call to `name` may be run again after a takeover: the tool is a
-/// built-in declared `ReadOnly`.
+/// Whether a call to `name` may be run again after process loss or a
+/// takeover: the tool is a built-in declared `ReadOnly`.
 pub fn is_replayable(name: &str) -> bool {
     declared_safety(name) == Some(RetrySafety::ReadOnly)
 }
@@ -87,7 +89,16 @@ mod tests {
 
     #[test]
     fn only_read_only_tools_are_replayable() {
-        for name in ["read", "ls", "grep", "find", "memory_search"] {
+        for name in [
+            "read",
+            "ls",
+            "grep",
+            "find",
+            "memory_search",
+            "agent_status",
+            "remind_status",
+            "list_models",
+        ] {
             assert!(is_replayable(name), "{name}");
         }
         for name in [

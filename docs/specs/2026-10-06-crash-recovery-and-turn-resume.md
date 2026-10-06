@@ -1,7 +1,9 @@
 # Crash recovery and interrupted-turn resume
 
-Status: proposed 2026-10-06, awaiting approval. No production code or tests
-until approved.
+Status: approved 2026-10-06; open questions resolved as recommended
+(`agent_status`, `remind_status` and `list_models` become `ReadOnly` after
+review of their implementations; the server reports trigger `recovery`; one
+automatic resume per chain, not configurable).
 
 This extends [replay read-only tool calls after a takeover](2026-10-02-replay-readonly-on-takeover.md),
 [session failover](2026-09-28-session-failover.md) and Phase 4 of
@@ -207,8 +209,9 @@ Two existing wiring constraints stay as they are:
   to `ReadOnly` after the attempt was written is not replayed.
 - **Callers and unchanged rules.** The store's `all_replayable` and the agent's
   `replay_pending_calls` both call this predicate instead of keeping two copies
-  of the rule. The store's tool-name predicate becomes
-  `fn(&str) -> Option<RetrySafety>`. Unchanged:
+  of the rule. The store keeps its tool-name predicate (whether the tool is
+  `ReadOnly` now), and executors expose `ToolExecutor::retry_safety` for the
+  recorded value. Unchanged:
   - all-or-nothing per assistant message;
   - no replay when hooks are configured;
   - same operation id with `attempt + 1`.

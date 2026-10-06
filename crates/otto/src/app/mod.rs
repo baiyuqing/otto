@@ -568,6 +568,15 @@ impl Controller {
         }
     }
 
+    /// Whether the session's last turn was interrupted by process loss, so
+    /// the next wake turn resumes it (see `otto_core::session::turn`).
+    pub fn resumes_interrupted_turn(&self) -> bool {
+        let state = self.lock();
+        state.current.as_ref().is_some_and(|current| {
+            otto_core::session::Session::interrupted_turn(&current.session).is_some()
+        })
+    }
+
     pub fn history(&self) -> Vec<Message> {
         if !self.dynamic_content {
             return Vec::new();

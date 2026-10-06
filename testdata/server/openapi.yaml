@@ -229,7 +229,7 @@ components:
           type: string
         trigger:
           type: string
-          enum: [user, task]
+          enum: [user, task, recovery]
         status:
           type: string
           enum: [running, ok, error, canceled]
@@ -338,7 +338,7 @@ components:
           type: string
         trigger:
           type: string
-          enum: [user, task]
+          enum: [user, task, recovery]
         status:
           type: string
           enum: [queued, running, ok, error, canceled]

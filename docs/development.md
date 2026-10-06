@@ -46,7 +46,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`
   - `tui`: the terminal frontend and alternate-screen lifecycle. `features/` owns injected presenters and the command catalog; add a feature by implementing a presenter and registering it there. Presenters project domain data to `View` and return transitions, while `interaction/` owns shared terminal-independent selection, focus, fields and composer state. `backend.rs` owns asynchronous requests and scope tickets; `widgets.rs` and `render.rs` draw views and `App` snapshots without reaching services. Local and `--attach` share composer and feature input; `attach.rs` sends requests through `client`, follows `/v1/status`, and reconnects, while both modes apply turn events as wire frames. `tests/tui_boundary.rs` protects these ownership lines.
 - The browser UI and WASM bindings live in [otto-plus](https://github.com/baiyuqing/otto-plus), which consumes the shared core at a pinned revision.
-- `connect/`: `otto-connect`, the Go chat connector (module `github.com/baiyuqing/otto/connect`). It is an ACP client that starts an ACP agent (by default `otto acp`) as a child process and links no otto code; its contract with otto is ACP v1 on stdio or authenticated loopback TCP (`[agent].address`). `internal/agent` owns the child process or TCP connection and the ACP handshake, `internal/bridge` the chat-to-session map, queues, commands, replies, permission requests and admission, `internal/telegram` the Bot API adapter (including Markdown rendering to entities), `internal/feishu` the Feishu/Lark adapter over `channel-sdk-go`, `internal/config` `connect.toml`, and `internal/state` the state file. Design: [chat connector](specs/2026-10-02-otto-connect.md)
+- `chat-connector/`: `otto-connect`, the Go chat connector (module `github.com/baiyuqing/otto/chat-connector`). It is an ACP client that starts an ACP agent (by default `otto acp`) as a child process and links no otto code; its contract with otto is ACP v1 on stdio or authenticated loopback TCP (`[agent].address`). `internal/agent` owns the child process or TCP connection and the ACP handshake, `internal/bridge` the chat-to-session map, queues, commands, replies, permission requests and admission, `internal/telegram` the Bot API adapter (including Markdown rendering to entities), `internal/feishu` the Feishu/Lark adapter over `channel-sdk-go`, `internal/config` `connect.toml`, and `internal/state` the state file. Design: [chat connector](specs/2026-10-02-otto-connect.md)
 
 Keep provider-specific wire structs inside the two provider implementation
 modules. Keep file-tool workspace enforcement inside `crates/otto`'s `tool`
@@ -455,7 +455,7 @@ checks, and the core wasm tests under Node. It does not run `cargo build
 --release` or `rust-wasm-check`; `make build` is the release build, and
 `make check-linux` runs `rust-wasm-check`.
 
-`connect-check` needs the Go version named in `connect/go.mod`; CI installs it
+`connect-check` needs the Go version named in `chat-connector/go.mod`; CI installs it
 with `actions/setup-go`. It gets `target/debug/otto` from
 `cargo test --workspace --no-run`, which resolves the same features as
 `rust-test` and so reuses its build; `cargo build -p otto` would leave the
@@ -504,7 +504,7 @@ compile (36 of 479 on 2026-10-05); such a crate can fail the check without
 shipping.
 
 Dev-only Rust crates are not checked because they do
-not ship. The Go module under `connect/` is not checked because
+not ship. The Go module under `chat-connector/` is not checked because
 `go.mod` carries no license metadata.
 
 When the check fails, read the package's license. If it is acceptable, add its
@@ -540,7 +540,7 @@ uncommitted and untracked files, and runs only the commands those paths need:
 | `crates/otto/tests/<name>.rs` | `cargo test --workspace --test <name>` |
 | `crates/otto-core/`, `testdata/`, root manifests, `crates/otto/` `Cargo.toml`, `build.rs`, `src/lib.rs`, `src/main.rs`, `tests/common/`, `tests/fixtures/`, `tests/testdata/`, and any other path under `crates/`  | `cargo test --workspace`, in place of the two rows above |
 | `crates/otto-core/`, root manifests | `make rust-wasm-check` |
-| `connect/` | `make connect-check` |
+| `chat-connector/` | `make connect-check` |
 | `scripts/` | `make scripts-test` |
 | root `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml`, `scripts/license-check.mjs` | `make license-check` |
 | `docs/`, `LICENSE`, Markdown outside `crates/` and `testdata/` | nothing |

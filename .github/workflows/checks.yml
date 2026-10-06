@@ -179,8 +179,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: needs.changes.outputs.docs_only != 'true'
         with:
-          go-version-file: connect/go.mod
-          cache-dependency-path: connect/go.sum
+          go-version-file: chat-connector/go.mod
+          cache-dependency-path: chat-connector/go.sum
       # rust-fmt and rust-lint run in the macOS lint job below, at the same
       # time as this one; `make check` is check-tests plus those two.
       - name: Run make check-tests
@@ -307,8 +307,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: needs.changes.outputs.docs_only != 'true'
         with:
-          go-version-file: connect/go.mod
-          cache-dependency-path: connect/go.sum
+          go-version-file: chat-connector/go.mod
+          cache-dependency-path: chat-connector/go.sum
       # Linux has no Seatbelt, so this is the Rust gate without the sandbox
       # conformance suite; core WASM compatibility remains
       # checked here. Browser build/tests live in otto-plus.

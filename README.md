@@ -29,7 +29,7 @@ the runtime, session history, and default memory storage.
 ## Install from source
 
 Requires the pinned **Rust 1.98** toolchain (`rustup toolchain install` picks
-it up from `rust-toolchain.toml`), **Go** (version pinned in `connect/go.mod`), and access
+it up from `rust-toolchain.toml`), **Go** (version pinned in `chat-connector/go.mod`), and access
 to one of the two providers. **macOS** is the supported platform: it is the
 only one with a sandbox, and the only one the acceptance gate runs on. Otto
 also builds and runs on **Linux**, with the limits under
@@ -183,7 +183,7 @@ The selected model and OpenAI-compatible endpoint must support image input.
   Agent Client Protocol on stdio for ACP clients; `otto acp --attach`
   forwards it to a running `otto serve`.
 - [Chat connector](docs/user-manual.md#chat-connector): `otto-connect`, a
-  separate Go program in `connect/`, runs `otto acp` and connects it to
+  separate Go program in `chat-connector/`, runs `otto acp` and connects it to
   Telegram and Feishu chats, one session per chat, with Approve / Deny buttons and `/allow` / `/deny` for
   elevated `bash` commands and `/sessions` and `/use` to pick a session.
   With `otto acp --attach`, chats share sessions with the `otto serve` web UI

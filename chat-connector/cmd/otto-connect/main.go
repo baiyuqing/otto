@@ -14,14 +14,14 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/baiyuqing/otto/connect/internal/agent"
-	"github.com/baiyuqing/otto/connect/internal/bridge"
-	"github.com/baiyuqing/otto/connect/internal/config"
-	"github.com/baiyuqing/otto/connect/internal/feishu"
-	"github.com/baiyuqing/otto/connect/internal/manage"
-	"github.com/baiyuqing/otto/connect/internal/metrics"
-	"github.com/baiyuqing/otto/connect/internal/state"
-	"github.com/baiyuqing/otto/connect/internal/telegram"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent"
+	"github.com/baiyuqing/otto/chat-connector/internal/bridge"
+	"github.com/baiyuqing/otto/chat-connector/internal/config"
+	"github.com/baiyuqing/otto/chat-connector/internal/feishu"
+	"github.com/baiyuqing/otto/chat-connector/internal/manage"
+	"github.com/baiyuqing/otto/chat-connector/internal/metrics"
+	"github.com/baiyuqing/otto/chat-connector/internal/state"
+	"github.com/baiyuqing/otto/chat-connector/internal/telegram"
 )
 
 func main() {

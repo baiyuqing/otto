@@ -15,7 +15,7 @@ import (
 	channel "github.com/larksuite/channel-sdk-go"
 	"github.com/larksuite/channel-sdk-go/types"
 
-	"github.com/baiyuqing/otto/connect/internal/bridge"
+	"github.com/baiyuqing/otto/chat-connector/internal/bridge"
 )
 
 func TestPolicyMapsLists(t *testing.T) {

@@ -36,7 +36,7 @@ and fenced application claims, not process-local channels alone.
 | [Subagents](../../crates/otto/src/subagent/) | Child operations have separate task/session lifecycles | Requests identify originating task and parent audience; parent cannot approve |
 | [MCP](../../crates/otto/src/mcp/), [MCP tool adapter](../../crates/otto/src/tool/mcp.rs) | External tool dispatch has no common human-interaction service | Enforce configured authorization before dispatch; route supported server elicitation separately |
 | [ACP permission](../../crates/otto/src/acp/approval.rs), [attach](../../crates/otto/src/acp/attach.rs) | Bash-oriented standard permission mapping | Typed mapping, capability negotiation, durable pending queries and cross-client decisions |
-| [Chat bridge](../../connect/internal/bridge/bridge.go), [memory cards](../../connect/internal/bridge/memory_cards.go) | Shared card transport, separate permission waiter and memory-card routing | One request presenter and callback path, with durable recovery |
+| [Chat bridge](../../chat-connector/internal/bridge/bridge.go), [memory cards](../../chat-connector/internal/bridge/memory_cards.go) | Shared card transport, separate permission waiter and memory-card routing | One request presenter and callback path, with durable recovery |
 | [Core agent loop](../../crates/otto-core/src/agent/mod.rs), [wire events](../../crates/otto-core/src/wire/events.rs) | Sequential tool dispatch; requests discovered after a completed agent step | Explicit approval wait/settlement and a batch execution barrier |
 
 Direct human commands already specifying a complete action can provide its

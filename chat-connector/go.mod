@@ -1,4 +1,4 @@
-module github.com/baiyuqing/otto/connect
+module github.com/baiyuqing/otto/chat-connector
 
 go 1.26
 

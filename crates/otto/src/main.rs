@@ -64,7 +64,9 @@ async fn async_main() -> i32 {
         let signal_terminate = std::sync::Arc::clone(&terminate);
         tokio::spawn(async move {
             while signals.recv().await.is_some() {
-                match signal_terminate.on_signal(otto::failover::lease::holds_lease()) {
+                match signal_terminate
+                    .on_signal(otto::failover::ownership::holds_writer_ownership())
+                {
                     Action::Migrate | Action::Cancel => signal_cancel.cancel(),
                     Action::Die => die_by_sigterm(),
                     Action::Ignore => {}

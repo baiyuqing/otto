@@ -16,8 +16,7 @@
 //! cancellation plumbing here yet.
 
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -46,9 +45,10 @@ use otto_core::session::{
     index_context_entries,
 };
 
-use crate::failover::lease;
+use crate::storage::backends::posix::lease::{self, Keeper};
 
-use super::fsops;
+use crate::session::fsops;
+use crate::storage::files::{FileDriver, FileRoot, JournalFile, JournalOpen};
 
 const OPERATION_RESULT_UNAVAILABLE_TEXT: &str = "tool result unavailable after prior session interruption; the durable operation outcome is recorded in session history";
 
@@ -121,7 +121,9 @@ pub(crate) struct StoreState {
     pub(crate) entry_ids: HashSet<String>,
     pub(crate) leaf_id: Option<String>,
     pub(crate) path: String,
-    pub(crate) file: Option<File>,
+    pub(crate) file: Option<Box<dyn JournalFile>>,
+    pub(crate) file_driver: FileDriverRef,
+    pub(crate) keeper: KeeperRef,
     pub(crate) file_bytes: i64,
     pub(crate) fatal: Option<PiError>,
     pub(crate) closed: bool,
@@ -133,6 +135,9 @@ pub(crate) struct StoreState {
     /// The lease backing this session, when it is lease-managed. Checked
     /// before every durable write; see [`StoreState::check_lease`].
     pub(crate) lease: Option<Arc<lease::Lease>>,
+    /// Neutral check/release authority consumed by runtime and child-session
+    /// ports; the protocol-specific lease stays inside this POSIX adapter.
+    pub(crate) writer_ownership: Option<Arc<dyn crate::session::WriterOwnership>>,
     /// Whether `close` releases `lease`: true for the store that acquired
     /// it, false for a child transcript that only checks the parent's
     /// lease (see [`Store::set_lease_check`]).
@@ -155,18 +160,73 @@ pub struct Store {
     pub(crate) state: Mutex<StoreState>,
 }
 
-impl Store {
-    /// Creates the session directory and file eagerly and writes the header
-    /// and the initial `otto.runtime` entry.
-    pub fn create(root: impl AsRef<Path>, header: Header) -> Result<Self, PiError> {
-        let store = Self::create_lazy(root, header)?;
-        store.lock()?.ensure_file()?;
-        Ok(store)
-    }
+#[derive(Clone)]
+pub(crate) struct FileDriverRef(pub(crate) Arc<dyn FileDriver>);
 
-    /// Returns a store that does not touch disk until its first durable write.
-    /// A session created and closed without a message leaves no file behind.
-    pub fn create_lazy(root: impl AsRef<Path>, mut header: Header) -> Result<Self, PiError> {
+impl std::fmt::Debug for FileDriverRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FileDriver")
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct KeeperRef(pub(crate) Arc<Keeper>);
+
+impl std::fmt::Debug for KeeperRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LeaseKeeper")
+    }
+}
+
+fn open_path_journal(
+    driver: &dyn FileDriver,
+    path: &Path,
+    mode: JournalOpen,
+) -> Result<Box<dyn JournalFile>, PiError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| PiError::invalid("session file has no parent directory"))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| PiError::invalid("session file name is not a valid component"))?;
+    let root = driver
+        .open_root(parent)
+        .map_err(|error| PiError::other(format!("open session directory: {error}")))?;
+    root.open_journal(name, mode)
+        .map_err(|error| PiError::other(format!("open session file: {error}")))
+}
+
+fn open_or_create_root(driver: &dyn FileDriver, path: &Path) -> std::io::Result<Box<dyn FileRoot>> {
+    match driver.open_root(path) {
+        Ok(root) => Ok(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or(error)?;
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    std::io::Error::other("session root name is not a valid component")
+                })?;
+            let parent_root = open_or_create_root(driver, parent)?;
+            match parent_root.create_directory(name) {
+                Ok(()) => parent_root.sync_all()?,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            parent_root.open_directory(name)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+impl Store {
+    pub(crate) fn create_lazy_with_driver_and_keeper(
+        root: impl AsRef<Path>,
+        mut header: Header,
+        driver: Arc<dyn FileDriver>,
+        keeper: Arc<Keeper>,
+    ) -> Result<Self, PiError> {
         header.version = CURRENT_VERSION;
         validate_domain_header(&header)?;
         Ok(Self {
@@ -185,12 +245,15 @@ impl Store {
                 leaf_id: None,
                 path: String::new(),
                 file: None,
+                file_driver: FileDriverRef(driver),
+                keeper: KeeperRef(keeper),
                 file_bytes: 0,
                 fatal: None,
                 closed: false,
                 file_path: None,
                 parent_session: None,
                 lease: None,
+                writer_ownership: None,
                 owns_lease: false,
                 enable_failover: None,
                 takeover: None,
@@ -198,6 +261,23 @@ impl Store {
                 fail_writes: false,
             }),
         })
+    }
+
+    pub(crate) fn create_child_lazy_with_driver_and_keeper(
+        parent: impl AsRef<Path>,
+        name: &str,
+        header: Header,
+        driver: Arc<dyn FileDriver>,
+        keeper: Arc<Keeper>,
+    ) -> Result<Self, PiError> {
+        let parent = parent.as_ref();
+        let store =
+            Self::create_lazy_with_driver_and_keeper(PathBuf::new(), header, driver, keeper)?;
+        let mut state = store.lock()?;
+        state.file_path = Some(Self::child_path(parent, name));
+        state.parent_session = Some(parent.to_string_lossy().into_owned());
+        drop(state);
+        Ok(store)
     }
 
     /// Marks this lazy, top-level store to acquire its own lease directory
@@ -212,25 +292,6 @@ impl Store {
         Ok(())
     }
 
-    /// Returns a lazy store for a sub-agent transcript of the parent session
-    /// file `parent`: `<parent without .jsonl>/<name>.jsonl`, with the Pi
-    /// header's `parentSession` set to `parent`. The directory is created
-    /// `0700` on the first write, as the default layout's is.
-    pub fn create_child_lazy(
-        parent: impl AsRef<Path>,
-        name: &str,
-        header: Header,
-    ) -> Result<Self, PiError> {
-        let parent = parent.as_ref();
-        let store = Self::create_lazy(PathBuf::new(), header)?;
-        {
-            let mut state = store.lock()?;
-            state.file_path = Some(Self::child_path(parent, name));
-            state.parent_session = Some(parent.to_string_lossy().into_owned());
-        }
-        Ok(store)
-    }
-
     /// The file [`Store::create_child_lazy`] writes for `parent` and `name`.
     pub fn child_path(parent: impl AsRef<Path>, name: &str) -> PathBuf {
         parent
@@ -241,10 +302,13 @@ impl Store {
 
     /// Reads a session header without opening a store.
     pub fn read_header(path: impl AsRef<Path>) -> Result<Header, PiError> {
-        let mut file = File::open(path.as_ref())
-            .map_err(|error| PiError::other(format!("open session file: {error}")))?;
-        reject_oversized_session_file(&file)?;
-        let decoded = decode_pi_file_read_only(&mut file)?;
+        let mut file = open_path_journal(
+            &crate::storage::drivers::posix::PosixDriver,
+            path.as_ref(),
+            JournalOpen::ReadOnly,
+        )?;
+        reject_oversized_session_file(file.as_ref())?;
+        let decoded = decode_pi_file_read_only(file.as_mut())?;
         Ok(resolve_pi_store_state(&decoded)?.header)
     }
 
@@ -260,20 +324,15 @@ impl Store {
     /// message transcript, with the same read-only behavior as
     /// [`Store::read_transcript`]. For callers that need custom entries.
     pub fn read_entries(path: impl AsRef<Path>) -> Result<(Vec<PiEntry>, Vec<Message>), PiError> {
-        let mut file = File::open(path.as_ref())
-            .map_err(|error| PiError::other(format!("open session file: {error}")))?;
-        reject_oversized_session_file(&file)?;
-        let decoded = decode_pi_file_read_only(&mut file)?;
+        let mut file = open_path_journal(
+            &crate::storage::drivers::posix::PosixDriver,
+            path.as_ref(),
+            JournalOpen::ReadOnly,
+        )?;
+        reject_oversized_session_file(file.as_ref())?;
+        let decoded = decode_pi_file_read_only(file.as_mut())?;
         let messages = resolve_pi_store_state(&decoded)?.messages;
         Ok((decoded.entries, messages))
-    }
-
-    /// Opens an existing session for appending, repairing an incomplete final
-    /// line and any tool call left without a result.
-    pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<Warning>), PiError> {
-        let path = path.as_ref();
-        let prepared = super::prepared::Prepared::prepare(path, None)?;
-        prepared.activate()
     }
 
     /// Builds a store around an already-verified descriptor. The descriptor is
@@ -284,14 +343,17 @@ impl Store {
     /// resulting store owns that lease (releases it on
     /// [`Store::close`]/drop) and records a [`Takeover`] when it does.
     pub(crate) fn from_file(
-        mut file: File,
+        mut file: Box<dyn JournalFile>,
         path: &str,
         lease: Option<(Arc<lease::Lease>, lease::Acquired)>,
+        driver: Arc<dyn FileDriver>,
+        keeper: Arc<Keeper>,
         replayable: fn(&str) -> bool,
     ) -> Result<(Self, Vec<Warning>), PiError> {
-        fsops::lock_session_exclusive(&file)?;
-        reject_oversized_session_file(&file)?;
-        let (decoded, mut warnings) = decode_pi_file_for_open(&mut file, path)?;
+        file.lock_exclusive()
+            .map_err(|error| PiError::other(format!("lock session file: {error}")))?;
+        reject_oversized_session_file(file.as_ref())?;
+        let (decoded, mut warnings) = decode_pi_file_for_open(file.as_mut(), path)?;
         let state = resolve_pi_store_state(&decoded)?;
         warnings.extend(state.warnings);
         let position = file
@@ -303,6 +365,9 @@ impl Store {
             None => (None, None),
         };
         let owns_lease = lease_value.is_some();
+        let writer_ownership = lease_value
+            .as_ref()
+            .map(|lease| Arc::clone(lease) as Arc<dyn crate::session::WriterOwnership>);
 
         let store = Self {
             state: Mutex::new(StoreState {
@@ -320,12 +385,15 @@ impl Store {
                 leaf_id: state.leaf_id,
                 path: path.to_owned(),
                 file: Some(file),
+                file_driver: FileDriverRef(driver),
+                keeper: KeeperRef(keeper),
                 file_bytes: position as i64,
                 fatal: None,
                 closed: false,
                 file_path: None,
                 parent_session: None,
                 lease: lease_value,
+                writer_ownership,
                 owns_lease,
                 enable_failover: None,
                 takeover: None,
@@ -355,8 +423,18 @@ impl Store {
     }
 
     /// The lease backing this store, when it is lease-managed.
-    pub fn lease(&self) -> Option<Arc<lease::Lease>> {
-        self.lock().expect("session mutex").lease.clone()
+    pub fn lease(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
+        self.writer_ownership()
+    }
+
+    pub fn writer_ownership(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
+        let state = self.lock().expect("session mutex");
+        state.writer_ownership.clone().or_else(|| {
+            state
+                .lease
+                .as_ref()
+                .map(|lease| Arc::clone(lease) as Arc<dyn crate::session::WriterOwnership>)
+        })
     }
 
     /// Takes the takeover record left by [`Store::from_file`] when this
@@ -370,10 +448,14 @@ impl Store {
     /// against it (see [`StoreState::check_lease`]), but [`Store::close`]
     /// does not release it. For a child transcript whose lease is the
     /// parent session's.
-    pub fn set_lease_check(&self, lease: Arc<lease::Lease>) {
+    pub fn set_lease_check(&self, ownership: Arc<dyn crate::session::WriterOwnership>) {
         let mut state = self.lock().expect("session mutex");
-        state.lease = Some(lease);
+        state.writer_ownership = Some(ownership);
         state.owns_lease = false;
+    }
+
+    pub fn set_writer_ownership_check(&self, ownership: Arc<dyn crate::session::WriterOwnership>) {
+        self.set_lease_check(ownership);
     }
 
     pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, StoreState>, PiError> {
@@ -439,7 +521,13 @@ impl Store {
         let metadata = file
             .metadata()
             .map_err(|error| PiError::other(format!("stat session file: {error}")))?;
-        super::prepared::archive_open_file(root, workspace, Path::new(&path), file, &metadata)
+        super::prepared::archive_open_file(
+            root,
+            workspace,
+            Path::new(&path),
+            file.as_mut(),
+            &metadata,
+        )
     }
 
     /// The compaction currently in force on the active path.
@@ -698,12 +786,16 @@ impl Store {
         };
         file.sync_all()
             .map_err(|error| PiError::other(format!("close session file: {error}")))?;
-        if state.owns_lease
-            && let Some(lease) = state.lease.as_ref()
-        {
-            lease
-                .release()
-                .map_err(|error| PiError::other(format!("release session lease: {error}")))?;
+        if state.owns_lease {
+            if let Some(ownership) = state.writer_ownership.as_ref() {
+                ownership
+                    .release()
+                    .map_err(|error| PiError::other(format!("release session lease: {error}")))?;
+            } else if let Some(lease) = state.lease.as_ref() {
+                lease
+                    .release()
+                    .map_err(|error| PiError::other(format!("release session lease: {error}")))?;
+            }
         }
         Ok(())
     }
@@ -845,11 +937,12 @@ impl Drop for Store {
         let Ok(state) = self.state.lock() else {
             return;
         };
-        if !state.closed
-            && state.owns_lease
-            && let Some(lease) = state.lease.as_ref()
-        {
-            let _ = lease.release();
+        if !state.closed && state.owns_lease {
+            if let Some(ownership) = state.writer_ownership.as_ref() {
+                let _ = ownership.release();
+            } else if let Some(lease) = state.lease.as_ref() {
+                let _ = lease.release();
+            }
         }
     }
 }
@@ -900,13 +993,34 @@ impl StoreState {
             }
         };
 
-        std::fs::create_dir_all(&directory)
-            .map_err(|error| PiError::other(format!("create session directory: {error}")))?;
-        std::fs::set_permissions(
-            &directory,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
-        )
-        .map_err(|error| PiError::other(format!("chmod session directory: {error}")))?;
+        let directory_name = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| PiError::invalid("session directory name is not a valid component"))?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| PiError::invalid("session file name is not a valid component"))?;
+        let root_path = directory
+            .parent()
+            .ok_or_else(|| PiError::invalid("session directory has no parent"))?;
+        let root = open_or_create_root(self.file_driver.0.as_ref(), root_path)
+            .map_err(|error| PiError::other(format!("open session root: {error}")))?;
+        let session_dir = match root.open_directory(directory_name) {
+            Ok(dir) => dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                root.create_directory(directory_name).map_err(|error| {
+                    PiError::other(format!("create session directory: {error}"))
+                })?;
+                root.sync_all()
+                    .map_err(|error| PiError::other(format!("sync session root: {error}")))?;
+                root.open_directory(directory_name)
+                    .map_err(|error| PiError::other(format!("open session directory: {error}")))?
+            }
+            Err(error) => {
+                return Err(PiError::other(format!("open session directory: {error}")));
+            }
+        };
 
         // A lazy, top-level store `Store::enable_failover` marked: acquire its
         // own lease directory before the session file exists, so the file is
@@ -918,32 +1032,34 @@ impl StoreState {
             lease::create_lease_dir(&path, lease_seconds).map_err(|error| {
                 PiError::other(format!("create session lease directory: {error}"))
             })?;
-            let (lease, _acquired) = lease::Lease::acquire(&path)
+            let (lease, _acquired) = lease::Lease::acquire_with_keeper(&path, &self.keeper.0)
                 .map_err(|error| PiError::other(format!("acquire session lease: {error}")))?;
+            self.writer_ownership =
+                Some(Arc::clone(&lease) as Arc<dyn crate::session::WriterOwnership>);
             self.lease = Some(lease);
             self.owns_lease = true;
         }
 
-        let mut file = {
-            use std::os::unix::fs::OpenOptionsExt;
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_CLOEXEC)
-                .open(&path)
-                .map_err(|error| PiError::other(format!("create session file: {error}")))?
-        };
+        let mut file = session_dir
+            .open_journal(filename, JournalOpen::CreateNew)
+            .map_err(|error| PiError::other(format!("create session file: {error}")))?;
 
-        let result = fsops::lock_session_exclusive(&file)
+        let result = file
+            .lock_exclusive()
+            .map_err(|error| PiError::other(format!("lock session file: {error}")))
             .and_then(|_| self.check_lease())
-            .and_then(|_| self.write_initial_records(&mut file));
+            .and_then(|_| self.write_initial_records(file.as_mut()))
+            .and_then(|value| {
+                session_dir
+                    .sync_all()
+                    .map(|_| value)
+                    .map_err(|error| PiError::other(format!("sync session directory: {error}")))
+            });
         let (file_bytes, entry) = match result {
             Ok(value) => value,
             Err(error) => {
                 drop(file);
-                if let Err(remove) = std::fs::remove_file(&path)
+                if let Err(remove) = session_dir.remove_journal(filename)
                     && remove.kind() != std::io::ErrorKind::NotFound
                 {
                     return Err(PiError::other(format!(
@@ -963,7 +1079,7 @@ impl StoreState {
         Ok(())
     }
 
-    fn write_initial_records(&self, file: &mut File) -> Result<(i64, PiEntry), PiError> {
+    fn write_initial_records(&self, file: &mut dyn JournalFile) -> Result<(i64, PiEntry), PiError> {
         use otto_core::session::pi::{PI_SESSION_VERSION, PiHeader};
         let timestamp = format_rfc3339_nano(self.header.created_at);
         let header = PiHeader {
@@ -1083,9 +1199,12 @@ impl StoreState {
     /// the check's text when the lease has been lost or is not renewing.
     /// Called before every durable write.
     pub(crate) fn check_lease(&mut self) -> Result<(), PiError> {
-        if let Some(lease) = self.lease.as_ref()
-            && let Err(text) = lease.check()
-        {
+        let check = self
+            .writer_ownership
+            .as_ref()
+            .map(|ownership| ownership.check())
+            .or_else(|| self.lease.as_ref().map(|lease| lease.check()));
+        if let Some(Err(text)) = check {
             let fatal = PiError::fatal(text);
             self.fatal = Some(fatal.clone());
             return Err(fatal);
@@ -1107,7 +1226,7 @@ impl StoreState {
             self.fatal = Some(fatal.clone());
             return Err(fatal);
         };
-        if let Err(error) = write_pi_record(file, encoded) {
+        if let Err(error) = write_pi_record(file.as_mut(), encoded) {
             let fatal = PiError::fatal(error);
             self.fatal = Some(fatal.clone());
             return Err(fatal);
@@ -1148,7 +1267,7 @@ impl Session for Store {
             .map_err(|error| SessionError::Persist(error.to_string()))
     }
 
-    fn append_operation_fact(&self, fact: OperationFact) -> Result<(), SessionError> {
+    async fn append_operation_fact(&self, fact: OperationFact) -> Result<(), SessionError> {
         Store::append_operation_fact(self, fact)
             .map_err(|error| SessionError::Persist(error.to_string()))
     }
@@ -1157,14 +1276,14 @@ impl Session for Store {
         Store::operation_ledger(self)
     }
 
-    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+    async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         Store::append_custom_entry(self, custom_type, data)
             .map_err(|error| SessionError::Persist(error.to_string()))
     }
 }
 
 /// Writes `encoded` plus its newline delimiter and `fsync`s the file.
-fn write_pi_record(file: &mut File, encoded: &[u8]) -> Result<i64, PiError> {
+fn write_pi_record(file: &mut dyn JournalFile, encoded: &[u8]) -> Result<i64, PiError> {
     let mut record = Vec::with_capacity(encoded.len() + 1);
     record.extend_from_slice(encoded);
     record.push(b'\n');
@@ -1297,7 +1416,7 @@ fn pi_level_to_thinking(thinking: &str) -> Result<String, PiError> {
 }
 
 /// Rejects a file above [`MAX_SESSION_FILE_BYTES`] before any of it is read.
-pub(crate) fn reject_oversized_session_file(file: &File) -> Result<(), PiError> {
+pub(crate) fn reject_oversized_session_file(file: &dyn JournalFile) -> Result<(), PiError> {
     let metadata = file
         .metadata()
         .map_err(|error| PiError::other(format!("stat session file: {error}")))?;
@@ -1312,7 +1431,7 @@ pub(crate) fn reject_oversized_session_file(file: &File) -> Result<(), PiError> 
 
 /// Where the final record starts, whether the file lacks a trailing newline,
 /// and whether that final record is truncated JSON.
-fn final_pi_record_state(file: &mut File) -> Result<(u64, bool, bool), PiError> {
+fn final_pi_record_state(file: &mut dyn JournalFile) -> Result<(u64, bool, bool), PiError> {
     let size = file
         .metadata()
         .map_err(|error| PiError::other(format!("stat session file: {error}")))?
@@ -1346,7 +1465,11 @@ fn final_pi_record_state(file: &mut File) -> Result<(u64, bool, bool), PiError> 
     ))
 }
 
-fn read_exact_at(file: &mut File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+fn read_exact_at(
+    file: &mut dyn JournalFile,
+    buffer: &mut [u8],
+    offset: u64,
+) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(buffer)
 }
@@ -1360,7 +1483,7 @@ fn is_incomplete_json(line: &[u8]) -> bool {
     }
 }
 
-fn read_all(file: &mut File, start: u64, end: Option<u64>) -> Result<Vec<u8>, PiError> {
+fn read_all(file: &mut dyn JournalFile, start: u64, end: Option<u64>) -> Result<Vec<u8>, PiError> {
     file.seek(SeekFrom::Start(start))
         .map_err(|error| PiError::other(format!("seek session file: {error}")))?;
     let mut data = Vec::new();
@@ -1376,7 +1499,7 @@ fn read_all(file: &mut File, start: u64, end: Option<u64>) -> Result<Vec<u8>, Pi
 }
 
 /// Decodes a session file without repairing it.
-pub(crate) fn decode_pi_file_read_only(file: &mut File) -> Result<PiFile, PiError> {
+pub(crate) fn decode_pi_file_read_only(file: &mut dyn JournalFile) -> Result<PiFile, PiError> {
     let (final_start, _, incomplete) = final_pi_record_state(file)?;
     let end = (incomplete && final_start > 0).then_some(final_start);
     decode_pi_file(&read_all(file, 0, end)?)
@@ -1385,7 +1508,10 @@ pub(crate) fn decode_pi_file_read_only(file: &mut File) -> Result<PiFile, PiErro
 /// Decodes a session file for appending, repairing a truncated final record or
 /// a missing final newline. Both repairs are rejected when the repaired file
 /// would not resolve to a valid session.
-fn decode_pi_file_for_open(file: &mut File, path: &str) -> Result<(PiFile, Vec<Warning>), PiError> {
+fn decode_pi_file_for_open(
+    file: &mut dyn JournalFile,
+    path: &str,
+) -> Result<(PiFile, Vec<Warning>), PiError> {
     let (final_start, missing_lf, incomplete) = final_pi_record_state(file)?;
     if incomplete && final_start > 0 {
         let decoded = decode_pi_file(&read_all(file, 0, Some(final_start))?)?;

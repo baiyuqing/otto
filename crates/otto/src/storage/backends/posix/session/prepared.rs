@@ -7,19 +7,20 @@
 //! calls leave exactly one winner. Errors: an identity that changed between
 //! preparation and activation is rejected rather than used.
 
-use std::fs::{File, Metadata};
+use std::fs::Metadata;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use otto_core::session::{PiError, SessionInfo, Warning};
 
-use crate::failover::lease;
+use crate::storage::backends::posix::lease::{self, Keeper};
+use crate::storage::files::{FileDriver, JournalFile, JournalOpen};
 
-use super::fsops;
 use super::list::{
     inspect_opened_session, open_session_root_no_follow, open_workspace_session_directory_no_follow,
 };
 use super::store::Store;
+use crate::session::fsops;
 
 const ARCHIVE_DIRECTORY_NAME: &str = "archive";
 
@@ -39,6 +40,7 @@ type AcquiredLease = (Arc<lease::Lease>, lease::Acquired);
 fn acquire_lease_if_managed(
     path: &Path,
     create_lease: Option<u64>,
+    keeper: &Arc<Keeper>,
 ) -> Result<Option<AcquiredLease>, PiError> {
     if let Some(lease_seconds) = create_lease
         && !lease::is_lease_managed(path)
@@ -52,7 +54,7 @@ fn acquire_lease_if_managed(
     if !managed {
         return Ok(None);
     }
-    match lease::Lease::acquire(path) {
+    match lease::Lease::acquire_with_keeper(path, keeper) {
         Ok((lease, acquired)) => Ok(Some((lease, acquired))),
         Err(error) => Err(PiError::invalid(format!("open session: {error}"))),
     }
@@ -82,10 +84,9 @@ enum Identity {
 }
 
 /// One verified session file descriptor and the metadata read from it.
-#[derive(Debug)]
 pub struct Prepared {
     path: String,
-    handle: Mutex<Option<(File, Metadata)>>,
+    handle: Mutex<Option<(Box<dyn JournalFile>, Metadata)>>,
     info: SessionInfo,
     identity: Identity,
     /// The lease acquired opening `path`, when it is lease-managed. Moved
@@ -96,6 +97,18 @@ pub struct Prepared {
     /// when this open takes over a lease epoch. Set by the composition root
     /// through [`Prepared::with_replayable`]; never replays by default.
     replayable: fn(&str) -> bool,
+    driver: Arc<dyn FileDriver>,
+    keeper: Arc<Keeper>,
+}
+
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Prepared")
+            .field("path", &self.path)
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A completed archive move.
@@ -106,29 +119,35 @@ pub struct ArchiveResult {
 }
 
 impl Prepared {
-    /// Pins the session file at `path`, read-write, refusing a symlink.
-    ///
-    /// `create_lease` is `Some(lease_seconds)` when `[failover]` is enabled;
-    /// see [`acquire_lease_if_managed`] for what that does and does not
-    /// depend on `path` already being lease-managed. The lease, when any, is
-    /// acquired before the session file is opened, so a takeover's rename of
-    /// `path` (see `lease::Lease::acquire`) happens before this call ever
-    /// opens a descriptor on it.
-    pub fn prepare(path: &Path, create_lease: Option<u64>) -> Result<Self, PiError> {
-        let lease = acquire_lease_if_managed(path, create_lease)?;
-        let (file, metadata) =
-            match open_prepared_session_file_no_follow(path).and_then(|(file, metadata)| {
-                fsops::lock_session_exclusive(&file)?;
+    pub(crate) fn prepare_with_driver_and_keeper(
+        path: &Path,
+        create_lease: Option<u64>,
+        driver: Arc<dyn FileDriver>,
+        keeper: Arc<Keeper>,
+    ) -> Result<Self, PiError> {
+        let lease = acquire_lease_if_managed(path, create_lease, &keeper)?;
+        let (file, metadata) = match open_prepared_session_file_no_follow(driver.as_ref(), path)
+            .and_then(|(file, metadata)| {
+                file.lock_exclusive()
+                    .map_err(|error| PiError::other(format!("lock session file: {error}")))?;
                 Ok((file, metadata))
             }) {
-                Ok(value) => value,
-                Err(error) => {
-                    release_on_prepare_failure(&lease);
-                    return Err(error);
-                }
-            };
+            Ok(value) => value,
+            Err(error) => {
+                release_on_prepare_failure(&lease);
+                return Err(error);
+            }
+        };
         let path = path.to_string_lossy().into_owned();
-        Self::from_opened(path.clone(), file, metadata, Identity::Path(path), lease)
+        Self::from_opened(
+            path.clone(),
+            file,
+            metadata,
+            Identity::Path(path),
+            lease,
+            driver,
+            keeper,
+        )
     }
 
     /// Pins a candidate that `list` returned for this root and workspace.
@@ -137,27 +156,34 @@ impl Prepared {
     /// `openat` and `O_NOFOLLOW` before the descriptor is pinned, and the
     /// session's recorded workspace must match the expected one. `create_lease`
     /// is as in [`Prepared::prepare`].
-    pub fn prepare_listed(
+    pub(crate) fn prepare_listed_with_driver_and_keeper(
         root: &Path,
         workspace: &str,
         path: &Path,
         create_lease: Option<u64>,
+        driver: Arc<dyn FileDriver>,
+        keeper: Arc<Keeper>,
     ) -> Result<Self, PiError> {
         let (root_path, workspace_canonical, basename, candidate_path) =
             validate_listed_candidate_path(root, workspace, path)?;
-        let lease = acquire_lease_if_managed(Path::new(&candidate_path), create_lease)?;
-        let (file, metadata) =
-            match open_listed_prepared_session_file(&root_path, &workspace_canonical, &basename)
-                .and_then(|(file, metadata)| {
-                    fsops::lock_session_exclusive(&file)?;
-                    Ok((file, metadata))
-                }) {
-                Ok(value) => value,
-                Err(error) => {
-                    release_on_prepare_failure(&lease);
-                    return Err(error);
-                }
-            };
+        let lease = acquire_lease_if_managed(Path::new(&candidate_path), create_lease, &keeper)?;
+        let (file, metadata) = match open_listed_prepared_session_file(
+            driver.as_ref(),
+            &root_path,
+            &workspace_canonical,
+            &basename,
+        )
+        .and_then(|(file, metadata)| {
+            file.lock_exclusive()
+                .map_err(|error| PiError::other(format!("lock session file: {error}")))?;
+            Ok((file, metadata))
+        }) {
+            Ok(value) => value,
+            Err(error) => {
+                release_on_prepare_failure(&lease);
+                return Err(error);
+            }
+        };
         let prepared = Self::from_opened(
             candidate_path,
             file,
@@ -168,6 +194,8 @@ impl Prepared {
                 basename,
             },
             lease,
+            driver,
+            keeper,
         )?;
         match crate::workspace::owns_session(&workspace_canonical, &prepared.info.cwd) {
             Ok(true) => Ok(prepared),
@@ -182,12 +210,14 @@ impl Prepared {
 
     fn from_opened(
         path: String,
-        mut file: File,
+        mut file: Box<dyn JournalFile>,
         metadata: Metadata,
         identity: Identity,
         lease: Option<AcquiredLease>,
+        driver: Arc<dyn FileDriver>,
+        keeper: Arc<Keeper>,
     ) -> Result<Self, PiError> {
-        match inspect_opened_session(&path, &mut file, &metadata) {
+        match inspect_opened_session(&path, file.as_mut(), &metadata) {
             Ok((info, _)) => Ok(Self {
                 path,
                 handle: Mutex::new(Some((file, metadata))),
@@ -195,6 +225,8 @@ impl Prepared {
                 identity,
                 lease: Mutex::new(lease),
                 replayable: |_| false,
+                driver,
+                keeper,
             }),
             Err(error) => {
                 release_on_prepare_failure(&lease);
@@ -237,7 +269,8 @@ impl Prepared {
         if fsops::file_identity(&metadata) != fsops::file_identity(&current_metadata) {
             return Err(PiError::invalid("prepared session file identity changed"));
         }
-        let (current_info, _) = inspect_opened_session(&self.path, &mut file, &current_metadata)?;
+        let (current_info, _) =
+            inspect_opened_session(&self.path, file.as_mut(), &current_metadata)?;
         if !same_prepared_metadata(&self.info, &current_info) {
             return Err(PiError::invalid(
                 "prepared session metadata changed before activation",
@@ -251,7 +284,14 @@ impl Prepared {
             .lock()
             .map_err(|_| PiError::other("prepared session mutex is poisoned"))?
             .take();
-        Store::from_file(file, &self.path, lease, self.replayable)
+        Store::from_file(
+            file,
+            &self.path,
+            lease,
+            Arc::clone(&self.driver),
+            Arc::clone(&self.keeper),
+            self.replayable,
+        )
     }
 
     fn verify_identity(&self, prepared: &Metadata) -> Result<(), PiError> {
@@ -274,8 +314,12 @@ impl Prepared {
                 workspace,
                 basename,
             } => {
-                let Ok((_, current)) = open_listed_prepared_session_file(root, workspace, basename)
-                else {
+                let Ok((_, current)) = open_listed_prepared_session_file(
+                    self.driver.as_ref(),
+                    root,
+                    workspace,
+                    basename,
+                ) else {
                     return Err(PiError::invalid(
                         "prepared listed session path identity changed before activation",
                     ));
@@ -325,14 +369,15 @@ impl Drop for Prepared {
     }
 }
 
-/// Moves one active session file into the workspace's `archive/` directory.
-///
-/// The source must be a direct child of the workspace-key directory and a
-/// valid Pi v3 session whose recorded workspace matches the current canonical
-/// workspace. The move is atomic and never replaces an existing archived
-/// session; on success the file exists only under `archive/`.
-pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResult, PiError> {
-    Prepared::prepare_listed(root, workspace, path, None)?.archive(root, workspace)
+pub(crate) fn archive_with_driver_and_keeper(
+    root: &Path,
+    workspace: &str,
+    path: &Path,
+    driver: Arc<dyn FileDriver>,
+    keeper: Arc<Keeper>,
+) -> Result<ArchiveResult, PiError> {
+    Prepared::prepare_listed_with_driver_and_keeper(root, workspace, path, None, driver, keeper)?
+        .archive(root, workspace)
 }
 
 impl Prepared {
@@ -346,7 +391,7 @@ impl Prepared {
             .take()
             .ok_or_else(|| PiError::other("prepared session is no longer available"))?;
         self.verify_identity(&metadata)?;
-        archive_open_file(root, workspace, Path::new(&path), &mut file, &metadata)
+        archive_open_file(root, workspace, Path::new(&path), file.as_mut(), &metadata)
     }
 }
 
@@ -355,7 +400,7 @@ pub(crate) fn archive_open_file(
     root: &Path,
     workspace: &str,
     path: &Path,
-    file: &mut File,
+    file: &mut dyn JournalFile,
     metadata: &Metadata,
 ) -> Result<ArchiveResult, PiError> {
     let (_, workspace_canonical, basename, _) =
@@ -520,27 +565,41 @@ fn absolute(path: &Path) -> Result<String, PiError> {
 }
 
 fn open_listed_prepared_session_file(
+    driver: &dyn FileDriver,
     root: &str,
     workspace: &str,
     basename: &str,
-) -> Result<(File, Metadata), PiError> {
-    let root_dir = open_session_root_no_follow(Path::new(root))?;
-    let Some((workspace_dir, _)) =
-        open_workspace_session_directory_no_follow(&root_dir, Path::new(root), workspace)?
-    else {
-        return Err(PiError::invalid(
-            "listed session directory no longer exists",
-        ));
-    };
-    let file =
-        fsops::open_at_no_follow(&workspace_dir, basename, libc::O_RDWR).map_err(|error| {
-            if fsops::is_eloop(&error) {
-                PiError::invalid("listed session file is a symlink")
-            } else if error.raw_os_error() == Some(libc::EISDIR) {
-                PiError::invalid("listed session file is not a regular file")
-            } else {
-                PiError::other(format!("open listed session file: {error}"))
-            }
+) -> Result<(Box<dyn JournalFile>, Metadata), PiError> {
+    let root_dir = driver.open_root(Path::new(root)).map_err(|error| {
+        map_path_open_error(
+            error,
+            "open session root",
+            "session root is a symlink",
+            "session root is not a directory",
+        )
+    })?;
+    let key = crate::workspace::session_key(workspace)?;
+    let workspace_dir = root_dir.open_directory(&key).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            PiError::invalid("listed session directory no longer exists")
+        } else {
+            map_path_open_error(
+                error,
+                "open listed session directory",
+                "session directory is a symlink",
+                "session directory is not a directory",
+            )
+        }
+    })?;
+    let file = workspace_dir
+        .open_journal(basename, JournalOpen::ReadWrite)
+        .map_err(|error| {
+            map_path_open_error(
+                error,
+                "open listed session file",
+                "listed session file is a symlink",
+                "listed session file is not a regular file",
+            )
         })?;
     let metadata = file
         .metadata()
@@ -553,14 +612,35 @@ fn open_listed_prepared_session_file(
     Ok((file, metadata))
 }
 
-fn open_prepared_session_file_no_follow(path: &Path) -> Result<(File, Metadata), PiError> {
-    let file = fsops::open_no_follow(path, libc::O_RDWR).map_err(|error| {
-        if fsops::is_eloop(&error) {
-            PiError::invalid("session file is a symlink")
-        } else {
-            PiError::other(format!("open session file: {error}"))
-        }
+fn open_prepared_session_file_no_follow(
+    driver: &dyn FileDriver,
+    path: &Path,
+) -> Result<(Box<dyn JournalFile>, Metadata), PiError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| PiError::invalid("session file has no parent"))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| PiError::invalid("session file name is not a valid component"))?;
+    let root = driver.open_root(parent).map_err(|error| {
+        map_path_open_error(
+            error,
+            "open session directory",
+            "session directory is a symlink",
+            "session directory is not a directory",
+        )
     })?;
+    let file = root
+        .open_journal(name, JournalOpen::ReadWrite)
+        .map_err(|error| {
+            map_path_open_error(
+                error,
+                "open session file",
+                "session file is a symlink",
+                "session file is not a regular file",
+            )
+        })?;
     let metadata = file
         .metadata()
         .map_err(|error| PiError::other(format!("stat session file: {error}")))?;
@@ -568,6 +648,20 @@ fn open_prepared_session_file_no_follow(path: &Path) -> Result<(File, Metadata),
         return Err(PiError::invalid("session file is not a regular file"));
     }
     Ok((file, metadata))
+}
+
+fn map_path_open_error(
+    error: std::io::Error,
+    operation: &str,
+    symlink: &str,
+    non_regular: &str,
+) -> PiError {
+    match error.raw_os_error() {
+        Some(libc::ELOOP) => PiError::invalid(symlink),
+        Some(libc::EISDIR) | Some(libc::ENOTDIR) => PiError::invalid(non_regular),
+        _ if error.kind() == std::io::ErrorKind::InvalidInput => PiError::invalid(non_regular),
+        _ => PiError::other(format!("{operation}: {error}")),
+    }
 }
 
 fn same_prepared_metadata(prepared: &SessionInfo, current: &SessionInfo) -> bool {

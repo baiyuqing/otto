@@ -21,17 +21,19 @@
 
 pub mod children;
 pub mod lease;
+pub mod ownership;
 pub mod recovery;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::session::WriterOwnership;
 use crate::tool::registry::CallGuard;
 
 /// Produces the lease currently backing a session, or `None` when the
 /// session is not lease-managed. Called once per tool call by
 /// [`CommitGuard`].
-pub type LeaseSource = Arc<dyn Fn() -> Option<Arc<lease::Lease>> + Send + Sync>;
+pub type LeaseSource = Arc<dyn Fn() -> Option<Arc<dyn WriterOwnership>> + Send + Sync>;
 
 /// Linux: `syncfs(2)` on the file system holding `path`. Other platforms:
 /// returns `Ok(())` without syncing; the commit rule applies on Linux only.
@@ -151,7 +153,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lease = lease::Lease::for_test(tmp.path());
         lease.mark_lost_for_test("test fence");
-        let source: LeaseSource = Arc::new(move || Some(Arc::clone(&lease)));
+        let source: LeaseSource =
+            Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
         let guard = CommitGuard::new(source, PathBuf::from("/tmp"));
 
         let err = guard.before().unwrap_err();
@@ -162,7 +165,8 @@ mod tests {
     fn after_syncs_the_workspace_when_a_lease_backs_the_session() {
         let tmp = tempfile::tempdir().unwrap();
         let lease = lease::Lease::for_test(tmp.path());
-        let source: LeaseSource = Arc::new(move || Some(Arc::clone(&lease)));
+        let source: LeaseSource =
+            Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
 
         static SYNCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         fn fake_sync(_p: &Path) -> std::io::Result<()> {
@@ -179,7 +183,8 @@ mod tests {
     async fn sync_failure_settles_the_registry_call_as_unknown() {
         let tmp = tempfile::tempdir().unwrap();
         let lease = lease::Lease::for_test(tmp.path());
-        let source: LeaseSource = Arc::new(move || Some(Arc::clone(&lease)));
+        let source: LeaseSource =
+            Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
         fn failing_sync(_p: &Path) -> std::io::Result<()> {
             Err(std::io::Error::other("disk full"))
         }
@@ -215,7 +220,8 @@ mod tests {
     fn after_wraps_a_sync_failure_with_operator_facing_text() {
         let tmp = tempfile::tempdir().unwrap();
         let lease = lease::Lease::for_test(tmp.path());
-        let source: LeaseSource = Arc::new(move || Some(Arc::clone(&lease)));
+        let source: LeaseSource =
+            Arc::new(move || Some(Arc::clone(&lease) as Arc<dyn WriterOwnership>));
         fn failing_sync(_p: &Path) -> std::io::Result<()> {
             Err(std::io::Error::other("disk full"))
         }

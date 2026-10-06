@@ -545,13 +545,31 @@ toolchain and dependency installation; it is not copied into the image.
 
 ## Secret scanning
 
-Run `gitleaks git -v --redact` from the repository root to scan Git history.
-The root `.gitleaksignore` lists reviewed historical false positives by exact
-fingerprint, with a reason for each group. These cover synthetic test inputs,
-assertions, an environment variable name, and a documentation path. All files
-and new commits remain scanned. Before adding an entry, inspect the finding
-in its original commit and confirm its provenance; do not ignore whole test
-directories, rules, or commits.
+Install Gitleaks (`brew install gitleaks` on macOS), then run
+`make setup-git-hooks` once per clone. The native pre-commit hook scans staged
+changes and blocks commits on findings or scanner errors, including a missing
+Gitleaks binary. The hook is shared with this clone's worktrees; installation
+refuses to overwrite a different hook. Other clones need their own setup.
+
+The independent **Secret scan** CI job scans full Git history on every PR and
+push to `main`, including documentation-only changes. It uses Gitleaks 8.30.1
+with a pinned download checksum and redacted output. Configure this job as a
+required status check for `main`. GitHub Secret Scanning and Push Protection
+provide complementary server-side detection for supported secret types.
+
+For a manual scan, run `gitleaks git -v --redact --ignore-gitleaks-allow` from
+the repository root. Inline `gitleaks:allow` comments do not bypass the hook
+or CI. The root `.gitleaksignore` lists reviewed historical false positives
+by exact fingerprint, with a reason for each group. All files and new commits
+remain scanned. Before adding an entry, inspect the finding in its original
+commit and confirm its provenance; do not ignore whole test directories,
+rules, or commits. Changes to ignore lists or scanner configuration need the
+same careful review as security-sensitive code.
+
+Hooks can be bypassed and CI runs after upload; neither guarantees that secrets
+never reach the remote. Keep real credentials outside tracked files. If a real
+secret is uploaded, revoke or rotate it immediately; deleting it in a later
+commit leaves it in history.
 
 ## Changelog
 

@@ -157,7 +157,7 @@ restricted approval dialogue for ordinary messages.
   outside the mutable transcript. `otto_help` remains an installed-version view.
 - HTTP/client and ACP: thin adapters for the same controller operations, with
   explicit capability negotiation and session binding.
-- `connect/internal/agent` and `connect/internal/bridge`: receive natural input
+- `chat-connector/internal/agent` and `chat-connector/internal/bridge`: receive natural input
   while a task is running, call control dialogue without waiting behind the
   ordinary prompt, and respect the returned route. Keep replies from control
   dialogue separate from the running task's streamed reply.

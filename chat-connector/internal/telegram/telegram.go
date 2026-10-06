@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/baiyuqing/otto/connect/internal/bridge"
-	"github.com/baiyuqing/otto/connect/internal/state"
+	"github.com/baiyuqing/otto/chat-connector/internal/bridge"
+	"github.com/baiyuqing/otto/chat-connector/internal/state"
 )
 
 const (

@@ -285,7 +285,7 @@ a typed error and leaves the file unchanged.
 ## Connect implementation
 
 Add an internal Unix-socket management client separate from
-`connect/internal/agent`, which remains an ACP client. It discovers only the
+`chat-connector/internal/agent`, which remains an ACP client. It discovers only the
 socket that the existing attach command names or Otto's existing default.
 
 The bridge reserves `/config`, `/models`, and later `/model` before queueing a

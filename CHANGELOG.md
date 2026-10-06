@@ -17,6 +17,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### User experience
 
+- Rename the independent Go chat connector source directory to `chat-connector/`, making its Telegram/Feishu-to-ACP role clear while preserving the `otto-connect` command and existing `~/.otto/connect/state.json` state location.
+
 - Make active-task steering observable and reversible before delivery: explicit
   steer responses now show the exact message and a transient id/status; clients
   can list and withdraw a still-queued steer. Delivered guidance remains

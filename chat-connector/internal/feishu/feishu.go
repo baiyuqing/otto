@@ -15,8 +15,8 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 
-	"github.com/baiyuqing/otto/connect/internal/bridge"
-	"github.com/baiyuqing/otto/connect/internal/metrics"
+	"github.com/baiyuqing/otto/chat-connector/internal/bridge"
+	"github.com/baiyuqing/otto/chat-connector/internal/metrics"
 )
 
 // noChat is the group allowlist used when no chat is configured. The SDK

@@ -2665,7 +2665,7 @@ See [Chat connector](#chat-connector).
 ## Chat connector
 
 `otto-connect` connects Telegram and Feishu (Lark) chats to Otto through ACP.
-It is a separate Go program in `connect/`: it starts one `otto acp` child by
+It is a separate Go program in `chat-connector/`: it starts one `otto acp` child by
 default or connects directly to `otto serve` over authenticated ACP TCP,
 and maps each chat to one Otto session.
 Telegram and Feishu can be enabled in the same process.
@@ -2683,7 +2683,7 @@ behavior for channel hints.
 
 ### Building and running
 
-Building requires Go at the version in `connect/go.mod`.
+Building requires Go at the version in `chat-connector/go.mod`.
 
 ```bash
 make connect-build                 # writes target/otto-connect

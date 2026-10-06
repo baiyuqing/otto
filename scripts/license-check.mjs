@@ -9,7 +9,7 @@
 // `license` in the lock file). It does not inspect license files or source.
 // A package without a license field fails unless CLARIFIED names it.
 //
-// ponytail: Go modules under connect/ are not checked because go.mod carries
+// ponytail: Go modules under chat-connector/ are not checked because go.mod carries
 // no license metadata (7 modules on 2026-10-05); go-licenses would be the
 // upgrade path.
 import { execFileSync } from 'node:child_process';

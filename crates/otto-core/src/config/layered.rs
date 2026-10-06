@@ -223,14 +223,34 @@ fn redact_table(table: &mut Table, path: &[String]) {
     for (key, value) in table {
         let mut p = path.to_vec();
         p.push(key.clone());
-        if matches!(
-            key.as_str(),
-            "env" | "headers" | "api_key_env" | "args" | "url" | "base_url" | "oauth_client_id"
-        ) {
+        if (key == "command" && value.is_array())
+            || matches!(
+                key.as_str(),
+                "bindings"
+                    | "env"
+                    | "headers"
+                    | "api_key_env"
+                    | "args"
+                    | "url"
+                    | "base_url"
+                    | "oauth_client_id"
+            )
+        {
             *value = Value::String("<redacted>".into());
-        } else if let Some(t) = value.as_table_mut() {
-            redact_table(t, &p);
+        } else {
+            redact_value(value, &p);
         }
+    }
+}
+fn redact_value(value: &mut Value, path: &[String]) {
+    match value {
+        Value::Table(table) => redact_table(table, path),
+        Value::Array(values) => {
+            for value in values {
+                redact_value(value, path);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -327,6 +347,13 @@ fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str
         }
         ["plugins", "disabled"] => true,
         ["plugins", "enabled"] => true,
+        ["hooks", ..] => {
+            return if trusted {
+                None
+            } else {
+                Some("executable project configuration is not trusted")
+            };
+        }
         ["web", "allow_hosts"] => true,
         _ => false,
     };

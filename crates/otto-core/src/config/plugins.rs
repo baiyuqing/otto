@@ -92,3 +92,80 @@ mod tests {
         );
     }
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hook {
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub timeout: String,
+    #[serde(default)]
+    pub matcher: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hooks {
+    #[serde(default)]
+    pub session_start: Vec<Hook>,
+    #[serde(default)]
+    pub before_prompt: Vec<Hook>,
+    #[serde(default)]
+    pub before_tool: Vec<Hook>,
+    #[serde(default)]
+    pub after_tool: Vec<Hook>,
+    #[serde(default)]
+    pub before_compaction: Vec<Hook>,
+    #[serde(default)]
+    pub after_compaction: Vec<Hook>,
+    #[serde(default)]
+    pub turn_end: Vec<Hook>,
+    #[serde(default)]
+    pub session_end: Vec<Hook>,
+}
+
+impl Hooks {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn entries(&self) -> [(&'static str, &[Hook]); 8] {
+        [
+            ("session_start", &self.session_start),
+            ("before_prompt", &self.before_prompt),
+            ("before_tool", &self.before_tool),
+            ("after_tool", &self.after_tool),
+            ("before_compaction", &self.before_compaction),
+            ("after_compaction", &self.after_compaction),
+            ("turn_end", &self.turn_end),
+            ("session_end", &self.session_end),
+        ]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub timeout: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Components {
+    pub version: u32,
+    #[serde(default)]
+    pub hooks: Hooks,
+    #[serde(default)]
+    pub tools: Vec<Tool>,
+}
+
+impl Components {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}

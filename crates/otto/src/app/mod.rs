@@ -164,6 +164,12 @@ impl Current {
     }
 
     fn discard(self) -> Result<(), String> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let runner = self.runner.clone();
+            handle.spawn(async move {
+                runner.end_session_hooks().await;
+            });
+        }
         self.runner.close();
         self.session.close()
     }
@@ -709,6 +715,7 @@ impl Controller {
             .as_ref()
             .map(|current| Arc::clone(&current.runner));
         if let Some(runner) = runner {
+            runner.end_session_hooks().await;
             runner.close_mcp().await;
         }
     }
@@ -741,6 +748,7 @@ impl Controller {
             return Vec::new();
         };
         let warnings = runner.migrate().await;
+        runner.end_session_hooks().await;
         runner.close_mcp().await;
         self.request_close();
         drop(admission);

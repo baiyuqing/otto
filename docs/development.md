@@ -686,6 +686,31 @@ read grants from elevation for attached clients. ACP advertises `allow_always`
 and discloses persistence in the title; the connector routes it through its
 existing cards and callback admission checks.
 
+## Plugin execution contracts
+
+`otto-core::config::plugins` owns package/config schemas; `agent::hooks` owns
+an optional async hook port and session lifecycle state. Core invokes hooks
+before tool dispatch so argument rewrites reach child write policy, tool
+validation and exact-argument authorization. Native `plugin/` owns pinned
+package discovery and immutable resource digests; `plugin/hooks.rs` owns
+command execution and offline JSON Schema validation. Runtime wiring composes
+existing skill/MCP paths and
+injects the same plugin runtime into parent and child agents.
+
+Before hooks may deny but cannot grant rights. Commands use the native sandbox
+executor with bounded stdin, output and process-group cleanup. Project roots,
+hook declarations and resources participate in executable trust; recheck at
+effects and cancel running package commands when source or authority changes.
+Preserve original operation facts across output transformations and append
+argument/original-result audit entries before exposing rewritten results.
+Hook effects make even read-only tool attempts ineligible for automatic
+crash replay. Session hook state belongs to the shared session, never a
+replacement runner. Graceful close owners await session-end hooks where the
+frontend exposes asynchronous shutdown; synchronous close starts bounded
+cleanup, and a process crash makes no delivery guarantee.
+
+Protocol and examples: [Hooks and custom tools](user-manual.md#hooks-and-custom-tools).
+
 ## Agent implementation contracts
 
 Apply these requirements to every feature, fix, and refactor:

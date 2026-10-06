@@ -3,7 +3,7 @@ import test from 'node:test';
 import { allowed, npmPackages, rustPackages, violations } from './license-check.mjs';
 
 test('allowed evaluates SPDX expressions', () => {
-  const yes = ['MIT', 'MIT OR GPL-3.0', 'GPL-3.0 OR MIT AND Apache-2.0', '(MIT OR Apache-2.0) AND Unicode-3.0', 'Apache-2.0 WITH LLVM-exception OR MIT', 'MIT/Apache-2.0', 'Apache-2.0 / MIT / MPL-2.0', 'MIT or Apache-2.0'];
+  const yes = ['MIT', 'MIT-0', 'MIT OR GPL-3.0', 'GPL-3.0 OR MIT AND Apache-2.0', '(MIT OR Apache-2.0) AND Unicode-3.0', 'Apache-2.0 WITH LLVM-exception OR MIT', 'MIT/Apache-2.0', 'Apache-2.0 / MIT / MPL-2.0', 'MIT or Apache-2.0'];
   const no = ['GPL-3.0', 'MIT AND GPL-3.0', 'GPL-3.0 OR MIT AND LGPL-2.1', '(MIT OR GPL-2.0) AND MPL-2.0', 'GPL-2.0 WITH Classpath-exception-2.0', 'GPL-3.0/LGPL-3.0', 'GPL-2.0+', 'LGPL-2.1-or-later', 'MPL-2.0', 'mit'];
   for (const e of yes) assert.equal(allowed(e), true, e);
   for (const e of no) assert.equal(allowed(e), false, e);

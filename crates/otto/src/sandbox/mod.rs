@@ -153,6 +153,8 @@ pub struct Capabilities {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Request {
     pub argv: Vec<String>,
+    /// Optional bounded protocol input; ordinary bash keeps stdin closed.
+    pub stdin: Option<Vec<u8>>,
     pub dir: PathBuf,
     pub env: Vec<String>,
     /// Asks the driver to report what the sandbox denied when the command
@@ -425,6 +427,13 @@ impl Executor {
     }
 
     fn validated_request(&self, request: Request) -> Result<Request, Error> {
+        if request
+            .stdin
+            .as_ref()
+            .is_some_and(|input| input.len() > 1 << 20)
+        {
+            return Err(Error::InvalidRequest);
+        }
         if request.argv.is_empty() || request.argv.iter().any(|arg| arg.contains('\0')) {
             return Err(Error::InvalidRequest);
         }

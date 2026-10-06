@@ -531,6 +531,7 @@ impl SeatbeltDriver {
         let home = self.state.directories.home.to_string_lossy().into_owned();
         let temp = self.state.directories.temp.to_string_lossy().into_owned();
         let spec = Spec {
+            stdin: None,
             path: SANDBOX_EXEC_PATH.to_string(),
             args: self.sandbox_exec_args(argv.iter().map(|value| (*value).to_string())),
             directory: std::path::PathBuf::from(&self.workspace),
@@ -698,6 +699,7 @@ impl Driver for SeatbeltDriver {
         let report_denials = request.report_denials;
         let started = Instant::now();
         let spec = Spec {
+            stdin: request.stdin,
             path: SANDBOX_EXEC_PATH.to_string(),
             args: self.sandbox_exec_args(request.argv.into_iter()),
             directory: request.dir,
@@ -1343,6 +1345,7 @@ mod tests {
             .driver
             .execute(
                 Request {
+                    stdin: None,
                     argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
                     dir: fixture.workspace.clone(),
                     env: vec![
@@ -1549,6 +1552,7 @@ mod tests {
             .driver
             .execute(
                 Request {
+                    stdin: None,
                     argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
                     dir: fixture.workspace.clone(),
                     env: vec![

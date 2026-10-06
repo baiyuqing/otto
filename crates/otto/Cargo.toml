@@ -31,6 +31,8 @@ turso.workspace = true
 tempfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Validate custom tool schemas offline, including local references and constraints.
+jsonschema = { version = "=0.49.9", default-features = false }
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal", "net"] }

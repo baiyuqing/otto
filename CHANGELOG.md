@@ -34,6 +34,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - Prevent a generic conversational confirmation from being requested before the
   exact memory review for the same model-originated `remember` proposal.
 
+### Architecture and reliability
+
+- Introduce a shared, WASM-safe `Mailbox` contract for agent notifications. Agent execution and runner-facing producers now depend on ordered snapshot and acknowledgement semantics instead of a concrete queue; the bundled in-memory mailbox remains the default, while native composition retains session-sidecar persistence and provides the extension boundary for alternative durable adapters.
+
 ### Storage and migration
 
 - Expose registered external repository factories, environment-bound endpoints,

@@ -857,8 +857,9 @@ impl Runner {
         self.agent.context_report()
     }
 
-    pub fn inbox(&self) -> &Arc<otto_core::agent::inbox::Inbox> {
-        self.agent.inbox()
+    /// The session mailbox shared with notification producers.
+    pub fn mailbox(&self) -> &Arc<dyn otto_core::mailbox::Mailbox> {
+        self.agent.mailbox()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -971,6 +972,8 @@ impl Runner {
         let registry = Registry::new(tools).expect("test tool registry");
         let definitions = registry.definitions();
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
+        let inbox = tasks.notifications().clone();
+        let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = inbox.clone();
         Self {
             agent: Agent::new(
                 ProviderClient::Scripted(provider),
@@ -981,7 +984,7 @@ impl Runner {
                     provider_name: "openai-compatible".to_string(),
                     request_sizer: Some(Arc::new(ScriptedSizer)),
                     now: Box::new(Utc::now),
-                    inbox: Arc::clone(tasks.notifications()),
+                    mailbox: Arc::clone(&mailbox),
                     steering: task_control.steering(),
                     tasks: Some(Arc::clone(&tasks)
                         as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
@@ -993,9 +996,7 @@ impl Runner {
             system_prompt: String::new(),
             definitions,
             usage: None,
-            reminders: Some(Arc::new(crate::tool::remind::Reminders::new(Arc::clone(
-                tasks.notifications(),
-            )))),
+            reminders: Some(Arc::new(crate::tool::remind::Reminders::new(inbox))),
             tasks: Some(tasks),
             subagents: None,
             skills: Catalog::default(),
@@ -1934,7 +1935,7 @@ impl Builder {
                 .tasks
                 .clone()
                 .map(|tasks| tasks as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
-            inbox: subagents.inbox.unwrap_or_default(),
+            mailbox: subagents.inbox.unwrap_or_default(),
             steering: task_control.steering(),
             ..Options::default()
         };

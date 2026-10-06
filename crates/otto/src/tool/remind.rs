@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use otto_core::agent::inbox::{Inbox, Notification};
+use otto_core::mailbox::{Mailbox, Notification};
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
 use serde::{Deserialize, Serialize};
@@ -166,7 +166,7 @@ struct Armed {
 /// sleeping timer does not keep [`Reminders`] itself alive: dropping the
 /// registry must still cancel.
 struct Inner {
-    inbox: Arc<Inbox>,
+    mailbox: Arc<dyn Mailbox>,
     /// `None` for `--no-session`, which has nothing to write.
     path: Option<PathBuf>,
     armed: Mutex<Vec<Armed>>,
@@ -238,7 +238,7 @@ impl Inner {
             return;
         };
         let message = armed[index].item.message.clone();
-        self.inbox.push(Notification {
+        self.mailbox.enqueue(Notification {
             task_id: "timer".into(),
             text: format!("[timer] {message}"),
             ..Notification::default()
@@ -328,19 +328,19 @@ pub struct Reminders {
 }
 
 impl Reminders {
-    pub fn new(inbox: Arc<Inbox>) -> Self {
-        Self::create(inbox, None)
+    pub fn new<M: Mailbox + 'static>(mailbox: Arc<M>) -> Self {
+        Self::create(mailbox, None)
     }
 
     /// Restores any timers already stored at `path`, then keeps writing new
     /// ones there. A timer that is already due fires as soon as the runtime
     /// polls it.
-    pub fn with_persist(inbox: Arc<Inbox>, path: PathBuf) -> Self {
+    pub fn with_persist<M: Mailbox + 'static>(mailbox: Arc<M>, path: PathBuf) -> Self {
         let stored: Vec<StoredReminder> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
-        let reminders = Self::create(inbox, Some(path));
+        let reminders = Self::create(mailbox, Some(path));
         reminders
             .inner
             .next_id
@@ -351,18 +351,19 @@ impl Reminders {
         reminders
     }
 
-    fn create(inbox: Arc<Inbox>, path: Option<PathBuf>) -> Self {
-        Self::create_with_directory_sync(inbox, path, sync_directory)
+    fn create<M: Mailbox + 'static>(mailbox: Arc<M>, path: Option<PathBuf>) -> Self {
+        Self::create_with_directory_sync(mailbox, path, sync_directory)
     }
 
-    fn create_with_directory_sync(
-        inbox: Arc<Inbox>,
+    fn create_with_directory_sync<M: Mailbox + 'static>(
+        mailbox: Arc<M>,
         path: Option<PathBuf>,
         sync_directory: DirectorySync,
     ) -> Self {
+        let mailbox: Arc<dyn Mailbox> = mailbox;
         Self {
             inner: Arc::new(Inner {
-                inbox,
+                mailbox,
                 path,
                 armed: Mutex::new(Vec::new()),
                 next_id: AtomicUsize::new(0),
@@ -699,6 +700,7 @@ mod tests {
 
     use super::*;
     use crate::tool::testutil::{run, run_cancelled};
+    use otto_core::mailbox::Inbox;
     use otto_core::model::{EffectCertainty, OperationDisposition, OperationStopReason};
 
     fn fail_directory_sync(_directory: &std::fs::File) -> std::io::Result<()> {

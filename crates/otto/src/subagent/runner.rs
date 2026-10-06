@@ -260,6 +260,10 @@ pub type Transcript = Arc<dyn Session + Send + Sync>;
 pub type ChildSession =
     Arc<dyn Fn(&str) -> Result<Option<(Transcript, String)>, String> + Send + Sync>;
 
+/// Builds the durable mailbox for the child whose transcript is at the given
+/// path, restoring the parent messages it had not read when it stopped.
+pub type ChildMailbox = Arc<dyn Fn(&str) -> Arc<dyn Mailbox> + Send + Sync>;
+
 struct SharedTranscript(Transcript);
 
 #[async_trait::async_trait]
@@ -667,6 +671,10 @@ pub struct Config {
     /// The workspace the commit guard syncs to disk after a child tool call
     /// finishes. Ignored when `lease` is `None`.
     pub workspace_path: PathBuf,
+    /// Makes a file-backed child's mailbox durable beside its transcript, so
+    /// `agent_send` messages it has not read survive a restart and reach it
+    /// when it is resumed. `None` keeps child mailboxes in memory.
+    pub child_mailbox: Option<ChildMailbox>,
 }
 
 /// One delegation request.
@@ -936,7 +944,7 @@ impl Runner {
                     context,
                     now,
                     Vec::new(),
-                    transcript,
+                    transcript.map(|transcript| (transcript, String::new())),
                     None,
                     self.task_deadline(parent_deadline),
                 )
@@ -955,7 +963,7 @@ impl Runner {
             context,
             now,
             snapshot,
-            transcript,
+            transcript.map(|transcript| (transcript, String::new())),
             None,
             self.task_deadline(parent_deadline),
         )
@@ -1027,7 +1035,7 @@ impl Runner {
             record.context.clone(),
             now,
             Vec::new(),
-            Some(transcript),
+            Some((transcript, record.path.to_string_lossy().into_owned())),
             Some(record.task_id.clone()),
             self.task_deadline(None),
         )
@@ -1127,7 +1135,7 @@ impl Runner {
         context: String,
         now: DateTime<Utc>,
         snapshot: Vec<Message>,
-        transcript: Option<Transcript>,
+        transcript: Option<(Transcript, String)>,
         resume_id: Option<String>,
         deadline: Deadline,
     ) -> Result<Task, StartError> {
@@ -1173,7 +1181,12 @@ impl Runner {
             armed: true,
         };
         let transcript = match (transcript, &self.config.child_session) {
-            (Some(transcript), _) => transcript,
+            (Some((transcript, path)), _) => {
+                if !path.is_empty() {
+                    self.config.tasks.set_session_path(&task.id, &path);
+                }
+                transcript
+            }
             (None, None) => Arc::new(MemorySession::new()),
             (None, Some(build)) => match build(&task.id) {
                 Ok(Some((transcript, path))) => {
@@ -1197,6 +1210,18 @@ impl Runner {
             },
         };
         let _ = slot.set(Arc::clone(&transcript));
+        if let Some(build) = &self.config.child_mailbox
+            && let Some(path) = self
+                .config
+                .tasks
+                .get(&task.id)
+                .map(|task| task.session_path)
+                .filter(|path| !path.is_empty())
+        {
+            self.config
+                .tasks
+                .replace_child_inbox(&task.id, build(&path));
+        }
 
         // Durable custom entries are awaited before `start` returns, so even
         // a task that remains queued has its complete specification on disk.
@@ -3965,6 +3990,56 @@ mod tests {
         let mut config = test_config(provider, tasks, Vec::new());
         config.children_dir = Some(Arc::new(move || Some(dir.clone())));
         config
+    }
+
+    #[tokio::test]
+    async fn resume_delivers_parent_messages_the_child_had_not_read() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        let path = interrupted_fixture(
+            &parent_path,
+            "t1",
+            "look at this",
+            None,
+            true,
+            true,
+            interrupted::INTERRUPTED_STATUS,
+        );
+        let sidecar = path.with_extension("inbox.json");
+        std::fs::write(
+            &sidecar,
+            r#"[{"seq":0,"task_id":"t1","kind":"message","text":"[parent-message] use the v2 API","usage":null,"id":"in_1"}]"#,
+        )
+        .expect("pending parent message");
+
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![assistant_text("all done", Usage::default())],
+        );
+        let tasks = Arc::new(Tasks::new());
+        let mut config = config_with_children_dir(&provider, &tasks, children_dir);
+        config.child_mailbox = Some(crate::runtime::wiring::child_mailbox());
+        let (runner, _) = runner(config);
+        runner
+            .resume("t1", "continue please".to_string())
+            .await
+            .expect("resume");
+        let final_task = wait_final(&tasks, "t1").await;
+        assert_eq!(final_task.status, TaskStatus::Succeeded);
+
+        let requests = provider.requests();
+        let request = &requests[0];
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message.text().contains("use the v2 API")),
+            "the unread parent message reaches the resumed child: {:?}",
+            request.messages
+        );
+        assert!(!sidecar.exists(), "delivered messages leave the sidecar");
     }
 
     #[tokio::test]

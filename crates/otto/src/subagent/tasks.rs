@@ -569,6 +569,26 @@ impl Tasks {
         Some(Arc::clone(&entry.inbox))
     }
 
+    /// Replaces the task's mailbox with `mailbox` (a durable one, built once
+    /// the child's transcript path is known). Messages already queued in the
+    /// old mailbox move after the ones `mailbox` restored, in order.
+    pub fn replace_child_inbox(&self, reference: &str, mailbox: Arc<dyn Mailbox>) {
+        let old = {
+            let mut state = self.lock();
+            let Some(id) = Self::entry(&state, reference).map(|entry| entry.task.id.clone()) else {
+                return;
+            };
+            let Some(entry) = state.entries.get_mut(&id) else {
+                return;
+            };
+            std::mem::replace(&mut entry.inbox, Arc::clone(&mailbox))
+        };
+        for entry in old.queued() {
+            mailbox.push(entry.notification);
+            old.ack(entry.seq);
+        }
+    }
+
     /// The task's `agent_report` budget counter, shared with the running
     /// child's `ChildTools`. `None` when `reference` names no task.
     pub fn report_allowance(&self, reference: &str) -> Option<Arc<AtomicUsize>> {
@@ -1438,5 +1458,42 @@ mod tests {
         let tasks = Tasks::new_from(7);
         let task = tasks.add(Task::default(), None, None).expect("valid");
         assert_eq!(task.id, "t8");
+    }
+
+    #[test]
+    fn replacing_a_child_mailbox_keeps_restored_messages_first() {
+        let tasks = Tasks::new();
+        let task = tasks.add(Task::default(), None, None).expect("add");
+        tasks.send_message(&task.id, "queued early").expect("send");
+        let durable = Arc::new(Inbox::default());
+        durable.push(otto_core::agent::inbox::Notification {
+            text: "[parent-message] restored".into(),
+            ..Default::default()
+        });
+        tasks.replace_child_inbox(&task.id, durable.clone());
+        let texts: Vec<String> = durable
+            .snapshot()
+            .into_iter()
+            .map(|notification| notification.text)
+            .collect();
+        assert_eq!(
+            texts,
+            ["[parent-message] restored", "[parent-message] queued early"]
+        );
+        assert!(tasks.child_inbox(&task.id).expect("mailbox").len() == 2);
+    }
+
+    #[test]
+    fn a_parent_message_that_cannot_be_saved_is_not_sent() {
+        let tasks = Tasks::new();
+        let task = tasks.add(Task::default(), None, None).expect("add");
+        let failing = Arc::new(Inbox::default());
+        failing.set_persist(Box::new(|_| Err("disk full".into())));
+        tasks.replace_child_inbox(&task.id, failing.clone());
+        let error = tasks
+            .send_message(&task.id, "hello")
+            .expect_err("not persisted");
+        assert!(matches!(error, TaskError::NotPersisted(_)), "{error}");
+        assert!(failing.is_empty());
     }
 }

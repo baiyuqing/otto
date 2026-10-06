@@ -244,6 +244,12 @@ fn render_body(
             truncate_bytes(&child.prompt, PROMPT_PREVIEW_BYTES)
         ));
         text.push_str(&format!("started: {}\n", child.started));
+        let pending = pending_parent_messages(&child.path);
+        if pending > 0 {
+            text.push_str(&format!(
+                "parent messages not yet read: {pending} (delivered when the task is resumed)\n"
+            ));
+        }
         if !child.unanswered.is_empty() {
             text.push_str("calls left unanswered:\n");
             for call in &child.unanswered {
@@ -261,6 +267,15 @@ fn render_body(
          prompt. A task not continued this way stays interrupted.\n",
     );
     text
+}
+
+/// How many `agent_send` messages the child at `transcript` had not read,
+/// from its mailbox sidecar; 0 when there is none or it cannot be read.
+fn pending_parent_messages(transcript: &Path) -> usize {
+    std::fs::read_to_string(transcript.with_extension("inbox.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(&raw).ok())
+        .map_or(0, |entries| entries.len())
 }
 
 fn render_call(call: &UnansweredCall) -> String {
@@ -704,5 +719,19 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("op_turn"), "{warnings:?}");
         assert!(warnings[0].contains("not resuming"), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_notice_counts_parent_messages_an_interrupted_child_had_not_read() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut child = interrupted_child("t1");
+        child.path = dir.path().join("t1-child.jsonl");
+        std::fs::write(
+            child.path.with_extension("inbox.json"),
+            r#"[{"seq":0,"text":"a"},{"seq":1,"text":"b"}]"#,
+        )
+        .expect("sidecar");
+        let text = render(&takeover(Vec::new()), std::slice::from_ref(&child), 100);
+        assert!(text.contains("parent messages not yet read: 2"), "{text}");
     }
 }

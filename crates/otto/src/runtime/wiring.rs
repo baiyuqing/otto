@@ -621,6 +621,7 @@ impl Builder {
                 session_for_children,
                 Arc::clone(&self.storage),
             )),
+            child_mailbox: (!self.no_session).then(child_mailbox),
             checker: self.skill_checker.clone(),
             lease: Some(Arc::new(move || session_for_lease.lease())),
             workspace_path: PathBuf::from(&self.workspace_path),
@@ -1730,6 +1731,26 @@ fn child_sessions(parent: SharedSession, storage: Arc<super::storage::Storage>) 
                 .create_child_lazy(&parent_path, &name, header, parent.lease())?;
         let transcript: Transcript = store;
         Ok(Some((transcript, path)))
+    })
+}
+
+/// Builds a child's durable mailbox, `<child transcript>.inbox.json`, and
+/// restores the parent messages it had not read. An unreadable sidecar is
+/// moved aside and the child is told so in its first notification.
+pub(crate) fn child_mailbox() -> crate::subagent::runner::ChildMailbox {
+    Arc::new(|transcript: &str| {
+        let mailbox = Arc::new(otto_core::mailbox::InMemoryMailbox::new(None));
+        let sidecar = Path::new(transcript).with_extension("inbox.json");
+        let warning = super::sidecar_mailbox::load(&mailbox, &sidecar);
+        super::sidecar_mailbox::install(&mailbox, ".inbox.json", move || Some(sidecar.clone()));
+        if let Some(warning) = warning {
+            mailbox.push(otto_core::agent::inbox::Notification {
+                kind: Some(otto_core::agent::inbox::NotificationKind::Message),
+                text: format!("[parent-message] {warning}"),
+                ..Default::default()
+            });
+        }
+        mailbox as Arc<dyn otto_core::mailbox::Mailbox>
     })
 }
 

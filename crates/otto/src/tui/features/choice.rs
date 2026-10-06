@@ -4,6 +4,7 @@ use super::{Presenter, Transition};
 
 pub(crate) enum ChoiceKind {
     Resume,
+    Fork,
     Archive,
     Profiles,
     Thinking { profile: Option<String> },
@@ -66,6 +67,7 @@ impl Presenter for Choice {
     fn key(&self) -> String {
         match &self.kind {
             ChoiceKind::Resume => "resume",
+            ChoiceKind::Fork => "fork",
             ChoiceKind::Archive => "archive",
             ChoiceKind::Profiles => "model",
             ChoiceKind::Thinking { .. } => "thinking",
@@ -77,6 +79,7 @@ impl Presenter for Choice {
         let allow = matches!(self.kind, ChoiceKind::Allow(_));
         let title = match self.kind {
             ChoiceKind::Resume => "Resume session",
+            ChoiceKind::Fork => "Fork session before a prompt",
             ChoiceKind::Archive => "Archive session",
             ChoiceKind::Profiles => "Switch profile",
             ChoiceKind::Thinking { .. } => "Reasoning effort",
@@ -101,10 +104,10 @@ impl Presenter for Choice {
         } else {
             let mut a = vec![Action {
                 id: "apply".into(),
-                label: if matches!(self.kind, ChoiceKind::Archive) {
-                    "Archive selected session"
-                } else {
-                    "Use selected"
+                label: match self.kind {
+                    ChoiceKind::Archive => "Archive selected session",
+                    ChoiceKind::Fork => "Fork before this prompt",
+                    _ => "Use selected",
                 }
                 .into(),
                 enabled: !self.rows.is_empty(),
@@ -125,12 +128,14 @@ impl Presenter for Choice {
             collection: !allow,
             title: title.into(),
             rows: self.rows.clone(),
-            document: if let ChoiceKind::Allow(path) = &self.kind {
-                format!(
+            document: match &self.kind {
+                ChoiceKind::Allow(path) => format!(
                     "Permanently allow reading: {path}\nSaved to read_paths; commands remain sandboxed."
-                )
-            } else {
-                String::new()
+                ),
+                ChoiceKind::Fork if self.loaded && self.rows.is_empty() => {
+                    "This session has no prompt to fork before yet.".into()
+                }
+                _ => String::new(),
             },
             actions,
             default_action: allow.then(|| "cancel".into()),
@@ -159,6 +164,7 @@ impl Presenter for Choice {
         }
         let command = match &self.kind {
             ChoiceKind::Resume => Command::Resume(selected.unwrap_or_default()),
+            ChoiceKind::Fork => Command::Fork(selected.unwrap_or_default()),
             ChoiceKind::Archive => Command::Archive(selected.unwrap_or_default()),
             ChoiceKind::Profiles => {
                 let current = selected
@@ -219,7 +225,7 @@ impl Presenter for Choice {
                 self.kind = ChoiceKind::Allow(path);
                 self.loaded = true;
             }
-            Reply::Operation { .. } => return Transition::Close,
+            Reply::Operation { .. } | Reply::Forked { .. } => return Transition::Close,
             _ => {}
         }
         Transition::Stay
@@ -227,6 +233,7 @@ impl Presenter for Choice {
     fn refresh(&self) -> Option<Request> {
         match self.kind {
             ChoiceKind::Resume | ChoiceKind::Archive => Some(Request::Sessions),
+            ChoiceKind::Fork => Some(Request::ForkPoints),
             ChoiceKind::Profiles => Some(Request::Profiles),
             ChoiceKind::Allow(ref path) => Some(Request::SandboxPath(path.clone())),
             _ => None,

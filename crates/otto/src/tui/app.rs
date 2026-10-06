@@ -351,6 +351,7 @@ impl App {
             Request::Command(
                 backend::Command::NewSession
                     | backend::Command::Resume(_)
+                    | backend::Command::Fork(_)
                     | backend::Command::Archive(_)
                     | backend::Command::SwitchProfile(_)
                     | backend::Command::SwitchProfileThinking { .. }
@@ -474,12 +475,7 @@ impl App {
                         self.withdrawing_queued = false;
                     }
                     if let Some(receipt) = operation_receipt(&reply) {
-                        self.apply_receipt(
-                            receipt.message,
-                            receipt.info,
-                            receipt.history,
-                            receipt.prompt,
-                        )
+                        self.apply_receipt(receipt)
                     }
                 }
                 Err(error) if mutation => {
@@ -539,12 +535,7 @@ impl App {
             self.push_system(message);
         }
         if let Some(receipt) = receipt {
-            self.apply_receipt(
-                receipt.message,
-                receipt.info,
-                receipt.history,
-                receipt.prompt,
-            );
+            self.apply_receipt(receipt);
         }
         if let Some(message) = error
             && (mutation || !attached)
@@ -555,13 +546,14 @@ impl App {
             self.transition(id, transition);
         }
     }
-    fn apply_receipt(
-        &mut self,
-        message: String,
-        info: Info,
-        history: Option<Vec<Message>>,
-        prompt: Option<String>,
-    ) {
+    fn apply_receipt(&mut self, receipt: OperationReceipt) {
+        let OperationReceipt {
+            message,
+            info,
+            history,
+            prompt,
+            draft,
+        } = receipt;
         let old = (self.info.workspace.clone(), self.info.session_id.clone());
         self.info = info;
         if let Some(history) = history {
@@ -588,6 +580,9 @@ impl App {
             self.writes.clear();
             self.session_changes.clear();
             self.invalidate_reads();
+        }
+        if let Some(draft) = draft {
+            self.composer.set_input(&draft);
         }
         if let Some(prompt) = prompt {
             self.actions.push(Action::Prompt(prompt));
@@ -1283,6 +1278,8 @@ struct OperationReceipt {
     info: Info,
     history: Option<Vec<Message>>,
     prompt: Option<String>,
+    /// Text placed in the editor, not sent.
+    draft: Option<String>,
 }
 fn operation_receipt(reply: &Reply) -> Option<OperationReceipt> {
     match reply {
@@ -1296,6 +1293,19 @@ fn operation_receipt(reply: &Reply) -> Option<OperationReceipt> {
             info: info.clone(),
             history: history.clone(),
             prompt: prompt.clone(),
+            draft: None,
+        }),
+        Reply::Forked {
+            message,
+            info,
+            history,
+            draft,
+        } => Some(OperationReceipt {
+            message: message.clone(),
+            info: info.clone(),
+            history: Some(history.clone()),
+            prompt: None,
+            draft: draft.clone(),
         }),
         _ => None,
     }
@@ -1534,6 +1544,35 @@ mod tests {
         assert!(
             app.drain_actions()
                 .contains(&Action::Prompt("retry this".into()))
+        );
+    }
+
+    #[test]
+    fn a_fork_puts_its_prompt_in_the_editor_without_sending_it() {
+        let (mut app, _) = app();
+        app.enqueue(
+            0,
+            Request::Command(backend::Command::Fork("00000002".into())),
+        );
+        let ticket = app.requests.last().unwrap().0.clone();
+        let mut info = app.info.clone();
+        info.session_id = "forked".into();
+        app.apply_completion(Completion {
+            mutation: true,
+            ticket,
+            result: Ok(Reply::Forked {
+                message: "Forked: forked".into(),
+                info,
+                history: Vec::new(),
+                draft: Some("second".into()),
+            }),
+        });
+        assert_eq!(app.info.session_id, "forked");
+        assert_eq!(app.composer.input.iter().collect::<String>(), "second");
+        assert!(
+            !app.drain_actions()
+                .iter()
+                .any(|action| matches!(action, Action::Prompt(_)))
         );
     }
 

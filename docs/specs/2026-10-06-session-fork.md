@@ -1,6 +1,6 @@
 # Session fork at a turn
 
-Status: proposed 2026-10-06; awaiting approval and answers to the open
+Status: approved 2026-10-06 with the recommended answers to all three open
 questions.
 
 This design closes the "session fork at an entry" item listed under "Later
@@ -141,13 +141,15 @@ reads the source and writes the copy in one go:
 3. Write the header and kept entries to a temporary file in the session
    directory, fsync it, and `rename_excl` it to `<new id>.jsonl`.
    - A crash leaves either no copy or a whole one.
-   - A leftover temporary file is ignored by `list` and removed on the next
-     fork.
+   - The temporary name does not end in `.jsonl`, so `list` ignores a
+     leftover.
 4. Open the copy as a normal `Prepared`.
 
 ### Surfaces
 
-- **HTTP.** `POST /v1/sessions/{id}/fork` with body `{"before": "<message id>"}`;
+- **HTTP.** `GET /v1/sessions/{id}/fork-points` lists the fork points, oldest
+  first, as `{entry_id, prompt}`; the attached TUI's picker reads it.
+  `POST /v1/sessions/{id}/fork` with body `{"before": "<message id>"}`;
   `before` is optional.
   - Success: `201` with the new session object, plus `forked_from:
     {session_id, entry_id}` and `prompt`.
@@ -211,7 +213,7 @@ reads the source and writes the copy in one go:
 - **Compatibility.** A forked file opens with the `otto.fork` record ignored
   by context.
 
-## Open questions
+## Resolved questions
 
 1. **Keep the turn, or cut before it?** Should a fork point mean "before this
    prompt" (re-ask it differently) or "after this turn" (keep the answer)?

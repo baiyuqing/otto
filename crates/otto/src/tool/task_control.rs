@@ -61,7 +61,7 @@ impl Tool for TaskQueue {
         }
         definition(
             "task_queue",
-            "Schedule a separate, agent-originated follow-up prompt to run after the current logical task ends. Use only for work subordinate to the user's current objective, not for new authority or approvals. Prompt must be nonblank and at most 32000 UTF-8 bytes. At most 16 follow-ups run in FIFO order per logical task, and are discarded if the task is cancelled or fails. If a direct terminal turn ends while approval is pending, remaining follow-ups are discarded with a notice.",
+            "Schedule a separate, agent-originated follow-up prompt to run after the current logical task ends. Use only for work subordinate to the user's current objective, not for new authority or approvals. Prompt must be nonblank and at most 32000 UTF-8 bytes. At most 16 follow-ups run in FIFO order per logical task, and are discarded if the task is cancelled or fails. If a direct terminal turn ends while approval is pending, remaining follow-ups are discarded with a notice. Follow-ups are saved with the session: if Otto stops during the task, they run after the task is automatically resumed, otherwise they are discarded with a notice. Returns an error, and queues nothing, when the follow-up cannot be saved.",
             json!({"type":"object","additionalProperties":false,"properties":{"prompt":{"type":"string","minLength":1,"maxLength":32000}},"required":["prompt"]}),
         )
     }
@@ -227,7 +227,7 @@ mod tests {
             )
             .await;
         assert!(!result.is_error);
-        let queued = run.next_followup().expect("queued follow-up");
+        let queued = run.next_followup().expect("queued follow-up").text;
         assert!(!queued.contains("private-token"), "{queued}");
         assert!(control.queue_followup("later").is_ok());
         drop(run);

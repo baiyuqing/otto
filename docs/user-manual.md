@@ -1280,6 +1280,14 @@ Notes:
   resumes it after the session is reopened delivers that guidance first;
   the next turn that does not resume it discards it. Guidance that cannot be
   written is not accepted.
+- **Agent-scheduled follow-ups** (`task_queue`) are written to
+  `<session-id>.followups.json` until their step runs; every way the logical
+  task ends removes the rest. When the Otto process stops during the task,
+  the wake turn that resumes it runs them afterwards in order, skipping a
+  step whose message is already in the session. When the task is not
+  resumed (its automatic resume was used, or Otto stopped between two
+  steps), the next task discards them and stores a visible notice with
+  their count.
 - **Unread parent messages** (`agent_send`) for a sub-agent task are written
   to `<child transcript>.inbox.json` beside the child's transcript. When the
   task is interrupted and later resumed with `agent` `resume`, they are
@@ -2195,8 +2203,12 @@ follow-ups scheduled by other follow-ups. These are labelled as agent-originated
 context and cannot create user authority. ACP/server keep them behind approval;
 denial, cancellation, or failure clears remaining model follow-ups. Direct
 terminal prompts that end awaiting approval clear remaining follow-ups with a
-visible, stored notice; resubmit them after resolving approval. Pending queues
-are in memory and are not recovered after a process restart.
+visible, stored notice; resubmit them after resolving approval. Accepted
+follow-ups are also saved with the session (see [Sessions](#sessions)): when
+the Otto process stops during the task, they run, in order, after the turn
+that automatically resumes it, and a step that already ran is not run again.
+A follow-up that cannot be saved is not queued and `task_queue` returns an
+error. The `otto serve` and ACP turn queues remain in memory.
 
 Tool schemas and the applicable operation policy accompany each task request
 outside the mutable transcript. Compaction and session reload preserve this

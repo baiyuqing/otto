@@ -5,7 +5,7 @@ BINARY := otto
 INSTALL_DIR ?= $(HOME)/.local/bin
 SKILLS_INSTALL_DIR ?= $(HOME)/.otto/skills
 
-CONNECT_DIR := connect
+CHAT_CONNECTOR_DIR := chat-connector
 
 .PHONY: setup-git-hooks all build install check-fast check check-tests check-linux rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
 
@@ -68,12 +68,12 @@ test-tui: ## run only the TUI PTY tests, local and --attach (rust-test runs them
 # features off, which changes even proc-macro crates).
 connect-check: ## Go chat connector: gofmt, vet, race tests; builds target/debug/otto for its end-to-end test
 	cargo test --workspace --no-run
-	@unformatted="$$(cd $(CONNECT_DIR) && gofmt -l .)"; test -z "$$unformatted" || { echo "gofmt needed: $$unformatted"; exit 1; }
-	cd $(CONNECT_DIR) && go vet ./...
-	cd $(CONNECT_DIR) && OTTO_BIN="$(CURDIR)/target/debug/otto" go test -race ./...
+	@unformatted="$$(cd $(CHAT_CONNECTOR_DIR) && gofmt -l .)"; test -z "$$unformatted" || { echo "gofmt needed: $$unformatted"; exit 1; }
+	cd $(CHAT_CONNECTOR_DIR) && go vet ./...
+	cd $(CHAT_CONNECTOR_DIR) && OTTO_BIN="$(CURDIR)/target/debug/otto" go test -race ./...
 
 connect-build: ## build the chat connector to target/otto-connect
-	cd $(CONNECT_DIR) && go build -o ../target/otto-connect ./cmd/otto-connect
+	cd $(CHAT_CONNECTOR_DIR) && go build -o ../target/otto-connect ./cmd/otto-connect
 
 # check-fast is the local gate. All worktrees of this repository share one lock
 # file in the common git directory, so check-fast in several worktrees runs one

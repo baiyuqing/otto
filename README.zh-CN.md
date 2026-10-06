@@ -19,7 +19,7 @@
 ## 从源码安装
 
 需要由 `rust-toolchain.toml` 锁定的 **Rust 1.98** 工具链
-（`rustup toolchain install` 会自动安装）、`connect/go.mod` 指定的 **Go**，
+（`rustup toolchain install` 会自动安装）、`chat-connector/go.mod` 指定的 **Go**，
 以及受支持服务的访问权限。**macOS** 是受支持的平台：只有它有沙箱，
 也只有它跑验收门禁。Otto 同样可以在 **Linux** 上编译和运行，限制见下方
 [安全与限制](#安全与限制)。
@@ -141,7 +141,7 @@ Web UI 可点击 **Image** 或粘贴截图。所选模型和 OpenAI-compatible �
 - [子代理](README.md#delegate-work-to-sub-agents)
 - [本地服务：otto serve](docs/user-manual.md#agent-server)
 - [ACP agent：otto acp](docs/user-manual.md#acp-agent-server)
-- [聊天连接器 otto-connect](docs/user-manual.md#chat-connector)：`connect/` 中独立的 Go 程序，运行 `otto acp` 并接入 Telegram 和飞书；可连接 `otto serve`，与 Web UI 和附加终端共享会话。
+- [聊天连接器 otto-connect](docs/user-manual.md#chat-connector)：`chat-connector/` 中独立的 Go 程序，运行 `otto acp` 并接入 Telegram 和飞书；可连接 `otto serve`，与 Web UI 和附加终端共享会话。
 - [MCP 服务](docs/user-manual.md#mcp-servers)：连接 stdio 或 HTTP 的 MCP 服务，在同一轮循环中调用它们的工具
 - [定时提醒](docs/user-manual.md#remind) · [持久化 workflow](docs/user-manual.md#durable-workflows)：TOML 描述的 DAG，支持顺序/并发的 agent 与 handoff 步骤、持久化审批、重启恢复、CLI 控制和 Web UI 查看
 - [用量历史](docs/user-manual.md#observability)：Web UI 分析页展示本地 token 趋势和缓存命中率，不保存提示词或工具内容

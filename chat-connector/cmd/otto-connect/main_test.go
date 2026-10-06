@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/baiyuqing/otto/connect/internal/bridge"
-	"github.com/baiyuqing/otto/connect/internal/config"
-	"github.com/baiyuqing/otto/connect/internal/metrics"
+	"github.com/baiyuqing/otto/chat-connector/internal/bridge"
+	"github.com/baiyuqing/otto/chat-connector/internal/config"
+	"github.com/baiyuqing/otto/chat-connector/internal/metrics"
 )
 
 func TestWithoutVarsDropsTokenVariable(t *testing.T) {

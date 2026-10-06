@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/baiyuqing/otto/connect/internal/agent/fake"
+	"github.com/baiyuqing/otto/chat-connector/internal/agent/fake"
 	"github.com/coder/acp-go-sdk"
 )
 

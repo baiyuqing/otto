@@ -39,7 +39,7 @@ use axum::extract::{DefaultBodyLimit, MatchedPath, Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use otto_core::agent::Event;
 use otto_core::model::{Block, MAX_IMAGE_BYTES, Message, Usage};
 use otto_core::session::ListResult;
@@ -634,7 +634,14 @@ impl Server {
                 post(approvals::message),
             )
             .route("/v1/sessions/{id}/inputs", post(task_control::admit_input))
-            .route("/v1/sessions/{id}/tasks/steer", post(task_control::steer))
+            .route(
+                "/v1/sessions/{id}/tasks/steer",
+                get(task_control::steering_messages).post(task_control::steer),
+            )
+            .route(
+                "/v1/sessions/{id}/tasks/steer/{message_id}",
+                delete(task_control::withdraw_steering),
+            )
             .route(
                 "/v1/sessions/{id}/tasks/control",
                 post(task_control::control),
@@ -5164,6 +5171,50 @@ mod tests {
             .await;
         assert_eq!(admitted.status, StatusCode::OK);
         assert_eq!(admitted.json(), serde_json::json!("steered"));
+
+        let steer = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/steer"),
+                Some(r#"{"text":"do not change the public API"}"#),
+            )
+            .await;
+        assert_eq!(steer.status, StatusCode::OK);
+        let steer = steer.json();
+        assert_eq!(steer["text"], "do not change the public API");
+        assert_eq!(steer["status"], "queued");
+        let message_id = steer["id"].as_u64().expect("steer id");
+
+        let listed = harness
+            .send("GET", &format!("/v1/sessions/{id}/tasks/steer"), None)
+            .await;
+        assert_eq!(listed.status, StatusCode::OK);
+        assert!(
+            listed
+                .json()
+                .as_array()
+                .expect("messages")
+                .iter()
+                .any(|message| { message["id"] == message_id && message["status"] == "queued" })
+        );
+
+        let withdrawn = harness
+            .send(
+                "DELETE",
+                &format!("/v1/sessions/{id}/tasks/steer/{message_id}"),
+                None,
+            )
+            .await;
+        assert_eq!(withdrawn.status, StatusCode::OK);
+        assert_eq!(withdrawn.json()["status"], "withdrawn");
+        let duplicate_withdrawal = harness
+            .send(
+                "DELETE",
+                &format!("/v1/sessions/{id}/tasks/steer/{message_id}"),
+                None,
+            )
+            .await;
+        assert_eq!(duplicate_withdrawal.status, StatusCode::CONFLICT);
 
         let empty = harness
             .send(

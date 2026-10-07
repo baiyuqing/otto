@@ -782,7 +782,10 @@ func TestEndToEndCompletedWorkAutomaticallyReflects(t *testing.T) {
 			return chatTextReply(`{"memories":[],"skills":[]}`)
 		}
 		if request < 10 {
-			return chatToolCallReply(fmt.Sprintf("read-%d", request), "read", `{"path":"notes.txt"}`)
+			// A distinct limit per call keeps the no-progress guard, which
+			// stops a turn after 8 identical calls in a row, from ending it.
+			arguments := fmt.Sprintf(`{"path":"notes.txt","limit":%d}`, request+1)
+			return chatToolCallReply(fmt.Sprintf("read-%d", request), "read", arguments)
 		}
 		return chatTextReply("work complete")
 	})

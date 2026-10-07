@@ -211,7 +211,7 @@ fn store_failing_writes_from(temp: &TempDir, from_write: u32) -> (Store, Arc<Fau
             Trigger::FromNth(from_write),
             Fault::Before(FaultError::Os(libc::EIO)),
         )
-        .filter(Filter::NameSuffix(".jsonl")),
+        .filter(Filter::NameContains(".jsonl")),
     ]);
     let driver = FaultyFileDriver::new(Arc::new(PosixDriver), Arc::clone(&plan));
     let store = Store::create_lazy_with_driver(

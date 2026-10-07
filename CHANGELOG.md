@@ -24,7 +24,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   reflection, schedule, session persistence, usage or task history at
   construction. The CLI, `otto serve` and `otto acp` run the same startup
   code, and their behavior is unchanged. The dependency is a git dependency
-  ([design](docs/specs/2026-10-07-otto-embedding-api.md)).
+  ([design](docs/specs/2026-10-07-otto-embedding-api.md),
+  [#392](https://github.com/baiyuqing/otto/pull/392)).
 
 - Report Otto's lifecycle to [Herdr](https://herdr.dev) when Herdr starts it in
   a pane: the pane becomes the agent `otto` as soon as Otto starts, `working`

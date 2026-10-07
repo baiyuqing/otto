@@ -209,6 +209,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Keep queued prompts across a crash or restart: `otto serve` turns sent with
+  `"queue": true` (including from the attached TUI and ACP) and local ACP
+  `/queue` prompts are saved with the session before they are accepted.
+  When the session is next opened, they run once each, in order, after the
+  interrupted turn's automatic resume, keeping their serve turn ids, with a
+  notice. A prompt that cannot be saved is refused (`503
+  input_not_persisted`); cancelling or deleting removes it for good. Images
+  in queued prompts are not saved
+  ([design](docs/specs/2026-10-07-durable-turn-queue.md)).
+
 - Let the model keep a short plan for multi-step work with the new
   `update_plan` tool: up to 20 one-line steps, each `pending`, `in_progress` or
   `completed`. The plan is saved with the session, so it survives Otto

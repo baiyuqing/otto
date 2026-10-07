@@ -4230,6 +4230,56 @@ fn an_invalid_fork_point_or_a_taken_id_writes_nothing() {
     store.close().expect("close");
 }
 
+fn fork_failing_at(
+    step: crate::fsops::PublishStep,
+) -> (TempDir, Store, PathBuf, Result<(), String>) {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    let source = PathBuf::from(store.path());
+    let plan = FaultPlan::new(vec![Rule::new(
+        step,
+        Trigger::Always,
+        Fault::Before(FaultError::Os(libc::EIO)),
+    )]);
+    let result = super::fork::fork_with(
+        &crate::storage::drivers::posix::PosixDriver,
+        &source,
+        None,
+        FORK_ID,
+        &crate::faults::publish::FaultyPublishOps::new(plan.clone()),
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string());
+    plan.assert_all_fired();
+    (temp, store, source, result)
+}
+
+#[test]
+fn a_fork_rename_failure_publishes_nothing_and_removes_the_temporary_file() {
+    let (_temp, store, source, result) = fork_failing_at(crate::fsops::PublishStep::Rename);
+    let error = result.expect_err("rename fails");
+    assert!(error.contains("publish fork file"), "{error}");
+    let names = session_files(source.parent().expect("directory"));
+    assert!(
+        !names.iter().any(|name| name.starts_with(FORK_ID)),
+        "{names:?}"
+    );
+    store.close().expect("close");
+}
+
+#[test]
+fn a_fork_directory_sync_failure_is_reported_after_the_fork_is_in_place() {
+    let (_temp, store, source, result) = fork_failing_at(crate::fsops::PublishStep::DirSync);
+    let error = result.expect_err("directory sync fails");
+    assert!(error.contains("sync session directory"), "{error}");
+    let fork_path = source.with_file_name(format!("{FORK_ID}.jsonl"));
+    let (fork, _) = Store::open(&fork_path).expect("open fork");
+    assert!(fork.forked_from().is_some());
+    fork.close().expect("close fork");
+    store.close().expect("close");
+}
+
 #[test]
 fn listing_shows_a_fork_and_ignores_a_leftover_temporary_file() {
     let temp = TempDir::new();

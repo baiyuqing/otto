@@ -157,7 +157,7 @@ Web UI 可点击 **Image** 或粘贴截图。所选模型和 OpenAI-compatible �
 - [子代理](README.md#delegate-work-to-sub-agents)
 - [本地服务：otto serve](docs/user-manual.md#agent-server)
 - [ACP agent：otto acp](docs/user-manual.md#acp-agent-server)
-- [聊天连接器 otto-connect](docs/user-manual.md#chat-connector)：`chat-connector/` 中独立的 Go 程序，运行 `otto acp` 并接入 Telegram 和飞书；可连接 `otto serve`，与 Web UI 和附加终端共享会话。
+- [聊天连接器 otto-connect](docs/user-manual.md#chat-connector)：`chat-connector/` 中独立的 Go 程序，运行 `otto acp` 并接入 Telegram 和飞书；可连接 `otto serve`，与 Web UI 和附加终端共享会话。也可用 `scripts/otto-tcp.sh` 直接走 ACP TCP：由 `otto serve --acp-listen` 充当 agent，连接器不再自行启动进程，脚本负责启动、重启、查看状态与日志。
 - [MCP 服务](docs/user-manual.md#mcp-servers)：连接 stdio 或 HTTP 的 MCP 服务，在同一轮循环中调用它们的工具
 - [定时提醒](docs/user-manual.md#remind) · [持久化 workflow](docs/user-manual.md#durable-workflows)：TOML 描述的 DAG，支持顺序/并发的 agent 与 handoff 步骤、持久化审批、重启恢复、CLI 控制和 Web UI 查看
 - [用量历史](docs/user-manual.md#observability)：Web UI 分析页展示本地 token 趋势和缓存命中率，不保存提示词或工具内容

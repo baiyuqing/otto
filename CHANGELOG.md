@@ -150,9 +150,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - Retry OpenAI-compatible requests whose connection could not be
   established, up to three times 1, 2 and 4 seconds apart within the turn
   deadline. Such a request never reached the endpoint, so it cannot run
-  twice; failures after connecting remain single-attempt
-  ([#378](https://github.com/baiyuqing/otto/pull/378),
+  twice ([#378](https://github.com/baiyuqing/otto/pull/378),
   [user manual](docs/user-manual.md#configuration)).
+- Retry an OpenAI-compatible reply whose transport failed before any output
+  arrived, such as `Connection reset by peer (os error 54)`, instead of
+  failing the turn: three retries 1, 2 and 4 seconds apart within the turn
+  deadline, each shown as `connection interrupted` on the status line. The
+  endpoint may have started the completion, so a stream that does not recover
+  is reported as interrupted with unknown effect, and a reply that was already
+  streaming is never repeated. This matches what the ChatGPT transport already
+  did ([user manual](docs/user-manual.md#tui-behavior)).
 - Keep `task_queue` follow-ups across a crash: they are saved in
   `<id>.followups.json`, run in order after the turn that automatically
   resumes their task (a step that already ran is skipped), and are otherwise

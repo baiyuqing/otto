@@ -660,6 +660,18 @@ mod tests {
             .collect()
     }
 
+    /// The drawn rows above the status line, joined.
+    ///
+    /// The status line is the one row whose content a test cannot predict: it
+    /// shows the workspace's last path component and the session id, which a
+    /// temporary-directory fixture draws at random. A two-character task id
+    /// like `t9` therefore occurs there by chance, so an "this id does not
+    /// appear" assertion may only scan the rows above it. The panel is drawn
+    /// within that range, so the assertion still catches a panel row.
+    fn above_status_line(rows: &[String]) -> String {
+        rows[..rows.len().saturating_sub(1)].join("\n")
+    }
+
     /// The model id is the longest field of the footer's fixed prefix, so the
     /// token and cache totals used to sit past the right edge of any terminal
     /// that a long id like `deepseek-v4-flash` did not leave room on, where
@@ -1089,9 +1101,15 @@ mod tests {
 
     /// With no queued or running task the panel takes no rows at all, and a
     /// finished task never appears in it.
+    ///
+    /// The workspace is pinned to a name that spells the task id: the status
+    /// line shows the workspace's last path component, and a temporary
+    /// directory's random name spells a two-character id often enough to have
+    /// failed this test's absence assertion by chance.
     #[tokio::test]
     async fn a_finished_task_leaves_no_panel_row() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.info.workspace = "/tmp/t9-workspace".to_string();
         app.tasks = vec![Task {
             id: "t9".into(),
             status: TaskStatus::Succeeded,
@@ -1105,7 +1123,10 @@ mod tests {
         // above the status line.
         let composer_border_row = &rows[(height - 2) as usize];
         assert!(composer_border_row.contains('─'), "{composer_border_row:?}");
-        assert!(!rows.join("\n").contains("t9"));
+        // The pinned workspace reaches the frame, so the assertion below has
+        // to exclude that row rather than pass for want of the id on screen.
+        assert!(rows[(height - 1) as usize].contains("t9"), "{rows:?}");
+        assert!(!above_status_line(&rows).contains("t9"), "{rows:?}");
     }
 
     /// More than 4 queued/running tasks show only the first 3 and a
@@ -1117,7 +1138,8 @@ mod tests {
             .map(|i| running_task(&format!("t{i}"), &format!("agent{i}"), "working"))
             .collect();
 
-        let screen = screen_rows(&app, 100, 30).join("\n");
+        let rows = screen_rows(&app, 100, 30);
+        let screen = above_status_line(&rows);
 
         for i in 0..3 {
             assert!(screen.contains(&format!("t{i}")), "{screen}");
@@ -1153,7 +1175,7 @@ mod tests {
         assert!(rows[4].contains("t1"), "{rows:?}");
         assert!(rows[5].contains("t2"), "{rows:?}");
         assert!(rows[6].contains("t3"), "{rows:?}");
-        assert!(!rows.join("\n").contains("t4"), "{rows:?}");
+        assert!(!above_status_line(&rows).contains("t4"), "{rows:?}");
         // The footer text is longer than this width, but it still starts
         // with the model field, confirming the status line landed on the
         // frame's last row rather than being pushed off it.

@@ -18,6 +18,8 @@ use std::time::Duration;
 use crate::memory::guard::ContentGuard;
 use crate::memory::{Error, ErrorKind, MAX_DUPLICATE_ID_RETRIES, Result, Scope, StoreIdentity};
 use crate::storage::Connection;
+use crate::storage::drivers::turso::TursoDriver;
+use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
 
 /// Driver diagnostics can contain row data; only domain error kinds escape.
 pub fn map_storage_error(error: crate::storage::Error) -> Error {
@@ -66,12 +68,26 @@ pub struct Store {
 impl Store {
     /// Opens `filename`, creating and initializing it when it does not exist.
     pub fn open(filename: &std::path::Path, options: Options) -> Result<Self> {
+        Self::open_with_driver(&TursoDriver, filename, options)
+    }
+
+    pub fn open_with_driver(
+        driver: &dyn SqlDriver,
+        filename: &std::path::Path,
+        options: Options,
+    ) -> Result<Self> {
         if let Some(parent) = filename.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent).map_err(|_| Error::new(ErrorKind::Unavailable))?;
         }
-        let connection = Connection::open(filename).map_err(map_storage_error)?;
+        let connection = Connection::open_with_driver(
+            driver,
+            filename,
+            OpenOptions::default(),
+            SqlRequirements::DURABLE,
+        )
+        .map_err(map_storage_error)?;
         Self::from_connection(connection, options)
     }
 

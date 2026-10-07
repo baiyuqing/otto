@@ -335,10 +335,22 @@ async fn run_app<B: Backend>(
     let mut feature_tick = tokio::time::interval(std::time::Duration::from_secs(2));
     feature_tick.reset();
     let mut actions = std::collections::VecDeque::new();
+    // The session whose saved turn queue was restored; a `/resume` or
+    // `/new` changes the session and restores again.
+    let mut restored_session = String::new();
     redraw(terminal, &mut app, controller)?;
     loop {
         for text in controller.take_notices() {
             app.push_system(text);
+        }
+        let session_id = controller.info().session_id;
+        if session_id != restored_session {
+            restored_session = session_id;
+            if let Err(error) =
+                run_restored_prompts(&mut app, terminal, keys, controller, cancel).await
+            {
+                propagate_turn_error(error)?;
+            }
         }
         if controller.take_bell() {
             use std::io::Write as _;
@@ -617,6 +629,41 @@ fn apply_turn_key<B: Backend>(
 /// Runs one prompt turn: build a sink over the live view, await the call, and
 /// turn a non-cancelled `Err` into [`Error::Turn`] using the same
 /// [`is_fatal_persistence`] check the line frontend uses.
+/// Runs the prompts saved in the session's turn queue before Otto stopped,
+/// in order, after the wake turn that resumes an interrupted turn. Each runs
+/// as a normal turn carrying its saved input id, and its entry is removed
+/// once it ran; the first delivers the restore notice.
+async fn run_restored_prompts<B: Backend>(
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    keys: &mut mpsc::Receiver<TuiEvent>,
+    controller: &Arc<Controller>,
+    cancel: &CancellationToken,
+) -> Result<(), ReplError> {
+    let prompts = controller.restorable_prompts();
+    if prompts.is_empty() {
+        return Ok(());
+    }
+    if controller
+        .subagent_tasks()
+        .is_some_and(|tasks| !tasks.notifications().is_empty())
+    {
+        run_wake(app, terminal, keys, controller, cancel).await?;
+    }
+    controller.announce_restored_prompts(&prompts);
+    let journal = controller.turn_queue();
+    for prompt in prompts {
+        controller.set_next_input_id(Some(prompt.input_id.clone()));
+        let result = run_turn(app, terminal, keys, controller, cancel, prompt.text, None).await;
+        controller.set_next_input_id(None);
+        if let Some(journal) = &journal {
+            journal.forget(&prompt.input_id);
+        }
+        result?;
+    }
+    Ok(())
+}
+
 async fn run_turn<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
@@ -1314,33 +1361,25 @@ mod tests {
         assert!(turn.is_cancelled());
     }
 
-    /// The idle loop starts a turn only when a notification is pending. A
-    /// registry signal with nothing pending must not start a turn; a later
-    /// pending notification must.
-    #[tokio::test]
-    async fn the_idle_loop_wakes_only_when_a_notification_is_pending() {
+    /// A provider that answers every call with `reply(call number)` and
+    /// records the role of each request's last message.
+    mod idle_provider {
         use std::sync::{Arc, Mutex};
-        use std::time::Duration;
 
-        use otto_core::agent::inbox::Notification;
         use otto_core::model::{Block, BlockType, FinishReason, Message, Role};
         use otto_core::provider::{
             Provider, ProviderError, Request as ProviderRequest, Response as ProviderResponse,
             StreamEvent, StreamSink,
         };
-        use ratatui::backend::TestBackend;
 
-        use crate::runtime::builder::Runner;
-        use crate::subagent::tasks::Tasks;
-
-        struct ScriptedProvider {
+        pub(super) struct ScriptedProvider {
             reply: Box<dyn Fn(usize) -> Result<String, String> + Send + Sync>,
             roles: Mutex<Vec<Role>>,
             calls: tokio::sync::watch::Sender<usize>,
         }
 
         impl ScriptedProvider {
-            fn new(
+            pub(super) fn new(
                 reply: impl Fn(usize) -> Result<String, String> + Send + Sync + 'static,
             ) -> Arc<Self> {
                 Arc::new(Self {
@@ -1350,15 +1389,15 @@ mod tests {
                 })
             }
 
-            fn roles(&self) -> Vec<Role> {
+            pub(super) fn roles(&self) -> Vec<Role> {
                 self.roles.lock().expect("roles").clone()
             }
 
-            fn calls(&self) -> usize {
+            pub(super) fn calls(&self) -> usize {
                 *self.calls.borrow()
             }
 
-            async fn wait_calls(&self, count: usize) {
+            pub(super) async fn wait_calls(&self, count: usize) {
                 let mut receiver = self.calls.subscribe();
                 receiver
                     .wait_for(|seen| *seen >= count)
@@ -1415,6 +1454,24 @@ mod tests {
                 )
             }
         }
+    }
+
+    /// The idle loop starts a turn only when a notification is pending. A
+    /// registry signal with nothing pending must not start a turn; a later
+    /// pending notification must.
+    #[tokio::test]
+    async fn the_idle_loop_wakes_only_when_a_notification_is_pending() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use idle_provider::ScriptedProvider;
+        use otto_core::agent::inbox::Notification;
+        use otto_core::model::Role;
+        use otto_core::provider::Provider;
+        use ratatui::backend::TestBackend;
+
+        use crate::runtime::builder::Runner;
+        use crate::subagent::tasks::Tasks;
 
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
@@ -1471,5 +1528,86 @@ mod tests {
             vec![Role::Context],
             "want exactly one wake turn, whose last request message is the notification"
         );
+    }
+
+    /// Prompts saved in the turn queue before Otto stopped run when the TUI
+    /// opens the session, in order, each once, carrying its input id.
+    #[tokio::test]
+    async fn saved_queued_prompts_run_in_order_when_the_tui_opens_the_session() {
+        use std::sync::Arc;
+
+        use idle_provider::ScriptedProvider;
+        use otto_core::provider::Provider;
+        use ratatui::backend::TestBackend;
+
+        use crate::runtime::builder::Runner;
+        use crate::subagent::tasks::Tasks;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let tasks = Arc::new(Tasks::new());
+        let provider = ScriptedProvider::new(|call| Ok(format!("answer {call}")));
+        let builder = crate::cli::testutil::builder(workspace.path(), sessions.path());
+        let runtime = crate::cli::testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("session");
+        let info = builder.runtime_info(&runtime);
+        let runner = Runner::scripted(
+            session.clone(),
+            Arc::clone(&provider) as Arc<dyn Provider + Send + Sync>,
+            Arc::clone(&tasks),
+        );
+        runner
+            .task_control()
+            .set_turn_queue_journal(Arc::new(otto_core::mailbox::InMemoryMailbox::default()));
+        let controller = Arc::new(Controller::new(builder, true, session, runner, info));
+        let journal = controller.turn_queue().expect("journal");
+        for (input_id, text) in [("in-1", "first saved"), ("in-2", "second saved")] {
+            journal
+                .save(&crate::app::turn_queue::QueuedPrompt {
+                    input_id: input_id.into(),
+                    turn_id: String::new(),
+                    text: text.into(),
+                    channel: None,
+                    origin: None,
+                    image_dropped: false,
+                })
+                .expect("save");
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let (_keys_tx, mut keys) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let driver = async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), provider.wait_calls(2))
+                .await
+                .expect("the saved prompts did not run");
+            cancel.cancel();
+        };
+        let (_, ()) = tokio::join!(
+            run_app(&mut terminal, &controller, &cancel, &mut keys),
+            driver
+        );
+
+        let history = controller.history();
+        let users: Vec<(String, String)> = history
+            .iter()
+            .filter(|message| message.role == otto_core::model::Role::User)
+            .map(|message| (message.text(), message.input_id.clone()))
+            .collect();
+        assert_eq!(
+            users,
+            [
+                ("first saved".to_string(), "in-1".to_string()),
+                ("second saved".to_string(), "in-2".to_string())
+            ]
+        );
+        assert!(
+            history.iter().any(|message| message
+                .text()
+                .contains("Otto stopped before 2 queued prompts")),
+            "the restore notice was delivered"
+        );
+        assert!(journal.pending().is_empty());
+        assert_eq!(provider.calls(), 2, "each ran once");
     }
 }

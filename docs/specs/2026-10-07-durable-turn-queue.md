@@ -1,7 +1,7 @@
 # Durable turn queue
 
-Status: proposed 2026-10-07; awaiting approval, the change to an approved
-contract below, and answers to the open questions.
+Status: approved 2026-10-07 with the contract change below and the
+recommended answers to all three open questions.
 
 This design closes the last durable-input gap that
 [durable inputs](2026-10-06-durable-inputs.md) left as a non-goal: the
@@ -194,7 +194,7 @@ match (see open question 1).
   until a client opens the session.
 - **Graceful shutdown.** It follows the answer to open question 1.
 
-## Open questions
+## Resolved questions
 
 1. **Graceful shutdown (SIGTERM).** Today queued turns end `canceled`. Keep
    them for the next start instead?

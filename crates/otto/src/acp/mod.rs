@@ -538,12 +538,15 @@ impl Connection {
                 "sessionId must be 32 lowercase hexadecimal characters",
             ));
         }
-        let history = match &self.backend {
+        let (history, plan) = match &self.backend {
             Backend::Local(local) => local.load_session(&id, &workspace).await?,
             Backend::Attach(relay) => relay.load_session(&id, &workspace).await?,
         };
         for update in update::history_updates(&history) {
             self.update(&id, update);
+        }
+        if !plan.is_empty() {
+            self.update(&id, update::plan_update(&plan));
         }
         self.start_wake_loop(&id);
         self.start_notice_watcher(&id).await;
@@ -1414,7 +1417,12 @@ impl Local {
     }
 
     /// Loads the session if this process has not, and returns its history.
-    async fn load_session(&self, id: &str, workspace: &Path) -> Result<Vec<Message>, Error> {
+    /// Opens the session and returns its history and plan for replay.
+    async fn load_session(
+        &self,
+        id: &str,
+        workspace: &Path,
+    ) -> Result<(Vec<Message>, Vec<otto_core::session::PlanStep>), Error> {
         let session = match self.session(id) {
             Some(session) => session,
             None => {
@@ -1437,7 +1445,7 @@ impl Local {
                 self.register(controller).1
             }
         };
-        Ok(session.controller.history())
+        Ok((session.controller.history(), session.controller.info().plan))
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionInfo>, Error> {

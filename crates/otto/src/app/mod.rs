@@ -114,6 +114,8 @@ pub struct Info {
     pub auto_mode: bool,
     /// Where this session was forked from, when it is a fork.
     pub forked_from: Option<ForkedFrom>,
+    /// The session plan in force; empty when there is none.
+    pub plan: Vec<otto_core::session::PlanStep>,
 }
 
 /// The session and prompt a fork was taken from.
@@ -603,6 +605,7 @@ impl Controller {
             sandbox,
             auto_mode,
             forked_from: current.session.forked_from().map(ForkedFrom::from),
+            plan: otto_core::session::Session::plan(&current.session),
         }
     }
 

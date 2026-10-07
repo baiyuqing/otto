@@ -11,6 +11,10 @@ use crate::mailbox::Mailbox;
 const MAX_MESSAGES: usize = 16;
 const MAX_BYTES: usize = 32_000;
 const MAX_HISTORY: usize = 32;
+/// Losses held for the frontend to report. A run can discard at most
+/// [`MAX_MESSAGES`] at once; the bound only protects a frontend that never
+/// asks.
+const MAX_DISCARDED: usize = MAX_MESSAGES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmitError {
@@ -51,6 +55,9 @@ struct State {
     accepting: bool,
     messages: VecDeque<Message>,
     history: VecDeque<Message>,
+    /// Guidance a run end discarded and no frontend has reported yet, so a
+    /// canceled or failed turn never drops the user's words in silence.
+    discarded: VecDeque<Message>,
     /// The `otto.turn` id of the active run; empty when it has none.
     turn: String,
     /// The interrupted turn whose journaled guidance this run restored.
@@ -60,6 +67,11 @@ struct State {
 /// Transient FIFO for messages bound to one active run. Messages remain
 /// observable for the run even after delivery, but are never persisted unless
 /// delivery reaches the agent loop.
+///
+/// Guidance a run end finds undelivered is discarded — it never reaches a
+/// later run — and the frontend reports that loss through
+/// [`Steering::take_discarded`], so an interrupted turn cannot make the user's
+/// words vanish without a word.
 ///
 /// With a journal ([`Steering::set_journal`]), accepted guidance is also kept
 /// in a durable mailbox, scoped to the run's `otto.turn` id. Every way a run
@@ -208,6 +220,14 @@ impl Steering {
             .collect()
     }
 
+    /// Removes and returns the guidance the last run end discarded, oldest
+    /// first. The frontend that owns the run reports each loss exactly once,
+    /// which is why this drains instead of reading: a discard that no one
+    /// reports is a loss the user never learns about.
+    pub fn take_discarded(&self) -> Vec<Message> {
+        self.lock().discarded.drain(..).collect()
+    }
+
     /// Withdraws exactly one undelivered message from the active run.
     pub fn withdraw(&self, id: u64) -> Option<Message> {
         let mut state = self.lock();
@@ -273,7 +293,8 @@ fn push_history(history: &mut VecDeque<Message>, message: Message) {
 }
 
 /// The active run's admission guard. Dropping it marks undelivered text as
-/// discarded rather than allowing it to wake a later run.
+/// discarded rather than allowing it to wake a later run, and hands that loss
+/// to [`Steering::take_discarded`] for the frontend to report.
 pub(super) struct Run {
     steering: Arc<Steering>,
     ticket: u64,
@@ -323,13 +344,15 @@ impl Drop for Run {
         if state.active && state.generation == self.ticket {
             let discarded: Vec<_> = state.messages.drain(..).collect();
             for message in discarded {
-                push_history(
-                    &mut state.history,
-                    Message {
-                        status: Status::Discarded,
-                        ..message
-                    },
-                );
+                let message = Message {
+                    status: Status::Discarded,
+                    ..message
+                };
+                state.discarded.push_back(message.clone());
+                if state.discarded.len() > MAX_DISCARDED {
+                    state.discarded.pop_front();
+                }
+                push_history(&mut state.history, message);
             }
             state.active = false;
             state.accepting = false;
@@ -411,6 +434,41 @@ mod tests {
                 input_id: String::new(),
             }]
         );
+    }
+
+    #[test]
+    fn a_run_end_hands_its_undelivered_guidance_to_the_frontend_once() {
+        let steering = Arc::new(Steering::default());
+        let run = steering.begin_turn("op_t1", None);
+        let ticket = steering.ticket().unwrap();
+        steering.submit_for(ticket, "delivered").unwrap();
+        assert_eq!(run.drain().len(), 1);
+        let dropped = steering.submit_for(ticket, "dropped").unwrap();
+        assert!(
+            steering.take_discarded().is_empty(),
+            "an active run has lost nothing"
+        );
+        drop(run);
+        let reported = steering.take_discarded();
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].id, dropped.id);
+        assert_eq!(reported[0].text, "dropped");
+        assert_eq!(reported[0].status, Status::Discarded);
+        assert!(
+            steering.take_discarded().is_empty(),
+            "a loss is reported exactly once"
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_message_is_never_reported_as_a_loss() {
+        let steering = Arc::new(Steering::default());
+        let run = steering.begin_turn("op_t1", None);
+        let ticket = steering.ticket().unwrap();
+        let withdrawn = steering.submit_for(ticket, "withdraw me").unwrap();
+        steering.withdraw(withdrawn.id).unwrap();
+        drop(run);
+        assert!(steering.take_discarded().is_empty());
     }
 
     #[test]

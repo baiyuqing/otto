@@ -15,8 +15,6 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
-## 0.4.4 - 2026-10-07
-
 ### Usage and compatibility
 
 - AUTO now reviews requests for additional authority against the original user
@@ -26,6 +24,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
   additional authority without prompting. Approval storage migrates to version
   4 after a backup; use MANUAL to disable smart review and restore the backup
   before running an older binary. See [unified approvals](docs/user-manual.md#unified-approvals).
+
+## 0.4.4 - 2026-10-07
+
+### Usage and compatibility
 
 - Sub-agent waiting is now runtime-owned and non-blocking. The `agent` tool
   always returns immediately, child reports and completion wake an idle parent

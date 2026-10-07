@@ -64,8 +64,27 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const AUTHORIZATION_FAILED: &str = "chatgpt authorization failed; run 'otto login'";
 /// The request did not complete, with no detail that could carry a secret.
 const REQUEST_FAILED: &str = "chatgpt request failed";
-/// `Retry` event reason for transport failures.
+/// `Retry` event reason for transport failures and a clean stream close before
+/// any terminal event. In either case the dispatched request may have run.
 const TRANSPORT_RETRY_REASON: &str = "connection interrupted";
+
+/// Classifies a Responses stream failure for the bounded transport retry.
+/// The caller still suppresses the retry after any output reached its sink.
+fn stream_retry(error: &StreamError) -> Option<Retry> {
+    let reason = match error {
+        StreamError::Reported { code, .. } => match code.as_str() {
+            "server_is_overloaded" => "server_is_overloaded",
+            "server_error" => "server_error",
+            _ => return None,
+        },
+        StreamError::MissingCompletion => TRANSPORT_RETRY_REASON,
+        _ => return None,
+    };
+    Some(Retry {
+        reason,
+        retry_after: None,
+    })
+}
 
 #[derive(Clone, Copy)]
 struct Retry {
@@ -372,19 +391,7 @@ impl Client {
                 if let Err(stop) = check_running(control) {
                     return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
                 }
-                if let StreamError::Reported { code, .. } = &error {
-                    *retry_reason = match code.as_str() {
-                        "server_is_overloaded" => Some(Retry {
-                            reason: "server_is_overloaded",
-                            retry_after: None,
-                        }),
-                        "server_error" => Some(Retry {
-                            reason: "server_error",
-                            retry_after: None,
-                        }),
-                        _ => None,
-                    };
-                }
+                *retry_reason = stream_retry(&error);
                 let certainty = if retry_reason.is_some() {
                     EffectCertainty::Unknown
                 } else {
@@ -429,10 +436,16 @@ impl Client {
                 if let Err(stop) = check_running(control) {
                     return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
                 }
+                *retry_reason = stream_retry(&error);
+                let certainty = if retry_reason.is_some() {
+                    EffectCertainty::Unknown
+                } else {
+                    EffectCertainty::Completed
+                };
                 return ProviderSettlement::failed(
                     ProviderError::Other(redactor.redact_string(&error.to_string())),
                     1,
-                    EffectCertainty::Completed,
+                    certainty,
                 );
             }
         };
@@ -1231,6 +1244,64 @@ mod tests {
         "\n",
     );
 
+    const OVERLOADED_STREAM_WITHOUT_SEPARATOR: &str = concat!(
+        "event: error\n",
+        "data: {\"type\":\"error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded.\"}",
+    );
+
+    #[tokio::test]
+    async fn an_overload_dispatched_at_clean_eof_is_retried() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let server = testserver::spawn(move |_| {
+            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                sse_response(OVERLOADED_STREAM_WITHOUT_SEPARATOR)
+            } else {
+                sse_response(CANNED_STREAM)
+            }
+        })
+        .await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let (settlement, events) = complete(&client, &model_request()).await;
+        assert!(settlement.result.is_ok());
+        assert_eq!(settlement.attempts, 2);
+        assert_eq!(retry_reasons(&events), ["server_is_overloaded"]);
+    }
+
+    #[tokio::test]
+    async fn a_clean_eof_without_output_is_retried() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let server = testserver::spawn(move |_| {
+            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                sse_response(": keepalive\n\n")
+            } else {
+                sse_response(CANNED_STREAM)
+            }
+        })
+        .await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let (settlement, events) = complete(&client, &model_request()).await;
+        assert!(settlement.result.is_ok());
+        assert_eq!(settlement.attempts, 2);
+        assert_eq!(server.count(), 2);
+        assert_eq!(retry_reasons(&events), [TRANSPORT_RETRY_REASON]);
+    }
+
+    #[tokio::test]
+    async fn a_clean_eof_after_output_is_terminal_without_retry() {
+        const PARTIAL: &str = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n",
+            "\n",
+        );
+        let server = testserver::spawn(|_| sse_response(PARTIAL)).await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let (settlement, events) = complete(&client, &model_request()).await;
+        assert!(settlement.result.is_err());
+        assert_eq!(settlement.attempts, 1);
+        assert_eq!(server.count(), 1);
+        assert!(retry_reasons(&events).is_empty());
+    }
+
     fn retry_reasons(events: &[StreamEvent]) -> Vec<&str> {
         events
             .iter()
@@ -1266,25 +1337,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_response_failed_server_error_is_retried() {
-        const FAILED: &str = concat!(
-            "event: response.failed\n",
-            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n",
-            "\n",
-        );
-        let count = std::sync::atomic::AtomicUsize::new(0);
-        let server = testserver::spawn(move |_| {
-            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                sse_response(FAILED)
-            } else {
-                sse_response(CANNED_STREAM)
-            }
-        })
-        .await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
-        let (settlement, events) = complete(&client, &model_request()).await;
-        assert!(settlement.result.is_ok());
-        assert_eq!(retry_reasons(&events), ["server_error"]);
+    async fn response_error_variants_are_retried() {
+        for failed in [
+            concat!(
+                "event: response.failed\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n",
+                "\n",
+            ),
+            concat!(
+                "event: error\n",
+                "data: {\"error\":{\"type\":\"server_error\",\"message\":\"boom\"}}\n",
+                "\n",
+            ),
+            concat!(
+                "event: error\n",
+                "data: {\"type\":\"error\",\"error\":{},\"code\":\"server_error\",\"message\":\"boom\"}\n",
+                "\n",
+            ),
+        ] {
+            let count = std::sync::atomic::AtomicUsize::new(0);
+            let server = testserver::spawn(move |_| {
+                if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    sse_response(failed)
+                } else {
+                    sse_response(CANNED_STREAM)
+                }
+            })
+            .await;
+            let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+            let (settlement, events) = complete(&client, &model_request()).await;
+            assert!(settlement.result.is_ok(), "variant: {failed}");
+            assert_eq!(
+                retry_reasons(&events),
+                ["server_error"],
+                "variant: {failed}"
+            );
+        }
     }
 
     #[tokio::test]

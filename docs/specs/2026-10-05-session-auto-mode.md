@@ -1,5 +1,10 @@
 # Session automatic approval
 
+Session modes now include YOLO, which decides every request of a session; see
+[YOLO session approval mode](2026-10-07-yolo-approval-mode.md). The mode values
+below read `manual|auto|yolo` in place of the `on|off` spellings, and the API
+answers a `mode` field beside `automatic`.
+
 Authority boundaries: [AUTO mode authority boundaries](2026-10-07-auto-mode-authority-boundaries.md)
 limits automatic decisions to a bounded authorization; the rules below about
 which request the policy may decide are superseded by that contract.

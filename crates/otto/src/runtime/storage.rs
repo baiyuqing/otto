@@ -698,6 +698,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::ApprovalMode;
     use crate::storage::{SqlCapabilities, SqlConnection, SqlDialect, WriteIsolation};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -844,9 +845,9 @@ mod tests {
             task_id: String::new(),
             run_id: String::new(),
         };
-        assert!(service.auto_mode(&scope).unwrap());
-        service.set_auto_mode(&scope, false).unwrap();
-        assert!(!service.auto_mode(&scope).unwrap());
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Auto);
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Manual);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
@@ -1045,7 +1046,7 @@ mod tests {
             task_id: String::new(),
             run_id: String::new(),
         };
-        service.set_auto_mode(&scope, false).unwrap();
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
         drop(service);
         let storage = Storage::default()
             .with_routes(route("sqlite", path.to_str().unwrap()))
@@ -1054,7 +1055,7 @@ mod tests {
             storage.approvals(Path::new("ignored-default")).unwrap(),
         )
         .unwrap();
-        assert!(!service.auto_mode(&scope).unwrap());
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Manual);
         drop(service);
         std::fs::remove_file(&path).unwrap();
         assert!(storage.approvals(Path::new("ignored-default")).is_err());

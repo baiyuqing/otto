@@ -55,6 +55,7 @@ use crate::tool::remind::Reminders;
 pub use channel::Channel;
 
 pub use approval::{ApprovalDecision, ApprovalRequest, Step, Stop};
+use otto_core::approval::ApprovalMode;
 pub use sandbox::SandboxControl;
 pub use tasks::{Task, TaskStatus, TaskView};
 pub use wake::WakeOperation;
@@ -112,7 +113,8 @@ pub struct Info {
     pub context_input_tokens_present: bool,
     pub context_input_tokens_pending: bool,
     pub sandbox: SandboxInfo,
-    pub auto_mode: bool,
+    /// The session's approval policy: MANUAL, AUTO or YOLO.
+    pub approval_mode: ApprovalMode,
     /// Where this session was forked from, when it is a fork.
     pub forked_from: Option<ForkedFrom>,
     /// The session plan in force; empty when there is none.
@@ -160,12 +162,15 @@ pub struct ResumeResult {
     pub warnings: Vec<String>,
 }
 
-pub fn parse_auto_mode(args: &str) -> Result<Option<bool>, String> {
+pub fn parse_auto_mode(args: &str) -> Result<Option<ApprovalMode>, String> {
     match args.trim() {
         "" => Ok(None),
-        "on" => Ok(Some(true)),
-        "off" => Ok(Some(false)),
-        _ => Err("usage: /auto [on|off]".into()),
+        "on" => Ok(Some(ApprovalMode::Auto)),
+        "off" => Ok(Some(ApprovalMode::Manual)),
+        "manual" => Ok(Some(ApprovalMode::Manual)),
+        "auto" => Ok(Some(ApprovalMode::Auto)),
+        "yolo" => Ok(Some(ApprovalMode::Yolo)),
+        _ => Err("usage: /auto [manual|auto|yolo]".into()),
     }
 }
 
@@ -622,16 +627,16 @@ impl Controller {
         };
         let header = current.session.header();
         let snapshot = current.session.snapshot();
-        let auto_mode = self
+        let approval_mode = self
             .builder
             .approvals
-            .auto_mode(&crate::approval::Scope {
+            .mode(&crate::approval::Scope {
                 workspace: header.workspace.clone(),
                 session_id: header.id.clone(),
                 task_id: String::new(),
                 run_id: String::new(),
             })
-            .unwrap_or(false);
+            .unwrap_or_default();
         Info {
             session_id: header.id,
             session_name: current.session.name(),
@@ -648,7 +653,7 @@ impl Controller {
             context_input_tokens_present: snapshot.context_input_tokens_present,
             context_input_tokens_pending: snapshot.context_input_tokens_pending,
             sandbox,
-            auto_mode,
+            approval_mode,
             forked_from: current.session.forked_from().map(ForkedFrom::from),
             plan: otto_core::session::Session::plan(&current.session),
         }
@@ -939,21 +944,20 @@ impl Controller {
         warnings
     }
 
+    /// Reads the session's approval mode, or sets it when `args` selects one:
+    /// `manual`, `auto`, `yolo`, and the older `on` (AUTO) and `off` (MANUAL).
     pub fn auto_mode_command(&self, args: &str) -> Result<String, String> {
-        let automatic = parse_auto_mode(args)?;
-        if let Some(automatic) = automatic {
+        let selected = parse_auto_mode(args)?;
+        if let Some(mode) = selected {
             self.approval_service()
-                .set_auto_mode(&self.approval_scope(), automatic)
+                .set_mode(&self.approval_scope(), mode)
                 .map_err(|e| e.to_string())?;
         }
-        let automatic = self
+        let mode = self
             .approval_service()
-            .auto_mode(&self.approval_scope())
+            .mode(&self.approval_scope())
             .map_err(|e| e.to_string())?;
-        Ok(format!(
-            "Approval mode: {}",
-            if automatic { "AUTO" } else { "MANUAL" }
-        ))
+        Ok(format!("Approval mode: {}", mode.as_str().to_uppercase()))
     }
 
     pub fn approval_service(&self) -> &Arc<crate::approval::Service> {
@@ -2651,20 +2655,31 @@ mod tests {
             .await
             .unwrap();
         let first = controller.info();
-        assert!(first.auto_mode);
+        assert_eq!(first.approval_mode, ApprovalMode::Auto);
         assert_eq!(
             controller.auto_mode_command("off").unwrap(),
             "Approval mode: MANUAL"
         );
-        assert!(!controller.info().auto_mode);
+        assert_eq!(controller.info().approval_mode, ApprovalMode::Manual);
+        // The mode name is the command's own value, and YOLO is one of them.
+        assert_eq!(
+            controller.auto_mode_command("yolo").unwrap(),
+            "Approval mode: YOLO"
+        );
+        assert_eq!(controller.info().approval_mode, ApprovalMode::Yolo);
+        assert_eq!(
+            controller.auto_mode_command("").unwrap(),
+            "Approval mode: YOLO"
+        );
         assert!(controller.auto_mode_command("invalid").is_err());
+        controller.auto_mode_command("off").unwrap();
         controller.new_session().await.unwrap();
-        assert!(controller.info().auto_mode);
+        assert_eq!(controller.info().approval_mode, ApprovalMode::Auto);
         controller
             .resume_session(&first.session_path)
             .await
             .unwrap();
-        assert!(!controller.info().auto_mode);
+        assert_eq!(controller.info().approval_mode, ApprovalMode::Manual);
     }
 
     #[tokio::test]

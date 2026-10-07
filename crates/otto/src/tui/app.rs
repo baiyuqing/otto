@@ -1307,14 +1307,18 @@ impl App {
                             }
                         ));
                     }
-                    if request.state == crate::approval::State::Pending && self.info.auto_mode {
+                    // A request the session mode decides is reported and then
+                    // decided by the policy; one it does not decide opens the
+                    // interactive card.
+                    let decided = self.info.approval_mode.decides(request);
+                    if request.state == crate::approval::State::Pending && decided {
                         self.push_system(format!(
                             "[approval] requested: {} ({})\n{}\nReason: {}",
                             request.title, request.id, request.subject.details, request.reason
                         ));
                     }
                     if request.state == crate::approval::State::Pending
-                        && !self.info.auto_mode
+                        && !decided
                         && !self.hidden_approvals.contains(&request.id)
                         && !self
                             .surfaces

@@ -537,13 +537,19 @@ func (b *Bridge) sessionLock(id string) *sync.Mutex {
 
 // Update implements agent.Handler. It only takes a mutex.
 func (b *Bridge) Update(sid string, u acp.SessionUpdate) {
-	text, markdown := "", false
-	ok := false
-	if text, ok = agent.ReflectionNotice(u); !ok {
-		text, ok = agent.WakeReply(u)
-		markdown = ok
+	if text, origin, ok := agent.ReflectionNotice(u); ok {
+		if origin == "" {
+			return
+		}
+		b.mu.Lock()
+		c := b.chats[strings.TrimPrefix(origin, "chat:")]
+		b.mu.Unlock()
+		if c != nil && c.presentationOrigin() == origin && b.opts.Store.Session(c.key) == sid {
+			c.sendBackground(sid, text, false)
+		}
+		return
 	}
-	if ok {
+	if text, ok := agent.WakeReply(u); ok {
 		b.mu.Lock()
 		chats := make([]*chat, 0, len(b.chats))
 		for _, c := range b.chats {
@@ -552,7 +558,7 @@ func (b *Bridge) Update(sid string, u acp.SessionUpdate) {
 		b.mu.Unlock()
 		for _, c := range chats {
 			if b.opts.Store.Session(c.key) == sid {
-				c.sendBackground(sid, text, markdown)
+				c.sendBackground(sid, text, true)
 			}
 		}
 		return

@@ -124,6 +124,10 @@ pub struct Request {
     #[serde(default)]
     pub authority: Authority,
     pub scope: Scope,
+    /// Trusted passive-delivery origin, such as `chat:telegram:<id>`.
+    /// Empty means discoverable through approval lists but not broadcast.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub presentation_origin: String,
     pub subject: Subject,
     pub title: String,
     pub reason: String,
@@ -254,6 +258,7 @@ mod tests {
                 task_id: String::new(),
                 run_id: String::new(),
             },
+            presentation_origin: String::new(),
             subject: Subject {
                 tool_call_id: String::new(),
                 source: "test".into(),
@@ -319,6 +324,20 @@ mod tests {
             );
         }
         assert_eq!(ApprovalMode::parse("automatic"), None);
+    }
+
+    #[test]
+    fn presentation_origin_is_optional_and_round_trips_when_present() {
+        let request = request(Authority::Consent, Kind::Confirmation, false);
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(!encoded.contains("presentation_origin"));
+        assert_eq!(serde_json::from_str::<Request>(&encoded).unwrap(), request);
+
+        let mut routed = request;
+        routed.presentation_origin = "chat:telegram:42".into();
+        let encoded = serde_json::to_string(&routed).unwrap();
+        assert!(encoded.contains("\"presentation_origin\":\"chat:telegram:42\""));
+        assert_eq!(serde_json::from_str::<Request>(&encoded).unwrap(), routed);
     }
 
     #[test]

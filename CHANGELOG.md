@@ -15,6 +15,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Fixes
+
+- ChatGPT Responses streams now recognize transient overload/server errors
+  across top-level, nested and SSE-event envelope variants, and retry a clean
+  pre-output close with the existing bounded backoff. The REPL displays each
+  planned retry, exhausted retries end the turn with an actionable error, and
+  malformed streams cannot grow an individual SSE line or event without
+  bound.
+
 ### Usage and compatibility
 
 - Automatic skill contract checks are now a regular `[skills]` feature and
@@ -84,6 +93,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
   bytes. In recorded sessions, 229 of 2825 `edit` calls failed with one of
   these two errors.
 
+- Rust hosts can replace Otto's memory service through `MemoryExtension`,
+  without implementing Otto's storage schema. The service-neutral core contract
+  and host client enforce declared capabilities, scopes, reviewed preparations,
+  explicit learning grants and honest operation receipts. The existing native
+  recall/review path remains the default; external record-management views and
+  a Mem0 transport are not included. See the
+  [contract](docs/specs/2026-10-07-open-memory-contract.md)
+  ([#419](https://github.com/baiyuqing/otto/pull/419)).
+
 - Stop a sub-agent task from the model side with the new `agent_cancel` tool:
   it takes a task id or name and cancels that task, the same registry call
   `/task cancel`, `POST /v1/sessions/{id}/tasks/{task_id}/cancel` and ACP
@@ -115,6 +133,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
   replaced text and can restore the break instead of leaving broken code.
 
 ### Fixes
+
+- Approval review in the TUI now opens as a centered modal over the active
+  conversation instead of replacing the whole screen. It has no feedback
+  field, selects **Approve** by default, closes immediately after either
+  successful decision, and presents concurrent requests one at a time in
+  creation order instead of stacking them. Telegram and Feishu approval cards
+  plus passive memory/reflection notices now follow the exact originating chat;
+  workspace-visible or originless reviews remain explicitly discoverable but
+  are no longer broadcast to every chat bound to the session or workspace. See
+  [unified approvals](docs/user-manual.md#unified-approvals)
+  ([#421](https://github.com/baiyuqing/otto/pull/421)).
 
 - Compaction works again for sessions with `thinking` set on a model that
   returns reasoning, such as ChatGPT. The summary request inherits `thinking`,
@@ -191,6 +220,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- `make check-fast` runs its existing change selector directly, without a
+  cross-worktree `lockf`/`flock` wrapper. Independent worktrees can start checks
+  concurrently; the selected checks are unchanged. See
+  [local verification](docs/development.md#local-verification)
+  ([#419](https://github.com/baiyuqing/otto/pull/419)).
+
 - Add test-only fault injection. The `fault-injection` Cargo feature exposes
   `otto::faults` to integration tests and no shipped build enables it;
   `tests/faults_boundary.rs` fails if production code names it. `faults::http`
@@ -235,6 +270,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
   went red from #407 until each scripted call was given a distinct argument;
   the call count and the reflection assertion are unchanged
   ([#411](https://github.com/baiyuqing/otto/pull/411)).
+
+### Documentation
+
+- Archive the open Memory contract research in English, preserving source
+  versions, short excerpts, verified facts and unknown guarantees. See the
+  [research records](docs/specs/2026-10-07-open-memory-research/README.md)
+  ([#419](https://github.com/baiyuqing/otto/pull/419)).
 
 ## 0.4.1 - 2026-10-07
 

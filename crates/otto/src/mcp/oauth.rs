@@ -774,7 +774,9 @@ async fn exchange_code(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::testserver::{self, json_response, status_response, unauthorized_response};
+    use crate::faults::http::{
+        self as testserver, json_response, status_response, unauthorized_response,
+    };
     use serde_json::json;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -782,7 +784,7 @@ mod tests {
     /// URL (needed because the URLs served, e.g. `resource_metadata`, embed
     /// the server's own address, which is not known until after `spawn`
     /// returns).
-    async fn spawn_self_aware<F>(respond: F) -> (testserver::TestServer, String)
+    async fn spawn_self_aware<F>(respond: F) -> (testserver::Server, String)
     where
         F: Fn(&str, &testserver::Request) -> String + Send + Sync + 'static,
     {

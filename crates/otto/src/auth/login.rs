@@ -228,7 +228,7 @@ async fn write_browser_message(
 mod tests {
     use super::*;
     use crate::auth::claims::fake_id_token;
-    use crate::auth::testserver::{self, json_response, redirect_response};
+    use crate::faults::http::{self as testserver, json_response, redirect_response};
     use serde_json::json;
 
     /// Drives the callback the way a browser would, from the authorize URL the

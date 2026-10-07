@@ -198,6 +198,7 @@ impl Tool for ScheduleTool {
         Ok(Some(ApprovalSpec {
             version: crate::approval::digest(arguments.get()),
             source: "schedule".into(),
+            authority: crate::approval::Authority::Durable,
             title,
             reason: "At the due time this prompt runs the agent with its tools, including file edits and sandboxed commands, without the user present. Approval requests during that run are denied.".into(),
             details,

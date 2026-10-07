@@ -11,6 +11,9 @@ workspace = true
 [features]
 default = ["storage-conformance"]
 storage-conformance = []
+# Test-only fault injection (`otto::faults`). Off in every shipped build; the
+# integration tests turn it on through the self dev-dependency below.
+fault-injection = []
 
 [dependencies]
 otto-core.workspace = true
@@ -68,6 +71,9 @@ agent-client-protocol-schema = { version = "=1.10.2", default-features = false }
 tower.workspace = true
 
 [dev-dependencies]
+# Gives the integration tests `otto::faults` without compiling it into a
+# default build.
+otto = { path = ".", features = ["fault-injection"] }
 # `pty` for the TUI's PTY smoke test (crates/otto/tests/tui_pty.rs).
 nix = { workspace = true, features = ["term"] }
 # `start_paused` drives the bash timeout deterministically without real waits.

@@ -9,6 +9,21 @@ pub enum Kind {
     Confirmation,
 }
 
+/// The session policy that decides which requests reach the user. Selected
+/// only by an admitted user action; never by a model argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    /// Every request waits for the user.
+    Manual,
+    /// Only a [`Authority::Bounded`] authorization is decided automatically.
+    #[default]
+    Auto,
+    /// Every request of the session is decided automatically, including the
+    /// consents, boundary crossings and durable grants AUTO refuses.
+    Yolo,
+}
+
 /// The authority a request reaches for, declared by its native producer.
 /// Only a [`Authority::Bounded`] authorization may be decided by the session
 /// AUTO policy; a plan review, a sandbox or workspace boundary crossing and a
@@ -122,6 +137,52 @@ pub struct Request {
     pub application_error: String,
 }
 
+impl ApprovalMode {
+    /// The stable wire, storage and frontend name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+            Self::Yolo => "yolo",
+        }
+    }
+
+    /// Parses [`ApprovalMode::as_str`]; `None` for any other value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "manual" => Some(Self::Manual),
+            "auto" => Some(Self::Auto),
+            "yolo" => Some(Self::Yolo),
+            _ => None,
+        }
+    }
+
+    /// Whether the policy decides anything without the user.
+    pub fn is_automatic(&self) -> bool {
+        !matches!(self, Self::Manual)
+    }
+
+    /// The frontend label of this mode.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Manual => "MANUAL",
+            Self::Auto => "AUTO",
+            Self::Yolo => "YOLO",
+        }
+    }
+
+    /// Whether this policy decides `request` without the user. The single
+    /// policy predicate: the service and every backend's committing
+    /// transaction ask it, so no other component may decide automatically.
+    pub fn decides(&self, request: &Request) -> bool {
+        match self {
+            Self::Manual => false,
+            Self::Auto => request.auto_decidable(),
+            Self::Yolo => true,
+        }
+    }
+}
+
 impl Request {
     /// Whether the session AUTO policy may decide this request without the
     /// user. The conjunction is deliberate: a wrong producer declaration must
@@ -228,6 +289,36 @@ mod tests {
         ] {
             assert!(!request(authority, Kind::Authorization, false).auto_decidable());
         }
+    }
+
+    #[test]
+    fn the_session_mode_decides_exactly_its_own_class() {
+        let bounded = request(Authority::Bounded, Kind::Authorization, false);
+        let review = request(Authority::Consent, Kind::Confirmation, false);
+        let escalation = request(Authority::Boundary, Kind::Authorization, false);
+        let grant = request(Authority::Durable, Kind::Authorization, true);
+        let legacy = request(Authority::Unclassified, Kind::Authorization, false);
+        assert!(!ApprovalMode::Manual.decides(&bounded));
+        assert!(!ApprovalMode::Manual.decides(&review));
+        assert!(ApprovalMode::Auto.decides(&bounded));
+        for request in [&review, &escalation, &grant, &legacy] {
+            assert!(!ApprovalMode::Auto.decides(request));
+            assert!(ApprovalMode::Yolo.decides(request));
+        }
+        assert!(ApprovalMode::Yolo.decides(&bounded));
+        assert_eq!(
+            serde_json::to_string(&ApprovalMode::Yolo).unwrap(),
+            "\"yolo\""
+        );
+        assert_eq!(ApprovalMode::default(), ApprovalMode::Auto);
+        for mode in [ApprovalMode::Manual, ApprovalMode::Auto, ApprovalMode::Yolo] {
+            assert_eq!(ApprovalMode::parse(mode.as_str()), Some(mode));
+            assert_eq!(
+                serde_json::to_string(&mode).unwrap(),
+                format!("\"{}\"", mode.as_str())
+            );
+        }
+        assert_eq!(ApprovalMode::parse("automatic"), None);
     }
 
     #[test]

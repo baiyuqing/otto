@@ -50,7 +50,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   binary. Options written after the script name come last and win over the file,
   a missing `otto.env` still starts with Otto's own configuration, and
   `OTTO_ENV_FILE` and `OTTO_BIN` select another settings file or binary
-  ([user manual](docs/user-manual.md#launcher-script)).
+  ([user manual](docs/user-manual.md#launcher-script),
+  [#389](https://github.com/baiyuqing/otto/pull/389)).
 
 ### User experience
 

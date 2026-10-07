@@ -1,6 +1,10 @@
 //! Process death at a named operation, for [`super::Fault::Exit`] and its
 //! variants.
 
+use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
 /// The exit status of a process ended by an injected [`super::Fault::Exit`].
 pub const CRASH_EXIT: i32 = 86;
 
@@ -14,10 +18,6 @@ pub fn exit() -> ! {
         libc::_exit(CRASH_EXIT)
     }
 }
-
-use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
 
 /// Environment variable that marks a re-executed test binary as the child and
 /// names the directory shared with the parent.

@@ -14,6 +14,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod deadline;
+pub mod delivery;
 pub mod embed;
 pub mod failover;
 pub(crate) mod fsops;

@@ -22,7 +22,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories and logical migration ports | `runtime/storage.rs` composition and route registry |
 | `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
-| `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check` | `Makefile`, `.github/workflows/checks.yml` |
+| `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check`, and `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options | `Makefile`, `.github/workflows/checks.yml` |
 
 The root Cargo workspace contains `otto-core` and `otto` only.
 `chat-connector/` has its own build definition and is not a root workspace crate.
@@ -86,7 +86,8 @@ resolved configuration (`builder.rs` holds `Builder` and `Runner`,
 `wiring.rs` connects memory, MCP and sub-agents, `prompt.rs` builds the system
 prompt). `runtime/startup.rs` holds the startup composition, from environment
 capture to the memory service, as phase functions; `cli::run`, `otto serve`
-(`load_workspace`, `admit_workspace`) and `embed` all call it. `src/app/`
+(`load_workspace`) and `embed` all call it. `runtime/workspace_admission.rs`
+admits a workspace path for `otto serve`, delivery and `embed`. `src/app/`
 exposes the shared application lifecycle used by frontends. `src/embed.rs` is
 the public in-process API (`otto::embed::Otto`) that builds the `otto acp`
 runtime for another Rust program; see the
@@ -193,6 +194,7 @@ guards these dependency directions.
 | Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `acp/mod.rs` wake loop | [Design](specs/2026-10-04-acp-wake-replies.md), the `wake-replies` HTTP route, `client/`, `chat-connector/internal/bridge` |
 | Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | [Design](specs/2026-10-04-scheduled-deliveries.md), turn origin in `app/approval.rs`, the worker spawn in `cli/run.rs` and `cli/serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `chat-connector/internal/bridge`, external otto-plus |
 | Persistent memories, sessions, workflow runs, or token aggregates | The matching native state module | Its store and lifecycle tests |
+| Cross-workspace delivery tasks (target admission, approval, worktree setup, handoff) | `crates/otto/src/delivery.rs`, then `cli/serve.rs` (`DeliveryManager`, `DeliveryBroker`, `DeliveryToolFactory`) | [Design](specs/2026-10-06-cross-workspace-delivery-design.md), [user manual](user-manual.md#cross-workspace-deliveries), `runtime/workspace_admission.rs`, `ParentToolSlot` in `runtime/builder.rs`, the receipt/task ledger tests |
 
 ## Dependency and documentation rules
 

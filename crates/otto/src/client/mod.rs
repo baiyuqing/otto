@@ -10,7 +10,10 @@
 //!   [`Error::Http`] when serve answered with a non-2xx status. The latter
 //!   keeps the status and the `code` and `message` of serve's
 //!   `{"error":{"code","message"}}` body (empty when the body has another
-//!   shape).
+//!   shape). The former carries the failure and its causes, so a missing
+//!   socket reads as `... (http://otto/healthz): client error (Connect): No
+//!   such file or directory (os error 2)` instead of a bare `reqwest`
+//!   request error.
 //! - [`Client::start_turn`] returns once the response headers arrive, which
 //!   serve sends before a queued turn starts. [`TurnStream::next`] then
 //!   yields the turn's frames in order and `Ok(None)` when serve closes the
@@ -85,8 +88,29 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-fn unreachable_error(error: impl fmt::Display) -> Error {
+/// [`Error::Unreachable`] for a failure. `reqwest`'s `Display` names only the
+/// request, so an absent socket or a refused connection is named only by the
+/// chain, and `otto acp --attach` has to print it to explain the failure.
+fn unreachable_error(error: impl std::error::Error + 'static) -> Error {
+    Error::Unreachable(error_chain(&error))
+}
+
+/// [`unreachable_error`] for a literal or already-formatted message.
+fn unreachable_text(error: impl fmt::Display) -> Error {
     Error::Unreachable(error.to_string())
+}
+
+/// Joins an error with its causes, so a transport failure names the reason
+/// instead of hiding it behind `reqwest`'s generic "error sending request".
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 /// A row of `GET /v1/sessions`; absent fields are empty.
@@ -464,7 +488,7 @@ impl Client {
             .get(TURN_ID_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
-            .ok_or_else(|| unreachable_error("response has no Otto-Turn-Id header"))?;
+            .ok_or_else(|| unreachable_text("response has no Otto-Turn-Id header"))?;
         Ok(TurnStream::new(turn_id, response))
     }
 
@@ -505,6 +529,47 @@ impl Client {
             .await?;
         let wire: SessionWire = decode(response).await?;
         Ok(wire.into_info())
+    }
+
+    /// `POST /v1/sessions/{id}/profile`: run the session on another configured
+    /// profile and return the session's new info. The configuration file and
+    /// every other session are unchanged.
+    pub async fn switch_profile(
+        &self,
+        session_id: &str,
+        profile: &str,
+    ) -> Result<crate::app::Info, Error> {
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/profile"),
+                &json!({ "profile": profile }),
+            ))
+            .await?;
+        let wire: SessionWire = decode(response).await?;
+        Ok(wire.into_info())
+    }
+
+    /// `GET /v1/config/profiles`: the configured profile names, sorted.
+    pub async fn profiles(&self) -> Result<Vec<String>, Error> {
+        #[derive(Deserialize)]
+        struct Row {
+            name: String,
+        }
+        #[derive(Deserialize)]
+        struct Reply {
+            profiles: Vec<Row>,
+        }
+        let response = self
+            .send(self.http.get(format!("{BASE}/v1/config/profiles")))
+            .await?;
+        let mut names: Vec<String> = decode::<Reply>(response)
+            .await?
+            .profiles
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        names.sort();
+        Ok(names)
     }
 
     /// `GET /v1/sessions/{id}/fork-points`, oldest first, as (entry id,
@@ -588,7 +653,7 @@ impl Client {
         }
         serde_json::from_slice(&body)
             .map(Some)
-            .map_err(|error| unreachable_error(format!("decode response: {error}")))
+            .map_err(|error| unreachable_text(format!("decode response: {error}")))
     }
 
     /// `POST /v1/sessions/{id}/reflect`. The request id binds a later cancel
@@ -611,7 +676,7 @@ impl Client {
         }
         serde_json::from_slice(&body)
             .map(Some)
-            .map_err(|error| unreachable_error(format!("decode response: {error}")))
+            .map_err(|error| unreachable_text(format!("decode response: {error}")))
     }
 
     /// Cancels only the reflection with this request id. A missing or stale
@@ -949,7 +1014,7 @@ impl Client {
 async fn decode<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Result<T, Error> {
     let body = response.bytes().await.map_err(unreachable_error)?;
     serde_json::from_slice(&body)
-        .map_err(|error| unreachable_error(format!("decode response: {error}")))
+        .map_err(|error| unreachable_text(format!("decode response: {error}")))
 }
 
 /// The `GET /v1/sessions/{id}` body, the fields [`crate::app::Info`] reads.
@@ -1066,7 +1131,7 @@ impl SseBody {
             };
             match self.response.chunk().await.map_err(unreachable_error)? {
                 Some(chunk) => {
-                    for frame in parser.feed(&chunk).map_err(unreachable_error)? {
+                    for frame in parser.feed(&chunk).map_err(unreachable_text)? {
                         self.ready.push_back(frame.data);
                     }
                 }
@@ -1085,7 +1150,7 @@ impl SseBody {
 }
 
 fn decode_frame<T: for<'de> Deserialize<'de>>(data: &str) -> Result<T, Error> {
-    serde_json::from_str(data).map_err(|error| unreachable_error(format!("decode frame: {error}")))
+    serde_json::from_str(data).map_err(|error| unreachable_text(format!("decode frame: {error}")))
 }
 
 /// The SSE body of one turn.
@@ -1220,12 +1285,64 @@ mod tests {
         (line, body)
     }
 
+    /// An error that names only itself, as `reqwest::Error` does.
+    #[derive(Debug)]
+    struct Bare(&'static str);
+
+    impl fmt::Display for Bare {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Bare {}
+
+    /// [`Bare`] with the OS reason as its only cause.
+    #[derive(Debug)]
+    struct Wrapped(Bare, Bare);
+
+    impl fmt::Display for Wrapped {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.0.fmt(f)
+        }
+    }
+
+    impl std::error::Error for Wrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.1)
+        }
+    }
+
+    #[test]
+    fn unreachable_errors_name_the_cause_a_display_leaves_out() {
+        let error = unreachable_error(Wrapped(
+            Bare("error sending request for url (http://otto/healthz)"),
+            Bare("No such file or directory (os error 2)"),
+        ));
+        assert_eq!(
+            error.to_string(),
+            "error sending request for url (http://otto/healthz): No such file or directory (os error 2)"
+        );
+    }
+
+    /// Context that is already formatted has no chain to add and keeps its
+    /// shape.
+    #[test]
+    fn unreachable_text_keeps_a_message_verbatim() {
+        let error = unreachable_text(format!("decode frame: {}", Bare("truncated")));
+        assert_eq!(error.to_string(), "decode frame: truncated");
+    }
+
     #[tokio::test]
     async fn a_missing_socket_is_unreachable_not_an_http_error() {
         let dir = tempfile::tempdir().expect("dir");
         let client = Client::new(&dir.path().join("absent.sock")).expect("client");
         let error = client.healthz().await.expect_err("no server");
         assert!(matches!(error, Error::Unreachable(_)), "{error}");
+        // `otto acp --attach` and the attached TUI print this text to explain
+        // an absent `otto serve`, so the OS reason has to reach it.
+        let text = error.to_string();
+        assert!(text.contains("No such file or directory"), "{text}");
     }
 
     #[test]

@@ -447,6 +447,10 @@ pub(crate) fn resolve_sandbox_settings(
 pub(crate) struct WorkspaceSandbox {
     pub(crate) control: Arc<SandboxSwitch>,
     pub(crate) approval_executor: Option<Arc<Executor>>,
+    /// The exact resolved environment paired with `approval_executor`. A
+    /// constrained delivery setup must use this snapshot, never borrow the
+    /// target's ordinary sandbox environment.
+    pub(crate) approval_environment: Option<Vec<String>>,
     pub(crate) reloader: Option<Arc<SandboxReloader>>,
 }
 
@@ -485,6 +489,7 @@ pub(crate) async fn compose_workspace_sandbox(
         return WorkspaceSandbox {
             control: SandboxSwitch::new(runtime),
             approval_executor: None,
+            approval_environment: None,
             reloader: None,
         };
     }
@@ -518,6 +523,7 @@ pub(crate) async fn compose_workspace_sandbox(
         builder.sandbox_secrets_complete && redactions_complete && merged_complete;
 
     let mut approval_executor: Option<Arc<Executor>> = None;
+    let mut approval_environment: Option<Vec<String>> = None;
     if sandbox_info.mode == crate::runtime::info::SandboxMode::Seatbelt {
         let elevated_environment = resolve_environment(&EnvironmentOptions {
             host_entries: builder.host_entries.clone(),
@@ -554,6 +560,7 @@ pub(crate) async fn compose_workspace_sandbox(
                 merge_redactions(&builder.sandbox_secrets, snapshot.redaction_values());
             builder.sandbox_secrets = merged;
             builder.sandbox_secrets_complete &= complete;
+            approval_environment = Some(entries.to_vec());
             approval_executor = Some(executor);
         }
     }
@@ -583,6 +590,7 @@ pub(crate) async fn compose_workspace_sandbox(
     WorkspaceSandbox {
         control,
         approval_executor,
+        approval_environment,
         reloader,
     }
 }
@@ -608,7 +616,7 @@ pub(crate) async fn load_workspace(
     disabled: &Disabled,
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),
-) -> Result<(Builder, Option<Arc<SandboxReloader>>), String> {
+) -> Result<(Builder, WorkspaceSandbox), String> {
     let mut scoped = (*shared).clone();
     if shared.config.user_values.is_some() {
         let loaded = crate::config::layered::for_workspace(
@@ -675,81 +683,7 @@ pub(crate) async fn load_workspace(
     builder.workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
 
-    Ok((builder, composed.reloader))
-}
-
-// ---- workspace admission ----
-
-/// Why a requested workspace path was rejected.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Admission {
-    /// The path does not resolve to an existing directory.
-    Invalid,
-    /// A real directory, but neither the startup workspace nor a descendant
-    /// of any `workspace_roots` entry.
-    NotAdmitted,
-}
-
-/// Canonicalizes `requested` and admits it when it is `startup` or a
-/// descendant of one entry in `roots` (a root itself is admitted).
-/// `canonical_directory` resolves symlinks before the comparison, so a link
-/// inside a root that points outside it is rejected as `NotAdmitted`, and a
-/// missing path or a file is rejected as `Invalid`. The comparison is by path
-/// component (`Path::starts_with`), so `/root-x` is not a descendant of
-/// `/root`. `requested` must already be absolute: it arrives over HTTP, so
-/// resolving a relative path against the server process's working directory
-/// would let a client name a directory it never typed.
-pub(crate) fn admit_workspace(
-    requested: &str,
-    startup: &Path,
-    roots: &[PathBuf],
-    trusted: &[PathBuf],
-) -> Result<PathBuf, Admission> {
-    if !Path::new(requested).is_absolute() {
-        return Err(Admission::Invalid);
-    }
-    let canonical = canonical_directory(Path::new(requested)).map_err(|_| Admission::Invalid)?;
-    if canonical == startup
-        || roots.iter().any(|root| canonical.starts_with(root))
-        || trusted.iter().any(|dir| canonical.starts_with(dir))
-    {
-        Ok(canonical)
-    } else {
-        Err(Admission::NotAdmitted)
-    }
-}
-
-/// Canonicalizes `[server].workspace_roots` once at startup. A root that does
-/// not resolve to an existing directory is a startup error naming the config
-/// key and the offending path, not a per-request admission failure.
-pub(crate) fn canonicalize_workspace_roots(raw_roots: &[String]) -> Result<Vec<PathBuf>, String> {
-    raw_roots
-        .iter()
-        .map(|root| {
-            canonical_directory(Path::new(root))
-                .map_err(|error| format!("[server] workspace_roots: \"{root}\": {error}"))
-        })
-        .collect()
-}
-
-/// Canonical directories trusted via `otto trust`, read fresh from
-/// `config_path` on every call. Unlike [`canonicalize_workspace_roots`], any
-/// failure — the file is missing or unparsable, or a `[projects]` entry has
-/// an invalid `trust_level` — resolves to no trusted directories rather than
-/// an error: trust only widens admission, so a config problem here must not
-/// break the startup workspace or configured roots. A trusted path that no
-/// longer resolves to a directory is likewise dropped rather than reported.
-pub(crate) fn trusted_projects(config_path: &Path) -> Vec<PathBuf> {
-    let Ok(text) = std::fs::read_to_string(config_path) else {
-        return Vec::new();
-    };
-    let Ok(file) = otto_core::config::parse(&text) else {
-        return Vec::new();
-    };
-    file.projects
-        .keys()
-        .filter_map(|path| canonical_directory(Path::new(path)).ok())
-        .collect()
+    Ok((builder, composed))
 }
 
 // ---- components ----
@@ -1119,6 +1053,7 @@ pub(crate) fn compose(
         memory: Default::default(),
         reflector,
         logger: options.logger,
+        parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
     });
     let builder = Builder::for_workspace(
         shared,

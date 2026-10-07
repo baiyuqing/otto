@@ -26,6 +26,7 @@ what the CLI actually does today.
     [Unified approvals](#unified-approvals)
 12. [Headless mode](#headless-mode)
 13. [Agent server](#agent-server)
+    [Cross-workspace deliveries](#cross-workspace-deliveries)
 14. [ACP agent server](#acp-agent-server)
 15. [Chat connector](#chat-connector)
 16. [Durable workflows](#durable-workflows)
@@ -247,6 +248,49 @@ OTTO_API_KEY=your-key otto \
   --model deepseek-chat \
   --no-session
 ```
+
+### Launcher script
+
+In a source checkout, `scripts/otto.sh` starts Otto in the foreground with the
+settings from `otto.env`, so the command line lives in one file instead of your
+shell history. Copy the template and edit it:
+
+```bash
+cp otto.env.example otto.env
+make run                 # same as scripts/otto.sh
+```
+
+`otto.env` is read as a shell file and ignored by Git, as are variants such as
+`otto.env.local`, so quoting, `#` comments and `export` work. It is trusted
+local configuration, like a shell profile; put the real key there only in your
+own copy, never in the committed example. A checkout without `otto.env` still
+starts: the script says so on stderr and Otto falls back to its own
+configuration and the environment. An empty setting says nothing and behaves
+the same way.
+
+| Setting | Otto option |
+| --- | --- |
+| `OTTO_PROVIDER`, `OTTO_MODEL`, `OTTO_PROFILE` | `--provider`, `--model`, `--profile` |
+| `OTTO_BASE_URL` | `--base-url` |
+| `OTTO_CWD` | `--cwd` |
+| `OTTO_UI` | `--ui` |
+| `OTTO_SANDBOX` | `--sandbox` |
+| `OTTO_THINKING` | `--thinking` |
+| `OTTO_SHELL_TIMEOUT`, `OTTO_MAX_OUTPUT_BYTES` | `--shell-timeout`, `--max-output-bytes` |
+| `OTTO_API_KEY` | Environment only; there is no key option |
+| `OTTO_EXTRA_ARGS` | Appended verbatim, split on whitespace |
+
+Options written after the script name are appended last and win over the file,
+which is how a one-off run overrides it:
+
+```bash
+scripts/otto.sh --model other-model --prompt "summarize the diff"
+```
+
+`OTTO_ENV_FILE` selects another settings file and `OTTO_BIN` another binary;
+both default to the checkout. The launcher is for the foreground frontends; the
+`otto serve` agent server is started directly, as described under
+[agent server](#agent-server).
 
 ## ChatGPT subscription
 
@@ -2208,6 +2252,41 @@ for every workspace.
   `warning: cannot save workspace list: <error>`. `DELETE /v1/workspaces`
   removes an entry.
 
+### Cross-workspace deliveries
+
+A session can hand work to a **different** admitted repository instead of
+editing its own. The entry point is the parent-only `start_delivery_task`
+tool; ordinary sub-agents never receive it.
+
+- Arguments: `target` (absolute path of an admitted primary Git checkout),
+  `objective` (the goal for the isolated target task), optional `branch`
+  (a new branch; defaults to `agent/<objective slug>`) and optional
+  `source_refs` (bounded references already selected from this conversation,
+  never filesystem paths).
+- The source workspace stays read-only. Only a bounded, hashed handoff packet
+  of the selected context reaches the target; the delivery runner never
+  receives a source root or handle.
+- The call asks you to authorize exactly one target together with its primary
+  checkout, Git directory, HEAD/base, the new branch, the target worktree path
+  and the handoff digest. Nothing is created before that decision, and any
+  change to those facts requires a fresh authorization. The target must
+  already be an admitted workspace (`otto trust` or a configured
+  `workspace_roots` entry); an approval never persists trust.
+- After approval Otto creates `TARGET/.otto/delivery-worktrees/<delivery-id>`
+  and runs the task there as its own session and runner. A completion notice is
+  appended to this conversation, and the result is readable with
+  `GET /v1/sessions/{source_session}/deliveries/{approval_id}`, which returns
+  only `approval_id`, `state` (`running`, `succeeded`, `failed`, `canceled`,
+  `unknown`), `result` and `error`.
+- A failure or a cancellation keeps the worktree for inspection. Recovery never
+  repeats the worktree creation or the target turn: an interrupted delivery is
+  reported as `unknown`, and retrying is an explicit new decision.
+- GitHub credentials, network access, protected Git metadata writes, `push`
+  and pull-request creation keep their own approval and permission boundaries;
+  a delivery does not inherit them. Delivery is available in `otto serve`
+  sessions (HTTP, ACP and the attached TUI); the local CLI frontends have no
+  target registry and do not offer the tool.
+
 ### Turn queue
 
 `POST /v1/sessions/{id}/turns` with `"queue": true` starts the turn at once
@@ -2407,6 +2486,7 @@ are served at the root. Request and error bodies are JSON.
 | `DELETE /v1/sessions/{id}/tasks/steer/{message_id}` | Withdraws exactly one still-`queued` steer. Delivered guidance is append-only session history and cannot be removed; a non-queued or unknown item returns `409 task_steer_withdraw_failed`. |
 | `POST /v1/sessions/{id}/tasks/control` | Interpret `{"text":"...","channel":"telegram"}` (`channel` optional, `telegram` or `feishu`) using the restricted control dialogue. Returns null if no active dialogue applies, otherwise `{"text","queued"}`. `queued:true` means the caller must submit the original message as a queued turn; this route does not itself admit a follow-up. `409 task_control_failed` reports routing failure. |
 | `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
+| `POST /v1/sessions/{id}/profile` | With `{"profile":"<name>"}`, rebuild the session on another configured profile and return the session; it makes no model request and never writes the configuration file, so other sessions and the next start keep their profile. `400` for a missing, empty or unknown profile; `409 turn_active` while a turn runs, or `409 profile_switch_unavailable` when the session withholds dynamic content or policy forbids a dynamic profile. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
@@ -2708,18 +2788,19 @@ them.
 
 After `session/new` and `session/load` has replied, Otto sends a
 `session/update` of type `available_commands_update` listing `compact`,
-`context`, `reflect`, `skill`, `steer`, `queue`, and `auto`.
-A `session/prompt` containing `/context`, `/compact [focus]`,
+`context`, `model`, `reflect`, `skill`, `steer`, `queue`, and `auto`.
+A `session/prompt` containing `/context`, `/compact [focus]`, `/model`,
+`/model <profile>`,
 `/reflect [focus]`, `/reflect list`, `/reflect show <id>`, `/skill generated`, or
 `/skill revert <name>` is run by
 Otto itself and is not sent to the task model. Command names must match
-whole words; `/compactx` or a sentence that contains `/context` is a normal
+whole words; `/compactx`, `/models` or a sentence that contains `/context` is a normal
 prompt. `otto acp --attach` does the same, running the command on
 `otto serve` through its existing HTTP APIs. Each command answers with one
 `agent_message_chunk` and the stop reason `end_turn`; `session/cancel` during
 `/compact` or `/reflect` answers `cancelled`. Attached reflection cancellation
 uses an exact request ID and cannot cancel a later operation. Existing
-context/compaction/reflection/skill commands are rejected while the session runs
+context/compaction/reflection/skill/model commands are rejected while the session runs
 a prompt. `/steer <guidance>` bypasses the occupied prompt slot and accepts
 guidance for that run. `/queue <prompt>` acknowledges acceptance immediately,
 then streams the independent answer as later session updates; local ACP keeps
@@ -2753,6 +2834,15 @@ through the chat connector.
   summary, memory, messages). It never includes the text of any part. When
   the session withholds dynamic content, the reply is "The context report is
   not available in this session."
+- `/model` replies with the session's profile, provider, model and effort,
+  then `Configured profiles: <names>` and `Switch with /model <profile>.`
+- `/model <profile>` rebuilds this session's runner on another configured
+  profile and replies `Switched to profile <name> (provider <provider>, model
+  <model>).` It makes no model request and never writes the configuration
+  file, so other sessions and the next start keep their profile; an unknown
+  profile answers with an error instead of a model turn. This is the same
+  session-level switch as the TUI's `/model`, which additionally saves the
+  default profile.
 
 During a prompt Otto sends assistant text as `agent_message_chunk`,
 reasoning as `agent_thought_chunk`, and each tool call as a `tool_call`
@@ -2863,7 +2953,7 @@ See [Chat connector](#chat-connector).
 - `session/resume`, `session/close`, `session/delete`, session modes and
   config options, and client-supplied MCP servers.
 - Image, audio, and embedded-resource prompt content.
-- Slash commands other than `/compact`, `/context`, `/reflect`, `/steer`, `/queue`, and the
+- Slash commands other than `/compact`, `/context`, `/model`, `/reflect`, `/steer`, `/queue`, and the
   supported `/skill` operations, such as `/approve` or
   `/sandbox`: text from the client reaches the model as a user message.
 
@@ -3138,7 +3228,9 @@ a log line.
 A message whose whole text is one of these commands (for `/use`, the
 command and its argument) is handled by `otto-connect` and not sent to Otto,
 except `/compact`, `/context`, `/reflect`, and `/skill`, which are sent to
-Otto as typed for agent-side command handling.
+Otto as typed for agent-side command handling, and `/model <profile>`, which the
+connector forwards to Otto as a prompt. Bare `/model` is answered by the
+connector itself.
 Any other text, including other words starting with `/`, is a prompt.
 
 | Command | Effect |
@@ -3149,6 +3241,8 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/queue <prompt>` | Queues an independent prompt without model routing. Starts immediately when idle, otherwise waits behind the task and any approval; acknowledges actual admission. |
 | `/compact [focus]` | Sent to Otto as a prompt; `otto acp` runs it as `/compact` (see [`/compact` and `/context` are slash commands](#compact-and-context-are-slash-commands)) and replies with the token counts before and after. Like any prompt it waits in the chat's queue behind a running turn. |
 | `/context` | Sent to Otto as a prompt; `otto acp` replies with the token counts of the next request, part by part. It waits in the chat's queue like any prompt. |
+| `/model` | Answered by `otto-connect`: it posts the profiles from the local `~/.config/otto/config.toml`, one line each with provider and model, plus one button per profile. Choosing a button switches the conversation exactly as `/model <profile>` does. On a platform without buttons the same list is posted as text. It makes no model request. The list covers the user configuration only (a workspace's `.otto/config.toml` is not read), and it marks the configured default profile, not the session's current one. |
+| `/model <profile>` | Sent to Otto as a prompt; `otto acp` rebuilds this session on the named profile, replies "Switched to profile …", and leaves the configuration file and every other session unchanged. It works whether the connector runs `otto acp` or `otto acp --attach`, uses no model request, and is therefore the way to move off a profile whose quota is exhausted. An unknown profile answers with an error. |
 | `/reflect [focus]` | Runs the existing reflection over the uncovered part of this session and reports the result and the retrospective. Memory proposals require `/memory` review; generated skills pass the existing evidence and safety checks. `/reflect list` and `/reflect show <id>` show past runs. |
 | `/skill generated` | Lists skills written by reflection. Generated skills become active in new sessions. |
 | `/skill revert <name>` | Restores the previous version or removes a skill created by reflection. Refuses a skill edited by hand. |
@@ -3161,7 +3255,7 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/memory reject <id>` | Rejects one pending candidate; no record is written. |
 
 At startup `otto-connect` sets the Telegram bot's command menu to these
-commands, including `/compact`, `/context`, `/reflect`, `/skill`, `/steer`, and `/queue`, and to `/models` and `/config` (see
+commands, including `/compact`, `/context`, `/model`, `/reflect`, `/skill`, `/steer`, and `/queue`, and to `/models` and `/config` (see
 [Provider-profile management](#provider-profile-management)): `setMyCommands`
 for the default scope, then `deleteMyCommands` for the `all_private_chats` and
 `all_group_chats` scopes, whose lists Telegram would show instead. Lists set
@@ -3209,6 +3303,13 @@ default marker. `/config show` also shows the endpoint and API-key environment
 **variable name**, never its value. `/models` asks an OpenAI-compatible
 endpoint for its model IDs; ChatGPT profiles report that model enumeration is
 not supported rather than guessing an ID.
+
+These commands require the attached deployment. A connector that starts
+`otto acp` directly has no management client and answers
+"This command requires otto acp --attach connected to a running otto serve.
+Use /model <profile> to switch this conversation's profile."; `/model` is the
+session-level switch, which needs no configuration write and works in both
+deployments.
 
 Every mutation first returns a redacted preview and a one-time confirmation
 token. Send `/config confirm <token>` from the same chat and sender within ten

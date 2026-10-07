@@ -90,6 +90,16 @@ candidates and `/memory review <id> accept|reject` decides one through
 `Service::review` (human authority, like `/memory forget`). The TUI dispatches `/memory` and `/remember` to the same
 functions the REPL uses (`crates/otto/src/cli/repl_commands.rs`).
 
+The [open Memory service contract](specs/2026-10-07-open-memory-contract.md)
+defines the implemented Rust port in `otto-core::memory` and the native
+`memory::client::Client` admission boundary. `BuiltinAdapter` projects the
+existing service without changing its native recall/review behavior.
+`embed::MemoryExtension` and `cli::run::run_with_extensions` inject another
+service through the shared startup phase. External ReviewedChanges model tools
+are read-only; trusted Rust hosts use prepared snapshots for inspection/review.
+Delegated mutations require an explicit scope/input grant. Native-record
+management must never silently fall back to a local store for that service.
+
 Keep `crates/otto`'s `skill` module free of imports from other Otto modules
 besides `otto-core`. The skill tool's file reads stay confined to the skill
 directory. `/skills` and `/skill` are wired in both frontends and documented
@@ -618,17 +628,15 @@ binaries are distributed, the MIT, BSD and Apache-2.0 terms require one.
 Locally, run the focused tests for the change and then `make check-fast`. Do
 not run `make check` or `make check-linux`; CI runs both on every PR. A full
 gate compiles the workspace in test mode and again in check mode for clippy,
-checks core WASM compatibility and runs the Go race tests. Every
-worktree has its own `target/`, so two worktrees running a full gate at the
-same time each compile the whole dependency tree on every core.
+checks core WASM compatibility and runs the Go race tests.
 
-`make check-fast` first takes the lock file `otto-check-fast.lock` in the
-common git directory (`lockf` on macOS, `flock` on Linux). All worktrees of the
-checkout share that directory, so `check-fast` runs in one worktree at a time;
-a second invocation waits until the first exits, and the lock is released when
-the process exits, including on a crash. Then `scripts/check-changed.mjs`
-lists the paths changed since `git merge-base HEAD origin/main`, including
-uncommitted and untracked files, and runs only the commands those paths need:
+`make check-fast` directly runs `scripts/check-changed.mjs`. Independent
+worktrees can run it at the same time. Worktrees have separate `target/`
+caches; if commands share a target directory, Cargo may serialize builds.
+`check-fast` adds no cross-worktree coordination or performance guarantee.
+The selector lists paths changed since `git merge-base HEAD origin/main`,
+including uncommitted and untracked files, and runs only the commands those
+paths need:
 
 | Changed path | Commands |
 |---|---|

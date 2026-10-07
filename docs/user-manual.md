@@ -1559,7 +1559,9 @@ lease in `<session-id>.lease/` beside the session file.
 - The model continues an interrupted task with the `agent` tool's `resume`
   argument (the task id or name) and a `prompt`. The task keeps its recorded
   agent definition, model, and context; `resume` on a task that is not
-  interrupted is an error. A task that is not continued stays interrupted.
+  interrupted is an error. Empty `agent`, `model`, `name`, and `description`
+  values and `context: "fresh"` count as omitted; any other value for those
+  arguments is an error. A task that is not continued stays interrupted.
   Effects of calls without results are not undone.
 - `SIGTERM` to a process that holds a lease (the REPL, the TUI, `--prompt`, or
   `otto serve`) moves the session to the next host that opens it. Otto

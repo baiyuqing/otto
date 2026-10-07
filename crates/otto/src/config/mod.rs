@@ -1091,7 +1091,8 @@ mod tests {
                 let path = dir.join("config.toml");
                 assert_eq!(
                     fs::read_to_string(&path).expect("the config is still at the target"),
-                    "default_profile = \"old\"\n"
+                    "default_profile = \"old\"\n",
+                    "the target changed before the rename"
                 );
                 // A later write replaces the file whether or not the crash
                 // left a temporary file beside it.

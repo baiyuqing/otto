@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn tool_names_are_screened() {
-        assert!(safe_prompt_tool_name("agent_wait"));
+        assert!(safe_prompt_tool_name("agent_status"));
         assert!(safe_prompt_tool_name("alpha-2"));
         assert!(!safe_prompt_tool_name(""));
         assert!(!safe_prompt_tool_name("a b"));

@@ -1430,7 +1430,11 @@ paths:
     parameters:
       - $ref: "#/components/parameters/sessionID"
     get:
-      summary: Get an open session
+      summary: Get a session
+      description: >-
+        Returns the session, re-opening it first when the server closed it for
+        being idle. A session closed by DELETE, or one that never existed,
+        answers 404.
       responses:
         "200":
           description: OK
@@ -1439,13 +1443,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/Session"
         "404":
-          description: Session not open
+          description: Session not found, or already closed by DELETE
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
     patch:
-      summary: Rename an open session
+      summary: Rename a session
       requestBody:
         required: true
         content:
@@ -1483,6 +1487,10 @@ paths:
                 $ref: "#/components/schemas/Error"
     delete:
       summary: Cancel any active turn and close the session
+      description: >-
+        Closes the session for good: no later request re-opens it, unlike a
+        session the server closed for being idle. Use POST /v1/sessions with
+        `{"resume":"<id>"}` to open it again.
       responses:
         "204":
           description: Closed

@@ -30,6 +30,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [user manual](docs/user-manual.md#stopping-a-turn-that-makes-no-progress)
   ([#407](https://github.com/baiyuqing/otto/pull/407)).
 
+- Session **AUTO** approval now decides only a *bounded authorization*: an
+  operation that stays inside the sandbox and the workspace and grants nothing
+  durable. A plan review (`request_approval`), an unsandboxed command, a
+  cross-workspace delivery task, an external MCP tool call, a persistent
+  sandbox read grant and a scheduled `prompt` item now always wait for the
+  user in either mode instead of being approved automatically in AUTO. A
+  request AUTO cannot decide is presented exactly as in MANUAL, and its
+  recorded `pending` event is unchanged. See the
+  [authority boundary contract](docs/specs/2026-10-07-auto-mode-authority-boundaries.md)
+  and the [user manual](docs/user-manual.md#unified-approvals)
+  ([#401](https://github.com/baiyuqing/otto/pull/401)).
+
 ### Features
 
 - Stop a sub-agent task from the model side with the new `agent_cancel` tool:
@@ -49,20 +61,32 @@ limitations are documented in the [user manual](docs/user-manual.md).
   and remains the case `agent_status` plus `agent_cancel` exists for
   ([#407](https://github.com/baiyuqing/otto/pull/407)).
 
-- Session **AUTO** approval now decides only a *bounded authorization*: an
-  operation that stays inside the sandbox and the workspace and grants nothing
-  durable. A plan review (`request_approval`), an unsandboxed command, a
-  cross-workspace delivery task, an external MCP tool call, a persistent
-  sandbox read grant and a scheduled `prompt` item now always wait for the
-  user in either mode instead of being approved automatically in AUTO. A
-  request AUTO cannot decide is presented exactly as in MANUAL, and its
-  recorded `pending` event is unchanged. See the
-  [authority boundary contract](docs/specs/2026-10-07-auto-mode-authority-boundaries.md)
-  and the [user manual](docs/user-manual.md#unified-approvals)
-  ([#401](https://github.com/baiyuqing/otto/pull/401)).
+- Steer the active turn from the TUI and take the guidance back. `/steer
+  <guidance>` delivers guidance at the next safe boundary as an explicit
+  command that never starts a turn, and `/inputs` lists what the active run has
+  accepted with its message id and status (`queued`, `delivered`, `withdrawn`,
+  `discarded`), so a still-queued item can be withdrawn with `/inputs withdraw
+  <id>` or `Ctrl+U` for the newest one. Both work locally and with `--attach`,
+  and mirror the existing HTTP `GET`/`DELETE /v1/sessions/{id}/tasks/steer`
+  routes ([user manual](docs/user-manual.md#tui-behavior),
+  [#404](https://github.com/baiyuqing/otto/pull/404)).
 
 ### Fixes
 
+- Stop dropping the input typed during a turn without saying so. Ordinary text
+  submitted while a turn runs is guidance for that turn, but the TUI never
+  recorded it: `Ctrl+U` did nothing, the transcript never showed `Queued for
+  current turn: …`, and the composer and transcript branches that advertised
+  those clues were unreachable (`queued_input_sent` was set only by tests).
+  Cancelling with `Esc`, a provider failure, or the turn deadline then
+  destroyed the guidance silently, because a run end discards the guidance it
+  never delivered. The TUI now shows the queued guidance while it waits,
+  withdraws it with `Ctrl+U`, and every frontend reports a turn that ended
+  without delivering it: once, as a visible `agent_steering` context message
+  and a notification that quotes the message, with the text put back in the
+  composer when it was empty. The unreachable queued-input withdrawal wiring
+  this replaces (`queue_user_message`/`withdraw_user_message` from the TUI) is
+  gone ([#404](https://github.com/baiyuqing/otto/pull/404)).
 - The session AUTO policy no longer approves a request raised by the model on
   its own behalf: a plan or approach review is a human judgement, and letting
   the asking session answer it made the requesting model the approving party
@@ -97,7 +121,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [development guide](docs/development.md#fault-injection)). `faults::sql`
   wraps the SQL driver that every Turso repository now opens through, and
   `tests/fault_storage.rs` runs commit, rollback, open and read faults against
-  each repository ([#403](https://github.com/baiyuqing/otto/pull/403)).
+  each repository ([#403](https://github.com/baiyuqing/otto/pull/403)). `faults::files`
+  wraps the session store's file driver, and `tests/fault_session.rs` runs
+  write, sync and lock faults against session journals
+  ([#406](https://github.com/baiyuqing/otto/pull/406)).
 
 ## 0.4.1 - 2026-10-07
 

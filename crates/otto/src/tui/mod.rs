@@ -430,17 +430,7 @@ async fn run_app<B: Backend>(
                     let result =
                         run_turn(&mut app, terminal, keys, controller, cancel, line, image).await;
                     if let Err(error) = result {
-                        app.defer_queued_input(&backend);
                         propagate_turn_error(error)?;
-                    } else if app.queued_input_sent {
-                        if let Err(error) =
-                            run_wake(&mut app, terminal, keys, controller, cancel).await
-                        {
-                            propagate_turn_error(error)?;
-                        }
-                        if app.queued_input_sent {
-                            app.defer_queued_input(&backend);
-                        }
                     }
                     if let Some(action) = app.submit_queued_input(&backend, cancel) {
                         actions.push_back(action);

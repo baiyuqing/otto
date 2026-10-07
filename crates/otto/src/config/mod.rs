@@ -20,6 +20,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::fsops::{self, PosixPublish, Publish, PublishMode, PublishOps, PublishStep};
 use chrono::Utc;
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, fcntl};
@@ -133,6 +134,15 @@ pub(crate) fn write_bytes(
     replacing: &[u8],
     updated: &[u8],
 ) -> Result<(), &'static str> {
+    write_bytes_with(path, replacing, updated, &PosixPublish)
+}
+
+fn write_bytes_with(
+    path: &Path,
+    replacing: &[u8],
+    updated: &[u8],
+    publish: &dyn PublishOps,
+) -> Result<(), &'static str> {
     let _process_lock = CONFIG_WRITE_LOCK
         .lock()
         .map_err(|_| "cannot lock configuration")?;
@@ -162,25 +172,26 @@ pub(crate) fn write_bytes(
     }
     let suffix = crate::runtime::builder::random_id()
         .map_err(|_| "cannot create temporary configuration")?;
-    let temp = directory.join(format!(".otto-config-{suffix}"));
-    let write = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|_| "cannot create temporary configuration")
-        .and_then(|mut file| {
-            file.write_all(updated)
-                .and_then(|()| file.sync_all())
-                .map_err(|_| "cannot write configuration")
-        });
-    let result = write
-        .and_then(|()| fs::rename(&temp, path).map_err(|_| "cannot replace configuration"))
-        .and_then(|()| sync_directory(directory));
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+    let temp = format!(".otto-config-{suffix}");
+    let (parent, name) =
+        fsops::open_parent(path).map_err(|_| "cannot create temporary configuration")?;
+    fsops::publish_file(
+        &parent,
+        &Publish {
+            name,
+            temp: &temp,
+            permissions: 0o600,
+            mode: PublishMode::Replace,
+        },
+        updated,
+        publish,
+    )
+    .map_err(|error| match error.step {
+        PublishStep::CreateTemp => "cannot create temporary configuration",
+        PublishStep::Write | PublishStep::FileSync => "cannot write configuration",
+        PublishStep::Rename => "cannot replace configuration",
+        PublishStep::DirSync => "cannot sync configuration directory",
+    })
 }
 
 struct ConfigLock {
@@ -925,6 +936,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::faults::publish::FaultyPublishOps;
+    use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
 
     fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
         let path = dir.join(name);
@@ -1004,6 +1017,61 @@ mod tests {
         assert!(error.to_string().contains("changed on disk"), "{error}");
         assert_eq!(fs::read_to_string(&path).expect("read"), concurrent);
         assert!(backups(dir.path()).is_empty());
+    }
+
+    fn write_failing_at(
+        step: PublishStep,
+    ) -> (tempfile::TempDir, PathBuf, Result<(), &'static str>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write(dir.path(), "config.toml", "default_profile = \"old\"\n");
+        let plan = FaultPlan::new(vec![Rule::new(
+            step,
+            Trigger::Always,
+            Fault::Before(FaultError::Os(libc::EIO)),
+        )]);
+        let result = write_bytes_with(
+            &path,
+            b"default_profile = \"old\"\n",
+            &profile_file("new"),
+            &FaultyPublishOps::new(plan.clone()),
+        );
+        plan.assert_all_fired();
+        (dir, path, result)
+    }
+
+    fn temporary_files(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").file_name().into_string().unwrap())
+            .filter(|name| name.starts_with(".otto-config-"))
+            .collect()
+    }
+
+    #[test]
+    fn a_failure_before_the_rename_keeps_the_config_and_leaves_no_temporary_file() {
+        for (step, message) in [
+            (PublishStep::FileSync, "cannot write configuration"),
+            (PublishStep::Rename, "cannot replace configuration"),
+        ] {
+            let (dir, path, result) = write_failing_at(step);
+            assert_eq!(result.expect_err("injected failure"), message, "{step:?}");
+            assert_eq!(
+                fs::read_to_string(&path).expect("read"),
+                "default_profile = \"old\"\n",
+                "{step:?}"
+            );
+            assert!(temporary_files(dir.path()).is_empty(), "{step:?}");
+        }
+    }
+
+    #[test]
+    fn a_directory_sync_failure_is_reported_after_the_new_config_is_in_place() {
+        let (_dir, path, result) = write_failing_at(PublishStep::DirSync);
+        assert_eq!(
+            result.expect_err("injected failure"),
+            "cannot sync configuration directory"
+        );
+        assert_eq!(fs::read(&path).expect("read"), profile_file("new"));
     }
 
     #[test]

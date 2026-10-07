@@ -15,6 +15,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Fixes
+
+- ChatGPT Responses streams now recognize transient overload/server errors
+  across top-level, nested and SSE-event envelope variants, and retry a clean
+  pre-output close with the existing bounded backoff. The REPL displays each
+  planned retry, exhausted retries end the turn with an actionable error, and
+  malformed streams cannot grow an individual SSE line or event without
+  bound.
+
 ### Usage and compatibility
 
 - Automatic skill contract checks are now a regular `[skills]` feature and

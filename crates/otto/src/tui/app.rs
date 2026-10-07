@@ -1378,6 +1378,7 @@ mod tests {
             id: id.into(),
             revision: 1,
             kind: crate::approval::Kind::Confirmation,
+            authority: crate::approval::Authority::Consent,
             scope: crate::approval::Scope {
                 workspace: "/work".into(),
                 session_id: "session".into(),

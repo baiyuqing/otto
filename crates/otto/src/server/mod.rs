@@ -9663,14 +9663,38 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         let ctrl = &harness.server.lookup(&two).unwrap().ctrl;
+        // A bounded authorization is still decided by AUTO without a dialog.
         let request = ctrl
             .approval_service()
             .create(crate::approval::Proposal {
+                kind: crate::approval::Kind::Authorization,
+                authority: crate::approval::Authority::Bounded,
+                scope: ctrl.approval_scope(),
+                subject: crate::approval::Subject {
+                    source: "plugin".into(),
+                    id: "api-test".into(),
+                    version: "1".into(),
+                    details: "Run a plugin command".into(),
+                    tool_call_id: String::new(),
+                },
+                title: "Run a plugin command".into(),
+                reason: "Inside the current sandbox".into(),
+                blocking: true,
+                persistent: false,
+                expires_at: None,
+            })
+            .unwrap();
+        assert_eq!(request.state, crate::approval::State::Approved);
+        // A plan review is a human judgement, so AUTO leaves it pending.
+        let review = ctrl
+            .approval_service()
+            .create(crate::approval::Proposal {
                 kind: crate::approval::Kind::Confirmation,
+                authority: crate::approval::Authority::Consent,
                 scope: ctrl.approval_scope(),
                 subject: crate::approval::Subject {
                     source: "conversation".into(),
-                    id: "api-test".into(),
+                    id: "api-test-plan".into(),
                     version: "1".into(),
                     details: "Test plan".into(),
                     tool_call_id: String::new(),
@@ -9682,7 +9706,7 @@ mod tests {
                 expires_at: None,
             })
             .unwrap();
-        assert_eq!(request.state, crate::approval::State::Approved);
+        assert_eq!(review.state, crate::approval::State::Pending);
         let events = harness
             .send(
                 "GET",
@@ -9691,9 +9715,12 @@ mod tests {
             )
             .await
             .json();
-        assert_eq!(events.as_array().unwrap().len(), 2);
+        let events = events.as_array().unwrap();
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0]["request"]["state"], "pending");
         assert_eq!(events[1]["request"]["decision"]["transport"], "auto-mode");
+        assert_eq!(events[2]["request"]["state"], "pending");
+        assert!(events[2]["request"]["decision"].is_null());
         let other = harness
             .send(
                 "GET",

@@ -1065,6 +1065,44 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_before_the_config_rename_keeps_the_previous_config_at_the_target() {
+        use crate::faults::crash::{self, CRASH_EXIT, Role};
+        crash::run(crash::name_of(&|| {}), |role| match role {
+            Role::Child(dir) => {
+                let path = write(dir, "config.toml", "default_profile = \"old\"\n");
+                let plan = FaultPlan::new(vec![Rule::new(
+                    PublishStep::Rename,
+                    Trigger::Always,
+                    Fault::Exit,
+                )]);
+                let _ = write_bytes_with(
+                    &path,
+                    b"default_profile = \"old\"\n",
+                    &profile_file("new"),
+                    &FaultyPublishOps::new(plan),
+                );
+            }
+            Role::Parent(dir, status) => {
+                assert_eq!(
+                    status.code(),
+                    Some(CRASH_EXIT),
+                    "child did not crash at the fault"
+                );
+                let path = dir.join("config.toml");
+                assert_eq!(
+                    fs::read_to_string(&path).expect("the config is still at the target"),
+                    "default_profile = \"old\"\n"
+                );
+                // A later write replaces the file whether or not the crash
+                // left a temporary file beside it.
+                write_bytes(&path, b"default_profile = \"old\"\n", &profile_file("new"))
+                    .expect("write after the crash");
+                assert_eq!(fs::read(&path).expect("read"), profile_file("new"));
+            }
+        });
+    }
+
+    #[test]
     fn a_directory_sync_failure_is_reported_after_the_new_config_is_in_place() {
         let (_dir, path, result) = write_failing_at(PublishStep::DirSync);
         assert_eq!(

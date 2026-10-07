@@ -5,7 +5,9 @@
 //! is performed through directory descriptors with `O_NOFOLLOW` and
 //! re-validated against the inode identities recorded at creation, so a
 //! concurrent rename or symlink swap can never redirect a write or a removal
-//! outside the tree this process built.
+//! outside the tree this process built. Removal restores the owner's access
+//! through those descriptors first, so a tree the child left read-only — a Go
+//! module cache entry, an installed plugin package — is still removed.
 //!
 //! Ownership: [`State`] owns the parent and root directory descriptors and
 //! closes them in [`State::close`]. Concurrency: [`State::write_profile`] and
@@ -1260,12 +1262,32 @@ fn cleanup_state_root_with_expectations(
     }
 }
 
+/// Restores the owner's read, write and search bits on a directory whose
+/// contents are about to be removed.
+///
+/// An entry can only be removed through a parent the owner may write and
+/// search, and the child can leave directories it created read-only: the Go
+/// module cache, otto's own plugin store and `install -m` all do. The
+/// descriptor is the one the caller already matched against the identities
+/// recorded at creation, so the change cannot reach an entry this process did
+/// not build, and the directory is removed by the same cleanup.
+fn restore_owner_access(directory_fd: BorrowedFd<'_>) -> Result<(), Error> {
+    let stat = nix::sys::stat::fstat(directory_fd).map_err(|_| Error::Cleanup)?;
+    let mode = u32::from(stat.st_mode) & 0o777;
+    if mode & 0o700 == 0o700 {
+        return Ok(());
+    }
+    nix::sys::stat::fchmod(directory_fd, Mode::from_bits_truncate((mode | 0o700) as _))
+        .map_err(|_| Error::Cleanup)
+}
+
 /// Removes everything inside the directory `directory_fd` holds open.
 fn remove_state_directory_contents(
     directory_fd: BorrowedFd<'_>,
     expected_children: &HashMap<String, CleanupExpectation>,
     strict: bool,
 ) -> Result<(), Error> {
+    restore_owner_access(directory_fd)?;
     let read_fd = nix::fcntl::openat(
         directory_fd,
         ".",
@@ -1755,6 +1777,32 @@ mod tests {
         assert_eq!(std::fs::read(&outside).expect("read outside"), b"fixture");
 
         state.close().expect("close state");
+    }
+
+    /// The child may leave directories it made read-only: the Go module cache
+    /// and the plugin store both do, and an entry can only be removed through a
+    /// parent the owner may write and search. Cleanup restores the owner's
+    /// access through the descriptor it already validated and removes the tree.
+    #[test]
+    fn close_removes_a_tree_the_child_made_read_only() {
+        let (_base, base) = temp_base();
+        let workspace = make_directory(&profile::join(&base, "workspace"), 0o700);
+        let cache = make_directory(&profile::join(&base, "user-cache"), 0o700);
+        let state = create(&workspace, &cache).expect("create state");
+
+        let module = profile::join(&text(&state.directories.cache), "go-mod/example@v1.0.0");
+        let package = profile::join(&module, "example");
+        std::fs::create_dir_all(&package).expect("create module");
+        std::fs::write(profile::join(&module, "go.mod"), b"module example").expect("write go.mod");
+        std::fs::write(profile::join(&package, "example.go"), b"package example")
+            .expect("write package");
+        chmod(&profile::join(&module, "go.mod"), 0o444);
+        chmod(&profile::join(&package, "example.go"), 0o444);
+        chmod(&package, 0o555);
+        chmod(&module, 0o555);
+
+        state.close().expect("close state");
+        assert_no_leaves(&cache);
     }
 
     #[test]

@@ -43,6 +43,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Quitting Otto no longer fails with `otto: close sandbox: sandbox runtime
+  close failed` and exit code 1 after a session whose sandboxed commands left
+  read-only directories behind. A child creates them routinely: the Go module
+  cache and Otto's own plugin store both install `0555` directories. The
+  private state tree is removed through directory descriptors, and an entry can
+  only be unlinked through a parent the owner may write and search, so removal
+  stopped at the first such directory, deleted nothing else, and left the tree
+  in `~/Library/Caches/otto-sandbox-*` — a leaked tree per affected session.
+  Cleanup now restores the owner's access through the same descriptors it
+  already validated against the recorded inode identities, then removes the
+  tree; the identity checks and the symlink refusal are unchanged.
 - Stop dropping the input typed during a turn without saying so. Ordinary text
   submitted while a turn runs is guidance for that turn, but the TUI never
   recorded it: `Ctrl+U` did nothing, the transcript never showed `Queued for

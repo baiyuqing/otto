@@ -874,12 +874,14 @@ impl Connection {
                         }
                         match result {
                             Ok(page) => {
-                                emit_notices(
-                                    &connection,
-                                    &id,
-                                    page.notices.into_iter().map(|n| (n.id, n.text)).collect(),
-                                    false,
-                                );
+                                for notice in page.notices {
+                                    connection.reflection_notice(
+                                        &id,
+                                        notice.id,
+                                        &notice.text,
+                                        &notice.presentation_origin,
+                                    );
+                                }
                                 after = page.last;
                             }
                             Err(crate::client::Error::Http { status: 404, .. }) => return,
@@ -976,10 +978,20 @@ impl Connection {
         );
     }
 
-    fn reflection_notice(&self, session_id: &str, notice_id: u64, text: &str) {
+    fn reflection_notice(
+        &self,
+        session_id: &str,
+        notice_id: u64,
+        text: &str,
+        presentation_origin: &str,
+    ) {
         let meta = serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"reflectionNotice": true, "noticeId": notice_id}),
+            json!({
+                "reflectionNotice": true,
+                "noticeId": notice_id,
+                "presentationOrigin": presentation_origin,
+            }),
         )]);
         self.update(
             session_id,
@@ -1453,13 +1465,25 @@ async fn watch_controller_notices(
         if stop.is_cancelled() {
             return;
         }
-        let (notices, last) = if wake_replies {
-            controller.wake_replies_since(after)
+        let last = if wake_replies {
+            let (notices, last) = controller.wake_replies_since(after);
+            for (reply_id, text) in notices {
+                connection.wake_reply(&session_id, reply_id, &text);
+            }
+            last
         } else {
-            controller.notices_since(after)
+            let (notices, last) = controller.routed_notices_since(after);
+            for notice in notices {
+                connection.reflection_notice(
+                    &session_id,
+                    notice.id,
+                    &notice.text,
+                    &notice.presentation_origin,
+                );
+            }
+            last
         };
         after = last;
-        emit_notices(&connection, &session_id, notices, wake_replies);
         tokio::select! {
             biased;
             () = stop.cancelled() => return,
@@ -1489,7 +1513,7 @@ fn emit_notices(
         if wake_replies {
             connection.wake_reply(session_id, notice_id, &text);
         } else {
-            connection.reflection_notice(session_id, notice_id, &text);
+            connection.reflection_notice(session_id, notice_id, &text, "");
         }
     }
 }

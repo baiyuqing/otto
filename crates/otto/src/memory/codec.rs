@@ -43,6 +43,7 @@ pub fn encode_provenance(source: &Provenance) -> String {
     out.push_str(",\"session_id\":");
     json::encode_string(&source.session_id, &mut out);
     out.push_str(",\"message_ids\":");
+
     out.push_str(&json::encode_string_slice(&source.message_ids));
     out.push_str(",\"observation_id\":");
     json::encode_string(&source.observation_id, &mut out);

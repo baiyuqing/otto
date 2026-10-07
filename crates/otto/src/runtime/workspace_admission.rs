@@ -115,7 +115,7 @@ mod tests {
         let startup = std::fs::canonicalize(startup).unwrap();
         let root = std::fs::canonicalize(root).unwrap();
         assert_eq!(
-            admit_workspace("relative", &startup, &[root.clone()], &[]),
+            admit_workspace("relative", &startup, std::slice::from_ref(&root), &[]),
             Err(Admission::Invalid)
         );
         #[cfg(unix)]

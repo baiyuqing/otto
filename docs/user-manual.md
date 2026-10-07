@@ -26,6 +26,7 @@ what the CLI actually does today.
     [Unified approvals](#unified-approvals)
 12. [Headless mode](#headless-mode)
 13. [Agent server](#agent-server)
+    [Cross-workspace deliveries](#cross-workspace-deliveries)
 14. [ACP agent server](#acp-agent-server)
 15. [Chat connector](#chat-connector)
 16. [Durable workflows](#durable-workflows)
@@ -2187,6 +2188,41 @@ for every workspace.
   written, the workspace stays loaded and stderr gets
   `warning: cannot save workspace list: <error>`. `DELETE /v1/workspaces`
   removes an entry.
+
+### Cross-workspace deliveries
+
+A session can hand work to a **different** admitted repository instead of
+editing its own. The entry point is the parent-only `start_delivery_task`
+tool; ordinary sub-agents never receive it.
+
+- Arguments: `target` (absolute path of an admitted primary Git checkout),
+  `objective` (the goal for the isolated target task), optional `branch`
+  (a new branch; defaults to `agent/<objective slug>`) and optional
+  `source_refs` (bounded references already selected from this conversation,
+  never filesystem paths).
+- The source workspace stays read-only. Only a bounded, hashed handoff packet
+  of the selected context reaches the target; the delivery runner never
+  receives a source root or handle.
+- The call asks you to authorize exactly one target together with its primary
+  checkout, Git directory, HEAD/base, the new branch, the target worktree path
+  and the handoff digest. Nothing is created before that decision, and any
+  change to those facts requires a fresh authorization. The target must
+  already be an admitted workspace (`otto trust` or a configured
+  `workspace_roots` entry); an approval never persists trust.
+- After approval Otto creates `TARGET/.otto/delivery-worktrees/<delivery-id>`
+  and runs the task there as its own session and runner. A completion notice is
+  appended to this conversation, and the result is readable with
+  `GET /v1/sessions/{source_session}/deliveries/{approval_id}`, which returns
+  only `approval_id`, `state` (`running`, `succeeded`, `failed`, `canceled`,
+  `unknown`), `result` and `error`.
+- A failure or a cancellation keeps the worktree for inspection. Recovery never
+  repeats the worktree creation or the target turn: an interrupted delivery is
+  reported as `unknown`, and retrying is an explicit new decision.
+- GitHub credentials, network access, protected Git metadata writes, `push`
+  and pull-request creation keep their own approval and permission boundaries;
+  a delivery does not inherit them. Delivery is available in `otto serve`
+  sessions (HTTP, ACP and the attached TUI); the local CLI frontends have no
+  target registry and do not offer the tool.
 
 ### Turn queue
 

@@ -1219,7 +1219,6 @@ pub(crate) fn open_memory(
 
 // ---- straight-through start ----
 
-#[allow(dead_code)] // the embedding API is the caller; the CLI runs the phases itself
 pub(crate) struct StartOptions {
     pub(crate) host_entries: Vec<Vec<u8>>,
     pub(crate) config_path: String,
@@ -1230,7 +1229,6 @@ pub(crate) struct StartOptions {
     pub(crate) disabled: Disabled,
 }
 
-#[allow(dead_code)] // the embedding API is the caller; the CLI runs the phases itself
 pub(crate) struct Started {
     pub(crate) builder: Builder,
     pub(crate) runtime: Runtime,
@@ -1241,7 +1239,6 @@ pub(crate) struct Started {
 /// Builds the runtime `otto acp` runs on, from environment capture to the
 /// memory service, without a frontend. Warnings go to `stderr` as each step
 /// emits them; `Err` is the text the CLI would pass to `fail`.
-#[allow(dead_code)] // the embedding API is the caller; the CLI runs the phases itself
 pub(crate) async fn start(
     options: StartOptions,
     cancel: &CancellationToken,

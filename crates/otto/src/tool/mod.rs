@@ -24,6 +24,7 @@ pub mod mcp;
 pub mod memory;
 pub mod models;
 pub mod otto;
+pub(crate) mod plan;
 pub mod project_guard;
 pub mod read;
 pub mod reflect;

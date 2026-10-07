@@ -831,6 +831,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         skipped: bool,
     ) -> Result<crate::approval::BatchControl, AgentError> {
         let mut arguments = block.arguments.clone().unwrap_or_else(empty_object);
+        let plan_before = self.session.plan();
         let (operation_id, attempt) = match prior {
             Some((operation_id, attempts)) => (operation_id, attempts + 1),
             None => match (self.options.new_operation_id)() {
@@ -1008,6 +1009,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             result: execution.result,
             outcome: execution.outcome,
         });
+        let plan_after = self.session.plan();
+        if plan_after != plan_before {
+            emit(Event::PlanUpdated { steps: plan_after });
+        }
         let stored = Message {
             id: (self.options.new_id)(),
             role: Role::Tool,

@@ -872,6 +872,7 @@ impl Server {
             auto_mode: info.auto_mode,
             turn,
             forked_from: info.forked_from,
+            plan: info.plan,
         }
     }
 
@@ -1630,6 +1631,8 @@ struct SessionWire {
     turn: Option<SessionTurnWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     forked_from: Option<app::ForkedFrom>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    plan: Vec<otto_core::session::PlanStep>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2493,6 +2496,9 @@ mod tests {
         /// tool result answers with `deltas`. Needs [`HarnessOptions::elevate`]
         /// to register the `bash` tool.
         tool_command: Option<String>,
+        /// Like `tool_command`, for an `update_plan` call with these
+        /// arguments; the harness registers the real tool.
+        plan_call: Option<String>,
     }
 
     struct ScriptedProvider {
@@ -2640,6 +2646,21 @@ mod tests {
                 );
             }
             let (blocks, finish_reason) = match &self.script.tool_command {
+                _ if self.script.plan_call.is_some() && !after_tool_result => (
+                    vec![Block {
+                        block_type: BlockType::ToolCall,
+                        tool_call_id: format!("call-{call}"),
+                        tool_name: "update_plan".to_string(),
+                        arguments: Some(
+                            serde_json::value::RawValue::from_string(
+                                self.script.plan_call.clone().unwrap_or_default(),
+                            )
+                            .expect("arguments"),
+                        ),
+                        ..Block::default()
+                    }],
+                    Some(otto_core::model::FinishReason::ToolCalls),
+                ),
                 Some(command) if !after_tool_result => (
                     vec![Block {
                         block_type: BlockType::ToolCall,
@@ -2833,7 +2854,7 @@ mod tests {
             } else {
                 SharedSession::memory(header)
             };
-            let tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>> =
+            let mut tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>> =
                 match &self.builder.bash_approvals {
                     Some(approvals) => vec![Box::new(ElevatedBash {
                         approvals: Arc::clone(approvals),
@@ -2841,6 +2862,12 @@ mod tests {
                     })],
                     None => Vec::new(),
                 };
+            if self.provider.script.plan_call.is_some() {
+                tools.push(Box::new(crate::tool::plan::UpdatePlan::new(
+                    Arc::new(session.clone()),
+                    &[],
+                )));
+            }
             let runner = Runner::scripted_with_tools(
                 session.clone(),
                 Arc::clone(&self.provider) as Arc<dyn Provider + Send + Sync>,
@@ -3635,6 +3662,47 @@ mod tests {
             .await;
         assert_eq!(points.status, StatusCode::OK);
         assert_eq!(points.json()["fork_points"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn an_update_plan_call_streams_plan_updated_and_sets_the_session_plan() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["done".to_string()],
+                plan_call: Some(
+                    r#"{"steps":[{"text":"read","status":"completed"},{"text":"write","status":"in_progress"}]}"#
+                        .to_string(),
+                ),
+                ..Script::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let created = harness
+            .send("GET", &format!("/v1/sessions/{id}"), None)
+            .await
+            .json();
+        assert!(created.get("plan").is_none(), "{created}");
+
+        let response = post_turn(&harness, &id, "plan it", false).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let frames = SseReader::new(response).all().await;
+        let plan = frames
+            .iter()
+            .find(|frame| frame.event == "plan_updated")
+            .expect("plan_updated frame");
+        let data: Value = serde_json::from_str(&plan.data).expect("frame data");
+        let steps = serde_json::json!([
+            {"text": "read", "status": "completed"},
+            {"text": "write", "status": "in_progress"}
+        ]);
+        assert_eq!(data["steps"], steps);
+
+        let session = harness
+            .send("GET", &format!("/v1/sessions/{id}"), None)
+            .await
+            .json();
+        assert_eq!(session["plan"], steps, "{session}");
     }
 
     #[tokio::test]

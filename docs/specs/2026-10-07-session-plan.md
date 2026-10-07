@@ -1,6 +1,6 @@
 # Session plan
 
-Status: proposed 2026-10-07; awaiting approval and answers to the open
+Status: approved 2026-10-07 with the recommended answers to all three open
 questions.
 
 This design closes the "structured todo/plan state as session `custom`
@@ -187,7 +187,7 @@ The tool appends one custom entry through `Session::append_custom`:
 - **HTTP.** The SSE `plan_updated` frame and the session `plan` field.
 - **TUI.** The plan line, `/plan`, and the attached path.
 
-## Open questions
+## Resolved questions
 
 1. **Tool name.**
    - Recommended: `update_plan`. It says what the call does, and agents

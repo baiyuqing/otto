@@ -1,11 +1,11 @@
-//! The parent-facing sub-agent tools: `agent`, `agent_wait`, `agent_status`,
-//! `agent_send` and `agent_cancel`.
+//! The parent-facing sub-agent tools: `agent`, `agent_status`, `agent_send`
+//! and `agent_cancel`.
 //!
 //! Ownership: each tool holds an `Arc` to the session's [`Runner`] and owns
-//! nothing else. Concurrency and cancellation: `agent` returns as soon as the
-//! task is registered unless `wait` is set; the two waiting paths park on the
-//! task registry and stop when the tool's token is cancelled or the timeout
-//! elapses. Errors are reported in band, as the tool contract requires.
+//! nothing else. `agent` always returns as soon as the task is registered;
+//! completion is delivered through the parent's mailbox and a runtime-owned
+//! wake turn, never by parking the parent agent loop in a tool call. Errors are
+//! reported in band, as the tool contract requires.
 //!
 //! Security: `agent` is the only way a turn can start a child, and the runner
 //! decides what that child may call. These three tools are themselves excluded
@@ -13,7 +13,6 @@
 
 use std::sync::Arc;
 
-use otto_core::agent::inbox::NotificationKind;
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
 use serde::Deserialize;
@@ -21,20 +20,13 @@ use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
 use super::format::{first_runes, task_label};
-use super::runner::{
-    Runner, StartRequest, agent_label, completion_text, definition_label, pluralize_tools,
-};
+use super::runner::{Runner, StartRequest, agent_label, definition_label, pluralize_tools};
 use super::tasks::{Task, TaskStatus, Tasks};
 use super::{Catalog, runner};
 use crate::tool::result::decode_strict_json;
 use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 
-const DEFAULT_WAIT_TIMEOUT_SECONDS: i64 = 600;
-const MAX_WAIT_TIMEOUT_SECONDS: i64 = 3600;
-
-const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
-
-const AGENT_WAIT_DESCRIPTION: &str = "Wait for a sub-agent task to finish. With task_id, waits for that task; without it, waits for every task that is queued or running. Blocks up to timeout_seconds (default 600, max 3600) and returns each task's completion report. New user input ends the wait early so the current turn can handle it. Errors if the wait times out or is canceled, naming the tasks still running, or if task_id is unknown. A wait that times out does not stop the task: check it with agent_status and stop it with agent_cancel.";
+const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Its final report arrives later as a [task-notification] message that starts a runtime-owned wake turn when the parent is idle; do not poll agent_status to wait for it. Use agent_status only to inspect progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
 
 const AGENT_STATUS_DESCRIPTION: &str = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error. Stop a task that is stuck or no longer needed with agent_cancel.";
 
@@ -44,18 +36,16 @@ const AGENT_CANCEL_DESCRIPTION: &str = "Cancel a queued or running sub-agent tas
 
 const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (default, or the definition's setting): it sees only prompt. inherit: it also receives a copy of this conversation up to this call. Prefer, in order: (1) fresh with a self-contained prompt: goal, paths, constraints, what to report back; (2) fresh, with the context you already obtained pasted into prompt (file excerpts, tool output, decisions), so the sub-agent skips the tool calls that produced it; (3) inherit, when that context is too large or too scattered to paste and the sub-agent would otherwise repeat expensive tool calls. A sub-agent never shares your prompt cache, so inherit costs one full uncached pass over this conversation per sub-agent, and everything irrelevant to the task goes in with it.";
 
-const AGENT_NAME_DESCRIPTION: &str = "Optional task name, unique in this session; usable instead of the task id in agent_wait, agent_status, and /task. 1 to 64 letters, digits, '_' or '-'.";
+const AGENT_NAME_DESCRIPTION: &str = "Optional task name, unique in this session; usable instead of the task id in agent_status, agent_send, agent_cancel, and /task. 1 to 64 letters, digits, '_' or '-'.";
 
 const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-agent task in this session. With resume set, this continues that task on its own transcript instead of starting a new one: prompt is the next user message delivered to it, and agent, model, name, and description must be absent or empty, and context absent or \"fresh\"; the task keeps its recorded values.";
 
-/// The `agent`, `agent_wait`, `agent_status`, `agent_send` and `agent_cancel`
-/// definitions, without a built [`Runner`]. The redaction boundary check needs
-/// the tool set a real runner would register, and none of the definitions read
-/// runner state.
+/// The `agent`, `agent_status`, `agent_send` and `agent_cancel` definitions,
+/// without a built [`Runner`]. The redaction boundary check needs the tool set
+/// a real runner would register, and none of the definitions read runner state.
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         agent_definition(),
-        agent_wait_definition(),
         agent_status_definition(),
         agent_send_definition(),
         agent_cancel_definition(),
@@ -66,9 +56,6 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 pub fn tools(runner: &Arc<Runner>) -> Vec<Box<dyn Tool + Send + Sync>> {
     vec![
         Box::new(AgentTool {
-            runner: Arc::clone(runner),
-        }),
-        Box::new(AgentWaitTool {
             runner: Arc::clone(runner),
         }),
         Box::new(AgentStatusTool {
@@ -103,10 +90,6 @@ fn agent_definition() -> ToolDefinition {
                     "type": "string",
                     "description": AGENT_NAME_DESCRIPTION
                 },
-                "wait": {
-                    "type": "boolean",
-                    "description": "Block until the task ends and return its result instead of its id."
-                },
                 "model": {
                     "type": "string",
                     "description": "Provider model id for the sub-agent. Default: this session's model. Otto does not validate it; an id the endpoint rejects fails the task with the provider's error. Overrides the definition's model."
@@ -126,27 +109,6 @@ fn agent_definition() -> ToolDefinition {
                 }
             },
             "required": ["prompt"]
-        }),
-    )
-}
-
-fn agent_wait_definition() -> ToolDefinition {
-    definition(
-        "agent_wait",
-        AGENT_WAIT_DESCRIPTION,
-        serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "task_id": {
-                    "type": "string",
-                    "description": "Task id or name; omit to wait for every queued or running task."
-                },
-                "timeout_seconds": {
-                    "type": "integer",
-                    "description": "Maximum time to wait, in seconds. Default 600, max 3600."
-                }
-            }
         }),
     )
 }
@@ -222,8 +184,6 @@ struct AgentArgs {
     prompt: String,
     #[serde(default)]
     description: String,
-    #[serde(default)]
-    wait: bool,
     #[serde(default)]
     model: String,
     #[serde(default)]
@@ -305,24 +265,7 @@ impl Tool for AgentTool {
         } else {
             format!("task {} {name} started", task.id)
         };
-        if !args.wait {
-            return text_result(started);
-        }
-
-        match wait_tasks(
-            self.runner.tasks(),
-            std::slice::from_ref(&task.id),
-            self.runner.max_output_bytes(),
-            cancel,
-        )
-        .await
-        {
-            Ok(text) => text_result(text),
-            Err(remaining) => error_result(format!(
-                "wait canceled; still running: {}",
-                remaining.join(", ")
-            )),
-        }
+        text_result(started)
     }
 }
 
@@ -333,7 +276,7 @@ impl AgentTool {
         &self,
         target: &str,
         args: AgentArgs,
-        cancel: &CancellationToken,
+        _cancel: &CancellationToken,
     ) -> ToolResult {
         if args.prompt.trim().is_empty() {
             return error_result("prompt is required");
@@ -360,25 +303,7 @@ impl AgentTool {
         };
 
         let name = agent_label(&task);
-        let started = format!("task {} {name} resumed", task.id);
-        if !args.wait {
-            return text_result(started);
-        }
-
-        match wait_tasks(
-            self.runner.tasks(),
-            std::slice::from_ref(&task.id),
-            self.runner.max_output_bytes(),
-            cancel,
-        )
-        .await
-        {
-            Ok(text) => text_result(text),
-            Err(remaining) => error_result(format!(
-                "wait canceled; still running: {}",
-                remaining.join(", ")
-            )),
-        }
+        text_result(format!("task {} {name} resumed", task.id))
     }
 }
 
@@ -404,153 +329,6 @@ fn count_running(tasks: &Tasks) -> usize {
         .iter()
         .filter(|task| task.status == TaskStatus::Running)
         .count()
-}
-
-/// Waits for each id in order, stopping at the first that does not complete.
-///
-/// On success it removes each task's finished notification, so the inbox does
-/// not deliver it a second time, and returns their completion texts joined by
-/// a blank line. On failure it returns the ids from the failing one onward,
-/// removing no notification and returning no text.
-async fn wait_tasks(
-    tasks: &Tasks,
-    ids: &[String],
-    max_output_bytes: usize,
-    cancel: &CancellationToken,
-) -> Result<String, Vec<String>> {
-    let mut completed = Vec::with_capacity(ids.len());
-    for (index, id) in ids.iter().enumerate() {
-        match tasks.wait(id, cancel).await {
-            Ok(task) => completed.push(task),
-            Err(_) => return Err(ids[index..].to_vec()),
-        }
-    }
-    let texts: Vec<String> = completed
-        .iter()
-        .map(|task| {
-            tasks.notifications().remove(
-                &task.id,
-                otto_core::agent::inbox::NotificationKind::TaskFinished,
-            );
-            completion_text(task, max_output_bytes)
-        })
-        .collect();
-    Ok(texts.join("\n\n"))
-}
-
-/// The ids in `ids` that have not yet reached a final status, in order. A
-/// timeout drops the in-flight [`wait_tasks`] future, so the still-running
-/// suffix is recomputed from the registry instead.
-fn still_running(tasks: &Tasks, ids: &[String]) -> Vec<String> {
-    ids.iter()
-        .skip_while(|id| tasks.get(id).is_some_and(|task| task.is_final()))
-        .cloned()
-        .collect()
-}
-
-fn has_user_message(tasks: &Tasks) -> bool {
-    tasks
-        .notifications()
-        .snapshot()
-        .iter()
-        .any(|notification| notification.kind == Some(NotificationKind::UserMessage))
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentWaitArgs {
-    #[serde(default)]
-    task_id: String,
-    #[serde(default)]
-    timeout_seconds: i64,
-}
-
-struct AgentWaitTool {
-    runner: Arc<Runner>,
-}
-
-#[async_trait::async_trait]
-impl Tool for AgentWaitTool {
-    fn definition(&self) -> ToolDefinition {
-        agent_wait_definition()
-    }
-
-    async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
-        let args: AgentWaitArgs = match decode_strict_json(arguments.get(), &[]) {
-            Ok(args) => args,
-            Err(message) => return error_result(message),
-        };
-        if args.timeout_seconds < 0 {
-            return error_result("timeout_seconds must not be negative");
-        }
-        let timeout_seconds = match args.timeout_seconds {
-            0 => DEFAULT_WAIT_TIMEOUT_SECONDS,
-            seconds => seconds.min(MAX_WAIT_TIMEOUT_SECONDS),
-        };
-
-        let tasks = self.runner.tasks();
-        let ids = if args.task_id.is_empty() {
-            let ids: Vec<String> = tasks
-                .list()
-                .into_iter()
-                .filter(|task| !task.is_final())
-                .map(|task| task.id)
-                .collect();
-            if ids.is_empty() {
-                return text_result("no tasks are running");
-            }
-            ids
-        } else {
-            match tasks.get(&args.task_id) {
-                Some(task) => vec![task.id],
-                None => return error_result(format!("unknown task: {}", args.task_id)),
-            }
-        };
-
-        enum WaitOutcome {
-            Tasks(Result<String, Vec<String>>),
-            Timeout,
-            UserMessage,
-        }
-
-        let timeout = tokio::time::sleep(std::time::Duration::from_secs(timeout_seconds as u64));
-        let wait = wait_tasks(tasks, &ids, self.runner.max_output_bytes(), cancel);
-        let mut updates = tasks.updates();
-        tokio::pin!(timeout, wait);
-        let outcome = loop {
-            if has_user_message(tasks) && !still_running(tasks, &ids).is_empty() {
-                break WaitOutcome::UserMessage;
-            }
-            tokio::select! {
-                biased;
-                outcome = &mut wait => break WaitOutcome::Tasks(outcome),
-                () = &mut timeout => break WaitOutcome::Timeout,
-                changed = updates.changed() => {
-                    if changed.is_err() {
-                        break WaitOutcome::Tasks(wait.await);
-                    }
-                }
-            }
-        };
-        match outcome {
-            WaitOutcome::Tasks(Ok(text)) => text_result(text),
-            WaitOutcome::Tasks(Err(remaining)) if cancel.is_cancelled() => error_result(format!(
-                "wait canceled; still running: {}",
-                remaining.join(", ")
-            )),
-            WaitOutcome::Tasks(Err(_)) | WaitOutcome::Timeout => {
-                let remaining = still_running(tasks, &ids);
-                error_result(format!(
-                    "timed out after {timeout_seconds}s; still running: {}",
-                    remaining.join(", ")
-                ))
-            }
-            WaitOutcome::UserMessage => text_result(format!(
-                "wait paused for new user input; still running: {}",
-                still_running(tasks, &ids).join(", ")
-            )),
-        }
-    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -774,10 +552,10 @@ fn history_lines(history: &[otto_core::model::Message]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::subagent::Definition;
-    use crate::subagent::runner::{Config, StartRequest, completion_text};
+    use crate::subagent::runner::{Config, StartRequest};
     use crate::subagent::testsupport::{
-        FakeProvider, RouteStep, StubTool, assistant_text, assistant_tool_call, match_any,
-        match_prompt, raw, stub, test_config, wait_status,
+        FakeProvider, RouteStep, StubTool, assistant_text, assistant_tool_call, match_any, raw,
+        stub, test_config, wait_status,
     };
     use otto_core::agent::inbox::NotificationKind;
     use otto_core::model::Usage;
@@ -826,38 +604,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_tool_wait_true_blocks_and_returns_completion() {
+    async fn agent_returns_while_a_child_is_still_running() {
         let provider = FakeProvider::new();
-        provider.add_route(
-            match_prompt("do it"),
-            vec![assistant_text(
-                "all done",
-                Usage {
-                    input_tokens: 4,
-                    output_tokens: 2,
-                    ..Usage::default()
-                },
-            )],
-        );
+        provider.set_hook(block_until(CancellationToken::new()));
         let tasks = Arc::new(Tasks::new());
         let runner = runner(test_config(&provider, &tasks, Vec::new()));
 
-        let agent_tool = tool_named(&runner, "agent");
-        let result = run(agent_tool.as_ref(), r#"{"prompt":"do it","wait":true}"#).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run(
+                tool_named(&runner, "agent").as_ref(),
+                r#"{"prompt":"do it"}"#,
+            ),
+        )
+        .await
+        .expect("agent blocked on its child");
         assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("task t1"), "{}", result.content);
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
 
-        let final_task = tasks.get("t1").expect("t1 exists");
+        tasks.cancel("t1").expect("cancel succeeds");
+        wait_final(&tasks, "t1").await;
         assert_eq!(
-            result.content,
-            completion_text(&final_task, runner.max_output_bytes())
+            tasks.notifications().snapshot()[0].kind,
+            Some(NotificationKind::TaskFinished),
+            "completion stays queued for the runtime wake turn"
         );
-        assert_eq!(
-            tasks
-                .notifications()
-                .remove("t1", NotificationKind::TaskFinished),
-            None,
-            "agent with wait removes the notification"
-        );
+    }
+
+    #[tokio::test]
+    async fn agent_rejects_the_removed_wait_argument() {
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+
+        let result = run(
+            tool_named(&runner, "agent").as_ref(),
+            r#"{"prompt":"do it","wait":true}"#,
+        )
+        .await;
+        assert!(result.is_error, "{}", result.content);
+        assert!(tasks.list().is_empty());
     }
 
     #[tokio::test]
@@ -874,219 +661,6 @@ mod tests {
             );
         }
         assert!(tasks.list().is_empty());
-    }
-
-    #[tokio::test]
-    async fn agent_wait_named_task_waits_and_removes_its_notification() {
-        let provider = FakeProvider::new();
-        provider.add_route(
-            match_any,
-            vec![assistant_text(
-                "done",
-                Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    ..Usage::default()
-                },
-            )],
-        );
-        let tasks = Arc::new(Tasks::new());
-        let runner = runner(test_config(&provider, &tasks, Vec::new()));
-        runner
-            .start(StartRequest {
-                prompt: "go".into(),
-                ..StartRequest::default()
-            })
-            .await
-            .expect("start succeeds");
-
-        let wait_tool = tool_named(&runner, "agent_wait");
-        let result = run(wait_tool.as_ref(), r#"{"task_id":"t1"}"#).await;
-        assert!(!result.is_error, "{}", result.content);
-        let final_task = tasks.get("t1").expect("t1 exists");
-        assert_eq!(
-            result.content,
-            completion_text(&final_task, runner.max_output_bytes())
-        );
-        assert_eq!(
-            tasks
-                .notifications()
-                .remove("t1", NotificationKind::TaskFinished),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn agent_wait_without_task_id_waits_for_every_non_final_task() {
-        let provider = FakeProvider::new();
-        let release = CancellationToken::new();
-        provider.set_hook(block_until(release.clone()));
-        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
-
-        let tasks = Arc::new(Tasks::new());
-        let mut config = test_config(&provider, &tasks, Vec::new());
-        config.max_parallel = 2;
-        let runner = runner(config);
-        for prompt in ["a", "b"] {
-            runner
-                .start(StartRequest {
-                    prompt: prompt.into(),
-                    ..StartRequest::default()
-                })
-                .await
-                .expect("start succeeds");
-        }
-        wait_status(&tasks, "t1", TaskStatus::Running).await;
-        wait_status(&tasks, "t2", TaskStatus::Running).await;
-
-        let wait_tool = tool_named(&runner, "agent_wait");
-        let handle = tokio::spawn(async move { run(wait_tool.as_ref(), "{}").await });
-        // Let agent_wait read the non-final task list before they finish.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        release.cancel();
-
-        let result = handle.await.expect("the wait task did not panic");
-        assert!(!result.is_error, "{}", result.content);
-        let want = format!(
-            "{}\n\n{}",
-            completion_text(&tasks.get("t1").expect("t1"), runner.max_output_bytes()),
-            completion_text(&tasks.get("t2").expect("t2"), runner.max_output_bytes())
-        );
-        assert_eq!(result.content, want);
-    }
-
-    #[tokio::test]
-    async fn agent_wait_with_no_tasks_running_is_not_an_error() {
-        let provider = FakeProvider::new();
-        let tasks = Arc::new(Tasks::new());
-        let runner = runner(test_config(&provider, &tasks, Vec::new()));
-        let result = run(tool_named(&runner, "agent_wait").as_ref(), "{}").await;
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(result.content, "no tasks are running");
-    }
-
-    #[tokio::test]
-    async fn agent_wait_unknown_task_id_errors() {
-        let provider = FakeProvider::new();
-        let tasks = Arc::new(Tasks::new());
-        let runner = runner(test_config(&provider, &tasks, Vec::new()));
-        let result = run(
-            tool_named(&runner, "agent_wait").as_ref(),
-            r#"{"task_id":"t9"}"#,
-        )
-        .await;
-        assert!(result.is_error);
-        assert_eq!(result.content, "unknown task: t9");
-    }
-
-    #[tokio::test]
-    async fn agent_wait_negative_timeout_errors() {
-        let provider = FakeProvider::new();
-        let tasks = Arc::new(Tasks::new());
-        let runner = runner(test_config(&provider, &tasks, Vec::new()));
-        let result = run(
-            tool_named(&runner, "agent_wait").as_ref(),
-            r#"{"timeout_seconds":-1}"#,
-        )
-        .await;
-        assert!(result.is_error);
-    }
-
-    #[tokio::test]
-    async fn agent_wait_timeout_reports_still_running_tasks() {
-        let provider = FakeProvider::new();
-        provider.set_hook(block_until(CancellationToken::new()));
-        let tasks = Arc::new(Tasks::new());
-        let runner = runner(test_config(&provider, &tasks, Vec::new()));
-        runner
-            .start(StartRequest {
-                prompt: "go".into(),
-                ..StartRequest::default()
-            })
-            .await
-            .expect("start succeeds");
-        wait_status(&tasks, "t1", TaskStatus::Running).await;
-
-        let result = run(
-            tool_named(&runner, "agent_wait").as_ref(),
-            r#"{"timeout_seconds":1}"#,
-        )
-        .await;
-        assert!(result.is_error, "{}", result.content);
-        assert_eq!(result.content, "timed out after 1s; still running: t1");
-
-        tasks.cancel("t1").expect("cancel succeeds");
-        wait_final(&tasks, "t1").await;
-    }
-
-    #[tokio::test]
-    async fn agent_wait_cancel_reports_still_running_tasks() {
-        let provider = FakeProvider::new();
-        provider.set_hook(block_until(CancellationToken::new()));
-        let tasks = Arc::new(Tasks::new());
-        let runner = runner(test_config(&provider, &tasks, Vec::new()));
-        runner
-            .start(StartRequest {
-                prompt: "go".into(),
-                ..StartRequest::default()
-            })
-            .await
-            .expect("start succeeds");
-        wait_status(&tasks, "t1", TaskStatus::Running).await;
-
-        let wait_tool = tool_named(&runner, "agent_wait");
-        let call = CancellationToken::new();
-        let canceller = call.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            canceller.cancel();
-        });
-        let result = wait_tool.execute(&raw("{}"), &call).await;
-        assert!(result.is_error, "{}", result.content);
-        assert_eq!(result.content, "wait canceled; still running: t1");
-
-        tasks.cancel("t1").expect("cancel succeeds");
-        wait_final(&tasks, "t1").await;
-    }
-
-    #[tokio::test]
-    async fn agent_wait_yields_to_new_user_input_without_canceling_the_task() {
-        let provider = FakeProvider::new();
-        provider.set_hook(block_until(CancellationToken::new()));
-        let tasks = Arc::new(Tasks::new());
-        let runner = runner(test_config(&provider, &tasks, Vec::new()));
-        runner
-            .start(StartRequest {
-                prompt: "go".into(),
-                ..StartRequest::default()
-            })
-            .await
-            .expect("start succeeds");
-        wait_status(&tasks, "t1", TaskStatus::Running).await;
-
-        let wait_tool = tool_named(&runner, "agent_wait");
-        let inbox = Arc::clone(tasks.notifications());
-        let handle = tokio::spawn(async move { run(wait_tool.as_ref(), "{}").await });
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        inbox.push(otto_core::agent::inbox::Notification {
-            kind: Some(NotificationKind::UserMessage),
-            text: "change course".into(),
-            ..Default::default()
-        });
-
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle)
-            .await
-            .expect("wait did not yield")
-            .expect("wait task panicked");
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(
-            result.content,
-            "wait paused for new user input; still running: t1"
-        );
-        assert_eq!(tasks.get("t1").expect("t1").status, TaskStatus::Running);
-
-        tasks.cancel("t1").expect("cancel succeeds");
-        wait_final(&tasks, "t1").await;
     }
 
     #[tokio::test]
@@ -1481,35 +1055,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_wait_by_name_removes_notification() {
-        let provider = FakeProvider::new();
-        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
-        let tasks = Arc::new(Tasks::new());
-        let runner = runner(test_config(&provider, &tasks, Vec::new()));
-        runner
-            .start(StartRequest {
-                prompt: "go".into(),
-                name: "lint-check".into(),
-                ..StartRequest::default()
-            })
-            .await
-            .expect("start succeeds");
-
-        let result = run(
-            tool_named(&runner, "agent_wait").as_ref(),
-            r#"{"task_id":"lint-check"}"#,
-        )
-        .await;
-        assert!(!result.is_error, "{}", result.content);
-        let final_task = tasks.get("t1").expect("t1 exists");
-        assert_eq!(
-            result.content,
-            completion_text(&final_task, runner.max_output_bytes())
-        );
-        assert_eq!(tasks.pending(), 0);
-    }
-
-    #[tokio::test]
     async fn agent_send_queues_message_for_running_task() {
         let provider = FakeProvider::new();
         let release = CancellationToken::new();
@@ -1646,13 +1191,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            [
-                "agent",
-                "agent_wait",
-                "agent_status",
-                "agent_send",
-                "agent_cancel"
-            ]
+            ["agent", "agent_status", "agent_send", "agent_cancel"]
         );
     }
 

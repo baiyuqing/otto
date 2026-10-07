@@ -15,6 +15,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Usage and compatibility
+
+- Sub-agent waiting is now runtime-owned and non-blocking. The `agent` tool
+  always returns immediately, child reports and completion wake an idle parent
+  through its mailbox, and active guidance remains independently admissible.
+  The blocking `agent_wait` capability and `agent`'s `wait` argument have been
+  removed; use `agent_status` only for a progress snapshot, not polling. See
+  the [sub-agent guide](docs/user-manual.md#sub-agents) and the
+  [design](docs/specs/2026-10-07-nonblocking-parent-suspension.md).
+
 ### Fixes
 
 - `agent` with `resume` accepts `context: "fresh"` (the default) as omitted,

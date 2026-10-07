@@ -3086,7 +3086,6 @@ mod tests {
                 "web_search",
                 "list_models",
                 "agent",
-                "agent_wait",
                 "agent_status",
                 "agent_send",
                 "agent_cancel",
@@ -3104,6 +3103,82 @@ mod tests {
                 "otto_help"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_parent_agent_tool_round_finishes_before_the_child_and_wakes_later() {
+        use crate::subagent::runner::Runner as ChildRunner;
+        use crate::subagent::tasks::{TaskStatus, Tasks};
+        use crate::subagent::testsupport::{
+            FakeProvider, assistant_text, assistant_tool_call, match_any, test_config, wait_status,
+        };
+        use otto_core::agent::inbox::NotificationKind;
+        use otto_core::model::{BlockType, Usage};
+
+        let tasks = Arc::new(Tasks::new());
+        let release = CancellationToken::new();
+        let child_provider = FakeProvider::new();
+        let child_release = release.clone();
+        child_provider.set_hook(Arc::new(move |cancel, _request| {
+            let release = child_release.clone();
+            Box::pin(async move {
+                tokio::select! {
+                    () = release.cancelled() => {}
+                    () = cancel.cancelled() => {}
+                }
+            })
+        }));
+        child_provider.add_route(
+            match_any,
+            vec![assistant_text("child done", Usage::default())],
+        );
+        let (children, _) = ChildRunner::new(test_config(&child_provider, &tasks, Vec::new()))
+            .expect("child runner");
+        let children = Arc::new(children);
+
+        let parent_provider = FakeProvider::new();
+        parent_provider.add_route(
+            match_any,
+            vec![
+                assistant_tool_call(
+                    "call-agent",
+                    "agent",
+                    r#"{"prompt":"inspect it"}"#,
+                    Usage::default(),
+                ),
+                assistant_text("parent released", Usage::default()),
+            ],
+        );
+        let session = SharedSession::memory(Header::default());
+        let parent = Runner::scripted_with_tools(
+            session.clone(),
+            parent_provider.clone() as Arc<dyn Provider + Send + Sync>,
+            Arc::clone(&tasks),
+            crate::subagent::tools::tools(&children),
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            parent.run("delegate", &mut |_| {}, &CancellationToken::new()),
+        )
+        .await
+        .expect("parent turn blocked on the child")
+        .expect("parent turn");
+        assert_eq!(parent_provider.requests().len(), 2);
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+        assert!(session.messages().iter().any(|message| {
+            message.blocks.iter().any(|block| {
+                block.block_type == BlockType::ToolResult
+                    && block.tool_call_id == "call-agent"
+                    && block.text.contains("task t1")
+            })
+        }));
+
+        release.cancel();
+        wait_status(&tasks, "t1", TaskStatus::Succeeded).await;
+        let notifications = tasks.notifications().snapshot();
+        assert_eq!(notifications.len(), 1, "{notifications:?}");
+        assert_eq!(notifications[0].kind, Some(NotificationKind::TaskFinished));
     }
 
     #[tokio::test]
@@ -3415,7 +3490,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_wait, agent_status, agent_send, agent_cancel, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_status, agent_send, agent_cancel, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");

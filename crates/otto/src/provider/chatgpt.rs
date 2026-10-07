@@ -614,7 +614,7 @@ fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
 mod tests {
     use super::*;
     use crate::auth::Credentials;
-    use crate::auth::testserver::{self, sse_response};
+    use crate::faults::http::{self as testserver, sse_response};
     use otto_core::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
     use otto_core::provider::StreamEvent;
     use tokio_util::sync::CancellationToken;

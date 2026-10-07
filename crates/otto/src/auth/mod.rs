@@ -13,8 +13,6 @@ pub mod claims;
 pub mod login;
 pub mod oauth;
 pub mod service;
-#[cfg(test)]
-pub(crate) mod testserver;
 pub mod token;
 
 use std::fs::{File, OpenOptions};

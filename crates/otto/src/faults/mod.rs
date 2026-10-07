@@ -8,6 +8,7 @@
 //! `docs/development.md`.
 
 pub mod crash;
+pub mod http;
 pub mod plan;
 
 pub use plan::{Fault, FaultError, FaultPlan, Filter, Fired, Rule, SqlFault, Trigger};

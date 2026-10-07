@@ -333,8 +333,8 @@ mod tests {
         assert_eq!(plan.check(Op::Write, ""), Some(Fault::Hang));
         let fired: Vec<_> = plan.fired().iter().map(|fired| fired.rule).collect();
         assert_eq!(fired, [0, 1]);
-        let unfired = std::panic::catch_unwind(|| plan.assert_all_fired())
-            .expect_err("rule 2 never fired");
+        let unfired =
+            std::panic::catch_unwind(|| plan.assert_all_fired()).expect_err("rule 2 never fired");
         let message = unfired.downcast_ref::<String>().expect("panic message");
         assert!(message.contains("rule 2"), "{message}");
     }
@@ -344,7 +344,10 @@ mod tests {
         let plan = FaultPlan::new(vec![
             Rule::new(Op::Write, Trigger::Always, EIO).filter(Filter::SqlPrefix("insert into")),
         ]);
-        assert_eq!(plan.check(Op::Write, "\n  INSERT INTO t VALUES (1)"), Some(EIO));
+        assert_eq!(
+            plan.check(Op::Write, "\n  INSERT INTO t VALUES (1)"),
+            Some(EIO)
+        );
         assert_eq!(plan.check(Op::Write, "SELECT 1"), None);
         assert_eq!(plan.check(Op::Write, "ins"), None);
         plan.assert_all_fired();
@@ -360,7 +363,10 @@ mod tests {
 
     #[test]
     fn io_errors_keep_the_os_code() {
-        assert_eq!(FaultError::Os(libc::ENOSPC).io().raw_os_error(), Some(libc::ENOSPC));
+        assert_eq!(
+            FaultError::Os(libc::ENOSPC).io().raw_os_error(),
+            Some(libc::ENOSPC)
+        );
         assert_eq!(
             FaultError::Kind(io::ErrorKind::BrokenPipe).io().kind(),
             io::ErrorKind::BrokenPipe

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 	"github.com/baiyuqing/otto/chat-connector/internal/bridge"
 	"github.com/baiyuqing/otto/chat-connector/internal/state"
 )
@@ -600,12 +601,8 @@ func (b *Bot) SendChoices(ctx context.Context, chatID, replyTo, text string, cho
 	return b.sendWithRetry(ctx, params)
 }
 
-func (b *Bot) SendApprovalMode(ctx context.Context, chatID, messageID, session string, automatic bool) error {
-	mode := "MANUAL"
-	if automatic {
-		mode = "AUTO"
-	}
-	params := map[string]any{"chat_id": chatParam(chatID), "text": "Approval mode: " + mode + "\nSession: " + session, "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "AUTO", "callback_data": "auto:on:" + session}, map[string]any{"text": "MANUAL", "callback_data": "auto:off:" + session}}}}}
+func (b *Bot) SendApprovalMode(ctx context.Context, chatID, messageID, session, mode string) error {
+	params := map[string]any{"chat_id": chatParam(chatID), "text": "Approval mode: " + agent.ApprovalModeLabel(mode) + "\nSession: " + session, "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "AUTO", "callback_data": "auto:on:" + session}, map[string]any{"text": "MANUAL", "callback_data": "auto:off:" + session}}}}}
 	if messageID == "" {
 		return b.call(ctx, "sendMessage", params, nil)
 	}

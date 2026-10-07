@@ -223,6 +223,53 @@ fn reject_once_ends_the_turn_without_a_retry() {
 }
 
 #[test]
+fn yolo_mode_approves_an_escalated_command_without_a_permission_request() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("elevated.txt"), "outside-seatbelt\n").unwrap();
+    let (base_url, _) = serve(Script {
+        replies: vec![escalated("call-1"), text_reply("done")],
+        served: Arc::new(AtomicUsize::new(0)),
+    });
+    configure(home.path(), &base_url);
+    let mut client = Client::spawn(home.path(), workspace.path(), "seatbelt");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    let (_, set) = client.call(
+        "_otto/approval_mode/set",
+        json!({"sessionId": session_id, "mode": "yolo"}),
+    );
+    assert_eq!(set["result"]["mode"], "yolo", "{set}");
+    assert_eq!(set["result"]["automatic"], true, "{set}");
+    let (_, fetched) = client.call("_otto/approval_mode/get", json!({"sessionId": session_id}));
+    assert_eq!(fetched["result"]["mode"], "yolo", "{fetched}");
+    // A boolean that contradicts the mode is refused, not guessed.
+    let (_, refused) = client.call(
+        "_otto/approval_mode/set",
+        json!({"sessionId": session_id, "mode": "yolo", "automatic": false}),
+    );
+    assert!(refused["error"].is_object(), "{refused}");
+    let id = client.start("session/prompt", prompt(&session_id, "read the fixture"));
+    let (frames, response) = client.finish(id, &mut |frame| {
+        panic!("a YOLO session must not ask for a permission: {frame}")
+    });
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame["method"] == "session/request_permission"),
+        "{frames:?}"
+    );
+    assert!(
+        serde_json::to_string(&frames)
+            .unwrap()
+            .contains("outside-seatbelt"),
+        "the unsandboxed command must have run"
+    );
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
 fn question_and_ordinary_task_leave_the_permission_pending_until_answered() {
     let (home, workspace, mut client) = start_with_replies(vec![
         escalated("call-1"),

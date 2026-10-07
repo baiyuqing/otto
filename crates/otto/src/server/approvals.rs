@@ -327,10 +327,43 @@ pub async fn changes_shared(
     }
 }
 
+/// `GET`/`PUT /v1/sessions/{id}/approval-mode`. A `PUT` accepts the older
+/// `{"automatic":bool}` and the mode form `{"mode":"manual"|"auto"|"yolo"}`;
+/// both responses carry `{"automatic":bool,"mode":...}`.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModeBody {
-    automatic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automatic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<crate::approval::ApprovalMode>,
+}
+
+impl ModeBody {
+    fn of(mode: crate::approval::ApprovalMode) -> Self {
+        Self {
+            automatic: Some(mode.is_automatic()),
+            mode: Some(mode),
+        }
+    }
+
+    /// The mode this body selects: the explicit mode, the boolean's meaning
+    /// (MANUAL or AUTO), or nothing when a read leaves both out.
+    fn selected(&self) -> Option<crate::approval::ApprovalMode> {
+        match (self.mode, self.automatic) {
+            (Some(mode), Some(automatic)) if mode.is_automatic() != automatic => None,
+            (Some(mode), _) => Some(mode),
+            (None, Some(true)) => Some(crate::approval::ApprovalMode::Auto),
+            (None, Some(false)) => Some(crate::approval::ApprovalMode::Manual),
+            (None, None) => None,
+        }
+    }
+
+    /// Whether `automatic` and `mode` contradict each other.
+    fn contradicts(&self) -> bool {
+        matches!((self.mode, self.automatic), (Some(mode), Some(automatic))
+            if mode.is_automatic() != automatic)
+    }
 }
 
 pub async fn mode(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
@@ -340,9 +373,9 @@ pub async fn mode(State(server): State<Arc<Server>>, Path(id): Path<String>) -> 
     match session
         .ctrl
         .approval_service()
-        .auto_mode(&session.ctrl.approval_scope())
+        .mode(&session.ctrl.approval_scope())
     {
-        Ok(automatic) => json_response(StatusCode::OK, &ModeBody { automatic }),
+        Ok(mode) => json_response(StatusCode::OK, &ModeBody::of(mode)),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "approval_mode_failed",
@@ -360,16 +393,22 @@ pub async fn set_mode(
         return not_found("session not found");
     };
     let Ok(input) = serde_json::from_slice::<ModeBody>(&body) else {
-        return bad_request("expected automatic: boolean");
+        return bad_request("expected mode or automatic");
+    };
+    if input.contradicts() {
+        return bad_request("automatic contradicts mode");
+    }
+    let Some(mode) = input.selected() else {
+        return bad_request("expected mode or automatic");
     };
     match session
         .ctrl
         .approval_service()
-        .set_auto_mode(&session.ctrl.approval_scope(), input.automatic)
+        .set_mode(&session.ctrl.approval_scope(), mode)
     {
         Ok(()) => {
             server.bump_status();
-            json_response(StatusCode::OK, &input)
+            json_response(StatusCode::OK, &ModeBody::of(mode))
         }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -11,7 +11,8 @@ pub struct Store {
 }
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS approval_modes (
- workspace TEXT NOT NULL, session_id TEXT NOT NULL, automatic INTEGER NOT NULL CHECK(automatic IN (0,1)),
+ workspace TEXT NOT NULL, session_id TEXT NOT NULL,
+ mode TEXT NOT NULL CHECK(mode IN ('manual','auto','yolo')),
  PRIMARY KEY(workspace,session_id)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS approvals (
@@ -85,7 +86,7 @@ pub(super) fn initialize(connection: &mut Connection) -> Result<()> {
     let version: i64 = tx
         .query_row("PRAGMA user_version", (), |row| row.get(0))
         .map_err(storage_error)?;
-    if !(0..=2).contains(&version) {
+    if !(0..=3).contains(&version) {
         return Err(Error::Invalid("unsupported approval database version"));
     }
     if version == 1 {
@@ -96,30 +97,64 @@ pub(super) fn initialize(connection: &mut Connection) -> Result<()> {
         )
         .map_err(storage_error)?;
     }
+    if has_legacy_mode(&tx)? {
+        // The mode used to be an `automatic` boolean; rewrite every row with
+        // the meaning it was written with. A row cannot be lost here: the
+        // copy, the drop and the new table share one transaction.
+        for statement in [
+            "ALTER TABLE approval_modes RENAME TO approval_modes_legacy",
+            "CREATE TABLE approval_modes (workspace TEXT NOT NULL, session_id TEXT NOT NULL, \
+             mode TEXT NOT NULL CHECK(mode IN ('manual','auto','yolo')), \
+             PRIMARY KEY(workspace,session_id)) STRICT",
+            "INSERT INTO approval_modes (workspace,session_id,mode) SELECT workspace,session_id, \
+             CASE automatic WHEN 0 THEN 'manual' ELSE 'auto' END FROM approval_modes_legacy",
+            "DROP TABLE approval_modes_legacy",
+        ] {
+            tx.execute(statement, ()).map_err(storage_error)?;
+        }
+    }
     tx.execute_batch(SCHEMA).map_err(storage_error)?;
-    tx.execute_batch("PRAGMA user_version=2")
+    tx.execute_batch("PRAGMA user_version=3")
         .map_err(storage_error)?;
     tx.commit().map_err(storage_error)?;
     Ok(())
 }
+
+/// Whether `approval_modes` still carries the pre-mode `automatic` column.
+fn has_legacy_mode(tx: &Transaction<'_>) -> Result<bool> {
+    let mut statement = tx
+        .prepare("PRAGMA table_info(approval_modes)")
+        .map_err(storage_error)?;
+    let fields = statement
+        .query_map((), |row| row.get::<String>(1))
+        .map_err(storage_error)?;
+    for name in fields {
+        if name.map_err(storage_error)? == "automatic" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 impl ApprovalStore for Store {
-    fn mode(&self, scope: &Scope) -> Result<Option<bool>> {
-        self.connection
+    fn mode(&self, scope: &Scope) -> Result<Option<ApprovalMode>> {
+        let mode: Option<String> = self
+            .connection
             .lock()
             .map_err(|_| Error::Unavailable)?
             .query_row(
-                "SELECT automatic FROM approval_modes WHERE workspace=?1 AND session_id=?2",
+                "SELECT mode FROM approval_modes WHERE workspace=?1 AND session_id=?2",
                 params![scope.workspace, scope.session_id],
-                |row| row.get::<i64>(0),
+                |row| row.get(0),
             )
             .optional()
-            .map(|value| value.map(|v| v != 0))
-            .map_err(storage_error)
+            .map_err(storage_error)?;
+        mode.map(|mode| ApprovalMode::parse(&mode).ok_or(Error::Invalid("unknown approval mode")))
+            .transpose()
     }
-    fn set_mode(&self, scope: &Scope, automatic: bool) -> Result<()> {
+    fn set_mode(&self, scope: &Scope, mode: ApprovalMode) -> Result<()> {
         self.connection.lock().map_err(|_| Error::Unavailable)?.execute(
-            "INSERT INTO approval_modes VALUES (?1,?2,?3) ON CONFLICT(workspace,session_id) DO UPDATE SET automatic=excluded.automatic",
-            params![scope.workspace, scope.session_id, i64::from(automatic)],
+            "INSERT INTO approval_modes VALUES (?1,?2,?3) ON CONFLICT(workspace,session_id) DO UPDATE SET mode=excluded.mode",
+            params![scope.workspace, scope.session_id, mode.as_str()],
         ).map(|_| ()).map_err(storage_error)
     }
     fn create(&self, key: &str, request: &Request) -> Result<(Request, bool)> {
@@ -306,17 +341,23 @@ impl ApprovalStore for Store {
             return Err(Error::Conflict);
         }
         if automatic {
-            let enabled = tx
+            let mode: Option<String> = tx
                 .query_row(
-                    "SELECT automatic FROM approval_modes WHERE workspace=?1 AND session_id=?2",
+                    "SELECT mode FROM approval_modes WHERE workspace=?1 AND session_id=?2",
                     params![expected.scope.workspace, expected.scope.session_id],
-                    |row| row.get::<i64>(0),
+                    |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?
-                .unwrap_or(1)
-                != 0;
-            if !automatic_decision_allowed(enabled, next) {
+                .map_err(storage_error)?;
+            // A missing row means the AUTO default, as it did when the
+            // preference was a boolean.
+            let mode = mode
+                .map(|mode| {
+                    ApprovalMode::parse(&mode).ok_or(Error::Invalid("unknown approval mode"))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            if !automatic_decision_allowed(mode, next) {
                 return Err(Error::Conflict);
             }
         }
@@ -390,6 +431,7 @@ use crate::approval::codec::merge_persisted;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::ApprovalMode;
     use crate::approval::{Actor, Proposal, Service};
     use std::sync::Arc;
 
@@ -403,7 +445,7 @@ mod tests {
             task_id: String::new(),
             run_id: String::new(),
         };
-        service.set_auto_mode(&scope, false).unwrap();
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
         let pending = service
             .create(Proposal {
                 kind: Kind::Authorization,
@@ -443,6 +485,125 @@ mod tests {
     }
 
     #[test]
+    fn the_commit_fence_rechecks_the_persisted_mode_for_yolo_and_manual() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let service = Service::from_store(store.clone()).unwrap();
+        let scope = Scope {
+            workspace: "/w".into(),
+            session_id: "s".into(),
+            task_id: String::new(),
+            run_id: String::new(),
+        };
+        // A consent request: the class AUTO may never decide.
+        let review = Proposal {
+            kind: Kind::Confirmation,
+            authority: Authority::Consent,
+            scope: scope.clone(),
+            subject: Subject {
+                tool_call_id: String::new(),
+                source: "conversation".into(),
+                id: "plan".into(),
+                version: "1".into(),
+                details: "review".into(),
+            },
+            title: "Review".into(),
+            reason: "scope".into(),
+            persistent: false,
+            blocking: true,
+            expires_at: None,
+        };
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
+        let pending = service.create(review).unwrap();
+        assert_eq!(pending.state, State::Pending);
+        let mut next = pending.clone();
+        next.state = State::Approved;
+        // MANUAL refuses it even though the service could compute the
+        // decision, so the fence reads the persisted mode, not the caller.
+        assert!(matches!(
+            store.commit(&pending, &next, ClaimChange::None, true),
+            Err(Error::Conflict)
+        ));
+        assert_eq!(store.load(&pending.id).unwrap(), pending);
+        // The same commit lands once the store itself is in YOLO. The store
+        // port is used so the pending request is not swept by `set_mode`:
+        // the fence, not the sweep, is what publishes this decision.
+        store.set_mode(&scope, ApprovalMode::Yolo).unwrap();
+        let approved = store
+            .commit(&pending, &next, ClaimChange::None, true)
+            .unwrap();
+        assert_eq!(approved.state, State::Approved);
+    }
+
+    #[test]
+    fn a_boolean_mode_column_migrates_to_the_mode_form_with_its_meaning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("approvals.db");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute(
+                    "CREATE TABLE approval_modes (workspace TEXT NOT NULL,\
+                     session_id TEXT NOT NULL, automatic INTEGER NOT NULL CHECK(automatic IN (0,1)),\
+                     PRIMARY KEY(workspace,session_id)) STRICT",
+                    (),
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO approval_modes VALUES (?1,?2,?3)",
+                    params!["/w", "off", 0],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO approval_modes VALUES (?1,?2,?3)",
+                    params!["/w", "on", 1],
+                )
+                .unwrap();
+            connection.execute_batch("PRAGMA user_version=2").unwrap();
+        }
+        let store = match Store::open(&path) {
+            Ok(store) => store,
+            Err(error) => panic!("open failed: {error}"),
+        };
+        fn mode(store: &Store, session: &str) -> Option<ApprovalMode> {
+            store
+                .mode(&Scope {
+                    workspace: "/w".into(),
+                    session_id: session.into(),
+                    task_id: String::new(),
+                    run_id: String::new(),
+                })
+                .unwrap()
+        }
+        // A stored `automatic = 0` was MANUAL and `1` was AUTO; neither is
+        // re-read as the default, and YOLO is reachable afterwards.
+        assert_eq!(mode(&store, "off"), Some(ApprovalMode::Manual));
+        assert_eq!(mode(&store, "on"), Some(ApprovalMode::Auto));
+        assert_eq!(mode(&store, "absent"), None);
+        store
+            .set_mode(
+                &Scope {
+                    workspace: "/w".into(),
+                    session_id: "on".into(),
+                    task_id: String::new(),
+                    run_id: String::new(),
+                },
+                ApprovalMode::Yolo,
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(mode(&store, "on"), Some(ApprovalMode::Yolo));
+        assert_eq!(mode(&store, "off"), Some(ApprovalMode::Manual));
+        let version: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("PRAGMA user_version", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+    }
+
+    #[test]
     fn auto_mode_never_publishes_a_decision_for_a_request_it_cannot_decide() {
         let store = Arc::new(Store::in_memory().unwrap());
         let service = Service::from_store(store.clone()).unwrap();
@@ -454,7 +615,7 @@ mod tests {
         };
         // AUTO is the default for a new session, so this fence is the only
         // thing standing between a plan review and an automatic decision.
-        assert!(service.auto_mode(&scope).unwrap());
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Auto);
         let pending = service
             .create(Proposal {
                 kind: Kind::Confirmation,

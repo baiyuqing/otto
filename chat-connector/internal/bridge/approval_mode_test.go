@@ -29,7 +29,7 @@ func TestAutoCommandUsesSessionAPIAndSurvivesReload(t *testing.T) {
 
 type modeCall struct {
 	chat, message, session string
-	automatic              bool
+	mode                   string
 }
 
 type modePlatform struct {
@@ -37,8 +37,8 @@ type modePlatform struct {
 	calls chan modeCall
 }
 
-func (p modePlatform) SendApprovalMode(_ context.Context, chat, message, session string, automatic bool) error {
-	p.calls <- modeCall{chat, message, session, automatic}
+func (p modePlatform) SendApprovalMode(_ context.Context, chat, message, session, mode string) error {
+	p.calls <- modeCall{chat, message, session, mode}
 	return nil
 }
 
@@ -58,7 +58,11 @@ func TestAutoShortcutUpdatesClickedCardAndSessionMode(t *testing.T) {
 		h.b.deliver(m)
 		select {
 		case call := <-calls:
-			if call.chat != "c1" || call.message != wantID || call.automatic != (i != 3) {
+			want := "auto"
+			if i == 3 {
+				want = "manual"
+			}
+			if call.chat != "c1" || call.message != wantID || call.mode != want {
 				t.Fatalf("mode presentation = %+v", call)
 			}
 			if i == 0 {
@@ -68,7 +72,7 @@ func TestAutoShortcutUpdatesClickedCardAndSessionMode(t *testing.T) {
 				t.Fatalf("session = %q, call = %+v", sid, call)
 			}
 			mode, err := h.agent.ApprovalMode(context.Background(), sid, nil)
-			if err != nil || mode != call.automatic {
+			if err != nil || mode != call.mode {
 				t.Fatalf("stored mode = %v, error = %v", mode, err)
 			}
 		case <-time.After(5 * time.Second):

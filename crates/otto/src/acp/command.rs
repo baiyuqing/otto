@@ -125,7 +125,7 @@ pub(super) fn available_commands() -> SessionUpdate {
         )),
         AvailableCommand::new(
             "auto",
-            "Show approval mode or set /auto on|off for this session",
+            "Show the approval mode or set /auto manual|auto|yolo for this session",
         ),
     ]))
 }

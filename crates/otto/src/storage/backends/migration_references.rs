@@ -390,6 +390,7 @@ fn sql_error(_: crate::storage::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::ApprovalMode;
     use crate::storage::backends::turso::workflow::TursoWorkflowStore;
     use crate::workflow::{Definition, Step, StepKind, repository::WorkflowStore};
     #[test]
@@ -490,7 +491,7 @@ mod tests {
             task_id: String::new(),
             run_id: String::new(),
         };
-        approvals.set_auto_mode(&scope, false).unwrap();
+        approvals.set_mode(&scope, ApprovalMode::Manual).unwrap();
         approvals
             .create(crate::approval::Proposal {
                 kind: crate::approval::Kind::Confirmation,

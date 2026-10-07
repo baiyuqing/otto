@@ -1769,7 +1769,10 @@ canonical workspace, even when `--sandbox off` is selected:
   When `old_text` has no exact match, `edit` retries with a
   match that ignores trailing whitespace and treats curly quotes, dashes, and
   non-breaking spaces as ASCII, and it rewrites only the part of `old_text`
-  that `new_text` changes.
+  that `new_text` changes. The result shows a diff of the change. When
+  `old_text` ends with a line break that a non-empty `new_text` drops, the
+  edit still applies, and the result adds a note that the next line now joins
+  the replaced text.
 
 `write` and `edit` refuse the workspace's read-only git paths listed in
 [Git metadata is read-only in the Seatbelt sandbox](#git-metadata-is-read-only-in-the-seatbelt-sandbox),

@@ -507,6 +507,47 @@ impl Client {
         Ok(wire.into_info())
     }
 
+    /// `POST /v1/sessions/{id}/profile`: run the session on another configured
+    /// profile and return the session's new info. The configuration file and
+    /// every other session are unchanged.
+    pub async fn switch_profile(
+        &self,
+        session_id: &str,
+        profile: &str,
+    ) -> Result<crate::app::Info, Error> {
+        let response = self
+            .send(self.post(
+                &format!("{BASE}/v1/sessions/{session_id}/profile"),
+                &json!({ "profile": profile }),
+            ))
+            .await?;
+        let wire: SessionWire = decode(response).await?;
+        Ok(wire.into_info())
+    }
+
+    /// `GET /v1/config/profiles`: the configured profile names, sorted.
+    pub async fn profiles(&self) -> Result<Vec<String>, Error> {
+        #[derive(Deserialize)]
+        struct Row {
+            name: String,
+        }
+        #[derive(Deserialize)]
+        struct Reply {
+            profiles: Vec<Row>,
+        }
+        let response = self
+            .send(self.http.get(format!("{BASE}/v1/config/profiles")))
+            .await?;
+        let mut names: Vec<String> = decode::<Reply>(response)
+            .await?
+            .profiles
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
     /// `GET /v1/sessions/{id}/fork-points`, oldest first, as (entry id,
     /// prompt) pairs.
     pub async fn fork_points(&self, session_id: &str) -> Result<Vec<(String, String)>, Error> {

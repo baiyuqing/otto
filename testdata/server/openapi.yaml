@@ -1615,6 +1615,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/profile:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Run this session on another configured profile
+      description: >-
+        Rebuilds the session's runner on the named profile and returns the
+        session. The configuration file is not written, so every other session
+        and the next serve start keep the profile they had. The switch makes no
+        model request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile:
+                  type: string
+                  description: A configured profile name.
+              required: [profile]
+      responses:
+        "200":
+          description: Switched session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          description: Missing, empty or unknown profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            turn_active (a turn is running), or profile_switch_unavailable
+            (the session withholds dynamic content, or policy forbids a
+            dynamic profile)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}/approvals/message:
     parameters:
       - $ref: "#/components/parameters/sessionID"

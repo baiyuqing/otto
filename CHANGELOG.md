@@ -147,6 +147,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
   after the rename
   ([#409](https://github.com/baiyuqing/otto/pull/409)).
 
+- Main's `connect-check` no longer fails on the connector's end-to-end
+  reflection test. That test scripted ten identical `read {"path":"notes.txt"}`
+  calls to reach the ten successful operations automatic reflection waits for,
+  but the progress guard ends a turn that repeats one call, with the same
+  canonical arguments, eight times in a row — so the turn ended with
+  `no progress: the same read call repeated 8 times in a row` and the test
+  never saw a reflection. Both failing jobs, Linux checks and macOS acceptance,
+  went red from #407 until each scripted call was given a distinct argument;
+  the call count and the reflection assertion are unchanged
+  ([#411](https://github.com/baiyuqing/otto/pull/411)).
+
 ## 0.4.1 - 2026-10-07
 
 ### Features

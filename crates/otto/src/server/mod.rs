@@ -31,8 +31,9 @@ pub mod workflows;
 pub mod workspaces;
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -65,6 +66,17 @@ use turn::{TRIGGER_RECOVERY, TRIGGER_TASK, TRIGGER_USER, Turn};
 pub const SESSION_NOT_FOUND: &str = "session not found";
 const IMAGE_TURN_BODY_MAX_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 4096;
 const REMEMBERED_REFLECTION_CANCELS: usize = 16;
+
+/// An open session with nothing running is closed after this much idle time,
+/// unless `[server].session_idle_timeout` says otherwise; a server that stays
+/// up for weeks then keeps only the sessions in play. `[server]` also caps how
+/// many stay open at once. See [`Server::sweep_idle_sessions`].
+const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// How many evicted session ids a later request still re-opens. A client that
+/// touches an evicted session finds it open again; ids evicted before the last
+/// [`REMEMBERED_EVICTIONS`] are treated as never opened, which is what a
+/// request for a closed session already answers.
+const REMEMBERED_EVICTIONS: usize = 1024;
 
 /// The embedded API description. Served verbatim at `GET /v1/openapi.yaml`,
 /// read from the shared fixture at the repository root so the server and the
@@ -272,6 +284,12 @@ pub struct Options {
     /// The scheduled-delivery store shared by every workspace; `None` when
     /// `~/.otto/schedule.db` could not be opened.
     pub schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
+    /// `[server].session_idle_timeout`: how long a session with nothing running
+    /// stays open. `None` never closes one for being idle.
+    pub session_idle_timeout: Option<Duration>,
+    /// `[server].max_open_sessions`: how many sessions stay open at once.
+    /// `None` keeps every open session, whatever the count.
+    pub max_open_sessions: Option<usize>,
 }
 
 // ---- registry ----
@@ -290,6 +308,19 @@ pub struct OpenSession {
     /// the registry and outlives the controller, so the loop needs its own stop
     /// signal.
     closed: CancellationToken,
+    /// Milliseconds after [`activity_now`]'s origin of the last route lookup,
+    /// turn start and turn end. [`Server::sweep_idle_sessions`] reads it.
+    last_active: AtomicU64,
+    /// How many live frontend connections hold this session open. A pinned
+    /// session is never evicted; see [`Server::pin_session`].
+    pins: AtomicUsize,
+}
+
+/// Milliseconds since this process's first session activity stamp. Monotonic
+/// like [`Instant`], and cheap enough to read and write per request.
+fn activity_now() -> u64 {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// A session queues at most this many turns behind the running one.
@@ -419,7 +450,23 @@ impl OpenSession {
             state: Mutex::new(SessionState::default()),
             turn_finished: tokio::sync::Notify::new(),
             closed: CancellationToken::new(),
+            last_active: AtomicU64::new(activity_now()),
+            pins: AtomicUsize::new(0),
         })
+    }
+
+    /// Records that the session was just used, so the sweeper leaves it alone.
+    fn touch(&self) {
+        self.last_active.store(activity_now(), Ordering::Relaxed);
+    }
+
+    /// How long ago [`Self::touch`] last ran.
+    fn idle_millis(&self, now: u64) -> u64 {
+        now.saturating_sub(self.last_active.load(Ordering::Relaxed))
+    }
+
+    fn pinned(&self) -> bool {
+        self.pins.load(Ordering::SeqCst) > 0
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, SessionState> {
@@ -484,6 +531,18 @@ pub struct Server {
     open_gate: tokio::sync::Mutex<()>,
     /// One handle per running wake loop, awaited by [`Server::close`].
     wake_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Ids the sweeper evicted, oldest first. A request that names one
+    /// re-opens it from disk ([`Server::session_for_route`]), which is what
+    /// makes eviction invisible to a client; an id the client closed itself
+    /// is not here, so a close still answers 404 as it always did.
+    evicted: Mutex<VecDeque<String>>,
+    /// How long a session with nothing running stays open
+    /// (`[server].session_idle_timeout`). `None` never closes one for being
+    /// idle.
+    session_idle_timeout: Option<Duration>,
+    /// How many sessions stay open at once (`[server].max_open_sessions`).
+    /// `None` keeps every open session, whatever the count.
+    max_open_sessions: Option<usize>,
     cancel: CancellationToken,
     workflows: Option<Arc<crate::workflow::Controller>>,
     schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
@@ -519,6 +578,9 @@ impl Server {
             sessions: Mutex::new(HashMap::new()),
             open_gate: tokio::sync::Mutex::new(()),
             wake_loops: Mutex::new(Vec::new()),
+            evicted: Mutex::new(VecDeque::new()),
+            session_idle_timeout: options.session_idle_timeout,
+            max_open_sessions: options.max_open_sessions,
             cancel: CancellationToken::new(),
             workflows: options.workflows,
             schedule: options.schedule,
@@ -790,6 +852,10 @@ impl Server {
             .layer(DefaultBodyLimit::max(1 << 20))
             .layer(axum::middleware::from_fn_with_state(
                 Arc::clone(&state),
+                reopen_evicted_session,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
                 instrument,
             ))
             .with_state(state)
@@ -802,12 +868,114 @@ impl Server {
         self.lookup(id).map(|session| Arc::clone(&session.ctrl))
     }
 
+    /// Shared controller for a route that names a session in a query or a body
+    /// rather than in its path, re-opening one the sweeper evicted. `None` when
+    /// no such session exists, which the caller answers 404 for.
+    pub(crate) async fn controller_for_route(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> Option<Arc<Controller>> {
+        self.session_for_route(id)
+            .await
+            .map(|session| Arc::clone(&session.ctrl))
+    }
+
+    /// The session a route names: the open one, else one this server evicted and
+    /// can re-open from disk. `None` when it is neither, so a client that closed
+    /// a session still gets the 404 it always did.
+    ///
+    /// A re-open goes through [`Self::resume_or_create`], which serializes on
+    /// `open_gate`, so concurrent requests for one evicted id open it once.
+    async fn session_for_route(self: &Arc<Self>, id: &str) -> Option<Arc<OpenSession>> {
+        if let Some(open) = self.lookup(id) {
+            return Some(open);
+        }
+        if !self.was_evicted(id) {
+            return None;
+        }
+        match self.resume_or_create(id, None).await {
+            Ok((session, _created)) => Some(session),
+            // The id stays evicted only until the next request; this one gets
+            // the same 404 a request for a closed session gets.
+            Err(message) if message == SESSION_NOT_FOUND => None,
+            Err(message) => {
+                self.log.warn(
+                    "session_reopen_failed",
+                    &[("session_id", id.to_string()), ("error", message)],
+                );
+                None
+            }
+        }
+    }
+
+    fn was_evicted(&self, id: &str) -> bool {
+        self.evicted
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains(&id.to_string())
+    }
+
+    /// Remembers that `id` was evicted, so a later request re-opens it. Drops
+    /// the oldest id once [`REMEMBERED_EVICTIONS`] are remembered.
+    fn remember_evicted(&self, id: &str) {
+        let mut evicted = self
+            .evicted
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if evicted.iter().any(|known| known == id) {
+            return;
+        }
+        if evicted.len() == REMEMBERED_EVICTIONS {
+            evicted.pop_front();
+        }
+        evicted.push_back(id.to_string());
+    }
+
+    /// Forgets an eviction: the session is open again.
+    fn forget_evicted(&self, id: &str) {
+        let mut evicted = self
+            .evicted
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(position) = evicted.iter().position(|known| known == id) {
+            evicted.remove(position);
+        }
+    }
+
+    /// Pins `id` open for a live frontend connection, so the sweeper leaves it
+    /// alone. `false` when no such session is open, which a caller that has just
+    /// opened one never sees.
+    pub fn pin_session(&self, id: &str) -> bool {
+        let Some(session) = self.lookup(id) else {
+            return false;
+        };
+        session.pins.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    /// Releases one [`Self::pin_session`] hold.
+    pub fn unpin_session(&self, id: &str) {
+        let Some(session) = self.lookup(id) else {
+            return;
+        };
+        let _ = session
+            .pins
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_sub(1)
+            });
+    }
+
     fn lookup(&self, id: &str) -> Option<Arc<OpenSession>> {
-        self.sessions
+        let session = self
+            .sessions
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .get(id)
-            .cloned()
+            .cloned();
+        if let Some(session) = &session {
+            session.touch();
+        }
+        session
     }
 
     fn remove(&self, id: &str) -> Option<Arc<OpenSession>> {
@@ -837,12 +1005,158 @@ impl Server {
         self.sessions
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .insert(id, Arc::clone(&session));
+            .insert(id.clone(), Arc::clone(&session));
+        self.forget_evicted(&id);
         self.metrics.sessions_open(1);
         self.status_changed.send_modify(|version| *version += 1);
         self.restore_queued_turns(&session);
         self.start_wake_loop(&session);
         session
+    }
+
+    /// Removes `id` when the registry still holds exactly `session`, so a sweep
+    /// that lost a race never evicts a session that was deleted, or re-opened as
+    /// a new one, while it was deciding.
+    fn remove_if_same(&self, id: &str, session: &Arc<OpenSession>) -> bool {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match sessions.get(id) {
+            Some(current) if Arc::ptr_eq(current, session) => {
+                sessions.remove(id);
+                self.status_changed.send_modify(|version| *version += 1);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Cancels everything running on `session` and closes its controller. The
+    /// session's files, its saved queued turns and its eviction marker stay as
+    /// they are, so a later open restores it; [`delete_session`] clears the
+    /// marker and the journal itself.
+    async fn close_session(&self, session: &Arc<OpenSession>) -> Result<(), String> {
+        session.cancel_work();
+        // Awaited before the blocking close, exactly as `Server::close` does:
+        // `Controller::close` only spawns the MCP shutdown.
+        session.ctrl.close_mcp().await;
+        let ctrl = Arc::clone(&session.ctrl);
+        match tokio::task::spawn_blocking(move || ctrl.close()).await {
+            Ok(result) => result,
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Closes every open session that has been idle for
+    /// [`Self::session_idle_timeout`] and has nothing running, then the
+    /// least-recently-active idle sessions while the registry holds more than
+    /// [`Self::max_open_sessions`]. Returns the ids it closed; `None` in either
+    /// setting turns that rule off, and both off close nothing.
+    ///
+    /// A session closed here keeps its files and its saved queued turns, and a
+    /// request that names it re-opens it ([`Self::session_for_route`]), so a
+    /// client never notices. Busy work -- a running or queued turn, a
+    /// compaction, a reflection, a waiting approval, an unfinished sub-agent
+    /// task or an undelivered notification -- keeps a session whatever its age,
+    /// so an idle sweeper never truncates real work. Pinned sessions are
+    /// skipped: a live frontend connection holds them.
+    pub(crate) async fn sweep_idle_sessions(&self) -> Vec<String> {
+        let (idle_for, max_open) = (self.session_idle_timeout, self.max_open_sessions);
+        if idle_for.is_none() && max_open.is_none() {
+            return Vec::new();
+        }
+        let now = activity_now();
+        // With no idle window nothing is ever aged; the cap alone decides.
+        let threshold = idle_for.map_or(u64::MAX, |idle_for| idle_for.as_millis() as u64);
+        // Snapshot the registry, then judge every candidate outside its lock.
+        let mut candidates: Vec<(u64, String, Arc<OpenSession>)> = self
+            .all_sessions()
+            .into_iter()
+            .filter(|session| !session.pinned())
+            .map(|session| {
+                let idle = session.idle_millis(now);
+                (idle, session.ctrl.info().session_id, session)
+            })
+            .collect();
+        // Most idle first, which is also the cap's eviction order.
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+
+        let mut remaining = candidates.len();
+        let mut victims: Vec<(u64, String, Arc<OpenSession>)> = Vec::new();
+        for (idle, id, session) in candidates {
+            let aged = idle >= threshold;
+            let over_cap = max_open.is_some_and(|max_open| remaining > max_open);
+            if !aged && !over_cap {
+                break;
+            }
+            if !self.idle_session(&session) {
+                continue;
+            }
+            victims.push((idle, id, session));
+            remaining -= 1;
+        }
+
+        let mut evicted = Vec::with_capacity(victims.len());
+        for (idle, id, session) in victims {
+            // A delete, or a request that re-opened the session while this
+            // sweep decided, already answered for this id.
+            if !self.remove_if_same(&id, &session) {
+                continue;
+            }
+            self.metrics.sessions_open(-1);
+            self.metrics.session_evicted();
+            self.remember_evicted(&id);
+            let fields = [("session_id", id.clone()), ("idle_ms", idle.to_string())];
+            self.log.info("session_evicted", &fields);
+            if let Err(error) = self.close_session(&session).await {
+                self.log.error(
+                    "session_close_error",
+                    &[("session_id", id.clone()), ("error", error)],
+                );
+            }
+            evicted.push(id);
+        }
+        evicted
+    }
+
+    /// Whether `session` has nothing to lose: no turn, compaction, reflection,
+    /// waiting approval, unfinished sub-agent task or undelivered
+    /// notification.
+    fn idle_session(&self, session: &OpenSession) -> bool {
+        {
+            let state = session.lock();
+            if state.busy() || state.waiting.is_some() {
+                return false;
+            }
+        }
+        match session.ctrl.tasks() {
+            Some(tasks) => {
+                tasks.pending() == 0 && tasks.list().iter().all(|task| task.status.final_status())
+            }
+            None => true,
+        }
+    }
+
+    /// Runs [`Self::sweep_idle_sessions`] every [`SESSION_SWEEP_INTERVAL`] with
+    /// this server's configured idle window and cap, until `cancel` is
+    /// cancelled. `otto serve` starts one per process.
+    pub fn start_session_sweeper(self: &Arc<Self>, cancel: CancellationToken) {
+        let server = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SESSION_SWEEP_INTERVAL);
+            // The first tick of a fresh interval is immediate; a server that
+            // just started has nothing to sweep.
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    _ = tick.tick() => {
+                        server.sweep_idle_sessions().await;
+                    }
+                }
+            }
+        });
     }
 
     /// A hit in the registry returns the existing session without calling
@@ -1118,6 +1432,9 @@ impl Server {
         self.log.info("turn_started", &fields);
         self.run_turn(session, &turn, Step::Wake(wake), trigger, None, None)
             .await;
+        // A wake turn that ran for longer than the idle timeout restarts the
+        // clock, so a reader can still replay it from the buffer.
+        session.touch();
         // Restored turns, then queued turns that arrived during the wake
         // turn, start now.
         self.release_restored(session);
@@ -1424,6 +1741,7 @@ impl Server {
             }
             (turn, running)
         };
+        session.touch();
         self.bump_status();
         if let Some((text, image, channel, origin, input_id)) = running {
             self.spawn_user_turn(
@@ -1460,6 +1778,7 @@ impl Server {
         };
         self.bump_status();
         if let Some(next) = next {
+            session.touch();
             self.spawn_user_turn(
                 session,
                 next.turn,
@@ -1502,6 +1821,9 @@ impl Server {
             if let (Some(input_id), Some(journal)) = (&input_id, session.ctrl.turn_queue()) {
                 journal.forget(input_id);
             }
+            // A turn that ran for longer than the idle timeout restarts the
+            // clock, so a reader can still replay it from the buffer.
+            session.touch();
             server.start_next(&session);
             // A notification that landed too late for this turn's own drain is
             // caught by the wake loop's end-of-turn check.
@@ -1530,6 +1852,32 @@ fn new_id() -> Result<String, String> {
 /// Request extension set by [`Server::socket_router`].
 #[derive(Clone, Copy)]
 struct SocketRequest;
+
+/// Re-opens a session the idle sweeper evicted before the route runs, so a
+/// client that holds a session id keeps working across an eviction. Runs inside
+/// [`instrument`], so a request still has to pass the token gate first.
+///
+/// A failure is not answered here: the route resolves the session itself and
+/// answers its own 404 (or its own error) exactly as it does for a session that
+/// was never open.
+async fn reopen_evicted_session(
+    State(server): State<Arc<Server>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if let Some(id) = session_id_in_path(request.uri().path()) {
+        let _ = server.session_for_route(id).await;
+    }
+    next.run(request).await
+}
+
+/// The session id in `/v1/sessions/{id}[...]`, when the request's path names
+/// one. Anything else -- `/v1/sessions` itself, a route that is not
+/// session-scoped, an id that is not a session id -- is left to the route.
+fn session_id_in_path(path: &str) -> Option<&str> {
+    let id = path.strip_prefix("/v1/sessions/")?.split('/').next()?;
+    crate::session::is_session_id(id).then_some(id)
+}
 
 /// Request-ID handling, token gating, structured logging and HTTP metrics.
 /// Token gating is folded in so a 401 is still logged and measured under its
@@ -2144,23 +2492,18 @@ async fn delete_session(State(server): State<Arc<Server>>, Path(id): Path<String
     let Some(session) = server.remove(&id) else {
         return not_found("session not found");
     };
-    session.cancel_work();
     // Deleting ends the session's queued turns for good.
     if let Some(journal) = session.ctrl.turn_queue() {
         journal.clear();
     }
-    let ctrl = Arc::clone(&session.ctrl);
-    let closed = tokio::task::spawn_blocking(move || ctrl.close()).await;
-    match closed {
-        Ok(Err(error)) => server.log.error(
+    // A close, not an eviction: the client asked for this session to be closed,
+    // so a later request for it must not re-open it.
+    server.forget_evicted(&id);
+    if let Err(error) = server.close_session(&session).await {
+        server.log.error(
             "session_close_error",
             &[("session_id", id.clone()), ("error", error)],
-        ),
-        Err(error) => server.log.error(
-            "session_close_error",
-            &[("session_id", id.clone()), ("error", error.to_string())],
-        ),
-        Ok(Ok(())) => {}
+        );
     }
     server.metrics.sessions_open(-1);
     Response::builder()
@@ -3394,6 +3737,13 @@ mod tests {
         schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
         /// Backs every session with a real session file instead of memory.
         persistent: bool,
+        /// `[server].session_idle_timeout` for the harness's server, as the
+        /// resolved runtime holds it. `None` (the default) never closes a
+        /// session for being idle.
+        session_idle_timeout: Option<Duration>,
+        /// `[server].max_open_sessions` for the harness's server. `None` (the
+        /// default) keeps every open session.
+        max_open_sessions: Option<usize>,
     }
 
     struct Harness {
@@ -3503,6 +3853,8 @@ mod tests {
                 )))))),
                 workflows: options.workflows,
                 schedule: options.schedule,
+                session_idle_timeout: options.session_idle_timeout,
+                max_open_sessions: options.max_open_sessions,
             });
             let router = server.router();
             Self {
@@ -3963,6 +4315,199 @@ mod tests {
         SseReader::new(response).all().await;
         let summary = harness.wait_turn_done(session, &turn_id).await;
         assert_eq!(summary["status"], turn::TURN_OK, "{summary}");
+    }
+
+    // ---- idle eviction ----
+
+    #[test]
+    fn a_session_route_names_a_session_id_and_nothing_else() {
+        let id = "0123456789abcdef0123456789abcdef";
+        assert_eq!(session_id_in_path(&format!("/v1/sessions/{id}")), Some(id));
+        assert_eq!(
+            session_id_in_path(&format!("/v1/sessions/{id}/turns/{id}/events")),
+            Some(id)
+        );
+        for path in [
+            "/v1/sessions",
+            "/v1/sessions/",
+            "/v1/sessions/missing",
+            "/v1/sessions/missing/history",
+            // Uppercase and non-hex ids are not session ids.
+            "/v1/sessions/0123456789ABCDEF0123456789ABCDEF/history",
+            "/v1/tasks/s1/with-transcript",
+            "/v1/approvals/changes?session_id=1",
+            "/healthz",
+        ] {
+            assert_eq!(session_id_in_path(path), None, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_session_is_evicted_and_its_next_request_opens_it_again() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["answer".to_string()],
+                ..Script::default()
+            },
+            persistent: true,
+            session_idle_timeout: Some(Duration::ZERO),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        complete_turn(&harness, &id, "first").await;
+        let history = harness
+            .send("GET", &format!("/v1/sessions/{id}/history"), None)
+            .await
+            .json();
+
+        // Idle for any length of time: the session closes and leaves the
+        // registry, which is what keeps a long-lived server bounded.
+        let evicted = harness.server.sweep_idle_sessions().await;
+        assert_eq!(evicted, vec![id.clone()]);
+        assert!(harness.server.lookup(&id).is_none());
+        let metrics = harness.metrics_body().await;
+        assert!(metrics.contains("otto_sessions_open 0"), "{metrics}");
+        assert!(
+            metrics.contains("otto_sessions_evicted_total 1"),
+            "{metrics}"
+        );
+
+        // The client still holds the id: the next request re-opens the session
+        // from disk and answers exactly as it did before the eviction.
+        let reply = harness
+            .send("GET", &format!("/v1/sessions/{id}/history"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert_eq!(reply.json(), history);
+        assert!(harness.server.lookup(&id).is_some());
+        let metrics = harness.metrics_body().await;
+        assert!(metrics.contains("otto_sessions_open 1"), "{metrics}");
+    }
+
+    #[tokio::test]
+    async fn an_evicted_session_keeps_accepting_turns_over_its_own_routes() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["answer".to_string()],
+                ..Script::default()
+            },
+            persistent: true,
+            session_idle_timeout: Some(Duration::ZERO),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        complete_turn(&harness, &id, "first").await;
+        assert_eq!(harness.server.sweep_idle_sessions().await, vec![id.clone()]);
+
+        complete_turn(&harness, &id, "second").await;
+        let history = harness
+            .send("GET", &format!("/v1/sessions/{id}/history"), None)
+            .await
+            .json();
+        let texts: Vec<&str> = history
+            .as_array()
+            .expect("history")
+            .iter()
+            .filter_map(|message| message["blocks"][0]["text"].as_str())
+            .collect();
+        assert_eq!(texts, ["first", "answer", "second", "answer"], "{history}");
+    }
+
+    #[tokio::test]
+    async fn a_closed_session_is_not_re_opened_by_a_later_request() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let deleted = harness
+            .send("DELETE", &format!("/v1/sessions/{id}"), None)
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+
+        // The client closed this one itself: closing it must keep winning, so
+        // eviction stays the only state a request re-opens.
+        for path in [
+            format!("/v1/sessions/{id}"),
+            format!("/v1/sessions/{id}/history"),
+        ] {
+            let reply = harness.send("GET", &path, None).await;
+            assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        assert!(harness.server.lookup(&id).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_session_with_a_running_turn_is_never_evicted() {
+        let (gate, mut options) = gated();
+        options.session_idle_timeout = Some(Duration::ZERO);
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let (_stream, _turn_id) = start_stream(&harness, &id).await;
+        harness.provider.wait_started(1).await;
+
+        assert!(harness.server.sweep_idle_sessions().await.is_empty());
+        assert!(harness.server.lookup(&id).is_some());
+        gate.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_pinned_session_is_never_evicted_until_the_holder_releases_it() {
+        let harness = Harness::with(HarnessOptions {
+            session_idle_timeout: Some(Duration::ZERO),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        assert!(harness.server.pin_session(&id));
+        assert!(harness.server.sweep_idle_sessions().await.is_empty());
+
+        harness.server.unpin_session(&id);
+        assert_eq!(harness.server.sweep_idle_sessions().await, vec![id.clone()]);
+    }
+
+    #[tokio::test]
+    async fn the_sweep_closes_the_least_recently_active_sessions_over_the_cap() {
+        const CAP: usize = 3;
+        let harness = Harness::with(HarnessOptions {
+            // Nothing is old enough to be idle, so only the cap applies.
+            session_idle_timeout: Some(Duration::from_secs(3600)),
+            max_open_sessions: Some(CAP),
+            ..HarnessOptions::default()
+        });
+        let mut ids = Vec::new();
+        for _ in 0..(CAP + 2) {
+            ids.push(harness.create().await);
+        }
+        // A request on the first session makes it the most recently active one,
+        // which the cap must leave open. The sleep separates its stamp from the
+        // creation stamps.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let touched = harness
+            .send("GET", &format!("/v1/sessions/{}", ids[0]), None)
+            .await;
+        assert_eq!(touched.status, StatusCode::OK);
+
+        let evicted = harness.server.sweep_idle_sessions().await;
+        assert_eq!(evicted.len(), 2, "{evicted:?}");
+        assert!(!evicted.contains(&ids[0]), "{evicted:?}");
+        assert_eq!(harness.server.all_sessions().len(), CAP);
+        assert_eq!(
+            harness.server.sweep_idle_sessions().await,
+            Vec::<String>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_with_no_limits_closes_nothing() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        assert!(harness.server.sweep_idle_sessions().await.is_empty());
+        assert!(harness.server.lookup(&id).is_some());
+
+        // An idle window with no cap still closes an aged session.
+        let timed = Harness::with(HarnessOptions {
+            session_idle_timeout: Some(Duration::ZERO),
+            ..HarnessOptions::default()
+        });
+        let id = timed.create().await;
+        assert_eq!(timed.server.sweep_idle_sessions().await, vec![id]);
     }
 
     #[tokio::test]

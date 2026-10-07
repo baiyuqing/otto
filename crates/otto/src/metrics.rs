@@ -109,6 +109,9 @@ struct State {
 
     sessions_open: i64,
     turns_active: i64,
+    /// Sessions the idle sweeper closed. Visible so an operator can tell an
+    /// eviction from a client closing a session, which bumps it not at all.
+    sessions_evicted_total: u64,
 
     turns_total: BTreeMap<String, u64>,
     turn_duration: Option<Histogram>,
@@ -235,6 +238,11 @@ impl Metrics {
 
     pub fn sessions_open(&self, delta: i64) {
         self.lock().sessions_open += delta;
+    }
+
+    /// One session closed by the idle sweeper.
+    pub fn session_evicted(&self) {
+        self.lock().sessions_evicted_total += 1;
     }
 
     pub fn turn_started(&self) {
@@ -405,6 +413,12 @@ impl Metrics {
             "otto_sessions_open",
             "Number of sessions currently open.",
             state.sessions_open,
+        );
+        write_counter(
+            &mut out,
+            "otto_sessions_evicted_total",
+            "Total sessions closed by the idle sweeper, which a later request re-opens.",
+            state.sessions_evicted_total,
         );
         write_session_context_gauges(&mut out, &state.session_context);
         write_counter_by_label(
@@ -1100,6 +1114,18 @@ mod tests {
         metrics.sessions_open(1);
         metrics.sessions_open(-1);
         assert_lines(&metrics.render(), &["otto_sessions_open 1"]);
+    }
+
+    #[test]
+    fn the_evicted_sessions_counter_only_grows() {
+        let metrics = Metrics::new();
+        metrics.session_evicted();
+        metrics.session_evicted();
+        metrics.sessions_open(-2);
+        assert_lines(
+            &metrics.render(),
+            &["otto_sessions_evicted_total 2", "otto_sessions_open -2"],
+        );
     }
 
     #[test]

@@ -635,6 +635,13 @@ curl -s --unix-socket ./otto.sock http://otto/metrics | grep otto_
 - Resuming a session older than the 20 most recent by ID.
 - Wiring `memory.Binding.Observe`.
 
+Landed later: idle eviction and an open-session cap. Since 2026-10-07 `otto serve`
+closes a session idle for `[server].session_idle_timeout` (default `"30m"`),
+keeps at most `[server].max_open_sessions` (default `64`) sessions open per
+process, and re-opens a session it closed on the next request that names it, so
+the closure is invisible to a client. See
+[Session lifetime](../user-manual.md#session-lifetime).
+
 ## Decisions taken
 
 - Multi-session model: one process, one workspace, N sessions each with

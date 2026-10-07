@@ -3,12 +3,14 @@
 Status: source research completed on 2026-10-07; not an implementation claim.
 
 The original records below were collected independently before the contract
-was designed. They retain source dates or versions, short excerpts, verified
-facts, unknown guarantees, and the researchers' separately labelled inferences.
+was designed. Their prose has been translated into English while retaining
+source dates or versions, short excerpts, verified facts, unknown guarantees,
+and the researchers' separately labelled inferences.
 No live memory service was called. Unknown capabilities are not treated as
 unsupported capabilities, and documentation evidence is not runtime acceptance.
-Statements such as "未写文件" describe the original Plan-mode research phase;
-the records have since been archived here without changing their findings.
+Statements such as "no files were written" describe the original Plan-mode
+research phase; the records have since been archived here without changing
+their findings.
 
 | Record | Sources | Coverage |
 | --- | --- | --- |

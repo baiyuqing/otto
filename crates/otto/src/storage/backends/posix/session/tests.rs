@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::session::archive;
@@ -27,6 +28,9 @@ use super::fsops;
 use super::list::{self, MAX_LIST_SESSIONS};
 use super::prepared::Prepared;
 use super::store::Store;
+use crate::faults::files::{FaultyFileDriver, FileOp};
+use crate::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
+use crate::storage::drivers::posix::PosixDriver;
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -192,6 +196,36 @@ fn new_store(temp: &TempDir) -> (Store, PathBuf) {
     let root = temp.join("root");
     let store = Store::create(&root, test_header(&workspace)).expect("create store");
     (store, root)
+}
+
+/// A store as `new_store` builds it, over a driver that fails every journal
+/// write from write number `from_write` on with `EIO` before writing. The
+/// header and runtime record are writes 1 and 2, so `from_write` 3 fails the
+/// first durable write after creation.
+fn store_failing_writes_from(temp: &TempDir, from_write: u32) -> (Store, Arc<FaultPlan<FileOp>>) {
+    let workspace = temp.join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    let plan = FaultPlan::new(vec![
+        Rule::new(
+            FileOp::Write,
+            Trigger::FromNth(from_write),
+            Fault::Before(FaultError::Os(libc::EIO)),
+        )
+        .filter(Filter::NameSuffix(".jsonl")),
+    ]);
+    let driver = FaultyFileDriver::new(Arc::new(PosixDriver), Arc::clone(&plan));
+    let store = Store::create_lazy_with_driver(
+        temp.join("root"),
+        test_header(&workspace),
+        Arc::new(driver),
+    )
+    .expect("create store");
+    store
+        .lock()
+        .expect("lock")
+        .ensure_file()
+        .expect("create file");
+    (store, plan)
 }
 
 fn json_lines(path: &Path) -> Vec<serde_json::Value> {
@@ -862,9 +896,8 @@ fn store_append_after_close_fails() {
 #[test]
 fn store_poisoned_after_durable_append_failure() {
     let temp = TempDir::new();
-    let (store, _) = new_store(&temp);
+    let (store, plan) = store_failing_writes_from(&temp, 4);
     store.append_message(&user("first")).expect("append");
-    store.lock().expect("lock").fail_writes = true;
 
     let error = store
         .append_message(&user("second"))
@@ -872,12 +905,12 @@ fn store_poisoned_after_durable_append_failure() {
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
     assert_eq!(store.messages().len(), 1);
 
-    store.lock().expect("lock").fail_writes = false;
     let error = store.append_message(&user("third")).expect_err("poisoned");
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
     let error = store.rename("name").expect_err("poisoned");
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
     assert_eq!(store.messages().len(), 1);
+    plan.assert_all_fired();
     store.close().expect("close");
 }
 
@@ -1292,9 +1325,8 @@ fn generic_operation_custom_uses_strict_typed_path_and_malformed_fails_closed() 
 #[test]
 fn failed_operation_fact_write_does_not_commit_candidate_ledger() {
     let temp = TempDir::new();
-    let (store, _) = new_store(&temp);
+    let (store, plan) = store_failing_writes_from(&temp, 3);
     let before = fs::read(store.path()).expect("read before");
-    store.lock().expect("lock").fail_writes = true;
     let error = store
         .append_operation_fact(OperationFact::attempt(
             operation_id("op-1"),
@@ -1306,6 +1338,7 @@ fn failed_operation_fact_write_does_not_commit_candidate_ledger() {
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
     assert!(store.operation_ledger().operations().next().is_none());
     assert_eq!(fs::read(store.path()).expect("read after"), before);
+    plan.assert_all_fired();
 }
 
 #[test]
@@ -1639,11 +1672,10 @@ fn store_append_compaction_after_close_fails() {
 #[test]
 fn store_append_compaction_durable_failure_poisons_without_advancing_context() {
     let temp = TempDir::new();
-    let (store, _) = new_store(&temp);
+    let (store, plan) = store_failing_writes_from(&temp, 4);
     store.append_message(&user("one")).expect("append");
     let anchor = message_entry_id(&store.path(), 1);
     let before = store.messages();
-    store.lock().expect("lock").fail_writes = true;
 
     let error = store
         .append_compaction(&checkpoint(&anchor))
@@ -1651,6 +1683,7 @@ fn store_append_compaction_durable_failure_poisons_without_advancing_context() {
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
     assert_eq!(store.messages(), before);
     assert!(store.latest_compaction().is_none());
+    plan.assert_all_fired();
     store.close().expect("close");
 }
 
@@ -2566,8 +2599,7 @@ fn store_append_rejects_invalid_role_context() {
 #[test]
 fn store_runtime_update_failure_poisons_further_appends() {
     let temp = TempDir::new();
-    let (store, _) = new_store(&temp);
-    store.lock().expect("lock").fail_writes = true;
+    let (store, plan) = store_failing_writes_from(&temp, 3);
     let error = store
         .update_runtime(&RuntimeMetadata {
             profile: "local".into(),
@@ -2577,9 +2609,9 @@ fn store_runtime_update_failure_poisons_further_appends() {
         .expect_err("must fail");
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
 
-    store.lock().expect("lock").fail_writes = false;
     let error = store.append_message(&user("hello")).expect_err("poisoned");
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
+    plan.assert_all_fired();
     store.close().expect("close");
 }
 

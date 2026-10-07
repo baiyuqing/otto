@@ -25,6 +25,7 @@
 //!     .await?;
 //!
 //! let session = otto.new_session(None).await?; // None: the startup workspace
+//! session.set_auto_mode(false)?;                // MANUAL: approvals reach `decide`
 //! let stop = session
 //!     .prompt(
 //!         Input::Text("fix the failing test"),
@@ -780,10 +781,13 @@ impl Session {
     }
 
     /// Runs one turn and every approval retry it needs. `emit` receives each
-    /// event in order. `decide` is called once per request for a command
-    /// outside the sandbox grants or for an approval the model asked for;
-    /// a headless host returns [`ApprovalDecision::Deny`]. A second call on
-    /// this session while a turn runs returns [`Error::PromptActive`].
+    /// event in order. In MANUAL approval mode `decide` is called once per
+    /// request for a command outside the sandbox grants or for an approval
+    /// the model asked for; a headless host returns
+    /// [`ApprovalDecision::Deny`]. In AUTO mode, the default for a new
+    /// session, those requests are approved without calling `decide`; see
+    /// [`Session::set_auto_mode`]. A second call on this session while a turn
+    /// runs returns [`Error::PromptActive`].
     pub async fn prompt<F, Fut>(
         &self,
         input: Input<'_>,
@@ -827,6 +831,19 @@ impl Session {
     /// The messages of the session so far.
     pub fn history(&self) -> Vec<Message> {
         self.controller.history()
+    }
+
+    /// Sets the approval mode of this session: `true` is AUTO, which approves
+    /// requests without calling `decide`; `false` is MANUAL. The mode is
+    /// stored in `~/.otto/approvals.db` per workspace and session, as
+    /// `/auto on|off` and ACP `_otto/approval_mode/set` store it.
+    /// [`Info::auto_mode`] reports the mode in effect.
+    pub fn set_auto_mode(&self, automatic: bool) -> Result<(), Error> {
+        let controller = &self.controller;
+        controller
+            .approval_service()
+            .set_auto_mode(&controller.approval_scope(), automatic)
+            .map_err(|e| Error::Agent(AgentError::Other(e.to_string())))
     }
 
     /// Identity, model, usage, sandbox and plan of the session.
@@ -1426,8 +1443,9 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         provider.serve(&fixture);
         let otto = builder(&fixture).build().await.unwrap();
         let session = otto.new_session(None).await.unwrap();
-        // A new session approves automatically; `decide` is consulted in MANUAL.
-        session.controller.auto_mode_command("off").unwrap();
+        assert!(session.info().auto_mode, "a new session starts in AUTO");
+        session.set_auto_mode(false).unwrap();
+        assert!(!session.info().auto_mode);
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&events);

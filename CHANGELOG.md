@@ -15,6 +15,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Build and CI
+
+- Add test-only fault injection. The `fault-injection` Cargo feature exposes
+  `otto::faults` to integration tests and no shipped build enables it;
+  `tests/faults_boundary.rs` fails if production code names it. `faults::http`
+  is one loopback HTTP server with scripted connection faults (refused, reset,
+  stall, truncated or malformed stream) and replaces the servers copied into
+  six test modules. `tests/fault_provider.rs` checks the attempt count, request
+  count and effect certainty of both providers under those faults
+  ([#402](https://github.com/baiyuqing/otto/pull/402),
+  [development guide](docs/development.md#fault-injection)).
+
 ## 0.4.1 - 2026-10-07
 
 ### Features

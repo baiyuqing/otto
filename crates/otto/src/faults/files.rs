@@ -72,7 +72,9 @@ fn run<T>(
 }
 
 fn hang(op: FileOp, subject: &str) -> ! {
-    panic!("Fault::Hang on {op:?} for {subject}: the file boundary is synchronous, so a hang cannot be ended by a deadline; this plan is a test bug")
+    panic!(
+        "Fault::Hang on {op:?} for {subject}: the file boundary is synchronous, so a hang cannot be ended by a deadline; this plan is a test bug"
+    )
 }
 
 /// A [`FileDriver`] that applies a [`FaultPlan`] to the driver it wraps.
@@ -116,7 +118,10 @@ struct FaultyRoot {
 
 impl fmt::Debug for FaultyRoot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_tuple("FaultyRoot").field(&self.name).finish()
+        formatter
+            .debug_tuple("FaultyRoot")
+            .field(&self.name)
+            .finish()
     }
 }
 

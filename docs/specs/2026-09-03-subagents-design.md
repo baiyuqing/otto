@@ -4,9 +4,13 @@ Status: draft, 2026-09-03, pending approval; historical and superseded for the
 current sub-agent API. It is retained for rationale. The proposal includes
 aspirational APIs; only the tool surface and behavior verified in the current
 [`crates/otto/src/subagent`](../../crates/otto/src/subagent) implementation and the
-[README](../../README.md#delegate-work-to-sub-agents) are current. In
-particular, `agent_send`, `agent_cancel`, and `agent_report` remain proposal
-items, not implemented features. Also consult the
+[README](../../README.md#delegate-work-to-sub-agents) are current. The tool
+surface described under "The parent's tools" and "Tools available to the
+child", including `agent_send`, `agent_cancel` and `agent_report`, is
+implemented; the Go package layout below and every item marked "Not scheduled"
+are not. `agent_cancel` takes `task_id`, cancels the task's own token, and lets
+the child stop at its next checkpoint without detaching an effectful call. Also
+consult the
 [2026-09-05 architecture contracts](2026-09-05-architecture-contracts.md)
 for current ownership rules.
 
@@ -149,10 +153,13 @@ Pushes `[message from parent]\n<message>` into the child's inbox. The child
 drains it before its next provider request. Error result when the task is not
 queued or running.
 
-### `agent_cancel` (Phase C)
+### `agent_cancel` (implemented)
 
 Parameters: `task_id`. Cancels the child's context. The task ends as
-`canceled` and produces the usual notification.
+`canceled` and produces the usual notification. Cancellation is cooperative:
+a queued task is released before it starts, and a running one stops at its
+next checkpoint. The same registry call serves `/task cancel`,
+`POST /v1/sessions/{id}/tasks/{task_id}/cancel`, and ACP.
 
 ## Tools available to the child
 

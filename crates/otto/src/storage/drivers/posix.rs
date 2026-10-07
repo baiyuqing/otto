@@ -16,7 +16,7 @@
 use std::ffi::CString;
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -29,6 +29,12 @@ impl Dir {
     /// The raw descriptor. Valid for the lifetime of this `Dir`.
     pub fn fd(&self) -> RawFd {
         self.0
+    }
+}
+
+impl From<OwnedFd> for Dir {
+    fn from(fd: OwnedFd) -> Self {
+        Self(fd.into_raw_fd())
     }
 }
 
@@ -258,6 +264,7 @@ pub fn rename_at(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
 
 /// Publish a staged directory inside one pinned root. Creation is exclusive;
 /// replacement exchanges both names atomically, leaving the old tree at `from`.
+/// Exclusive creation also works for a file.
 /// No fallback to a non-atomic sequence on unsupported filesystems.
 pub fn publish_directory(dir: &Dir, from: &str, to: &str, replace: bool) -> io::Result<()> {
     let (from, to) = (c_name(from)?, c_name(to)?);
@@ -285,6 +292,16 @@ pub fn publish_directory(dir: &Dir, from: &str, to: &str, replace: bool) -> io::
         )
     };
     if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `fsync` on a pinned directory, which makes the names created, renamed or
+/// removed in it durable.
+pub fn sync_dir(dir: &Dir) -> io::Result<()> {
+    // SAFETY: the pinned directory descriptor remains live through fsync.
+    if unsafe { libc::fsync(dir.fd()) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -484,11 +501,7 @@ impl crate::storage::files::FileRoot for Dir {
         unlink_at(self, name)
     }
     fn sync_all(&self) -> io::Result<()> {
-        // SAFETY: the pinned directory descriptor remains live through fsync.
-        if unsafe { libc::fsync(self.fd()) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        sync_dir(self)
     }
 }
 

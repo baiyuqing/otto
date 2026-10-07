@@ -5,12 +5,14 @@
 //! for context overflow. Both are attempted at most once per turn.
 //!
 //! Ownership: [`RunDispatchState`] lives for one `Agent::run` call and is
-//! dropped with it, so the tool-result overlay never outlives the turn.
+//! dropped with it, so the tool-result overlay never outlives the turn, and the
+//! per-turn [`ProgressGuard`] starts every turn with no history.
 
 use std::collections::HashMap;
 
 use crate::provider::ProviderError;
 
+use super::progress::ProgressGuard;
 use super::{AgentError, CompactionSettings};
 
 /// Proactive compaction failed, but the request still fits under the hard
@@ -45,6 +47,9 @@ pub struct RunDispatchState {
     /// whose stored text is a placeholder. It is substituted into provider
     /// requests only, never into the session.
     pub tool_result_overlay: HashMap<String, String>,
+    /// The limits that stop a turn making no progress. The turn loop replaces
+    /// the default with the one this run's [`super::Options`] configured.
+    pub progress: ProgressGuard,
 }
 
 /// Builds the error an automatic dispatch path gives up with, dropping causes

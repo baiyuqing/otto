@@ -13,7 +13,7 @@ The [repository rules](../AGENTS.md) apply.
   design becomes implementation.
 - Keep notable changes in the root changelog using
   [the changelog rules](development.md#changelog).
-- Do not describe `agent_cancel`, `Binding.Observe`, memory
+- Do not describe `Binding.Observe`, memory
   backup/restore/verify or `allowed-tools` enforcement as working features.
 - Documentation-only edits need no new tests. Check links, paths, examples
   and Markdown layout, and keep any behavioral descriptions aligned with

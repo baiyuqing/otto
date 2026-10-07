@@ -6,7 +6,6 @@
 //! and the destination is never resolved outside the workspace. An existing
 //! file's permission bits are preserved; a new file gets `0644`.
 
-use std::io::Write;
 use std::path::Path;
 
 use otto_core::model::ToolDefinition;
@@ -16,7 +15,6 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
-use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 
 use super::gopath::{bytes, dir, path_from};
@@ -24,6 +22,7 @@ use super::result::decode_strict_json;
 use super::root::is_dir;
 use super::workspace::Workspace;
 use super::{Tool, definition, error_result, preflight_error, text_result};
+use crate::fsops::{PosixPublish, Publish, PublishMode, PublishOps, publish_file};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,29 +36,20 @@ struct WriteArgs {
 /// Writes a workspace file.
 pub struct WriteTool<'a> {
     workspace: &'a Workspace,
-    sync_directory: DirectorySync,
-}
-
-pub(crate) type DirectorySync = fn(&std::fs::File) -> std::io::Result<()>;
-
-pub(crate) fn sync_directory(directory: &std::fs::File) -> std::io::Result<()> {
-    directory.sync_all()
+    publish: &'a dyn PublishOps,
 }
 
 impl<'a> WriteTool<'a> {
     pub fn new(workspace: &'a Workspace) -> Self {
         Self {
             workspace,
-            sync_directory,
+            publish: &PosixPublish,
         }
     }
 
     #[cfg(test)]
-    fn with_directory_sync(workspace: &'a Workspace, sync_directory: DirectorySync) -> Self {
-        Self {
-            workspace,
-            sync_directory,
-        }
+    fn with_publish_ops(workspace: &'a Workspace, publish: &'a dyn PublishOps) -> Self {
+        Self { workspace, publish }
     }
 }
 
@@ -109,7 +99,7 @@ impl Tool for WriteTool<'_> {
             self.workspace,
             &relative,
             args.content.as_bytes(),
-            self.sync_directory,
+            self.publish,
         ) {
             return error.into_tool_result();
         }
@@ -127,7 +117,7 @@ pub(crate) fn write_file_atomic(
     workspace: &Workspace,
     path: &Path,
     content: &[u8],
-    sync_directory: DirectorySync,
+    publish: &dyn PublishOps,
 ) -> Result<(), AtomicWriteError> {
     let before_rename = |error: String| AtomicWriteError::BeforeRename(error);
     let root = workspace.root_fs();
@@ -150,45 +140,40 @@ pub(crate) fn write_file_atomic(
         Err(error) => return Err(before_rename(error.to_string())),
     }
 
-    let (temporary_path, mut temporary) =
-        create_workspace_temp(workspace, &directory, mode).map_err(before_rename)?;
-    let result = (|| -> std::io::Result<()> {
-        temporary.set_permissions(std::fs::Permissions::from_mode(mode))?;
-        temporary.write_all(content)?;
-        temporary.sync_all()?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        drop(temporary);
-        let _ = root.remove(&temporary_path);
-        return Err(before_rename(error.to_string()));
-    }
-    drop(temporary);
     let refuse_git = |resolved: &[std::ffi::OsString]| {
         super::workspace::refuse_git_read_only(resolved.iter().map(|part| part.as_os_str()), path)
     };
-    if let Err(error) = root.rename(&temporary_path, path, &refuse_git) {
-        let _ = root.remove(&temporary_path);
-        return Err(before_rename(error.to_string()));
-    }
-    // The rename is durable only once the directory entry itself is on stable
-    // storage: `fsync` on the temporary file covers the file's data and
-    // metadata but not the directory that now points the destination name at
-    // it. Without this, a host crash after a reported success can revert the
-    // rename and bring back the old file content or make the file disappear.
-    if let Err(error) = root
-        .open_file(
-            &directory,
-            OFlag::O_RDONLY | OFlag::O_DIRECTORY,
-            Mode::empty(),
-        )
-        .and_then(|directory_handle| sync_directory(&directory_handle))
-    {
-        return Err(AtomicWriteError::AfterRename(format!(
-            "file replaced but directory sync failed: {error}"
-        )));
-    }
-    Ok(())
+    let (parent, name) = root
+        .open_parent(path, &refuse_git)
+        .map_err(|error| before_rename(error.to_string()))?;
+    let suffix =
+        crate::auth::random_hex::<8>().map_err(|error| before_rename(error.to_string()))?;
+    let temp = format!(".otto-{suffix}");
+    // The publish fsyncs the directory after the rename: `fsync` on the
+    // temporary file covers the file's data and metadata but not the
+    // directory entry that now points the destination name at it. Without
+    // it, a host crash after a reported success can revert the rename.
+    publish_file(
+        &parent,
+        &Publish {
+            name: &name,
+            temp: &temp,
+            permissions: mode,
+            mode: PublishMode::Replace,
+        },
+        content,
+        publish,
+    )
+    .map_err(|error| {
+        if error.committed {
+            AtomicWriteError::AfterRename(format!(
+                "file replaced but directory sync failed: {}",
+                error.source
+            ))
+        } else {
+            before_rename(error.source.to_string())
+        }
+    })
 }
 
 /// A failed atomic write distinguishes failures after the destination rename,
@@ -208,51 +193,22 @@ impl AtomicWriteError {
     }
 }
 
-use std::os::unix::fs::PermissionsExt;
-
-/// Creates an exclusive temporary file in `directory`. The name uses eight
-/// bytes from the system random source so a hostile workspace cannot predict
-/// and pre-create it.
-fn create_workspace_temp(
-    workspace: &Workspace,
-    directory: &Path,
-    mode: u32,
-) -> Result<(std::path::PathBuf, std::fs::File), String> {
-    for _ in 0..100 {
-        let suffix = random_suffix().map_err(|error| error.to_string())?;
-        let name = path_from(super::gopath::join(&[
-            bytes(directory),
-            format!(".otto-{suffix}").as_bytes(),
-        ]));
-        match workspace.root_fs().open_file(
-            &name,
-            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL,
-            Mode::from_bits_truncate(mode as nix::sys::stat::mode_t),
-        ) {
-            Ok(file) => return Ok((name, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Err("could not create temporary file".to_owned())
-}
-
-fn random_suffix() -> std::io::Result<String> {
-    use std::io::Read;
-    let mut bytes = [0u8; 8];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::faults::publish::FaultyPublishOps;
+    use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
+    use crate::fsops::PublishStep;
     use crate::tool::testutil::{run, workspace};
     use otto_core::model::{EffectCertainty, OperationDisposition};
     use std::os::unix::fs::PermissionsExt;
 
-    fn fail_directory_sync(_directory: &std::fs::File) -> std::io::Result<()> {
-        Err(std::io::Error::other("injected directory sync failure"))
+    fn publish_fault(step: PublishStep) -> std::sync::Arc<FaultPlan<PublishStep>> {
+        FaultPlan::new(vec![Rule::new(
+            step,
+            Trigger::Always,
+            Fault::Before(FaultError::Os(libc::EIO)),
+        )])
     }
 
     #[tokio::test]
@@ -307,7 +263,7 @@ mod tests {
             "g/hoo\u{212A}s/pre-commit",
             "g/hook\u{17F}/pre-commit",
         ] {
-            let error = write_file_atomic(&workspace, Path::new(path), b"new", sync_directory)
+            let error = write_file_atomic(&workspace, Path::new(path), b"new", &PosixPublish)
                 .expect_err(path);
             assert!(
                 matches!(&error, AtomicWriteError::BeforeRename(message) if message.contains("read-only")),
@@ -373,9 +329,12 @@ mod tests {
         let path = root.path().join("file.txt");
         std::fs::write(&path, "before").unwrap();
         let workspace = workspace(root.path());
-        let tool = WriteTool::with_directory_sync(&workspace, fail_directory_sync);
+        let plan = publish_fault(PublishStep::DirSync);
+        let ops = FaultyPublishOps::new(plan.clone());
+        let tool = WriteTool::with_publish_ops(&workspace, &ops);
 
         let result = run(&tool, r#"{"path":"file.txt","content":"after"}"#).await;
+        plan.assert_all_fired();
 
         assert!(result.is_error, "{result:?}");
         let outcome = result
@@ -384,6 +343,31 @@ mod tests {
         assert_eq!(outcome.disposition, OperationDisposition::Error);
         assert_eq!(outcome.effect_certainty, EffectCertainty::Unknown);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "after");
+    }
+
+    #[tokio::test]
+    async fn rename_failure_keeps_the_file_and_leaves_no_temporary_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file.txt");
+        std::fs::write(&path, "before").unwrap();
+        let workspace = workspace(root.path());
+        let plan = publish_fault(PublishStep::Rename);
+        let ops = FaultyPublishOps::new(plan.clone());
+        let tool = WriteTool::with_publish_ops(&workspace, &ops);
+
+        let result = run(&tool, r#"{"path":"file.txt","content":"after"}"#).await;
+
+        plan.assert_all_fired();
+        assert!(result.is_error, "{result:?}");
+        // A plain error result: only a post-rename failure overrides the
+        // outcome to `Unknown`.
+        assert!(result.outcome_override.is_none(), "{result:?}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "before");
+        let names: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["file.txt"]);
     }
 
     #[tokio::test]

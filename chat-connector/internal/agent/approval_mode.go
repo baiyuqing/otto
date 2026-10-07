@@ -3,16 +3,20 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 )
 
 // ApprovalMode uses Otto's session policy API, including during an active turn.
-func (a *Agent) ApprovalMode(ctx context.Context, sid string, automatic *bool) (bool, error) {
+// It returns the session's mode name: "manual", "auto" or "yolo". `automatic`
+// selects MANUAL or AUTO when it is not nil; YOLO is a mode name and has no
+// boolean form, so a chat shortcut never selects it.
+func (a *Agent) ApprovalMode(ctx context.Context, sid string, automatic *bool) (string, error) {
 	p, err := a.process(ctx)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if err := a.Load(ctx, sid); err != nil {
-		return false, err
+		return "", err
 	}
 	method := "_otto/approval_mode/get"
 	input := map[string]any{"sessionId": sid}
@@ -22,13 +26,28 @@ func (a *Agent) ApprovalMode(ctx context.Context, sid string, automatic *bool) (
 	}
 	raw, err := p.conn.CallExtension(ctx, method, input)
 	if err != nil {
-		return false, p.wrap(err)
+		return "", p.wrap(err)
 	}
 	var mode struct {
-		Automatic bool `json:"automatic"`
+		Automatic bool   `json:"automatic"`
+		Mode      string `json:"mode"`
 	}
-	err = json.Unmarshal(raw, &mode)
-	return mode.Automatic, err
+	if err := json.Unmarshal(raw, &mode); err != nil {
+		return "", err
+	}
+	// An agent older than the mode field reports only the boolean.
+	if mode.Mode == "" {
+		if mode.Automatic {
+			return "auto", nil
+		}
+		return "manual", nil
+	}
+	return mode.Mode, nil
+}
+
+// ApprovalModeLabel is the frontend name of a mode name.
+func ApprovalModeLabel(mode string) string {
+	return strings.ToUpper(mode)
 }
 
 type ApprovalChange struct {

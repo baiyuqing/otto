@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 )
 
 // ModePlatform presents session-bound shortcuts. The bridge still admits the
 // sender and checks the binding when a shortcut is used. A non-empty message ID
-// updates the clicked mode card instead of posting another one.
+// updates the clicked mode card instead of posting another one. `mode` is the
+// exact session policy ("manual", "auto" or "yolo"); the shortcuts stay
+// AUTO/MANUAL, so a chat participant cannot select YOLO from a button.
 type ModePlatform interface {
-	SendApprovalMode(ctx context.Context, chatID, messageID, session string, automatic bool) error
+	SendApprovalMode(ctx context.Context, chatID, messageID, session, mode string) error
 }
 
 func (c *chat) cmdAuto(m Message, arg string) {
@@ -57,10 +61,11 @@ func (c *chat) cmdAuto(m Message, arg string) {
 				return
 			}
 		}
-		name := "MANUAL"
-		if mode {
-			name = "AUTO"
+		name := agent.ApprovalModeLabel(mode)
+		note := "/auto on · /auto off"
+		if mode == "yolo" {
+			note = "This session approves every request without asking. /auto off requires manual approval again."
 		}
-		c.send(ctx, m.MessageID, fmt.Sprintf("Approval mode: %s\nSession: %s\n/auto on · /auto off", name, sid))
+		c.send(ctx, m.MessageID, fmt.Sprintf("Approval mode: %s\nSession: %s\n%s", name, sid, note))
 	}()
 }

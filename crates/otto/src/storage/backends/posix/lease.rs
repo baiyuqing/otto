@@ -1812,7 +1812,7 @@ mod tests {
             "expected TakenOver, got {acquired:?}"
         );
         assert_eq!(
-            std::fs::read(&session_path).unwrap(),
+            std::fs::read(&session_path).expect("the next acquire restores the log"),
             b"{\"a\":1}\n",
             "the log is restored from the earlier fenced copy, complete lines only"
         );

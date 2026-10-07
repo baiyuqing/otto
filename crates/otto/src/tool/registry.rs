@@ -113,6 +113,7 @@ impl Registry {
                 let version = spec.version.clone();
                 let request = match service.create(crate::approval::Proposal {
                     kind: crate::approval::Kind::Authorization,
+                    authority: spec.authority,
                     scope: scope.clone(),
                     subject: crate::approval::Subject {
                         tool_call_id: call.tool_call_id.into(),
@@ -380,6 +381,7 @@ mod tests {
                 }
                 .into(),
                 source: "test".into(),
+                authority: crate::approval::Authority::Bounded,
                 title: "Approve?".into(),
                 reason: "test".into(),
                 details: if self.change_on_second_call && call > 0 {

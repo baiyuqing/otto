@@ -15,7 +15,26 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Usage and compatibility
+
+- Session **AUTO** approval now decides only a *bounded authorization*: an
+  operation that stays inside the sandbox and the workspace and grants nothing
+  durable. A plan review (`request_approval`), an unsandboxed command, a
+  cross-workspace delivery task, an external MCP tool call, a persistent
+  sandbox read grant and a scheduled `prompt` item now always wait for the
+  user in either mode instead of being approved automatically in AUTO. A
+  request AUTO cannot decide is presented exactly as in MANUAL, and its
+  recorded `pending` event is unchanged. See the
+  [authority boundary contract](docs/specs/2026-10-07-auto-mode-authority-boundaries.md)
+  and the [user manual](docs/user-manual.md#unified-approvals)
+  ([#401](https://github.com/baiyuqing/otto/pull/401)).
+
 ### Fixes
+
+- The session AUTO policy no longer approves a request raised by the model on
+  its own behalf: a plan or approach review is a human judgement, and letting
+  the asking session answer it made the requesting model the approving party
+  ([#401](https://github.com/baiyuqing/otto/pull/401)).
 
 - A memory write whose commit fails with an error other than busy now
   reports "memory commit outcome is unknown" and closes the memory database
@@ -24,6 +43,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
   requires. Before, the write issued `COMMIT` as a raw statement, so the
   failure was reported as an ordinary error and later writes kept using the
   connection ([#403](https://github.com/baiyuqing/otto/pull/403)).
+
+### Security
+
+- A request outside the sandbox boundary, a durable grant and a plan review
+  cannot be approved by the session policy. The rule is enforced in the
+  approval service and rechecked inside the committing transaction, and a
+  request persisted without a declared authority class is treated as a user
+  decision ([#401](https://github.com/baiyuqing/otto/pull/401)).
 
 ### Build and CI
 

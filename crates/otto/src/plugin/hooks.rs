@@ -528,6 +528,7 @@ impl crate::tool::Tool for CommandTool {
             .map_err(|e| otto_core::tool::ToolResult::error(e).not_started())?;
         Ok(Some(crate::tool::ApprovalSpec {
             source: "plugin".into(),
+            authority: crate::approval::Authority::Bounded,
             version: self.package.installed.digest.clone(),
             title: format!("Run {}", self.definition().name),
             details:

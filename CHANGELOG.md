@@ -17,6 +17,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Otto's default system prompt now asks the model to structure and restate new
+  action requests, resolve material ambiguity and wait for user confirmation
+  before changing files or causing external side effects. Simple questions stay
+  direct, confirmed scope does not need repeated confirmation, and an existing
+  mandatory review can serve as that confirmation. This is prompt guidance;
+  tool permissions still apply. See the
+  [user manual](docs/user-manual.md#unified-approvals).
+
 - **A turn can now end by itself when it makes no progress.** A turn whose
   model repeats the same tool call, with the same arguments, 8 times in a row,
   or whose tool results fail 12 times in a row, ends with the error

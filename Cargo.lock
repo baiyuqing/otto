@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "otto"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "otto-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

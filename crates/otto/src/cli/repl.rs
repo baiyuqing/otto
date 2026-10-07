@@ -1119,6 +1119,20 @@ fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -
         Event::CompactionCompleted { compaction } => {
             let _ = write!(stdout, "{}", compaction_line(compaction));
         }
+        Event::ProviderRetry {
+            attempt,
+            max_attempts,
+            delay,
+            reason,
+            ..
+        } => {
+            let _ = writeln!(
+                stderr,
+                "[provider retry] attempt {attempt}/{max_attempts} in {}ms: {}",
+                delay.as_millis(),
+                first_line(reason)
+            );
+        }
         Event::CompactionWarning { message } | Event::MemoryWarning { message } => {
             let _ = writeln!(stderr, "{message}");
         }
@@ -2179,6 +2193,31 @@ Justification: \"push branch\"\n"
             "[tool warning] Outcome unknown — check effects before retrying (operation op_test): connection lost\n"
         );
         assert_eq!(stderr.text(), "");
+    }
+
+    #[test]
+    fn provider_retry_renders_progress_without_suppressing_a_terminal_error() {
+        let mut stdout = Buffer::default();
+        let mut stderr = Buffer::default();
+
+        let rendered_error = render_event(
+            &mut stdout,
+            &mut stderr,
+            &Event::ProviderRetry {
+                operation_id: operation_id(),
+                attempt: 2,
+                max_attempts: 4,
+                delay: std::time::Duration::from_millis(1_250),
+                reason: "HTTP 503\nresponse body omitted".to_string(),
+            },
+        );
+
+        assert!(!rendered_error);
+        assert_eq!(stdout.text(), "");
+        assert_eq!(
+            stderr.text(),
+            "[provider retry] attempt 2/4 in 1250ms: HTTP 503\n"
+        );
     }
 
     #[test]

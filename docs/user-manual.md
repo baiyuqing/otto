@@ -599,6 +599,8 @@ paths = ["~/.otto/skills", ".otto/skills"]
 socket = "~/.otto/otto.sock"
 # listen = "127.0.0.1:8787"  # loopback TCP instead of the socket
 # workspace_roots = ["~/Work"]  # directories another workspace may load from
+# session_idle_timeout = "30m"  # close a session this long after its last use
+# max_open_sessions = 64  # keep at most this many sessions open
 
 # Written by `otto trust <dir>`; one table per trusted directory.
 # [projects."/Users/me/src/app"]
@@ -728,6 +730,14 @@ external side effect did not occur.
   load another workspace besides the startup one (see
   [Workspaces](#workspaces)). Default empty: only the startup workspace is
   admitted. TOML-only, no CLI flag or environment variable.
+- `[server].session_idle_timeout` is how long `otto serve` keeps a session
+  that has nothing running, as a duration (`"30m"`, `"2h"`); the default is
+  `"30m"`, and `"0"` keeps idle sessions open until a client closes them.
+  `[server].max_open_sessions` is how many sessions one process keeps open,
+  closing the least recently used idle ones above it; the default is `64`, and
+  `0` keeps every session open. Both take effect without a restart and are on
+  by default; see [Session lifetime](#session-lifetime). TOML-only, no CLI flag
+  or environment variable.
 - `[projects."<path>"]` records a trusted directory: `otto serve` admits it
   and its descendants as workspaces (see [Workspaces](#workspaces)).
   `trust_level` is required and `"trusted"` is its only accepted value; any
@@ -2464,9 +2474,9 @@ are served at the root. Request and error bodies are JSON.
 | `POST /v1/sessions` | Create a session (`{}`, optionally `"workspace":"<path>"`, default the startup workspace) or open one by id (`{"resume":"<id>"}`, 32 lowercase hexadecimal characters, looked up in `workspace` if given, else every loaded workspace, including sessions older than the newest 20 listed). `201` for a new session, `200` for an existing one, including one already open in this process. Returns the session object. |
 | `GET /v1/status` | `text/event-stream` of `event: status` snapshots of every session open in this process, in every loaded workspace: `{"sessions":[{"id","workspace","turn","turn_id","queued","approvals","tasks"}...]}`, sorted by workspace, then id. `turn` is `running`, the last finished turn's `ok`, `error`, or `canceled`, or `null` before the first turn; `turn_id` is the running turn's id, else the newest turn's; `queued` counts queued turns; `approvals` counts Bash approvals waiting for a decision; `tasks` counts queued or running sub-agent tasks. The current snapshot is sent on connect and again whenever it changes; there is no replay. The stream ends when the server shuts down. |
 | `GET /v1/sessions?workspace=<path>` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`, with `last_user_text` (at most 80 characters) and `modified` (RFC 3339). Without `workspace`, every loaded workspace; with it, that workspace only. |
-| `GET /v1/sessions/{id}` | Return one open session's info. `404` if the session is not open. |
+| `GET /v1/sessions/{id}` | Return one session's info, re-opening it first when the server closed it for being idle (see [Session lifetime](#session-lifetime)). `404` if the session does not exist, or was closed by `DELETE`. |
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
-| `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
+| `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. The session is not re-opened by later requests; see [Session lifetime](#session-lifetime). |
 | `GET /v1/sessions/{id}/fork-points` | `{"fork_points":[{"entry_id","prompt"}]}`: the user prompts that start a turn, oldest first. Empty for a session with no file yet. |
 | `POST /v1/sessions/{id}/fork` | Write a new session from this session's history before the turn that `{"before":"<entry_id>"}` starts, open it, and return it, `201`, with `prompt` (the text of that message) and `forked_from`. Without `before`, the copy keeps everything up to the last finished turn. The source session is not changed, and a running turn on it is left out. `409 invalid_fork_point` when `before` is not a fork point or the session has no history yet. |
 | `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
@@ -2520,6 +2530,36 @@ are served at the root. Request and error bodies are JSON.
 
 A turn keeps running after its client disconnects; `POST .../cancel` is the
 only way to stop it.
+
+### Session lifetime
+
+The server keeps only the sessions in play. A session with no request, turn
+start, or turn end for `[server].session_idle_timeout` (default `"30m"`) is
+closed, and when more than `[server].max_open_sessions` (default `64`) sessions
+are open the least recently used ones are closed first; the sweep runs once a
+minute. A setting of `"0"`, or `0` for the cap, turns that rule off. Both are on
+by default and need no restart to change. Busy sessions are never closed,
+whatever their age or the count: a running or queued turn, a compaction, a
+reflection, a waiting approval, an unfinished sub-agent task, or an undelivered
+notification keeps a session open. A live ACP connection (`--acp-listen`, or the
+Web UI's own connection) pins the sessions it opened, so those stay open until
+it ends.
+
+Closing a session this way is invisible to a client. The session keeps its file,
+its history, and its saved queued turns, and the next request that names it —
+`GET /v1/sessions/{id}/history`, `POST /v1/sessions/{id}/turns`, any other
+session route — re-opens it from disk and answers as before. The one thing an
+eviction drops is the in-memory event buffer of the session's most recent turn,
+so `GET /v1/sessions/{id}/turns/{turn_id}/events` for that turn answers `404`
+afterwards, exactly as it already does for an older turn. A session older than
+the last 1024 evictions is treated as one that was never opened: it answers
+`404` until a client opens it with `POST /v1/sessions` and `{"resume":"<id>"}`.
+`GET /v1/sessions` still lists a closed session with `"open": false`, and
+`/healthz` counts only the open ones.
+
+`DELETE /v1/sessions/{id}` is not an eviction: it closes the session for good,
+and no later request re-opens it. Use `POST /v1/sessions` with
+`{"resume":"<id>"}` to open it again.
 
 ### Session object
 
@@ -2635,7 +2675,8 @@ backend is involved.
 `otto_http_request_duration_seconds{route}`,
 `otto_provider_api_requests_total{provider,model,status}`,
 `otto_provider_api_request_duration_seconds{provider,model}`,
-`otto_sessions_open`, `otto_session_context_window_tokens{session_id,provider,model}`,
+`otto_sessions_open`, `otto_sessions_evicted_total`,
+`otto_session_context_window_tokens{session_id,provider,model}`,
 `otto_session_context_input_tokens{session_id,provider,model}`,
 `otto_session_context_input_tokens_pending{session_id,provider,model}`,
 `otto_turns_total{status}`, `otto_turns_active`, `otto_turn_duration_seconds`,
@@ -3524,6 +3565,7 @@ files accordingly.
 | Event | Fields |
 | --- | --- |
 | `http_request` | `method`, `route`, `status`, `duration_ms`, `request_id` |
+| `session_evicted` | `session_id`, `idle_ms` |
 | `turn_started` | `session_id`, `turn_id`, `trigger`, `request_id`, `inbox_kind` on wake turns |
 | `provider_request_finished` | `session_id`, `turn_id`, `request_id`, `provider`, `model`, `status`, `attempts`, `duration_ms` |
 | `tool_call_finished` | `session_id`, `turn_id`, `request_id`, `tool`, `status`, `duration_ms` |

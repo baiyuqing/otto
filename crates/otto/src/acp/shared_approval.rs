@@ -179,22 +179,31 @@ impl Connection {
 
 impl Connection {
     pub(super) async fn approval_mode(&self, method: &str, params: Value) -> Reply {
+        use crate::approval::ApprovalMode;
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Input {
             session_id: String,
             automatic: Option<bool>,
+            mode: Option<ApprovalMode>,
         }
         let input: Input = serde_json::from_value(params)
             .map_err(|_| invalid_params("invalid approval mode request"))?;
-        let automatic = if method.ends_with("/set") {
-            Some(
-                input
-                    .automatic
-                    .ok_or_else(|| invalid_params("automatic boolean is required"))?,
-            )
+        // `mode` is the mode form; `automatic` keeps its meaning of MANUAL or
+        // AUTO. Both may be sent only when they agree.
+        let selected = match (input.mode, input.automatic) {
+            (Some(mode), Some(automatic)) if mode.is_automatic() != automatic => {
+                return Err(invalid_params("automatic contradicts mode"));
+            }
+            (Some(mode), _) => Some(mode),
+            (None, Some(true)) => Some(ApprovalMode::Auto),
+            (None, Some(false)) => Some(ApprovalMode::Manual),
+            (None, None) => None,
+        };
+        let selected = if method.ends_with("/set") {
+            Some(selected.ok_or_else(|| invalid_params("mode or automatic is required"))?)
         } else {
-            if input.automatic.is_some() {
+            if selected.is_some() {
                 return Err(invalid_params("get takes only sessionId"));
             }
             None
@@ -205,21 +214,21 @@ impl Connection {
                     .session(&input.session_id)
                     .ok_or_else(unknown_session)?;
                 let ctrl = &session.controller;
-                if let Some(automatic) = automatic {
+                if let Some(mode) = selected {
                     ctrl.approval_service()
-                        .set_auto_mode(&ctrl.approval_scope(), automatic)
+                        .set_mode(&ctrl.approval_scope(), mode)
                         .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?;
                 }
                 ctrl.approval_service()
-                    .auto_mode(&ctrl.approval_scope())
+                    .mode(&ctrl.approval_scope())
                     .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?
             }
             Backend::Attach(relay) => relay
                 .client
-                .approval_mode(&input.session_id, automatic)
+                .approval_mode(&input.session_id, selected)
                 .await
                 .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?,
         };
-        result(json!({"automatic":mode}))
+        result(json!({"automatic":mode.is_automatic(),"mode":mode.as_str()}))
     }
 }

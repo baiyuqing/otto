@@ -691,7 +691,7 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
     definition(
         "bash",
         &describe(
-            "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. Only the user can grant either request through the approval dialog/card or /approve; the command does not run until approval.",
+            "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. The approval is the user's decision, made in the approval dialog/card, by /approve, or by the session approval mode (AUTO for a bounded authorization, YOLO for any request); the command does not run until approval.",
             private_home,
         ),
         json!({
@@ -908,7 +908,7 @@ Command: {command}\n\
 Justification: {justification}\n\
 Read path: {path}\n\
 Approval saves the path to read_paths and reloads the sandbox. The command did not run. \
-Only the user can approve; do not run /approve in a shell. After approval retry this exact Bash call inside the sandbox."
+Only the user or their session approval mode can approve; do not run /approve in a shell. After approval retry this exact Bash call inside the sandbox."
                 ));
             }
         }
@@ -939,7 +939,7 @@ Only the user can approve; do not run /approve in a shell. After approval retry 
 Approve in Otto: /approve {id}\n\
 Command: {command}\n\
 Justification: {justification}\n\
-The command did not run. Only the user can approve it in Otto; do not run \
+The command did not run. Only the user or their session approval mode can approve it in Otto; do not run \
 /approve in a shell. Ask the user to review the command above, then retry \
 this exact elevated Bash command after approval."
                     ));
@@ -1309,7 +1309,7 @@ The command did not run.";
 Approve in Otto: /approve approval-1\n\
 Command: \"git push\"\n\
 Justification: \"push the reviewed branch\"\n\
-The command did not run. Only the user can approve it in Otto; do not run /approve in a shell. Ask the user to review the command above, then retry this exact elevated Bash command after approval."
+The command did not run. Only the user or their session approval mode can approve it in Otto; do not run /approve in a shell. Ask the user to review the command above, then retry this exact elevated Bash command after approval."
         );
         assert_eq!(confined.calls(), 0);
         assert_eq!(elevated.calls(), 0);
@@ -1328,7 +1328,7 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
 Approve in Otto: /approve approval-3\n\
 Command: \"git push\"\n\
 Justification: \"push the reviewed branch\"\n\
-The command did not run. Only the user can approve it in Otto; do not run /approve in a shell. Ask the user to review the command above, then retry this exact elevated Bash command after approval."
+The command did not run. Only the user or their session approval mode can approve it in Otto; do not run /approve in a shell. Ask the user to review the command above, then retry this exact elevated Bash command after approval."
         );
         approvals
             .approve("session-1", "approval-3")

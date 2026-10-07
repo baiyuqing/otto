@@ -544,6 +544,16 @@ async fn cancellation_discards_undelivered_steering() {
             .iter()
             .any(|message| message.text() == "do not leak")
     );
+    // A cancelled turn never delivers the guidance it accepted, so the loss is
+    // handed to the frontend instead of disappearing.
+    let reported = steering.take_discarded();
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert_eq!(reported[0].text, "do not leak");
+    assert_eq!(reported[0].status, super::steering::Status::Discarded);
+    assert!(
+        steering.take_discarded().is_empty(),
+        "the loss is reported exactly once"
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

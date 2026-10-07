@@ -937,13 +937,17 @@ OTTO_UI=repl otto
 - Entries are separated by a blank line.
 - While a turn is running, an animated status line is shown under the
   transcript, and the composer title reads `Working — Enter queues for this
-  turn · Esc cancels turn` (or, once ordinary input is queued, `Queued for
-  next checkpoint · Ctrl+U withdraw · Esc cancels turn`). A queued slash
-  command instead reads `Queued next input`, because it remains local until
-  the active turn succeeds. Ordinary input is
+  turn · Esc cancels turn`. Once ordinary input is queued for that turn, the
+  transcript shows `Queued for current turn: …` and the title becomes
+  `Queued for current turn · Ctrl+U withdraw · Esc cancels turn`. A queued slash
+  command instead reads `Queued next input · Ctrl+U withdraw`, because it
+  remains local until the active turn succeeds. Ordinary input is
   delivered within the same turn after the current provider response or tool
   call finishes; `agent_wait` yields immediately. Slash commands still wait
-  until the turn finishes. The status line reads
+  until the turn finishes. If the turn ends before that delivery — `Esc`, a
+  provider failure, or the turn deadline — the guidance is not delivered and
+  Otto says so, quoting the message; when the composer was empty, the text is
+  put back there to send again. The status line reads
   `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and the
   seconds since the turn started. The phase is `waiting for model`,
   `reasoning`, `responding`, `compacting`, or `running TOOL ARGS` (arguments
@@ -1067,7 +1071,10 @@ Turns:
   transcript shows only the prompt text.
 - Ordinary text submitted while a turn runs steers that active task. Otto
   accepts it for the next safe provider boundary without interrupting a tool or
-  silently creating a later turn. If the turn has just ended, the text becomes
+  silently creating a later turn. The transcript then shows
+  `Queued for current turn: …`, and `Ctrl+U` withdraws it (as does
+  `/inputs withdraw <id>`); an interrupted turn that never delivered it is
+  reported with the text. If the turn has just ended, the text becomes
   a new turn; when an approval is pending, resolve that approval first. Use an
   explicit `/queue` command when the text is a separate follow-up task. Slash
   commands submitted while a turn runs retain their command-specific behavior.
@@ -1089,7 +1096,7 @@ Turns:
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
 `/image`, `/context`, `/agents`, `/auto [on|off]`, `/sandbox`, `/sandbox reload`,
-`/approve [<id>]`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
+`/approve [<id>]`, `/steer`, `/inputs`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/reflect`, `/memory`, `/remember`, `/skill`,
 `/tasks`, `/task`, `/timers`, `/mcp`, `/login`, `/logout`,
@@ -1263,6 +1270,17 @@ Shared commands:
 
 TUI-only commands:
 
+- `/steer <guidance>` delivers guidance to the active task at its next safe
+  boundary, exactly like typing it as an ordinary message while the turn runs,
+  but as an explicit command that never starts a turn: with no active task it
+  answers `there is no active task accepting guidance`, and while an approval is
+  pending it refuses. The transcript then shows `Queued for current turn: …`.
+- `/inputs` shows the active run's guidance with its message id and status
+  (`queued`, `delivered`, `withdrawn`, or `discarded`); `/inputs withdraw <id>`
+  withdraws one still-queued item, and `Ctrl+U` withdraws the newest one.
+  Delivered guidance is session history and cannot be withdrawn. The same list
+  is available over HTTP (see [HTTP API](#http-api)) as
+  `GET /v1/sessions/{id}/tasks/steer`.
 - `/context` opens a modal that lists what the next provider request contains:
   the system prompt parts (base, environment, workspace instructions, skills,
   agents), built-in and MCP tool definitions, the compaction summary, the
@@ -1401,13 +1419,17 @@ Notes:
   unreadable file is renamed to `<session-id>.inbox.json.corrupt-<seconds>`
   with a warning on standard error. `--no-session` keeps notifications in
   memory only.
-- **Guidance for a running turn** (steering from the TUI, `/inputs`,
+- **Guidance for a running turn** (steering from the TUI, `/steer`, `/inputs`,
   `/tasks/steer`, or ACP) is also written to `<session-id>.inputs.json`
   until it is delivered. Delivery, withdrawal, and every way a turn ends
   remove it. When the Otto process stops during the turn, the turn that
   resumes it after the session is reopened delivers that guidance first;
   the next turn that does not resume it discards it. Guidance that cannot be
-  written is not accepted.
+  written is not accepted. Guidance a turn ends without delivering — the user
+  cancelled it, the provider failed, the turn hit its deadline — is reported
+  once, as a visible `agent_steering` context message and a notification
+  quoting the message, so an interrupted turn never drops the user's words in
+  silence.
 - **Agent-scheduled follow-ups** (`task_queue`) are written to
   `<session-id>.followups.json` until their step runs; every way the logical
   task ends removes the rest. When the Otto process stops during the task,

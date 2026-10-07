@@ -67,7 +67,7 @@ mod tests {
             .iter()
             .map(|c| c.name)
             .collect();
-        assert_eq!(names, ["/session", "/sandbox", "/skill"]);
+        assert_eq!(names, ["/session", "/sandbox", "/steer", "/skill"]);
     }
 
     #[test]

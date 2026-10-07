@@ -112,7 +112,8 @@ Telegram updates have no deduplication.
 
 ## Non-goals
 
-- **Serve and ACP queued turns stay in memory.** This is the approved
+- **Serve and ACP queued turns stay in memory.** (Superseded 2026-10-07 by
+  [durable turn queue](2026-10-07-durable-turn-queue.md).) This is the approved
   active-task contract: "disconnect/shutdown must not silently restart
   requests". Instead, `request_id` makes a client's resubmission after a
   restart safe.

@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::storage::drivers::turso::TursoDriver;
 use crate::storage::{Connection, params};
+use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
 use crate::usage::repository::UsageRepository;
 use crate::usage::{Analysis, DailyPoint, Error, Result, Sink, Summary, UsageRecord, date_range};
 use otto_core::model::Usage;
@@ -46,6 +48,10 @@ pub struct Store {
 
 impl Store {
     pub fn open(filename: &Path) -> Result<Self> {
+        Self::open_with_driver(&TursoDriver, filename)
+    }
+
+    pub fn open_with_driver(driver: &dyn SqlDriver, filename: &Path) -> Result<Self> {
         if let Some(parent) = filename.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -53,7 +59,13 @@ impl Store {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| Error)?;
         }
-        let connection = Connection::open(filename).map_err(|_| Error)?;
+        let connection = Connection::open_with_driver(
+            driver,
+            filename,
+            OpenOptions::default(),
+            SqlRequirements::DURABLE,
+        )
+        .map_err(|_| Error)?;
         std::fs::set_permissions(filename, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error)?;
         Self::from_connection(connection)

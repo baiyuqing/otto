@@ -33,6 +33,8 @@ impl Actor {
 
 pub struct Proposal {
     pub kind: Kind,
+    /// Declared by the native producer; see [`Authority`].
+    pub authority: Authority,
     pub scope: Scope,
     pub subject: Subject,
     pub title: String,

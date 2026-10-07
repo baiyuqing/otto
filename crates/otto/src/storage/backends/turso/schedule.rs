@@ -4,7 +4,9 @@ use crate::schedule::{
     CreateError, Delivery, Error, Item, Kind, NewItem, Origin, Repeat, Result, RunOutcome,
     ScheduleStore, Scope, State,
 };
+use crate::storage::drivers::turso::TursoDriver;
 use crate::storage::{Connection, params};
+use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
 use chrono::{DateTime, Local, NaiveTime, TimeDelta, Utc};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -136,6 +138,10 @@ pub struct TursoScheduleStore {
 type Store = TursoScheduleStore;
 impl TursoScheduleStore {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_driver(&TursoDriver, path)
+    }
+
+    pub fn open_with_driver(driver: &dyn SqlDriver, path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -143,7 +149,13 @@ impl TursoScheduleStore {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| Error)?;
         }
-        let connection = Connection::open(path).map_err(|_| Error)?;
+        let connection = Connection::open_with_driver(
+            driver,
+            path,
+            OpenOptions::default(),
+            SqlRequirements::DURABLE,
+        )
+        .map_err(|_| Error)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error)?;
         Self::from_connection(connection)

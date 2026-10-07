@@ -1,6 +1,8 @@
 use crate::approval::repository::*;
 use crate::approval::{Error, Result};
+use crate::storage::drivers::turso::TursoDriver;
 use crate::storage::{Connection, OptionalExtension, Transaction, params};
+use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
 use otto_core::approval::*;
 use std::{path::Path, sync::Mutex, time::Duration};
 
@@ -35,6 +37,10 @@ CREATE INDEX IF NOT EXISTS approvals_scope ON approvals(workspace, session_id, s
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_driver(&TursoDriver, path)
+    }
+
+    pub fn open_with_driver(driver: &dyn SqlDriver, path: &Path) -> Result<Self> {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|_| Error::Unavailable)?;
@@ -50,7 +56,15 @@ impl Store {
             .map_err(|_| Error::Unavailable)?;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error::Unavailable)?;
-        Self::from_connection(Connection::open(path).map_err(storage_error)?)
+        Self::from_connection(
+            Connection::open_with_driver(
+                driver,
+                path,
+                OpenOptions::default(),
+                SqlRequirements::DURABLE,
+            )
+            .map_err(storage_error)?,
+        )
     }
     pub fn in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory().map_err(storage_error)?)

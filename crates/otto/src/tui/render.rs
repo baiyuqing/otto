@@ -14,7 +14,8 @@ use super::commands::Completion;
 use super::entries::Entry;
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN,
-    escape_single_line_text, footer_workspace, format_context_percentage, format_token_count,
+    escape_single_line_text, footer_workspace, format_cache_hit_rate, format_context_percentage,
+    format_token_count,
 };
 use super::transcript;
 use crate::subagent::format::{one_line, round_to_seconds};
@@ -229,6 +230,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// The footer's fields, most important first. The footer is one row and
+/// ratatui clips whatever does not fit, so the fields a reader cannot do
+/// without come first and the ones that describe the environment come last:
+/// the model id identifies the session, the approval mode and the token
+/// totals are what a turn changes, and the context percentage warns before a
+/// compaction. Only the tail is lost on a narrow terminal.
 fn footer_text(app: &App) -> String {
     let model = escape_single_line_text(&app.info.model);
     let profile_model = if model.is_empty() {
@@ -236,24 +243,23 @@ fn footer_text(app: &App) -> String {
     } else {
         model
     };
-    let thinking = if app.info.thinking.is_empty() {
-        "default".to_string()
-    } else {
-        escape_single_line_text(&app.info.thinking)
-    };
     let mut text = format!(
-        "{profile_model} | {thinking} | {} | {} | {} | tokens {}/{}",
+        "{profile_model} | {} | tokens {}/{}",
         if app.info.auto_mode { "AUTO" } else { "MANUAL" },
-        app.info.sandbox.status_summary(),
-        escape_single_line_text(&footer_workspace(&app.info.workspace)),
         format_token_count(app.usage.input_tokens),
         format_token_count(app.usage.output_tokens)
     );
     if app.usage.cached_input_tokens > 0 {
         text.push_str(&format!(
-            " (cached {})",
+            " (cached {}",
             format_token_count(app.usage.cached_input_tokens)
         ));
+        if let Some(rate) =
+            format_cache_hit_rate(app.usage.cached_input_tokens, app.usage.input_tokens)
+        {
+            text.push_str(&format!(", {rate}"));
+        }
+        text.push(')');
     }
     if app.info.context_input_tokens_pending {
         text.push_str(" | ctx ?%");
@@ -263,6 +269,16 @@ fn footer_text(app: &App) -> String {
             format_context_percentage(app.info.context_input_tokens, app.info.context_window)
         ));
     }
+    let thinking = if app.info.thinking.is_empty() {
+        "default".to_string()
+    } else {
+        escape_single_line_text(&app.info.thinking)
+    };
+    text.push_str(&format!(
+        " | {} | {thinking} | {}",
+        app.info.sandbox.status_summary(),
+        escape_single_line_text(&footer_workspace(&app.info.workspace))
+    ));
     if !app.info.session_id.is_empty() {
         text.push_str(" | ");
         text.push_str(&escape_single_line_text(&app.info.session_id));
@@ -598,6 +614,7 @@ fn fit_column(value: &str, width: usize, alignment: Alignment) -> String {
 mod tests {
     use crossterm::event::KeyCode;
     use otto_core::agent::Event;
+    use otto_core::model::Usage;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, TestBackend};
 
@@ -643,6 +660,30 @@ mod tests {
             .collect()
     }
 
+    /// The model id is the longest field of the footer's fixed prefix, so the
+    /// token and cache totals used to sit past the right edge of any terminal
+    /// that a long id like `deepseek-v4-flash` did not leave room on, where
+    /// ratatui clips them.
+    #[tokio::test]
+    async fn a_long_model_id_keeps_the_token_and_cache_totals_visible() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.info.model = "deepseek-v4-flash".to_string();
+        app.usage = Usage {
+            input_tokens: 93_498 + 7_091_584,
+            output_tokens: 37_475,
+            cached_input_tokens: 7_091_584,
+        };
+
+        for width in [72u16, 80, 88, 100] {
+            let rows = screen_rows(&app, width, MIN_TERMINAL_HEIGHT);
+            let footer = rows.last().expect("footer row");
+            assert!(
+                footer.contains("tokens 7.2M/37.5k") && footer.contains("(cached 7.1M, 98.7%)"),
+                "{width} columns: {footer}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn footer_omits_the_profile_and_uses_compact_status_labels() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
@@ -654,7 +695,11 @@ mod tests {
         let footer = footer_text(&app);
 
         assert!(
-            footer.starts_with("gpt-5.6-terra | default | AUTO | sb · write · net | "),
+            footer.starts_with("gpt-5.6-terra | AUTO | tokens 0/0 | "),
+            "{footer}"
+        );
+        assert!(
+            footer.contains(" | sb · write · net | default | "),
             "{footer}"
         );
         assert!(!footer.contains("terra/gpt-5.6-terra"), "{footer}");
@@ -990,7 +1035,7 @@ mod tests {
 
         let narrow = rendered(&app, MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
         assert!(narrow.contains("gpt-alpha"), "{narrow}");
-        assert!(narrow.contains("default"), "{narrow}");
+        assert!(narrow.contains("tokens 0/0"), "{narrow}");
     }
 
     /// A running task, ready to drop into `app.tasks` for the panel tests

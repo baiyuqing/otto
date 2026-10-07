@@ -327,10 +327,16 @@ impl Script {
         Self(steps)
     }
 
-    /// Sends the first `n` of `events`, then resets the connection.
+    /// Sends the first `n` of `events`, then resets the connection. After a
+    /// non-empty prefix the reset waits 100 ms so the client reads the events
+    /// before it sees the reset; a reset can discard data the client has not
+    /// read yet.
     pub fn sse_cut_after(events: &[&str], n: usize) -> Self {
         let mut steps = vec![Self::sse_head()];
         steps.extend(events.iter().take(n).map(|e| Step::Sse((*e).into())));
+        if n > 0 {
+            steps.push(Step::Stall(Some(Duration::from_millis(100))));
+        }
         steps.push(Step::Reset);
         Self(steps)
     }

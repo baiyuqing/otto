@@ -107,6 +107,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Keep ChatGPT turns running through pre-output HTTP 429 and 500/502/503/504
+  responses. Otto now retries the borrowed provider request up to six times
+  with 1/2/4/8/16/30-second backoff, honoring a numeric `Retry-After` up to 30
+  seconds; it never re-executes a tool or retries once output is visible.
+
 - A process killed while it wrote the first records of a new session no longer
   leaves an empty or torn `<session-id>.jsonl`. Such a file failed to open
   ("session file is empty" or "session header must be one JSON object"),

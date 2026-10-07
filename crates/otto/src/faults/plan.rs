@@ -18,6 +18,8 @@ pub enum Filter {
     Any,
     /// The subject ends with this text.
     NameSuffix(&'static str),
+    /// The subject contains this text.
+    NameContains(&'static str),
     /// The subject, after leading whitespace, starts with this text, ASCII
     /// case-insensitively.
     SqlPrefix(&'static str),
@@ -28,6 +30,7 @@ impl Filter {
         match self {
             Self::Any => true,
             Self::NameSuffix(suffix) => subject.ends_with(suffix),
+            Self::NameContains(text) => subject.contains(text),
             Self::SqlPrefix(prefix) => subject
                 .trim_start()
                 .get(..prefix.len())

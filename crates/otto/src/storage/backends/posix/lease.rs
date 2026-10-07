@@ -1787,6 +1787,46 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_between_the_two_renames_of_a_takeover_is_completed_by_the_next_acquire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_path = tmp.path().join("s.jsonl");
+        create_lease_dir(&session_path, 6).unwrap();
+        let (_lease1, _) = acquire_with(&session_path, &FakeClock::new(), &no_op_keeper()).unwrap();
+
+        // The state a process killed in `move_aside_log` leaves: it created
+        // epoch 2, then renamed the log to `fenced-1.jsonl` and ended before
+        // writing the truncated copy back. The lease has no fault seam, so
+        // the state is built directly.
+        let original = b"{\"a\":1}\n{\"a\":2, incomplete";
+        let dir_path = lease_dir(&session_path);
+        create_epoch_marker(&fsops::open_dir_no_follow(&dir_path).unwrap(), 2).unwrap();
+        std::fs::write(dir_path.join("fenced-1.jsonl"), original).unwrap();
+        assert!(!session_path.exists());
+
+        let (lease3, acquired) =
+            acquire_with(&session_path, &FakeClock::new(), &no_op_keeper()).unwrap();
+
+        assert_eq!(lease3.epoch(), 3);
+        assert!(
+            matches!(acquired, Acquired::TakenOver(_)),
+            "expected TakenOver, got {acquired:?}"
+        );
+        assert_eq!(
+            std::fs::read(&session_path).expect("the next acquire restores the log"),
+            b"{\"a\":1}\n",
+            "the log is restored from the earlier fenced copy, complete lines only"
+        );
+        assert_eq!(
+            std::fs::read(dir_path.join("fenced-1.jsonl")).unwrap(),
+            original
+        );
+        assert!(
+            !dir_path.join("fenced-2.jsonl").exists(),
+            "the earlier fenced copy is reused, not replaced"
+        );
+    }
+
+    #[test]
     fn holds_any_is_false_with_nothing_registered() {
         let keeper = no_op_keeper();
         assert!(!keeper.holds_any());

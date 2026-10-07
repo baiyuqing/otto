@@ -1,8 +1,9 @@
 //! Confined local file capability used by append-only journals.
 //!
 //! Names are single components under pinned directory handles. This interface
-//! promises no-follow traversal, exclusive writer locks and durable file/directory
-//! sync; it is not an object store or a multi-file transaction abstraction.
+//! promises no-follow traversal, exclusive writer locks, exclusive publication
+//! of a new journal and durable file/directory sync; it is not an object store
+//! or a multi-file transaction abstraction.
 use std::{
     fmt::Debug,
     fs::Metadata,
@@ -34,6 +35,11 @@ pub trait FileRoot: Debug + Send + Sync {
     fn create_directory(&self, name: &str) -> io::Result<()>;
     fn open_journal(&self, name: &str, mode: JournalOpen) -> io::Result<Box<dyn JournalFile>>;
     fn remove_journal(&self, name: &str) -> io::Result<()>;
+    /// Gives journal `temp` the name `name`, failing with `AlreadyExists` when
+    /// `name` exists, then removes `temp`. An open handle to `temp` stays
+    /// valid. A process exit between the two steps leaves `temp` as a second
+    /// name of the same file.
+    fn publish_journal(&self, temp: &str, name: &str) -> io::Result<()>;
     fn sync_all(&self) -> io::Result<()>;
 }
 

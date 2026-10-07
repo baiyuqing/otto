@@ -32,6 +32,7 @@ pub enum FileOp {
     CreateDirectory,
     OpenJournal,
     RemoveJournal,
+    PublishJournal,
     ListNames,
     RootSync,
     Read,
@@ -163,6 +164,12 @@ impl FileRoot for FaultyRoot {
     fn remove_journal(&self, name: &str) -> io::Result<()> {
         run(&self.plan, FileOp::RemoveJournal, name, || {
             self.inner.remove_journal(name)
+        })
+    }
+
+    fn publish_journal(&self, temp: &str, name: &str) -> io::Result<()> {
+        run(&self.plan, FileOp::PublishJournal, name, || {
+            self.inner.publish_journal(temp, name)
         })
     }
 

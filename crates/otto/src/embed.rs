@@ -1428,37 +1428,40 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
             .await
             .expect("prompt");
         assert!(matches!(stop, Stop::EndTurn));
-        let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "decide runs once");
-        assert!(
-            seen[0].command.contains("git push"),
-            "{:?}",
-            seen[0].command
-        );
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1, "decide runs once");
+            assert!(
+                seen[0].command.contains("git push"),
+                "{:?}",
+                seen[0].command
+            );
 
-        let requests = script.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2, "the denial result reaches the model");
-        let result = requests[1]
-            .messages
-            .iter()
-            .flat_map(|message| &message.blocks)
-            .find(|block| block.block_type == BlockType::ToolResult)
-            .expect("a tool result block");
-        assert!(
-            result.text.contains("\"approved\":false")
-                || result.text.contains("\"approved\": false"),
-            "{}",
-            result.text
-        );
+            let requests = script.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2, "the denial result reaches the model");
+            let result = requests[1]
+                .messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .find(|block| block.block_type == BlockType::ToolResult)
+                .expect("a tool result block");
+            assert!(
+                result.text.contains("\"approved\":false")
+                    || result.text.contains("\"approved\": false"),
+                "{}",
+                result.text
+            );
 
-        let events = events.lock().unwrap();
-        let position = |wanted: fn(&Event) -> bool| events.iter().position(wanted);
-        let started = position(|e| matches!(e, Event::AgentStarted)).expect("AgentStarted");
-        let call = position(|e| matches!(e, Event::ToolCallStarted { .. })).expect("call started");
-        let finished =
-            position(|e| matches!(e, Event::ToolCallFinished { .. })).expect("call finished");
-        let done = position(|e| matches!(e, Event::AgentFinished)).expect("AgentFinished");
-        assert!(started < call && call < finished && finished < done);
+            let events = events.lock().unwrap();
+            let position = |wanted: fn(&Event) -> bool| events.iter().position(wanted);
+            let started = position(|e| matches!(e, Event::AgentStarted)).expect("AgentStarted");
+            let call =
+                position(|e| matches!(e, Event::ToolCallStarted { .. })).expect("call started");
+            let finished =
+                position(|e| matches!(e, Event::ToolCallFinished { .. })).expect("call finished");
+            let done = position(|e| matches!(e, Event::AgentFinished)).expect("AgentFinished");
+            assert!(started < call && call < finished && finished < done);
+        }
         drop(session);
         otto.close().await.unwrap();
     }

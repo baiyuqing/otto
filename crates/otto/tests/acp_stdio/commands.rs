@@ -111,6 +111,7 @@ fn session_new_and_load_are_followed_by_the_command_list() {
         [
             &json!("compact"),
             &json!("context"),
+            &json!("model"),
             &json!("reflect"),
             &json!("skill"),
             &json!("steer"),
@@ -178,6 +179,73 @@ fn context_command_answers_with_counts_and_sends_no_provider_request() {
         requests.lock().unwrap().len(),
         1,
         "/context called the provider"
+    );
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
+fn model_command_reports_and_switches_the_session_without_a_provider_request() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, requests) = provider_with(vec![text_reply("plain answer")]);
+    configure(home.path(), &base_url);
+    add_profile(home.path(), "other", &base_url, "gpt-other");
+
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+
+    let (frames, response) = client.call("session/prompt", prompt(&session_id, "/model"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_eq!(
+        message_text(&frames),
+        "Profile: test\nProvider: openai-compatible\nModel: gpt-test\n\
+         Configured profiles: other, test\nSwitch with /model <profile>."
+    );
+
+    let (frames, response) = client.call("session/prompt", prompt(&session_id, "/model other"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_eq!(
+        message_text(&frames),
+        "Switched to profile other (provider openai-compatible, model gpt-other)."
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        0,
+        "/model called the provider"
+    );
+
+    // The switch is real for this session and nothing else changed.
+    let (_, response) = client.call("session/prompt", prompt(&session_id, "hello"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let sent: Value = serde_json::from_str(&requests.lock().unwrap()[0]).unwrap();
+    assert_eq!(sent["model"], json!("gpt-other"), "{sent}");
+    let (frames, response) = client.call("session/prompt", prompt(&session_id, "/model"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert!(
+        message_text(&frames).starts_with("Profile: other\n"),
+        "{frames:?}"
+    );
+    let config = std::fs::read_to_string(home.path().join(".config/otto/config.toml")).unwrap();
+    assert!(
+        config.starts_with("default_profile = \"test\""),
+        "the switch wrote the configuration file: {config}"
+    );
+
+    // An unknown profile is an error, not a model request.
+    let (_, response) = client.call("session/prompt", prompt(&session_id, "/model nope"));
+    assert!(response["error"].is_object(), "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("nope"),
+        "{response}"
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "/model nope reached the provider"
     );
     assert_eq!(client.close(), Some(0));
 }
@@ -298,4 +366,18 @@ fn update_plan_sends_a_plan_update_and_load_replays_it() {
     assert_eq!(last["sessionUpdate"], "plan", "{frames:?}");
     assert_eq!(last["entries"], entries);
     assert_eq!(client.close(), Some(0));
+}
+
+/// Adds a second configured profile to the test home so `/model` has a target.
+fn add_profile(home: &Path, name: &str, base_url: &str, model: &str) {
+    let config = home.join(".config/otto/config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            "{text}\n[profiles.{name}]\nprovider = \"openai-compatible\"\n\
+             base_url = \"{base_url}\"\nmodel = \"{model}\"\napi_key_env = \"OTTO_API_KEY\"\n"
+        ),
+    )
+    .unwrap();
 }

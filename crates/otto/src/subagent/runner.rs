@@ -4427,7 +4427,7 @@ mod tests {
         let result = agent_tool
             .execute(
                 &raw(
-                    r#"{"agent":"","context":"fresh","description":"","model":"","name":"","prompt":"Retry the audit.","resume":"t1","wait":false}"#,
+                    r#"{"agent":"","context":"fresh","description":"","model":"","name":"","prompt":"Retry the audit.","resume":"t1"}"#,
                 ),
                 &CancellationToken::new(),
             )

@@ -1472,8 +1472,13 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         assert_eq!(session.info().approval_mode, ApprovalMode::Auto);
         session.set_auto_mode(false).unwrap();
         assert_eq!(session.info().approval_mode, ApprovalMode::Manual);
+        // The embedding API selects every mode. Assert it, then put the
+        // session back in MANUAL: this round trip is about `decide` receiving
+        // the request, and YOLO would approve it without calling `decide`.
         session.set_approval_mode(ApprovalMode::Yolo).unwrap();
         assert_eq!(session.info().approval_mode, ApprovalMode::Yolo);
+        session.set_approval_mode(ApprovalMode::Manual).unwrap();
+        assert_eq!(session.info().approval_mode, ApprovalMode::Manual);
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&events);

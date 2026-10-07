@@ -42,6 +42,9 @@ type Options struct {
 	Access    map[string]Access // by Platform.Name()
 	Store     *state.Store
 	Metrics   *metrics.Metrics // nil disables counting
+	// Profiles reads the local Otto configuration for the "/model" picker.
+	// Nil leaves bare "/model" to Otto.
+	Profiles ProfileSource
 
 	QueueLimit        int           // default 10
 	PermissionTimeout time.Duration // default 10 min
@@ -294,7 +297,7 @@ var Commands = []Command{
 	{"queue", "Run a separate follow-up: /queue <prompt>", false},
 	{"compact", "Compact the session context: /compact [focus]", true},
 	{"context", "Show what the next request sends, with token counts", true},
-	{"model", "Show the profile and model, or switch: /model <profile>", true},
+	{"model", "Choose the conversation's profile: /model, or /model <profile>", true},
 	{"reflect", "Retrospective and proposals: /reflect [focus], list, show <id>", true},
 	{"skill", "List generated skills or undo one: /skill generated | /skill revert <name>", true},
 	{"sessions", "List the newest sessions", false},
@@ -346,6 +349,9 @@ func (b *Bridge) deliver(m Message) {
 		return
 	}
 	if c.cmdManage(m, text) {
+		return
+	}
+	if arg, ok := commandArg(text, "model"); ok && c.cmdModel(m, arg) {
 		return
 	}
 	for _, command := range []string{"/allow", "/deny"} {

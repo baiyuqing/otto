@@ -22,7 +22,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories and logical migration ports | `runtime/storage.rs` composition and route registry |
 | `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
-| `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check`, and `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options | `Makefile`, `.github/workflows/checks.yml` |
+| `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-tcp.sh` supervises the ACP TCP pair (`otto serve --acp-listen` plus `otto-connect`) | `Makefile`, `.github/workflows/checks.yml` |
 
 The root Cargo workspace contains `otto-core` and `otto` only.
 `chat-connector/` has its own build definition and is not a root workspace crate.
@@ -84,8 +84,14 @@ REPL and owns process lifecycle; it is the primary starting point for a new
 command or startup behavior. `src/runtime/` assembles one runnable agent from
 resolved configuration (`builder.rs` holds `Builder` and `Runner`,
 `wiring.rs` connects memory, MCP and sub-agents, `prompt.rs` builds the system
-prompt). `src/app/` exposes the shared application lifecycle used by
-frontends.
+prompt). `runtime/startup.rs` holds the startup composition, from environment
+capture to the memory service, as phase functions; `cli::run`, `otto serve`
+(`load_workspace`) and `embed` all call it. `runtime/workspace_admission.rs`
+admits a workspace path for `otto serve`, delivery and `embed`. `src/app/`
+exposes the shared application lifecycle used by frontends. `src/embed.rs` is
+the public in-process API (`otto::embed::Otto`) that builds the `otto acp`
+runtime for another Rust program; see the
+[embedding API design](specs/2026-10-07-otto-embedding-api.md).
 
 The frontends (`cli/`, `tui/`, `acp/`, `server/` and `client/`) build on every
 other module, and no other module may import a frontend:

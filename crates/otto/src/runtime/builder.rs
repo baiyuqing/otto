@@ -572,6 +572,14 @@ where
 #[cfg(test)]
 struct ScriptedSizer;
 
+/// Test providers keyed by home directory: a runner built by a [`Builder`]
+/// whose `home` is listed uses that provider, so a test can drive the full
+/// composition without a network and without affecting tests that run
+/// concurrently under other homes.
+#[cfg(test)]
+pub(crate) static TEST_PROVIDERS: std::sync::Mutex<Vec<(String, Arc<dyn Provider + Send + Sync>)>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[cfg(test)]
 impl RequestSizer for ScriptedSizer {
     fn serialized_request_size(&self, request: &Request) -> Result<usize, ProviderError> {
@@ -1714,6 +1722,15 @@ impl Builder {
     /// The provider client for `runtime`; `Unavailable` when the redaction
     /// boundary is closed.
     fn provider_client(&self, runtime: &Runtime) -> Result<ProviderClient, BuildError> {
+        #[cfg(test)]
+        if let Some((_, provider)) = TEST_PROVIDERS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|(home, _)| *home == self.home)
+        {
+            return Ok(ProviderClient::Scripted(provider.clone()));
+        }
         Ok(if !self.boundary_allows_dynamic(Some(runtime)) {
             ProviderClient::Unavailable
         } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {

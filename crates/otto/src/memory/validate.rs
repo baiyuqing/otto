@@ -252,6 +252,14 @@ pub fn validate_labels(labels: &[String], record_base: bool) -> Result<()> {
     Ok(())
 }
 
+fn presentation_route_only(metadata: &BTreeMap<String, String>) -> bool {
+    metadata.is_empty()
+        || (metadata.len() == 1
+            && metadata
+                .get(super::PRESENTATION_ORIGIN_METADATA)
+                .is_some_and(|origin| crate::schedule::Origin::parse(origin).is_ok()))
+}
+
 pub fn validate_metadata(metadata: &BTreeMap<String, String>, record_base: bool) -> Result<()> {
     let bad = |field: &str, limit: Option<usize>| -> Error {
         let kind = if record_base {
@@ -339,9 +347,13 @@ pub fn validate_proposed_record(record: &Record, action: CandidateAction) -> Res
     }
     validate_provenance(&record.source, false, true)?;
     if action == CandidateAction::Forget {
+        if !presentation_route_only(&record.metadata) {
+            return Err(invalid_record("forget proposed content"));
+        }
         let mut copy = record.clone();
         copy.scope = Scope::default();
         copy.source = Provenance::default();
+        copy.metadata.clear();
         if !record_zero(&copy) {
             return Err(invalid_record("forget proposed content"));
         }
@@ -699,11 +711,12 @@ pub fn validate_propose_request(request: &ProposeRequest) -> Result<()> {
         {
             return Err(invalid_request("forget proposal target"));
         }
+        let route_only = presentation_route_only(&request.metadata);
         if !request.kind.is_empty()
             || !request.key.is_empty()
             || !request.text.is_empty()
             || !request.labels.is_empty()
-            || !request.metadata.is_empty()
+            || !route_only
             || request.confidence != 0.0
             || request.expires_at.is_some()
         {

@@ -10,17 +10,18 @@ import (
 var ErrSharedApprovalUnsupported = errors.New("agent does not support unified approvals")
 
 type SharedApproval struct {
-	ID               string `json:"id"`
-	Revision         uint64 `json:"revision"`
-	Kind             string `json:"kind"`
-	Title            string `json:"title"`
-	Reason           string `json:"reason"`
-	Persistent       bool   `json:"persistent"`
-	Blocking         bool   `json:"blocking"`
-	State            string `json:"state"`
-	Application      string `json:"application"`
-	ApplicationError string `json:"application_error"`
-	Decision         *struct {
+	ID                 string `json:"id"`
+	Revision           uint64 `json:"revision"`
+	Kind               string `json:"kind"`
+	Title              string `json:"title"`
+	Reason             string `json:"reason"`
+	Persistent         bool   `json:"persistent"`
+	Blocking           bool   `json:"blocking"`
+	PresentationOrigin string `json:"presentation_origin"`
+	State              string `json:"state"`
+	Application        string `json:"application"`
+	ApplicationError   string `json:"application_error"`
+	Decision           *struct {
 		Transport string `json:"transport"`
 	} `json:"decision"`
 	Subject struct {

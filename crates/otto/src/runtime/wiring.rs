@@ -367,23 +367,27 @@ impl Builder {
         &self,
         max_output: usize,
         advisor: Option<Arc<crate::memory::advice::Advisor>>,
+        turn: Option<(&str, Arc<crate::schedule::tools::TurnOrigin>)>,
     ) -> Vec<Box<dyn Tool + Send + Sync>> {
         let scopes = vec![self.memory.user_scope.clone(), self.workspace_scope.clone()];
+        let mut remember = RememberTool::new(
+            Arc::clone(&self.memory.service),
+            self.memory.user_scope.clone(),
+            self.workspace_scope.clone(),
+        );
+        let mut forget = ForgetTool::new(Arc::clone(&self.memory.service), scopes.clone());
+        if let Some((session_id, origin)) = turn {
+            remember = remember.with_turn_context(session_id, Arc::clone(&origin));
+            forget = forget.with_turn_context(session_id, origin);
+        }
         vec![
             Box::new(MemorySearchTool::new(
                 Arc::clone(&self.memory.service),
-                scopes.clone(),
+                scopes,
                 max_output,
             )),
-            Box::new(
-                RememberTool::new(
-                    Arc::clone(&self.memory.service),
-                    self.memory.user_scope.clone(),
-                    self.workspace_scope.clone(),
-                )
-                .with_advisor(advisor),
-            ),
-            Box::new(ForgetTool::new(Arc::clone(&self.memory.service), scopes)),
+            Box::new(remember.with_advisor(advisor)),
+            Box::new(forget),
         ]
     }
 
@@ -1277,7 +1281,7 @@ impl Builder {
         if !self.memory.usable {
             return Vec::new();
         }
-        self.memory_tools(max_output, None)
+        self.memory_tools(max_output, None, None)
             .iter()
             .map(|tool| tool.definition())
             .collect()

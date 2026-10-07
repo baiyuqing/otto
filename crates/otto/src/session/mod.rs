@@ -8,8 +8,8 @@ mod repository;
 pub use crate::fsops::clean_go_path;
 pub(crate) use crate::storage::backends::posix::session::unanswered_calls_from;
 pub use crate::storage::backends::posix::session::{
-    ArchiveResult, MAX_AUTOMATIC_RESUMES, MAX_LIST_SESSIONS, Prepared, Recovery, RecoveryCause,
-    Store, UnansweredCall, inspect, list, session_directory,
+    ArchiveResult, Forked, MAX_AUTOMATIC_RESUMES, MAX_LIST_SESSIONS, Prepared, Recovery,
+    RecoveryCause, Store, UnansweredCall, inspect, list, session_directory,
 };
 pub(crate) use fsops::workspace_key;
 pub use legacy::archive;

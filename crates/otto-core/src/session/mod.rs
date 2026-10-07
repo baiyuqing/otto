@@ -21,6 +21,7 @@ use crate::model::{BlockType, Message, Role, ValidationError};
 pub mod codec;
 pub mod compaction;
 pub mod context;
+pub mod fork;
 pub mod operation;
 pub mod pi;
 pub mod turn;
@@ -32,6 +33,10 @@ pub use context::{
     COMPACTION_CONTEXT_TYPE, Capabilities, ContextEntryIndex, OTTO_RUNTIME_CUSTOM_TYPE,
     ResolvedContext, active_context_path, build_context, decode_capabilities, encode_capabilities,
     index_context_entries, is_pi_entry_id, new_context_message,
+};
+pub use fork::{
+    FORK_CUSTOM_TYPE, FORK_SCHEMA_VERSION, ForkError, ForkPlan, ForkPoint, ForkRecord,
+    decode_fork_record, encode_fork_record, fork_origin, fork_points, plan_fork,
 };
 pub use operation::{
     DecodedOperationFact, OPERATION_CUSTOM_TYPE, OPERATION_SCHEMA_VERSION, OperationFact,

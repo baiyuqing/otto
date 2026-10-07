@@ -196,6 +196,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Fork a session before an earlier prompt: TUI `/fork` (local and attached)
+  lists the prompts that start a turn, writes a new session with the history
+  before the chosen one, switches to it and puts the prompt in the editor.
+  `POST /v1/sessions/{id}/fork` and `GET /v1/sessions/{id}/fork-points` do the
+  same over HTTP, and the session object reports `forked_from`. The source
+  session is never changed, a fork never ends inside a turn, and queued
+  inputs, reminders and sub-agents stay with the source
+  ([design](docs/specs/2026-10-06-session-fork.md)).
+
 - Tell the model when a resumed session's tool set differs from the tool set
   recorded for it. At run start Otto appends a `capability_update` message,
   shown in the transcript, before the user message. It lists added and removed

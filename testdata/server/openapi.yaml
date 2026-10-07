@@ -277,7 +277,37 @@ components:
           $ref: "#/components/schemas/Sandbox"
         turn:
           $ref: "#/components/schemas/SessionTurn"
+        forked_from:
+          $ref: "#/components/schemas/ForkedFrom"
       required: [id, workspace, provider, model, thinking, sandbox, turn]
+    ForkedFrom:
+      type: object
+      description: Where a forked session came from. Omitted for a session that is not a fork.
+      properties:
+        session_id:
+          type: string
+          description: The source session.
+        entry_id:
+          type: string
+          description: The user message the fork stops before. Omitted for a fork of the whole history.
+      required: [session_id]
+    ForkedSession:
+      allOf:
+        - $ref: "#/components/schemas/Session"
+        - type: object
+          properties:
+            prompt:
+              type: string
+              description: The text of the message the fork stops before, for the editor. Omitted for a fork of the whole history.
+    ForkPoint:
+      type: object
+      properties:
+        entry_id:
+          type: string
+          description: The id of a user message that starts a turn; pass it as `before`.
+        prompt:
+          type: string
+      required: [entry_id, prompt]
     SessionListRow:
       type: object
       properties:
@@ -1420,6 +1450,78 @@ paths:
       responses:
         "204":
           description: Closed
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/fork:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Fork the session into a new one
+      description: >-
+        Writes a new session whose history is this session's history before
+        the turn that `before` starts, opens it and returns it. Without
+        `before`, the copy keeps everything up to the last finished turn. The
+        source session is not changed. Queued inputs, reminders and sub-agents
+        stay with the source.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                before:
+                  type: string
+                  description: A fork point's `entry_id`.
+      responses:
+        "201":
+          description: The new session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForkedSession"
+        "400":
+          description: Invalid JSON body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            `invalid_fork_point`: `before` is not a user message that starts a
+            turn on this session's history, or the session has no history yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/fork-points:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: The prompts the session can be forked before, oldest first
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fork_points:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ForkPoint"
+                required: [fork_points]
         "404":
           description: Session not open
           content:

@@ -507,6 +507,56 @@ impl Client {
         Ok(wire.into_info())
     }
 
+    /// `GET /v1/sessions/{id}/fork-points`, oldest first, as (entry id,
+    /// prompt) pairs.
+    pub async fn fork_points(&self, session_id: &str) -> Result<Vec<(String, String)>, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/fork-points")),
+            )
+            .await?;
+        #[derive(Deserialize)]
+        struct Point {
+            entry_id: String,
+            prompt: String,
+        }
+        #[derive(Deserialize)]
+        struct Points {
+            fork_points: Vec<Point>,
+        }
+        Ok(decode::<Points>(response)
+            .await?
+            .fork_points
+            .into_iter()
+            .map(|point| (point.entry_id, point.prompt))
+            .collect())
+    }
+
+    /// `POST /v1/sessions/{id}/fork`: the fork's session id and the prompt it
+    /// stops before.
+    pub async fn fork_session(
+        &self,
+        session_id: &str,
+        before: Option<&str>,
+    ) -> Result<(String, Option<String>), Error> {
+        let body = match before {
+            Some(before) => json!({ "before": before }),
+            None => json!({}),
+        };
+        let response = self
+            .send(self.post(&format!("{BASE}/v1/sessions/{session_id}/fork"), &body))
+            .await?;
+        #[derive(Deserialize)]
+        struct Forked {
+            id: String,
+            #[serde(default)]
+            prompt: Option<String>,
+        }
+        let forked = decode::<Forked>(response).await?;
+        Ok((forked.id, forked.prompt))
+    }
+
     /// `PATCH /v1/sessions/{id}`.
     pub async fn rename_session(&self, session_id: &str, name: &str) -> Result<(), Error> {
         self.send(
@@ -928,6 +978,8 @@ struct SessionWire {
     sandbox: SandboxWireIn,
     #[serde(default)]
     auto_mode: bool,
+    #[serde(default)]
+    forked_from: Option<crate::app::ForkedFrom>,
 }
 
 #[derive(Default, Deserialize)]
@@ -956,6 +1008,7 @@ impl SessionWire {
         };
         crate::app::Info {
             auto_mode: self.auto_mode,
+            forked_from: self.forked_from,
             session_id: self.id,
             session_name: self.name,
             workspace: self.workspace,
@@ -1392,6 +1445,35 @@ mod tests {
             (
                 "PATCH /v1/sessions/s1".into(),
                 json!({ "name": "new name" })
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_calls_post_the_fork_point_and_decode_the_new_session() {
+        let (client, seen, _dir) = stub(|_, path| {
+            if path.ends_with("/fork-points") {
+                json_body(
+                    StatusCode::OK,
+                    r#"{"fork_points":[{"entry_id":"00000001","prompt":"first"}]}"#,
+                )
+            } else {
+                json_body(StatusCode::CREATED, r#"{"id":"s2","prompt":"first"}"#)
+            }
+        });
+        assert_eq!(
+            client.fork_points("s1").await.unwrap(),
+            [("00000001".to_string(), "first".to_string())]
+        );
+        assert_eq!(
+            client.fork_session("s1", Some("00000001")).await.unwrap(),
+            ("s2".to_string(), Some("first".to_string()))
+        );
+        assert_eq!(
+            request(&seen, 1),
+            (
+                "POST /v1/sessions/s1/fork".into(),
+                json!({ "before": "00000001" })
             )
         );
     }

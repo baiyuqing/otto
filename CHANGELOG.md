@@ -17,6 +17,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Embed Otto in another Rust program: `otto::embed::Otto` builds the same
+  runtime `otto acp` builds (tools, sandbox, approvals, session files,
+  warnings) in the host process, serves several sessions and workspaces, and
+  lets the host switch off bash, MCP, memory, skills, plugins, sub-agents,
+  reflection, schedule, session persistence, usage or task history at
+  construction. The CLI, `otto serve` and `otto acp` run the same startup
+  code, and their behavior is unchanged. The dependency is a git dependency
+  ([design](docs/specs/2026-10-07-otto-embedding-api.md),
+  [#392](https://github.com/baiyuqing/otto/pull/392)).
+
 - Switch the conversation's profile from a chat with one tap: bare `/model`
   replies with the profiles from the local `~/.config/otto/config.toml` — name,
   provider and model each — and one inline button per profile in Telegram or one

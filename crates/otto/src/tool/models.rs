@@ -82,38 +82,15 @@ impl Tool for ListModelsTool {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
     use super::*;
+    use crate::faults::http;
     use crate::tool::testutil::{MAX_OUTPUT_BYTES, run, run_cancelled};
 
     /// Serves one fixed HTTP response to every connection and returns the base
     /// URL. The accept loop ends with the test's runtime.
     async fn serve(status: u16, body: &'static str) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind a loopback port");
-        let base_url = format!("http://{}", listener.local_addr().expect("an address"));
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let mut head = Vec::new();
-                let mut buffer = [0u8; 1024];
-                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
-                    match stream.read(&mut buffer).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => head.extend_from_slice(&buffer[..read]),
-                    }
-                }
-                let response = format!(
-                    "HTTP/1.1 {status} Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            }
-        });
-        base_url
+        let script = http::Script::status(status, body);
+        http::spawn_repeating(script).await.url
     }
 
     fn tool(base_url: &str) -> ListModelsTool {

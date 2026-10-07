@@ -55,6 +55,17 @@ otto --version   # otto 0.1.0+a1b2c3d4e5f6; `.dirty` is appended for uncommitted
 If you only want a local copy in the checkout, run `make build` and then
 `./otto --help`.
 
+To keep the startup options in one place instead of retyping them, copy the
+launcher template and start Otto through the script:
+
+```bash
+cp otto.env.example otto.env   # provider, model, workspace, sandbox
+make run                       # or: scripts/otto.sh
+```
+
+`otto.env` is ignored by Git and read like a shell profile; see the
+[launcher script](docs/user-manual.md#launcher-script).
+
 ## Docker Desktop on Mac
 
 With Docker Desktop running, build and start the Otto API from this checkout:

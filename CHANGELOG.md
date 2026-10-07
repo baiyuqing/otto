@@ -42,6 +42,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([design](docs/specs/2026-10-07-herdr-agent-state.md),
   [#384](https://github.com/baiyuqing/otto/pull/384)).
 
+- Start Otto from a source checkout with `scripts/otto.sh` or `make run`: the
+  script reads `otto.env`, a gitignored shell file copied from the committed
+  `otto.env.example`, and turns its settings — provider, model, profile, base
+  URL, workspace, frontend, sandbox, thinking effort, timeouts and the API key
+  variable — into the matching command-line options before executing the
+  binary. Options written after the script name come last and win over the file,
+  a missing `otto.env` still starts with Otto's own configuration, and
+  `OTTO_ENV_FILE` and `OTTO_BIN` select another settings file or binary
+  ([user manual](docs/user-manual.md#launcher-script),
+  [#389](https://github.com/baiyuqing/otto/pull/389)).
+
 ### User experience
 
 - Rename the independent Go chat connector source directory to `chat-connector/`, making its Telegram/Feishu-to-ACP role clear while preserving the `otto-connect` command and existing `~/.otto/connect/state.json` state location.

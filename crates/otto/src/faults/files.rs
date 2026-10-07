@@ -45,10 +45,10 @@ pub enum FileOp {
 type Plan = Arc<FaultPlan<FileOp>>;
 
 /// Applies the fault selected for `op` around `call`. `Short` and `ShortExit`
-/// are for [`FileOp::Write`], which handles them itself.
-fn run<T>(
-    plan: &Plan,
-    op: FileOp,
+/// are for the write operations, which handle them themselves.
+pub(super) fn run<Op: Copy + Eq + fmt::Debug, T>(
+    plan: &FaultPlan<Op>,
+    op: Op,
     subject: &str,
     call: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
@@ -66,12 +66,12 @@ fn run<T>(
         }
         Some(Fault::Hang) => hang(op, subject),
         Some(fault @ (Fault::Short { .. } | Fault::ShortExit { .. })) => {
-            panic!("{fault:?} applies to FileOp::Write only, not {op:?} on {subject}")
+            panic!("{fault:?} applies to a write operation only, not {op:?} on {subject}")
         }
     }
 }
 
-fn hang(op: FileOp, subject: &str) -> ! {
+pub(super) fn hang(op: impl fmt::Debug, subject: &str) -> ! {
     panic!(
         "Fault::Hang on {op:?} for {subject}: the file boundary is synchronous, so a hang cannot be ended by a deadline; this plan is a test bug"
     )

@@ -17,6 +17,19 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- **A turn can now end by itself when it makes no progress.** A turn whose
+  model repeats the same tool call, with the same arguments, 8 times in a row,
+  or whose tool results fail 12 times in a row, ends with the error
+  `no progress: ...` instead of running until a deadline — and the deadlines
+  are unlimited unless configured. This applies to every turn, including each
+  sub-agent's, which inherits the parent's limits. A turn that ends this way is
+  not a persistence failure, so a frontend continues the session. The two
+  limits are `[agent].no_progress_repeats` and `[agent].no_progress_failures`;
+  `0` disables one condition and `0`/`0` disables the guard, which is the
+  setting for a deliberate poll loop that repeats one identical call. See the
+  [user manual](docs/user-manual.md#stopping-a-turn-that-makes-no-progress)
+  ([#407](https://github.com/baiyuqing/otto/pull/407)).
+
 - Session **AUTO** approval now decides only a *bounded authorization*: an
   operation that stays inside the sandbox and the workspace and grants nothing
   durable. A plan review (`request_approval`), an unsandboxed command, a
@@ -30,6 +43,23 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([#401](https://github.com/baiyuqing/otto/pull/401)).
 
 ### Features
+
+- Stop a sub-agent task from the model side with the new `agent_cancel` tool:
+  it takes a task id or name and cancels that task, the same registry call
+  `/task cancel`, `POST /v1/sessions/{id}/tasks/{task_id}/cancel` and ACP
+  already reached. Cancellation stays cooperative — a queued task is released
+  before it starts, a running one stops at its next checkpoint, and an
+  effectful call settles instead of being abandoned — so the parent can stop a
+  child that is stuck or no longer needed without waiting for it
+  ([#407](https://github.com/baiyuqing/otto/pull/407)).
+
+- Each turn now carries a progress guard that ends a turn which repeats one
+  identical tool call, or keeps failing, past the configured limits. Two calls
+  count as identical when the tool name and the arguments match; key order and
+  spacing in the arguments are ignored. Only consecutive conditions are
+  detected, so a cycle that alternates between different calls is not stopped
+  and remains the case `agent_status` plus `agent_cancel` exists for
+  ([#407](https://github.com/baiyuqing/otto/pull/407)).
 
 - Steer the active turn from the TUI and take the guidance back. `/steer
   <guidance>` delivers guidance at the next safe boundary as an explicit
@@ -46,6 +76,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Quitting Otto no longer fails with `otto: close sandbox: sandbox runtime
+  close failed` and exit code 1 after a session whose sandboxed commands left
+  read-only directories behind. A child creates them routinely: the Go module
+  cache and Otto's own plugin store both install `0555` directories. The
+  private state tree is removed through directory descriptors, and an entry can
+  only be unlinked through a parent the owner may write and search, so removal
+  stopped at the first such directory, deleted nothing else, and left the tree
+  in `~/Library/Caches/otto-sandbox-*` — a leaked tree per affected session.
+  Cleanup now restores the owner's access through the same descriptors it
+  already validated against the recorded inode identities, then removes the
+  tree; the identity checks and the symlink refusal are unchanged
+  ([#408](https://github.com/baiyuqing/otto/pull/408)).
 - Stop dropping the input typed during a turn without saying so. Ordinary text
   submitted while a turn runs is guidance for that turn, but the TUI never
   recorded it: `Ctrl+U` did nothing, the transcript never showed `Queued for
@@ -94,10 +136,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [development guide](docs/development.md#fault-injection)). `faults::sql`
   wraps the SQL driver that every Turso repository now opens through, and
   `tests/fault_storage.rs` runs commit, rollback, open and read faults against
-  each repository ([#403](https://github.com/baiyuqing/otto/pull/403)). `faults::files`
-  wraps the session store's file driver, and `tests/fault_session.rs` runs
-  write, sync and lock faults against session journals
-  ([#406](https://github.com/baiyuqing/otto/pull/406)).
+  each repository ([#403](https://github.com/baiyuqing/otto/pull/403)).
+  `faults::files` wraps the session store's file driver, and
+  `tests/fault_session.rs` runs write, sync and lock faults against session
+  journals ([#406](https://github.com/baiyuqing/otto/pull/406)). The six atomic
+  file writers (write and edit tools, reminder and inbox sidecars, workspace
+  identity, configuration, reflection skill files, session forks) now share
+  `fsops::publish_file`, and `faults::publish` injects create, write, sync and
+  rename faults into it; reflection skill files now also sync their directory
+  after the rename
+  ([#409](https://github.com/baiyuqing/otto/pull/409)).
 
 ## 0.4.1 - 2026-10-07
 

@@ -195,6 +195,12 @@ pub struct Agent {
     pub cancellation_grace: Option<String>,
     pub subagent_timeout: Option<String>,
     pub workflow_step_timeout: Option<String>,
+    /// Identical consecutive tool calls that stop a turn making no progress.
+    /// `None` keeps the built-in default; `0` disables this condition.
+    pub no_progress_repeats: Option<i64>,
+    /// Consecutive failed tool results that stop a turn making no progress.
+    /// `None` keeps the built-in default; `0` disables this condition.
+    pub no_progress_failures: Option<i64>,
     #[serde(default)]
     pub compaction: CompactionConfig,
 }

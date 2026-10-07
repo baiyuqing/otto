@@ -45,6 +45,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
+use otto_core::agent::progress::ProgressPolicy;
 use otto_core::agent::redactor::Redactor;
 use otto_core::agent::{Agent, CompactionSettings, Event, EventSink, Options};
 use otto_core::mailbox::Mailbox;
@@ -599,6 +600,9 @@ pub struct OptionsTemplate {
     pub provider_name: String,
     pub thinking: String,
     pub compaction: CompactionSettings,
+    /// The parent's progress limits. A child inherits them, so a stuck child
+    /// stops on the same rule as the parent's own loop.
+    pub progress: ProgressPolicy,
     pub request_sizer: Option<Arc<dyn RequestSizer + Send + Sync>>,
     pub provider_timeout: Option<Duration>,
     pub cancellation_grace: Duration,
@@ -619,6 +623,7 @@ impl Default for OptionsTemplate {
             provider_name: String::new(),
             thinking: String::new(),
             compaction: CompactionSettings::default(),
+            progress: ProgressPolicy::default(),
             request_sizer: None,
             provider_timeout: None,
             cancellation_grace: Duration::from_secs(5),
@@ -1358,6 +1363,7 @@ impl Runner {
             new_operation_id: Box::new(move || new_operation_id()),
             request_sizer: template.request_sizer.clone(),
             compaction: template.compaction,
+            progress: template.progress,
             // A child gets no memory binding, no registry of its own, and a
             // private inbox: it can neither recall, delegate, nor observe the
             // parent's notifications, but the parent can send messages into

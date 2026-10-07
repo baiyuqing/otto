@@ -43,7 +43,7 @@ pub fn agent_guidance(
         "Use a model ID the user named or the session model. Otto cannot list this provider's models; do not write a model ID from memory."
     };
     format!(
-        "<delegation_policy>\nUse the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result.\n<subagent_runtime {identity}>\n{model_policy}\n</subagent_runtime>\n</delegation_policy>"
+        "<delegation_policy>\nUse the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result. Use agent_status to see what a running task is doing; when it is stuck, repeating itself, or no longer needed, stop it with agent_cancel.\n<subagent_runtime {identity}>\n{model_policy}\n</subagent_runtime>\n</delegation_policy>"
     )
 }
 

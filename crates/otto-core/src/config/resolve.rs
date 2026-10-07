@@ -20,6 +20,14 @@ const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_OUTPUT_BYTES: i64 = 51200;
 const DEFAULT_COMPACTION_RESERVE: i64 = 16_384;
 const DEFAULT_COMPACTION_KEEP: i64 = 20_000;
+/// The built-in progress limits. They are repeated from the agent's own
+/// defaults so the configuration layer stays free of agent types; a test
+/// pins the two together.
+const DEFAULT_PROGRESS_REPEATED_CALLS: u32 = 8;
+const DEFAULT_PROGRESS_CONSECUTIVE_FAILURES: u32 = 12;
+/// The largest accepted progress limit, so a mistyped value fails loudly
+/// instead of acting as "off".
+const MAX_PROGRESS_LIMIT: u32 = 1000;
 const MINIMUM_COMPACTION_WINDOW: i64 = 4_096;
 const MINIMUM_COMPACTION_TARGET: i64 = 1_024;
 
@@ -84,6 +92,22 @@ pub struct ResilienceRuntime {
     pub deadlines: DeadlineRuntime,
 }
 
+/// The resolved limits that stop a turn making no progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressRuntime {
+    pub repeated_calls: u32,
+    pub consecutive_failures: u32,
+}
+
+impl Default for ProgressRuntime {
+    fn default() -> Self {
+        Self {
+            repeated_calls: DEFAULT_PROGRESS_REPEATED_CALLS,
+            consecutive_failures: DEFAULT_PROGRESS_CONSECUTIVE_FAILURES,
+        }
+    }
+}
+
 /// The fully resolved configuration for one process run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Runtime {
@@ -100,6 +124,7 @@ pub struct Runtime {
     pub max_output_bytes: i64,
     pub compaction: CompactionRuntime,
     pub resilience: ResilienceRuntime,
+    pub progress: ProgressRuntime,
 }
 
 fn env_value(env: &HashMap<String, String>, key: &str) -> String {
@@ -249,6 +274,7 @@ fn resolve_impl(
 
     let compaction = resolve_compaction(&file.agent.compaction, &profile_config, &model)?;
     let resilience = resolve_resilience(&file.agent)?;
+    let progress = resolve_progress(&file.agent)?;
 
     let mut api_key = String::new();
     if provider == super::PROVIDER_OPENAI_COMPATIBLE && credentials {
@@ -283,6 +309,7 @@ fn resolve_impl(
         max_output_bytes,
         compaction,
         resilience,
+        progress,
     };
     if let Some(policy) = &file.policy {
         policy.runtime(&runtime)?;
@@ -307,6 +334,39 @@ fn resolve_resilience(agent: &super::Agent) -> Result<ResilienceRuntime, ConfigE
     };
 
     Ok(ResilienceRuntime { deadlines })
+}
+
+fn resolve_progress(agent: &super::Agent) -> Result<ProgressRuntime, ConfigError> {
+    Ok(ProgressRuntime {
+        repeated_calls: optional_progress_limit(
+            "no_progress_repeats",
+            agent.no_progress_repeats,
+            DEFAULT_PROGRESS_REPEATED_CALLS,
+        )?,
+        consecutive_failures: optional_progress_limit(
+            "no_progress_failures",
+            agent.no_progress_failures,
+            DEFAULT_PROGRESS_CONSECUTIVE_FAILURES,
+        )?,
+    })
+}
+
+/// An absent limit keeps the built-in default; an explicit zero disables the
+/// condition.
+fn optional_progress_limit(
+    field: &str,
+    configured: Option<i64>,
+    default: u32,
+) -> Result<u32, ConfigError> {
+    let Some(value) = configured else {
+        return Ok(default);
+    };
+    if !(0..=i64::from(MAX_PROGRESS_LIMIT)).contains(&value) {
+        return Err(ConfigError::new(format!(
+            "[agent].{field} must be between 0 and {MAX_PROGRESS_LIMIT}, got {value}"
+        )));
+    }
+    Ok(value as u32)
 }
 
 fn optional_positive_duration(
@@ -490,6 +550,7 @@ fn go_authority_is_empty(raw: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::progress::{DEFAULT_CONSECUTIVE_FAILURES, DEFAULT_REPEATED_CALLS};
     use crate::config::{Agent, CompactionConfig as Compaction};
 
     fn profile(provider: &str, model: &str, base_url: &str, api_key_env: &str) -> Profile {
@@ -998,6 +1059,90 @@ mod tests {
                 workflow_step_timeout: Some(Duration::from_secs(3 * 60 * 60)),
             }
         );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn resolves_progress_defaults_and_explicit_values() {
+        let file = file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
+        let runtime = resolve(
+            &file,
+            &HashMap::new(),
+            &SessionDefaults::default(),
+            &Overrides {
+                profile: "sub".into(),
+                ..Default::default()
+            },
+        )
+        .expect("resolve defaults");
+        assert_eq!(runtime.progress, ProgressRuntime::default());
+
+        let mut file = file;
+        file.agent.no_progress_repeats = Some(3);
+        file.agent.no_progress_failures = Some(0);
+        let runtime = resolve(
+            &file,
+            &HashMap::new(),
+            &SessionDefaults::default(),
+            &Overrides {
+                profile: "sub".into(),
+                ..Default::default()
+            },
+        )
+        .expect("resolve explicit values");
+        assert_eq!(
+            runtime.progress,
+            ProgressRuntime {
+                repeated_calls: 3,
+                consecutive_failures: 0,
+            }
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn progress_defaults_match_the_agents_own_defaults() {
+        assert_eq!(
+            ProgressRuntime::default().repeated_calls,
+            DEFAULT_REPEATED_CALLS
+        );
+        assert_eq!(
+            ProgressRuntime::default().consecutive_failures,
+            DEFAULT_CONSECUTIVE_FAILURES
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn rejects_out_of_range_progress_limits() {
+        for (field, values) in [
+            ("no_progress_repeats", [-1_i64, 1001]),
+            ("no_progress_failures", [-1_i64, 1001]),
+        ] {
+            for value in values {
+                let mut file =
+                    file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
+                match field {
+                    "no_progress_repeats" => file.agent.no_progress_repeats = Some(value),
+                    "no_progress_failures" => file.agent.no_progress_failures = Some(value),
+                    _ => unreachable!(),
+                }
+                let err = resolve(
+                    &file,
+                    &HashMap::new(),
+                    &SessionDefaults::default(),
+                    &Overrides {
+                        profile: "sub".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    format!("[agent].{field} must be between 0 and 1000, got {value}")
+                );
+            }
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

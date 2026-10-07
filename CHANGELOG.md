@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Bash now admits canonical Git-linked worktrees registered to the selected
+  repository's exact common Git directory, without persistent `read_paths`
+  approvals. Their Git and Otto identity metadata remain read-only; absent
+  legacy read paths are skipped instead of disabling Bash.
+
 - ChatGPT Responses streams now recognize transient overload/server errors
   across top-level, nested and SSE-event envelope variants, and retry a clean
   pre-output close with the existing bounded backoff. The REPL displays each

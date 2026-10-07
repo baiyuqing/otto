@@ -1561,6 +1561,8 @@ pub async fn run(
         logger: Some(Arc::clone(&builder.logger)),
         workflows: host.workflows.clone(),
         schedule: builder.schedule.clone(),
+        session_idle_timeout: listen.session_idle_timeout,
+        max_open_sessions: listen.max_open_sessions,
     });
 
     // Runs due scheduled prompts of every origin; delivery is the web routes
@@ -1581,6 +1583,9 @@ pub async fn run(
             .run(serve_cancel.child_token()),
         )
     });
+    // Closes sessions nobody has used for a while, so a server that stays up
+    // keeps only the sessions in play. See `Server::sweep_idle_sessions`.
+    server.start_session_sweeper(serve_cancel.child_token());
     let (serve_error, acp_error) = tokio::join!(
         serve_listeners(&server, tcp, socket, &serve_cancel),
         async {

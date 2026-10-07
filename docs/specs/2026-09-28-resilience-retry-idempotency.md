@@ -1004,6 +1004,14 @@ content. Default tests remain offline and deterministic. Cross-process tests
 use local fixture binaries and temporary directories. Platform-specific
 process and durability claims remain behind `cfg` and their existing gates.
 
+> Amended 2026-10-07. The deterministic seams for the provider boundary are
+> the scripted loopback HTTP server in `otto::faults::http` and the matrix in
+> `crates/otto/tests/fault_provider.rs`, specified in
+> [fault injection testing](2026-10-07-fault-injection-testing.md). The matrix
+> asserts the retry and settlement contract above, including the 2026-10-07
+> transport-retry exception, against injected refusals, resets, cut and
+> malformed streams, error statuses and stalls.
+
 ## Delivery plan
 
 The design is implemented as reviewable slices in dependency order. Each slice

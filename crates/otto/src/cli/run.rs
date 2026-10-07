@@ -1209,17 +1209,9 @@ mod tests {
         );
     }
 
-    /// A config with `[experimental].typesafe_skill_check = true` and
-    /// `[skills].enabled` left at its default (enabled).
-    fn skill_check_enabled_config() -> File {
-        let mut file = File::default();
-        file.experimental.typesafe_skill_check = Some(true);
-        file
-    }
-
     #[test]
     fn skill_checker_is_none_when_skills_are_disabled() {
-        let mut file = skill_check_enabled_config();
+        let mut file = File::default();
         file.skills.enabled = Some(false);
         let environment = HashMap::from([("TYPESAFE_API_KEY".to_string(), "key".to_string())]);
         let mut stderr = Cursor::new(Vec::new());
@@ -1238,8 +1230,9 @@ mod tests {
     }
 
     #[test]
-    fn skill_checker_is_none_without_the_experimental_flag() {
-        let file = File::default();
+    fn skill_checker_is_none_when_explicitly_disabled() {
+        let mut file = File::default();
+        file.skills.typesafe_skill_check = Some(false);
         let environment = HashMap::from([("TYPESAFE_API_KEY".to_string(), "key".to_string())]);
         let mut stderr = Cursor::new(Vec::new());
 
@@ -1258,7 +1251,7 @@ mod tests {
 
     #[test]
     fn skill_checker_is_none_without_an_api_key() {
-        let file = skill_check_enabled_config();
+        let file = File::default();
         let environment = HashMap::new();
         let mut stderr = Cursor::new(Vec::new());
 
@@ -1276,9 +1269,9 @@ mod tests {
     }
 
     #[test]
-    fn skill_checker_opens_a_database_when_all_three_conditions_hold() {
+    fn skill_checker_is_enabled_by_default_with_an_api_key() {
         let home = tempfile::tempdir().expect("home");
-        let file = skill_check_enabled_config();
+        let file = File::default();
         let environment = HashMap::from([("TYPESAFE_API_KEY".to_string(), "key".to_string())]);
         let mut stderr = Cursor::new(Vec::new());
 
@@ -1293,6 +1286,25 @@ mod tests {
         assert!(checker.is_some());
         assert!(stderr.get_ref().is_empty());
         assert!(home.path().join(".otto/skill-checks.db").exists());
+    }
+
+    #[test]
+    fn skill_checker_honors_the_legacy_experimental_setting() {
+        let mut file = File::default();
+        file.experimental.typesafe_skill_check = Some(false);
+        let environment = HashMap::from([("TYPESAFE_API_KEY".to_string(), "key".to_string())]);
+        let mut stderr = Cursor::new(Vec::new());
+
+        assert!(
+            skill_checker(
+                &crate::runtime::storage::Storage::default(),
+                &file,
+                &environment,
+                "/nonexistent",
+                &mut stderr,
+            )
+            .is_none()
+        );
     }
 
     #[test]

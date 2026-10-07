@@ -17,6 +17,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Automatic skill contract checks are now a regular `[skills]` feature and
+  default to enabled when `TYPESAFE_API_KEY` is set. Disable them with
+  `[skills].typesafe_skill_check = false`; the old `[experimental]` setting is
+  still accepted as a fallback. See the
+  [user manual](docs/user-manual.md#automatic-contract-check)
+  ([#417](https://github.com/baiyuqing/otto/pull/417)).
+
 - **A session can now decide every request: the YOLO approval mode.**
   `/auto manual|auto|yolo` (and `/auto on|off`, unchanged) selects the
   session's policy, `otto --yolo` starts one session in YOLO, and the HTTP and
@@ -110,6 +117,23 @@ limitations are documented in the [user manual](docs/user-manual.md).
   are no longer broadcast to every chat bound to the session or workspace. See
   [unified approvals](docs/user-manual.md#unified-approvals)
   ([#421](https://github.com/baiyuqing/otto/pull/421)).
+
+- Compaction works again for sessions with `thinking` set on a model that
+  returns reasoning, such as ChatGPT. The summary request inherits `thinking`,
+  and the summary path cancelled the stream at the first reasoning delta and
+  rejected the reasoning block, so every automatic and manual compaction
+  failed. Each turn above the proactive trigger then sent one discarded summary
+  request and the original request, and the context grew until the turn
+  stopped at the hard input limit. Reasoning in a summary response is now
+  ignored and is not stored in the checkpoint. The `compaction_warning` message
+  and compaction errors now include the failure cause. See the
+  [user manual](docs/user-manual.md#context-compaction)
+  ([#420](https://github.com/baiyuqing/otto/pull/420)).
+
+- Keep ChatGPT turns running through pre-output HTTP 429 and 500/502/503/504
+  responses. Otto now retries the borrowed provider request up to six times
+  with 1/2/4/8/16/30-second backoff, honoring a numeric `Retry-After` up to 30
+  seconds; it never re-executes a tool or retries once output is visible.
 
 - A process killed while it wrote the first records of a new session no longer
   leaves an empty or torn `<session-id>.jsonl`. Such a file failed to open

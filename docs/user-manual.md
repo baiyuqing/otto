@@ -1617,6 +1617,12 @@ Rules and defaults:
   - **Reactive overflow recovery:** when the provider returns a typed
     context-overflow error, Otto does one automatic compaction and retries once.
 - The automatic paths are one-shot only; they never loop.
+- When proactive compaction fails and the estimate is below
+  `hard_input_window - reserve_tokens`, Otto emits a `compaction_warning` that
+  names the cause and sends the original request. At or above that limit the
+  turn fails.
+- Reasoning the model returns with a summary is discarded; only the summary
+  text is stored in the checkpoint.
 - `reserve_tokens = 16384` and `keep_recent_tokens = 20000` are the defaults.
 - `context_window` and `compaction_window` must be at least `4096` when set.
 - `compaction_window` requires `context_window` and must not exceed it.
@@ -4529,6 +4535,7 @@ workspace after starting a new Otto session:
 ```toml
 [skills]
 enabled = true                              # default true
+typesafe_skill_check = true                 # default true
 paths = ["~/.otto/skills", ".otto/skills"]  # default; later entries win on name conflict
 disabled = []                               # skill names disabled without removing their files
 ```
@@ -4588,10 +4595,7 @@ Not yet implemented:
 - `allowed-tools` enforcement.
 - Reading `~/.claude/skills`; hot reload inside a session.
 
-### Automatic contract check (experimental)
-
-This feature is experimental: its config, storage, and display may change or
-be removed without notice.
+### Automatic contract check
 
 When enabled, the first time a session delegates to a given version of a
 skill's `SKILL.md` (a skill with an `input`/`output` contract, run through the
@@ -4603,19 +4607,20 @@ example, an `output` field too vague to be useful) is judged locally and
 never sent. Results are stored in `~/.otto/skill-checks.db` (Turso,
 append-only) and shown in `/skill <name>` for contract skills.
 
-Enable it with all three of:
+The check is enabled by default when skills are enabled. It runs when both of
+these conditions hold:
 
 ```toml
 [skills]
-enabled = true            # default; must not be explicitly false
-
-[experimental]
-typesafe_skill_check = true
+enabled = true                 # default
+typesafe_skill_check = true    # default
 ```
 
-and a non-empty `TYPESAFE_API_KEY` environment variable. Any one of these
-missing leaves the checker off entirely: nothing is sent, and
-`~/.otto/skill-checks.db` is never opened.
+and `TYPESAFE_API_KEY` is non-empty. Set `typesafe_skill_check = false` to
+disable it. When disabled or when the key is missing, nothing is sent and
+`~/.otto/skill-checks.db` is never opened. The old
+`[experimental].typesafe_skill_check` setting is still accepted for
+compatibility when the `[skills]` setting is absent.
 
 ## MCP servers
 

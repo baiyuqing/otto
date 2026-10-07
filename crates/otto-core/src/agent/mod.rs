@@ -1334,7 +1334,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                             ));
                         }
                         emit(Event::CompactionWarning {
-                            message: AUTOMATIC_COMPACTION_WARNING_MESSAGE.into(),
+                            message: format!(
+                                "{AUTOMATIC_COMPACTION_WARNING_MESSAGE}: {}",
+                                self.redactor.redact_error(error)
+                            ),
                         });
                     }
                     Ok(_) => {

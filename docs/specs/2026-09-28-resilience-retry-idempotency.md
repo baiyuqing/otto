@@ -552,11 +552,15 @@ separately proven and tested.
 > non-transport failure, or any operation whose contract requires the
 > receiver's deduplication before repetition.
 
-> Amended 2026-10-07. ChatGPT also retries a stream-reported
-> `server_is_overloaded` or `server_error` that arrives before any reasoning,
-> text or tool-call delta, within the same attempt budget (#339). The
-> statements in this spec that ChatGPT completions do not retry predate that
-> change and the transport amendment above.
+> Amended 2026-10-07. ChatGPT retries a stream-reported
+> `server_is_overloaded` or `server_error`, and HTTP 429/500/502/503/504,
+> before any reasoning, text or tool-call delta. It uses at most six retries
+> with 1/2/4/8/16/30-second backoff; a numeric `Retry-After` takes precedence
+> but is capped at 30 seconds. Each retry repeats only the borrowed provider
+> request; tools are not re-executed. Exhaustion retains `Unknown` certainty.
+> Other status and reported error codes remain terminal. The statements in
+> this spec that ChatGPT completions do not retry predate the transport
+> amendment above.
 
 ## Phase 1: identity, disposition, and effect-certainty contract
 

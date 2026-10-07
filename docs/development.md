@@ -149,13 +149,15 @@ earlier of their local policy and the parent's remaining budget. `otto-core`
 receives only the wasm-safe `operation::OperationControl` capability and must
 not read a native clock. Provider retries, compaction, task queueing, and
 workflow attempts consume the same logical budget rather than restarting it.
-The ChatGPT transport retries only connection/send/body failures before any
-streamed output, at most three times with 1/2/4-second backoff; the
-OpenAI-compatible transport retries the classes described next. A retry
-repeats only the borrowed provider request, never tools or the agent turn.
-HTTP, auth, and stream-codec errors are terminal; retries preserve
-cancellation, the original deadline, actual send-attempt counts, and unknown
-effect certainty on failure.
+The ChatGPT transport retries connection/send/body failures, HTTP 429 and
+500/502/503/504 responses, and stream-reported `server_is_overloaded` or
+`server_error` before any streamed output. It makes at most six retries with
+1/2/4/8/16/30-second backoff; a numeric `Retry-After` is preferred and capped
+at 30 seconds. The OpenAI-compatible transport retries the classes described
+next. A retry repeats only the borrowed provider request, never tools or the
+agent turn. Other HTTP, auth, and stream-codec errors are terminal; retries
+preserve cancellation, the original deadline, actual send-attempt counts, and
+unknown effect certainty on failure.
 The OpenAI-compatible transport uses the same policy (4 attempts, 1/2/4 s)
 for two failure classes, both of which prove that nothing was visible to the
 caller yet. A send whose connection could not be established

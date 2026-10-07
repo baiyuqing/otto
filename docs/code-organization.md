@@ -22,7 +22,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories and logical migration ports | `runtime/storage.rs` composition and route registry |
 | `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
-| `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check` | `Makefile`, `.github/workflows/checks.yml` |
+| `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check`, and `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options | `Makefile`, `.github/workflows/checks.yml` |
 
 The root Cargo workspace contains `otto-core` and `otto` only.
 `chat-connector/` has its own build definition and is not a root workspace crate.

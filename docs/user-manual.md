@@ -249,6 +249,48 @@ OTTO_API_KEY=your-key otto \
   --no-session
 ```
 
+### Launcher script
+
+In a source checkout, `scripts/otto.sh` starts Otto in the foreground with the
+settings from `otto.env`, so the command line lives in one file instead of your
+shell history. Copy the template and edit it:
+
+```bash
+cp otto.env.example otto.env
+make run                 # same as scripts/otto.sh
+```
+
+`otto.env` is read as a shell file and ignored by Git, so quoting, `#` comments
+and `export` work. It is trusted local configuration, like a shell profile; put
+the real key there only in your own copy, never in the committed example. A
+checkout without `otto.env` still starts: the script says so on stderr and Otto
+falls back to its own configuration and the environment. An empty setting says
+nothing and behaves the same way.
+
+| Setting | Otto option |
+| --- | --- |
+| `OTTO_PROVIDER`, `OTTO_MODEL`, `OTTO_PROFILE` | `--provider`, `--model`, `--profile` |
+| `OTTO_BASE_URL` | `--base-url` |
+| `OTTO_CWD` | `--cwd` |
+| `OTTO_UI` | `--ui` |
+| `OTTO_SANDBOX` | `--sandbox` |
+| `OTTO_THINKING` | `--thinking` |
+| `OTTO_SHELL_TIMEOUT`, `OTTO_MAX_OUTPUT_BYTES` | `--shell-timeout`, `--max-output-bytes` |
+| `OTTO_API_KEY` | Environment only; there is no key option |
+| `OTTO_EXTRA_ARGS` | Appended verbatim, split on whitespace |
+
+Options written after the script name are appended last and win over the file,
+which is how a one-off run overrides it:
+
+```bash
+scripts/otto.sh --model other-model --prompt "summarize the diff"
+```
+
+`OTTO_ENV_FILE` selects another settings file and `OTTO_BIN` another binary;
+both default to the checkout. The launcher is for the foreground frontends; the
+`otto serve` agent server is started directly, as described under
+[agent server](#agent-server).
+
 ## ChatGPT subscription
 
 Otto can authorize requests with a ChatGPT Plus/Pro/Team/Enterprise subscription

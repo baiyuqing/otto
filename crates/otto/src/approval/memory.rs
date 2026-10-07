@@ -121,37 +121,44 @@ pub fn publish(
         scope: candidate.proposed.scope.clone(),
         id: candidate.id.clone(),
     };
-    service.create(Proposal {
-        kind: Kind::Authorization,
-        authority: Authority::Durable,
-        scope: super::Scope {
-            workspace: workspace.into(),
-            session_id: String::new(),
-            task_id: String::new(),
-            run_id: String::new(),
+    service.create_with_origin(
+        Proposal {
+            kind: Kind::Authorization,
+            authority: Authority::Durable,
+            scope: super::Scope {
+                workspace: workspace.into(),
+                session_id: String::new(),
+                task_id: String::new(),
+                run_id: String::new(),
+            },
+            subject: Subject {
+                tool_call_id: String::new(),
+                source: "memory".into(),
+                id: format!(
+                    "{}/{}/{}/{}",
+                    scopes.first().map_or("", |s| s.id.as_str()),
+                    reference.scope.namespace,
+                    reference.scope.id,
+                    reference.id
+                ),
+                version: super::digest(&format!(
+                    "{}:{}:{:?}",
+                    candidate.created_at, candidate.base_revision, candidate.proposed
+                )),
+                details: serde_json::to_string(&reference).map_err(|_| Error::Unavailable)?,
+            },
+            title: format!("Review memory {}", candidate.action.as_str()),
+            reason: "Review this memory change before it is applied.".into(),
+            persistent: false,
+            blocking: false,
+            expires_at: None,
         },
-        subject: Subject {
-            tool_call_id: String::new(),
-            source: "memory".into(),
-            id: format!(
-                "{}/{}/{}/{}",
-                scopes.first().map_or("", |s| s.id.as_str()),
-                reference.scope.namespace,
-                reference.scope.id,
-                reference.id
-            ),
-            version: super::digest(&format!(
-                "{}:{}:{:?}",
-                candidate.created_at, candidate.base_revision, candidate.proposed
-            )),
-            details: serde_json::to_string(&reference).map_err(|_| Error::Unavailable)?,
-        },
-        title: format!("Review memory {}", candidate.action.as_str()),
-        reason: "Review this memory change before it is applied.".into(),
-        persistent: false,
-        blocking: false,
-        expires_at: None,
-    })?;
+        candidate
+            .proposed
+            .metadata
+            .get(crate::memory::PRESENTATION_ORIGIN_METADATA)
+            .map_or("", String::as_str),
+    )?;
     Ok(())
 }
 
@@ -241,6 +248,10 @@ mod tests {
                 key: "tabs".into(),
                 text: "prefers tabs".into(),
                 reason: "private reason: prefers tabs".into(),
+                metadata: std::collections::BTreeMap::from([(
+                    crate::memory::PRESENTATION_ORIGIN_METADATA.into(),
+                    "chat:telegram:42".into(),
+                )]),
                 source: crate::memory::Provenance {
                     origin: Some(crate::memory::Origin::Model),
                     ..Default::default()
@@ -250,6 +261,10 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap();
+        assert_eq!(
+            candidate.proposed.metadata[crate::memory::PRESENTATION_ORIGIN_METADATA],
+            "chat:telegram:42"
+        );
         let one = service
             .snapshot("/one", Some("s1"))
             .unwrap()
@@ -263,6 +278,8 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(one.id, two.id);
+        assert_eq!(one.presentation_origin, "chat:telegram:42");
+        assert_eq!(two.presentation_origin, "chat:telegram:42");
         assert!(one.subject.details.contains("prefers tabs"));
         assert!(one.subject.details.contains("private reason"));
         let events = service.events("/one", None, 0).unwrap();
@@ -287,15 +304,24 @@ mod tests {
             )
             .unwrap();
         service.apply_available("/two").unwrap();
-        assert_eq!(
-            memory
-                .get_candidate(&CandidateRef {
-                    scope: user,
-                    id: candidate.id
-                })
-                .unwrap()
-                .state,
-            CandidateState::Accepted
+        let accepted = memory
+            .get_candidate(&CandidateRef {
+                scope: user.clone(),
+                id: candidate.id,
+            })
+            .unwrap();
+        assert_eq!(accepted.state, CandidateState::Accepted);
+        let record = memory
+            .get(&crate::memory::RecordRef {
+                scope: user,
+                id: accepted.result_record_id,
+            })
+            .unwrap();
+        assert!(
+            !record
+                .metadata
+                .contains_key(crate::memory::PRESENTATION_ORIGIN_METADATA),
+            "routing metadata must not become remembered user data"
         );
         assert!(
             service

@@ -22,10 +22,10 @@
 //! the account id redacted.
 //!
 //! Two deliberate decisions:
-//!   - transport failures and stream-reported `server_is_overloaded` or
-//!     `server_error` before any streamed output get up to three retries;
-//!     HTTP status, other reported codes and protocol failures are returned on
-//!     the first attempt.
+//!   - transport failures, HTTP 429/500/502/503/504, and stream-reported
+//!     `server_is_overloaded` or `server_error` before any streamed output get
+//!     up to six retries; other statuses, reported codes and protocol failures
+//!     are returned on the first attempt.
 //!   - reqwest exposes no cap on the size of a response header block, so no
 //!     bound is enforced on it. The same gap exists in
 //!     [`crate::provider::openaicompat`].
@@ -64,17 +64,42 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const AUTHORIZATION_FAILED: &str = "chatgpt authorization failed; run 'otto login'";
 /// The request did not complete, with no detail that could carry a secret.
 const REQUEST_FAILED: &str = "chatgpt request failed";
-/// `Retry` event reason for transport failures.
+/// `Retry` event reason for transport failures and a clean stream close before
+/// any terminal event. In either case the dispatched request may have run.
 const TRANSPORT_RETRY_REASON: &str = "connection interrupted";
 
+/// Classifies a Responses stream failure for the bounded transport retry.
+/// The caller still suppresses the retry after any output reached its sink.
+fn stream_retry(error: &StreamError) -> Option<Retry> {
+    let reason = match error {
+        StreamError::Reported { code, .. } => match code.as_str() {
+            "server_is_overloaded" => "server_is_overloaded",
+            "server_error" => "server_error",
+            _ => return None,
+        },
+        StreamError::MissingCompletion => TRANSPORT_RETRY_REASON,
+        _ => return None,
+    };
+    Some(Retry {
+        reason,
+        retry_after: None,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct Retry {
+    reason: &'static str,
+    retry_after: Option<Duration>,
+}
+
 const RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
-    max_attempts: 4,
+    max_attempts: 7,
     base: Duration::from_secs(1),
-    max: Duration::from_secs(4),
-    retry_after_cap: Duration::from_secs(4),
+    max: Duration::from_secs(30),
+    retry_after_cap: Duration::from_secs(30),
 };
 
-// Fixed exponential backoff; no new randomness dependency for three delays.
+// Fixed exponential backoff; no new randomness dependency for six delays.
 struct Backoff;
 impl crate::retry::JitterSource for Backoff {
     fn full_jitter(&mut self, upper_bound: Duration) -> Duration {
@@ -180,7 +205,7 @@ impl Provider for Client {
             settlement.attempts = attempts;
             // Retry this completion only. Previously executed tools stay in
             // the unchanged request; streamed output cannot be replayed.
-            let Some(reason) = retry_reason else {
+            let Some(retry) = retry_reason else {
                 return settlement;
             };
             if output_started {
@@ -192,7 +217,7 @@ impl Provider for Client {
             let Some(delay) = crate::retry::next_delay(
                 RETRY_POLICY,
                 attempts,
-                None,
+                retry.retry_after,
                 control.remaining().unwrap_or(Duration::MAX),
                 Duration::from_secs(1),
                 &mut Backoff,
@@ -203,7 +228,7 @@ impl Provider for Client {
                 attempt: attempts + 1,
                 max_attempts: RETRY_POLICY.max_attempts,
                 delay,
-                reason: reason.to_owned(),
+                reason: retry.reason.to_owned(),
             });
             if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
                 return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
@@ -213,15 +238,15 @@ impl Provider for Client {
 }
 
 impl Client {
-    /// One request attempt. Only transport failures and stream-reported
-    /// `server_is_overloaded` or `server_error` are eligible for retry;
-    /// `retry_reason` is set to the `Retry` event reason for those.
+    /// One request attempt. Transport failures, transient HTTP responses, and
+    /// stream-reported `server_is_overloaded` or `server_error` are eligible
+    /// for retry; `retry_reason` records the retry metadata for those.
     async fn attempt(
         &self,
         request: &Request,
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
-        retry_reason: &mut Option<&'static str>,
+        retry_reason: &mut Option<Retry>,
     ) -> ProviderSettlement {
         if let Err(error) = check_running(control) {
             return chatgpt_failure(error, 0, EffectCertainty::NotStarted, control);
@@ -300,7 +325,10 @@ impl Client {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 if !error.is_builder() && !error.is_redirect() {
-                    *retry_reason = Some(TRANSPORT_RETRY_REASON);
+                    *retry_reason = Some(Retry {
+                        reason: TRANSPORT_RETRY_REASON,
+                        retry_after: None,
+                    });
                 }
                 if let Err(error) = check_running(control) {
                     return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
@@ -316,6 +344,14 @@ impl Client {
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
+            if let Some(retry) = transient_http_retry(status, response.headers()) {
+                *retry_reason = Some(retry);
+                return ProviderSettlement::failed(
+                    ProviderError::Other(format!("chatgpt responses HTTP {status}")),
+                    1,
+                    EffectCertainty::Unknown,
+                );
+            }
             return ProviderSettlement::failed(
                 ProviderError::Other(format!("chatgpt responses HTTP {status}")),
                 1,
@@ -332,7 +368,10 @@ impl Client {
                 Ok(Ok(None)) => break,
                 Ok(Err(error)) => {
                     if !error.is_builder() && !error.is_redirect() {
-                        *retry_reason = Some(TRANSPORT_RETRY_REASON);
+                        *retry_reason = Some(Retry {
+                            reason: TRANSPORT_RETRY_REASON,
+                            retry_after: None,
+                        });
                     }
                     if let Err(error) = check_running(control) {
                         return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
@@ -352,17 +391,16 @@ impl Client {
                 if let Err(stop) = check_running(control) {
                     return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
                 }
-                if let StreamError::Reported { code, .. } = &error {
-                    *retry_reason = match code.as_str() {
-                        "server_is_overloaded" => Some("server_is_overloaded"),
-                        "server_error" => Some("server_error"),
-                        _ => None,
-                    };
-                }
+                *retry_reason = stream_retry(&error);
+                let certainty = if retry_reason.is_some() {
+                    EffectCertainty::Unknown
+                } else {
+                    EffectCertainty::Completed
+                };
                 return ProviderSettlement::failed(
                     ProviderError::Other(redactor.redact_string(&error.to_string())),
                     1,
-                    EffectCertainty::Completed,
+                    certainty,
                 );
             }
             if assembler.is_done() {
@@ -398,10 +436,16 @@ impl Client {
                 if let Err(stop) = check_running(control) {
                     return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
                 }
+                *retry_reason = stream_retry(&error);
+                let certainty = if retry_reason.is_some() {
+                    EffectCertainty::Unknown
+                } else {
+                    EffectCertainty::Completed
+                };
                 return ProviderSettlement::failed(
                     ProviderError::Other(redactor.redact_string(&error.to_string())),
                     1,
-                    EffectCertainty::Completed,
+                    certainty,
                 );
             }
         };
@@ -413,6 +457,26 @@ impl Client {
             1,
         )
     }
+}
+
+fn transient_http_retry(status: u16, headers: &reqwest::header::HeaderMap) -> Option<Retry> {
+    let reason = match status {
+        429 => "HTTP 429",
+        500 => "HTTP 500",
+        502 => "HTTP 502",
+        503 => "HTTP 503",
+        504 => "HTTP 504",
+        _ => return None,
+    };
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs);
+    Some(Retry {
+        reason,
+        retry_after,
+    })
 }
 
 impl RequestSizer for Client {
@@ -1040,9 +1104,44 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    #[test]
+    fn transient_http_statuses_and_retry_after_are_classified_without_a_body() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "45".parse().unwrap());
+        for (status, reason) in [
+            (429, "HTTP 429"),
+            (500, "HTTP 500"),
+            (502, "HTTP 502"),
+            (503, "HTTP 503"),
+            (504, "HTTP 504"),
+        ] {
+            let retry = transient_http_retry(status, &headers).expect("retryable status");
+            assert_eq!(retry.reason, reason);
+            assert_eq!(retry.retry_after, Some(Duration::from_secs(45)));
+        }
+        let retry = transient_http_retry(503, &headers).expect("retryable status");
+        assert_eq!(
+            crate::retry::next_delay(
+                RETRY_POLICY,
+                1,
+                retry.retry_after,
+                Duration::MAX,
+                Duration::from_secs(1),
+                &mut Backoff,
+            ),
+            Some(Duration::from_secs(30))
+        );
+        for status in [400, 401, 408, 409, 501] {
+            assert!(
+                transient_http_retry(status, &headers).is_none(),
+                "status {status}"
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn rate_limits_and_server_errors_are_not_retried() {
-        for status in [429, 503] {
+    async fn non_transient_http_statuses_are_not_retried() {
+        for status in [400, 401, 408, 409, 501] {
             let server = testserver::spawn(move |_| {
                 testserver::status_response(status, "provider body is not exposed")
             })
@@ -1060,12 +1159,12 @@ mod tests {
     }
 
     /// A connection that is refused carries no provider text into the error.
-    /// Paused time skips the 1 + 2 + 4 s backoff.
+    /// Paused time skips the 1 + 2 + 4 + 8 + 16 + 30 s backoff.
     #[tokio::test(start_paused = true)]
-    async fn a_transport_failure_stops_after_three_retries() {
+    async fn a_transport_failure_stops_after_six_retries() {
         let client = Client::with_base_url("http://127.0.0.1:1", static_tokens("token"), "acct-1");
         let (settlement, events) = complete(&client, &Request::default()).await;
-        assert_eq!(settlement.attempts, 4);
+        assert_eq!(settlement.attempts, 7);
         assert_eq!(
             settlement.outcome.effect_certainty,
             EffectCertainty::Unknown
@@ -1073,14 +1172,44 @@ mod tests {
         assert_eq!(settlement.result.unwrap_err().to_string(), REQUEST_FAILED);
         assert_eq!(
             events,
-            (2..=4)
-                .map(|attempt| StreamEvent::Retry {
-                    attempt,
-                    max_attempts: 4,
-                    delay: Duration::from_secs(1 << (attempt - 2)),
-                    reason: "connection interrupted".into(),
-                })
-                .collect::<Vec<_>>()
+            vec![
+                StreamEvent::Retry {
+                    attempt: 2,
+                    max_attempts: 7,
+                    delay: Duration::from_secs(1),
+                    reason: "connection interrupted".into()
+                },
+                StreamEvent::Retry {
+                    attempt: 3,
+                    max_attempts: 7,
+                    delay: Duration::from_secs(2),
+                    reason: "connection interrupted".into()
+                },
+                StreamEvent::Retry {
+                    attempt: 4,
+                    max_attempts: 7,
+                    delay: Duration::from_secs(4),
+                    reason: "connection interrupted".into()
+                },
+                StreamEvent::Retry {
+                    attempt: 5,
+                    max_attempts: 7,
+                    delay: Duration::from_secs(8),
+                    reason: "connection interrupted".into()
+                },
+                StreamEvent::Retry {
+                    attempt: 6,
+                    max_attempts: 7,
+                    delay: Duration::from_secs(16),
+                    reason: "connection interrupted".into()
+                },
+                StreamEvent::Retry {
+                    attempt: 7,
+                    max_attempts: 7,
+                    delay: Duration::from_secs(30),
+                    reason: "connection interrupted".into()
+                },
+            ]
         );
     }
 
@@ -1114,6 +1243,64 @@ mod tests {
         "data: {\"type\":\"error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded.\"}\n",
         "\n",
     );
+
+    const OVERLOADED_STREAM_WITHOUT_SEPARATOR: &str = concat!(
+        "event: error\n",
+        "data: {\"type\":\"error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded.\"}",
+    );
+
+    #[tokio::test]
+    async fn an_overload_dispatched_at_clean_eof_is_retried() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let server = testserver::spawn(move |_| {
+            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                sse_response(OVERLOADED_STREAM_WITHOUT_SEPARATOR)
+            } else {
+                sse_response(CANNED_STREAM)
+            }
+        })
+        .await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let (settlement, events) = complete(&client, &model_request()).await;
+        assert!(settlement.result.is_ok());
+        assert_eq!(settlement.attempts, 2);
+        assert_eq!(retry_reasons(&events), ["server_is_overloaded"]);
+    }
+
+    #[tokio::test]
+    async fn a_clean_eof_without_output_is_retried() {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let server = testserver::spawn(move |_| {
+            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                sse_response(": keepalive\n\n")
+            } else {
+                sse_response(CANNED_STREAM)
+            }
+        })
+        .await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let (settlement, events) = complete(&client, &model_request()).await;
+        assert!(settlement.result.is_ok());
+        assert_eq!(settlement.attempts, 2);
+        assert_eq!(server.count(), 2);
+        assert_eq!(retry_reasons(&events), [TRANSPORT_RETRY_REASON]);
+    }
+
+    #[tokio::test]
+    async fn a_clean_eof_after_output_is_terminal_without_retry() {
+        const PARTIAL: &str = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n",
+            "\n",
+        );
+        let server = testserver::spawn(|_| sse_response(PARTIAL)).await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let (settlement, events) = complete(&client, &model_request()).await;
+        assert!(settlement.result.is_err());
+        assert_eq!(settlement.attempts, 1);
+        assert_eq!(server.count(), 1);
+        assert!(retry_reasons(&events).is_empty());
+    }
 
     fn retry_reasons(events: &[StreamEvent]) -> Vec<&str> {
         events
@@ -1149,42 +1336,43 @@ mod tests {
         assert_eq!(requests[0].body, requests[1].body);
     }
 
-    /// Runs in real time (1 + 2 + 4 s): paused time auto-advances while the
-    /// client waits on the loopback socket and trips its read timeout.
     #[tokio::test]
-    async fn a_reported_overload_stops_after_three_retries() {
-        let server = testserver::spawn(|_| sse_response(OVERLOADED_STREAM)).await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
-        let (settlement, events) = complete(&client, &model_request()).await;
-        assert_eq!(settlement.attempts, 4);
-        assert_eq!(server.count(), 4);
-        assert_eq!(
-            settlement.result.unwrap_err().to_string(),
-            "responses stream reported error: server_is_overloaded: Our servers are currently overloaded."
-        );
-        assert_eq!(retry_reasons(&events), ["server_is_overloaded"; 3]);
-    }
-
-    #[tokio::test]
-    async fn a_response_failed_server_error_is_retried() {
-        const FAILED: &str = concat!(
-            "event: response.failed\n",
-            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n",
-            "\n",
-        );
-        let count = std::sync::atomic::AtomicUsize::new(0);
-        let server = testserver::spawn(move |_| {
-            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                sse_response(FAILED)
-            } else {
-                sse_response(CANNED_STREAM)
-            }
-        })
-        .await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
-        let (settlement, events) = complete(&client, &model_request()).await;
-        assert!(settlement.result.is_ok());
-        assert_eq!(retry_reasons(&events), ["server_error"]);
+    async fn response_error_variants_are_retried() {
+        for failed in [
+            concat!(
+                "event: response.failed\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n",
+                "\n",
+            ),
+            concat!(
+                "event: error\n",
+                "data: {\"error\":{\"type\":\"server_error\",\"message\":\"boom\"}}\n",
+                "\n",
+            ),
+            concat!(
+                "event: error\n",
+                "data: {\"type\":\"error\",\"error\":{},\"code\":\"server_error\",\"message\":\"boom\"}\n",
+                "\n",
+            ),
+        ] {
+            let count = std::sync::atomic::AtomicUsize::new(0);
+            let server = testserver::spawn(move |_| {
+                if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    sse_response(failed)
+                } else {
+                    sse_response(CANNED_STREAM)
+                }
+            })
+            .await;
+            let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+            let (settlement, events) = complete(&client, &model_request()).await;
+            assert!(settlement.result.is_ok(), "variant: {failed}");
+            assert_eq!(
+                retry_reasons(&events),
+                ["server_error"],
+                "variant: {failed}"
+            );
+        }
     }
 
     #[tokio::test]

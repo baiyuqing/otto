@@ -441,33 +441,27 @@ fn chatgpt(server: &Server, access_token: &str) -> chatgpt::Client {
 }
 
 #[tokio::test]
-async fn chatgpt_transport_failure_three_times_then_success_sends_four_identical_requests() {
+async fn chatgpt_transport_failure_then_success_retries_the_same_request() {
     let server = http::spawn_scripted(vec![
-        Script::truncated("", 4096),
-        Script::truncated("", 4096),
         Script::truncated("", 4096),
         Script::sse_without_done(&[TEXT, COMPLETED]),
     ])
     .await;
     let (settlement, events) = complete_plain(&chatgpt(&server, "token")).await;
     assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
-    assert_eq!(settlement.attempts, 4);
+    assert_eq!(settlement.attempts, 2);
     assert_eq!(
         retries(&events),
-        [
-            (2, Duration::from_secs(1), "connection interrupted"),
-            (3, Duration::from_secs(2), "connection interrupted"),
-            (4, Duration::from_secs(4), "connection interrupted"),
-        ]
+        [(2, Duration::from_secs(1), "connection interrupted")]
     );
     let requests = server.requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 2);
     assert!(requests.iter().all(|r| r.body == requests[0].body));
 }
 
 #[tokio::test]
-async fn chatgpt_http_401_and_500_are_terminal_after_one_request() {
-    for status in [401, 500] {
+async fn chatgpt_non_transient_http_statuses_are_terminal_after_one_request() {
+    for status in [400, 401, 408, 409, 501] {
         let server = http::spawn_repeating(Script::status(status, "body is not exposed")).await;
         let (settlement, events) = complete_plain(&chatgpt(&server, "token")).await;
         assert_eq!(
@@ -477,6 +471,38 @@ async fn chatgpt_http_401_and_500_are_terminal_after_one_request() {
         assert_eq!(settlement.attempts, 1, "status {status}");
         assert_eq!(server.count(), 1, "status {status}");
         assert!(retries(&events).is_empty(), "status {status}");
+    }
+}
+
+#[tokio::test]
+async fn chatgpt_transient_http_statuses_retry_with_the_same_request() {
+    for (status, reason) in [
+        (429, "HTTP 429"),
+        (500, "HTTP 500"),
+        (502, "HTTP 502"),
+        (503, "HTTP 503"),
+        (504, "HTTP 504"),
+    ] {
+        let server = http::spawn_scripted(vec![
+            Script::status(status, "body is not exposed"),
+            Script::sse_without_done(&[TEXT, COMPLETED]),
+        ])
+        .await;
+        let (settlement, events) = complete_plain(&chatgpt(&server, "token")).await;
+        assert!(
+            settlement.result.is_ok(),
+            "status {status}: {:?}",
+            settlement.result.err()
+        );
+        assert_eq!(settlement.attempts, 2, "status {status}");
+        assert_eq!(
+            retries(&events),
+            [(2, Duration::from_secs(1), reason)],
+            "status {status}"
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "status {status}");
+        assert_eq!(requests[0].body, requests[1].body, "status {status}");
     }
 }
 

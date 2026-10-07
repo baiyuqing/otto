@@ -465,6 +465,8 @@ pub struct NoticesQuery {
 struct NoticeWire {
     id: u64,
     text: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    presentation_origin: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -481,7 +483,24 @@ pub async fn notices(
     Path(id): Path<String>,
     Query(query): Query<NoticesQuery>,
 ) -> Response {
-    notice_page(&server, &id, query.after, app::Controller::notices_since)
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let (notices, last) = session.ctrl.routed_notices_since(query.after);
+    json_response(
+        StatusCode::OK,
+        &NoticeList {
+            notices: notices
+                .into_iter()
+                .map(|notice| NoticeWire {
+                    id: notice.id,
+                    text: notice.text,
+                    presentation_origin: notice.presentation_origin,
+                })
+                .collect(),
+            last,
+        },
+    )
 }
 
 /// `GET /v1/sessions/{id}/wake-replies`: the model-written texts of wake
@@ -512,7 +531,11 @@ fn notice_page(server: &Server, id: &str, after: u64, since: Since) -> Response 
         &NoticeList {
             notices: lines
                 .into_iter()
-                .map(|(id, text)| NoticeWire { id, text })
+                .map(|(id, text)| NoticeWire {
+                    id,
+                    text,
+                    presentation_origin: String::new(),
+                })
                 .collect(),
             last,
         },

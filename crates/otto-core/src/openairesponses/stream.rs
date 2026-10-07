@@ -24,7 +24,12 @@ use serde_json::value::RawValue;
 use crate::model::{Block, BlockType, Message, Role, Usage};
 use crate::provider::{Response, StreamEvent};
 
-use super::protocol::{WireEvent, finish_reason, valid_arguments};
+use super::protocol::{WireError, WireEvent, finish_reason, valid_arguments};
+
+/// Maximum bytes buffered for one SSE field line, excluding its line ending.
+const MAX_SSE_LINE_BYTES: usize = 64 * 1024;
+/// Maximum bytes buffered across the `data:` fields of one SSE event.
+const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
 
 /// Everything the assembler can reject.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -32,6 +37,13 @@ pub enum StreamError {
     /// A `data:` payload was not valid event JSON.
     #[error("decode responses stream: {0}")]
     Decode(String),
+    /// One SSE field line exceeded [`MAX_SSE_LINE_BYTES`].
+    #[error("responses stream line exceeds {limit} bytes")]
+    LineTooLarge { limit: usize },
+    /// One SSE event's accumulated `data:` fields exceeded
+    /// [`MAX_SSE_EVENT_BYTES`].
+    #[error("responses stream event exceeds {limit} bytes")]
+    EventTooLarge { limit: usize },
     /// The backend sent a `response.failed` or an `error` event. The text is
     /// the event type followed by `: <code>: <message>` for the parts the
     /// event carried. `code` is the event's error code, empty when absent.
@@ -61,6 +73,8 @@ struct AssembledToolCall {
 pub struct StreamAssembler {
     line: Vec<u8>,
     data_lines: Vec<Vec<u8>>,
+    data_bytes: usize,
+    event_name: String,
     text: String,
     reasoning: String,
     /// The `(item_id, summary_index)` of the last reasoning delta; a new pair
@@ -97,6 +111,12 @@ impl StreamAssembler {
                 return Ok(());
             }
             if byte != b'\n' {
+                let terminal_cr = self.line.len() == MAX_SSE_LINE_BYTES && byte == b'\r';
+                if self.line.len() >= MAX_SSE_LINE_BYTES && !terminal_cr {
+                    return Err(StreamError::LineTooLarge {
+                        limit: MAX_SSE_LINE_BYTES,
+                    });
+                }
                 self.line.push(byte);
                 continue;
             }
@@ -175,10 +195,9 @@ impl StreamAssembler {
         self.completed
     }
 
-    /// Applies one field line of the event stream. Comments, `event:` names,
-    /// and every other field are ignored because the `data:` payload repeats
-    /// the event name in its `type` field; a blank line ends the current
-    /// event.
+    /// Applies one field line of the event stream. An `event:` name supplies
+    /// the type only when the JSON payload has no non-empty `type`; a blank
+    /// line ends the current event.
     fn consume_line(
         &mut self,
         line: &[u8],
@@ -192,24 +211,53 @@ impl StreamAssembler {
             return Ok(());
         }
         if line == b"data" {
-            self.data_lines.push(Vec::new());
+            self.push_data_line(&[])?;
             return Ok(());
         }
         if let Some(value) = line.strip_prefix(b"data:") {
             let value = value.strip_prefix(b" ").unwrap_or(value);
-            self.data_lines.push(value.to_vec());
+            self.push_data_line(value)?;
+        } else if let Some(value) = line.strip_prefix(b"event:") {
+            let value = value.strip_prefix(b" ").unwrap_or(value);
+            self.event_name = String::from_utf8_lossy(value).into_owned();
         }
+        Ok(())
+    }
+
+    fn push_data_line(&mut self, value: &[u8]) -> Result<(), StreamError> {
+        let separator = usize::from(!self.data_lines.is_empty());
+        let next = self
+            .data_bytes
+            .checked_add(separator)
+            .and_then(|size| size.checked_add(value.len()))
+            .ok_or(StreamError::EventTooLarge {
+                limit: MAX_SSE_EVENT_BYTES,
+            })?;
+        if next > MAX_SSE_EVENT_BYTES {
+            return Err(StreamError::EventTooLarge {
+                limit: MAX_SSE_EVENT_BYTES,
+            });
+        }
+        self.data_bytes = next;
+        self.data_lines.push(value.to_vec());
         Ok(())
     }
 
     /// Decodes and applies the buffered `data:` payload of one event.
     fn dispatch(&mut self, emit: &mut dyn FnMut(StreamEvent)) -> Result<(), StreamError> {
         if self.data_lines.is_empty() {
+            self.event_name.clear();
             return Ok(());
         }
         let data = std::mem::take(&mut self.data_lines).join(&b'\n');
-        let event: WireEvent = serde_json::from_slice(&data)
+        self.data_bytes = 0;
+        let mut event: WireEvent = serde_json::from_slice(&data)
             .map_err(|error| StreamError::Decode(error.to_string()))?;
+        if event.event_type.is_empty() {
+            event.event_type = std::mem::take(&mut self.event_name);
+        } else {
+            self.event_name.clear();
+        }
         match event.event_type.as_str() {
             "response.output_text.delta" => {
                 if !event.delta.is_empty() {
@@ -292,10 +340,7 @@ impl StreamAssembler {
                 }
             }
             "response.failed" | "error" => {
-                let (code, message) = match event.response.and_then(|r| r.error).or(event.error) {
-                    Some(error) => (error.code, error.message),
-                    None => (event.code, event.message),
-                };
+                let (code, message) = normalized_error(&event);
                 let detail = [code.clone(), message]
                     .into_iter()
                     .filter(|part| !part.is_empty())
@@ -314,6 +359,64 @@ impl StreamAssembler {
         }
         Ok(())
     }
+}
+
+/// Normalizes backend error spellings. Classification takes the first
+/// non-empty value in protocol precedence; the message follows the selected
+/// object's message first, then falls back through the other error locations.
+fn normalized_error(event: &WireEvent) -> (String, String) {
+    let response_error = event
+        .response
+        .as_ref()
+        .and_then(|result| result.error.as_ref());
+    let nested_error = event.error.as_ref();
+
+    if let Some((code, error)) = classified_error(response_error) {
+        return (
+            code.to_owned(),
+            first_message(error, nested_error, &event.message).to_owned(),
+        );
+    }
+    if let Some((code, error)) = classified_error(nested_error) {
+        return (
+            code.to_owned(),
+            first_message(error, response_error, &event.message).to_owned(),
+        );
+    }
+
+    (
+        event.code.clone(),
+        first_nonempty([
+            Some(event.message.as_str()),
+            response_error.map(|error| error.message.as_str()),
+            nested_error.map(|error| error.message.as_str()),
+        ])
+        .unwrap_or_default()
+        .to_owned(),
+    )
+}
+
+fn classified_error(error: Option<&WireError>) -> Option<(&str, &WireError)> {
+    let error = error?;
+    first_nonempty([Some(error.code.as_str()), Some(error.error_type.as_str())])
+        .map(|code| (code, error))
+}
+
+fn first_message<'a>(
+    selected: &'a WireError,
+    other: Option<&'a WireError>,
+    top_level: &'a str,
+) -> &'a str {
+    first_nonempty([
+        Some(selected.message.as_str()),
+        other.map(|error| error.message.as_str()),
+        Some(top_level),
+    ])
+    .unwrap_or_default()
+}
+
+fn first_nonempty<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<&'a str> {
+    values.into_iter().flatten().find(|value| !value.is_empty())
 }
 
 #[cfg(test)]
@@ -566,6 +669,26 @@ mod tests {
                 "responses stream reported error: rate_limit_exceeded: The usage limit has been reached",
             ),
             (
+                "nested type is retained when code is empty",
+                "data: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"code\":\"\",\"message\":\"try later\"}}\n\n",
+                "responses stream reported error: server_error: try later",
+            ),
+            (
+                "response error type precedes nested error code",
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"\",\"type\":\"server_error\",\"message\":\"response message\"}},\"error\":{\"code\":\"nested_code\",\"message\":\"nested message\"},\"code\":\"top_code\",\"message\":\"top message\"}\n\n",
+                "responses stream reported response.failed: server_error: response message",
+            ),
+            (
+                "empty nested classification falls through to top level",
+                "data: {\"type\":\"error\",\"error\":{\"code\":\"\",\"type\":\"\",\"message\":\"nested message\"},\"code\":\"top_code\",\"message\":\"top message\"}\n\n",
+                "responses stream reported error: top_code: top message",
+            ),
+            (
+                "selected classification uses a fallback message",
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"response_code\",\"message\":\"\"}},\"error\":{\"message\":\"nested message\"},\"message\":\"top message\"}\n\n",
+                "responses stream reported response.failed: response_code: nested message",
+            ),
+            (
                 "error message only",
                 "data: {\"type\":\"error\",\"code\":null,\"message\":\"boom\"}\n\n",
                 "responses stream reported error: boom",
@@ -644,6 +767,90 @@ mod tests {
         let response = response.expect("stream assembles");
         assert_eq!(response.message.blocks[0].text, "hi");
         assert_eq!(events, [StreamEvent::TextDelta { text: "hi".into() }]);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn event_field_supplies_only_an_empty_json_type() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "missing JSON type",
+                "event: error\ndata: {\"code\":\"server_error\",\"message\":\"boom\"}\n\n",
+                "responses stream reported error: server_error: boom",
+            ),
+            (
+                "empty JSON type",
+                "event: error\ndata: {\"type\":\"\",\"message\":\"boom\"}\n\n",
+                "responses stream reported error: boom",
+            ),
+            (
+                "JSON type wins conflicts",
+                "event: response.completed\ndata: {\"type\":\"error\",\"message\":\"boom\"}\n\n",
+                "responses stream reported error: boom",
+            ),
+        ];
+        for (name, body, want) in cases {
+            let (result, _) = assemble(body.as_bytes(), 0);
+            assert_eq!(result.expect_err(name).to_string(), *want, "{name}");
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn rejects_oversized_lines_before_accumulating_them() {
+        let mut sink = |_: StreamEvent| {};
+        for ending in [b"\n".as_slice(), b"\r\n".as_slice()] {
+            let mut assembler = StreamAssembler::new();
+            let mut bytes = vec![b'x'; MAX_SSE_LINE_BYTES];
+            bytes.extend_from_slice(ending);
+            assert_eq!(
+                assembler.push(&bytes, &mut sink),
+                Ok(()),
+                "the line ending is excluded from the limit"
+            );
+            assert!(assembler.line.is_empty());
+        }
+
+        for suffix in [b"x".as_slice(), b"\rx".as_slice()] {
+            let mut assembler = StreamAssembler::new();
+            let mut bytes = vec![b'x'; MAX_SSE_LINE_BYTES];
+            bytes.extend_from_slice(suffix);
+            assert_eq!(
+                assembler.push(&bytes, &mut sink),
+                Err(StreamError::LineTooLarge {
+                    limit: MAX_SSE_LINE_BYTES
+                })
+            );
+            assert!(assembler.line.len() <= MAX_SSE_LINE_BYTES + 1);
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn rejects_oversized_events_before_accumulating_the_last_data_line() {
+        let mut assembler = StreamAssembler::new();
+        let mut sink = |_: StreamEvent| {};
+        let line = vec![b'x'; MAX_SSE_LINE_BYTES - b"data:".len()];
+        let mut accepted = 0usize;
+        loop {
+            let mut field = b"data:".to_vec();
+            field.extend_from_slice(&line);
+            field.push(b'\n');
+            match assembler.push(&field, &mut sink) {
+                Ok(()) => accepted += 1,
+                Err(error) => {
+                    assert_eq!(
+                        error,
+                        StreamError::EventTooLarge {
+                            limit: MAX_SSE_EVENT_BYTES
+                        }
+                    );
+                    break;
+                }
+            }
+        }
+        assert_eq!(assembler.data_lines.len(), accepted);
+        assert!(assembler.data_bytes <= MAX_SSE_EVENT_BYTES);
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

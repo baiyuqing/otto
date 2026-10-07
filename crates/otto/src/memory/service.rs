@@ -366,11 +366,21 @@ impl Service {
     pub fn review(&self, request: &ReviewRequest) -> Result<ReviewResult> {
         let store = self.ready()?;
         let candidate = store.get_candidate(&request.reference)?;
+        let mut edited = request.edited.clone();
+        if request.decision == ReviewDecision::Accept
+            && candidate
+                .proposed
+                .metadata
+                .contains_key(super::PRESENTATION_ORIGIN_METADATA)
+        {
+            let record = edited.get_or_insert_with(|| candidate.proposed.clone());
+            record.metadata.remove(super::PRESENTATION_ORIGIN_METADATA);
+        }
         let mut store_request = StoreReviewRequest {
             reference: request.reference.clone(),
             result_record_id: String::new(),
             decision: request.decision,
-            edited: request.edited.clone(),
+            edited,
             target_revision: request.target_revision,
             decision_source: Some(Origin::Human),
             decided_at: now_utc(),

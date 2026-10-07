@@ -966,7 +966,8 @@ OTTO_UI=repl otto
   command instead reads `Queued next input · Ctrl+U withdraw`, because it
   remains local until the active turn succeeds. Ordinary input is
   delivered within the same turn after the current provider response or tool
-  call finishes; `agent_wait` yields immediately. Slash commands still wait
+  call finishes. Sub-agent delegation never adds a blocking wait tool; child
+  results arrive through a runtime-owned wake turn. Slash commands still wait
   until the turn finishes. If the turn ends before that delivery — `Esc`, a
   provider failure, or the turn deadline — the guidance is not delivered and
   Otto says so, quoting the message; when the composer was empty, the text is
@@ -2086,10 +2087,13 @@ the session's model. Child agents do not get this tool.
 
 ### Sub-agents
 
-The `agent` tool starts a child task that runs in parallel with the turn, so a
-stuck child cannot hold the parent's turn open. The parent watches it with
-`agent_status`, sends it guidance with `agent_send`, and stops it with
-`agent_cancel`; `agent_wait` blocks the turn until the task ends. Children
+The `agent` tool starts or resumes a child task and always returns immediately
+with its task id, so a running child cannot hold the parent's agent loop open.
+Continue independent work after delegation, or finish the current response. A
+child report or completion is queued in the parent mailbox; if the parent is
+idle, the runtime starts a wake turn and delivers it as a `[task-notification]`.
+Use `agent_status` only to inspect progress, `agent_send` to send guidance, and
+`agent_cancel` to stop a task; do not poll status to simulate waiting. Children
 never receive these tools, so a child cannot start or stop another child.
 
 `agent_cancel` takes a task id or name and cancels that task. Cancellation is

@@ -141,7 +141,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   identity, configuration, reflection skill files, session forks) now share
   `fsops::publish_file`, and `faults::publish` injects create, write, sync and
   rename faults into it; reflection skill files now also sync their directory
-  after the rename (PRNUM).
+  after the rename
+  ([#409](https://github.com/baiyuqing/otto/pull/409)).
 
 ## 0.4.1 - 2026-10-07
 

@@ -314,6 +314,7 @@ pub(super) async fn preview(
     };
     let approval = match service.create(crate::approval::Proposal {
         kind: crate::approval::Kind::Authorization,
+        authority: crate::approval::Authority::Durable,
         scope: crate::approval::Scope {
             workspace: server.info.workspace.clone(),
             session_id: String::new(),

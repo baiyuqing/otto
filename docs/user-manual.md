@@ -1195,7 +1195,8 @@ Shared commands:
   command that failed. The model can also request the same persistent read
   grant through Bash's `sandbox_read_path` argument. Otto shows an approval
   dialog in the TUI or an Allow/Deny card in Telegram and Feishu, including
-  the resolved path and the fact that it will be saved. Approval updates
+  the resolved path and the fact that it will be saved. This grant is always a
+  user decision, whatever the session approval mode. Approval updates
   `read_paths`, reloads the sandbox, and asks the model to retry the command
   inside the sandbox. Denial or expiry leaves the configuration unchanged.
   This also works through `--attach`.
@@ -1629,14 +1630,28 @@ overflow. For private deployments, set `context_window` and optionally
 
 ## Unified approvals
 
-Sessions start in **AUTO** mode: every session-owned approval is recorded and
-automatically approved. Otto shows the request and its automatic decision;
-execution/application failure remains a separate outcome. This includes tool
-permissions, proposal confirmations and session-owned persistent grants.
+Sessions start in **AUTO** mode: a session-owned **bounded authorization** is
+recorded and automatically approved. A bounded authorization stays inside the
+sandbox and the workspace and grants nothing durable. Otto shows the request
+and its automatic decision; execution/application failure remains a separate
+outcome. Every other request waits for your decision in either mode, because
+AUTO does not decide what is not its to decide:
+
+- a plan or approach review (`request_approval`), which only you can answer;
+- an authorization that leaves the sandbox or the workspace: an unsandboxed
+  command, a cross-workspace delivery task, a tool call on an external MCP
+  server;
+- an authorization that establishes durable authority: a persistent sandbox
+  read grant, a scheduled `prompt` item, or a memory, skill or profile change.
+
+A request AUTO cannot decide is presented exactly as it is in MANUAL, and the
+footer still shows the session mode.
+
 Workspace-wide approvals and independent child tasks remain manual.
 
 Use `/auto` to inspect the mode, `/auto off` to require manual approval, and
-`/auto on` to approve automatically, including pending requests in this session.
+`/auto on` to approve automatically, including pending requests in this session
+that AUTO may decide.
 The preference survives session loading and process restarts in `approvals.db`;
 new sessions start in AUTO. TUI and Web footers show AUTO or MANUAL. The same
 commands work in ACP, Telegram and Feishu. Telegram's command menu includes
@@ -1676,6 +1691,9 @@ The same request closes on all connected surfaces after a decision. Old
 buttons cannot approve a new request. Ordinary messages while a foreground
 request waits use a restricted discussion; they do not silently approve it.
 Memory/workflow reviews remain independent of the foreground turn.
+
+See the [authority boundary contract](specs/2026-10-07-auto-mode-authority-boundaries.md)
+for which request classes each mode decides.
 
 Generated skills still pass the rule scan and configured model review, then
 wait for human approval. Saving a profile change still requires a restart.
@@ -1789,7 +1807,8 @@ and a restart.
 
 Exactly one of `text` and `prompt` and exactly one of `seconds` and `at` are
 required. Creating a `prompt` item asks the user for approval first, whatever
-its `repeat`: the request shows the prompt, `at` or `seconds`, and `repeat`,
+its `repeat` and whatever the session approval mode: the request shows the
+prompt, `at` or `seconds`, and `repeat`,
 because the run uses the agent's tools (file edits and sandboxed commands)
 with no user present. A denied request creates nothing. A `text` item needs no
 approval. An empty or blank string counts as an absent field. Each origin (see

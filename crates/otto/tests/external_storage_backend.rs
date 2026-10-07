@@ -5,7 +5,7 @@ mod support;
 #[cfg(feature = "storage-conformance")]
 mod tests {
     use super::support;
-    use otto::approval::{self, Kind, Proposal, Scope, Subject};
+    use otto::approval::{self, Authority, Kind, Proposal, Scope, Subject};
     use otto::runtime::storage::{BackendRegistry, Storage};
     use std::collections::HashMap;
     use std::sync::{Arc, atomic::Ordering};
@@ -25,6 +25,7 @@ mod tests {
     fn proposal() -> Proposal {
         Proposal {
             kind: Kind::Confirmation,
+            authority: Authority::Consent,
             scope: Scope {
                 workspace: "/contract".into(),
                 session_id: "memory:contract".into(),

@@ -78,9 +78,8 @@ use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result}
 /// because a child's plan would be shown nowhere; and delivery, which only a
 /// parent may start and which would otherwise let a child reach another
 /// workspace.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 16] = [
+pub const EXCLUDED_CHILD_TOOLS: [&str; 15] = [
     "agent",
-    "agent_wait",
     "agent_status",
     "agent_send",
     "agent_cancel",

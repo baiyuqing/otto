@@ -165,10 +165,10 @@ mod tests {
     fn changed_notice_lists_added_and_removed_and_omits_empty_lists() {
         let text = notice(
             Some(&tools(&["bash", "web_search"])),
-            &tools(&["agent", "agent_wait", "bash"]),
+            &tools(&["agent", "agent_status", "bash"]),
             true,
         );
-        assert!(text.contains("Added: agent, agent_wait\nRemoved: web_search\nUse only"));
+        assert!(text.contains("Added: agent, agent_status\nRemoved: web_search\nUse only"));
         let added_only = notice(Some(&tools(&["bash"])), &tools(&["agent", "bash"]), true);
         assert!(added_only.contains("Added: agent\nUse only"));
         assert!(!added_only.contains("Removed:"));

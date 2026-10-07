@@ -708,6 +708,27 @@ dev-dependency on itself enables the feature for every integration test, and
 The design and contract matrices are in
 [fault injection testing](specs/2026-10-07-fault-injection-testing.md).
 
+Fault decorators over a seam take a `FaultPlan<Op>`, where `Op` is the
+decorator's operation enum. A plan is a list of `Rule`s: an operation, a
+`Filter` on the operation's subject (`Any`, `NameSuffix` or `SqlPrefix`), a
+`Trigger` (`Always`, `Nth(n)` or `FromNth(n)`, counting matching calls from 1)
+and a `Fault`:
+
+- `Before(error)` returns the error without performing the operation, so the
+  effect did not happen.
+- `After(error)` performs the operation and then returns the error. It models
+  a lost acknowledgement: the effect happened, the caller sees a failure.
+- `Short { keep, error }` writes the first `keep` bytes, then returns the
+  error.
+- `Exit`, `ExitAfter` and `ShortExit { keep }` end the process with exit code
+  86 before the operation, after it, or after a partial write. No destructor
+  runs.
+- `Hang` blocks an asynchronous operation; synchronous decorators reject it.
+
+A test calls `plan.assert_all_fired()` after the code under test; it panics
+with the rules that never fired. Dropping a plan with rules that was never
+checked panics in debug builds.
+
 HTTP faults use `otto::faults::http`, a raw-TCP loopback server:
 
 - `spawn(handler)` answers each request from a closure; `spawn_repeating`

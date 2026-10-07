@@ -323,7 +323,9 @@ impl Tool for McpTool {
         if self.redact(&details) != details {
             return Err(error_result("MCP approval would expose credentials").not_started());
         }
-        Ok(Some(super::ApprovalSpec { version:crate::approval::digest(arguments.get()),source:"mcp".into(),title:format!("Authorize {}?",self.name),
+        Ok(Some(super::ApprovalSpec { version:crate::approval::digest(arguments.get()),source:"mcp".into(),
+            authority:crate::approval::Authority::Boundary,
+            title:format!("Authorize {}?",self.name),
             reason:"This external tool can affect an external system.".into(),persistent:false,
             details:serde_json::json!({"tool":self.name,"arguments":serde_json::from_str::<serde_json::Value>(arguments.get()).map_err(|_| error_result("invalid MCP arguments"))?}).to_string(),
         }))

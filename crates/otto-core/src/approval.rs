@@ -9,6 +9,29 @@ pub enum Kind {
     Confirmation,
 }
 
+/// The authority a request reaches for, declared by its native producer.
+/// Only a [`Authority::Bounded`] authorization may be decided by the session
+/// AUTO policy; a plan review, a sandbox or workspace boundary crossing and a
+/// durable grant are always a user decision. Model arguments never select this
+/// value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Authority {
+    /// A judgement about a proposal, plan or workflow step.
+    Consent,
+    /// This operation leaves the sandbox or the workspace, or affects an
+    /// external system.
+    Boundary,
+    /// This operation establishes or extends durable authority.
+    Durable,
+    /// Inside the sandbox and the workspace, granting nothing durable.
+    Bounded,
+    /// No declared class. Only a request persisted before this field existed
+    /// decodes this way; it is never decided automatically.
+    #[default]
+    Unclassified,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -81,6 +104,10 @@ pub struct Request {
     pub id: String,
     pub revision: u64,
     pub kind: Kind,
+    /// Absent in a row persisted before the field existed; such a request is
+    /// never decided automatically.
+    #[serde(default)]
+    pub authority: Authority,
     pub scope: Scope,
     pub subject: Subject,
     pub title: String,
@@ -96,6 +123,13 @@ pub struct Request {
 }
 
 impl Request {
+    /// Whether the session AUTO policy may decide this request without the
+    /// user. The conjunction is deliberate: a wrong producer declaration must
+    /// not make a plan review or a persistent grant decidable by policy.
+    pub fn auto_decidable(&self) -> bool {
+        self.authority == Authority::Bounded && self.kind == Kind::Authorization && !self.persistent
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.schema_version != 1
             || self.revision == 0
@@ -139,4 +173,76 @@ pub enum BatchControl {
     #[default]
     Continue,
     Replan,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(authority: Authority, kind: Kind, persistent: bool) -> Request {
+        Request {
+            options: Vec::new(),
+            schema_version: 1,
+            id: "r".into(),
+            revision: 1,
+            kind,
+            authority,
+            scope: Scope {
+                workspace: "/w".into(),
+                session_id: "s".into(),
+                task_id: String::new(),
+                run_id: String::new(),
+            },
+            subject: Subject {
+                tool_call_id: String::new(),
+                source: "test".into(),
+                id: "op".into(),
+                version: "1".into(),
+                details: "details".into(),
+            },
+            title: "Title".into(),
+            reason: "Reason".into(),
+            persistent,
+            blocking: true,
+            created_at: 1,
+            expires_at: None,
+            state: State::Pending,
+            decision: None,
+            application: ApplicationState::NotStarted,
+            application_error: String::new(),
+        }
+    }
+
+    #[test]
+    fn only_a_declared_bounded_authorization_is_auto_decidable() {
+        assert!(request(Authority::Bounded, Kind::Authorization, false).auto_decidable());
+        // A declaration must not make a plan review or a durable grant
+        // decidable by the session policy.
+        assert!(!request(Authority::Bounded, Kind::Confirmation, false).auto_decidable());
+        assert!(!request(Authority::Bounded, Kind::Authorization, true).auto_decidable());
+        for authority in [
+            Authority::Consent,
+            Authority::Boundary,
+            Authority::Durable,
+            Authority::Unclassified,
+        ] {
+            assert!(!request(authority, Kind::Authorization, false).auto_decidable());
+        }
+    }
+
+    #[test]
+    fn a_persisted_request_without_an_authority_class_stays_a_user_decision() {
+        let declared = request(Authority::Boundary, Kind::Authorization, false);
+        let encoded = serde_json::to_string(&declared).unwrap();
+        assert!(encoded.contains("\"authority\":\"boundary\""));
+        assert_eq!(serde_json::from_str::<Request>(&encoded).unwrap(), declared);
+        let mut legacy: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        legacy.as_object_mut().unwrap().remove("authority");
+        let legacy = serde_json::from_str::<Request>(&legacy.to_string()).unwrap();
+        assert_eq!(legacy.authority, Authority::Unclassified);
+        assert!(!legacy.auto_decidable());
+        let mut invalid: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        invalid["authority"] = serde_json::json!("harmless");
+        assert!(serde_json::from_str::<Request>(&invalid.to_string()).is_err());
+    }
 }

@@ -17,6 +17,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Otto's default system prompt now asks the model to structure and restate new
+  action requests, resolve material ambiguity and wait for user confirmation
+  before changing files or causing external side effects. Simple questions stay
+  direct, confirmed scope does not need repeated confirmation, and an existing
+  mandatory review can serve as that confirmation. This is prompt guidance;
+  tool permissions still apply. See the
+  [user manual](docs/user-manual.md#unified-approvals)
+  ([#414](https://github.com/baiyuqing/otto/pull/414)).
+
 - **A turn can now end by itself when it makes no progress.** A turn whose
   model repeats the same tool call, with the same arguments, 8 times in a row,
   or whose tool results fail 12 times in a row, ends with the error
@@ -151,6 +160,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `SIGTERM` is killed with its group after the grace on every driver, and that
   a hung MCP request times out, stopping a stdio server and leaving an HTTP
   client usable ([#413](https://github.com/baiyuqing/otto/pull/413)).
+
+- Main's `connect-check` no longer fails on the connector's end-to-end
+  reflection test. That test scripted ten identical `read {"path":"notes.txt"}`
+  calls to reach the ten successful operations automatic reflection waits for,
+  but the progress guard ends a turn that repeats one call, with the same
+  canonical arguments, eight times in a row — so the turn ended with
+  `no progress: the same read call repeated 8 times in a row` and the test
+  never saw a reflection. Both failing jobs, Linux checks and macOS acceptance,
+  went red from #407 until each scripted call was given a distinct argument;
+  the call count and the reflection assertion are unchanged
+  ([#411](https://github.com/baiyuqing/otto/pull/411)).
 
 ## 0.4.1 - 2026-10-07
 

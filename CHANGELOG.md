@@ -115,7 +115,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
   request and the original request, and the context grew until the turn
   stopped at the hard input limit. Reasoning in a summary response is now
   ignored and is not stored in the checkpoint. The `compaction_warning` message
-  and compaction errors now include the failure cause.
+  and compaction errors now include the failure cause. See the
+  [user manual](docs/user-manual.md#context-compaction)
+  ([#420](https://github.com/baiyuqing/otto/pull/420)).
 
 - Keep ChatGPT turns running through pre-output HTTP 429 and 500/502/503/504
   responses. Otto now retries the borrowed provider request up to six times

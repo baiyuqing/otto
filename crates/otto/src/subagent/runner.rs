@@ -74,8 +74,10 @@ use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result}
 /// depth is fixed at one; the memory tools, because a child gets no memory
 /// binding; the timer tools, which read and wake the parent session; the schedule
 /// tools, which deliver to the parent conversation's origin; and `update_plan`,
-/// because a child's plan would be shown nowhere.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 15] = [
+/// because a child's plan would be shown nowhere; and delivery, which only a
+/// parent may start and which would otherwise let a child reach another
+/// workspace.
+pub const EXCLUDED_CHILD_TOOLS: [&str; 16] = [
     "agent",
     "agent_wait",
     "agent_status",
@@ -91,6 +93,7 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 15] = [
     "schedule_list",
     "schedule_cancel",
     "update_plan",
+    "start_delivery_task",
 ];
 
 /// Appended to a child's system prompt inside `<subagent_role>` when it has

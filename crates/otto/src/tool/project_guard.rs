@@ -120,6 +120,15 @@ impl Tool for Guarded {
             .arguments(&self.inner.definition().name, arguments)?;
         self.inner.approval_spec(arguments)
     }
+    async fn approval_spec_async(
+        &self,
+        arguments: &RawValue,
+        cancel: &CancellationToken,
+    ) -> Result<Option<ApprovalSpec>, ToolResult> {
+        self.guard
+            .arguments(&self.inner.definition().name, arguments)?;
+        self.inner.approval_spec_async(arguments, cancel).await
+    }
     async fn apply_approval(
         &self,
         arguments: &RawValue,

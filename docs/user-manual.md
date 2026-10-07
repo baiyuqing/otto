@@ -290,7 +290,11 @@ scripts/otto.sh --model other-model --prompt "summarize the diff"
 `OTTO_ENV_FILE` selects another settings file and `OTTO_BIN` another binary;
 both default to the checkout. The launcher is for the foreground frontends; the
 `otto serve` agent server is started directly, as described under
-[agent server](#agent-server).
+[agent server](#agent-server), or as the pair described under [the ACP TCP
+stack script](#the-acp-tcp-stack-script), which reads this same file. That
+script ignores `OTTO_UI` and `OTTO_EXTRA_ARGS`, because `otto serve` accepts
+neither `--ui` nor `--prompt`; `OTTO_SERVE_EXTRA_ARGS` is its equivalent of the
+latter.
 
 ## ChatGPT subscription
 
@@ -3126,6 +3130,76 @@ Authentication must finish within five seconds. The listener allows at most
 Configuration-management chat commands that require the separate HTTP
 management client remain available with `command = ["otto", "acp", "--attach"]`;
 they are unavailable in direct TCP mode.
+
+### The ACP TCP stack script
+
+Starting that pair by hand, in the right order, with the same token in two
+processes, is what `scripts/otto-tcp.sh` does:
+
+```bash
+export OTTO_ACP_TOKEN=<token>     # read by both programs; never stored
+scripts/otto-tcp.sh start         # serve --acp-listen plus otto-connect
+scripts/otto-tcp.sh status
+scripts/otto-tcp.sh restart       # both; `restart serve` or `restart connect` for one
+scripts/otto-tcp.sh logs connect
+scripts/otto-tcp.sh stop
+```
+
+Build the two programs first (`make build`, `make connect-build`), or install
+them and set `OTTO_BIN` and `OTTO_CONNECT_BIN`.
+
+It reads the same `otto.env` as [the launcher](#launcher-script), so the
+provider, model, profile, base URL, workspace, sandbox mode, thinking effort
+and shell limits are shared with the terminal frontends:
+
+| Setting | Meaning |
+| --- | --- |
+| `OTTO_BIN`, `OTTO_CONNECT_BIN` | the two binaries; empty uses `<checkout>/otto` and `<checkout>/target/otto-connect`, then `PATH` |
+| `OTTO_ACP_LISTEN` | loopback `HOST:PORT` serve binds ACP on; empty uses `127.0.0.1:9001` |
+| `OTTO_CONNECT_CONFIG` | `connect.toml` to run; empty uses `~/.config/otto/connect.toml` |
+| `OTTO_CWD` | workspace serve starts in; empty uses `[agent].workspace` from `connect.toml` |
+| `OTTO_LISTEN` | optional HTTP listener for serve (`--listen`), for `otto --attach` over TCP and the web UI |
+| `OTTO_SERVE_EXTRA_ARGS` | extra `otto serve` options, appended verbatim |
+| `OTTO_TCP_HOME` | state and log directory; empty uses `~/.local/state/otto-tcp` |
+| `OTTO_UI`, `OTTO_EXTRA_ARGS` | not used: `otto serve` accepts neither `--ui` nor `--prompt` |
+
+Before starting anything it checks the deployment and reports what would
+otherwise fail obscurely: that `OTTO_ACP_TOKEN` is set and well formed, that
+`connect.toml` really uses `[agent] address` (and not `command`, which would
+start an `otto acp` of its own, the mode this script exists to avoid), that the
+address is the one serve binds, that `token_env` names `OTTO_ACP_TOKEN` (or a
+variable holding the same value), and that the workspace is absolute. A
+workspace that differs from `OTTO_CWD` is a warning, not a failure, because a
+serve may serve several workspaces. `OTTO_TCP_SKIP_CHECKS=1` turns the
+`connect.toml` checks off for a configuration the operator vouches for.
+
+`start` runs the supervisor in the background; `run` runs it in the foreground
+for launchd, `tmux` or a terminal. It starts connect only after serve has
+announced its ACP listener, and it restarts a process that exits: immediately
+when it had run for 60 s, otherwise after 1 s doubling to 60 s. Five
+consecutive fast failures stop the whole stack instead of looping, which is
+what a rejected `connect.toml`, a token the platform refuses, or a missing
+provider credential looks like. `SIGTERM` and `SIGINT` stop connect first, so
+its running prompts are cancelled, and then serve; `SIGUSR1` restarts serve and
+`SIGUSR2` restarts connect. Restarting serve does not restart connect: the next
+chat message reconnects and loads the chat's session, while the turns that were
+running in the old serve process are cancelled.
+
+State, pid files and the three logs (`supervisor.log`, `serve.log`,
+`connect.log`) live in `OTTO_TCP_HOME`, mode `0700` with mode `0600` files,
+because the serve log carries the serve HTTP token URL and the connect log
+carries chat and sender ids. `start` keeps one previous generation of each log;
+`logs` follows one of them. The supervisor writes no secret: the ACP token and
+the connector's platform tokens come from the environment of whoever runs it,
+or from that user's own ignored `otto.env`. That is also why no launchd plist
+ships here — a plist can carry those secrets only as a file, which the safety
+rules forbid. `otto-tcp.sh run` is the program to point a supervisor at if you
+accept that trade-off, or have your own wrapper read the token from the macOS
+Keychain.
+
+These knobs exist for tests and unusual deployments: `OTTO_TCP_POLL`,
+`OTTO_TCP_READY_TIMEOUT`, `OTTO_TCP_STOP_TIMEOUT`, `OTTO_TCP_MIN_DELAY`,
+`OTTO_TCP_MAX_DELAY`, `OTTO_TCP_STABLE_AFTER` and `OTTO_TCP_MAX_FAILS`.
 
 ### Admission
 

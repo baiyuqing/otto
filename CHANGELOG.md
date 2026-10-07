@@ -18,13 +18,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 ### Features
 
 - Report Otto's lifecycle to [Herdr](https://herdr.dev) when Herdr starts it in
-  a pane: the pane appears as the agent `otto`, `working` while a turn runs,
-  `blocked` while a tool call waits for your decision, and `idle` when it waits
-  for input. `herdr agent wait otto --until blocked`, `herdr agent prompt` and
-  the sidebar therefore work for Otto, and the reported session file plus
-  `otto --resume` command are what Herdr restores the session with. Nothing is
-  reported outside a Herdr pane, and only the frontend that is the pane's agent
-  reports: `otto serve`, `otto acp`, `--attach` and `--prompt` runs do not
+  a pane: the pane becomes the agent `otto` as soon as Otto starts, `working`
+  while a turn runs, `blocked` while a tool call waits for your decision, and
+  `idle` when it waits for input. `herdr agent wait otto --until blocked`,
+  `herdr agent prompt` and the sidebar therefore work for Otto, and the
+  reported session file plus `otto --resume` command are what Herdr restores
+  the session with. Nothing is reported outside a Herdr pane, and only the
+  frontend that is the pane's agent reports: `otto serve`, `otto acp`,
+  `--attach` and `--prompt` runs do not
   ([design](docs/specs/2026-10-07-herdr-agent-state.md),
   [#384](https://github.com/baiyuqing/otto/pull/384)).
 

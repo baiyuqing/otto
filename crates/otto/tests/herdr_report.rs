@@ -121,6 +121,12 @@ async fn reports_the_turn_lifecycle_and_the_session_reference() {
 
     reporter.observe(&Event::AgentStarted, &session);
 
+    // The state goes first: Herdr accepts the session reference (and its
+    // `resume_argv`) only from a reporter that already holds the pane.
+    let working = herdr.next().await;
+    assert_eq!(working["method"], "pane.report_agent");
+    assert_eq!(working["params"]["state"], "working");
+
     let session_report = herdr.next().await;
     assert_eq!(session_report["method"], "pane.report_agent_session");
     assert_eq!(session_report["params"]["pane_id"], "w1:p1");
@@ -135,10 +141,6 @@ async fn reports_the_turn_lifecycle_and_the_session_reference() {
         session_report["params"]["resume_argv"],
         json!(["otto", "--resume", "/tmp/otto/s-1.jsonl"])
     );
-
-    let working = herdr.next().await;
-    assert_eq!(working["method"], "pane.report_agent");
-    assert_eq!(working["params"]["state"], "working");
 
     reporter.observe(
         &Event::ApprovalChanged {
@@ -173,6 +175,62 @@ async fn reports_the_turn_lifecycle_and_the_session_reference() {
     assert_eq!(released["params"]["agent"], "otto");
 }
 
+/// A Herdr pane is nobody until the agent inside it reports, so the pane is
+/// claimed when the frontend starts, not when the first turn begins.
+#[tokio::test]
+async fn the_pane_is_announced_before_the_first_turn() {
+    let mut herdr = fake_herdr();
+    // A long debounce: the announcement must not wait for it.
+    let reporter = Reporter::start_with_debounce(herdr.config(), Duration::from_millis(300));
+    let session = session();
+
+    reporter.ready(&session);
+
+    let announced = herdr.next().await;
+    assert_eq!(announced["method"], "pane.report_agent");
+    assert_eq!(announced["params"]["pane_id"], "w1:p1");
+    assert_eq!(announced["params"]["source"], "custom:otto");
+    assert_eq!(announced["params"]["agent"], "otto");
+    assert_eq!(announced["params"]["state"], "idle");
+
+    let reference = herdr.next().await;
+    assert_eq!(reference["method"], "pane.report_agent_session");
+    assert_eq!(reference["params"]["agent_session_id"], "s-1");
+    assert_eq!(
+        reference["params"]["resume_argv"],
+        json!(["otto", "--resume", "/tmp/otto/s-1.jsonl"])
+    );
+
+    // The first turn changes the state and repeats neither report.
+    reporter.observe(&Event::AgentStarted, &session);
+    let working = herdr.next().await;
+    assert_eq!(working["method"], "pane.report_agent");
+    assert_eq!(working["params"]["state"], "working");
+    let quiet = tokio::time::timeout(Duration::from_millis(200), herdr.requests.recv()).await;
+    assert!(
+        quiet.is_err(),
+        "the announced state and the session reference are sent once"
+    );
+}
+
+/// The session can be missing when the frontend starts; the pane is still
+/// claimed, and no session reference is invented.
+#[tokio::test]
+async fn announcing_without_a_session_claims_the_pane() {
+    let mut herdr = fake_herdr();
+    let reporter = Reporter::start_with_debounce(herdr.config(), Duration::from_millis(50));
+    let empty = SessionRef {
+        id: String::new(),
+        path: String::new(),
+    };
+
+    reporter.ready(&empty);
+
+    assert_eq!(herdr.next().await["params"]["state"], "idle");
+    let quiet = tokio::time::timeout(Duration::from_millis(200), herdr.requests.recv()).await;
+    assert!(quiet.is_err(), "no session reference without a session");
+}
+
 #[tokio::test]
 async fn a_later_step_cancels_the_idle_report() {
     let mut herdr = fake_herdr();
@@ -180,8 +238,8 @@ async fn a_later_step_cancels_the_idle_report() {
     let session = session();
 
     reporter.observe(&Event::AgentStarted, &session);
-    assert_eq!(herdr.next().await["method"], "pane.report_agent_session");
     assert_eq!(herdr.next().await["params"]["state"], "working");
+    assert_eq!(herdr.next().await["method"], "pane.report_agent_session");
 
     // A follow-up step of the same logical turn: the finished run must not
     // show up as `idle` in Herdr's sidebar.
@@ -205,8 +263,8 @@ async fn an_approval_decided_after_the_turn_does_not_revive_working() {
     let session = session();
 
     reporter.observe(&Event::AgentStarted, &session);
-    assert_eq!(herdr.next().await["method"], "pane.report_agent_session");
     assert_eq!(herdr.next().await["params"]["state"], "working");
+    assert_eq!(herdr.next().await["method"], "pane.report_agent_session");
 
     // The turn ended and the decision arrives afterwards: the pane must settle
     // on `idle` rather than be stranded in `working`.
@@ -234,6 +292,7 @@ async fn an_unreachable_socket_changes_nothing() {
     let reporter = Reporter::start_with_debounce(config, Duration::from_millis(10));
     let session = session();
 
+    reporter.ready(&session);
     reporter.observe(&Event::AgentStarted, &session);
     reporter.observe(&Event::AgentFinished, &session);
     tokio::time::timeout(Duration::from_secs(2), reporter.release())

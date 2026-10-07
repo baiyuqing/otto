@@ -26,7 +26,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `logs`. A process that exits is restarted with backoff, and five consecutive
   fast failures stop the stack instead of looping. State and logs are mode
   `0600` under `~/.local/state/otto-tcp`; no secret is written
-  ([user manual](docs/user-manual.md#the-acp-tcp-stack-script)).
+  ([user manual](docs/user-manual.md#the-acp-tcp-stack-script),
+  [#393](https://github.com/baiyuqing/otto/pull/393)).
 
 - Embed Otto in another Rust program: `otto::embed::Otto` builds the same
   runtime `otto acp` builds (tools, sandbox, approvals, session files,

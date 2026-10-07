@@ -279,7 +279,22 @@ components:
           $ref: "#/components/schemas/SessionTurn"
         forked_from:
           $ref: "#/components/schemas/ForkedFrom"
+        plan:
+          type: array
+          description: The session plan the model keeps with update_plan. Omitted when there is none.
+          items:
+            $ref: "#/components/schemas/PlanStep"
       required: [id, workspace, provider, model, thinking, sandbox, turn]
+    PlanStep:
+      type: object
+      properties:
+        text:
+          type: string
+          maxLength: 200
+        status:
+          type: string
+          enum: [pending, in_progress, completed]
+      required: [text, status]
     ForkedFrom:
       type: object
       description: Where a forked session came from. Omitted for a session that is not a fork.
@@ -814,6 +829,7 @@ components:
             - compaction_warning
             - memory_warning
             - agent_error
+            - plan_updated
             - notification
             - user_message
             - approval_requested
@@ -861,6 +877,12 @@ components:
           $ref: "#/components/schemas/Compaction"
         plan:
           type: object
+          description: compaction_planned only; the compaction plan.
+        steps:
+          type: array
+          description: plan_updated only; the whole session plan, empty when it was cleared.
+          items:
+            $ref: "#/components/schemas/PlanStep"
         image:
           type: boolean
           description: user_message only; true when the prompt carried an image.

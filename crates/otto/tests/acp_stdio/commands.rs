@@ -254,3 +254,48 @@ fn task_queue_capability_survives_compaction_and_session_reload() {
     assert_task_queue_capability(&requests.lock().unwrap()[4]);
     assert_eq!(loaded.close(), Some(0));
 }
+
+#[test]
+fn update_plan_sends_a_plan_update_and_load_replays_it() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, _requests) = provider_with(vec![
+        tool_call_reply(
+            "call-1",
+            "update_plan",
+            r#"{"steps":[{"text":"read","status":"completed"},{"text":"write","status":"in_progress"}]}"#,
+        ),
+        text_reply("working on it"),
+    ]);
+    configure(home.path(), &base_url);
+    let entries = json!([
+        {"content": "read", "priority": "medium", "status": "completed"},
+        {"content": "write", "priority": "medium", "status": "in_progress"}
+    ]);
+
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    let (frames, response) = client.call("session/prompt", prompt(&session_id, "plan it"));
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let plans: Vec<&Value> = updates(&frames)
+        .into_iter()
+        .filter(|update| update["sessionUpdate"] == "plan")
+        .collect();
+    assert_eq!(plans.len(), 1, "{frames:?}");
+    assert_eq!(plans[0]["entries"], entries);
+    assert_eq!(client.close(), Some(0));
+
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let (frames, response) = client.call(
+        "session/load",
+        json!({"cwd": workspace.path(), "sessionId": session_id, "mcpServers": []}),
+    );
+    assert!(response["result"].is_object(), "{response}");
+    let replayed = updates(&frames);
+    let last = replayed.last().expect("replayed updates");
+    assert_eq!(last["sessionUpdate"], "plan", "{frames:?}");
+    assert_eq!(last["entries"], entries);
+    assert_eq!(client.close(), Some(0));
+}

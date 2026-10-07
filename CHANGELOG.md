@@ -196,6 +196,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Let the model keep a short plan for multi-step work with the new
+  `update_plan` tool: up to 20 one-line steps, each `pending`, `in_progress` or
+  `completed`. The plan is saved with the session, so it survives Otto
+  stopping, resume and fork, and compaction carries it in a `<plan>` block.
+  The TUI shows `Plan 2/5 · <step>` above the status line and `/plan` shows
+  the checklist; ACP clients receive standard `plan` updates, also on
+  `session/load`; HTTP adds a `plan_updated` SSE event and the session
+  object's `plan` field
+  ([design](docs/specs/2026-10-07-session-plan.md)).
+
 - Fork a session before an earlier prompt: TUI `/fork` (local and attached)
   lists the prompts that start a turn, writes a new session with the history
   before the chosen one, switches to it and puts the prompt in the editor.

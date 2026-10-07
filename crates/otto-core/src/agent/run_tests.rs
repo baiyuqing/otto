@@ -2632,6 +2632,10 @@ impl Session for FailingSession {
         self.inner.interrupted_turn()
     }
 
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.inner.plan()
+    }
+
     async fn append_input_if_absent(
         &self,
         input_id: &str,
@@ -2719,6 +2723,10 @@ impl Session for OperationFailingSession {
         self.inner.interrupted_turn()
     }
 
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.inner.plan()
+    }
+
     async fn append_input_if_absent(
         &self,
         input_id: &str,
@@ -2798,6 +2806,10 @@ impl Session for AsyncOrderingSession {
 
     fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
         self.inner.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.inner.plan()
     }
 
     async fn append_input_if_absent(
@@ -3847,6 +3859,10 @@ impl Session for TurnRecordingSession {
         self.inner.interrupted_turn()
     }
 
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.inner.plan()
+    }
+
     async fn append_input_if_absent(
         &self,
         input_id: &str,
@@ -4195,4 +4211,144 @@ async fn a_followup_step_message_carries_its_input_id() {
         .expect("agent_followup message");
     assert_eq!(followup.input_id, "followup:task:1");
     assert!(agent.session().has_input("followup:task:1"));
+}
+
+// -- plan ------------------------------------------------------------------
+
+/// A session one `Arc` shares between the agent and a tool.
+struct SharedMemory(Arc<MemorySession>);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Session for SharedMemory {
+    fn messages(&self) -> Vec<Message> {
+        self.0.messages()
+    }
+    async fn append(&self, message: Message) -> Result<(), crate::session::SessionError> {
+        self.0.append(message).await
+    }
+    fn latest_compaction(&self) -> Option<crate::session::CompactionMetadata> {
+        self.0.latest_compaction()
+    }
+    async fn append_compaction(
+        &self,
+        checkpoint: crate::session::CompactionCheckpoint,
+    ) -> Result<crate::session::CompactionMetadata, crate::session::SessionError> {
+        self.0.append_compaction(checkpoint).await
+    }
+    async fn append_operation_fact(
+        &self,
+        fact: crate::session::OperationFact,
+    ) -> Result<(), crate::session::SessionError> {
+        self.0.append_operation_fact(fact).await
+    }
+    fn operation_history(&self) -> Vec<crate::session::OperationFact> {
+        self.0.operation_history()
+    }
+    fn operation_ledger(&self) -> crate::session::OperationLedger {
+        self.0.operation_ledger()
+    }
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.0.observed_capabilities()
+    }
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.0.interrupted_turn()
+    }
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.0.plan()
+    }
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.0.append_input_if_absent(input_id, message).await
+    }
+    fn has_input(&self, input_id: &str) -> bool {
+        self.0.has_input(input_id)
+    }
+    async fn append_custom(
+        &self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), crate::session::SessionError> {
+        self.0.append_custom(custom_type, data).await
+    }
+}
+
+/// An `echo` tool that writes its `steps` argument as the session plan.
+struct PlanWriter(Arc<MemorySession>);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl ToolExecutor for PlanWriter {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        EchoExecutor::default().definitions()
+    }
+
+    async fn execute(
+        &self,
+        call: crate::tool::ToolCall<'_>,
+        _control: &dyn OperationControl,
+    ) -> crate::tool::ToolExecution {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            steps: Vec<crate::session::PlanStep>,
+        }
+        let steps = serde_json::from_str::<Args>(call.arguments.get())
+            .expect("steps")
+            .steps;
+        self.0
+            .append_custom(
+                crate::session::PLAN_CUSTOM_TYPE,
+                &crate::session::encode_plan(&steps),
+            )
+            .await
+            .expect("plan");
+        crate::tool::ToolExecution::completed(ToolResult::default())
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_tool_call_that_changes_the_plan_emits_plan_updated_once() {
+    let memory = Arc::new(MemorySession::new());
+    let steps = r#"{"steps":[{"text":"ship","status":"in_progress"}]}"#;
+    let provider = FakeProvider::new(vec![
+        Turn::tool_call("call-1", steps),
+        // The same plan again changes nothing and emits nothing.
+        Turn::tool_call("call-2", steps),
+        Turn::text("done"),
+    ]);
+    let agent = Agent::new(
+        provider,
+        PlanWriter(Arc::clone(&memory)),
+        SharedMemory(Arc::clone(&memory)),
+        options(),
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    agent
+        .run(
+            "plan it",
+            &mut |event| sink.lock().unwrap().push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+    let updates: Vec<_> = collect(&events)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::PlanUpdated { steps } => Some(steps),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 1, "{updates:?}");
+    assert_eq!(updates[0][0].text, "ship");
+    let names = names(&collect(&events));
+    let finished = names
+        .iter()
+        .position(|name| *name == "tool_call_finished")
+        .unwrap();
+    assert_eq!(names[finished + 1], "plan_updated");
 }

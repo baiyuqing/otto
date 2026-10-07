@@ -206,12 +206,15 @@ Acceptance on a real machine (manual, in the user's Herdr session):
   custom-reported reference is verified once in a live session; until then
   `resume_argv` is reported best-effort and no Otto behavior depends on it.
 
-## Open questions
+## Decisions
 
-Resolved 2026-10-07: **(1)** no configuration key — the Herdr environment is
-the only switch; **(2)** the reported label is always `otto`.
+Resolved 2026-10-07 by the maintainer:
 
-3. `--attach` and `otto serve` in the first release, or later? This design
-   assumes later.
-4. `resume_argv`/session reference in the first release, or after the live
-   check above? This design assumes included, as best-effort.
+1. **No configuration key** — the Herdr environment is the only switch.
+2. **The reported label is always `otto`.**
+3. **The first release covers Otto started directly in the pane** (local TUI and
+   REPL). `otto serve`, `otto --attach` and `otto acp` are out of scope.
+4. **The session reference and `resume_argv` are reported in the first
+   release**, best-effort.
+
+No open questions remain.

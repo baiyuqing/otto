@@ -1118,6 +1118,18 @@ pub async fn run_with_backends(
         None => controller,
     };
     let controller = Arc::new(controller);
+    // Only the frontend that *is* the agent in a Herdr pane reports: `otto
+    // serve`, `--acp`, `--attach` and headless runs are not it. Reporting is
+    // inert unless Herdr started this process.
+    let herdr = match frontend {
+        Frontend::Tui | Frontend::Repl => {
+            crate::herdr::Config::from_environment(&lookup).map(crate::herdr::Reporter::start)
+        }
+        Frontend::Once => None,
+    };
+    if let Some(reporter) = &herdr {
+        controller.install_herdr(Arc::clone(reporter));
+    }
     let schedule_worker = match (&frontend, controller.builder().schedule.clone()) {
         (Frontend::Repl | Frontend::Tui, Some(store)) => Some(tokio::spawn(
             crate::schedule::worker::Worker {
@@ -1202,6 +1214,11 @@ pub async fn run_with_backends(
         }
     }
     controller.close_mcp().await;
+    if let Some(reporter) = &herdr {
+        // Tell Herdr this pane no longer holds an agent before the session
+        // closes, so it keeps no stale row.
+        reporter.release().await;
+    }
     let controller_error = controller.close();
     let sandbox_error = control.close().await;
     let approval_error = approval_executor

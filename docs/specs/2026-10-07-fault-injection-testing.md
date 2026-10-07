@@ -595,3 +595,40 @@ Phase 6, checked against `main` at `d3f17e7` on 2026-10-07:
   because sandbox errors carry no I/O error.
 - The rows live next to the existing harnesses; there is no
   `tests/fault_process.rs` or `tests/fault_mcp.rs`.
+
+Phase 5, checked against `main` at `cb5ee53` on 2026-10-07:
+
+- The session create row has two tests. A crash during the header write left
+  a torn `<id>.jsonl`: 0 bytes, or `{"type"` with `ShortExit { keep: 7 }`.
+  `Store::open` rejected it ("session file is empty", "session header must be
+  one JSON object"), `session::list` counted it as skipped, and `--continue`
+  resumed an older session. A new session file is now written as
+  `<id>.jsonl.<hex>.tmp`. After the header and runtime record are synced,
+  `FileRoot::publish_journal` (`FileOp::PublishJournal`) links it to
+  `<id>.jsonl`, failing when that name exists, and unlinks the temporary
+  name. A crash before the link leaves only the temporary file, which no
+  session scan reads. `linkat` is used instead of `renameat2` with
+  `RENAME_NOREPLACE` because the Linux NFS and CephFS clients return `EINVAL`
+  for rename flags, and session failover supports both. Files torn by
+  earlier versions still fail to open. The second test crashes at the
+  session directory sync, as specified.
+- `Filter::NameContains` is added: the writes made while a session file is
+  created have the temporary name as their subject.
+- The lease row builds the on-disk state (epoch 2 marker, `fenced-1.jsonl`,
+  no log), as the amendment above says. The skillwrite row does not: the
+  child reverts through a reflection store whose `pop_skill_version` calls
+  `crash::exit()` after the tree has moved to its `.reflection-*` staging
+  directory. Recovery is manual: the staging directory holds the whole tree,
+  and moving it back restores the skill. No code removes the staging
+  directory or corrects the store row.
+- The session append row asserts `MAY_HAVE_RUN_TOOL_RESULT_TEXT` for a tool
+  call without an operation record. The bash call in the `SIGKILL` test has a
+  durable operation record, so its repaired result starts with "tool result
+  unavailable after prior session interruption". The resumed request carries
+  the recovery text "Continue the interrupted turn from the transcript".
+- The `SIGKILL` test serves the tool call from the scripted server in
+  `tests/common` instead of `faults::http`; the command
+  `echo ran >> ran.txt; sleep 30` provides the stall and the evidence that
+  the resume did not run it again.
+- `remind::replace_private` is replaced by `replace_private_with`, which
+  takes the publish ops, so the sidecar crash rows can inject them.

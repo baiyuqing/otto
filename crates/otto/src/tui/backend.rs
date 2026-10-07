@@ -1140,7 +1140,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_approval_revision_cannot_be_rebound_to_current_state() {
-        use crate::approval::{ApplicationState, Kind, Proposal, State, Subject};
+        use crate::approval::{ApplicationState, Authority, Kind, Proposal, State, Subject};
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
         let (controller, _, _) =
@@ -1154,6 +1154,7 @@ mod tests {
             .approval_service()
             .create(Proposal {
                 kind: Kind::Confirmation,
+                authority: Authority::Consent,
                 scope: scope.clone(),
                 subject: Subject {
                     source: "backend-test".into(),

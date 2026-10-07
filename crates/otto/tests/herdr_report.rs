@@ -12,7 +12,7 @@ use std::time::Duration;
 use otto::herdr::{Config, Reporter, SessionRef};
 use otto_core::agent::Event;
 use otto_core::approval::{
-    ApplicationState, Choice, Kind, Request, Scope, State as ApprovalState, Subject,
+    ApplicationState, Authority, Choice, Kind, Request, Scope, State as ApprovalState, Subject,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -87,6 +87,7 @@ fn request(state: ApprovalState) -> Request {
         id: "req-1".to_owned(),
         revision: 1,
         kind: Kind::Authorization,
+        authority: Authority::Boundary,
         scope: Scope {
             workspace: "/tmp/otto".to_owned(),
             session_id: "s-1".to_owned(),

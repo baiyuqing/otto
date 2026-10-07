@@ -494,6 +494,7 @@ mod tests {
         approvals
             .create(crate::approval::Proposal {
                 kind: crate::approval::Kind::Confirmation,
+                authority: crate::approval::Authority::Consent,
                 scope,
                 subject: crate::approval::Subject {
                     tool_call_id: String::new(),

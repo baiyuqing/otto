@@ -786,7 +786,9 @@ impl Session {
     /// request for a command outside the sandbox grants or for an approval
     /// the model asked for; a headless host returns
     /// [`ApprovalDecision::Deny`]. In AUTO mode, the default for a new
-    /// session, those requests are approved without calling `decide`; see
+    /// session, a bounded authorization that stays inside the sandbox is
+    /// approved without calling `decide`; a plan review and any request that
+    /// leaves the sandbox or the workspace still comes to `decide`; see
     /// [`Session::set_auto_mode`]. A second call on this session while a turn
     /// runs returns [`Error::PromptActive`].
     pub async fn prompt<F, Fut>(
@@ -835,7 +837,9 @@ impl Session {
     }
 
     /// Sets the approval mode of this session: `true` is AUTO, which approves
-    /// requests without calling `decide`; `false` is MANUAL. The mode is
+    /// a bounded authorization without calling `decide`; `false` is MANUAL.
+    /// A plan review and any request outside the sandbox always reaches
+    /// `decide`, whatever the mode. The mode is
     /// stored in `~/.otto/approvals.db` per workspace and session, as
     /// `/auto on|off` and ACP `_otto/approval_mode/set` store it.
     /// [`Info::auto_mode`] reports the mode in effect.

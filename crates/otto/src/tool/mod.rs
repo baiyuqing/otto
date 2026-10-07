@@ -52,6 +52,11 @@ pub(crate) const CONTEXT_CANCELED: &str = "context canceled";
 pub struct ApprovalSpec {
     pub version: String,
     pub source: String,
+    /// The authority class this tool's authorization reaches for; see
+    /// [`crate::approval::Authority`]. A tool that stays inside the sandbox and
+    /// the workspace declares `Bounded`, which the session AUTO policy may
+    /// decide; anything else always waits for the user.
+    pub authority: crate::approval::Authority,
     pub title: String,
     pub reason: String,
     pub details: String,

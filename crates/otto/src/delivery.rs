@@ -1404,6 +1404,7 @@ impl StartDeliveryTask {
         ApprovalSpec {
             version: hash(&details),
             source: "delivery".into(),
+            authority: crate::approval::Authority::Boundary,
             title: "Start a cross-workspace delivery task?".into(),
             reason: "Creates one target-local worktree after approval; GitHub push and PR permissions remain separate.".into(),
             details,
@@ -1659,6 +1660,7 @@ mod tests {
             id: id.into(),
             revision: 1,
             kind: crate::approval::Kind::Authorization,
+            authority: crate::approval::Authority::Boundary,
             scope: crate::approval::Scope {
                 workspace: "/source".into(),
                 session_id: "s1".into(),

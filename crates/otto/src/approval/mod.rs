@@ -33,42 +33,61 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
-    fn auto_mode_is_default_scoped_persistent_and_records_both_events() {
+    fn auto_mode_decides_only_a_bounded_authorization() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let service = Service::open(&path).unwrap();
         let scope = proposal().scope;
         assert!(service.auto_mode(&scope).unwrap());
-        let request = service.create(proposal()).unwrap();
-        assert_eq!(request.state, State::Approved);
-        assert_eq!(request.decision.as_ref().unwrap().transport, "auto-mode");
+        // A model-originated plan review is not the session policy's decision.
+        let review = service.create(proposal()).unwrap();
+        assert_eq!(review.state, State::Pending);
+        assert!(review.decision.is_none());
+        assert_eq!(service.events("/w", Some("s"), 0).unwrap().len(), 1);
+        // A bounded authorization is still decided without a dialog, and both
+        // events are recorded.
+        let mut bounded = authorization();
+        bounded.subject.id = "bounded".into();
+        let bounded = service.create(bounded).unwrap();
+        assert_eq!(bounded.state, State::Approved);
+        assert_eq!(bounded.decision.as_ref().unwrap().transport, "auto-mode");
         let events = service.events("/w", Some("s"), 0).unwrap();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0].request.state, State::Pending);
-        assert_eq!(events[1].request.state, State::Approved);
+        assert_eq!(events[1].request.state, State::Pending);
+        assert_eq!(events[2].request.state, State::Approved);
         service.set_auto_mode(&scope, false).unwrap();
-        let mut manual = proposal();
+        let mut manual = authorization();
         manual.subject.id = "manual".into();
         let manual = service.create(manual).unwrap();
         assert_eq!(manual.state, State::Pending);
-        let mut other = proposal();
+        let mut other = authorization();
+        other.subject.id = "other".into();
         other.scope.session_id = "other".into();
         assert_eq!(service.create(other).unwrap().state, State::Approved);
-        let mut child = proposal();
+        let mut child = authorization();
+        child.subject.id = "child".into();
         child.scope.task_id = "child".into();
         assert_eq!(service.create(child).unwrap().state, State::Pending);
-        let mut workspace = proposal();
+        let mut workspace = authorization();
+        workspace.subject.id = "workspace".into();
         workspace.scope.session_id.clear();
         assert_eq!(service.create(workspace).unwrap().state, State::Pending);
         drop(service);
         let service = Service::open(&path).unwrap();
         assert!(!service.auto_mode(&scope).unwrap());
         service.set_auto_mode(&scope, true).unwrap();
+        // Switching to AUTO decides the pending bounded authorization and
+        // leaves the plan review for the user.
         assert_eq!(
             service.get(&manual.id, "/w", Some("s")).unwrap().state,
             State::Approved
         );
-        assert_eq!(service.snapshot("/w", Some("s")).unwrap().requests.len(), 2);
+        assert_eq!(
+            service.get(&review.id, "/w", Some("s")).unwrap().state,
+            State::Pending
+        );
+        assert_eq!(service.snapshot("/w", Some("s")).unwrap().requests.len(), 3);
     }
 
     #[tokio::test]
@@ -91,6 +110,7 @@ mod tests {
     fn proposal() -> Proposal {
         Proposal {
             kind: Kind::Confirmation,
+            authority: Authority::Consent,
             scope: Scope {
                 workspace: "/w".into(),
                 session_id: "s".into(),
@@ -106,6 +126,32 @@ mod tests {
             },
             title: "Review plan".into(),
             reason: "scope".into(),
+            persistent: false,
+            blocking: true,
+            expires_at: None,
+        }
+    }
+    /// A bounded authorization: this is the class the session AUTO policy may
+    /// decide on its own.
+    fn authorization() -> Proposal {
+        Proposal {
+            kind: Kind::Authorization,
+            authority: Authority::Bounded,
+            scope: Scope {
+                workspace: "/w".into(),
+                session_id: "s".into(),
+                task_id: String::new(),
+                run_id: String::new(),
+            },
+            subject: Subject {
+                tool_call_id: String::new(),
+                source: "plugin".into(),
+                id: "plugin-1".into(),
+                version: "1".into(),
+                details: "run a plugin command".into(),
+            },
+            title: "Run a plugin command".into(),
+            reason: "inside the current sandbox".into(),
             persistent: false,
             blocking: true,
             expires_at: None,

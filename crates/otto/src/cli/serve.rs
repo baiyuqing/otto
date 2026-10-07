@@ -25,6 +25,10 @@ use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
 use crate::runtime::builder::Builder;
 use crate::runtime::info::SandboxInfo;
 use crate::runtime::sandbox_runtime::canonical_directory;
+use crate::runtime::startup::{
+    Admission, Disabled, admit_workspace, canonicalize_workspace_roots, load_workspace,
+    trusted_projects,
+};
 
 /// Writes `otto: {message}\n` and returns exit code 1.
 fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
@@ -135,8 +139,14 @@ impl Workspaces {
         if let Some(host) = loaded.get(&path) {
             return Ok((Arc::clone(host), false));
         }
-        let (builder, reloader) =
-            super::run::load_workspace(Arc::clone(shared), canonical, cancel, stderr).await?;
+        let (builder, reloader) = load_workspace(
+            Arc::clone(shared),
+            canonical,
+            &Disabled::default(),
+            cancel,
+            stderr,
+        )
+        .await?;
         let builder = Arc::new(builder);
         let workspace_runtime = crate::runtime::builder::resolve_initial_runtime(
             &builder.config,
@@ -221,45 +231,6 @@ impl Workspaces {
 
 // ---- admission ----
 
-/// Why a requested workspace path was rejected.
-#[derive(Debug, PartialEq, Eq)]
-enum Admission {
-    /// The path does not resolve to an existing directory.
-    Invalid,
-    /// A real directory, but neither the startup workspace nor a descendant
-    /// of any `workspace_roots` entry.
-    NotAdmitted,
-}
-
-/// Canonicalizes `requested` and admits it when it is `startup` or a
-/// descendant of one entry in `roots` (a root itself is admitted).
-/// `canonical_directory` resolves symlinks before the comparison, so a link
-/// inside a root that points outside it is rejected as `NotAdmitted`, and a
-/// missing path or a file is rejected as `Invalid`. The comparison is by path
-/// component (`Path::starts_with`), so `/root-x` is not a descendant of
-/// `/root`. `requested` must already be absolute: it arrives over HTTP, so
-/// resolving a relative path against the server process's working directory
-/// would let a client name a directory it never typed.
-fn admit_workspace(
-    requested: &str,
-    startup: &Path,
-    roots: &[PathBuf],
-    trusted: &[PathBuf],
-) -> Result<PathBuf, Admission> {
-    if !Path::new(requested).is_absolute() {
-        return Err(Admission::Invalid);
-    }
-    let canonical = canonical_directory(Path::new(requested)).map_err(|_| Admission::Invalid)?;
-    if canonical == startup
-        || roots.iter().any(|root| canonical.starts_with(root))
-        || trusted.iter().any(|dir| canonical.starts_with(dir))
-    {
-        Ok(canonical)
-    } else {
-        Err(Admission::NotAdmitted)
-    }
-}
-
 /// The canonical form of `path`, or `path` itself when it no longer resolves
 /// (its directory was deleted since it was added). Unlike [`admit_workspace`],
 /// `DELETE /v1/workspaces` must still match a persisted entry whose directory
@@ -268,39 +239,6 @@ fn canonical_or_literal(path: &str) -> String {
     canonical_directory(Path::new(path))
         .map(|canonical| canonical.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string())
-}
-
-/// Canonicalizes `[server].workspace_roots` once at startup. A root that does
-/// not resolve to an existing directory is a startup error naming the config
-/// key and the offending path, not a per-request admission failure.
-fn canonicalize_workspace_roots(raw_roots: &[String]) -> Result<Vec<PathBuf>, String> {
-    raw_roots
-        .iter()
-        .map(|root| {
-            canonical_directory(Path::new(root))
-                .map_err(|error| format!("[server] workspace_roots: \"{root}\": {error}"))
-        })
-        .collect()
-}
-
-/// Canonical directories trusted via `otto trust`, read fresh from
-/// `config_path` on every call. Unlike [`canonicalize_workspace_roots`], any
-/// failure — the file is missing or unparsable, or a `[projects]` entry has
-/// an invalid `trust_level` — resolves to no trusted directories rather than
-/// an error: trust only widens admission, so a config problem here must not
-/// break the startup workspace or configured roots. A trusted path that no
-/// longer resolves to a directory is likewise dropped rather than reported.
-fn trusted_projects(config_path: &Path) -> Vec<PathBuf> {
-    let Ok(text) = std::fs::read_to_string(config_path) else {
-        return Vec::new();
-    };
-    let Ok(file) = otto_core::config::parse(&text) else {
-        return Vec::new();
-    };
-    file.projects
-        .keys()
-        .filter_map(|path| canonical_directory(Path::new(path)).ok())
-        .collect()
 }
 
 // ---- persisted workspace list ----
@@ -1520,9 +1458,10 @@ mod tests {
         let other_sessions = tempfile::tempdir().expect("other sessions");
         let shared = crate::cli::testutil::shared_with_offline_sandbox(other_sessions.path());
         std::fs::write(&shared.config_path, "[sandbox]\ndriver='off'\n").expect("config");
-        let (mut builder, reloader) = super::super::run::load_workspace(
+        let (mut builder, reloader) = load_workspace(
             shared,
             &other_path,
+            &Disabled::default(),
             &CancellationToken::new(),
             &mut Vec::new(),
         )

@@ -8,6 +8,7 @@
 //! `docs/development.md`.
 
 pub mod crash;
+pub mod files;
 pub mod http;
 pub mod plan;
 pub mod sql;

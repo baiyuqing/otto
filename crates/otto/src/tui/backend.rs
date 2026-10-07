@@ -91,7 +91,13 @@ pub(crate) enum Command {
     },
     /// Admit ordinary input to the active turn rather than creating a queued turn.
     AdmitInput(String),
-    WithdrawQueued,
+    /// Explicit guidance for the active task, never a start of a new turn.
+    Steer(String),
+    /// The active run's guidance items; the caller repaints the queued one
+    /// from this read rather than from what it sent.
+    SteeringState,
+    /// Withdraw one guidance item that is still queued.
+    WithdrawSteer(u64),
     Management(crate::app::management::Request),
     Logout,
 }
@@ -120,6 +126,7 @@ pub(crate) enum Reply {
     },
     Reviews(Vec<Candidate>),
     ApprovalSnapshot(crate::approval::Snapshot),
+    Steering(Vec<otto_core::agent::steering::Message>),
     Management(crate::app::management::Reply),
     Operation {
         message: String,
@@ -436,10 +443,13 @@ async fn local_command(c: Arc<Controller>, command: Command) -> Result<Reply, St
             draft,
         });
     }
+    if let Command::SteeringState = command {
+        return c.steering_messages().map(Reply::Steering);
+    }
     let mut history = false;
     let mut prompt = None;
     let message = match command {
-        Command::Image(_) | Command::Fork(_) => unreachable!(),
+        Command::Image(_) | Command::Fork(_) | Command::SteeringState => unreachable!(),
         Command::NewSession => {
             c.new_session().await?;
             history = true;
@@ -612,11 +622,13 @@ async fn local_command(c: Arc<Controller>, command: Command) -> Result<Reply, St
             })
             .await?
         }
-        Command::WithdrawQueued => {
-            if !c.withdraw_user_message() {
-                return Err("no queued input to withdraw".into());
-            }
+        Command::WithdrawSteer(id) => {
+            c.withdraw_steering(id)?;
             "Queued input withdrawn.".into()
+        }
+        Command::Steer(text) => {
+            c.steer(&text)?;
+            format!("Guidance queued: {text}")
         }
         Command::Management(request) => {
             return blocking(c, move |c| c.management(request).map(Reply::Management)).await;
@@ -917,13 +929,29 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                         "The task is waiting for approval; respond to that approval before steering it.".into()
                     }
                 },
-                Command::WithdrawQueued => {
-                    if !remote.withdraw_queued_turn_async().await.map_err(|error| {
-                        format!("{error}; outcome unknown, reconcile state before retrying")
-                    })? {
-                        return Err("no queued input to withdraw".into());
-                    }
+                Command::WithdrawSteer(id) => {
+                    client
+                        .withdraw_steering(session, id)
+                        .await
+                        .map_err(mutation_error)?;
                     "Queued input withdrawn.".into()
+                }
+                Command::Steer(text) => {
+                    client
+                        .steer(session, &text)
+                        .await
+                        .map_err(mutation_error)?;
+                    format!("Guidance queued: {text}")
+                }
+                // Reads rather than reports: the caller paints the queued
+                // guidance from this list. An unreachable serve changed
+                // nothing here, so the error carries no unknown outcome.
+                Command::SteeringState => {
+                    return client
+                        .steering_messages(session)
+                        .await
+                        .map(Reply::Steering)
+                        .map_err(|error| error.to_string());
                 }
                 _ => return Err("not available with --attach".into()),
             };
@@ -1210,6 +1238,117 @@ mod tests {
                 .unwrap()
                 .state,
             State::Approved
+        );
+    }
+
+    #[tokio::test]
+    async fn steering_commands_reach_the_controller_for_the_active_run() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller =
+            Arc::new(crate::cli::testutil::controller(workspace.path(), sessions.path()).await);
+
+        // The read reaches `Controller::steering_messages`; an idle session has
+        // no guidance, which is what the TUI paints as nothing queued.
+        assert!(matches!(
+            local_command(controller.clone(), Command::SteeringState)
+                .await
+                .unwrap(),
+            Reply::Steering(messages) if messages.is_empty()
+        ));
+        // Both writes reach their controller calls and report the runtime's own
+        // reason, never a fallback that would start a turn instead.
+        assert_eq!(
+            local_command(controller.clone(), Command::WithdrawSteer(1))
+                .await
+                .unwrap_err(),
+            "steering message is not queued for the active task"
+        );
+        assert_eq!(
+            local_command(controller, Command::Steer("go left".into()))
+                .await
+                .unwrap_err(),
+            "there is no active task accepting guidance"
+        );
+    }
+
+    /// The attach arms route to the client rather than to the
+    /// `not available with --attach` fallback. `Remote::offline` has no socket,
+    /// so the steering route in the transport error is what proves the call was
+    /// attempted rather than rejected locally.
+    #[tokio::test]
+    async fn attach_steering_commands_route_to_the_client_transport() {
+        let remote = Arc::new(Remote::offline(Vec::new()));
+        let info = remote.info();
+        let ticket = Ticket {
+            workspace: info.workspace,
+            session: info.session_id,
+            surface: 0,
+            generation: 1,
+        };
+        let read = remote_request(
+            remote.clone(),
+            &ticket,
+            Request::Command(Command::SteeringState),
+        )
+        .await
+        .unwrap_err();
+        assert!(read.contains("/tasks/steer"), "{read}");
+        let withdraw = remote_request(
+            remote.clone(),
+            &ticket,
+            Request::Command(Command::WithdrawSteer(7)),
+        )
+        .await
+        .unwrap_err();
+        assert!(withdraw.contains("/tasks/steer/7"), "{withdraw}");
+        assert!(withdraw.contains("outcome unknown"), "{withdraw}");
+        let steer = remote_request(
+            remote,
+            &ticket,
+            Request::Command(Command::Steer("go left".into())),
+        )
+        .await
+        .unwrap_err();
+        assert!(steer.contains("/tasks/steer"), "{steer}");
+    }
+
+    /// The TUI reads the run's guidance right after admitting or withdrawing it,
+    /// so the read must not overtake the change it is meant to show. Both are
+    /// commands, which puts them on the driver's single write lane: the read
+    /// observes the state the admission left behind, and the display cannot flap
+    /// back to a stale list. The same driver serves the local and attached
+    /// backends, so this ordering holds for both.
+    #[tokio::test]
+    async fn a_guidance_read_follows_the_command_it_observes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller =
+            Arc::new(crate::cli::testutil::controller(workspace.path(), sessions.path()).await);
+        let info = controller.info();
+        let ticket = Ticket {
+            workspace: info.workspace,
+            session: info.session_id,
+            surface: 0,
+            generation: 1,
+        };
+        let mut driver = Driver::new(Connection::Local(controller));
+        // The idle session refuses the guidance, and the read that follows still
+        // completes second: the failed change cannot be observed out of order.
+        driver.submit(
+            ticket.clone(),
+            Request::Command(Command::Steer("go left".into())),
+        );
+        driver.submit(ticket, Request::Command(Command::SteeringState));
+
+        let first = driver.next().await;
+        assert!(matches!(first.result, Err(ref error) if error.contains("no active task")));
+        assert!(first.mutation);
+        let second = driver.next().await;
+        assert!(matches!(second.result, Ok(Reply::Steering(_))));
+        assert!(
+            second.mutation,
+            "the read takes the same gate as the command it follows"
         );
     }
 

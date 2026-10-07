@@ -186,9 +186,6 @@ pub(crate) struct StoreState {
     /// from a session its previous writer left mid-turn or by taking over
     /// another holder's lease epoch.
     pub(crate) recovery: Option<Recovery>,
-    /// Test-only fault injection for the durable-write path.
-    #[cfg(test)]
-    pub(crate) fail_writes: bool,
 }
 
 /// An append-only session file.
@@ -297,8 +294,6 @@ impl Store {
                 owns_lease: false,
                 enable_failover: None,
                 recovery: None,
-                #[cfg(test)]
-                fail_writes: false,
             }),
         })
     }
@@ -441,8 +436,6 @@ impl Store {
                 owns_lease,
                 enable_failover: None,
                 recovery: None,
-                #[cfg(test)]
-                fail_writes: false,
             }),
         };
         let mut recovery = Recovery {
@@ -1332,12 +1325,6 @@ impl StoreState {
     /// Writes one record and `fsync`s it, poisoning the store on failure.
     pub(crate) fn write_record(&mut self, encoded: &[u8]) -> Result<(), PiError> {
         self.check_lease()?;
-        #[cfg(test)]
-        if self.fail_writes {
-            let fatal = PiError::fatal("write session record: injected failure");
-            self.fatal = Some(fatal.clone());
-            return Err(fatal);
-        }
         let Some(file) = self.file.as_mut() else {
             let fatal = PiError::fatal("write session record: session file is not open");
             self.fatal = Some(fatal.clone());

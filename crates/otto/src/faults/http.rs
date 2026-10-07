@@ -1,9 +1,9 @@
-//! A minimal loopback HTTP origin for the auth and ChatGPT provider tests.
+//! A minimal loopback HTTP origin for the auth, provider and MCP tests.
 //!
 //! There is no equivalent in this crate's dependency set, and adding an HTTP
-//! server for tests alone is not worth it, so the handful of bytes these tests
-//! need are written directly onto the socket. The server never leaves loopback
-//! and serves canned responses only.
+//! server for tests alone is not worth it, so the bytes these tests need are
+//! written directly onto the socket. The server never leaves loopback and
+//! serves canned responses only.
 
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// One request the server received.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Request {
+pub struct Request {
     /// The request target from the request line, e.g. `/oauth/token`.
     pub target: String,
     /// The request line and every header, verbatim.
@@ -45,12 +45,12 @@ impl Request {
     }
 }
 
-pub(crate) struct TestServer {
+pub struct Server {
     pub url: String,
     requests: Arc<Mutex<Vec<Request>>>,
 }
 
-impl TestServer {
+impl Server {
     pub fn requests(&self) -> Vec<Request> {
         self.requests.lock().unwrap().clone()
     }
@@ -62,7 +62,7 @@ impl TestServer {
 
 /// Starts a loopback server that answers every request with `respond(request)`,
 /// which returns the complete raw HTTP response.
-pub(crate) async fn spawn<F>(respond: F) -> TestServer
+pub async fn spawn<F>(respond: F) -> Server
 where
     F: Fn(&Request) -> String + Send + Sync + 'static,
 {
@@ -123,14 +123,14 @@ where
             let _ = stream.flush().await;
         }
     });
-    TestServer {
+    Server {
         url: format!("http://127.0.0.1:{port}"),
         requests,
     }
 }
 
 /// A complete 200 response carrying `body` as a `text/event-stream`.
-pub(crate) fn sse_response(body: &str) -> String {
+pub fn sse_response(body: &str) -> String {
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -139,14 +139,14 @@ pub(crate) fn sse_response(body: &str) -> String {
 
 /// A 200 response that promises `declared` more bytes than it sends, so the
 /// client sees the body cut short mid-stream.
-pub(crate) fn truncated_sse_response(body: &str, declared: usize) -> String {
+pub fn truncated_sse_response(body: &str, declared: usize) -> String {
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n{body}"
     )
 }
 
 /// A complete 200 response carrying `body` as JSON.
-pub(crate) fn json_response(body: &str) -> String {
+pub fn json_response(body: &str) -> String {
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -154,7 +154,7 @@ pub(crate) fn json_response(body: &str) -> String {
 }
 
 /// A complete response with `status` and `body`.
-pub(crate) fn status_response(status: u16, body: &str) -> String {
+pub fn status_response(status: u16, body: &str) -> String {
     format!(
         "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -162,7 +162,7 @@ pub(crate) fn status_response(status: u16, body: &str) -> String {
 }
 
 /// A redirect to `location` with the given 3xx status.
-pub(crate) fn redirect_response(status: u16, location: &str) -> String {
+pub fn redirect_response(status: u16, location: &str) -> String {
     format!(
         "HTTP/1.1 {status} X\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     )
@@ -170,7 +170,7 @@ pub(crate) fn redirect_response(status: u16, location: &str) -> String {
 
 /// A 401 response carrying `header` as its `WWW-Authenticate` value. Used by
 /// `mcp::oauth`'s discovery tests to simulate the initial unauthorized probe.
-pub(crate) fn unauthorized_response(header: &str) -> String {
+pub fn unauthorized_response(header: &str) -> String {
     format!(
         "HTTP/1.1 401 X\r\nWWW-Authenticate: {header}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     )
@@ -195,7 +195,7 @@ fn form_urlencoded_pairs(body: &str) -> Vec<(String, String)> {
 /// A loopback address that accepts connections and then never answers, so a
 /// caller blocks until it is cancelled. Returns the base URL; the accepted
 /// sockets are held by the background task for the life of the test.
-pub(crate) async fn spawn_hanging() -> String {
+pub async fn spawn_hanging() -> String {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();

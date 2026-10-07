@@ -666,20 +666,20 @@ mod tests {
         store: Store,
     }
 
+    fn roots_in(home: &Path) -> Roots {
+        let write_root = home.join(".otto/skills");
+        Roots {
+            history_root: home.join(".otto/skill-history"),
+            lookup_roots: vec![write_root.clone(), home.join("workspace/.otto/skills")],
+            write_root,
+        }
+    }
+
     fn fixture() -> Fixture {
         let home = tempfile::tempdir().expect("home");
-        let write_root = home.path().join(".otto/skills");
-        let roots = Roots {
-            history_root: home.path().join(".otto/skill-history"),
-            lookup_roots: vec![
-                write_root.clone(),
-                home.path().join("workspace/.otto/skills"),
-            ],
-            write_root,
-        };
         Fixture {
+            roots: roots_in(home.path()),
             _home: home,
-            roots,
             store: Store::open_in_memory().expect("store"),
         }
     }
@@ -1136,6 +1136,114 @@ mod tests {
         );
         assert!(!skill_file(&fixture.roots.write_root, "rust-lint").exists());
         assert_eq!(fixture.store.generated("rust-lint").expect("row"), None);
+    }
+
+    /// A store that ends the process when a revert records its pop, which
+    /// is after the skill directory was moved aside.
+    struct CrashOnPop(Store);
+
+    impl ReflectionStore for CrashOnPop {
+        fn watermark(&self, session_id: &str) -> super::super::store::Result<Option<String>> {
+            self.0.watermark(session_id)
+        }
+        fn record(&self, row: &super::super::store::RunRow) -> super::super::store::Result<()> {
+            self.0.record(row)
+        }
+        fn last_auto_started(
+            &self,
+            session_id: &str,
+        ) -> super::super::store::Result<Option<String>> {
+            self.0.last_auto_started(session_id)
+        }
+        fn generated(
+            &self,
+            name: &str,
+        ) -> super::super::store::Result<Option<super::super::store::GeneratedSkill>> {
+            self.0.generated(name)
+        }
+        fn list_generated(
+            &self,
+        ) -> super::super::store::Result<Vec<super::super::store::GeneratedSkill>> {
+            self.0.list_generated()
+        }
+        fn generated_count(&self) -> super::super::store::Result<usize> {
+            self.0.generated_count()
+        }
+        fn record_skill_write(&self, write: &SkillWrite) -> super::super::store::Result<()> {
+            self.0.record_skill_write(write)
+        }
+        fn skill_versions(&self, name: &str) -> super::super::store::Result<Vec<String>> {
+            self.0.skill_versions(name)
+        }
+        fn pop_skill_version(
+            &self,
+            _name: &str,
+            _at: &str,
+        ) -> super::super::store::Result<Option<String>> {
+            crate::faults::crash::exit()
+        }
+        fn runs(
+            &self,
+            session_id: &str,
+        ) -> super::super::store::Result<Vec<(String, super::super::store::Status)>> {
+            self.0.runs(session_id)
+        }
+    }
+
+    #[test]
+    fn a_crash_after_a_revert_moves_the_skill_aside_keeps_the_whole_tree_in_a_staging_directory() {
+        use crate::faults::crash::{self, CRASH_EXIT, Role};
+        crash::run(crash::name_of(&|| {}), |role| match role {
+            Role::Child(dir) => {
+                let roots = roots_in(dir);
+                let store = Store::open_in_memory().expect("store");
+                apply(
+                    &store,
+                    &roots,
+                    &vetted("rust-lint", SkillAction::Create, BODY),
+                    "run-1",
+                    "session-1",
+                    "2026-10-02T00:00:00Z",
+                    30,
+                )
+                .expect("create");
+                let created = fs::read(skill_file(&roots.write_root, "rust-lint")).expect("skill");
+                fs::write(dir.join("expected.md"), created).expect("expected");
+                let _ = revert(&CrashOnPop(store), &roots, "rust-lint", "t");
+            }
+            Role::Parent(dir, status) => {
+                assert_eq!(
+                    status.code(),
+                    Some(CRASH_EXIT),
+                    "child did not crash at the fault"
+                );
+                let roots = roots_in(dir);
+                let expected = fs::read(dir.join("expected.md")).expect("expected");
+                assert!(
+                    !roots.write_root.join("rust-lint").exists(),
+                    "the revert had moved the skill aside"
+                );
+                let staged: Vec<PathBuf> = fs::read_dir(&roots.write_root)
+                    .expect("skill root")
+                    .map(|entry| entry.expect("entry").path())
+                    .filter(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with(".reflection-"))
+                    })
+                    .collect();
+                let [staged] = staged.try_into().expect("one staging directory");
+                assert_eq!(
+                    fs::read(staged.join("SKILL.md")).expect("the staged tree holds the skill"),
+                    expected
+                );
+                // Moving the directory back restores the skill.
+                fs::rename(&staged, roots.write_root.join("rust-lint")).expect("restore");
+                assert_eq!(
+                    fs::read(skill_file(&roots.write_root, "rust-lint")).expect("restored skill"),
+                    expected
+                );
+            }
+        });
     }
 
     #[test]

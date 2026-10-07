@@ -68,6 +68,17 @@ pub trait Tool: Send + Sync {
         Ok(None)
     }
 
+    /// Prepares an approval subject before it is persisted and again after the
+    /// user decides. The default preserves every existing synchronous tool;
+    /// target-bound tools may override it for sandboxed asynchronous preflight.
+    async fn approval_spec_async(
+        &self,
+        arguments: &RawValue,
+        _cancel: &CancellationToken,
+    ) -> Result<Option<ApprovalSpec>, ToolResult> {
+        self.approval_spec(arguments)
+    }
+
     async fn apply_approval(
         &self,
         _arguments: &RawValue,

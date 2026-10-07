@@ -276,7 +276,7 @@ impl Request {
 impl Controller {
     pub(crate) fn memory_manager(&self) -> Option<(Arc<Service>, Scope, Scope)> {
         let wiring = self.memory_wiring();
-        (self.dynamic_content() && wiring.usable).then(|| {
+        (self.dynamic_content() && wiring.usable && wiring.extension.is_none()).then(|| {
             (
                 Arc::clone(&wiring.service),
                 wiring.user_scope.clone(),
@@ -290,6 +290,20 @@ impl Controller {
 
     pub(crate) fn management(&self, request: Request) -> Result<Reply, String> {
         use Request::*;
+        if self.memory_wiring().extension.is_some()
+            && matches!(
+                &request,
+                MemoryList { .. }
+                    | MemoryShow { .. }
+                    | MemorySearch { .. }
+                    | MemoryForget { .. }
+                    | MemoryReviewList
+                    | MemoryReview { .. }
+                    | Remember { .. }
+            )
+        {
+            return Err("memory operation is unsupported by the native record management interface; use the Rust memory service API".into());
+        }
         match request {
             MemoryList {
                 scope,

@@ -1914,7 +1914,10 @@ impl Builder {
         }
         let redactor = self.boundary_redactor(Some(runtime));
         let client = self.provider_client(runtime)?;
-        let advisor = if self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
+        let advisor = if self.memory_usable()
+            && self.memory.extension.is_none()
+            && self.boundary_allows_dynamic(Some(runtime))
+        {
             crate::approval::memory::attach(
                 &self.approvals,
                 &self.memory.service,
@@ -1951,6 +1954,20 @@ impl Builder {
             tools.extend(self.memory_tools(max_output, advisor.clone()));
             advisor
         } else {
+            if self.memory.extension.is_some()
+                && self.memory_usable()
+                && self.boundary_allows_dynamic(Some(runtime))
+                && let Some(client) = &self.memory.client
+            {
+                tools.extend(crate::tool::memory_service::tools(
+                    client.clone(),
+                    self.memory_context(
+                        otto_core::memory::Origin::Model,
+                        Some(session.header().id),
+                    ),
+                    max_output,
+                ));
+            }
             None
         };
         mark_build_trace(&mut trace, "runner/setup");
@@ -2223,7 +2240,7 @@ impl Builder {
                 consecutive_failures: runtime.progress.consecutive_failures,
             },
             memory: match self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
-                true => Some(Arc::new(self.bind_memory()?)),
+                true => Some(self.bind_selected_memory(session.header().id)?),
                 false => None,
             },
             memory_recall_limit: self.memory.recall_limit,

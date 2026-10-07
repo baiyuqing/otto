@@ -22,6 +22,7 @@ pub mod grep;
 pub mod ls;
 pub mod mcp;
 pub mod memory;
+pub mod memory_service;
 pub mod models;
 pub mod otto;
 pub(crate) mod plan;

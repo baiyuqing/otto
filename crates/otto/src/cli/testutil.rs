@@ -226,6 +226,8 @@ pub async fn controller_with_memory(
             .expect("open memory service");
     assert!(usable, "the test store must be usable");
     builder.shared_mut().memory = crate::runtime::wiring::MemoryWiring {
+        client: None,
+        extension: None,
         service,
         usable,
         user_scope,

@@ -1,8 +1,8 @@
 # Open Memory service contract
 
-Status: behavior direction approved on 2026-10-07; interface design only.
-No production interface, external adapter or semantic-search change is shipped
-by this document. The [research records](2026-10-07-open-memory-research/README.md)
+Status: Rust contracts, host admission, built-in projection and runtime injection
+implemented on 2026-10-07. External transports and a semantic-search upgrade are
+not included. The [research records](2026-10-07-open-memory-research/README.md)
 preserve the source evidence and its limits.
 
 ## Objective and decisions
@@ -85,6 +85,15 @@ Operation methods are asynchronous and use the existing `OperationControl`;
 the port follows the core's existing native/WASM async convention. Factories
 and the startup composition inject the same service into every native entry
 point and resumed session. Extend `embed` by addition only.
+
+The implementation is `otto_core::memory`, the native
+`memory::client::Client`, and `memory::adapter::BuiltinAdapter`. Inject an
+independent service with `embed::OttoBuilder::memory_service(MemoryExtension)`
+or `cli::run::run_with_extensions`; existing entry points retain their defaults.
+`MemoryExtension::new` borrows the provider; `owned` transfers shutdown
+responsibility to one host. `with_learning` requires an explicit host grant.
+Memory disablement, a closed content boundary and the existing encryption
+requirement still apply to injected services.
 
 | Value | Contract |
 | --- | --- |
@@ -191,6 +200,16 @@ binding, not its memories. Service shutdown releases owned resources and
 preserves references to accepted work whose completion is still pending or
 unknown; it does not promise to cancel remote background processing.
 
+The host client keeps up to 64 reviewed preparations. An apply atomically
+claims one attempt before calling the service; pending, partial, unknown and
+failed outcomes do not make that preparation replayable. A trusted host can
+persist a snapshot and its digest, then restore it with authenticated human
+context and `PreparationRecovery`. Recovery defaults to `Attempted`;
+`NotStarted` requires durable host evidence that no attempt occurred. A digest
+checks equality, not human approval. Service idempotency claims do not silently
+enable retries. Borrowed-provider close releases only the client, while an
+owned-provider close reports its actual shutdown result.
+
 ## Forgetting
 
 `forget` names a target form (item, source or scope) and required coverage.
@@ -215,8 +234,8 @@ Otto must not infer stronger guarantees from a successful HTTP response.
 | Letta | Standing context plus on-demand file/archival access | Current SDK and legacy blocks are different contracts |
 | LangGraph/LangMem | Store inspection/direct writes; extraction; reflection execution | A submission Future does not prove background completion |
 
-The acceptance suite for a later implementation uses offline fakes and actual
-adapters, with no credentials or live provider calls. It must cover:
+The acceptance suite uses offline fakes and the built-in adapter, with no
+credentials or live provider calls. It covers:
 
 - A recall-only service works; unsupported writes make no service call.
 - Scope admission and prompt trust are enforced independently of service data.
@@ -231,8 +250,23 @@ adapters, with no credentials or live provider calls. It must cover:
 - Close/resume preserve accepted-operation state and existing append-only
   history. CLI, TUI, ACP, HTTP and embed use the same selected service.
 
-Implementation follows a separately reviewed patch plan: adapt the existing
-service first, prove substitution with an independently compiled Rust service,
-then implement any selected external adapter. Updating model-callable behavior
-also updates its capability descriptions and canonical documentation. This
-design does not claim those implementation checks already pass.
+## Current integration limits
+
+The default agent recall and tools keep the native path, including the standing
+set's independent limit/budget and existing review UI. The built-in Rust
+projection declares only implemented capabilities; service-neutral `observe`,
+`reflect`, feedback and jobs are not wired to the existing reflection subsystem.
+
+Injected services use the neutral port for agent recall. Their context is
+always reference material; metadata cannot promote a standing rule. An external
+service in ReviewedChanges mode exposes read tools. Prepared-change review/apply
+is available to its trusted Rust host; no native candidates or frontend review
+flow are fabricated. In explicitly delegated mode, supported `remember` and
+retrieval-suppression `forget` tools return actual service receipts.
+
+Legacy record-management commands cannot represent arbitrary service objects
+and return Unsupported for an injected service. The Rust session's
+`memory_service()` and `memory_context(origin)` expose neutral inspection and
+management. History/change feeds/import-export and external frontend review
+presentation remain separate extensions. No Mem0 transport or new network
+protocol is advertised as implemented.

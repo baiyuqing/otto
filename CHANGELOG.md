@@ -91,7 +91,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   trailing whitespace, and how many `old_text` lines match there. The listing
   holds only current file lines, never `old_text`, and is capped at 4096
   bytes. In recorded sessions, 229 of 2825 `edit` calls failed with one of
-  these two errors.
+  these two errors ([#423](https://github.com/baiyuqing/otto/pull/423)).
 
 - Rust hosts can replace Otto's memory service through `MemoryExtension`,
   without implementing Otto's storage schema. The service-neutral core contract

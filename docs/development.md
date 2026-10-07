@@ -90,10 +90,15 @@ candidates and `/memory review <id> accept|reject` decides one through
 `Service::review` (human authority, like `/memory forget`). The TUI dispatches `/memory` and `/remember` to the same
 functions the REPL uses (`crates/otto/src/cli/repl_commands.rs`).
 
-The [open Memory service design](specs/2026-10-07-open-memory-contract.md)
-defines the proposed service boundary and capability guarantees; its linked
-research records preserve source evidence. This is design documentation, not
-an implemented adapter API or a change to the behavior above.
+The [open Memory service contract](specs/2026-10-07-open-memory-contract.md)
+defines the implemented Rust port in `otto-core::memory` and the native
+`memory::client::Client` admission boundary. `BuiltinAdapter` projects the
+existing service without changing its native recall/review behavior.
+`embed::MemoryExtension` and `cli::run::run_with_extensions` inject another
+service through the shared startup phase. External ReviewedChanges model tools
+are read-only; trusted Rust hosts use prepared snapshots for inspection/review.
+Delegated mutations require an explicit scope/input grant. Native-record
+management must never silently fall back to a local store for that service.
 
 Keep `crates/otto`'s `skill` module free of imports from other Otto modules
 besides `otto-core`. The skill tool's file reads stay confined to the skill

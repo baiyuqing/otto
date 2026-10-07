@@ -15,7 +15,10 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use futures_util::future::join_all;
@@ -67,7 +70,71 @@ const SECRETS_EXCEED_REDACTION_LIMITS: &str =
 /// The default is a null service reporting memory as disabled, which every
 /// operation answers without touching a store.
 #[derive(Clone)]
+pub struct MemoryExtension {
+    pub service: Arc<dyn otto_core::memory::MemoryService>,
+    pub user_scope: otto_core::memory::Scope,
+    pub mode: otto_core::memory::AuthorizationMode,
+    pub learning_grant: Option<otto_core::memory::LearningGrant>,
+    /// Explicit provider shutdown ownership. Borrowed services remain open when Otto closes.
+    pub owned: bool,
+}
+
+impl MemoryExtension {
+    /// Borrows a shared provider in reviewed mode. Otto closes only its local client.
+    pub fn new(
+        service: Arc<dyn otto_core::memory::MemoryService>,
+        user_scope: otto_core::memory::Scope,
+    ) -> Self {
+        Self {
+            service,
+            user_scope,
+            mode: otto_core::memory::AuthorizationMode::ReviewedChanges,
+            learning_grant: None,
+            owned: false,
+        }
+    }
+
+    /// Transfers shutdown responsibility to one Otto host. Do not transfer the same provider to multiple hosts.
+    pub fn owned(
+        service: Arc<dyn otto_core::memory::MemoryService>,
+        user_scope: otto_core::memory::Scope,
+    ) -> Self {
+        Self {
+            owned: true,
+            ..Self::new(service, user_scope)
+        }
+    }
+
+    pub fn with_learning(mut self, grant: otto_core::memory::LearningGrant) -> Self {
+        self.mode = otto_core::memory::AuthorizationMode::DelegatedLearning;
+        self.learning_grant = Some(grant);
+        self
+    }
+
+    pub fn validate(&self) -> otto_core::memory::Result<()> {
+        self.user_scope.validate()?;
+        self.client().map(|_| ())
+    }
+
+    pub(crate) fn client(&self) -> otto_core::memory::Result<crate::memory::client::Client> {
+        use otto_core::memory::{AuthorizationMode, Error, ErrorKind};
+        let client = match (self.mode, &self.learning_grant) {
+            (AuthorizationMode::ReviewedChanges, None) => {
+                crate::memory::client::Client::new(self.service.clone())
+            }
+            (AuthorizationMode::DelegatedLearning, Some(grant)) => {
+                crate::memory::client::Client::with_learning(self.service.clone(), grant.clone())
+            }
+            _ => Err(Error::new(ErrorKind::InvalidInput)),
+        }?;
+        Ok(client.with_provider_shutdown(self.owned))
+    }
+}
+
+#[derive(Clone)]
 pub struct MemoryWiring {
+    pub extension: Option<MemoryExtension>,
+    pub client: Option<Arc<crate::memory::client::Client>>,
     pub service: Arc<Service>,
     /// Whether the service is backed by a live store, and so worth exposing to
     /// the agent.
@@ -79,9 +146,275 @@ pub struct MemoryWiring {
     pub advice_audit: Option<Arc<dyn crate::memory::advice::audit::AuditStore>>,
 }
 
+fn neutral_scope(scope: &Scope) -> otto_core::memory::Scope {
+    otto_core::memory::Scope {
+        namespace: scope.namespace.clone(),
+        id: scope.id.clone(),
+    }
+}
+
+struct ServiceBinding {
+    client: Arc<crate::memory::client::Client>,
+    context: otto_core::memory::MemoryContext,
+    closed: AtomicBool,
+}
+
+#[cfg(test)]
+mod selected_memory_tests {
+    use super::*;
+    use otto_core::{agent::memory::MemoryRecall, memory as port, operation::OperationControl};
+
+    #[derive(Default)]
+    struct RecallOnly {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl port::MemoryService for RecallOnly {
+        fn describe(&self) -> port::ServiceDescription {
+            let mut description = port::ServiceDescription::new("independent-service".into());
+            description
+                .capabilities
+                .push(port::Capability::new(port::Operation::Recall));
+            description
+        }
+        async fn recall(
+            &self,
+            request: &port::RecallRequest,
+            _: &dyn OperationControl,
+        ) -> port::Result<port::RecallResult> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(port::RecallResult {
+                items: vec![port::RecallItem {
+                    reference: Some(port::MemoryRef {
+                        service: "independent-service".into(),
+                        scope: request.context.scopes[0].clone(),
+                        id: "opaque-item".into(),
+                        revision: None,
+                    }),
+                    content: port::Content::Text("Useful context".into()),
+                    sources: vec![],
+                    effective_at: None,
+                    metadata: [("standing".into(), "true".into())].into(),
+                }],
+                used_tokens: None,
+                coverage: port::Coverage::Complete,
+            })
+        }
+    }
+
+    fn context() -> port::MemoryContext {
+        let user = port::Scope {
+            namespace: "user".into(),
+            id: "host-user".into(),
+        };
+        let workspace = port::Scope {
+            namespace: "workspace".into(),
+            id: "host-workspace".into(),
+        };
+        port::MemoryContext {
+            principal: "host-user".into(),
+            scopes: vec![user, workspace.clone()],
+            write_scope: Some(workspace),
+            workspace_id: Some("host-workspace".into()),
+            session_id: Some("host-session".into()),
+            task_id: None,
+            origin: port::Origin::Model,
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_readonly_service_recalls_without_granting_standing_authority() {
+        let provider = Arc::new(RecallOnly::default());
+        let client = Arc::new(crate::memory::client::Client::new(provider.clone()).unwrap());
+        let binding = ServiceBinding {
+            client: client.clone(),
+            context: context(),
+            closed: AtomicBool::new(false),
+        };
+        let result = binding
+            .recall(
+                &otto_core::agent::memory::RecallRequest {
+                    query: "context".into(),
+                    limit: 4,
+                    token_budget: 1000,
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert!(!result.records[0].standing);
+        binding.close().unwrap();
+        let request = otto_core::agent::memory::RecallRequest {
+            query: "context".into(),
+            limit: 4,
+            token_budget: 1000,
+        };
+        let error = binding
+            .recall(&request, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "memory service closed");
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1,
+            "closed binding must not contact the provider"
+        );
+        let other = ServiceBinding {
+            client: client.clone(),
+            context: context(),
+            closed: AtomicBool::new(false),
+        };
+        assert_eq!(
+            other
+                .recall(&request, &CancellationToken::new())
+                .await
+                .unwrap()
+                .records
+                .len(),
+            1
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            !client.is_closed(),
+            "closing one session must preserve shared memory"
+        );
+        let tools = crate::tool::memory_service::tools(client, context(), 4096);
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.definition().name)
+                .collect::<Vec<_>>(),
+            ["memory_search"]
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_recall_enforces_host_budget_even_without_provider_token_count() {
+        let client =
+            Arc::new(crate::memory::client::Client::new(Arc::new(RecallOnly::default())).unwrap());
+        let binding = ServiceBinding {
+            client,
+            context: context(),
+            closed: AtomicBool::new(false),
+        };
+        let result = binding
+            .recall(
+                &otto_core::agent::memory::RecallRequest {
+                    query: "context".into(),
+                    limit: 4,
+                    token_budget: 1,
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(result.records.is_empty());
+        assert_eq!(result.used_tokens, 0);
+    }
+
+    #[test]
+    fn extensions_require_explicit_matching_mode_and_grant() {
+        let mut extension =
+            MemoryExtension::new(Arc::new(RecallOnly::default()), context().scopes[0].clone());
+        assert!(!extension.owned);
+        assert!(extension.validate().is_ok());
+        extension.mode = port::AuthorizationMode::DelegatedLearning;
+        assert!(extension.validate().is_err());
+    }
+}
+
+#[async_trait::async_trait]
+impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
+    async fn recall(
+        &self,
+        request: &otto_core::agent::memory::RecallRequest,
+        cancel: &CancellationToken,
+    ) -> Result<otto_core::agent::memory::RecallResult, otto_core::agent::memory::MemoryError> {
+        use otto_core::{agent::memory as agent, memory as port};
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(agent::MemoryError(
+                port::Error::new(port::ErrorKind::Closed).to_string(),
+            ));
+        }
+        let result = self
+            .client
+            .recall(
+                &port::RecallRequest {
+                    context: self.context.clone(),
+                    query: request.query.clone(),
+                    limit: usize::try_from(request.limit)
+                        .unwrap_or(0)
+                        .min(port::MAX_ITEMS),
+                    token_budget: usize::try_from(request.token_budget)
+                        .unwrap_or(0)
+                        .min(port::MAX_TOKEN_BUDGET),
+                },
+                cancel,
+            )
+            .await
+            .map_err(|error| agent::MemoryError(error.to_string()))?;
+        let records: Vec<_> = result
+            .items
+            .into_iter()
+            .map(|item| {
+                let scope = item
+                    .reference
+                    .as_ref()
+                    .map(|reference| reference.scope.clone())
+                    .unwrap_or_else(|| self.context.write_scope.clone().expect("workspace scope"));
+                agent::Record {
+                    id: item
+                        .reference
+                        .map(|reference| reference.id)
+                        .unwrap_or_default(),
+                    scope: agent::Scope {
+                        namespace: scope.namespace,
+                        id: scope.id,
+                    },
+                    kind: "reference".into(),
+                    key: String::new(),
+                    text: match item.content {
+                        port::Content::Text(text) => text,
+                        port::Content::Resource { uri, media_type } => {
+                            format!("Resource reference ({media_type}): {uri}")
+                        }
+                    },
+                    standing: false,
+                }
+            })
+            .collect();
+        // Provider token counts are advisory. Bound the complete rendered host
+        // projection independently, using bytes as a conservative token bound.
+        let mut admitted = Vec::new();
+        let budget = usize::try_from(request.token_budget)
+            .unwrap_or(0)
+            .min(port::MAX_TOKEN_BUDGET);
+        for record in records {
+            admitted.push(record);
+            if agent::render_memory_context(&admitted).len() > budget {
+                admitted.pop();
+            }
+        }
+        let used_tokens = agent::render_memory_context(&admitted).len() as i64;
+        Ok(agent::RecallResult {
+            records: admitted,
+            used_tokens,
+        })
+    }
+
+    fn close(&self) -> Result<(), otto_core::agent::memory::MemoryError> {
+        self.closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 impl Default for MemoryWiring {
     fn default() -> Self {
         Self {
+            extension: None,
+            client: None,
             service: Arc::new(Service::null(None)),
             usable: false,
             user_scope: Scope::default(),
@@ -362,12 +695,49 @@ enum McpConnectResult {
 }
 
 impl Builder {
+    pub fn memory_context(
+        &self,
+        origin: otto_core::memory::Origin,
+        session_id: Option<String>,
+    ) -> otto_core::memory::MemoryContext {
+        let user = self
+            .memory
+            .extension
+            .as_ref()
+            .map(|extension| extension.user_scope.clone())
+            .unwrap_or_else(|| neutral_scope(&self.memory.user_scope));
+        let workspace = neutral_scope(&self.workspace_scope);
+        otto_core::memory::MemoryContext {
+            principal: user.id.clone(),
+            scopes: vec![user, workspace.clone()],
+            write_scope: Some(workspace.clone()),
+            workspace_id: Some(workspace.id),
+            session_id,
+            task_id: None,
+            origin,
+        }
+    }
+
     /// The memory tools, in the order they are registered.
     pub fn memory_tools(
         &self,
         max_output: usize,
         advisor: Option<Arc<crate::memory::advice::Advisor>>,
     ) -> Vec<Box<dyn Tool + Send + Sync>> {
+        if self.memory.extension.is_some() {
+            return self
+                .memory
+                .client
+                .as_ref()
+                .map(|client| {
+                    crate::tool::memory_service::tools(
+                        client.clone(),
+                        self.memory_context(otto_core::memory::Origin::Model, None),
+                        max_output,
+                    )
+                })
+                .unwrap_or_default();
+        }
         let scopes = vec![self.memory.user_scope.clone(), self.workspace_scope.clone()];
         vec![
             Box::new(MemorySearchTool::new(
@@ -397,7 +767,7 @@ impl Builder {
         model: &str,
         usage: Option<crate::usage::Collector>,
     ) -> Option<Arc<crate::memory::advice::Advisor>> {
-        if !self.memory.usable {
+        if !self.memory.usable || self.memory.extension.is_some() {
             return None;
         }
         let key = self
@@ -1269,6 +1639,26 @@ impl Builder {
                 ..BindOptions::default()
             })
             .map_err(|error| format!("bind memory: {error}"))
+    }
+
+    pub fn bind_selected_memory(
+        &self,
+        session_id: String,
+    ) -> Result<Arc<dyn otto_core::agent::memory::MemoryRecall + Send + Sync>, BuildError> {
+        if self.memory.extension.is_some() {
+            let client = self
+                .memory
+                .client
+                .clone()
+                .ok_or("memory service unavailable")?;
+            Ok(Arc::new(ServiceBinding {
+                client,
+                context: self.memory_context(otto_core::memory::Origin::Model, Some(session_id)),
+                closed: AtomicBool::new(false),
+            }))
+        } else {
+            Ok(Arc::new(self.bind_memory()?))
+        }
     }
 
     /// The memory, skill and sub-agent halves of `boundaryToolDefinitions`. The

@@ -17,7 +17,8 @@ and [package contracts](../../docs/development.md#package-boundaries).
   project preference sources; each workspace resolves its own overlay.
 - Use `fsops` and workspace directory handles for confined/atomic operations.
   Keep native session storage append-only and Pi-compatible.
-- Memory callers use `memory::Service`, not the store directly. Reflection
+- Memory callers use `memory::Service` for the built-in domain or
+  `memory::client::Client` for the neutral service, not a store directly. Reflection
   queues human-reviewed candidates; its vetted skill writer and boundary
   tests remain the authority for filesystem mutation.
 - Bash uses `sandbox`. macOS Seatbelt is the supported confined driver;

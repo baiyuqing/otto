@@ -702,6 +702,8 @@ mod tests {
         let mut builder = builder(workspace.path(), sessions.path());
         builder.shared_mut().home = home.path().to_string_lossy().into_owned();
         builder.shared_mut().memory = MemoryWiring {
+            client: None,
+            extension: None,
             service: Arc::clone(&service),
             usable,
             user_scope: user_scope.clone(),

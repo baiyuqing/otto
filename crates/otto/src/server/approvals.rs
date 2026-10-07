@@ -140,7 +140,7 @@ pub async fn list_shared(
     State(server): State<Arc<Server>>,
     axum::extract::Query(query): axum::extract::Query<Query>,
 ) -> Response {
-    let Some(ctrl) = server.controller(&query.session_id) else {
+    let Some(ctrl) = server.controller_for_route(&query.session_id).await else {
         return not_found("session not found");
     };
     match ctrl.approval_snapshot() {
@@ -168,7 +168,7 @@ pub async fn decide_shared(
     Path(id): Path<String>,
     axum::Json(input): axum::Json<SharedDecision>,
 ) -> Response {
-    let Some(ctrl) = server.controller(&input.session_id) else {
+    let Some(ctrl) = server.controller_for_route(&input.session_id).await else {
         return not_found("session not found");
     };
     let allow = match input.option_id.as_str() {
@@ -215,7 +215,7 @@ pub async fn get_shared(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<Query>,
 ) -> Response {
-    let Some(ctrl) = server.controller(&query.session_id) else {
+    let Some(ctrl) = server.controller_for_route(&query.session_id).await else {
         return not_found("session not found");
     };
     let scope = ctrl.approval_scope();
@@ -237,7 +237,7 @@ pub async fn withdraw_shared(
     Path(id): Path<String>,
     axum::Json(input): axum::Json<SharedDecision>,
 ) -> Response {
-    let Some(ctrl) = server.controller(&input.session_id) else {
+    let Some(ctrl) = server.controller_for_route(&input.session_id).await else {
         return not_found("session not found");
     };
     let scope = ctrl.approval_scope();
@@ -266,7 +266,7 @@ pub async fn events_shared(
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
     };
-    let Some(ctrl) = server.controller(&query.session_id) else {
+    let Some(ctrl) = server.controller_for_route(&query.session_id).await else {
         return not_found("session not found");
     };
     if query.after < 0 {
@@ -310,7 +310,7 @@ pub async fn changes_shared(
     State(server): State<Arc<Server>>,
     axum::extract::Query(query): axum::extract::Query<Query>,
 ) -> Response {
-    let Some(ctrl) = server.controller(&query.session_id) else {
+    let Some(ctrl) = server.controller_for_route(&query.session_id).await else {
         return not_found("session not found");
     };
     let scope = ctrl.approval_scope();

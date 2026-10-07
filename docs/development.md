@@ -715,7 +715,8 @@ HTTP faults use `otto::faults::http`, a raw-TCP loopback server:
 - A `Script` is a list of `Step` values: `Head`, `DeclareLength`, `Body`,
   `Chunk`, `Sse`, `Flush`, `Stall`, `Close` and `Reset` (a TCP reset). The
   constructors `sse_done`, `sse_without_done`, `sse_cut_after`,
-  `malformed_event`, `status`, `stall_before_head`, `stall_after_head` and
+  `malformed_event`, `status`, `stall_before_head`, `stall_after_head`,
+  `stall_after_events` and
   `truncated` build the common scenarios.
 - `Server::requests()` and `count()` return the requests received. A
   connection past the last scripted one gets a 500, so an unplanned retry is

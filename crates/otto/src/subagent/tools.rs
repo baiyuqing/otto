@@ -1,4 +1,5 @@
-//! The parent-facing sub-agent tools: `agent`, `agent_wait`, `agent_status`.
+//! The parent-facing sub-agent tools: `agent`, `agent_wait`, `agent_status`,
+//! `agent_send` and `agent_cancel`.
 //!
 //! Ownership: each tool holds an `Arc` to the session's [`Runner`] and owns
 //! nothing else. Concurrency and cancellation: `agent` returns as soon as the
@@ -33,11 +34,13 @@ const MAX_WAIT_TIMEOUT_SECONDS: i64 = 3600;
 
 const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
 
-const AGENT_WAIT_DESCRIPTION: &str = "Wait for a sub-agent task to finish. With task_id, waits for that task; without it, waits for every task that is queued or running. Blocks up to timeout_seconds (default 600, max 3600) and returns each task's completion report. New user input ends the wait early so the current turn can handle it. Errors if the wait times out or is canceled, naming the tasks still running, or if task_id is unknown.";
+const AGENT_WAIT_DESCRIPTION: &str = "Wait for a sub-agent task to finish. With task_id, waits for that task; without it, waits for every task that is queued or running. Blocks up to timeout_seconds (default 600, max 3600) and returns each task's completion report. New user input ends the wait early so the current turn can handle it. Errors if the wait times out or is canceled, naming the tasks still running, or if task_id is unknown. A wait that times out does not stop the task: check it with agent_status and stop it with agent_cancel.";
 
-const AGENT_STATUS_DESCRIPTION: &str = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error.";
+const AGENT_STATUS_DESCRIPTION: &str = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error. Stop a task that is stuck or no longer needed with agent_cancel.";
 
 const AGENT_SEND_DESCRIPTION: &str = "Send a task update to a queued or running sub-agent. Use this when the user adds constraints, clarifies priorities, provides new facts, or asks the child to adjust direction. You can also ask the child a question; the answer arrives later as a [task-report] notification. The child reads updates at the next safe checkpoint; this does not interrupt an in-flight provider or tool call. It cannot be sent to a finished task. Returns an error, and the child does not receive the update, when it cannot be saved to the child's pending-message file. Updates not yet read survive a restart and reach the child when it is resumed. To check progress instead, use agent_status, which reads the task registry and does not run the child model.";
+
+const AGENT_CANCEL_DESCRIPTION: &str = "Cancel a queued or running sub-agent task. Use it when agent_status shows a task that is stuck, repeating itself, or no longer needed. Cancellation is cooperative: the task stops at its next safe checkpoint, a task inside a tool call stops once that call settles, and a queued task never starts. The task ends as canceled and produces the usual [task-notification].";
 
 const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (default, or the definition's setting): it sees only prompt. inherit: it also receives a copy of this conversation up to this call. Prefer, in order: (1) fresh with a self-contained prompt: goal, paths, constraints, what to report back; (2) fresh, with the context you already obtained pasted into prompt (file excerpts, tool output, decisions), so the sub-agent skips the tool calls that produced it; (3) inherit, when that context is too large or too scattered to paste and the sub-agent would otherwise repeat expensive tool calls. A sub-agent never shares your prompt cache, so inherit costs one full uncached pass over this conversation per sub-agent, and everything irrelevant to the task goes in with it.";
 
@@ -45,15 +48,17 @@ const AGENT_NAME_DESCRIPTION: &str = "Optional task name, unique in this session
 
 const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-agent task in this session. With resume set, this continues that task on its own transcript instead of starting a new one: prompt is the next user message delivered to it, and agent, model, context, name, and description must be absent.";
 
-/// The `agent`, `agent_wait` and `agent_status` definitions, without a built
-/// [`Runner`]. The redaction boundary check needs the tool set a real runner
-/// would register, and none of the three definitions read runner state.
+/// The `agent`, `agent_wait`, `agent_status`, `agent_send` and `agent_cancel`
+/// definitions, without a built [`Runner`]. The redaction boundary check needs
+/// the tool set a real runner would register, and none of the definitions read
+/// runner state.
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         agent_definition(),
         agent_wait_definition(),
         agent_status_definition(),
         agent_send_definition(),
+        agent_cancel_definition(),
     ]
 }
 
@@ -70,6 +75,9 @@ pub fn tools(runner: &Arc<Runner>) -> Vec<Box<dyn Tool + Send + Sync>> {
             runner: Arc::clone(runner),
         }),
         Box::new(AgentSendTool {
+            runner: Arc::clone(runner),
+        }),
+        Box::new(AgentCancelTool {
             runner: Arc::clone(runner),
         }),
     ]
@@ -178,6 +186,31 @@ fn agent_send_definition() -> ToolDefinition {
                 }
             },
             "required": ["task_id", "message"]
+        }),
+    )
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentCancelArgs {
+    #[serde(default)]
+    task_id: String,
+}
+
+fn agent_cancel_definition() -> ToolDefinition {
+    definition(
+        "agent_cancel",
+        AGENT_CANCEL_DESCRIPTION,
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task id or name of the queued or running sub-agent to cancel."
+                }
+            },
+            "required": ["task_id"]
         }),
     )
 }
@@ -621,6 +654,43 @@ impl Tool for AgentSendTool {
             }
             Err(super::tasks::TaskError::Finished(_)) => error_result(format!(
                 "task {task_id} is already completed; cannot send message"
+            )),
+            Err(error) => error_result(error.to_string()),
+        }
+    }
+}
+
+struct AgentCancelTool {
+    runner: Arc<Runner>,
+}
+
+#[async_trait::async_trait]
+impl Tool for AgentCancelTool {
+    fn definition(&self) -> ToolDefinition {
+        agent_cancel_definition()
+    }
+
+    async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
+        let args: AgentCancelArgs = match decode_strict_json(arguments.get(), &["task_id"]) {
+            Ok(args) => args,
+            Err(message) => return error_result(message),
+        };
+        if cancel.is_cancelled() {
+            return error_result(CONTEXT_CANCELED);
+        }
+        let task_id = args.task_id.trim();
+        if task_id.is_empty() {
+            return error_result("task_id is required");
+        }
+        match self.runner.tasks().cancel(task_id) {
+            Ok(()) => text_result(format!(
+                "cancel requested for task {task_id}; it stops at its next safe checkpoint and its final status arrives as a [task-notification]"
+            )),
+            Err(super::tasks::TaskError::NotFound(_)) => {
+                error_result(format!("unknown task: {task_id}"))
+            }
+            Err(super::tasks::TaskError::Finished(_)) => error_result(format!(
+                "task {task_id} is already completed; nothing to cancel"
             )),
             Err(error) => error_result(error.to_string()),
         }
@@ -1565,12 +1635,149 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_definitions_include_agent_send() {
+    async fn tool_definitions_include_agent_send_and_agent_cancel() {
         let names: Vec<String> = tool_definitions()
             .into_iter()
             .map(|definition| definition.name)
             .collect();
-        assert_eq!(names, ["agent", "agent_wait", "agent_status", "agent_send"]);
+        assert_eq!(
+            names,
+            [
+                "agent",
+                "agent_wait",
+                "agent_status",
+                "agent_send",
+                "agent_cancel"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_cancel_stops_a_running_task_and_reports_it() {
+        let provider = FakeProvider::new();
+        provider.set_hook(block_until(CancellationToken::new()));
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                name: "stuck".into(),
+                ..StartRequest::default()
+            })
+            .await
+            .expect("start succeeds");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+
+        let result = run(
+            tool_named(&runner, "agent_cancel").as_ref(),
+            r#"{"task_id":"t1"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("cancel requested for task t1"));
+
+        // A name resolves to the same task.
+        let final_task = wait_final(&tasks, "t1").await;
+        assert_eq!(final_task.status, TaskStatus::Canceled);
+        let named = run(
+            tool_named(&runner, "agent_cancel").as_ref(),
+            r#"{"task_id":"stuck"}"#,
+        )
+        .await;
+        assert!(named.is_error, "{}", named.content);
+        assert_eq!(
+            named.content,
+            "task stuck is already completed; nothing to cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_cancel_stops_a_queued_task_before_it_starts() {
+        let provider = FakeProvider::new();
+        provider.set_hook(block_until(CancellationToken::new()));
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.max_parallel = 1;
+        let runner = runner(config);
+        for prompt in ["first", "second"] {
+            runner
+                .start(StartRequest {
+                    prompt: prompt.into(),
+                    ..StartRequest::default()
+                })
+                .await
+                .expect("start succeeds");
+        }
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+        assert_eq!(
+            tasks.get("t2").expect("t2 exists").status,
+            TaskStatus::Queued
+        );
+
+        let result = run(
+            tool_named(&runner, "agent_cancel").as_ref(),
+            r#"{"task_id":"t2"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(wait_final(&tasks, "t2").await.status, TaskStatus::Canceled);
+        // The running task is untouched by cancelling its neighbour.
+        assert_eq!(
+            tasks.get("t1").expect("t1 exists").status,
+            TaskStatus::Running
+        );
+        tasks.cancel("t1").expect("cancel succeeds");
+        wait_final(&tasks, "t1").await;
+    }
+
+    #[tokio::test]
+    async fn agent_cancel_rejects_an_unknown_task_and_a_missing_id() {
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+        let tool = tool_named(&runner, "agent_cancel");
+
+        let unknown = run(tool.as_ref(), r#"{"task_id":"t9"}"#).await;
+        assert!(unknown.is_error);
+        assert_eq!(unknown.content, "unknown task: t9");
+
+        for body in [
+            r#"{}"#,
+            r#"{"task_id":"   "}"#,
+            r#"{"task_id":"t1","extra":1}"#,
+        ] {
+            assert!(
+                run(tool.as_ref(), body).await.is_error,
+                "body {body} must be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_cancel_errors_for_a_finished_task() {
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .await
+            .expect("start succeeds");
+        wait_final(&tasks, "t1").await;
+
+        let result = run(
+            tool_named(&runner, "agent_cancel").as_ref(),
+            r#"{"task_id":"t1"}"#,
+        )
+        .await;
+        assert!(result.is_error, "{}", result.content);
+        assert_eq!(
+            result.content,
+            "task t1 is already completed; nothing to cancel"
+        );
     }
 
     #[tokio::test]

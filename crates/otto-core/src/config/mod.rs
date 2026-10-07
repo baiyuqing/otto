@@ -14,6 +14,7 @@
 //! tests assert on that wording.
 
 pub mod agents;
+pub mod approval;
 pub mod duration;
 pub mod edit;
 pub mod failover;
@@ -38,6 +39,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 pub use agents::{Agents, AgentsRuntime, resolve_agents};
+pub use approval::ApprovalConfig;
 pub use failover::{Failover, FailoverRuntime, resolve_failover};
 pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
 pub use memory::{Memory, MemoryRuntime, MemoryTurso, resolve_memory};
@@ -76,6 +78,8 @@ impl ConfigError {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct File {
+    #[serde(default, skip_serializing_if = "ApprovalConfig::is_default")]
+    pub approval: ApprovalConfig,
     /// Runtime-only authority metadata; never accepted from TOML or written back.
     #[serde(skip)]
     pub policy: Option<layered::ManagedPolicy>,
@@ -234,7 +238,10 @@ pub struct Profile {
 /// table.
 pub fn parse(text: &str) -> Result<File, ConfigError> {
     match toml::from_str::<File>(text) {
-        Ok(file) => Ok(file),
+        Ok(file) => {
+            file.approval.validate()?;
+            Ok(file)
+        }
         Err(err) => {
             let message = err.message();
             if message.starts_with("unknown field `inbound`")

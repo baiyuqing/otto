@@ -27,6 +27,12 @@ pub trait SessionHandle: Session + Send + Sync {
     fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String>;
     fn close(&self) -> Result<(), String>;
 
+    /// Latest native custom record on the complete active path, including
+    /// records before compaction. Unsupported repositories return no evidence.
+    fn custom_data(&self, _custom_type: &str) -> Option<String> {
+        None
+    }
+
     fn archive(&self, _root: &Path, _workspace: &str) -> Result<ArchiveResult, String> {
         Err("session persistence is disabled".to_string())
     }
@@ -60,6 +66,25 @@ pub trait PreparedSession: Send + Sync {
 /// Discovery, creation and preparation boundary for native session repositories.
 /// References are opaque to callers; POSIX accepts the legacy path reference.
 pub trait SessionRepository: Send + Sync {
+    /// Read-only native custom evidence lookup; unsupported repositories fail closed.
+    fn custom_data(&self, _reference: &str, _custom_type: &str) -> Option<String> {
+        None
+    }
+    fn custom_data_for(
+        &self,
+        root: &Path,
+        workspace: &str,
+        session_id: &str,
+        custom_type: &str,
+    ) -> Option<String> {
+        let source = self
+            .list(root, workspace, "", super::MAX_LIST_SESSIONS)
+            .ok()?
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id)?;
+        self.custom_data(&source.path, custom_type)
+    }
     /// Checks an explicitly selected namespace without creating it.
     fn validate_existing_root(&self, root: &Path) -> Result<(), String>;
     fn create_lazy(

@@ -16,11 +16,12 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Service {
     worker_started: std::sync::atomic::AtomicBool,
-    owner: String,
-    store: Arc<dyn ApprovalStore>,
+    pub(super) owner: String,
+    pub(super) store: Arc<dyn ApprovalStore>,
     changes: watch::Sender<u64>,
     secrets: RwLock<BTreeMap<String, ExactGuard>>,
     domains: RwLock<BTreeMap<(String, String), Arc<dyn Domain>>>,
+    pub(super) review_state: RwLock<super::coordinator::ReviewState>,
 }
 enum Recovery {
     Active,
@@ -41,6 +42,7 @@ impl Service {
             changes: watch::channel(0).0,
             secrets: RwLock::new(BTreeMap::new()),
             domains: RwLock::new(BTreeMap::new()),
+            review_state: RwLock::new(Default::default()),
         })
     }
     pub fn start(self: &Arc<Self>) {
@@ -71,6 +73,7 @@ impl Service {
                 if service.expire_pending().is_err() {
                     eprintln!("approval maintenance is unavailable");
                 }
+                service.schedule_reviews();
                 for workspace in workspaces {
                     if service.apply_available(&workspace).is_err() {
                         eprintln!("approval application maintenance is unavailable");
@@ -92,7 +95,7 @@ impl Service {
             .insert((workspace.into(), source.into()), domain);
         Ok(())
     }
-    fn hydrate(&self, mut request: Request) -> Result<Request> {
+    pub(super) fn hydrate(&self, mut request: Request) -> Result<Request> {
         let domain = self
             .domains
             .read()
@@ -103,7 +106,23 @@ impl Service {
             ))
             .cloned();
         if let Some(domain) = domain {
-            request.subject.details = domain.details(&request)?;
+            match domain.details(&request) {
+                Ok(details) => request.subject.details = details,
+                Err(_) if request.state != State::Pending => {}
+                Err(Error::Conflict) => {
+                    return self.mutate(&request.id, &request.scope, |current| {
+                        if current.state != State::Pending {
+                            return Ok(false);
+                        }
+                        current.state = State::Superseded;
+                        if let Some(review) = current.review.as_mut() {
+                            review.status = ReviewStatus::Completed;
+                        }
+                        Ok(true)
+                    });
+                }
+                Err(error) => return Err(error),
+            }
         } else if request.subject.source == "memory" {
             let domains = self.domains.read().map_err(|_| Error::Unavailable)?;
             for ((_, source), domain) in domains.iter() {
@@ -119,12 +138,20 @@ impl Service {
     }
     pub fn apply_available(&self, workspace: &str) -> Result<()> {
         let requests = self.store.applications(workspace)?;
-        for request in requests {
+        for mut request in requests {
             if !matches!(
                 request.application,
                 ApplicationState::NotStarted | ApplicationState::Applying
             ) {
                 continue;
+            }
+            if request.state == State::Approved
+                && request.application == ApplicationState::NotStarted
+            {
+                request = self.revalidate_authorization(&request)?;
+                if request.state == State::Pending {
+                    continue;
+                }
             }
             if request.application == ApplicationState::Applying {
                 match self.recover_claim(&request.id)? {
@@ -168,6 +195,21 @@ impl Service {
                 }
                 continue;
             };
+            if request.state == State::Approved
+                && request.application == ApplicationState::NotStarted
+                && matches!(domain.details(&request), Err(Error::Conflict))
+            {
+                self.mutate(&request.id, &request.scope, |current| {
+                    if current.state != State::Approved
+                        || current.application != ApplicationState::NotStarted
+                    {
+                        return Ok(false);
+                    }
+                    current.state = State::Superseded;
+                    Ok(true)
+                })?;
+                continue;
+            }
             if request.application == ApplicationState::NotStarted
                 && self
                     .application(
@@ -179,6 +221,7 @@ impl Service {
                     )
                     .is_err()
             {
+                let _ = self.revalidate_authorization(&request);
                 continue;
             }
             let outcome = domain.apply(&request);
@@ -263,7 +306,7 @@ impl Service {
             .insert(key, guard);
         Ok(())
     }
-    fn check_content(&self, text: &str) -> Result<()> {
+    pub(super) fn check_content(&self, text: &str) -> Result<()> {
         let input = crate::memory::GuardInput {
             fields: vec![crate::memory::GuardField {
                 name: "approval".into(),
@@ -290,71 +333,43 @@ impl Service {
     pub fn changes(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
     }
-    fn changed(&self) {
+    pub(super) fn changed(&self) {
         self.changes.send_modify(|v| *v = v.wrapping_add(1));
     }
 
     /// The session policy for `scope`. A missing preference means AUTO for a
-    /// session. A workspace-only request and, under AUTO, an independent task
-    /// are never decided by a session policy and report MANUAL; YOLO reaches
-    /// the session's own child tasks.
+    /// session. Workspace-only requests report MANUAL; a child task inherits
+    /// its root session's current settings.
     pub fn mode(&self, scope: &Scope) -> Result<ApprovalMode> {
         if scope.session_id.is_empty() {
             return Ok(ApprovalMode::Manual);
         }
-        let mode = self.store.mode(scope)?.unwrap_or_default();
-        if !scope.task_id.is_empty() && mode != ApprovalMode::Yolo {
-            return Ok(ApprovalMode::Manual);
-        }
-        Ok(mode)
+        Ok(self.settings(scope)?.mode())
     }
 
     pub fn set_mode(&self, scope: &Scope, mode: ApprovalMode) -> Result<()> {
         if scope.workspace.is_empty() || scope.session_id.is_empty() || !scope.task_id.is_empty() {
             return Err(Error::Invalid("approval mode requires a session"));
         }
-        self.store.set_mode(scope, mode)?;
-        self.changed();
-        if mode != ApprovalMode::Manual {
-            for request in self
-                .snapshot(&scope.workspace, Some(&scope.session_id))?
-                .requests
-            {
-                // Visibility alone must not give this session authority over a
-                // workspace request or a different session's shared candidate.
-                if request.scope.workspace == scope.workspace
-                    && request.scope.session_id == scope.session_id
-                    && request.scope.task_id.is_empty()
-                {
-                    self.auto_approve(&request.id, &request.scope)?;
-                }
+        let settings = ApprovalSettings::from_mode(mode);
+        match self.set_settings(
+            scope,
+            self.settings(scope)?.revision,
+            settings.policy,
+            settings.reviewer,
+        ) {
+            Ok(_) => {}
+            Err(Error::Unavailable) => {
+                self.store.set_mode(scope, mode)?;
+                self.changed();
             }
+            Err(error) => return Err(error),
         }
         Ok(())
     }
 
     fn auto_approve(&self, id: &str, scope: &Scope) -> Result<Request> {
-        self.mutate_checked(id, scope, true, |request| {
-            let mode = self.mode(scope)?;
-            if request.state != State::Pending || !mode.decides(request) {
-                return Ok(false);
-            }
-            Self::record_decision(
-                request,
-                request.revision,
-                true,
-                match mode {
-                    ApprovalMode::Yolo => "Automatically approved in YOLO mode.",
-                    _ => "Automatically approved in AUTO mode.",
-                },
-                &Actor::local(if mode == ApprovalMode::Yolo {
-                    "yolo-mode"
-                } else {
-                    "auto-mode"
-                }),
-                false,
-            )
-        })
+        self.route_request(id, scope)
     }
 
     pub fn create(&self, proposal: Proposal) -> Result<Request> {
@@ -373,7 +388,7 @@ impl Service {
         std::fs::File::open("/dev/urandom")
             .and_then(|mut file| file.read_exact(&mut bytes))
             .map_err(|_| Error::Unavailable)?;
-        let request = Request {
+        let mut request = Request {
             options: vec![
                 Choice {
                     id: "approve".into(),
@@ -420,7 +435,9 @@ impl Service {
                 ApplicationState::NotStarted
             },
             application_error: String::new(),
+            review: None,
         };
+        request.review = Some(self.creation_review(&request)?);
         request.validate().map_err(Error::Invalid)?;
         self.check_content(&request.subject.details)?;
         self.check_content(&request.title)?;
@@ -480,9 +497,72 @@ impl Service {
         snapshot.requests = snapshot
             .requests
             .into_iter()
+            .filter(Request::is_human_pending)
             .map(|r| self.hydrate(r))
             .collect::<Result<_>>()?;
+        snapshot.requests.retain(Request::is_human_pending);
         Ok(snapshot)
+    }
+    pub fn activity_snapshot(
+        &self,
+        workspace: &str,
+        session: Option<&str>,
+    ) -> Result<ApprovalActivity> {
+        let snapshot = self.store.snapshot(workspace, session)?;
+        let mut requests = Vec::new();
+        let mut reviewing = Vec::new();
+        for request in snapshot.requests {
+            if request.is_human_pending() {
+                let request = self.hydrate(request)?;
+                if request.is_human_pending() {
+                    requests.push(request);
+                }
+            } else if request
+                .review
+                .as_ref()
+                .is_some_and(|r| matches!(r.status, ReviewStatus::Queued | ReviewStatus::Reviewing))
+            {
+                let request = self.hydrate(request)?;
+                if request.state == State::Pending {
+                    reviewing.push(request);
+                }
+            }
+        }
+        let mut decided = Vec::new();
+        for request in self.store.applications(workspace)? {
+            if self.store.visible(&request.id, workspace, session)? {
+                decided.push(request);
+            }
+        }
+        let application_failed = decided
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.application,
+                    ApplicationState::Failed | ApplicationState::Unknown
+                )
+            })
+            .count();
+        decided.sort_by_key(|r| {
+            std::cmp::Reverse(r.decision.as_ref().map_or(r.created_at, |d| d.decided_at))
+        });
+        let recent_decisions = decided
+            .into_iter()
+            .take(20)
+            .map(|r| self.hydrate(r))
+            .collect::<Result<Vec<_>>>()?;
+        let counts = ApprovalCounts {
+            human_pending: requests.len(),
+            reviewing: reviewing.len(),
+            application_failed,
+        };
+        Ok(ApprovalActivity {
+            requests,
+            cursor: snapshot.cursor,
+            reviewing,
+            recent_decisions,
+            counts,
+        })
     }
     pub fn events(
         &self,
@@ -529,7 +609,7 @@ impl Service {
             Self::record_decision(request, revision, allow, "", actor, true)
         })
     }
-    fn record_decision(
+    pub(super) fn record_decision(
         request: &mut Request,
         revision: u64,
         allow: bool,
@@ -583,6 +663,9 @@ impl Service {
             transport: actor.transport.clone(),
             decided_at: Utc::now().timestamp(),
         });
+        if let Some(review) = request.review.as_mut() {
+            review.status = ReviewStatus::Completed;
+        }
         Ok(true)
     }
     pub fn withdraw(&self, id: &str, scope: &Scope, revision: u64) -> Result<Request> {
@@ -598,6 +681,24 @@ impl Service {
             }
             request.state = State::Withdrawn;
             Ok(true)
+        })
+    }
+    pub fn supersede_unstarted(&self, expected: &Request) -> Result<Request> {
+        self.mutate(&expected.id, &expected.scope, |current| {
+            if current == expected
+                && matches!(current.state, State::Pending | State::Approved)
+                && current.application == ApplicationState::NotStarted
+            {
+                current.state = State::Superseded;
+                if let Some(review) = current.review.as_mut() {
+                    review.status = ReviewStatus::Completed;
+                }
+                return Ok(true);
+            }
+            if current.state == State::Superseded && current.subject == expected.subject {
+                return Ok(false);
+            }
+            Err(Error::Conflict)
         })
     }
     pub fn application(
@@ -641,7 +742,7 @@ impl Service {
             Ok(true)
         })
     }
-    fn mutate(
+    pub(super) fn mutate(
         &self,
         id: &str,
         scope: &Scope,
@@ -682,10 +783,7 @@ impl Service {
                 };
                 request = match self.store.commit(&expected, &request, claim, automatic) {
                     Ok(request) => request,
-                    Err(Error::Conflict)
-                        if self.store.load(id)? != expected
-                            || (automatic && !self.mode(scope)?.decides(&expected)) =>
-                    {
+                    Err(Error::Conflict) if self.store.load(id)? != expected => {
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -701,6 +799,25 @@ impl Service {
         scope: &Scope,
         cancel: &CancellationToken,
     ) -> Result<Request> {
+        self.wait_until(id, scope, cancel, false).await
+    }
+    /// Wait for review to finish or become an actionable human question.
+    /// The original executor keeps using `wait` until a terminal decision.
+    pub async fn wait_actionable(
+        &self,
+        id: &str,
+        scope: &Scope,
+        cancel: &CancellationToken,
+    ) -> Result<Request> {
+        self.wait_until(id, scope, cancel, true).await
+    }
+    async fn wait_until(
+        &self,
+        id: &str,
+        scope: &Scope,
+        cancel: &CancellationToken,
+        actionable: bool,
+    ) -> Result<Request> {
         let mut changes = self.changes();
         let mut poll = tokio::time::interval(Duration::from_millis(200));
         loop {
@@ -711,9 +828,21 @@ impl Service {
                 }
                 return Ok(request);
             }
-            let request = self.auto_approve(id, scope)?;
+            let mut request = self.auto_approve(id, scope)?;
             if request.state != State::Pending {
                 return Ok(request);
+            }
+            if request.review.as_ref().is_some_and(|review| {
+                matches!(
+                    review.status,
+                    ReviewStatus::Queued | ReviewStatus::Reviewing
+                )
+            }) {
+                self.review_once(&request, cancel).await?;
+                request = self.store.load(id)?;
+                if request.state != State::Pending || cancel.is_cancelled() {
+                    continue;
+                }
             }
             if request
                 .expires_at
@@ -727,6 +856,9 @@ impl Service {
                         Ok(false)
                     }
                 });
+            }
+            if actionable && request.is_human_pending() {
+                return Ok(request);
             }
             tokio::select! {
                 () = cancel.cancelled() => {

@@ -709,10 +709,27 @@ impl SqlDomainCodec for ApprovalCodec {
         };
         // A source written before the mode form stores `automatic` instead.
         let legacy = legacy_mode_column(connection)?;
+        let canonical = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='approval_settings'",(),|r|r.get::<i64>(0)).map_err(sql_error)? != 0;
         // ponytail: OFFSET scans are quadratic for large snapshots; switch these
         // five known record kinds to keyset cursors when migration volume needs it.
-        while section < 5 {
+        while section < 8 {
+            if section >= 5 && !canonical {
+                section += 1;
+                continue;
+            }
             let (fields, lengths, table, order) = match section {
+                7 => (
+                    "workspace,body",
+                    "length(CAST(workspace AS BLOB))+length(CAST(body AS BLOB))",
+                    "approval_managed_policy",
+                    "workspace",
+                ),
+                0 if canonical => (
+                    "workspace,session_id,policy,reviewer,revision",
+                    "length(CAST(workspace AS BLOB))+length(CAST(session_id AS BLOB))+64",
+                    "approval_settings",
+                    "workspace,session_id",
+                ),
                 0 => (
                     if legacy {
                         "workspace,session_id,automatic"
@@ -747,6 +764,18 @@ impl SqlDomainCodec for ApprovalCodec {
                     "approval_events",
                     "sequence",
                 ),
+                5 => (
+                    "workspace,session_id,evidence_digest,policy_digest",
+                    "length(CAST(workspace AS BLOB))+length(CAST(session_id AS BLOB))+length(CAST(evidence_digest AS BLOB))+length(CAST(policy_digest AS BLOB))",
+                    "approval_review_contexts",
+                    "workspace,session_id",
+                ),
+                6 => (
+                    "workspace,session_id,task_id,run_id,evidence_digest,denials",
+                    "length(CAST(workspace AS BLOB))+length(CAST(session_id AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(run_id AS BLOB))+length(CAST(evidence_digest AS BLOB))+32",
+                    "approval_review_denials",
+                    "workspace,session_id,task_id,run_id,evidence_digest",
+                ),
                 _ => unreachable!(),
             };
             let length: Option<i64> = connection
@@ -780,6 +809,42 @@ impl SqlDomainCodec for ApprovalCodec {
                     [offset],
                     |r| {
                         let value = match section {
+                            7 => {
+                                let forced: otto_core::config::ApprovalConfig =
+                                    serde_json::from_str(&r.get::<String>(1)?).map_err(|_| {
+                                        crate::storage::Error::ConversionFailure(
+                                            "invalid managed approval policy".into(),
+                                        )
+                                    })?;
+                                ApprovalRecord::ManagedPolicy {
+                                    workspace: r.get(0)?,
+                                    policy: forced.policy,
+                                    reviewer: forced.reviewer,
+                                }
+                            }
+                            0 if canonical => ApprovalRecord::Settings {
+                                workspace: r.get(0)?,
+                                session_id: r.get(1)?,
+                                settings: crate::approval::ApprovalSettings {
+                                    policy: serde_json::from_value(serde_json::Value::String(
+                                        r.get(2)?,
+                                    ))
+                                    .map_err(|_| {
+                                        crate::storage::Error::ConversionFailure(
+                                            "unknown approval policy".into(),
+                                        )
+                                    })?,
+                                    reviewer: serde_json::from_value(serde_json::Value::String(
+                                        r.get(3)?,
+                                    ))
+                                    .map_err(|_| {
+                                        crate::storage::Error::ConversionFailure(
+                                            "unknown approval reviewer".into(),
+                                        )
+                                    })?,
+                                    revision: r.get(4)?,
+                                },
+                            },
                             0 => ApprovalRecord::Mode {
                                 workspace: r.get(0)?,
                                 session_id: r.get(1)?,
@@ -817,6 +882,20 @@ impl SqlDomainCodec for ApprovalCodec {
                                 sequence: r.get(0)?,
                                 request: r.get(1)?,
                             },
+                            5 => ApprovalRecord::ReviewContext {
+                                workspace: r.get(0)?,
+                                session_id: r.get(1)?,
+                                evidence_digest: r.get(2)?,
+                                policy_digest: r.get(3)?,
+                            },
+                            6 => ApprovalRecord::ReviewDenials {
+                                workspace: r.get(0)?,
+                                session_id: r.get(1)?,
+                                task_id: r.get(2)?,
+                                run_id: r.get(3)?,
+                                evidence_digest: r.get(4)?,
+                                denials: r.get(5)?,
+                            },
                             _ => unreachable!(),
                         };
                         Ok(value)
@@ -834,7 +913,7 @@ impl SqlDomainCodec for ApprovalCodec {
                 },
             )));
         }
-        if section != 5 {
+        if section != 8 {
             return Err(Error::Invalid("unsupported approval cursor section".into()));
         }
         Ok(None)
@@ -848,6 +927,101 @@ impl SqlDomainCodec for ApprovalCodec {
             ));
         }
         match value {
+            ApprovalRecord::ManagedPolicy {
+                workspace,
+                policy,
+                reviewer,
+            } => {
+                let body = serde_json::to_string(&otto_core::config::ApprovalConfig {
+                    policy,
+                    reviewer,
+                    ..Default::default()
+                })
+                .map_err(json_error)?;
+                connection
+                    .execute(
+                        "INSERT INTO approval_managed_policy VALUES (?1,?2)",
+                        params![workspace, body],
+                    )
+                    .map_err(sql_error)?;
+            }
+            ApprovalRecord::Settings {
+                workspace,
+                session_id,
+                settings,
+            } => {
+                let policy = serde_json::to_value(settings.policy).map_err(json_error)?;
+                let reviewer = serde_json::to_value(settings.reviewer).map_err(json_error)?;
+                connection
+                    .execute(
+                        "INSERT INTO approval_settings VALUES (?1,?2,?3,?4,?5)",
+                        params![
+                            workspace,
+                            session_id,
+                            policy.as_str().unwrap(),
+                            reviewer.as_str().unwrap(),
+                            settings.revision
+                        ],
+                    )
+                    .map_err(sql_error)?;
+                connection
+                    .execute(
+                        "INSERT INTO approval_modes VALUES (?1,?2,?3)",
+                        params![workspace, session_id, settings.mode().as_str()],
+                    )
+                    .map_err(sql_error)?;
+            }
+            ApprovalRecord::ReviewContext {
+                workspace,
+                session_id,
+                evidence_digest,
+                policy_digest,
+            } => {
+                if workspace.is_empty()
+                    || (session_id.is_empty() && evidence_digest != "policy")
+                    || evidence_digest.is_empty()
+                    || policy_digest.is_empty()
+                    || evidence_digest.len() > 256
+                    || policy_digest.len() > 256
+                {
+                    return Err(Error::Invalid("invalid approval review context".into()));
+                }
+                connection
+                    .execute(
+                        "INSERT INTO approval_review_contexts VALUES (?1,?2,?3,?4)",
+                        params![workspace, session_id, evidence_digest, policy_digest],
+                    )
+                    .map_err(sql_error)?;
+            }
+            ApprovalRecord::ReviewDenials {
+                workspace,
+                session_id,
+                task_id,
+                run_id,
+                evidence_digest,
+                denials,
+            } => {
+                if workspace.is_empty()
+                    || session_id.is_empty()
+                    || evidence_digest.is_empty()
+                    || evidence_digest.len() > 256
+                {
+                    return Err(Error::Invalid("invalid approval denial history".into()));
+                }
+                connection
+                    .execute(
+                        "INSERT INTO approval_review_denials VALUES (?1,?2,?3,?4,?5,?6)",
+                        params![
+                            workspace,
+                            session_id,
+                            task_id,
+                            run_id,
+                            evidence_digest,
+                            denials
+                        ],
+                    )
+                    .map_err(sql_error)?;
+            }
             ApprovalRecord::Mode {
                 workspace,
                 session_id,
@@ -858,6 +1032,14 @@ impl SqlDomainCodec for ApprovalCodec {
                     .execute(
                         "INSERT INTO approval_modes VALUES (?1,?2,?3)",
                         params![workspace, session_id, mode.as_str()],
+                    )
+                    .map_err(sql_error)?;
+                let settings = crate::approval::ApprovalSettings::from_mode(mode);
+                let reviewer = serde_json::to_value(settings.reviewer).map_err(json_error)?;
+                connection
+                    .execute(
+                        "INSERT INTO approval_settings VALUES (?1,?2,'on_request',?3,1)",
+                        params![workspace, session_id, reviewer.as_str().unwrap()],
                     )
                     .map_err(sql_error)?;
             }
@@ -938,12 +1120,12 @@ impl SqlDomainCodec for ApprovalCodec {
         let version: i64 = connection
             .query_row("PRAGMA user_version", (), |r| r.get(0))
             .map_err(sql_error)?;
-        if !(2..=3).contains(&version) {
+        if !(2..=4).contains(&version) {
             return Err(Error::Invalid(
                 "unsupported approval database schema".into(),
             ));
         }
-        let unknown: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT IN ('approval_modes','approvals','approval_events','approval_claims','approval_visibility','sqlite_sequence','__turso_internal_seq___turso_internal_autoincrement_approval_events','otto_migration_stage','otto_migration_chunks')", (), |r| r.get(0)).map_err(sql_error)?;
+        let unknown: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT IN ('approval_modes','approval_settings','approval_review_contexts','approval_review_leases','approval_review_denials','approval_managed_policy','approvals','approval_events','approval_claims','approval_visibility','sqlite_sequence','__turso_internal_seq___turso_internal_autoincrement_approval_events','otto_migration_stage','otto_migration_chunks')", (), |r| r.get(0)).map_err(sql_error)?;
         if unknown != 0 {
             return Err(Error::Invalid(
                 "unsupported approval state tables; refusing partial migration".into(),

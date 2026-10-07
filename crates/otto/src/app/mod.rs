@@ -115,6 +115,7 @@ pub struct Info {
     pub sandbox: SandboxInfo,
     /// The session's approval policy: MANUAL, AUTO or YOLO.
     pub approval_mode: ApprovalMode,
+    pub approval_settings: crate::approval::ApprovalSettings,
     /// Where this session was forked from, when it is a fork.
     pub forked_from: Option<ForkedFrom>,
     /// The session plan in force; empty when there is none.
@@ -160,6 +161,51 @@ impl std::fmt::Display for ForkFailure {
 pub struct ResumeResult {
     pub session_path: String,
     pub warnings: Vec<String>,
+}
+
+pub fn permissions_update(
+    args: &str,
+    current: crate::approval::ApprovalSettings,
+) -> Result<
+    Option<(
+        crate::approval::ApprovalPolicy,
+        crate::approval::ApprovalReviewer,
+    )>,
+    String,
+> {
+    use crate::approval::{ApprovalPolicy as Policy, ApprovalReviewer as Reviewer};
+    match args.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] => Ok(None),
+        ["policy", "on_request"] => Ok(Some((Policy::OnRequest, current.reviewer))),
+        ["policy", "never"] => Ok(Some((Policy::Never, current.reviewer))),
+        ["reviewer", "user"] => Ok(Some((current.policy, Reviewer::User))),
+        ["reviewer", "auto_review"] => Ok(Some((current.policy, Reviewer::AutoReview))),
+        _ => {
+            Err("usage: /permissions [policy on_request|never | reviewer user|auto_review]".into())
+        }
+    }
+}
+
+pub fn format_permissions(settings: crate::approval::ApprovalSettings) -> String {
+    use crate::approval::{ApprovalPolicy, ApprovalReviewer};
+    let policy = match settings.policy {
+        ApprovalPolicy::OnRequest => "on_request",
+        ApprovalPolicy::Never => "never",
+    };
+    let reviewer = match settings.reviewer {
+        ApprovalReviewer::User => "user",
+        ApprovalReviewer::AutoReview => "auto_review",
+        ApprovalReviewer::Bypass => "bypass",
+    };
+    format!(
+        "Approval policy: {policy}\nReviewer: {reviewer}{}\nRevision: {}",
+        if settings.policy == ApprovalPolicy::Never {
+            " (disabled)"
+        } else {
+            ""
+        },
+        settings.revision
+    )
 }
 
 pub fn parse_auto_mode(args: &str) -> Result<Option<ApprovalMode>, String> {
@@ -651,10 +697,10 @@ impl Controller {
         };
         let header = current.session.header();
         let snapshot = current.session.snapshot();
-        let approval_mode = self
+        let approval_settings = self
             .builder
             .approvals
-            .mode(&crate::approval::Scope {
+            .settings(&crate::approval::Scope {
                 workspace: header.workspace.clone(),
                 session_id: header.id.clone(),
                 task_id: String::new(),
@@ -677,7 +723,8 @@ impl Controller {
             context_input_tokens_present: snapshot.context_input_tokens_present,
             context_input_tokens_pending: snapshot.context_input_tokens_pending,
             sandbox,
-            approval_mode,
+            approval_mode: approval_settings.mode(),
+            approval_settings,
             forked_from: current.session.forked_from().map(ForkedFrom::from),
             plan: otto_core::session::Session::plan(&current.session),
         }
@@ -977,11 +1024,45 @@ impl Controller {
                 .set_mode(&self.approval_scope(), mode)
                 .map_err(|e| e.to_string())?;
         }
-        let mode = self
+        let settings = self
             .approval_service()
-            .mode(&self.approval_scope())
+            .settings(&self.approval_scope())
             .map_err(|e| e.to_string())?;
-        Ok(format!("Approval mode: {}", mode.as_str().to_uppercase()))
+        Ok(format!(
+            "Approval mode: {}",
+            if settings.policy == crate::approval::ApprovalPolicy::Never {
+                "NEVER (reviewer disabled)"
+            } else {
+                settings.mode().label()
+            }
+        ))
+    }
+
+    pub fn permissions_command(&self, args: &str) -> Result<String, String> {
+        let scope = self.approval_scope();
+        let current = self
+            .approval_service()
+            .settings(&scope)
+            .map_err(|e| e.to_string())?;
+        let settings = match permissions_update(args, current)? {
+            Some((policy, reviewer)) => self
+                .approval_service()
+                .set_settings(&scope, current.revision, policy, reviewer)
+                .map_err(|e| e.to_string())?,
+            None => current,
+        };
+        self.approval_snapshot().map_err(|e| e.to_string())?;
+        let activity = self
+            .approval_service()
+            .activity_snapshot(&scope.workspace, Some(&scope.session_id))
+            .map_err(|e| e.to_string())?;
+        Ok(format!(
+            "{}\n{} human pending · {} reviewing · {} application failed",
+            format_permissions(settings),
+            activity.counts.human_pending,
+            activity.counts.reviewing,
+            activity.counts.application_failed
+        ))
     }
 
     pub fn approval_service(&self) -> &Arc<crate::approval::Service> {
@@ -1133,6 +1214,7 @@ impl Controller {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
         let _presentation = self.begin_user_turn(&runner, origin).await;
+        runner.record_user_authorization(text).await?;
         let task_run = runner
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))
@@ -1399,6 +1481,7 @@ impl Controller {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
         let _presentation = self.begin_user_turn(&runner, origin).await;
+        runner.record_user_authorization(text).await?;
         let task_run = runner
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))
@@ -2032,7 +2115,10 @@ impl Controller {
             .task_control()
             .steer(&session_id, ticket, text, input_id)
         {
-            Ok(_) => Ok(ActiveInputAdmission::Steered),
+            Ok(_) => {
+                runner.queue_user_authorization(text)?;
+                Ok(ActiveInputAdmission::Steered)
+            }
             // The active run can close after observing its ticket. This text
             // was not accepted and must not be silently queued elsewhere.
             Err(error) if error.contains("active task") => Ok(ActiveInputAdmission::Idle),
@@ -2077,6 +2163,10 @@ impl Controller {
         if !is_current || runner.steering().ticket() != Some(ticket) {
             return Ok(None);
         }
+        runner
+            .record_user_authorization(text)
+            .await
+            .map_err(|error| error.to_string())?;
         task_control::control_message(self, &runner, text, channel, ticket, cancel).await
     }
 
@@ -2130,6 +2220,9 @@ impl Controller {
             };
             Arc::clone(&current.runner)
         };
+        if runner.queue_user_authorization(text).is_err() {
+            return false;
+        }
         runner.mailbox().push(Notification {
             kind: Some(NotificationKind::UserMessage),
             text: text.to_string(),
@@ -2671,6 +2764,44 @@ mod tests {
     };
     use crate::runtime::info::SandboxNetwork;
     use crate::runtime::sandbox_config::SandboxChange;
+
+    #[tokio::test]
+    async fn permissions_controls_preserve_sandbox_and_report_disabled_reviewer() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let controller = controller(workspace.path(), sessions.path()).await;
+        let sandbox = controller.info().sandbox;
+        assert!(
+            controller
+                .permissions_command("policy never")
+                .unwrap()
+                .contains("Approval policy: never")
+        );
+        assert!(
+            controller
+                .permissions_command("")
+                .unwrap()
+                .contains("Reviewer: auto_review (disabled)")
+        );
+        assert_eq!(
+            controller.auto_mode_command("").unwrap(),
+            "Approval mode: NEVER (reviewer disabled)"
+        );
+        controller.permissions_command("reviewer user").unwrap();
+        let settings = controller.info().approval_settings;
+        assert_eq!(settings.policy, crate::approval::ApprovalPolicy::Never);
+        assert_eq!(settings.reviewer, crate::approval::ApprovalReviewer::User);
+        assert_eq!(controller.info().sandbox, sandbox);
+        assert!(controller.permissions_command("reviewer bypass").is_err());
+        controller.auto_mode_command("auto").unwrap();
+        let settings = controller.info().approval_settings;
+        assert_eq!(settings.policy, crate::approval::ApprovalPolicy::OnRequest);
+        assert_eq!(
+            settings.reviewer,
+            crate::approval::ApprovalReviewer::AutoReview
+        );
+        assert_eq!(controller.info().sandbox, sandbox);
+    }
 
     #[tokio::test]
     async fn session_mode_commands_keep_new_sessions_independent_and_resume_preferences() {

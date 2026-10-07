@@ -20,6 +20,7 @@ use otto_core::wire::events::WireCompaction;
 pub(super) enum Command<'a> {
     Context,
     Auto { args: &'a str },
+    Permissions { args: &'a str },
     Compact { focus: &'a str },
     Model { profile: &'a str },
     Reflect { focus: &'a str },
@@ -31,6 +32,11 @@ pub(super) enum Command<'a> {
 /// `Some` when the whole prompt is one of the supported slash commands.
 pub(super) fn parse(text: &str) -> Option<Command<'_>> {
     let text = text.trim();
+    if let Some(rest) = text.strip_prefix("/permissions")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        return Some(Command::Permissions { args: rest.trim() });
+    }
     if let Some(rest) = text.strip_prefix("/auto")
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     {
@@ -127,6 +133,7 @@ pub(super) fn available_commands() -> SessionUpdate {
             "auto",
             "Show the approval mode or set /auto manual|auto|yolo for this session",
         ),
+        AvailableCommand::new("permissions", "Inspect approval policy and reviewer, or set policy on_request|never or reviewer user|auto_review"),
     ]))
 }
 
@@ -329,6 +336,15 @@ mod tests {
         assert_eq!(commands[4]["name"], "skill");
         assert_eq!(commands[5]["name"], "steer");
         assert_eq!(commands[6]["name"], "queue");
+        assert_eq!(commands[7]["name"], "auto");
+        assert_eq!(commands[8]["name"], "permissions");
+        assert_eq!(
+            parse("/permissions policy never"),
+            Some(Command::Permissions {
+                args: "policy never"
+            })
+        );
+        assert_eq!(parse("/permissionsx"), None);
     }
 
     #[test]

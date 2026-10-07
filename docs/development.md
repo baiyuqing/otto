@@ -1006,22 +1006,37 @@ human/application states. `otto::approval` stores them in `approvals.db`; the
 same decision authority is injected into the parent and child native registries,
 HTTP, ACP and terminal surfaces. Models discover `request_approval` in actual
 runner definitions and system guidance, and choose when conversational consent
-is needed. Models can query/withdraw but cannot decide an approval. Session-owned requests
-default to automatic decisions under the persisted policy; user-only
-`/auto manual|auto|yolo` selects manual review, the default AUTO policy, or
-YOLO. Each native producer declares the authority class of its request, and
-`ApprovalMode::decides` is the single policy predicate: MANUAL decides nothing,
-AUTO decides only a bounded authorization that stays inside the sandbox and the
-workspace, and YOLO decides every request of that session, including its child
-tasks. The service applies it and every backend rechecks the persisted mode
-inside the committing transaction, so a stale automatic decision cannot land;
-the decision transport names the mode (`auto-mode` or `yolo-mode`). A
-workspace-wide or other-session request is never decided by a session policy,
-and only an admitted user action can set the mode. Creation
-and decision remain distinct journal events. See
-[session automatic approval](specs/2026-10-05-session-auto-mode.md),
-[authority boundaries](specs/2026-10-07-auto-mode-authority-boundaries.md) and
-[YOLO mode](specs/2026-10-07-yolo-approval-mode.md).
+is needed. Models can query/withdraw but cannot decide an approval. Canonical
+`ApprovalSettings { policy, reviewer, revision }` separates sandbox permissions
+from approval policy. `/auto manual|auto|yolo` resets both controls to a preset;
+`/permissions` and the revision-checked policy APIs expose separate controls.
+Only admitted user actions may change settings/rules. Confined operations run
+directly. `never` rejects requests needing additional authority; AUTO reviews
+eligible session-owned requests; explicit checkpoints, workflow human gates,
+questions and security permission changes still require human action. A child
+inherits its root session's live settings; unrelated/workspace requests cannot
+borrow them. User/managed rules precede isolated review, with deny > ask > allow;
+complex shell programs cannot match a simple argv-prefix rule.
+
+Native `approval/reviewer.rs` defines the isolated `ReviewProvider` and immutable
+`ReviewContext`; the service owns coordination, journal/leases and decisions.
+The provider assesses an exact operation with root user evidence and accepted
+instruction versions, never executes it or changes approval storage. Generated
+child prompts and assistant rationalizations are not user authorization. Review
+input/output limits are 64 KiB/2 KiB, the deadline is 30 seconds, and concurrency
+is capped at four. Missing/oversized context and provider failures require a user
+decision. Settings, evidence/policy digests and request revisions are checked
+again at decision commit; domain targets are rechecked before dispatch.
+
+`Request.review` is additive; absent metadata denotes a legacy human request.
+Queues expose only human-required requests; snapshots report reviews and
+application failures separately. Audit events retain queued/reviewing transitions
+and decision actor/transport. Review ownership is independent of application
+ownership: an expired review lease can be retried, but an unknown operation
+effect cannot. The version 4 database migration makes a consistent backup,
+preserves history and portable transfer metadata, and keeps old pending requests
+human-required. Creation and decision remain distinct journal events. See the
+[smart approval contract](specs/2026-10-08-smart-approval.md).
 
 Authorization is prepared before tool dispatch, bound to the logical operation,
 exact arguments and relevant domain version. Decisions/events commit together.

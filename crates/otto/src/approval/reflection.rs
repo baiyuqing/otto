@@ -168,7 +168,7 @@ pub fn publish(
             authority: Authority::Durable,
             scope: super::Scope {
                 workspace: workspace.into(),
-                session_id: String::new(),
+                session_id: session_id.into(),
                 task_id: String::new(),
                 run_id: run_id.into(),
             },

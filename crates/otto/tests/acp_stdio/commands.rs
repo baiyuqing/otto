@@ -6,7 +6,7 @@ fn prompt_streams_updates_then_list_and_load_see_the_session() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("hello.txt"), "file-body\n").unwrap();
     let served = Arc::new(AtomicUsize::new(0));
-    let (base_url, _requests) = serve(Script {
+    let (base_url, requests) = serve(Script {
         replies: vec![
             tool_call_reply("call-1", "read", r#"{"path":"hello.txt"}"#),
             text_reply("all done"),
@@ -44,6 +44,11 @@ fn prompt_streams_updates_then_list_and_load_see_the_session() {
     assert_eq!(
         updates(&frames).last().unwrap()["content"]["text"],
         "all done"
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        2,
+        "confined reads need no smart review"
     );
 
     let (_, listed) = client.call("session/list", json!({"cwd": workspace.path()}));
@@ -87,6 +92,68 @@ fn prompt_streams_updates_then_list_and_load_see_the_session() {
 }
 
 #[test]
+fn approval_policy_revision_checks_legacy_presets_and_reload() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, requests) = provider_with(vec![text_reply("session saved")]);
+    configure(home.path(), &base_url);
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    let initialized = client.initialize();
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["_meta"]["otto"]["approvalPolicy"]["version"], 1,
+        "{initialized}"
+    );
+    let session_id = client.new_session(workspace.path());
+    client.call("session/prompt", prompt(&session_id, "save this session"));
+    let get = |client: &mut Client| {
+        client
+            .call(
+                "_otto/approval_policy/get",
+                json!({"sessionId": session_id}),
+            )
+            .1
+    };
+    let initial = get(&mut client);
+    assert_eq!(initial["result"]["policy"], "on_request", "{initial}");
+    assert_eq!(initial["result"]["reviewer"], "auto_review", "{initial}");
+    let revision = initial["result"]["revision"].as_u64().unwrap();
+    let change = json!({"sessionId": session_id, "expectedRevision": revision,
+        "policy": "never", "reviewer": "auto_review"});
+    let (_, never) = client.call("_otto/approval_policy/set", change.clone());
+    assert_eq!(never["result"]["policy"], "never", "{never}");
+    assert_eq!(never["result"]["mode"], "auto", "{never}");
+    assert_eq!(never["result"]["automatic"], true, "{never}");
+    assert_eq!(never["result"]["reviewer_active"], false, "{never}");
+    let (_, stale) = client.call("_otto/approval_policy/set", change);
+    assert!(stale["error"].is_object(), "{stale}");
+    assert_eq!(get(&mut client)["result"], never["result"]);
+    assert_eq!(client.close(), Some(0));
+
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    client.call(
+        "session/load",
+        json!({"cwd": workspace.path(), "sessionId": session_id, "mcpServers": []}),
+    );
+    assert_eq!(get(&mut client)["result"], never["result"]);
+    let (_, manual) = client.call(
+        "_otto/approval_mode/set",
+        json!({"sessionId": session_id, "mode": "manual"}),
+    );
+    assert_eq!(manual["result"]["automatic"], false, "{manual}");
+    let reset = get(&mut client);
+    assert_eq!(reset["result"]["policy"], "on_request", "{reset}");
+    assert_eq!(reset["result"]["reviewer"], "user", "{reset}");
+    assert!(reset["result"]["revision"].as_u64().unwrap() > revision);
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "settings never need a provider"
+    );
+    assert_eq!(client.close(), Some(0));
+}
+
+#[test]
 fn session_new_and_load_are_followed_by_the_command_list() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -116,7 +183,8 @@ fn session_new_and_load_are_followed_by_the_command_list() {
             &json!("skill"),
             &json!("steer"),
             &json!("queue"),
-            &json!("auto")
+            &json!("auto"),
+            &json!("permissions")
         ]
     );
     assert_eq!(

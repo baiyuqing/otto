@@ -1119,7 +1119,7 @@ Turns:
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
-`/image`, `/context`, `/agents`, `/auto [manual|auto|yolo]`, `/sandbox`, `/sandbox reload`,
+`/image`, `/context`, `/agents`, `/auto [manual|auto|yolo]`, `/permissions`, `/sandbox`, `/sandbox reload`,
 `/approve [<id>]`, `/steer`, `/inputs`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/reflect`, `/memory`, `/remember`, `/skill`,
@@ -1689,57 +1689,65 @@ overflow. For private deployments, set `context_window` and optionally
 
 ## Unified approvals
 
-Otto's default system prompt asks the model to understand a new action request
-before executing it: identify the goal, target, scope, constraints and expected
-result; check colloquial wording, missing details, unclear references, ambiguity,
-contradictions and unverified premises; then briefly restate the request in your
-language. Missing information stays unknown. When different interpretations
-would change the result, Otto should explain them and ask focused questions.
+Otto proceeds within the task you requested. It asks when a material choice is
+missing, the scope changes, or you requested a checkpoint. Your original task
+provides the authorization evidence; accepted instructions and standing memory
+versions constrain its scope. Assistant replies, tool output and generated
+sub-agent instructions cannot grant new authority.
+Children inherit their root session's current settings.
 
-Before changing files or causing external side effects, Otto should ask you to
-confirm that understanding and wait for your reply. Only necessary read-only
-checks should happen before confirmation. A correction updates the restatement;
-silence or elapsed time does not confirm it. Simple questions get direct answers.
-After confirmation, Otto should complete the agreed scope without asking again
-unless the goal, scope or key constraints materially change. This also covers
-continuations, delegated tasks and scheduled runs within that confirmed scope.
-An existing mandatory review that presents the same requirements serves as the
-confirmation, so Otto should not add a separate confirmation to that review.
+Sandbox permissions and approval settings are independent. Ordinary confined
+work runs directly. Additional authority creates an exact, version-bound request
+in the shared journal. A session has an approval policy (`on_request` or `never`)
+and a reviewer (`user`, `auto_review` or `bypass`). The familiar modes are presets:
 
-These are model instructions, not a runtime enforcement gate. Confirming the
-requirements grants no additional tool or sandbox permissions. They apply across
-native frontends; install the updated binary and restart the running Otto
-process to use the updated prompt.
+| Mode | Policy / reviewer | Behavior |
+| --- | --- | --- |
+| **MANUAL** | `on_request` / `user` | Ask you for additional authority. |
+| **AUTO** (default) | `on_request` / `auto_review` | Review eligible operations against the task and exact targets. |
+| **YOLO** | `on_request` / `bypass` | Approve requests owned by this session without review. |
 
-A session has one of three approval modes. All three keep the same request
-record, journal and application steps; they differ only in which requests are
-decided without you.
+AUTO reviews shell escalations, external MCP calls, memory/skill writes, ordinary
+profile changes, schedules and cross-workspace delivery. Task-related low or
+medium risk operations can proceed; ordinary persistent writes need evidence
+covering their contents and scope. High risk needs exact user authorization and
+bounded targets. Critical or explicitly forbidden operations are denied. An
+ambiguous choice, missing evidence, an oversized review or a reviewer failure
+asks you. Three consecutive review denials stop further escalation attempts in
+the logical task; Otto must use a safer path or obtain concrete user direction.
 
-| Mode | Decides without you |
-| --- | --- |
-| **MANUAL** | nothing |
-| **AUTO** (default) | a session-owned **bounded authorization**: inside the sandbox and the workspace, granting nothing durable |
-| **YOLO** | every request of the session, whatever its class |
+User questions, explicit approval checkpoints, workflow human gates and security
+authority changes still require you in AUTO. A previously authorized operation
+does not need the same confirmation again. The model cannot invent a new choice.
+User/managed permission rules are checked first: deny takes precedence over ask,
+which takes precedence over allow. A command-prefix rule applies only to a
+strictly simple command; a complex shell program requires review.
 
-Sessions start in **AUTO**. In AUTO a bounded authorization is recorded and
-approved automatically: it stays inside the sandbox and the workspace and
-grants nothing durable. Otto shows the request and its automatic decision;
-execution/application failure remains a separate outcome. Every other request
-waits for your decision, because AUTO does not decide what is not its to
-decide:
-- a plan or approach review (`request_approval`), which only you can answer;
-- an authorization that leaves the sandbox or the workspace: an unsandboxed
-  command, a cross-workspace delivery task, a tool call on an external MCP
-  server;
-- an authorization that establishes durable authority: a persistent sandbox
-  read grant, a scheduled `prompt` item, or a memory, skill or profile change.
+User or managed configuration can set defaults in `[approval]` and select an
+existing configured profile with `reviewer_profile`. Without an override, the
+reviewer uses the root session's provider/model. Rules select exactly one of
+`source`, `tool` or `command_prefix`; their decision is `allow`, `ask` or `deny`.
+Project configuration, skills, model messages and tool output cannot install
+these rules. For example, in the user config:
 
-A request AUTO cannot decide is presented exactly as it is in MANUAL, and the
-footer still shows the session mode.
+```toml
+[approval]
+policy = "on_request"
+reviewer = "auto_review"
+
+[[approval.rules]]
+tool = "bash"
+decision = "ask"
+```
+
+Only requests needing your decision appear in pending queues, approval cards and
+modals. A queued or running review is recorded as a noninteractive status.
+Approval and application remain separate: an approved operation can still fail,
+and an operation with an unknown external effect is never replayed automatically.
 
 **YOLO** is the deliberate answer to "stop asking me": the session decides
-every request that carries its id, including the plan reviews, the sandbox
-escalations and the durable grants AUTO refuses, and including requests made
+every request that carries its id, including plan reviews, sandbox
+escalations and durable grants, and including requests made
 by its own child tasks. Choose it with `/auto yolo` or `--yolo`. It is a
 blanket consent: a request you would have refused is approved anyway, so the
 recorded decision names `YOLO`, the frontends always show the mode, and one
@@ -1758,7 +1766,13 @@ What no mode changes:
 
 Use `/auto` to inspect the mode, `/auto manual` (or `/auto off`) to require
 manual approval, `/auto auto` (or `/auto on`) for the default, and `/auto yolo`
-to decide everything. The preference survives session loading and process
+to decide everything. These commands reset both policy and reviewer to the
+selected preset. `/permissions` inspects both controls;
+`/permissions policy on_request|never` changes the policy, and
+`/permissions reviewer user|auto_review` changes the reviewer. `never` rejects
+requests needing additional authority without prompting, while confined work
+continues and the sandbox stays enabled. The reviewer is inactive under `never`.
+The preference survives session loading and process
 restarts in `approvals.db`; new sessions start in AUTO. TUI and Web footers show
 MANUAL, AUTO or YOLO. The same commands work in ACP, Telegram and Feishu.
 Telegram's command menu includes `/auto`, and its AUTO/MANUAL buttons apply to
@@ -1770,13 +1784,33 @@ another card.
 
 The session API exposes `GET /v1/sessions/{id}/approval-mode` and `PUT` with
 `{"automatic":true|false}` or `{"mode":"manual"|"auto"|"yolo"}`, returning
-`{"automatic":boolean,"mode":"..."}`. `automatic` keeps its meaning: `true` is
-AUTO and `false` is MANUAL. A body that contradicts itself is refused. ACP
+`{"automatic":boolean,"mode":"..."}`. Legacy clients see `never` as AUTO with
+`automatic:true`; read the canonical policy to distinguish it. A body that contradicts itself is refused. ACP
 clients use `_otto/approval_mode/get|set` with `sessionId` and, for set,
 `automatic` or `mode`, and read the same two fields.
 `GET /v1/sessions/{id}/approval-events?after=<cursor>` returns ordered recorded
-requests and decisions. See the [session mode contract](specs/2026-10-05-session-auto-mode.md)
-and the [YOLO mode contract](specs/2026-10-07-yolo-approval-mode.md).
+requests and decisions, including review metadata. Advanced clients use
+`GET /v1/sessions/{id}/approval-policy` and `PUT` with
+`{"expected_revision":1,"policy":"on_request","reviewer":"auto_review"}`.
+The response includes `policy`, `reviewer`, `revision`, legacy `mode` and
+`automatic` labels, and `reviewer_active` (false under `never`).
+ACP exposes `_otto/approval_policy/get|set` with `sessionId`, and the setter
+requires `expectedRevision`, `policy` and `reviewer`. Updates reject a stale
+revision; refresh the settings before retrying. See the
+[smart approval contract](specs/2026-10-08-smart-approval.md).
+
+Stop all old Otto processes, `otto serve` and connectors before the first
+database upgrade; mixed old/new writers are unsupported, and a startup version
+check does not close an already running old connection. Install the new binary
+with `make install`, then start those processes to use the updated prompt and
+reviewer. The first open migrates `approvals.db` from version 3 to 4 after making
+a consistent backup beside the database, named
+`approvals.db.pre-v4-<UTC timestamp>.db`. Existing pending requests remain
+human-required. To disable smart review, choose `/auto manual`; this needs no
+data restoration. To downgrade
+the binary, stop all writers and restore the pre-migration database backup first:
+older binaries reject version 4. Keep the migrated database separately if you
+need its newer journal entries; restoring a backup returns to the backup's state.
 
 
 Otto uses one approval service for tool permissions, memory review, workflow
@@ -2213,7 +2247,9 @@ constrain the shell.
 
 Under Seatbelt, the model may set `sandbox_permissions` to
 `require_escalated` with a justification. Otto prepares the exact command and
-waits for a human decision before dispatch. Approve it through the TUI, Web,
+routes it through the session's approval policy before dispatch. AUTO may
+authorize the exact operation after isolated review; MANUAL and human-required
+requests wait for your decision. Approve those through the TUI, Web,
 chat card, or `/approve <request-id> [feedback]` in the REPL; use
 `/deny <request-id> [feedback]` or `/withdraw <request-id>` to decline or withdraw.
 The approved command runs once through the unconfined driver with the same
@@ -3665,7 +3701,9 @@ variable values.
 
 ### Memory review
 
-`remember` and `forget` only queue candidates; a person decides them. In a
+`remember` and `forget` queue candidates through the shared approval service.
+AUTO may review and apply a change covered by your original task. A change
+requiring your decision, or any request in MANUAL, stays pending. In a
 chat, **Approve / Deny** buttons and `/memory accept` / `/memory reject` make
 that decision: the connector
 sends them to `otto acp` as the ACP extension requests `_otto/memory/pending`
@@ -4293,7 +4331,7 @@ scopes. Before proposing a deletion by ID, the agent can use
 `memory_search({"id":"<record-id>"})` to read the current scope and revision,
 then call `forget`. Search results stored in session history retain only IDs;
 the full record is available to the model during the search turn. In Telegram
-and Feishu, the user reviews the resulting deletion proposal with the memory
+and Feishu, a deletion needing human review uses the memory
 card or `/memory accept <candidate-id>`.
 
 `/memory list` and `otto memory list` page active records in stable update-time order. They
@@ -4302,7 +4340,9 @@ to narrow that set, or explicit `--scope all` to inventory every stored workspac
 `next_cursor=...` when another page exists; pass that value back with `--cursor`. `show` reads one
 record from the current scopes (or the selected user/workspace scope).
 
-Model-originated writes always land as pending candidates for human review.
+Model-originated writes first land as candidates. The shared approval policy
+reviews them; AUTO can apply changes supported by the user's requested content
+and scope, while requests needing a user decision remain pending.
 `/memory review` lists the pending candidates for the current user and workspace scopes (id,
 scope, action, kind, key, text, reason, confidence, origin), and `/memory review <id> accept`
 or `/memory review <id> reject` decides one. Accepting creates the active record (or applies the
@@ -4367,7 +4407,7 @@ turn, so they apply even when the message never mentions them. Ways to add one:
 - The model's `remember` tool takes `scope: "user"` for a habit that applies in
   every workspace (the default is the workspace), and reflection proposes
   `scope: user` for the same kind of habit. Both queue a pending candidate that
-  applies only after you accept it.
+  applies after the shared approval service authorizes it.
 
 A user-scope `preference` or `instruction` without a key is rejected, because
 only keyed records are standing.
@@ -4395,7 +4435,8 @@ differently), which durable facts and preferences are worth remembering, and whi
 procedures are worth reusing as skills. `/reflect` prints the result line followed by the
 retrospective, and the retrospective is the first section of the run log described below.
 Each memory survivor is queued as a pending candidate (origin
-`extractor`) that you review with `/memory review`; reflection never writes a memory
+`extractor`) for the shared approval service; candidates requiring a human decision
+remain available in `/memory review`. Reflection never writes a memory
 record itself, and it appends nothing to the session file. Skills are different: a skill
 that passes every check below is published as an approval request, and the file is
 written only after that request is approved, as described under

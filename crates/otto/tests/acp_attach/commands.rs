@@ -41,6 +41,7 @@ fn a_relay_advertises_commands_and_runs_context_and_compact_on_serve() {
     assert_eq!(update["availableCommands"][5]["name"], "steer");
     assert_eq!(update["availableCommands"][6]["name"], "queue");
     assert_eq!(update["availableCommands"][7]["name"], "auto");
+    assert_eq!(update["availableCommands"][8]["name"], "permissions");
 
     let (_, first_response) = relay.call("session/prompt", prompt(&session_id, "MARKER-USER-1"));
     assert_eq!(

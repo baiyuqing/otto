@@ -232,6 +232,35 @@ impl Client {
         session: &str,
         mode: Option<crate::approval::ApprovalMode>,
     ) -> Result<crate::approval::ApprovalMode, Error> {
+        self.approval_mode_response(session, mode)
+            .await
+            .map(|(mode, _)| mode)
+    }
+
+    pub async fn auto_mode_command(&self, session: &str, args: &str) -> Result<String, Error> {
+        let selected = crate::app::parse_auto_mode(args).map_err(Error::Unreachable)?;
+        let (mode, policy) = self.approval_mode_response(session, selected).await?;
+        Ok(format!(
+            "Approval mode: {}",
+            if policy == Some(crate::approval::ApprovalPolicy::Never) {
+                "NEVER (reviewer disabled)"
+            } else {
+                mode.label()
+            }
+        ))
+    }
+
+    async fn approval_mode_response(
+        &self,
+        session: &str,
+        mode: Option<crate::approval::ApprovalMode>,
+    ) -> Result<
+        (
+            crate::approval::ApprovalMode,
+            Option<crate::approval::ApprovalPolicy>,
+        ),
+        Error,
+    > {
         let url = format!("{BASE}/v1/sessions/{session}/approval-mode");
         let request = match mode {
             Some(mode) => self
@@ -247,16 +276,121 @@ impl Client {
             automatic: bool,
             #[serde(default)]
             mode: Option<crate::approval::ApprovalMode>,
+            #[serde(default)]
+            policy: Option<crate::approval::ApprovalPolicy>,
         }
         let response = self.send(request).await?;
         let body: Mode =
             serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
                 .map_err(unreachable_error)?;
-        Ok(body.mode.unwrap_or(if body.automatic {
-            crate::approval::ApprovalMode::Auto
-        } else {
-            crate::approval::ApprovalMode::Manual
-        }))
+        Ok((
+            body.mode.unwrap_or(if body.automatic {
+                crate::approval::ApprovalMode::Auto
+            } else {
+                crate::approval::ApprovalMode::Manual
+            }),
+            body.policy,
+        ))
+    }
+
+    pub async fn approval_policy(
+        &self,
+        session: &str,
+        update: Option<(
+            u64,
+            crate::approval::ApprovalPolicy,
+            crate::approval::ApprovalReviewer,
+        )>,
+    ) -> Result<crate::approval::ApprovalSettings, Error> {
+        let url = format!("{BASE}/v1/sessions/{session}/approval-policy");
+        let request = match update {
+            Some((revision, policy, reviewer)) => self
+                .http
+                .put(url)
+                .header(CONTENT_TYPE, "application/json")
+                .body(
+                    json!({"expected_revision":revision,"policy":policy,"reviewer":reviewer})
+                        .to_string(),
+                ),
+            None => self.http.get(url),
+        };
+        #[derive(Deserialize)]
+        struct Body {
+            policy: crate::approval::ApprovalPolicy,
+            reviewer: crate::approval::ApprovalReviewer,
+            revision: u64,
+        }
+        let response = self.send(request).await?;
+        let body: Body =
+            serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
+                .map_err(unreachable_error)?;
+        Ok(crate::approval::ApprovalSettings {
+            policy: body.policy,
+            reviewer: body.reviewer,
+            revision: body.revision,
+        })
+    }
+
+    pub async fn approval_activity(
+        &self,
+        session: &str,
+    ) -> Result<crate::approval::ApprovalActivity, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/approvals"))
+                    .query(&[("session_id", session)]),
+            )
+            .await?;
+        #[derive(Deserialize)]
+        struct Body {
+            requests: Vec<crate::approval::Request>,
+            cursor: i64,
+            #[serde(default)]
+            reviewing: Vec<crate::approval::Request>,
+            #[serde(default)]
+            recent_decisions: Vec<crate::approval::Request>,
+            #[serde(default)]
+            counts: Option<crate::approval::ApprovalCounts>,
+        }
+        let body: Body = decode(response).await?;
+        let requests: Vec<_> = body
+            .requests
+            .into_iter()
+            .filter(crate::approval::Request::is_human_pending)
+            .collect();
+        let counts = body.counts.unwrap_or(crate::approval::ApprovalCounts {
+            human_pending: requests.len(),
+            reviewing: body.reviewing.len(),
+            application_failed: 0,
+        });
+        Ok(crate::approval::ApprovalActivity {
+            requests,
+            cursor: body.cursor,
+            reviewing: body.reviewing,
+            recent_decisions: body.recent_decisions,
+            counts,
+        })
+    }
+
+    pub async fn permissions_command(&self, session: &str, args: &str) -> Result<String, Error> {
+        let current = self.approval_policy(session, None).await?;
+        let settings =
+            match crate::app::permissions_update(args, current).map_err(Error::Unreachable)? {
+                Some((policy, reviewer)) => {
+                    self.approval_policy(session, Some((current.revision, policy, reviewer)))
+                        .await?
+                }
+                None => current,
+            };
+        let activity = self.approval_activity(session).await?;
+        Ok(format!(
+            "{}\n{} human pending · {} reviewing · {} application failed",
+            crate::app::format_permissions(settings),
+            activity.counts.human_pending,
+            activity.counts.reviewing,
+            activity.counts.application_failed
+        ))
     }
 
     pub async fn approval_message(
@@ -1061,6 +1195,8 @@ struct SessionWire {
     #[serde(default)]
     approval_mode: Option<crate::approval::ApprovalMode>,
     #[serde(default)]
+    approval_settings: Option<crate::approval::ApprovalSettings>,
+    #[serde(default)]
     forked_from: Option<crate::app::ForkedFrom>,
     #[serde(default)]
     plan: Vec<otto_core::session::PlanStep>,
@@ -1091,6 +1227,15 @@ impl SessionWire {
             _ => SandboxNetwork::default(),
         };
         crate::app::Info {
+            approval_settings: self.approval_settings.unwrap_or_else(|| {
+                crate::approval::ApprovalSettings::from_mode(self.approval_mode.unwrap_or(
+                    if self.auto_mode {
+                        crate::approval::ApprovalMode::Auto
+                    } else {
+                        crate::approval::ApprovalMode::Manual
+                    },
+                ))
+            }),
             approval_mode: self.approval_mode.unwrap_or(if self.auto_mode {
                 crate::approval::ApprovalMode::Auto
             } else {
@@ -1537,6 +1682,72 @@ mod tests {
         assert_eq!(rows[1].turn, None);
         assert_eq!(stream.next().await.unwrap(), None);
         assert_eq!(request(&seen, 0).0, "GET /v1/status");
+    }
+
+    #[tokio::test]
+    async fn legacy_mode_command_labels_actual_never_and_supports_old_boolean_servers() {
+        let (client, seen, _dir) = stub(move |_, _| {
+            json_body(
+                StatusCode::OK,
+                r#"{"mode":"auto","automatic":true,"policy":"never"}"#,
+            )
+        });
+        assert_eq!(
+            client.auto_mode_command("session", "").await.unwrap(),
+            "Approval mode: NEVER (reviewer disabled)"
+        );
+        assert_eq!(
+            request(&seen, 0).0,
+            "GET /v1/sessions/session/approval-mode"
+        );
+        let (client, _, _dir) =
+            stub(move |_, _| json_body(StatusCode::OK, r#"{"automatic":false}"#));
+        assert_eq!(
+            client.auto_mode_command("session", "").await.unwrap(),
+            "Approval mode: MANUAL"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_mutation_keeps_revision_and_actual_never_policy() {
+        let (client, seen, _dir) = stub(move |_, _| {
+            json_body(
+                StatusCode::OK,
+                r#"{"policy":"never","reviewer":"user","revision":8,"mode":"auto","automatic":true,"reviewer_active":false}"#,
+            )
+        });
+        let settings = client
+            .approval_policy(
+                "session",
+                Some((
+                    7,
+                    crate::approval::ApprovalPolicy::Never,
+                    crate::approval::ApprovalReviewer::User,
+                )),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settings.policy, crate::approval::ApprovalPolicy::Never);
+        assert_eq!(settings.reviewer, crate::approval::ApprovalReviewer::User);
+        assert_eq!(settings.revision, 8);
+        let (path, body) = request(&seen, 0);
+        assert_eq!(path, "PUT /v1/sessions/session/approval-policy");
+        assert_eq!(
+            body,
+            json!({"expected_revision":7,"policy":"never","reviewer":"user"})
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_activity_accepts_legacy_snapshot_fields() {
+        let (client, seen, _dir) =
+            stub(move |_, _| json_body(StatusCode::OK, r#"{"requests":[],"cursor":9}"#));
+        let activity = client.approval_activity("session").await.unwrap();
+        assert_eq!(activity.cursor, 9);
+        assert_eq!(activity.counts.human_pending, 0);
+        assert_eq!(activity.counts.reviewing, 0);
+        assert!(activity.recent_decisions.is_empty());
+        assert_eq!(request(&seen, 0).0, "GET /v1/approvals?session_id=session");
     }
 
     #[tokio::test]

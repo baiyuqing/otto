@@ -112,9 +112,9 @@ pub struct WireContent {
     pub detail: String,
 }
 
-/// One decoded `data:` payload of the response stream. The payload repeats the
-/// SSE `event:` name in its `type` field, so decoding switches on `type`
-/// directly and the `event:` line is ignored.
+/// One decoded `data:` payload of the response stream. Most payloads repeat
+/// the SSE `event:` name in their `type` field. The stream assembler fills an
+/// empty `type` from the SSE field while preserving a non-empty JSON value.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct WireEvent {
     #[serde(rename = "type", default, deserialize_with = "null_as_default")]
@@ -176,6 +176,8 @@ pub struct WireResult {
 pub struct WireError {
     #[serde(default, deserialize_with = "null_as_default")]
     pub code: String,
+    #[serde(rename = "type", default, deserialize_with = "null_as_default")]
+    pub error_type: String,
     #[serde(default, deserialize_with = "null_as_default")]
     pub message: String,
 }

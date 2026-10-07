@@ -150,14 +150,22 @@ receives only the wasm-safe `operation::OperationControl` capability and must
 not read a native clock. Provider retries, compaction, task queueing, and
 workflow attempts consume the same logical budget rather than restarting it.
 The ChatGPT transport retries connection/send/body failures, HTTP 429 and
-500/502/503/504 responses, and stream-reported `server_is_overloaded` or
-`server_error` before any streamed output. It makes at most six retries with
-1/2/4/8/16/30-second backoff; a numeric `Retry-After` is preferred and capped
-at 30 seconds. The OpenAI-compatible transport retries the classes described
-next. A retry repeats only the borrowed provider request, never tools or the
-agent turn. Other HTTP, auth, and stream-codec errors are terminal; retries
-preserve cancellation, the original deadline, actual send-attempt counts, and
-unknown effect certainty on failure.
+500/502/503/504 responses, a clean EOF before a terminal stream event, and
+stream-reported `server_is_overloaded` or `server_error` before any streamed
+output. Responses error classification uses the first non-empty value from
+`response.error.code|type`, event `error.code|type`, then the event's top-level
+`code`; an SSE `event:` name supplies a missing JSON `type`, but never replaces
+a non-empty one. It makes at most six retries with 1/2/4/8/16/30-second
+backoff; a numeric `Retry-After` is preferred and capped at 30 seconds. The
+OpenAI-compatible transport retries the classes described next. A retry
+repeats only the borrowed provider request, never tools or the agent turn.
+Other HTTP, auth, and stream-codec errors are terminal; retries preserve
+cancellation, the original deadline, actual send-attempt counts, and unknown
+effect certainty on failure. A Responses SSE field line is capped at 64 KiB
+and one event's joined `data:` payload at 1 MiB; exceeding either bound is a
+terminal codec error. Native TUI and REPL surfaces show planned retry progress;
+ACP v1 has no stable retry-progress update and receives the normal terminal
+prompt error if retries are exhausted.
 The OpenAI-compatible transport uses the same policy (4 attempts, 1/2/4 s)
 for two failure classes, both of which prove that nothing was visible to the
 caller yet. A send whose connection could not be established

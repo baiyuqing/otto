@@ -24,6 +24,7 @@ pub mod context;
 pub mod fork;
 pub mod operation;
 pub mod pi;
+pub mod plan;
 pub mod turn;
 pub mod types;
 
@@ -48,6 +49,10 @@ pub use pi::{
     PiCompaction, PiContentBlock, PiContextEdit, PiCost, PiCustom, PiCustomMessage, PiEntry,
     PiFile, PiHeader, PiLabel, PiMessage, PiModelChange, PiOttoDetails, PiSessionInfo,
     PiThinkingLevelChange, PiUsage, decode_pi_otto_details, encode_pi_otto_details,
+};
+pub use plan::{
+    MAX_PLAN_STEP_CHARS, MAX_PLAN_STEPS, PLAN_CUSTOM_TYPE, PLAN_SCHEMA_VERSION, PlanStatus,
+    PlanStep, decode_plan, encode_plan, plan_checklist, plan_summary, validate_plan,
 };
 pub use turn::{
     InterruptedTurn, TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, decode_turn_record,
@@ -249,6 +254,11 @@ pub trait Session {
     /// [`Self::observed_capabilities`].
     fn interrupted_turn(&self) -> Option<InterruptedTurn>;
 
+    /// The steps of the latest valid `otto.plan` record on the active path;
+    /// empty when there is none or the latest one cleared the plan. No
+    /// default body, like [`Self::observed_capabilities`].
+    fn plan(&self) -> Vec<PlanStep>;
+
     /// Appends `message` as the delivery of input `input_id` unless a message
     /// with that input id is already on the active path. The check and the
     /// append run under one lock; a file-backed store persists before it
@@ -291,6 +301,7 @@ struct State {
     operation_ledger: OperationLedger,
     observed_capabilities: Option<Capabilities>,
     interrupted_turn: Option<InterruptedTurn>,
+    plan: Vec<PlanStep>,
     /// Input ids of every appended message, for
     /// [`Session::append_input_if_absent`].
     seen_inputs: HashSet<String>,
@@ -580,6 +591,10 @@ impl Session for MemorySession {
             .clone()
     }
 
+    fn plan(&self) -> Vec<PlanStep> {
+        self.state.lock().expect("session mutex").plan.clone()
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         if custom_type == TURN_CUSTOM_TYPE {
             let record = decode_turn_record(data)
@@ -597,6 +612,12 @@ impl Session for MemorySession {
                 .lock()
                 .expect("session mutex")
                 .observed_capabilities = Some(capabilities);
+            return Ok(());
+        }
+        if custom_type == PLAN_CUSTOM_TYPE {
+            let steps = decode_plan(data)
+                .ok_or_else(|| SessionError::Persist("malformed otto.plan data".into()))?;
+            self.state.lock().expect("session mutex").plan = steps;
             return Ok(());
         }
         if custom_type != OPERATION_CUSTOM_TYPE {

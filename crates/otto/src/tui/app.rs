@@ -80,9 +80,10 @@ pub(crate) struct App {
     pub info: Info,
     pub composer: Composer,
     pub queued_input: Option<String>,
-    pub queued_input_sent: bool,
+    /// The newest guidance the active run has queued, painted only from a
+    /// back-end read: the TUI never guesses what the run accepted.
+    pub queued_steer: Option<otto_core::agent::steering::Message>,
     awaiting_user_echo: Option<String>,
-    withdrawing_queued: bool,
     pub scroll: Option<u16>,
     pub max_scroll: std::cell::Cell<u16>,
     pub selection: Option<Selection>,
@@ -152,9 +153,8 @@ impl App {
             info: backend.info(),
             composer,
             queued_input: None,
-            queued_input_sent: false,
+            queued_steer: None,
             awaiting_user_echo: None,
-            withdrawing_queued: false,
             scroll: None,
             max_scroll: Default::default(),
             selection: None,
@@ -208,6 +208,23 @@ impl App {
     }
     pub fn end_turn(&mut self) {
         self.busy_since = None;
+        self.finish_steering();
+    }
+
+    /// A turn end is the last moment tracked guidance can be resolved. Guidance
+    /// still tracked here never reached the model, so the text goes back into an
+    /// empty composer for the user to resend. The loss itself is stated by the
+    /// runtime's own `agent_steering` notice: the TUI adds no claim of its own
+    /// that could contradict it.
+    fn finish_steering(&mut self) {
+        let Some(steer) = self.queued_steer.take() else {
+            return;
+        };
+        if self.composer.input.is_empty() {
+            self.composer.set_input(&steer.text);
+        }
+        self.resolve_steering(&steer);
+        self.refresh_steering();
     }
     pub(crate) fn has_writes(&self) -> bool {
         !self.writes.is_empty()
@@ -241,6 +258,8 @@ impl App {
         self.invalidate_reads();
         if old != (self.info.workspace.clone(), self.info.session_id.clone()) {
             self.surfaces.clear();
+            // The run that owned the tracked guidance ended with the session.
+            self.queued_steer = None;
             let draft = self.composer.input.iter().collect::<String>();
             self.composer = Composer::new(
                 self.entries
@@ -337,6 +356,18 @@ impl App {
         }
     }
     fn enqueue(&mut self, surface: u64, request: Request) {
+        // A steering read follows the command that changed the state. Both are
+        // serialized by the back end, so the read can never observe a state
+        // older than the admission or withdrawal it is meant to show, and the
+        // caller's display never flaps back to a stale list.
+        let follows_steering = matches!(
+            &request,
+            Request::Command(
+                backend::Command::AdmitInput(_)
+                    | backend::Command::Steer(_)
+                    | backend::Command::WithdrawSteer(_)
+            )
+        );
         let generation = self.generations.entry(surface).or_default();
         *generation = generation.wrapping_add(1);
         let g = *generation;
@@ -344,7 +375,12 @@ impl App {
             self.pending.insert((surface, g));
         }
         if matches!(request, Request::Command(_)) {
-            self.writes.insert((surface, g));
+            // A steering read takes the command lock only for its ordering: it
+            // changes nothing, so it must not hold an ordinary submission back
+            // the way an outstanding write does.
+            if !matches!(&request, Request::Command(backend::Command::SteeringState)) {
+                self.writes.insert((surface, g));
+            }
         }
         if matches!(
             &request,
@@ -365,6 +401,41 @@ impl App {
             driver.submit(ticket, request);
         } else {
             self.requests.push((ticket, request));
+        }
+        if follows_steering {
+            self.refresh_steering();
+        }
+    }
+
+    /// Asks the back end for the active run's guidance. The only source of
+    /// [`App::queued_steer`]: an empty answer means nothing is queued any more.
+    fn refresh_steering(&mut self) {
+        self.enqueue(0, Request::Command(backend::Command::SteeringState));
+    }
+
+    /// Paints the tracked guidance from a read. `messages` is the active run's
+    /// whole transient lifecycle, oldest first, so the newest queued item is
+    /// the one the user can still withdraw.
+    fn apply_steering(&mut self, messages: Vec<otto_core::agent::steering::Message>) {
+        let queued = messages
+            .into_iter()
+            .rev()
+            .find(|message| message.status == otto_core::agent::steering::Status::Queued);
+        if let Some(previous) = self.queued_steer.take()
+            && queued
+                .as_ref()
+                .is_none_or(|message| message.id != previous.id)
+        {
+            self.resolve_steering(&previous);
+        }
+        self.queued_steer = queued;
+    }
+
+    /// The tracked guidance left the queued state, so its text must not be
+    /// mistaken for a later identical message's delivery echo.
+    fn resolve_steering(&mut self, steer: &otto_core::agent::steering::Message) {
+        if self.awaiting_user_echo.as_deref() == Some(steer.text.as_str()) {
+            self.awaiting_user_echo = None;
         }
     }
     fn transition(&mut self, surface: u64, transition: Transition) {
@@ -451,6 +522,9 @@ impl App {
                         t.session,
                         crate::cli::repl_commands::format_management_reply(&reply)
                     )),
+                    // A steering read of a session that is no longer open says
+                    // nothing the user needs a line for.
+                    Ok(Reply::Steering(_)) => {}
                     _ => self.push_system(format!(
                         "An operation completed for previous session {}",
                         t.session
@@ -458,6 +532,9 @@ impl App {
                 }
             }
             return;
+        }
+        if let Ok(Reply::Steering(messages)) = &completion.result {
+            self.apply_steering(messages.clone());
         }
         if t.surface == 0 {
             self.pending.remove(&(0, t.generation));
@@ -468,20 +545,14 @@ impl App {
                 Ok(Reply::ApprovalSnapshot(snapshot)) => {
                     self.sync_shared_approval(&snapshot.requests)
                 }
+                // A steering read has no receipt: it only repaints state.
+                Ok(Reply::Steering(_)) => {}
                 Ok(reply) if mutation => {
-                    if self.withdrawing_queued {
-                        self.queued_input = None;
-                        self.queued_input_sent = false;
-                        self.withdrawing_queued = false;
-                    }
                     if let Some(receipt) = operation_receipt(&reply) {
                         self.apply_receipt(receipt)
                     }
                 }
-                Err(error) if mutation => {
-                    self.withdrawing_queued = false;
-                    self.push_system(error)
-                }
+                Err(error) if mutation => self.push_system(error),
                 _ => {}
             }
             return;
@@ -579,6 +650,8 @@ impl App {
             self.pending_image = None;
             self.writes.clear();
             self.session_changes.clear();
+            // The run that owned the tracked guidance ended with the session.
+            self.queued_steer = None;
             self.invalidate_reads();
         }
         if let Some(draft) = draft {
@@ -709,7 +782,7 @@ impl App {
         backend: &Backend<'_>,
         cancel: &CancellationToken,
     ) -> Option<Action> {
-        if self.queued_input_sent || self.has_writes() {
+        if self.has_writes() {
             return None;
         }
         if let Backend::Local(controller) = backend
@@ -724,22 +797,13 @@ impl App {
         let line = self.queued_input.take()?;
         self.dispatch_line(&line, backend, cancel)
     }
-    pub(crate) fn defer_queued_input(&mut self, backend: &Backend<'_>) {
-        if self.queued_input_sent {
-            let _ = backend;
-            self.enqueue(0, Request::Command(backend::Command::WithdrawQueued));
-            self.withdrawing_queued = true;
-        }
-    }
     pub(crate) fn submit_input(
         &mut self,
         backend: &Backend<'_>,
         cancel: &CancellationToken,
     ) -> Option<Action> {
         let current = self.composer.input.iter().collect::<String>();
-        if (self.queued_input_sent || self.queued_input.is_some())
-            && !current.trim().starts_with('/')
-        {
+        if self.queued_input.is_some() && !current.trim().starts_with('/') {
             return None;
         }
         let line = self.composer.take()?;
@@ -972,7 +1036,11 @@ impl App {
             self.composer.edit(Edit::Newline);
             return None;
         }
-        if self.busy() || self.has_writes() || self.queued_input.is_some() {
+        if self.busy()
+            || self.has_writes()
+            || self.queued_input.is_some()
+            || self.queued_steer.is_some()
+        {
             if self.busy() && key.code == KeyCode::Esc {
                 return Some(Action::CancelTurn);
             }
@@ -981,13 +1049,17 @@ impl App {
                     .modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL)
             {
-                if self.queued_input.is_some() {
-                    if self.queued_input_sent {
-                        self.defer_queued_input(backend)
-                    } else {
-                        self.queued_input = None;
-                        self.awaiting_user_echo = None;
-                    }
+                // The run owns the guidance's state, so the withdrawal goes to
+                // it and the read that follows repaints the display: dropping
+                // it locally could hide a message that is still waiting.
+                if let Some(steer) = &self.queued_steer {
+                    self.enqueue(
+                        0,
+                        Request::Command(backend::Command::WithdrawSteer(steer.id)),
+                    );
+                } else if self.queued_input.is_some() {
+                    self.queued_input = None;
+                    self.awaiting_user_echo = None;
                 }
                 self.composer.edit(Edit::Clear);
                 return None;
@@ -1128,6 +1200,18 @@ impl App {
                 return true;
             }
             USER_MESSAGE => {
+                // The run appended this text as the user's message, which is its
+                // own word that queued guidance reached the model. The steer is
+                // resolved here so a turn end cannot offer it again.
+                if let Some(steer) = self
+                    .queued_steer
+                    .as_ref()
+                    .filter(|steer| steer.text == event.text)
+                    .cloned()
+                {
+                    self.queued_steer = None;
+                    self.resolve_steering(&steer);
+                }
                 if self.attached {
                     if self.awaiting_user_echo.as_deref() == Some(event.text.as_str()) {
                         self.awaiting_user_echo = None;
@@ -1150,8 +1234,6 @@ impl App {
                         .as_ref()
                         .cloned()
                         .unwrap_or_else(|| event.text.clone());
-                    self.queued_input_sent = false;
-                    self.withdrawing_queued = false;
                     if queued.is_none() && !expected_echo {
                         self.composer.remember(&line);
                     }
@@ -1334,6 +1416,7 @@ pub(crate) fn compaction_line(result: &otto_core::wire::events::WireCompaction) 
 mod tests {
     use super::*;
     use crate::tui::interaction::{Action as SurfaceAction, Field, Row};
+    use otto_core::agent::steering::{Message as SteerMessage, Status};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1528,7 +1611,10 @@ mod tests {
             Transition::Push(probe("writer", View::default(), received)),
         );
         let id = app.surfaces.top().unwrap().id;
-        app.enqueue(id, Request::Command(backend::Command::WithdrawQueued));
+        app.enqueue(
+            id,
+            Request::Command(backend::Command::Rename("name".into())),
+        );
         let ticket = app.requests.last().unwrap().0.clone();
         app.surfaces.remove(id);
         let info = app.info.clone();
@@ -1601,7 +1687,6 @@ mod tests {
         app.insert_text("queued");
         let line = app.composer.take().unwrap();
         app.queued_input = Some(line.clone());
-        app.queued_input_sent = true;
         app.awaiting_user_echo = Some(line.clone());
         app.apply_event(&WireEvent {
             event_type: USER_MESSAGE.into(),
@@ -1675,7 +1760,10 @@ mod tests {
             Transition::Push(probe("writer", view, Arc::new(AtomicUsize::new(0)))),
         );
         let id = app.surfaces.top().unwrap().id;
-        app.enqueue(id, Request::Command(backend::Command::WithdrawQueued));
+        app.enqueue(
+            id,
+            Request::Command(backend::Command::Rename("name".into())),
+        );
         let ticket = app.requests.last().unwrap().0.clone();
         app.apply_completion(Completion {
             mutation: true,
@@ -1772,5 +1860,323 @@ mod tests {
         app.surfaces.top_mut().unwrap().state.scroll = u16::MAX;
         app.scroll_wheel(true);
         assert_eq!(app.surfaces.top().unwrap().state.scroll, 1);
+    }
+
+    fn steer(id: u64, text: &str, status: otto_core::agent::steering::Status) -> SteerMessage {
+        SteerMessage {
+            id,
+            text: text.into(),
+            status,
+            input_id: String::new(),
+        }
+    }
+
+    fn control_u() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('u'), crossterm::event::KeyModifiers::CONTROL)
+    }
+
+    fn commands(app: &App) -> Vec<Request> {
+        app.requests
+            .iter()
+            .map(|(_, request)| request.clone())
+            .collect()
+    }
+
+    /// The run's own read is the only source of the queued guidance: a message
+    /// that left the queued state disappears without the TUI deciding anything.
+    #[test]
+    fn a_steering_read_paints_and_clears_the_tracked_guidance() {
+        let (mut app, _) = app();
+        app.apply_steering(vec![steer(1, "use the other branch", Status::Queued)]);
+        assert_eq!(app.queued_steer.as_ref().map(|steer| steer.id), Some(1));
+
+        // Newest queued wins, and a delivered earlier message is history.
+        app.apply_steering(vec![
+            steer(1, "first", Status::Delivered),
+            steer(2, "second", Status::Queued),
+        ]);
+        assert_eq!(
+            app.queued_steer.as_ref().map(|steer| steer.text.as_str()),
+            Some("second")
+        );
+
+        app.apply_steering(vec![steer(2, "second", Status::Delivered)]);
+        assert!(app.queued_steer.is_none());
+    }
+
+    /// A submission during a busy turn must be admitted, and its guidance must
+    /// show up promptly: the read follows the admission on the command lock.
+    #[test]
+    fn a_busy_submission_admits_guidance_then_reads_the_state_after_it() {
+        let (mut app, remote) = app();
+        app.start_turn();
+        app.composer.set_input("use the other branch");
+        assert_eq!(
+            app.submit_input(&Backend::Attach(&remote), &CancellationToken::new()),
+            None
+        );
+        assert!(matches!(
+            commands(&app).as_slice(),
+            [Request::Command(backend::Command::AdmitInput(text)),
+             Request::Command(backend::Command::SteeringState)] if text == "use the other branch"
+        ));
+        let (admission, _) = app.requests[0].clone();
+        app.apply_completion(Completion {
+            mutation: true,
+            ticket: admission,
+            result: Ok(Reply::Operation {
+                message: "Guidance queued for the active task: use the other branch".into(),
+                info: app.info.clone(),
+                history: None,
+                prompt: None,
+            }),
+        });
+        let (read, _) = app.requests[1].clone();
+        app.apply_completion(Completion {
+            mutation: true,
+            ticket: read,
+            result: Ok(Reply::Steering(vec![steer(
+                1,
+                "use the other branch",
+                Status::Queued,
+            )])),
+        });
+        assert_eq!(app.queued_steer.as_ref().map(|steer| steer.id), Some(1));
+
+        // The read leaves no write pending, so typing again during the same
+        // turn is still guidance rather than a queued later turn.
+        app.composer.set_input("and stop after that");
+        assert_eq!(
+            app.submit_input(&Backend::Attach(&remote), &CancellationToken::new()),
+            None
+        );
+        assert!(app.queued_input.is_none());
+        let requests = commands(&app);
+        assert!(matches!(
+            &requests[requests.len() - 2..],
+            [Request::Command(backend::Command::AdmitInput(text)),
+             Request::Command(backend::Command::SteeringState)] if text == "and stop after that"
+        ));
+    }
+
+    /// The read that follows an admission changes nothing, so it must not hold
+    /// a later submission back. If it took the pending-write slot, typing again
+    /// while it was in flight would be parked as a queued next turn instead of
+    /// steering the same turn — the silent later turn the contract forbids.
+    #[test]
+    fn a_guidance_read_in_flight_never_defers_the_next_submission() {
+        let (mut app, remote) = app();
+        app.start_turn();
+        app.composer.set_input("use the other branch");
+        assert_eq!(
+            app.submit_input(&Backend::Attach(&remote), &CancellationToken::new()),
+            None
+        );
+        // The admission's own write resolves; only its read is outstanding.
+        let (admission, _) = app.requests[0].clone();
+        app.apply_completion(Completion {
+            mutation: true,
+            ticket: admission,
+            result: Ok(Reply::Operation {
+                message: "Guidance queued for the active task: use the other branch".into(),
+                info: app.info.clone(),
+                history: None,
+                prompt: None,
+            }),
+        });
+        assert!(
+            !app.has_writes(),
+            "a read in flight must not look like a pending write"
+        );
+
+        app.composer.set_input("and stop after that");
+        assert_eq!(
+            app.submit_input(&Backend::Attach(&remote), &CancellationToken::new()),
+            None
+        );
+        assert!(
+            app.queued_input.is_none(),
+            "a second guidance message must not become a queued next turn"
+        );
+        let requests = commands(&app);
+        assert!(
+            matches!(
+                &requests[2..],
+                [Request::Command(backend::Command::AdmitInput(text)),
+                 Request::Command(backend::Command::SteeringState)] if text == "and stop after that"
+            ),
+            "{requests:?}"
+        );
+    }
+
+    #[test]
+    fn control_u_withdraws_the_queued_guidance_through_the_backend() {
+        let (mut app, remote) = app();
+        app.start_turn();
+        // Both a queued next input and queued guidance are waiting: Ctrl+U must
+        // take back the guidance the run owns and leave the queued next input
+        // alone, because only the run can resolve the guidance's state.
+        app.queued_input = Some("/memory search vim".into());
+        app.queued_steer = Some(steer(3, "use the other branch", Status::Queued));
+        app.awaiting_user_echo = Some("use the other branch".into());
+        app.composer.set_input("draft");
+
+        app.handle_key(
+            control_u(),
+            &Backend::Attach(&remote),
+            &CancellationToken::new(),
+        );
+
+        assert!(app.composer.input.is_empty(), "the draft is cleared");
+        assert_eq!(app.queued_input.as_deref(), Some("/memory search vim"));
+        assert!(matches!(
+            commands(&app).as_slice(),
+            [
+                Request::Command(backend::Command::WithdrawSteer(3)),
+                Request::Command(backend::Command::SteeringState)
+            ]
+        ));
+
+        let (withdraw, _) = app.requests[0].clone();
+        app.apply_completion(Completion {
+            mutation: true,
+            ticket: withdraw,
+            result: Ok(Reply::Operation {
+                message: "Queued input withdrawn.".into(),
+                info: app.info.clone(),
+                history: None,
+                prompt: None,
+            }),
+        });
+        let (read, _) = app.requests[1].clone();
+        app.apply_completion(Completion {
+            mutation: true,
+            ticket: read,
+            result: Ok(Reply::Steering(vec![steer(
+                3,
+                "use the other branch",
+                Status::Withdrawn,
+            )])),
+        });
+
+        assert!(app.queued_steer.is_none());
+        assert!(
+            app.awaiting_user_echo.is_none(),
+            "withdrawn guidance cannot still be waiting for its echo"
+        );
+    }
+
+    /// The still-live queued-next-input path: Ctrl+U clears it locally, with no
+    /// backend round trip.
+    #[test]
+    fn control_u_still_withdraws_a_queued_next_input() {
+        let (mut app, remote) = app();
+        app.start_turn();
+        app.queued_input = Some("/memory search vim".into());
+        app.awaiting_user_echo = Some("/memory search vim".into());
+        app.composer.set_input("draft");
+
+        app.handle_key(
+            control_u(),
+            &Backend::Attach(&remote),
+            &CancellationToken::new(),
+        );
+
+        assert!(app.queued_input.is_none());
+        assert!(app.awaiting_user_echo.is_none());
+        assert!(app.composer.input.is_empty());
+        assert!(app.requests.is_empty());
+    }
+
+    #[test]
+    fn a_turn_end_returns_undelivered_guidance_to_the_composer() {
+        let (mut app, _) = app();
+        app.start_turn();
+        app.awaiting_user_echo = Some("use the other branch".into());
+        app.queued_steer = Some(steer(3, "use the other branch", Status::Queued));
+
+        app.end_turn();
+
+        assert!(app.queued_steer.is_none());
+        assert!(app.awaiting_user_echo.is_none());
+        assert_eq!(
+            app.composer.input.iter().collect::<String>(),
+            "use the other branch"
+        );
+        assert!(matches!(
+            app.requests.last().unwrap().1,
+            Request::Command(backend::Command::SteeringState)
+        ));
+
+        // A draft the user typed meanwhile is never overwritten.
+        app.composer.set_input("my own draft");
+        app.queued_steer = Some(steer(4, "use the other branch", Status::Queued));
+        app.end_turn();
+        assert_eq!(
+            app.composer.input.iter().collect::<String>(),
+            "my own draft"
+        );
+    }
+
+    /// Delivery, not the turn end, is what resolves guidance the run took: the
+    /// echo is the run's own word that the text reached the model.
+    #[test]
+    fn a_delivered_guidance_echo_leaves_the_composer_empty_at_the_turn_end() {
+        let (mut app, _) = app();
+        app.start_turn();
+        app.awaiting_user_echo = Some("use the other branch".into());
+        app.queued_steer = Some(steer(3, "use the other branch", Status::Queued));
+
+        app.apply_event(&WireEvent {
+            event_type: USER_MESSAGE.into(),
+            text: "use the other branch".into(),
+            ..Default::default()
+        });
+        assert!(app.queued_steer.is_none());
+        assert!(app.awaiting_user_echo.is_none());
+
+        app.end_turn();
+        assert!(app.composer.input.is_empty());
+    }
+
+    /// `/steer` is explicit guidance: with nothing running it reports the error
+    /// the runtime gave instead of silently becoming a prompt.
+    #[test]
+    fn an_explicit_steer_command_never_starts_a_turn() {
+        let (mut app, remote) = app();
+        assert_eq!(
+            app.dispatch_line(
+                "/steer use the other branch",
+                &Backend::Attach(&remote),
+                &CancellationToken::new()
+            ),
+            None
+        );
+        assert!(matches!(
+            commands(&app).as_slice(),
+            [Request::Command(backend::Command::Steer(text)),
+             Request::Command(backend::Command::SteeringState)] if text == "use the other branch"
+        ));
+        assert!(
+            app.drain_actions().is_empty(),
+            "an explicit steer must not dispatch a prompt"
+        );
+        // The runtime's reason reaches the transcript rather than a turn.
+        let (ticket, _) = app.requests[0].clone();
+        app.apply_completion(Completion {
+            mutation: true,
+            ticket,
+            result: Err("there is no active task accepting guidance".into()),
+        });
+        assert!(
+            app.entries
+                .iter()
+                .any(|entry| entry.raw == "there is no active task accepting guidance"),
+            "{:?}",
+            app.entries
+                .iter()
+                .map(|e| e.raw.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 }

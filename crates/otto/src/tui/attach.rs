@@ -111,28 +111,6 @@ impl Remote {
         self.state().session.clone()
     }
 
-    pub(crate) async fn withdraw_queued_turn_async(&self) -> Result<bool, String> {
-        let (session, turn) = {
-            let state = self.state();
-            let turn = state
-                .own
-                .iter()
-                .rev()
-                .find(|id| state.running.as_deref() != Some(id.as_str()))
-                .cloned();
-            (state.session.clone(), turn)
-        };
-        let Some(turn) = turn else { return Ok(false) };
-        within(self.client.cancel_turn(&session, &turn))
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut state = self.state();
-        if state.session == session {
-            state.own.retain(|id| *id != turn);
-        }
-        Ok(true)
-    }
-
     /// Replaces the cached session, history and info.
     async fn load(&self, id: &str, before_turn: Option<&str>) -> Result<(), Error> {
         let history = within(self.client.history(id, before_turn)).await?;
@@ -1293,18 +1271,5 @@ mod tests {
                 "{row:?}"
             );
         }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn withdraw_without_a_queued_own_turn_is_false() {
-        let remote = Remote::offline(Vec::new());
-        assert!(!remote.withdraw_queued_turn_async().await.expect("withdraw"));
-        // The running turn is not withdrawable; only a queued one is.
-        {
-            let mut state = remote.state();
-            state.own.push("t1".into());
-            state.running = Some("t1".into());
-        }
-        assert!(!remote.withdraw_queued_turn_async().await.expect("withdraw"));
     }
 }

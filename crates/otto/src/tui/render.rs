@@ -148,15 +148,24 @@ const STARTUP_LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ 
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = transcript::lines(&app.entries, app.show_details, area.width as usize);
-    if let Some(queued) = &app.queued_input {
-        let label = if app.queued_input_sent {
-            "Queued for current turn"
-        } else {
-            "Queued next input"
-        };
+    // Text the session does not hold yet: the next input the user queued, and
+    // the guidance the active run has taken but not delivered. Neither is in
+    // the transcript history nor in the composer any more, so it is drawn here
+    // under the label that says which of the two it is.
+    let waiting = app
+        .queued_input
+        .as_ref()
+        .map(|line| ("Queued next input", line.clone()))
+        .into_iter()
+        .chain(
+            app.queued_steer
+                .as_ref()
+                .map(|steer| ("Queued for current turn", steer.text.clone())),
+        );
+    for (label, text) in waiting {
         let queued = Entry {
             kind: Some(super::entries::EntryKind::User),
-            raw: format!("{label}: {queued}"),
+            raw: format!("{label}: {text}"),
             ..Entry::default()
         };
         if !lines.is_empty() {
@@ -372,13 +381,16 @@ fn composer_lines(input: &[char], cursor: usize, width: u16) -> (Vec<String>, u1
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let (title, style) = if app.busy() && app.queued_input.is_some() {
-        let title = if app.queued_input_sent {
-            "Queued for next checkpoint · Ctrl+U withdraw · Esc cancels turn"
-        } else {
-            "Queued next input · Ctrl+U withdraw · Esc cancels turn"
-        };
-        (title, Style::default().fg(Color::Cyan))
+    let (title, style) = if app.busy() && app.queued_steer.is_some() {
+        (
+            "Queued for current turn · Ctrl+U withdraw · Esc cancels turn",
+            Style::default().fg(Color::Cyan),
+        )
+    } else if app.busy() && app.queued_input.is_some() {
+        (
+            "Queued next input · Ctrl+U withdraw · Esc cancels turn",
+            Style::default().fg(Color::Cyan),
+        )
     } else if app.busy() {
         // Attached, typed text is posted as the next turn.
         let title = if app.attached {
@@ -838,23 +850,69 @@ mod tests {
             screen.contains("Queued next input · Ctrl+U withdraw"),
             "{screen}"
         );
+    }
 
-        app.queued_input = Some("follow up".to_string());
-        app.queued_input_sent = true;
+    /// Guidance the active turn has accepted but not delivered is neither in the
+    /// transcript history nor in the composer, so the frame has to say both that
+    /// it waits and how to take it back.
+    #[tokio::test]
+    async fn queued_guidance_draws_in_the_transcript_and_the_composer_title() {
+        use crate::tui::backend::{Completion, Reply, Ticket};
+        use otto_core::agent::steering::{Message, Status};
+
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        let message = |status| Message {
+            id: 3,
+            text: "use the other branch".to_string(),
+            status,
+            input_id: "steer:turn:1".to_string(),
+        };
+        // The run's own read is what paints the queued guidance; the frame test
+        // goes through it rather than setting the field directly.
+        let (workspace, session) = (app.info.workspace.clone(), app.info.session_id.clone());
+        let read = |messages| Completion {
+            mutation: true,
+            ticket: Ticket {
+                workspace: workspace.clone(),
+                session: session.clone(),
+                surface: 0,
+                generation: 1,
+            },
+            result: Ok(Reply::Steering(messages)),
+        };
+        app.start_turn();
+        app.apply_completion(read(vec![message(Status::Queued)]));
+
         let screen = rendered(&app, 72, 12);
+        assert!(
+            screen.contains("❯ Queued for current turn: use the other branch"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Queued for current turn · Ctrl+U withdraw · Esc cancels turn"),
+            "{screen}"
+        );
+        assert!(
+            !screen.contains("│use the other branch"),
+            "queued guidance should not remain in the composer:\n{screen}"
+        );
 
-        assert!(
-            screen.contains("❯ Queued for current turn: follow up"),
-            "{screen}"
-        );
-        assert!(
-            screen.contains("Queued for next checkpoint · Ctrl+U withdraw"),
-            "{screen}"
-        );
-        assert!(
-            !screen.contains("│follow up"),
-            "queued text should not remain in the composer:\n{screen}"
-        );
+        // A withdrawal, then a delivery, each leave nothing to draw.
+        app.apply_completion(read(vec![message(Status::Withdrawn)]));
+        let screen = rendered(&app, 72, 12);
+        assert!(!screen.contains("Queued for current turn"), "{screen}");
+        assert!(!screen.contains("Ctrl+U withdraw"), "{screen}");
+
+        app.apply_completion(read(vec![message(Status::Queued)]));
+        assert!(rendered(&app, 72, 12).contains("Queued for current turn: use the other branch"));
+        app.apply_event(&otto_core::wire::events::WireEvent {
+            event_type: otto_core::wire::events::USER_MESSAGE.into(),
+            text: "use the other branch".into(),
+            ..Default::default()
+        });
+        let screen = rendered(&app, 72, 12);
+        assert!(!screen.contains("Queued for current turn"), "{screen}");
+        assert!(!screen.contains("Ctrl+U withdraw"), "{screen}");
     }
 
     /// The drawn frame, not the row builder: a prompt, the reply after it,

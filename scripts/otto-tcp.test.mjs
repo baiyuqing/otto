@@ -104,9 +104,16 @@ function context(t) {
   const run = (args = [], extra = {}) =>
     spawnSync('bash', [SCRIPT, ...args], { encoding: 'utf8', env: { ...env, ...extra } });
 
+  // The supervisor removes a pid file when its child exits and writes it again
+  // after the restart, so the file can disappear between any check and the read.
   const readPid = (file) => {
-    if (!existsSync(file)) return null;
-    const text = readFileSync(file, 'utf8').trim();
+    let text;
+    try {
+      text = readFileSync(file, 'utf8').trim();
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
     return /^[0-9]+$/.test(text) ? Number(text) : null;
   };
 

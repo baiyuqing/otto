@@ -3116,7 +3116,6 @@ mod catalog_tests {
         let names = definition_names(&fixture.builder.boundary_catalog_definitions(65536, true));
         for want in [
             "agent",
-            "agent_wait",
             "agent_status",
             "agent_send",
             "agent_cancel",
@@ -3150,7 +3149,6 @@ mod catalog_tests {
         let names = definition_names(&fixture.builder.boundary_catalog_definitions(65536, true));
         for unwanted in [
             "agent",
-            "agent_wait",
             "agent_status",
             "agent_send",
             "agent_cancel",

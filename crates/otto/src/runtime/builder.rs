@@ -1177,6 +1177,73 @@ pub struct Shared {
     /// frontends get `Logger::discard()` because stderr would overwrite the
     /// screen.
     pub logger: Arc<crate::log::Logger>,
+    /// Frontend-owned parent tools, installed only after the frontend has
+    /// assembled any capabilities they need. Every workspace builder for this
+    /// process shares this slot.
+    pub parent_tool_factory: ParentToolSlot,
+}
+
+/// Context supplied to a frontend-owned parent-tool factory.
+///
+/// The factory receives identity and the append-only source transcript, not a
+/// workspace handle or command executor. This lets a delivery service record a
+/// text-only completion notice without granting it a second live filesystem
+/// root or arbitrary source-session control.
+#[derive(Clone)]
+pub struct ParentToolContext {
+    pub workspace: String,
+    pub session_id: String,
+    pub source_session: SharedSession,
+}
+
+/// Adds frontend-owned tools to parent runners only.
+///
+/// `runtime` defines this narrow seam but never implements it with CLI
+/// dependencies. Child runners are composed from a separate tool list and do
+/// not call this factory. Factories must return a fresh tool instance for each
+/// runner build because controllers rebuild runners after session/profile/
+/// thinking replacement.
+pub trait ParentToolFactory: Send + Sync {
+    fn tools(
+        &self,
+        context: &ParentToolContext,
+    ) -> Result<Vec<Box<dyn Tool + Send + Sync>>, String>;
+}
+
+/// A process-shared, post-construction installation point for frontend-owned
+/// parent tools. The slot is deliberately absent from child composition.
+#[derive(Clone, Default)]
+pub struct ParentToolSlot(Arc<std::sync::RwLock<Option<Arc<dyn ParentToolFactory>>>>);
+
+impl ParentToolSlot {
+    /// Installs the frontend's parent tools. The first installation wins: one
+    /// process has one frontend, and a second would silently replace the tools
+    /// every later parent runner composes. Returns whether this call installed.
+    pub fn install(&self, factory: Arc<dyn ParentToolFactory>) -> bool {
+        let mut slot = self.0.write().unwrap_or_else(|poison| poison.into_inner());
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(factory);
+        true
+    }
+
+    /// Whether a factory is installed. Test-only: production installs once and
+    /// relies on the first-install-wins rule above.
+    #[cfg(test)]
+    pub(crate) fn installed(&self) -> bool {
+        self.0
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_some()
+    }
+
+    fn get(&self) -> Option<Arc<dyn ParentToolFactory>> {
+        self.0
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
 }
 
 /// The composition root for one workspace.
@@ -1601,7 +1668,7 @@ impl Builder {
         runtime: &Runtime,
         warnings: &mut (dyn std::io::Write + Send),
     ) -> Result<Runner, BuildError> {
-        self.build_runner_inner(session, runtime, None, true, warnings)
+        self.build_runner_inner(session, runtime, None, true, true, warnings)
             .await
             .map(|(runner, _)| runner)
     }
@@ -1614,7 +1681,7 @@ impl Builder {
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let trace = trace.then(BuildTrace::new);
         let mut warnings = std::io::stderr();
-        self.build_runner_inner(session, runtime, trace, true, &mut warnings)
+        self.build_runner_inner(session, runtime, trace, true, true, &mut warnings)
             .await
     }
 
@@ -1626,8 +1693,22 @@ impl Builder {
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let trace = trace.then(BuildTrace::new);
         let mut warnings = std::io::stderr();
-        self.build_runner_inner(session, runtime, trace, false, &mut warnings)
+        self.build_runner_inner(session, runtime, trace, false, true, &mut warnings)
             .await
+    }
+
+    /// Composes the internal owner runner for durable workflows. Frontend
+    /// parent-only tools (such as cross-workspace delivery) are intentionally
+    /// absent: a workflow runtime is not a user parent session.
+    pub async fn build_workflow_runner(
+        &self,
+        session: &SharedSession,
+        runtime: &Runtime,
+        warnings: &mut (dyn std::io::Write + Send),
+    ) -> Result<Runner, BuildError> {
+        self.build_runner_inner(session, runtime, None, true, false, warnings)
+            .await
+            .map(|(runner, _)| runner)
     }
 
     /// The provider client for `runtime`; `Unavailable` when the redaction
@@ -1663,6 +1744,7 @@ impl Builder {
         runtime: &Runtime,
         mut trace: Option<BuildTrace>,
         connect_mcp: bool,
+        include_parent_tools: bool,
         warnings: &mut (dyn std::io::Write + Send),
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let redaction_values = self.secret_values(Some(runtime));
@@ -1914,6 +1996,13 @@ impl Builder {
                 tools.push(Box::new(crate::tool::reflect::ReflectTool::new(
                     Arc::clone(&reflection),
                 )));
+            }
+            if include_parent_tools && let Some(factory) = self.shared.parent_tool_factory.get() {
+                tools.extend(factory.tools(&ParentToolContext {
+                    workspace: self.workspace_path.clone(),
+                    session_id: session.header().id.clone(),
+                    source_session: session.clone(),
+                })?);
             }
             let mut definitions: Vec<_> = tools.iter().map(|tool| tool.definition()).collect();
             definitions.push(
@@ -2603,6 +2692,7 @@ mod tests {
             memory: Default::default(),
             reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
             logger: Arc::new(crate::log::Logger::discard()),
+            parent_tool_factory: ParentToolSlot::default(),
         })
     }
 
@@ -2720,6 +2810,78 @@ mod tests {
             .into_iter()
             .map(|definition| definition.name)
             .collect()
+    }
+
+    struct CountingParentToolFactory {
+        calls: Arc<AtomicUsize>,
+        contexts: Mutex<Vec<ParentToolContext>>,
+    }
+
+    impl ParentToolFactory for CountingParentToolFactory {
+        fn tools(
+            &self,
+            context: &ParentToolContext,
+        ) -> Result<Vec<Box<dyn Tool + Send + Sync>>, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.contexts.lock().unwrap().push(context.clone());
+            Ok(vec![
+                crate::subagent::testsupport::StubTool::new(
+                    "parent_factory_tool",
+                    otto_core::tool::ToolResult::default(),
+                )
+                .boxed(),
+            ])
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_tool_factory_is_fresh_per_parent_runner_and_absent_from_children() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let builder = builder(dir.path());
+        let factory = Arc::new(CountingParentToolFactory {
+            calls: Arc::new(AtomicUsize::new(0)),
+            contexts: Mutex::new(Vec::new()),
+        });
+        builder.shared.parent_tool_factory.install(factory.clone());
+        let first = SharedSession::memory(Header {
+            id: "session-one".into(),
+            ..Header::default()
+        });
+        let second = SharedSession::memory(Header {
+            id: "session-two".into(),
+            ..Header::default()
+        });
+
+        let first_runner = builder
+            .build_runner(&first, &runtime())
+            .await
+            .expect("first runner");
+        let second_runner = builder
+            .build_runner(&second, &runtime())
+            .await
+            .expect("second runner");
+        assert!(tool_names(&first_runner).contains(&"parent_factory_tool".into()));
+        assert!(tool_names(&second_runner).contains(&"parent_factory_tool".into()));
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            factory
+                .contexts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|context| context.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-one", "session-two"]
+        );
+
+        let child_names = builder
+            .child_tools(&runtime(), 65536, &[], &Catalog::default())
+            .expect("child tools")
+            .into_iter()
+            .map(|tool| tool.definition().name)
+            .collect::<Vec<_>>();
+        assert!(!child_names.contains(&"parent_factory_tool".into()));
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

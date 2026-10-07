@@ -6,14 +6,19 @@
 //! [`SandboxSwitch`](super::sandbox_switch::SandboxSwitch) that `POST
 //! /v1/sandbox/reload` replaces.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::{Arc, Weak};
 
+use async_trait::async_trait;
+
+use chrono::Utc;
 use otto_core::config::ServerRuntime;
 use otto_core::config::resolve::Runtime;
-use otto_core::session::ListResult;
+use otto_core::model::{Block, Message, Role};
+use otto_core::session::{ListResult, Session};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{Controller, SandboxControl};
@@ -25,6 +30,9 @@ use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
 use crate::runtime::builder::Builder;
 use crate::runtime::info::SandboxInfo;
 use crate::runtime::sandbox_runtime::canonical_directory;
+use crate::runtime::workspace_admission::{
+    Admission, admit_workspace, canonicalize_workspace_roots, trusted_projects,
+};
 
 /// Writes `otto: {message}\n` and returns exit code 1.
 fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
@@ -36,9 +44,26 @@ fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
 
 /// One loaded workspace: its composition root, its own `/sandbox reload`
 /// state, and, when the workflow lock was acquired, its workflow controller.
+#[allow(dead_code)] // Used only when the delivery lifecycle is fully installed.
+struct DeliverySetupCapability {
+    executor: Arc<crate::sandbox::Executor>,
+    environment: Vec<String>,
+}
+
+impl DeliverySetupCapability {
+    fn worktree_executor(&self) -> crate::delivery::WorktreeExecutor {
+        crate::delivery::WorktreeExecutor::new(self.executor.clone(), self.environment.clone())
+    }
+}
+
 struct WorkspaceHost {
     builder: Arc<Builder>,
     workflows: Option<Arc<crate::workflow::Controller>>,
+    /// The elevated executor plus its matching environment, retained solely
+    /// for constrained delivery worktree setup. It is intentionally private:
+    /// ordinary server routes and source runners cannot obtain either a target
+    /// executor or the environment needed to run it.
+    delivery_setup: Option<DeliverySetupCapability>,
     /// This workspace's own sandbox reloader (`None` when it never got a
     /// usable sandbox). `POST /v1/sandbox/reload` reloads the startup
     /// workspace through `ServeFactory::reload_sandbox` and every other
@@ -135,7 +160,7 @@ impl Workspaces {
         if let Some(host) = loaded.get(&path) {
             return Ok((Arc::clone(host), false));
         }
-        let (builder, reloader) =
+        let (builder, sandbox) =
             super::run::load_workspace(Arc::clone(shared), canonical, cancel, stderr).await?;
         let builder = Arc::new(builder);
         let workspace_runtime = crate::runtime::builder::resolve_initial_runtime(
@@ -164,7 +189,14 @@ impl Workspaces {
         let host = Arc::new(WorkspaceHost {
             builder,
             workflows,
-            reloader,
+            delivery_setup: match (sandbox.approval_executor, sandbox.approval_environment) {
+                (Some(executor), Some(environment)) => Some(DeliverySetupCapability {
+                    executor,
+                    environment,
+                }),
+                _ => None,
+            },
+            reloader: sandbox.reloader,
         });
         loaded.insert(path.clone(), Arc::clone(&host));
         if persist && let Err(error) = add_to_workspace_list(&shared.home, &path) {
@@ -221,45 +253,6 @@ impl Workspaces {
 
 // ---- admission ----
 
-/// Why a requested workspace path was rejected.
-#[derive(Debug, PartialEq, Eq)]
-enum Admission {
-    /// The path does not resolve to an existing directory.
-    Invalid,
-    /// A real directory, but neither the startup workspace nor a descendant
-    /// of any `workspace_roots` entry.
-    NotAdmitted,
-}
-
-/// Canonicalizes `requested` and admits it when it is `startup` or a
-/// descendant of one entry in `roots` (a root itself is admitted).
-/// `canonical_directory` resolves symlinks before the comparison, so a link
-/// inside a root that points outside it is rejected as `NotAdmitted`, and a
-/// missing path or a file is rejected as `Invalid`. The comparison is by path
-/// component (`Path::starts_with`), so `/root-x` is not a descendant of
-/// `/root`. `requested` must already be absolute: it arrives over HTTP, so
-/// resolving a relative path against the server process's working directory
-/// would let a client name a directory it never typed.
-fn admit_workspace(
-    requested: &str,
-    startup: &Path,
-    roots: &[PathBuf],
-    trusted: &[PathBuf],
-) -> Result<PathBuf, Admission> {
-    if !Path::new(requested).is_absolute() {
-        return Err(Admission::Invalid);
-    }
-    let canonical = canonical_directory(Path::new(requested)).map_err(|_| Admission::Invalid)?;
-    if canonical == startup
-        || roots.iter().any(|root| canonical.starts_with(root))
-        || trusted.iter().any(|dir| canonical.starts_with(dir))
-    {
-        Ok(canonical)
-    } else {
-        Err(Admission::NotAdmitted)
-    }
-}
-
 /// The canonical form of `path`, or `path` itself when it no longer resolves
 /// (its directory was deleted since it was added). Unlike [`admit_workspace`],
 /// `DELETE /v1/workspaces` must still match a persisted entry whose directory
@@ -268,39 +261,6 @@ fn canonical_or_literal(path: &str) -> String {
     canonical_directory(Path::new(path))
         .map(|canonical| canonical.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string())
-}
-
-/// Canonicalizes `[server].workspace_roots` once at startup. A root that does
-/// not resolve to an existing directory is a startup error naming the config
-/// key and the offending path, not a per-request admission failure.
-fn canonicalize_workspace_roots(raw_roots: &[String]) -> Result<Vec<PathBuf>, String> {
-    raw_roots
-        .iter()
-        .map(|root| {
-            canonical_directory(Path::new(root))
-                .map_err(|error| format!("[server] workspace_roots: \"{root}\": {error}"))
-        })
-        .collect()
-}
-
-/// Canonical directories trusted via `otto trust`, read fresh from
-/// `config_path` on every call. Unlike [`canonicalize_workspace_roots`], any
-/// failure — the file is missing or unparsable, or a `[projects]` entry has
-/// an invalid `trust_level` — resolves to no trusted directories rather than
-/// an error: trust only widens admission, so a config problem here must not
-/// break the startup workspace or configured roots. A trusted path that no
-/// longer resolves to a directory is likewise dropped rather than reported.
-fn trusted_projects(config_path: &Path) -> Vec<PathBuf> {
-    let Ok(text) = std::fs::read_to_string(config_path) else {
-        return Vec::new();
-    };
-    let Ok(file) = otto_core::config::parse(&text) else {
-        return Vec::new();
-    };
-    file.projects
-        .keys()
-        .filter_map(|path| canonical_directory(Path::new(path)).ok())
-        .collect()
 }
 
 // ---- persisted workspace list ----
@@ -414,12 +374,686 @@ async fn load_persisted_workspaces(
     }
 }
 
+/// Serve-owned delivery preflight broker. It retains only weak process
+/// references: installing it into a parent-tool slot cannot retain a cycle
+/// through loaded hosts or builders. It returns immutable previews only, never
+/// a target workspace handle or generic command executor.
+///
+/// The workspace registry is attached after construction. The parent-tool slot
+/// must be installed before the workflow controller is built, while
+/// `Workspaces` owns that controller through its host, so the weak registry
+/// reference cannot be a constructor argument.
+#[derive(Clone)]
+struct DeliveryBroker {
+    workspaces: Arc<std::sync::RwLock<Option<Weak<Workspaces>>>>,
+    shared: Weak<crate::runtime::builder::Shared>,
+    runtime: Runtime,
+    cancel: CancellationToken,
+}
+
+impl DeliveryBroker {
+    fn new(
+        shared: &Arc<crate::runtime::builder::Shared>,
+        runtime: Runtime,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            workspaces: Arc::new(std::sync::RwLock::new(None)),
+            shared: Arc::downgrade(shared),
+            runtime,
+            cancel,
+        }
+    }
+
+    /// Publishes the workspace registry once it exists. This happens before
+    /// the server accepts a request, so no delivery can observe the gap.
+    fn attach_workspaces(&self, workspaces: &Arc<Workspaces>) {
+        *self
+            .workspaces
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(workspaces));
+    }
+
+    fn workspaces(&self) -> Result<Arc<Workspaces>, String> {
+        self.workspaces
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| "delivery broker is no longer available".to_string())
+    }
+
+    async fn target_host(
+        &self,
+        requested: &str,
+        cancel: &CancellationToken,
+    ) -> Result<
+        (
+            PathBuf,
+            crate::delivery::AdmissionPolicy,
+            Arc<WorkspaceHost>,
+        ),
+        String,
+    > {
+        if cancel.is_cancelled() || self.cancel.is_cancelled() {
+            return Err("delivery target preflight cancelled".into());
+        }
+        let workspaces = self.workspaces()?;
+        let shared = self
+            .shared
+            .upgrade()
+            .ok_or("delivery broker is no longer available")?;
+        let admitted = workspaces
+            .admit(requested)
+            .map_err(|_| "delivery target is not an admitted workspace")?;
+        let policy = crate::delivery::AdmissionPolicy {
+            startup: PathBuf::from(&workspaces.startup),
+            roots: workspaces.roots.clone(),
+            trusted: trusted_projects(&workspaces.config_path),
+        };
+        let host = match workspaces.host(&admitted.to_string_lossy()).await {
+            Some(host) => host,
+            None => {
+                let mut stderr = std::io::sink();
+                workspaces
+                    .load(
+                        &admitted,
+                        &shared,
+                        &self.runtime,
+                        cancel,
+                        &mut stderr,
+                        false,
+                    )
+                    .await?
+                    .0
+            }
+        };
+        Ok((admitted, policy, host))
+    }
+}
+
+#[async_trait]
+impl crate::delivery::Preflight for DeliveryBroker {
+    async fn preview(
+        &self,
+        source_workspace: &str,
+        request: &crate::delivery::Request,
+        cancel: &CancellationToken,
+    ) -> Result<crate::delivery::Preview, String> {
+        let (admitted, policy, host) = self.target_host(&request.target, cancel).await?;
+        let executor = host
+            .builder
+            .command_executor
+            .as_ref()
+            .cloned()
+            .ok_or("delivery target sandbox is unavailable")?;
+        let environment = host.builder.sandbox_environment.clone().unwrap_or_default();
+        crate::delivery::Preflight::preview(
+            &crate::delivery::SandboxPreflight::new(
+                policy,
+                crate::delivery::SandboxTargetInspector::new(executor, environment),
+            ),
+            source_workspace,
+            &crate::delivery::Request {
+                target: admitted.to_string_lossy().into_owned(),
+                objective: request.objective.clone(),
+                branch: request.branch.clone(),
+                source_refs: request.source_refs.clone(),
+            },
+            cancel,
+        )
+        .await
+    }
+}
+
+/// The terminal target-turn boundary, reached only after the constrained
+/// worktree effect and worktree-root builder composition have completed.
+/// It cannot run setup Git or change roots.
+#[async_trait]
+trait DeliveryRun: Send {
+    fn target_session(&self) -> String;
+    fn worktree(&self) -> String;
+    async fn run_frozen(&self, prompt: &str, cancel: &CancellationToken) -> Result<String, String>;
+    async fn close(self: Box<Self>);
+}
+
+/// Server-owned resources for one started delivery. None of these values cross
+/// the delivery service boundary into a source session/tool.
+#[allow(dead_code)] // Retained only by the not-yet-installed delivery service.
+struct DeliveryRuntime {
+    _primary_host: Arc<WorkspaceHost>,
+    worktree_sandbox: super::run::WorkspaceSandbox,
+    _worktree_builder: Arc<Builder>,
+    worktree_session: crate::runtime::builder::SharedSession,
+    worktree_runner: Arc<crate::runtime::builder::Runner>,
+}
+
+#[async_trait]
+impl DeliveryRun for DeliveryRuntime {
+    fn target_session(&self) -> String {
+        self.worktree_session.header().id
+    }
+
+    fn worktree(&self) -> String {
+        self.worktree_session.header().workspace
+    }
+
+    async fn run_frozen(&self, prompt: &str, cancel: &CancellationToken) -> Result<String, String> {
+        let mut emit = |_| {};
+        self.worktree_runner
+            .run(prompt, &mut emit, cancel)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(self
+            .worktree_session
+            .messages()
+            .into_iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .map(|message| message.text())
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| "target delivery runner completed".into()))
+    }
+
+    async fn close(self: Box<Self>) {
+        self.worktree_runner.close_mcp().await;
+        self.worktree_runner.close();
+        let _ = self.worktree_session.close();
+        let _ = self.worktree_sandbox.control.close().await;
+    }
+}
+
+#[allow(dead_code)] // Held only by the not-yet-installed delivery service.
+struct PreparedDelivery {
+    primary_host: Arc<WorkspaceHost>,
+    executor: crate::delivery::WorktreeExecutor,
+}
+
+/// Receipt-owned delivery effect service. It is intentionally private and
+/// uninstalled until task execution/status wiring exists. Its only mutable Git
+/// operation is `WorktreeExecutor::add`; every target runner is built after
+/// that operation around the newly-created worktree root.
+#[allow(dead_code)] // Installed only after delivery task/status wiring is complete.
+struct DeliveryService {
+    broker: DeliveryBroker,
+    receipts: Arc<crate::delivery::ReceiptStore>,
+    /// Append-only source transcripts keyed by approval id. These are never
+    /// passed to the target runner and contain no source filesystem handle.
+    source_sessions: Mutex<HashMap<String, crate::runtime::builder::SharedSession>>,
+    prepared: Mutex<HashMap<String, PreparedDelivery>>,
+    runtimes: Mutex<HashMap<String, Box<dyn DeliveryRun>>>,
+    /// Test-only injection at the post-setup worktree-runtime boundary. It
+    /// is absent from production, so it cannot bypass constrained setup.
+    #[cfg(test)]
+    ready_runs: Mutex<HashMap<String, Box<dyn DeliveryRun>>>,
+}
+
+impl DeliveryService {
+    fn new(
+        broker: DeliveryBroker,
+        receipts: Arc<crate::delivery::ReceiptStore>,
+    ) -> Result<Self, String> {
+        // A process crash after `begin` has unknown external Git outcome.
+        // Never infer success or replay it on construction.
+        receipts.mark_interrupted_unknown()?;
+        Ok(Self {
+            broker,
+            receipts,
+            source_sessions: Mutex::new(HashMap::new()),
+            prepared: Mutex::new(HashMap::new()),
+            runtimes: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            ready_runs: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn bind_source_session(
+        &self,
+        approval_id: &str,
+        source: crate::runtime::builder::SharedSession,
+    ) -> Result<(), String> {
+        self.source_sessions
+            .lock()
+            .map_err(|_| "delivery source session store unavailable")?
+            .insert(approval_id.into(), source);
+        Ok(())
+    }
+
+    async fn prepare_target(
+        &self,
+        receipt: &crate::delivery::Receipt,
+        cancel: &CancellationToken,
+    ) -> Result<PreparedDelivery, String> {
+        let (target, _policy, host) = self
+            .broker
+            .target_host(
+                &receipt.preview.plan.target.repository.to_string_lossy(),
+                cancel,
+            )
+            .await?;
+        if target != receipt.preview.plan.target.repository {
+            return Err("delivery target changed before worktree setup".into());
+        }
+        let executor = host
+            .delivery_setup
+            .as_ref()
+            .ok_or("delivery target does not have constrained worktree setup capability")?
+            .worktree_executor();
+        Ok(PreparedDelivery {
+            primary_host: host,
+            executor,
+        })
+    }
+
+    fn source_session(
+        &self,
+        approval_id: &str,
+    ) -> Result<crate::runtime::builder::SharedSession, String> {
+        self.source_sessions
+            .lock()
+            .map_err(|_| "delivery source session store unavailable")?
+            .get(approval_id)
+            .cloned()
+            .ok_or("delivery receipt has no source session binding".to_string())
+    }
+
+    async fn notify_source(&self, task: &crate::delivery::StoredTask) -> Result<(), String> {
+        let Some(task) = self.receipts.claim_source_notification(&task.approval_id)? else {
+            return Ok(());
+        };
+        let source = self.source_session(&task.approval_id)?;
+        let summary = match task.state {
+            crate::delivery::TaskState::Succeeded => format!(
+                "Delivery task {} completed. {}",
+                task.approval_id, task.result
+            ),
+            crate::delivery::TaskState::Canceled => {
+                format!("Delivery task {} was canceled.", task.approval_id)
+            }
+            crate::delivery::TaskState::Failed | crate::delivery::TaskState::Unknown => format!(
+                "Delivery task {} did not complete: {}",
+                task.approval_id, task.error
+            ),
+            crate::delivery::TaskState::Running => return Ok(()),
+        };
+        source
+            .append(Message {
+                role: Role::Assistant,
+                blocks: vec![Block::text(summary)],
+                created_at: Utc::now(),
+                ..Message::default()
+            })
+            .await
+            .map_err(|_| "delivery source notification could not be recorded".into())
+    }
+
+    async fn finish_run(
+        &self,
+        receipt: &crate::delivery::Receipt,
+        cancel: &CancellationToken,
+    ) -> Result<(), String> {
+        let prompt = crate::delivery::render_handoff_prompt(&receipt.preview.handoff);
+        let runtime = self
+            .runtimes
+            .lock()
+            .map_err(|_| "delivery runtime store unavailable")?
+            .remove(&receipt.id)
+            .ok_or("delivery runtime is unavailable")?;
+        let outcome = runtime.run_frozen(&prompt, cancel).await;
+        let (state, result, error) = match outcome {
+            Ok(result) => (crate::delivery::TaskState::Succeeded, result, String::new()),
+            Err(error) if cancel.is_cancelled() => {
+                (crate::delivery::TaskState::Canceled, String::new(), error)
+            }
+            Err(error) => (crate::delivery::TaskState::Failed, String::new(), error),
+        };
+        runtime.close().await;
+        let task = self
+            .receipts
+            .finish_task(&receipt.id, state, &result, &error)?;
+        self.notify_source(&task).await
+    }
+
+    #[cfg(test)]
+    fn inject_ready_run(&self, approval_id: &str, run: Box<dyn DeliveryRun>) -> Result<(), String> {
+        self.ready_runs
+            .lock()
+            .map_err(|_| "delivery runtime store unavailable")?
+            .insert(approval_id.into(), run);
+        Ok(())
+    }
+
+    async fn start_worktree_runner(
+        &self,
+        receipt: &crate::delivery::Receipt,
+        cancel: &CancellationToken,
+    ) -> Result<Box<dyn DeliveryRun>, String> {
+        #[cfg(test)]
+        if let Some(run) = self
+            .ready_runs
+            .lock()
+            .map_err(|_| "delivery runtime store unavailable")?
+            .remove(&receipt.id)
+        {
+            return Ok(run);
+        }
+        let prepared = self
+            .prepared
+            .lock()
+            .map_err(|_| "delivery runtime store unavailable")?
+            .remove(&receipt.id)
+            .ok_or("delivery receipt has no prepared target capability")?;
+        prepared
+            .executor
+            .add(&receipt.preview.plan, &receipt.base, cancel)
+            .await?;
+
+        let shared = self
+            .broker
+            .shared
+            .upgrade()
+            .ok_or("delivery broker is no longer available")?;
+        let mut stderr = std::io::sink();
+        let (builder, sandbox) =
+            super::run::load_workspace(shared, &receipt.preview.plan.path, cancel, &mut stderr)
+                .await?;
+        let builder = Arc::new(builder);
+        if builder.workspace_path != receipt.preview.plan.path.to_string_lossy() {
+            return Err("delivery worktree builder root is invalid".into());
+        }
+        let runtime = crate::runtime::builder::resolve_initial_runtime(
+            &builder.config,
+            &builder.environment,
+            None,
+            &builder.overrides,
+        )
+        .map_err(|error| error.to_string())?;
+        let session = builder
+            .create_session(&runtime)
+            .map_err(|error| error.to_string())?;
+        let runner = Arc::new(
+            builder
+                .build_runner_quiet(&session, &runtime)
+                .await
+                .map_err(|error| error.to_string())?,
+        );
+        self.receipts.bind_session(
+            &receipt.id,
+            &session.header().id,
+            Path::new(&builder.workspace_path),
+        )?;
+        Ok(Box::new(DeliveryRuntime {
+            _primary_host: prepared.primary_host,
+            worktree_sandbox: sandbox,
+            _worktree_builder: builder,
+            worktree_session: session,
+            worktree_runner: runner,
+        }))
+    }
+
+    async fn shutdown(&self) {
+        let runtimes = self
+            .runtimes
+            .lock()
+            .map(|mut runtimes| std::mem::take(&mut *runtimes))
+            .unwrap_or_default();
+        for (_, runtime) in runtimes {
+            runtime.close().await;
+        }
+    }
+}
+
+#[async_trait]
+impl crate::delivery::Service for DeliveryService {
+    async fn prepare(
+        &self,
+        approval_id: &str,
+        preview: &crate::delivery::Preview,
+    ) -> Result<crate::delivery::Receipt, String> {
+        let binding = crate::delivery::ReceiptBinding {
+            approval_id: approval_id.into(),
+            source_workspace: preview.source_workspace.clone(),
+            target_repository: preview
+                .plan
+                .target
+                .repository
+                .to_string_lossy()
+                .into_owned(),
+            target_common_dir: preview
+                .plan
+                .target
+                .common_dir
+                .to_string_lossy()
+                .into_owned(),
+            worktree: preview.plan.path.to_string_lossy().into_owned(),
+            branch: preview.plan.branch.clone(),
+            base: preview.base.clone(),
+            handoff_digest: preview.handoff.digest.clone(),
+        };
+        let stored = self.receipts.prepare(binding)?;
+        if stored.state == crate::delivery::ReceiptState::Unknown {
+            return Err(
+                "delivery receipt outcome is unknown; inspect the worktree before retrying".into(),
+            );
+        }
+        let receipt = crate::delivery::Receipt {
+            id: approval_id.into(),
+            preview: preview.clone(),
+            base: stored.binding.base,
+        };
+        #[cfg(test)]
+        let has_ready_run = self
+            .ready_runs
+            .lock()
+            .map_err(|_| "delivery runtime store unavailable")?
+            .contains_key(approval_id);
+        #[cfg(not(test))]
+        let has_ready_run = false;
+        if !has_ready_run {
+            let prepared = self
+                .prepare_target(&receipt, &CancellationToken::new())
+                .await?;
+            self.prepared
+                .lock()
+                .map_err(|_| "delivery runtime store unavailable")?
+                .insert(approval_id.into(), prepared);
+        }
+        Ok(receipt)
+    }
+
+    async fn start(
+        &self,
+        receipt: &crate::delivery::Receipt,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        let stored = self.receipts.begin(&receipt.id)?;
+        if stored.binding.worktree != receipt.preview.plan.path.to_string_lossy()
+            || stored.binding.base != receipt.base
+        {
+            let _ = self.receipts.unknown(&receipt.id);
+            return Err("delivery receipt binding changed before worktree setup".into());
+        }
+        if self.source_session(&receipt.id).is_err() {
+            let _ = self.receipts.unknown(&receipt.id);
+            return Err("delivery receipt has no source session binding".into());
+        }
+        let runtime = match self.start_worktree_runner(receipt, cancel).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = self.receipts.unknown(&receipt.id);
+                return Err(error);
+            }
+        };
+        let source_session = self.source_session(&receipt.id)?.header().id;
+        let target_session = runtime.target_session();
+        let worktree = runtime.worktree();
+        self.receipts.begin_task(
+            &receipt.id,
+            &source_session,
+            &target_session,
+            Path::new(&worktree),
+        )?;
+        self.runtimes
+            .lock()
+            .map_err(|_| "delivery runtime store unavailable")?
+            .insert(receipt.id.clone(), runtime);
+        self.receipts.started(&receipt.id)?;
+        self.finish_run(receipt, cancel).await?;
+        Ok(format!("delivery task completed: {}", receipt.id))
+    }
+}
+
+/// The deliberately narrow delivery status projection suitable for a future
+/// server/ACP read-only aggregation. Paths and execution capabilities never
+/// cross this boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeliveryStatus {
+    approval_id: String,
+    state: crate::delivery::TaskState,
+    result: String,
+    error: String,
+}
+
+/// Serve-owned lifecycle owner for delivery receipts and their private target
+/// runtimes. It is not a tool factory and has no model-visible API.
+struct DeliveryManager {
+    service: Arc<DeliveryService>,
+    receipts: Arc<crate::delivery::ReceiptStore>,
+    /// Retained for late workspace attachment; the service owns a clone.
+    broker: DeliveryBroker,
+}
+
+impl DeliveryManager {
+    fn open(
+        home: &str,
+        shared: &Arc<crate::runtime::builder::Shared>,
+        runtime: Runtime,
+        cancel: CancellationToken,
+    ) -> Result<Self, String> {
+        let path = Path::new(home).join(".otto/delivery-receipts.db");
+        let receipts = Arc::new(crate::delivery::ReceiptStore::open(&path)?);
+        let broker = DeliveryBroker::new(shared, runtime, cancel);
+        let service = Arc::new(DeliveryService::new(broker.clone(), Arc::clone(&receipts))?);
+        Ok(Self {
+            service,
+            receipts,
+            broker,
+        })
+    }
+
+    /// Publishes the workspace registry the acceptance broker targets. Called
+    /// once the registry exists and before the server accepts a request.
+    fn attach_workspaces(&self, workspaces: &Arc<Workspaces>) {
+        self.broker.attach_workspaces(workspaces);
+    }
+
+    fn bind_source_session(
+        &self,
+        approval_id: &str,
+        source: crate::runtime::builder::SharedSession,
+    ) -> Result<(), String> {
+        self.service.bind_source_session(approval_id, source)
+    }
+
+    fn status(
+        &self,
+        source_session: &str,
+        approval_id: &str,
+    ) -> Result<Option<DeliveryStatus>, String> {
+        self.receipts.task(approval_id).map(|task| {
+            task.filter(|task| task.source_session == source_session)
+                .map(|task| DeliveryStatus {
+                    approval_id: task.approval_id,
+                    state: task.state,
+                    result: task.result,
+                    error: task.error,
+                })
+        })
+    }
+
+    fn service_for(
+        self: &Arc<Self>,
+        source: crate::runtime::builder::SharedSession,
+    ) -> Arc<dyn crate::delivery::Service> {
+        Arc::new(SourceDeliveryService {
+            manager: Arc::clone(self),
+            source,
+        })
+    }
+
+    async fn shutdown(&self) {
+        self.service.shutdown().await;
+    }
+}
+
+/// Per-parent source binding for a delivery receipt. It has no target host,
+/// filesystem root, sandbox environment, or command-execution API.
+struct SourceDeliveryService {
+    manager: Arc<DeliveryManager>,
+    source: crate::runtime::builder::SharedSession,
+}
+
+#[async_trait]
+impl crate::delivery::Service for SourceDeliveryService {
+    async fn prepare(
+        &self,
+        approval_id: &str,
+        preview: &crate::delivery::Preview,
+    ) -> Result<crate::delivery::Receipt, String> {
+        self.manager
+            .bind_source_session(approval_id, self.source.clone())?;
+        self.manager.service.prepare(approval_id, preview).await
+    }
+
+    async fn start(
+        &self,
+        receipt: &crate::delivery::Receipt,
+        cancel: &CancellationToken,
+    ) -> Result<String, String> {
+        self.manager.service.start(receipt, cancel).await
+    }
+}
+
+/// Parent-only serve tool factory. The returned tool gets only its source
+/// identity/transcript and delivery trait ports; target capabilities remain in
+/// the manager and broker.
+struct DeliveryToolFactory {
+    manager: Arc<DeliveryManager>,
+    preflight: Arc<dyn crate::delivery::Preflight>,
+}
+
+impl DeliveryToolFactory {
+    fn new(manager: Arc<DeliveryManager>) -> Self {
+        // The broker is shared with the manager, so the late
+        // `attach_workspaces` call is visible to this preflight.
+        let preflight: Arc<dyn crate::delivery::Preflight> = Arc::new(manager.broker.clone());
+        Self { manager, preflight }
+    }
+}
+
+impl crate::runtime::builder::ParentToolFactory for DeliveryToolFactory {
+    fn tools(
+        &self,
+        context: &crate::runtime::builder::ParentToolContext,
+    ) -> Result<Vec<Box<dyn crate::tool::Tool + Send + Sync>>, String> {
+        let service = self.manager.service_for(context.source_session.clone());
+        Ok(vec![Box::new(crate::delivery::StartDeliveryTask::new(
+            context.workspace.clone(),
+            service,
+            Arc::clone(&self.preflight),
+        ))])
+    }
+}
+
 // ---- the session factory ----
 
 /// Builds one [`Controller`] per server-side session on top of the same
 /// replacement plumbing the CLI's `/new` and `/resume` use.
 struct ServeFactory {
-    workspaces: Workspaces,
+    workspaces: Arc<Workspaces>,
+    /// Optional read-only delivery status owner; it does not grant any delivery
+    /// effect. Test/frontends without delivery return no delivery status.
+    delivery: Option<Arc<DeliveryManager>>,
     runtime: Runtime,
     /// Cancels a workspace load in progress when the server shuts down;
     /// otherwise never fired during normal operation.
@@ -475,6 +1109,31 @@ impl ServeFactory {
 
 #[async_trait::async_trait]
 impl Factory for ServeFactory {
+    fn delivery_status(
+        &self,
+        source_session: &str,
+        approval_id: &str,
+    ) -> Result<Option<crate::server::delivery::Status>, String> {
+        let Some(delivery) = &self.delivery else {
+            return Ok(None);
+        };
+        delivery.status(source_session, approval_id).map(|status| {
+            status.map(|status| crate::server::delivery::Status {
+                approval_id: status.approval_id,
+                state: match status.state {
+                    crate::delivery::TaskState::Running => "running",
+                    crate::delivery::TaskState::Succeeded => "succeeded",
+                    crate::delivery::TaskState::Failed => "failed",
+                    crate::delivery::TaskState::Canceled => "canceled",
+                    crate::delivery::TaskState::Unknown => "unknown",
+                }
+                .into(),
+                result: status.result,
+                error: status.error,
+            })
+        })
+    }
+
     fn approval_service(&self) -> Option<Arc<crate::approval::Service>> {
         Some(self.workspaces.startup_host().builder.approvals.clone())
     }
@@ -745,6 +1404,10 @@ pub struct ServeOptions<'a> {
     /// `None` when bash never came up, so `POST /v1/sandbox/reload` answers 501
     /// rather than a failure.
     pub reloader: Option<Arc<SandboxReloader>>,
+    /// Elevated target-local executor and its resolved environment, retained
+    /// privately by the startup host for constrained delivery worktree setup.
+    pub delivery_setup_executor: Option<Arc<crate::sandbox::Executor>>,
+    pub delivery_setup_environment: Option<Vec<String>>,
     /// Set to "serving" before bind so a SIGTERM with no held lease cancels
     /// serve instead of killing the process; read after the listen loop
     /// returns to decide whether to run the migration.
@@ -765,6 +1428,8 @@ pub async fn run(
         acp_token,
         control,
         reloader,
+        delivery_setup_executor,
+        delivery_setup_environment,
         terminate,
     } = options;
     terminate.set_serve();
@@ -809,6 +1474,28 @@ pub async fn run(
     }
 
     let builder = Arc::new(builder);
+    // The delivery manager opens before the workflow controller is built, and
+    // the parent-tool slot is installed before that, so every parent runner
+    // this process builds -- workflow steps included -- composes the same
+    // tools. `Workspaces` is attached once it exists: it owns the workflow
+    // controller through its host, so the broker cannot take it as an
+    // argument here.
+    let delivery = match DeliveryManager::open(
+        &builder.shared.home,
+        &builder.shared,
+        runtime.clone(),
+        serve_cancel.clone(),
+    ) {
+        Ok(manager) => Arc::new(manager),
+        Err(error) => {
+            let _ = control.close().await;
+            return fail(stderr, &builder.redact_error(&error, Some(&runtime)));
+        }
+    };
+    let _ = builder
+        .shared
+        .parent_tool_factory
+        .install(Arc::new(DeliveryToolFactory::new(Arc::clone(&delivery))));
     let workflows =
         match super::workflow::build_controller(Arc::clone(&builder), &runtime, stderr).await {
             Ok(controller) => Some(controller),
@@ -827,15 +1514,22 @@ pub async fn run(
     let host = Arc::new(WorkspaceHost {
         builder: Arc::clone(&builder),
         workflows,
+        delivery_setup: match (delivery_setup_executor, delivery_setup_environment) {
+            (Some(executor), Some(environment)) => Some(DeliverySetupCapability {
+                executor,
+                environment,
+            }),
+            _ => None,
+        },
         reloader,
     });
-    let workspaces = Workspaces {
+    let workspaces = Arc::new(Workspaces {
         startup: workspace_path.clone(),
         startup_host: Arc::clone(&host),
         roots: workspace_roots,
         config_path: builder.shared.config_path.clone(),
         loaded: tokio::sync::Mutex::new(BTreeMap::from([(workspace_path, Arc::clone(&host))])),
-    };
+    });
     load_persisted_workspaces(
         &workspaces,
         &builder.shared,
@@ -844,8 +1538,10 @@ pub async fn run(
         stderr,
     )
     .await;
+    delivery.attach_workspaces(&workspaces);
     let factory: Arc<dyn Factory> = Arc::new(ServeFactory {
         workspaces,
+        delivery: Some(Arc::clone(&delivery)),
         runtime: runtime.clone(),
         cancel: serve_cancel.clone(),
     });
@@ -918,6 +1614,7 @@ pub async fn run(
         }
     }
     let close_error = server.close().await.err();
+    delivery.shutdown().await;
     let sandbox_error = control.close().await.err();
 
     let redact = |message: &str| -> String { format!("serve: {message}") };
@@ -1227,8 +1924,801 @@ mod tests {
         Arc::new(WorkspaceHost {
             builder: Arc::new(crate::cli::testutil::builder(workspace_root, session_root)),
             workflows: None,
+            delivery_setup: None,
             reloader: None,
         })
+    }
+
+    #[tokio::test]
+    async fn controlled_delivery_run_persists_notifies_and_closes() {
+        struct FakeRun {
+            prompt: Arc<Mutex<Option<String>>>,
+            closed: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        #[async_trait]
+        impl DeliveryRun for FakeRun {
+            fn target_session(&self) -> String {
+                "target-session".into()
+            }
+
+            fn worktree(&self) -> String {
+                "/target/.otto/delivery-worktrees/delivery-1".into()
+            }
+
+            async fn run_frozen(
+                &self,
+                prompt: &str,
+                _cancel: &CancellationToken,
+            ) -> Result<String, String> {
+                *self.prompt.lock().unwrap() = Some(prompt.into());
+                Ok("target completed the frozen handoff".into())
+            }
+
+            async fn close(self: Box<Self>) {
+                self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let startup_host = dummy_host(&startup_path, sessions.path());
+        let shared = Arc::clone(&startup_host.builder.shared);
+        let workspaces = Arc::new(Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host,
+            roots: Vec::new(),
+            config_path: PathBuf::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        });
+        let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+        let manager = Arc::new(
+            DeliveryManager::open(
+                &home.path().to_string_lossy(),
+                &shared,
+                runtime,
+                CancellationToken::new(),
+            )
+            .expect("manager"),
+        );
+        manager.attach_workspaces(&workspaces);
+        let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
+            id: "source-session".into(),
+            workspace: "/source".into(),
+            ..otto_core::session::Header::default()
+        });
+        manager
+            .bind_source_session("approval-1", source.clone())
+            .expect("bind source");
+        let worktree = startup_path.join(".otto/delivery-worktrees/delivery-1");
+        let handoff = crate::delivery::handoff(
+            "Ship frozen design",
+            [("source-ref-1".into(), "Selected design text".into())],
+        )
+        .unwrap();
+        let preview = crate::delivery::Preview {
+            source_workspace: "/source".into(),
+            plan: crate::delivery::WorktreePlan {
+                target: crate::delivery::Target {
+                    repository: startup_path.clone(),
+                    common_dir: startup_path.join(".git"),
+                },
+                delivery_id: "delivery-1".into(),
+                branch: "agent/test".into(),
+                path: worktree.clone(),
+            },
+            base: "a".repeat(40),
+            handoff,
+        };
+        let receipt = crate::delivery::Receipt {
+            id: "approval-1".into(),
+            base: preview.base.clone(),
+            preview,
+        };
+        manager
+            .receipts
+            .prepare(crate::delivery::ReceiptBinding {
+                approval_id: receipt.id.clone(),
+                source_workspace: receipt.preview.source_workspace.clone(),
+                target_repository: receipt
+                    .preview
+                    .plan
+                    .target
+                    .repository
+                    .to_string_lossy()
+                    .into_owned(),
+                target_common_dir: receipt
+                    .preview
+                    .plan
+                    .target
+                    .common_dir
+                    .to_string_lossy()
+                    .into_owned(),
+                worktree: worktree.to_string_lossy().into_owned(),
+                branch: receipt.preview.plan.branch.clone(),
+                base: receipt.base.clone(),
+                handoff_digest: receipt.preview.handoff.digest.clone(),
+            })
+            .expect("receipt");
+        manager
+            .receipts
+            .begin_task("approval-1", "source-session", "target-session", &worktree)
+            .expect("task");
+        let prompt = Arc::new(Mutex::new(None));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        manager.service.runtimes.lock().unwrap().insert(
+            receipt.id.clone(),
+            Box::new(FakeRun {
+                prompt: Arc::clone(&prompt),
+                closed: Arc::clone(&closed),
+            }),
+        );
+
+        manager
+            .service
+            .finish_run(&receipt, &CancellationToken::new())
+            .await
+            .expect("terminal lifecycle");
+
+        assert_eq!(
+            prompt.lock().unwrap().as_deref(),
+            Some(
+                "Delivery objective:\nShip frozen design\n\nFrozen source handoff:\n\n## source-ref-1\nSelected design text"
+            )
+        );
+        assert!(closed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(manager.service.runtimes.lock().unwrap().is_empty());
+        let status = manager
+            .status("source-session", "approval-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.state, crate::delivery::TaskState::Succeeded);
+        assert_eq!(status.result, "target completed the frozen handoff");
+        let messages = source.messages();
+        assert_eq!(messages.len(), 1);
+        let text = messages[0].text();
+        assert!(text.contains("target completed the frozen handoff"));
+        assert!(!text.contains(&startup_path.to_string_lossy().to_string()));
+        assert!(!text.contains(&worktree.to_string_lossy().to_string()));
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn delivery_source_notification_is_once_only_and_capability_free() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let startup_host = dummy_host(&startup_path, sessions.path());
+        let shared = Arc::clone(&startup_host.builder.shared);
+        let workspaces = Arc::new(Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host,
+            roots: Vec::new(),
+            config_path: PathBuf::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        });
+        let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+        let manager = Arc::new(
+            DeliveryManager::open(
+                &home.path().to_string_lossy(),
+                &shared,
+                runtime,
+                CancellationToken::new(),
+            )
+            .expect("manager"),
+        );
+        manager.attach_workspaces(&workspaces);
+        let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
+            id: "source-session".into(),
+            workspace: "/source".into(),
+            ..otto_core::session::Header::default()
+        });
+        manager
+            .bind_source_session("approval-1", source.clone())
+            .expect("bind source");
+        let worktree = startup_path.join(".otto/delivery-worktrees/delivery-1");
+        let binding = crate::delivery::ReceiptBinding {
+            approval_id: "approval-1".into(),
+            source_workspace: "/source".into(),
+            target_repository: startup_path.to_string_lossy().into_owned(),
+            target_common_dir: startup_path.join(".git").to_string_lossy().into_owned(),
+            worktree: worktree.to_string_lossy().into_owned(),
+            branch: "agent/test".into(),
+            base: "a".repeat(40),
+            handoff_digest: "b".repeat(64),
+        };
+        manager.receipts.prepare(binding).expect("receipt");
+        manager
+            .receipts
+            .begin_task("approval-1", "source-session", "target-session", &worktree)
+            .expect("task");
+        let task = manager
+            .receipts
+            .finish_task(
+                "approval-1",
+                crate::delivery::TaskState::Succeeded,
+                "target work is complete",
+                "",
+            )
+            .expect("terminal task");
+        manager
+            .service
+            .notify_source(&task)
+            .await
+            .expect("notify once");
+        manager
+            .service
+            .notify_source(&task)
+            .await
+            .expect("notify twice");
+        let messages = source.messages();
+        assert_eq!(messages.len(), 1);
+        let text = messages[0].text();
+        assert!(text.contains("Delivery task approval-1 completed"));
+        assert!(text.contains("target work is complete"));
+        assert!(!text.contains(&startup_path.to_string_lossy().to_string()));
+        assert!(!text.contains(&worktree.to_string_lossy().to_string()));
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn delivery_tool_factory_is_fresh_and_unadmitted_preflight_has_no_source_binding() {
+        use crate::runtime::builder::ParentToolFactory;
+
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let startup_host = dummy_host(&startup_path, sessions.path());
+        let shared = Arc::clone(&startup_host.builder.shared);
+        let workspaces = Arc::new(Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host,
+            roots: Vec::new(),
+            config_path: PathBuf::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        });
+        let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+        let manager = Arc::new(
+            DeliveryManager::open(
+                &home.path().to_string_lossy(),
+                &shared,
+                runtime,
+                CancellationToken::new(),
+            )
+            .expect("manager"),
+        );
+        manager.attach_workspaces(&workspaces);
+        let factory = DeliveryToolFactory::new(Arc::clone(&manager));
+        let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
+            id: "source-session".into(),
+            workspace: "/source".into(),
+            ..otto_core::session::Header::default()
+        });
+        let context = crate::runtime::builder::ParentToolContext {
+            workspace: "/source".into(),
+            session_id: "source-session".into(),
+            source_session: source,
+        };
+        let first = factory.tools(&context).expect("first tools");
+        let second = factory.tools(&context).expect("second tools");
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].definition().name, crate::delivery::TOOL_NAME);
+        assert_eq!(second[0].definition().name, crate::delivery::TOOL_NAME);
+
+        let outside = tempfile::tempdir().expect("outside");
+        let arguments = crate::tool::testutil::raw(&format!(
+            r#"{{"target":"{}","objective":"ship"}}"#,
+            outside.path().to_string_lossy()
+        ));
+        let error = match first[0]
+            .approval_spec_async(&arguments, &CancellationToken::new())
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("unadmitted target must be rejected"),
+        };
+        assert!(error.content.contains("not an admitted workspace"));
+        assert!(manager.service.source_sessions.lock().unwrap().is_empty());
+        assert!(workspaces.loaded.lock().await.is_empty());
+        manager.shutdown().await;
+    }
+
+    fn approval_for_delivery(
+        id: &str,
+        spec: &crate::tool::ApprovalSpec,
+    ) -> crate::approval::Request {
+        crate::approval::Request {
+            options: Vec::new(),
+            schema_version: 1,
+            id: id.into(),
+            revision: 1,
+            kind: crate::approval::Kind::Authorization,
+            scope: crate::approval::Scope {
+                workspace: "/source".into(),
+                session_id: "source-session".into(),
+                task_id: String::new(),
+                run_id: String::new(),
+            },
+            subject: crate::approval::Subject {
+                tool_call_id: "delivery-call".into(),
+                source: "delivery".into(),
+                id: "op_delivery".into(),
+                version: spec.version.clone(),
+                details: spec.details.clone(),
+            },
+            title: spec.title.clone(),
+            reason: spec.reason.clone(),
+            persistent: false,
+            blocking: true,
+            created_at: 1,
+            expires_at: Some(2),
+            state: crate::approval::State::Approved,
+            decision: None,
+            application: crate::approval::ApplicationState::Applying,
+            application_error: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_factory_complete_controlled_flow_persists_status_notifies_and_closes() {
+        use crate::runtime::builder::ParentToolFactory;
+
+        struct GitReplies(Mutex<Vec<String>>);
+        #[async_trait]
+        impl crate::sandbox::CommandExecutor for GitReplies {
+            async fn execute(
+                &self,
+                _request: crate::sandbox::Request,
+                mut streams: crate::sandbox::Streams<'_>,
+                _cancel: &CancellationToken,
+            ) -> (
+                crate::sandbox::ExitStatus,
+                Result<(), crate::sandbox::Error>,
+            ) {
+                let output = self.0.lock().unwrap().remove(0);
+                let _ = std::io::Write::write_all(&mut streams.stdout, output.as_bytes());
+                (crate::sandbox::ExitStatus::default(), Ok(()))
+            }
+        }
+
+        struct ReadyRun {
+            prompt: Arc<Mutex<Option<String>>>,
+            closed: Arc<std::sync::atomic::AtomicBool>,
+            worktree: String,
+        }
+        #[async_trait]
+        impl DeliveryRun for ReadyRun {
+            fn target_session(&self) -> String {
+                "target-session".into()
+            }
+            fn worktree(&self) -> String {
+                self.worktree.clone()
+            }
+            async fn run_frozen(
+                &self,
+                prompt: &str,
+                _cancel: &CancellationToken,
+            ) -> Result<String, String> {
+                *self.prompt.lock().unwrap() = Some(prompt.into());
+                Ok("completed controlled target work".into())
+            }
+            async fn close(self: Box<Self>) {
+                self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let home = tempfile::tempdir().expect("home");
+        let target = tempfile::tempdir().expect("target");
+        let target_path = canonical_directory(target.path()).expect("canonical target");
+        let git_dir = target_path.join(".git");
+        std::fs::create_dir(&git_dir).expect("git dir");
+        let target_text = format!("{}\n", target_path.display());
+        let git_text = format!("{}\n", git_dir.display());
+        let head = format!("{}\n", "a".repeat(40));
+        let replies = Arc::new(GitReplies(Mutex::new(vec![
+            target_text.clone(),
+            git_text.clone(),
+            git_text.clone(),
+            head.clone(),
+            target_text,
+            git_text.clone(),
+            git_text,
+            head,
+        ])));
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+        let mut builder = crate::cli::testutil::builder(&target_path, home.path());
+        builder.command_executor = Some(replies as Arc<dyn crate::sandbox::CommandExecutor>);
+        builder.sandbox_environment = Some(Vec::new());
+        let host = Arc::new(WorkspaceHost {
+            builder: Arc::new(builder),
+            workflows: None,
+            delivery_setup: None,
+            reloader: None,
+        });
+        let workspaces = Arc::new(Workspaces {
+            startup: target_path.to_string_lossy().into_owned(),
+            startup_host: Arc::clone(&host),
+            roots: Vec::new(),
+            config_path: shared.config_path.clone(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::from([(
+                target_path.to_string_lossy().into_owned(),
+                host,
+            )])),
+        });
+        let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+        let manager = Arc::new(
+            DeliveryManager::open(
+                &home.path().to_string_lossy(),
+                &shared,
+                runtime,
+                CancellationToken::new(),
+            )
+            .expect("manager"),
+        );
+        manager.attach_workspaces(&workspaces);
+        let factory = DeliveryToolFactory::new(Arc::clone(&manager));
+        let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
+            id: "source-session".into(),
+            workspace: "/source".into(),
+            ..otto_core::session::Header::default()
+        });
+        let context = crate::runtime::builder::ParentToolContext {
+            workspace: "/source".into(),
+            session_id: "source-session".into(),
+            source_session: source.clone(),
+        };
+        let tool = factory
+            .tools(&context)
+            .expect("tool")
+            .pop()
+            .expect("delivery tool");
+        let arguments = crate::tool::testutil::raw(&format!(
+            r#"{{"target":"{}","objective":"ship frozen","source_refs":["design"]}}"#,
+            target_path.to_string_lossy()
+        ));
+        let spec = tool
+            .approval_spec_async(&arguments, &CancellationToken::new())
+            .await
+            .expect("preflight")
+            .expect("spec");
+        let approval = approval_for_delivery("approval-1", &spec);
+        let worktree = target_path.join(".otto/delivery-worktrees").join(
+            serde_json::from_str::<serde_json::Value>(&spec.details).unwrap()["worktree"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap(),
+        );
+        let prompt = Arc::new(Mutex::new(None));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        manager
+            .service
+            .inject_ready_run(
+                "approval-1",
+                Box::new(ReadyRun {
+                    prompt: Arc::clone(&prompt),
+                    closed: Arc::clone(&closed),
+                    worktree: worktree.to_string_lossy().into_owned(),
+                }),
+            )
+            .expect("inject ready run");
+        tool.apply_approval(&arguments, &CancellationToken::new(), &approval)
+            .await
+            .expect("apply approval");
+        let operation_id = serde_json::from_str(r#""op_delivery""#).unwrap();
+        let result = tool
+            .execute_approved(
+                otto_core::tool::ToolCall {
+                    tool_call_id: "call",
+                    operation_id: &operation_id,
+                    name: crate::delivery::TOOL_NAME,
+                    arguments: &arguments,
+                    attempt: 1,
+                },
+                &CancellationToken::new(),
+                &approval,
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            prompt.lock().unwrap().as_deref(),
+            Some(
+                "Delivery objective:\nship frozen\n\nFrozen source handoff:\n\n## source-ref-1\ndesign"
+            )
+        );
+        assert!(closed.load(std::sync::atomic::Ordering::SeqCst));
+        let status = manager
+            .status("source-session", "approval-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.state, crate::delivery::TaskState::Succeeded);
+        assert_eq!(status.result, "completed controlled target work");
+        let message = source.messages().pop().expect("source notice").text();
+        assert!(message.contains("completed controlled target work"));
+        assert!(!message.contains(&target_path.to_string_lossy().to_string()));
+        assert!(!message.contains(&worktree.to_string_lossy().to_string()));
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn delivery_factory_preflight_and_apply_bind_source_before_effect_capability() {
+        use crate::runtime::builder::ParentToolFactory;
+
+        struct GitReplies(Mutex<Vec<String>>);
+        #[async_trait]
+        impl crate::sandbox::CommandExecutor for GitReplies {
+            async fn execute(
+                &self,
+                _request: crate::sandbox::Request,
+                streams: crate::sandbox::Streams<'_>,
+                _cancel: &CancellationToken,
+            ) -> (
+                crate::sandbox::ExitStatus,
+                Result<(), crate::sandbox::Error>,
+            ) {
+                let output = self.0.lock().unwrap().remove(0);
+                let _ = streams.stdout.write_all(output.as_bytes());
+                (crate::sandbox::ExitStatus::default(), Ok(()))
+            }
+        }
+
+        let home = tempfile::tempdir().expect("home");
+        let target = tempfile::tempdir().expect("target");
+        let target_path = canonical_directory(target.path()).expect("canonical target");
+        let git_dir = target_path.join(".git");
+        std::fs::create_dir(&git_dir).expect("git directory");
+        let target_text = format!("{}\n", target_path.display());
+        let git_text = format!("{}\n", git_dir.display());
+        let head = format!("{}\n", "a".repeat(40));
+        let replies = Arc::new(GitReplies(Mutex::new(vec![
+            target_text.clone(),
+            git_text.clone(),
+            git_text.clone(),
+            head.clone(),
+            target_text,
+            git_text.clone(),
+            git_text,
+            head,
+        ])));
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+        let mut builder = crate::cli::testutil::builder(&target_path, home.path());
+        builder.command_executor = Some(replies as Arc<dyn crate::sandbox::CommandExecutor>);
+        builder.sandbox_environment = Some(Vec::new());
+        let host = Arc::new(WorkspaceHost {
+            builder: Arc::new(builder),
+            workflows: None,
+            delivery_setup: None,
+            reloader: None,
+        });
+        let workspaces = Arc::new(Workspaces {
+            startup: target_path.to_string_lossy().into_owned(),
+            startup_host: Arc::clone(&host),
+            roots: Vec::new(),
+            config_path: shared.config_path.clone(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::from([(
+                target_path.to_string_lossy().into_owned(),
+                host,
+            )])),
+        });
+        let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+        let manager = Arc::new(
+            DeliveryManager::open(
+                &home.path().to_string_lossy(),
+                &shared,
+                runtime,
+                CancellationToken::new(),
+            )
+            .expect("manager"),
+        );
+        manager.attach_workspaces(&workspaces);
+        let factory = DeliveryToolFactory::new(Arc::clone(&manager));
+        let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
+            id: "source-session".into(),
+            workspace: "/source".into(),
+            ..otto_core::session::Header::default()
+        });
+        let context = crate::runtime::builder::ParentToolContext {
+            workspace: "/source".into(),
+            session_id: "source-session".into(),
+            source_session: source,
+        };
+        let tool = factory
+            .tools(&context)
+            .expect("tool")
+            .pop()
+            .expect("delivery tool");
+        let arguments = crate::tool::testutil::raw(&format!(
+            r#"{{"target":"{}","objective":"ship fixture"}}"#,
+            target_path.to_string_lossy()
+        ));
+        let spec = tool
+            .approval_spec_async(&arguments, &CancellationToken::new())
+            .await
+            .expect("preflight")
+            .expect("approval spec");
+        let approval = approval_for_delivery("approval-1", &spec);
+        let error = tool
+            .apply_approval(&arguments, &CancellationToken::new(), &approval)
+            .await
+            .expect_err("no elevated effect capability in fixture");
+        assert!(error.contains("constrained worktree setup capability"));
+        assert!(
+            manager
+                .service
+                .source_sessions
+                .lock()
+                .unwrap()
+                .contains_key("approval-1")
+        );
+        assert!(
+            manager
+                .receipts
+                .get("approval-1")
+                .expect("receipt read")
+                .is_some()
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn delivery_manager_owns_private_receipts_status_and_shutdown() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let startup_host = dummy_host(&startup_path, sessions.path());
+        let shared = Arc::clone(&startup_host.builder.shared);
+        let workspaces = Arc::new(Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host,
+            roots: Vec::new(),
+            config_path: PathBuf::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        });
+        let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
+        let manager = DeliveryManager::open(
+            &home.path().to_string_lossy(),
+            &shared,
+            runtime,
+            CancellationToken::new(),
+        )
+        .expect("manager");
+        manager.attach_workspaces(&workspaces);
+        let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
+            id: "source-session".into(),
+            workspace: "/source".into(),
+            ..otto_core::session::Header::default()
+        });
+        manager
+            .bind_source_session("approval-1", source)
+            .expect("bind source");
+        assert!(
+            manager
+                .service
+                .source_sessions
+                .lock()
+                .unwrap()
+                .contains_key("approval-1")
+        );
+        let binding = crate::delivery::ReceiptBinding {
+            approval_id: "approval-1".into(),
+            source_workspace: "/source".into(),
+            target_repository: startup_path.to_string_lossy().into_owned(),
+            target_common_dir: startup_path.join(".git").to_string_lossy().into_owned(),
+            worktree: startup_path
+                .join(".otto/delivery-worktrees/delivery-1")
+                .to_string_lossy()
+                .into_owned(),
+            branch: "agent/test".into(),
+            base: "a".repeat(40),
+            handoff_digest: "b".repeat(64),
+        };
+        manager.receipts.prepare(binding).expect("receipt");
+        manager
+            .receipts
+            .begin_task(
+                "approval-1",
+                "source-session",
+                "target-session",
+                &startup_path.join(".otto/delivery-worktrees/delivery-1"),
+            )
+            .expect("task");
+        assert_eq!(
+            manager
+                .status("source-session", "approval-1")
+                .expect("status")
+                .expect("task")
+                .state,
+            crate::delivery::TaskState::Running
+        );
+        assert!(home.path().join(".otto/delivery-receipts.db").is_file());
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_delivery_factory_is_installed_exactly_once_for_later_parent_runners() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let home = tempfile::tempdir().expect("home");
+        let host = dummy_host(&startup_path, sessions.path());
+        let shared = Arc::clone(&host.builder.shared);
+
+        assert!(
+            !shared.parent_tool_factory.installed(),
+            "no frontend tool is present before serve installs one"
+        );
+
+        // Serve's order: the manager opens, the slot is installed, and every
+        // later parent runner -- the workflow controller included -- composes
+        // the same tools.
+        let manager = Arc::new(
+            DeliveryManager::open(
+                &home.path().to_string_lossy(),
+                &shared,
+                crate::cli::testutil::initial_runtime(&host.builder),
+                CancellationToken::new(),
+            )
+            .expect("manager"),
+        );
+        assert!(
+            shared
+                .parent_tool_factory
+                .install(Arc::new(DeliveryToolFactory::new(Arc::clone(&manager))))
+        );
+        assert!(shared.parent_tool_factory.installed());
+        assert!(
+            !shared
+                .parent_tool_factory
+                .install(Arc::new(DeliveryToolFactory::new(Arc::clone(&manager)))),
+            "a second installation cannot add a second frontend"
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_broker_refuses_unadmitted_target_before_loading_a_host() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let outside = tempfile::tempdir().expect("outside");
+        let startup_host = dummy_host(&startup_path, sessions.path());
+        let shared = Arc::clone(&startup_host.builder.shared);
+        let workspaces = Arc::new(Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host,
+            roots: Vec::new(),
+            config_path: PathBuf::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        });
+        let broker = DeliveryBroker::new(
+            &shared,
+            crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder),
+            CancellationToken::new(),
+        );
+        broker.attach_workspaces(&workspaces);
+
+        let error = crate::delivery::Preflight::preview(
+            &broker,
+            "/source",
+            &crate::delivery::Request {
+                target: outside.path().to_string_lossy().into_owned(),
+                objective: "ship".into(),
+                branch: None,
+                source_refs: Vec::new(),
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "delivery target is not an admitted workspace");
+        assert!(workspaces.loaded.lock().await.is_empty());
     }
 
     #[test]
@@ -1298,13 +2788,14 @@ mod tests {
         let startup_host = dummy_host(startup, sessions);
         let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
         ServeFactory {
-            workspaces: Workspaces {
+            workspaces: Arc::new(Workspaces {
                 startup: startup.to_string_lossy().into_owned(),
                 startup_host,
                 roots,
                 config_path,
                 loaded: tokio::sync::Mutex::new(BTreeMap::new()),
-            },
+            }),
+            delivery: None,
             runtime,
             cancel: CancellationToken::new(),
         }
@@ -1520,7 +3011,7 @@ mod tests {
         let other_sessions = tempfile::tempdir().expect("other sessions");
         let shared = crate::cli::testutil::shared_with_offline_sandbox(other_sessions.path());
         std::fs::write(&shared.config_path, "[sandbox]\ndriver='off'\n").expect("config");
-        let (mut builder, reloader) = super::super::run::load_workspace(
+        let (mut builder, sandbox) = super::super::run::load_workspace(
             shared,
             &other_path,
             &CancellationToken::new(),
@@ -1540,8 +3031,15 @@ mod tests {
         );
         let other_host = Arc::new(WorkspaceHost {
             builder: Arc::new(builder),
-            reloader,
             workflows: None,
+            delivery_setup: match (sandbox.approval_executor, sandbox.approval_environment) {
+                (Some(executor), Some(environment)) => Some(DeliverySetupCapability {
+                    executor,
+                    environment,
+                }),
+                _ => None,
+            },
+            reloader: sandbox.reloader,
         });
 
         let mut loaded = BTreeMap::new();
@@ -1551,13 +3049,14 @@ mod tests {
         );
         let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
         let factory = ServeFactory {
-            workspaces: Workspaces {
+            workspaces: Arc::new(Workspaces {
                 startup: startup_path.to_string_lossy().into_owned(),
                 startup_host,
                 roots: Vec::new(),
                 config_path: PathBuf::new(),
                 loaded: tokio::sync::Mutex::new(loaded),
-            },
+            }),
+            delivery: None,
             runtime,
             cancel: CancellationToken::new(),
         };
@@ -1590,7 +3089,7 @@ mod tests {
         let startup_host = dummy_host(startup_path, sessions);
         let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
         let factory = ServeFactory {
-            workspaces: Workspaces {
+            workspaces: Arc::new(Workspaces {
                 startup: startup_path.to_string_lossy().into_owned(),
                 startup_host: Arc::clone(&startup_host),
                 roots: Vec::new(),
@@ -1599,7 +3098,8 @@ mod tests {
                     startup_path.to_string_lossy().into_owned(),
                     Arc::clone(&startup_host),
                 )])),
-            },
+            }),
+            delivery: None,
             runtime,
             cancel: CancellationToken::new(),
         };
@@ -1745,16 +3245,17 @@ mod tests {
 
         // The restart: a fresh registry seeded with only the startup
         // workspace, as `run` seeds it before reloading the persisted list.
-        let restarted = Workspaces {
+        let restarted = Arc::new(Workspaces {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: vec![roots_path],
             config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
-        };
+        });
         load_persisted_workspaces(&restarted, &shared, &runtime, &cancel, &mut stderr).await;
         let factory = ServeFactory {
             workspaces: restarted,
+            delivery: None,
             runtime,
             cancel,
         };

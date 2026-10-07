@@ -378,16 +378,51 @@ async fn load_persisted_workspaces(
 /// references: installing it into a parent-tool slot cannot retain a cycle
 /// through loaded hosts or builders. It returns immutable previews only, never
 /// a target workspace handle or generic command executor.
-#[allow(dead_code)] // The broker is not installed until delivery task wiring is complete.
+///
+/// The workspace registry is attached after construction. The parent-tool slot
+/// must be installed before the workflow controller is built, while
+/// `Workspaces` owns that controller through its host, so the weak registry
+/// reference cannot be a constructor argument.
 #[derive(Clone)]
 struct DeliveryBroker {
-    workspaces: Weak<Workspaces>,
+    workspaces: Arc<std::sync::RwLock<Option<Weak<Workspaces>>>>,
     shared: Weak<crate::runtime::builder::Shared>,
     runtime: Runtime,
     cancel: CancellationToken,
 }
 
 impl DeliveryBroker {
+    fn new(
+        shared: &Arc<crate::runtime::builder::Shared>,
+        runtime: Runtime,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            workspaces: Arc::new(std::sync::RwLock::new(None)),
+            shared: Arc::downgrade(shared),
+            runtime,
+            cancel,
+        }
+    }
+
+    /// Publishes the workspace registry once it exists. This happens before
+    /// the server accepts a request, so no delivery can observe the gap.
+    fn attach_workspaces(&self, workspaces: &Arc<Workspaces>) {
+        *self
+            .workspaces
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(workspaces));
+    }
+
+    fn workspaces(&self) -> Result<Arc<Workspaces>, String> {
+        self.workspaces
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| "delivery broker is no longer available".to_string())
+    }
+
     async fn target_host(
         &self,
         requested: &str,
@@ -403,10 +438,7 @@ impl DeliveryBroker {
         if cancel.is_cancelled() || self.cancel.is_cancelled() {
             return Err("delivery target preflight cancelled".into());
         }
-        let workspaces = self
-            .workspaces
-            .upgrade()
-            .ok_or("delivery broker is no longer available")?;
+        let workspaces = self.workspaces()?;
         let shared = self
             .shared
             .upgrade()
@@ -887,26 +919,32 @@ struct DeliveryStatus {
 struct DeliveryManager {
     service: Arc<DeliveryService>,
     receipts: Arc<crate::delivery::ReceiptStore>,
+    /// Retained for late workspace attachment; the service owns a clone.
+    broker: DeliveryBroker,
 }
 
 impl DeliveryManager {
     fn open(
         home: &str,
-        workspaces: &Arc<Workspaces>,
         shared: &Arc<crate::runtime::builder::Shared>,
         runtime: Runtime,
         cancel: CancellationToken,
     ) -> Result<Self, String> {
         let path = Path::new(home).join(".otto/delivery-receipts.db");
         let receipts = Arc::new(crate::delivery::ReceiptStore::open(&path)?);
-        let broker = DeliveryBroker {
-            workspaces: Arc::downgrade(workspaces),
-            shared: Arc::downgrade(shared),
-            runtime,
-            cancel,
-        };
-        let service = Arc::new(DeliveryService::new(broker, Arc::clone(&receipts))?);
-        Ok(Self { service, receipts })
+        let broker = DeliveryBroker::new(shared, runtime, cancel);
+        let service = Arc::new(DeliveryService::new(broker.clone(), Arc::clone(&receipts))?);
+        Ok(Self {
+            service,
+            receipts,
+            broker,
+        })
+    }
+
+    /// Publishes the workspace registry the acceptance broker targets. Called
+    /// once the registry exists and before the server accepts a request.
+    fn attach_workspaces(&self, workspaces: &Arc<Workspaces>) {
+        self.broker.attach_workspaces(workspaces);
     }
 
     fn bind_source_session(
@@ -986,12 +1024,9 @@ struct DeliveryToolFactory {
 
 impl DeliveryToolFactory {
     fn new(manager: Arc<DeliveryManager>) -> Self {
-        let preflight: Arc<dyn crate::delivery::Preflight> = Arc::new(DeliveryBroker {
-            workspaces: manager.service.broker.workspaces.clone(),
-            shared: manager.service.broker.shared.clone(),
-            runtime: manager.service.broker.runtime.clone(),
-            cancel: manager.service.broker.cancel.clone(),
-        });
+        // The broker is shared with the manager, so the late
+        // `attach_workspaces` call is visible to this preflight.
+        let preflight: Arc<dyn crate::delivery::Preflight> = Arc::new(manager.broker.clone());
         Self { manager, preflight }
     }
 }
@@ -1439,6 +1474,28 @@ pub async fn run(
     }
 
     let builder = Arc::new(builder);
+    // The delivery manager opens before the workflow controller is built, and
+    // the parent-tool slot is installed before that, so every parent runner
+    // this process builds -- workflow steps included -- composes the same
+    // tools. `Workspaces` is attached once it exists: it owns the workflow
+    // controller through its host, so the broker cannot take it as an
+    // argument here.
+    let delivery = match DeliveryManager::open(
+        &builder.shared.home,
+        &builder.shared,
+        runtime.clone(),
+        serve_cancel.clone(),
+    ) {
+        Ok(manager) => Arc::new(manager),
+        Err(error) => {
+            let _ = control.close().await;
+            return fail(stderr, &builder.redact_error(&error, Some(&runtime)));
+        }
+    };
+    let _ = builder
+        .shared
+        .parent_tool_factory
+        .install(Arc::new(DeliveryToolFactory::new(Arc::clone(&delivery))));
     let workflows =
         match super::workflow::build_controller(Arc::clone(&builder), &runtime, stderr).await {
             Ok(controller) => Some(controller),
@@ -1481,19 +1538,7 @@ pub async fn run(
         stderr,
     )
     .await;
-    let delivery = match DeliveryManager::open(
-        &builder.shared.home,
-        &workspaces,
-        &builder.shared,
-        runtime.clone(),
-        serve_cancel.clone(),
-    ) {
-        Ok(manager) => Arc::new(manager),
-        Err(error) => {
-            let _ = control.close().await;
-            return fail(stderr, &builder.redact_error(&error, Some(&runtime)));
-        }
-    };
+    delivery.attach_workspaces(&workspaces);
     let factory: Arc<dyn Factory> = Arc::new(ServeFactory {
         workspaces,
         delivery: Some(Arc::clone(&delivery)),
@@ -1932,13 +1977,13 @@ mod tests {
         let manager = Arc::new(
             DeliveryManager::open(
                 &home.path().to_string_lossy(),
-                &workspaces,
                 &shared,
                 runtime,
                 CancellationToken::new(),
             )
             .expect("manager"),
         );
+        manager.attach_workspaces(&workspaces);
         let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
             id: "source-session".into(),
             workspace: "/source".into(),
@@ -2059,13 +2104,13 @@ mod tests {
         let manager = Arc::new(
             DeliveryManager::open(
                 &home.path().to_string_lossy(),
-                &workspaces,
                 &shared,
                 runtime,
                 CancellationToken::new(),
             )
             .expect("manager"),
         );
+        manager.attach_workspaces(&workspaces);
         let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
             id: "source-session".into(),
             workspace: "/source".into(),
@@ -2140,13 +2185,13 @@ mod tests {
         let manager = Arc::new(
             DeliveryManager::open(
                 &home.path().to_string_lossy(),
-                &workspaces,
                 &shared,
                 runtime,
                 CancellationToken::new(),
             )
             .expect("manager"),
         );
+        manager.attach_workspaces(&workspaces);
         let factory = DeliveryToolFactory::new(Arc::clone(&manager));
         let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
             id: "source-session".into(),
@@ -2309,13 +2354,13 @@ mod tests {
         let manager = Arc::new(
             DeliveryManager::open(
                 &home.path().to_string_lossy(),
-                &workspaces,
                 &shared,
                 runtime,
                 CancellationToken::new(),
             )
             .expect("manager"),
         );
+        manager.attach_workspaces(&workspaces);
         let factory = DeliveryToolFactory::new(Arc::clone(&manager));
         let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
             id: "source-session".into(),
@@ -2411,7 +2456,7 @@ mod tests {
             async fn execute(
                 &self,
                 _request: crate::sandbox::Request,
-                mut streams: crate::sandbox::Streams<'_>,
+                streams: crate::sandbox::Streams<'_>,
                 _cancel: &CancellationToken,
             ) -> (
                 crate::sandbox::ExitStatus,
@@ -2465,13 +2510,13 @@ mod tests {
         let manager = Arc::new(
             DeliveryManager::open(
                 &home.path().to_string_lossy(),
-                &workspaces,
                 &shared,
                 runtime,
                 CancellationToken::new(),
             )
             .expect("manager"),
         );
+        manager.attach_workspaces(&workspaces);
         let factory = DeliveryToolFactory::new(Arc::clone(&manager));
         let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
             id: "source-session".into(),
@@ -2539,12 +2584,12 @@ mod tests {
         let runtime = crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder);
         let manager = DeliveryManager::open(
             &home.path().to_string_lossy(),
-            &workspaces,
             &shared,
             runtime,
             CancellationToken::new(),
         )
         .expect("manager");
+        manager.attach_workspaces(&workspaces);
         let source = crate::runtime::builder::SharedSession::memory(otto_core::session::Header {
             id: "source-session".into(),
             workspace: "/source".into(),
@@ -2597,6 +2642,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_delivery_factory_is_installed_exactly_once_for_later_parent_runners() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let home = tempfile::tempdir().expect("home");
+        let host = dummy_host(&startup_path, sessions.path());
+        let shared = Arc::clone(&host.builder.shared);
+
+        assert!(
+            !shared.parent_tool_factory.installed(),
+            "no frontend tool is present before serve installs one"
+        );
+
+        // Serve's order: the manager opens, the slot is installed, and every
+        // later parent runner -- the workflow controller included -- composes
+        // the same tools.
+        let manager = Arc::new(
+            DeliveryManager::open(
+                &home.path().to_string_lossy(),
+                &shared,
+                crate::cli::testutil::initial_runtime(&host.builder),
+                CancellationToken::new(),
+            )
+            .expect("manager"),
+        );
+        assert!(
+            shared
+                .parent_tool_factory
+                .install(Arc::new(DeliveryToolFactory::new(Arc::clone(&manager))))
+        );
+        assert!(shared.parent_tool_factory.installed());
+        assert!(
+            !shared
+                .parent_tool_factory
+                .install(Arc::new(DeliveryToolFactory::new(Arc::clone(&manager)))),
+            "a second installation cannot add a second frontend"
+        );
+    }
+
+    #[tokio::test]
     async fn delivery_broker_refuses_unadmitted_target_before_loading_a_host() {
         let startup = tempfile::tempdir().expect("startup");
         let startup_path = canonical_directory(startup.path()).expect("canonical");
@@ -2611,12 +2696,12 @@ mod tests {
             config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         });
-        let broker = DeliveryBroker {
-            workspaces: Arc::downgrade(&workspaces),
-            shared: Arc::downgrade(&shared),
-            runtime: crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder),
-            cancel: CancellationToken::new(),
-        };
+        let broker = DeliveryBroker::new(
+            &shared,
+            crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder),
+            CancellationToken::new(),
+        );
+        broker.attach_workspaces(&workspaces);
 
         let error = crate::delivery::Preflight::preview(
             &broker,

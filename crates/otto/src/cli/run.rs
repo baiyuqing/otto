@@ -2326,6 +2326,87 @@ driver = "off"
         );
     }
 
+    /// Pins every startup warning, in emission order, with the exact bytes.
+    #[tokio::test]
+    async fn startup_warnings_keep_their_order_and_text() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = directory.path().join("home");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(home.join(".config/otto")).expect("config dir");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        for store in ["usage.db", "tasks.db", "schedule.db"] {
+            std::fs::create_dir_all(home.join(".otto").join(store)).expect("blocked store");
+        }
+        std::fs::create_dir_all(workspace.join(".otto")).expect("project dir");
+        std::fs::write(
+            workspace.join(".otto/config.toml"),
+            "[sandbox]\ndriver = \"seatbelt\"\n",
+        )
+        .expect("write project config");
+        let config = home.join(".config/otto/config.toml");
+        std::fs::write(
+            &config,
+            r#"
+default_profile = "alpha"
+
+[profiles.alpha]
+provider = "openai-compatible"
+base_url = "https://example.com/v1"
+model = "gpt-test"
+api_key_env = "ALPHA_KEY"
+
+[memory]
+enabled = false
+
+[mcp]
+enabled = false
+
+[sandbox]
+driver = "off"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "acp".to_string(),
+            "--cwd".to_string(),
+            workspace.to_string_lossy().into_owned(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            &args,
+            Box::new(Cursor::new(Vec::new())),
+            &mut stdout,
+            &mut stderr,
+            entries(&[
+                &format!("HOME={}", home.to_string_lossy()),
+                "ALPHA_KEY=sk-alpha",
+            ]),
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+            &crate::cli::terminate::Terminate::new(),
+        )
+        .await;
+
+        let stderr = String::from_utf8_lossy(&stderr).replace(
+            &*workspace
+                .canonicalize()
+                .expect("canonical")
+                .to_string_lossy(),
+            "<workspace>",
+        );
+        assert_eq!(code, 0, "stderr: {stderr}");
+        assert_eq!(
+            stderr,
+            "warning: sandbox in <workspace>/.otto/config.toml: field is restricted to user or managed configuration\n\
+             warning: usage store unavailable, continuing without usage history\n\
+             warning: task history store unavailable, continuing without task recording\n\
+             warning: schedule store unavailable, continuing without scheduled deliveries\n\
+             warning: sandbox is off; bash runs unsandboxed as your user\n"
+        );
+    }
+
     #[tokio::test]
     async fn an_unsafe_command_line_exits_two() {
         let mut stdout = Vec::new();

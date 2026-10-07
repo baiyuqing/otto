@@ -24,7 +24,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `discarded`), so a still-queued item can be withdrawn with `/inputs withdraw
   <id>` or `Ctrl+U` for the newest one. Both work locally and with `--attach`,
   and mirror the existing HTTP `GET`/`DELETE /v1/sessions/{id}/tasks/steer`
-  routes ([user manual](docs/user-manual.md#tui-behavior)).
+  routes ([user manual](docs/user-manual.md#tui-behavior),
+  [#404](https://github.com/baiyuqing/otto/pull/404)).
 
 ### Fixes
 
@@ -41,7 +42,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   and a notification that quotes the message, with the text put back in the
   composer when it was empty. The unreachable queued-input withdrawal wiring
   this replaces (`queue_user_message`/`withdraw_user_message` from the TUI) is
-  gone.
+  gone ([#404](https://github.com/baiyuqing/otto/pull/404)).
 
 ## 0.4.1 - 2026-10-07
 

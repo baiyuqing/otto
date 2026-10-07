@@ -251,6 +251,41 @@ impl JsonStore {
         }
         let settings = Self::settings_in(data, &request.scope).unwrap_or_default();
         let metadata = request.review.as_ref();
+        let transport = request.decision.as_ref().map(|d| d.transport.as_str());
+        let mut workspace_scope = request.scope.clone();
+        workspace_scope.session_id.clear();
+        if matches!(
+            transport,
+            Some("bounded-authority" | "approval-rule" | "never-policy" | "yolo-mode")
+        ) {
+            let policy = Self::context_in(data, &workspace_scope)
+                .map(|(_, p)| p)
+                .unwrap_or_else(|| {
+                    approval::digest(
+                        &serde_json::to_string(&otto_core::config::ApprovalConfig::default())
+                            .unwrap(),
+                    )
+                });
+            if metadata.is_none_or(|m| {
+                m.settings_revision != settings.revision || m.policy_digest != policy
+            }) {
+                return false;
+            }
+        }
+        if transport == Some("bounded-authority") {
+            return request.kind == approval::Kind::Authorization
+                && request.authority == approval::Authority::Bounded
+                && !request.persistent
+                && (settings.policy == ApprovalPolicy::Never
+                    || settings.reviewer != ApprovalReviewer::User);
+        }
+        if transport == Some("approval-rule") {
+            return metadata.is_some_and(|m| {
+                m.settings_revision == settings.revision
+                    && Self::context_in(data, &workspace_scope)
+                        .is_some_and(|(_, p)| p == m.policy_digest)
+            });
+        }
         if settings.policy == ApprovalPolicy::Never {
             return request.state == State::Rejected
                 && metadata.is_some_and(|m| m.settings_revision == settings.revision);
@@ -266,16 +301,6 @@ impl JsonStore {
         };
         if metadata.settings_revision != settings.revision {
             return false;
-        }
-        if request
-            .decision
-            .as_ref()
-            .is_some_and(|d| d.transport == "approval-rule")
-        {
-            let mut workspace_scope = request.scope.clone();
-            workspace_scope.session_id.clear();
-            return Self::context_in(data, &workspace_scope)
-                .is_some_and(|(_, p)| p == metadata.policy_digest);
         }
         review_owner
             && Self::context_in(data, &request.scope)
@@ -755,7 +780,7 @@ impl JsonStore {
                 && expected.decision.as_ref().is_some_and(|d| {
                     matches!(
                         d.transport.as_str(),
-                        "auto-review" | "approval-rule" | "yolo-mode"
+                        "auto-review" | "approval-rule" | "yolo-mode" | "bounded-authority"
                     )
                 });
             if (automatic || starting_auto)

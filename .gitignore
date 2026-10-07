@@ -26,6 +26,9 @@ target/
 !.env.sample
 !.env.template
 
+# Launcher configuration read by scripts/otto.sh; otto.env.example is tracked.
+otto.env
+
 # Local config that may embed secrets
 config.toml
 *.local.toml

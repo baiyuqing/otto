@@ -137,6 +137,9 @@ struct QueuedPrompt {
     text: String,
     channel: Option<Channel>,
     origin: Option<Origin>,
+    /// The input id of its saved copy in the session's turn queue; its user
+    /// message carries it.
+    input_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -275,8 +278,8 @@ impl PromptSlot {
     fn enqueue(
         &self,
         text: String,
-        channel: Option<Channel>,
-        origin: Option<Origin>,
+        (channel, origin): (Option<Channel>, Option<Origin>),
+        input_id: Option<String>,
     ) -> Result<bool, &'static str> {
         let mut state = self.state.lock().expect("prompt slot");
         if state.queue.len() >= ACP_QUEUE_LIMIT {
@@ -286,6 +289,7 @@ impl PromptSlot {
             text,
             channel,
             origin,
+            input_id,
         });
         let start_worker = !state.draining;
         state.draining = true;
@@ -327,6 +331,10 @@ impl PromptSlot {
                     () = changed => continue,
                 }
             };
+            let controller = connection.local_controller(&session_id);
+            if let Some(controller) = &controller {
+                controller.set_next_input_id(queued.input_id.clone());
+            }
             let reply = connection
                 .queued_prompt(
                     &session_id,
@@ -337,6 +345,14 @@ impl PromptSlot {
                     &token,
                 )
                 .await;
+            if let Some(controller) = &controller {
+                controller.set_next_input_id(None);
+                // The prompt ran: its saved copy is no longer waiting.
+                if let (Some(input_id), Some(journal)) = (&queued.input_id, controller.turn_queue())
+                {
+                    journal.forget(input_id);
+                }
+            }
             if let Some(notice) = queued_outcome_notice(&reply) {
                 connection.say(&session_id, &notice);
             }
@@ -486,6 +502,71 @@ impl Connection {
     }
 
     /// The prompt slot of a session this connection has opened.
+    /// The controller of a session this process runs itself.
+    fn local_controller(&self, id: &str) -> Option<Arc<Controller>> {
+        match &self.backend {
+            Backend::Local(local) => local
+                .session(id)
+                .map(|session| Arc::clone(&session.controller)),
+            Backend::Attach(_) => None,
+        }
+    }
+
+    /// Restores the `/queue` prompts saved before Otto stopped, after the
+    /// session's pending wake turn (the interrupted turn's recovery) has run:
+    /// they wait until the slot is free and either no notification is
+    /// pending or a wake turn has ended since. The first of them delivers
+    /// the restore notice.
+    fn restore_queued_prompts(self: &Arc<Self>, session_id: &str) {
+        let (Some(controller), Some(slot)) =
+            (self.local_controller(session_id), self.slot(session_id))
+        else {
+            return;
+        };
+        let prompts = controller.restorable_prompts();
+        if prompts.is_empty() {
+            return;
+        }
+        let connection = Arc::clone(self);
+        let session_id = session_id.to_string();
+        let stop = self.task_stop.clone();
+        tokio::spawn(async move {
+            let mut released = slot.released.subscribe();
+            let start = *released.borrow_and_update();
+            loop {
+                let idle = {
+                    let state = slot.state.lock().expect("prompt slot");
+                    state.active.is_none() && !state.draining && state.followups.is_empty()
+                };
+                let pending = controller
+                    .subagent_tasks()
+                    .is_some_and(|tasks| !tasks.notifications().is_empty());
+                if idle && (!pending || *released.borrow() != start) {
+                    break;
+                }
+                tokio::select! {
+                    () = stop.cancelled() => return,
+                    changed = released.changed() => if changed.is_err() { return },
+                    () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+                }
+            }
+            let mut start_worker = false;
+            for prompt in &prompts {
+                if let Ok(start) = slot.enqueue(
+                    prompt.text.clone(),
+                    (prompt.channel, prompt.origin.clone()),
+                    Some(prompt.input_id.clone()),
+                ) {
+                    start_worker |= start;
+                }
+            }
+            controller.announce_restored_prompts(&prompts);
+            if start_worker {
+                slot.drain_queue(connection, session_id).await;
+            }
+        });
+    }
+
     fn slot(&self, id: &str) -> Option<Arc<PromptSlot>> {
         match &self.backend {
             Backend::Local(local) => local.session(id).map(|session| Arc::clone(&session.prompt)),
@@ -545,6 +626,7 @@ impl Connection {
         for update in update::history_updates(&history) {
             self.update(&id, update);
         }
+        self.restore_queued_prompts(&id);
         if !plan.is_empty() {
             self.update(&id, update::plan_update(&plan));
         }
@@ -1687,6 +1769,13 @@ impl Dispatcher {
                     .and_then(Value::as_str);
                 if let Some(slot) = session_id.and_then(|id| self.connection.slot(id)) {
                     let dropped = slot.cancel();
+                    // Cancelled for good: a restart must not run them.
+                    if let Some(journal) = session_id
+                        .and_then(|id| self.connection.local_controller(id))
+                        .and_then(|controller| controller.turn_queue())
+                    {
+                        journal.clear();
+                    }
                     if dropped > 0 {
                         self.connection.say(
                             session_id.expect("slot requires session id"),
@@ -1946,26 +2035,55 @@ impl Dispatcher {
                 }
                 let prompt = prompt.to_string();
                 match &connection.backend {
-                    Backend::Local(_) => match slot.enqueue(prompt, channel, origin) {
-                        Ok(start_worker) => {
-                            connection.say(
+                    Backend::Local(_) => {
+                        // Saved before it is accepted, so a stop before it runs
+                        // does not lose it.
+                        let saved_id = input_id.clone().unwrap_or_else(|| {
+                            format!("queued:{}", crate::runtime::sidecar_mailbox::new_input_id())
+                        });
+                        let journal = connection
+                            .local_controller(&session_id)
+                            .and_then(|controller| controller.turn_queue());
+                        if let Some(journal) = &journal
+                            && let Err(message) =
+                                journal.save(&crate::app::turn_queue::QueuedPrompt {
+                                    input_id: saved_id.clone(),
+                                    turn_id: String::new(),
+                                    text: prompt.clone(),
+                                    channel,
+                                    origin: origin.clone(),
+                                    image_dropped: false,
+                                })
+                        {
+                            return connection.reply(id, Err(error(INTERNAL_ERROR, message)));
+                        }
+                        match slot.enqueue(prompt, (channel, origin), Some(saved_id.clone())) {
+                            Ok(start_worker) => {
+                                connection.say(
                                 &session_id,
                                 "Follow-up accepted; its answer will arrive as a later session update.",
                             );
-                            connection.reply(id, result(PromptResponse::new(StopReason::EndTurn)));
-                            if start_worker {
-                                let worker_slot = Arc::clone(&slot);
-                                let worker_connection = Arc::clone(&connection);
-                                let worker_session = session_id.clone();
-                                self.tasks.spawn(async move {
-                                    worker_slot
-                                        .drain_queue(worker_connection, worker_session)
-                                        .await;
-                                });
+                                connection
+                                    .reply(id, result(PromptResponse::new(StopReason::EndTurn)));
+                                if start_worker {
+                                    let worker_slot = Arc::clone(&slot);
+                                    let worker_connection = Arc::clone(&connection);
+                                    let worker_session = session_id.clone();
+                                    self.tasks.spawn(async move {
+                                        worker_slot
+                                            .drain_queue(worker_connection, worker_session)
+                                            .await;
+                                    });
+                                }
+                            }
+                            Err(message) => {
+                                if let Some(journal) = &journal {
+                                    journal.forget(&saved_id);
+                                }
+                                connection.reply(id, Err(error(INTERNAL_ERROR, message)))
                             }
                         }
-                        Err(message) => connection.reply(id, Err(error(INTERNAL_ERROR, message))),
-                    },
+                    }
                     Backend::Attach(_) => {
                         let Ok((followup_id, token)) = slot.begin_followup(&self.stop) else {
                             return connection.reply(

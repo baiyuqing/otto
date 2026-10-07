@@ -937,8 +937,9 @@ OTTO_UI=repl otto
   `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and the
   seconds since the turn started. The phase is `waiting for model`,
   `reasoning`, `responding`, `compacting`, or `running TOOL ARGS` (arguments
-  truncated to 60 characters). During a ChatGPT transport retry or an
-  OpenAI-compatible connection retry, it shows
+  truncated to 60 characters). During a provider transport retry — a ChatGPT
+  retry, or an OpenAI-compatible one whose reason is `connection failed` or
+  `connection interrupted` — it shows
   `retry A/M after REASON, waiting Ns`, with a live countdown, followed by
   `requesting` once the delay ends. `A/M` counts retries (1/3 through 3/3);
   the phase and turn elapsed times keep updating. Esc or Ctrl+C cancels the
@@ -4882,8 +4883,15 @@ Check the selected profile, `--base-url`, and endpoint path. Otto posts to
 
 ### `read chat completion stream: ...` or stream ended without `[DONE]`
 
-The provider or proxy is not delivering valid SSE chat-completions output.
-Confirm streaming is enabled and SSE is not buffered or rewritten.
+The provider or proxy did not deliver valid SSE chat-completions output. Otto
+retries a transport interruption — `connection reset by peer`, a connection
+closed before the message completed, a broken pipe, or a stalled read — three
+times, 1, 2 and 4 seconds apart, while no part of the response has arrived and
+the turn deadline allows it; the status line shows each retry. This message
+therefore means the interruption kept recurring, or it happened after part of
+the response had already been shown, which cannot be repeated. Check that
+streaming is enabled, that SSE is not buffered or rewritten, and that a proxy
+or load balancer is not dropping long-lived connections.
 
 ### `warning: bash is unavailable because the configured sandbox could not be established ...`
 

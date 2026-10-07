@@ -657,8 +657,8 @@ Key points:
 
   A Responses stream accepts error classification in `response.error`, a
   nested event `error`, or top-level fields, and falls back to the SSE `event:`
-  name when the JSON payload omits `type`. Individual SSE lines are limited to
-  64 KiB and one event payload to 1 MiB.
+  name when the JSON payload omits `type`. One event payload is limited to
+  1 MiB; an SSE line may hold one whole event at that limit.
 
   OpenAI-compatible requests are not automatically retried after dispatch.
   When the connection to an OpenAI-compatible endpoint cannot be
@@ -1484,8 +1484,9 @@ Notes:
   task is interrupted and later resumed with `agent` `resume`, they are
   delivered before the resume prompt, and the recovery notice counts them.
 - Each turn writes an `otto.turn` start entry before anything else and an end
-  entry (`completed`, `failed`, or `cancelled`) when it returns. Neither
-  reaches the model.
+  entry (`completed`, `failed`, or `cancelled`) when it returns. The end entry
+  of a failed turn also records the error that ended it, with known secrets
+  redacted and truncated to 4 KiB. Neither entry reaches the model.
 - When a session is reopened after its Otto process stopped in the middle of a
   turn (killed, out of memory, crashed, or the host lost power), Otto
   recovers it:

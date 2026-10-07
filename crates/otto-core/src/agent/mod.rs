@@ -597,17 +597,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         result: &Result<(), AgentError>,
         control: &dyn OperationControl,
     ) {
-        let outcome = match result {
-            Ok(()) => TurnOutcome::Completed,
-            Err(_) if control.stop_reason().is_some() => TurnOutcome::Cancelled,
-            Err(_) => TurnOutcome::Failed,
+        let record = match result {
+            Ok(()) => TurnRecord::ended(turn_id, TurnOutcome::Completed),
+            Err(_) if control.stop_reason().is_some() => {
+                TurnRecord::ended(turn_id, TurnOutcome::Cancelled)
+            }
+            Err(error) => {
+                TurnRecord::failed(turn_id, &self.redactor.redact_string(&error.to_string()))
+            }
         };
         let _ = self
             .session
-            .append_custom(
-                TURN_CUSTOM_TYPE,
-                &encode_turn_record(&TurnRecord::ended(turn_id, outcome)),
-            )
+            .append_custom(TURN_CUSTOM_TYPE, &encode_turn_record(&record))
             .await;
     }
 

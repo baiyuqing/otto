@@ -17,6 +17,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Switch the model of one session from ACP itself with `/model [profile]`: Otto
+  rebuilds the session's runner on another configured profile, makes no model
+  request, and leaves the configuration file and every other session unchanged.
+  A chat client connected directly to `otto acp` can therefore move off a
+  profile whose quota is exhausted, which the attach-only `/config` commands
+  cannot do. Bare `/model` reports the session's profile, provider, model,
+  effort and the configured profile names; `otto acp --attach` runs the switch
+  on `otto serve` through the new `POST /v1/sessions/{id}/profile` route
+  ([user manual](docs/user-manual.md#compact-and-context-are-slash-commands)).
+
 - Deliver work into a repository other than the session's own from an
   `otto serve` session: the parent-only `start_delivery_task` tool takes one
   authorization that binds the target checkout, its Git directory, base, new

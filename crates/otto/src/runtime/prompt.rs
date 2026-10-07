@@ -139,6 +139,9 @@ pub fn system_prompt_for(
     if tool_names.contains(&crate::tool::plan::UPDATE_PLAN_TOOL) {
         prompt.push_str("\n<plan_policy>For work of three or more steps, call update_plan before you start with the whole plan, keep exactly one step in_progress, and call it again as each step is completed or the plan changes; finish with every step completed or the plan cleared. Do not use it for single-step requests or plain questions. The user sees the plan, and it is saved with the session; it records progress only and does not run anything.</plan_policy>\n");
     }
+    if tool_names.contains(&crate::delivery::TOOL_NAME) {
+        prompt.push_str("\n<delivery_policy>Use start_delivery_task only when the user asks for work to be delivered into a repository other than this session's workspace, and name that repository as target. The source workspace stays read-only: pass the goal and the bounded source references you already selected, never source paths or file contents. The call asks the user to authorize exactly one target, its Git identity, the new branch and the frozen handoff; nothing is created before that decision, and any changed target needs a fresh authorization. The delivery runs as its own task in a new worktree of the target with its own session, and reports its result back to this conversation. Do not use it to change the current workspace or to work around a missing file-tool permission.</delivery_policy>\n");
+    }
     if has_agent_tool {
         prompt.push('\n');
         prompt.push_str(&agent_guidance(
@@ -419,6 +422,27 @@ mod tests {
         assert!(
             !system_prompt_for(&definitions(&["read"]), off(), "", "", "")
                 .contains("<plan_policy>"),
+        );
+    }
+
+    #[test]
+    fn delivery_policy_appears_only_with_start_delivery_task() {
+        let prompt = system_prompt_for(
+            &definitions(&["read", crate::delivery::TOOL_NAME]),
+            off(),
+            "",
+            "",
+            "",
+        );
+        assert!(prompt.contains("<delivery_policy>"), "{prompt}");
+        assert!(
+            prompt.contains("repository other than this session"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("stays read-only"), "{prompt}");
+        assert!(
+            !system_prompt_for(&definitions(&["read"]), off(), "", "", "")
+                .contains("<delivery_policy>"),
         );
     }
 

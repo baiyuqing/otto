@@ -18,4 +18,5 @@ pub mod sandbox_runtime;
 pub(crate) mod sidecar_mailbox;
 pub mod storage;
 pub mod wiring;
+pub mod workspace_admission;
 pub mod workspace_context;

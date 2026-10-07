@@ -22,7 +22,8 @@ the runtime, session history, and default memory storage.
 - **Keep useful context.** Persistent sessions, memory that requires human
   review, reusable skills and plugin packages, and selective reflection after completed work.
 - **Carry work forward.** Workspace tools, web fetch and search, and MCP integrations, bounded
-  sub-agents, timers, and durable workflows with approvals and restart recovery.
+  sub-agents, timers, durable workflows with approvals and restart recovery, and
+  [delivery tasks](docs/user-manual.md#cross-workspace-deliveries) that hand work to another admitted repository.
 - **Control access.** Workspace-confined file tools, macOS Seatbelt shell
   sandboxing by default, and explicit permission requests for additional access.
 

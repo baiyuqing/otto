@@ -14,6 +14,7 @@ pub mod approvals;
 pub mod auth;
 pub mod compact;
 pub mod config;
+pub mod delivery;
 pub mod diff;
 pub mod fs;
 pub mod listen;
@@ -151,6 +152,15 @@ pub trait Factory: Send + Sync {
         _parent_session: &str,
         _task_id: &str,
     ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
+        Ok(None)
+    }
+    /// A delivery status scoped to its source session. The status is a narrow
+    /// read-only projection and deliberately does not reuse ordinary tasks.
+    fn delivery_status(
+        &self,
+        _source_session: &str,
+        _approval_id: &str,
+    ) -> Result<Option<delivery::Status>, String> {
         Ok(None)
     }
     /// Every loaded workspace, startup first then by path, for `GET
@@ -709,6 +719,10 @@ impl Server {
                 post(reflection::revert_skill),
             )
             .route("/v1/sessions/{id}/tasks", get(tasks::list))
+            .route(
+                "/v1/sessions/{id}/deliveries/{approval_id}",
+                get(delivery::get),
+            )
             .route("/v1/sessions/{id}/tasks/{task_id}", get(tasks::get))
             .route(
                 "/v1/sessions/{id}/tasks/{task_id}/cancel",

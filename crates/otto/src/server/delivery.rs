@@ -128,6 +128,8 @@ mod tests {
             logger: None,
             workflows: None,
             schedule: None,
+            session_idle_timeout: None,
+            max_open_sessions: None,
         })
     }
 

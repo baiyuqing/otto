@@ -15,6 +15,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Fixes
+
+- A memory write whose commit fails with an error other than busy now
+  reports "memory commit outcome is unknown" and closes the memory database
+  connection, as the
+  [state storage contract](docs/specs/2026-10-06-state-storage-contracts.md)
+  requires. Before, the write issued `COMMIT` as a raw statement, so the
+  failure was reported as an ordinary error and later writes kept using the
+  connection ([#403](https://github.com/baiyuqing/otto/pull/403)).
+
 ### Build and CI
 
 - Add test-only fault injection. The `fault-injection` Cargo feature exposes
@@ -25,7 +35,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
   six test modules. `tests/fault_provider.rs` checks the attempt count, request
   count and effect certainty of both providers under those faults
   ([#402](https://github.com/baiyuqing/otto/pull/402),
-  [development guide](docs/development.md#fault-injection)).
+  [development guide](docs/development.md#fault-injection)). `faults::sql`
+  wraps the SQL driver that every Turso repository now opens through, and
+  `tests/fault_storage.rs` runs commit, rollback, open and read faults against
+  each repository ([#403](https://github.com/baiyuqing/otto/pull/403)).
 
 ## 0.4.1 - 2026-10-07
 

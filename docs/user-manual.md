@@ -960,11 +960,13 @@ OTTO_UI=repl otto
 - Entries are separated by a blank line.
 - While a turn is running, an animated status line is shown under the
   transcript, and the composer title reads `Working — Enter queues for this
-  turn · Esc cancels turn`. Once ordinary input is queued for that turn, the
-  transcript shows `Queued for current turn: …` and the title becomes
-  `Queued for current turn · Ctrl+U withdraw · Esc cancels turn`. A queued slash
-  command instead reads `Queued next input · Ctrl+U withdraw`, because it
-  remains local until the active turn succeeds. Ordinary input is
+  turn · Esc cancels turn`. Once input is queued, a yellow `◆ QUEUED …` banner
+  on a shaded background stays pinned immediately above the composer, even
+  while the transcript scrolls. Ordinary guidance uses `◆ QUEUED FOR CURRENT
+  TURN` and changes the title to `Queued for current turn · Ctrl+U withdraw ·
+  Esc cancels turn`. A queued slash command uses `◆ QUEUED NEXT INPUT` and the
+  title `Queued next input · Ctrl+U withdraw`, because it remains local until
+  the active turn succeeds. Ordinary input is
   delivered within the same turn after the current provider response or tool
   call finishes. Sub-agent delegation never adds a blocking wait tool; child
   results arrive through a runtime-owned wake turn. Slash commands still wait
@@ -1095,8 +1097,8 @@ Turns:
   transcript shows only the prompt text.
 - Ordinary text submitted while a turn runs steers that active task. Otto
   accepts it for the next safe provider boundary without interrupting a tool or
-  silently creating a later turn. The transcript then shows
-  `Queued for current turn: …`, and `Ctrl+U` withdraws it (as does
+  silently creating a later turn. The pinned banner above the composer then
+  shows `◆ QUEUED FOR CURRENT TURN …`, and `Ctrl+U` withdraws it (as does
   `/inputs withdraw <id>`); an interrupted turn that never delivered it is
   reported with the text. If the turn has just ended, the text becomes
   a new turn; when an approval is pending, resolve that approval first. Use an
@@ -1298,7 +1300,8 @@ TUI-only commands:
   boundary, exactly like typing it as an ordinary message while the turn runs,
   but as an explicit command that never starts a turn: with no active task it
   answers `there is no active task accepting guidance`, and while an approval is
-  pending it refuses. The transcript then shows `Queued for current turn: …`.
+  pending it refuses. The pinned banner above the composer then shows `◆ QUEUED
+  FOR CURRENT TURN …`.
 - `/inputs` shows the active run's guidance with its message id and status
   (`queued`, `delivered`, `withdrawn`, or `discarded`); `/inputs withdraw <id>`
   withdraws one still-queued item, and `Ctrl+U` withdraws the newest one.

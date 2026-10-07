@@ -1838,7 +1838,12 @@ canonical workspace, even when `--sandbox off` is selected:
   that `new_text` changes. The result shows a diff of the change. When
   `old_text` ends with a line break that a non-empty `new_text` drops, the
   edit still applies, and the result adds a note that the next line now joins
-  the replaced text.
+  the replaced text. A match error writes nothing. When `old_text` matches
+  more than once, the error lists the line numbers of up to 5 matches with the
+  line before and after each one; when it matches nowhere, the error shows the
+  file lines that best align with `old_text`, ignoring leading and trailing
+  whitespace. Error listings show only current file lines and stop at 4096
+  bytes.
 
 `write` and `edit` refuse the workspace's read-only git paths listed in
 [Git metadata is read-only in the Seatbelt sandbox](#git-metadata-is-read-only-in-the-seatbelt-sandbox),

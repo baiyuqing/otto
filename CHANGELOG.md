@@ -91,10 +91,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [development guide](docs/development.md#fault-injection)). `faults::sql`
   wraps the SQL driver that every Turso repository now opens through, and
   `tests/fault_storage.rs` runs commit, rollback, open and read faults against
-  each repository ([#403](https://github.com/baiyuqing/otto/pull/403)). `faults::files`
-  wraps the session store's file driver, and `tests/fault_session.rs` runs
-  write, sync and lock faults against session journals
-  ([#406](https://github.com/baiyuqing/otto/pull/406)).
+  each repository ([#403](https://github.com/baiyuqing/otto/pull/403)).
+  `faults::files` wraps the session store's file driver, and
+  `tests/fault_session.rs` runs write, sync and lock faults against session
+  journals ([#406](https://github.com/baiyuqing/otto/pull/406)). The six atomic
+  file writers (write and edit tools, reminder and inbox sidecars, workspace
+  identity, configuration, reflection skill files, session forks) now share
+  `fsops::publish_file`, and `faults::publish` injects create, write, sync and
+  rename faults into it; reflection skill files now also sync their directory
+  after the rename (PRNUM).
 
 ## 0.4.1 - 2026-10-07
 

@@ -576,3 +576,22 @@ Checked against `main` at `cef0a16` on 2026-10-07:
   because those renames have no seam.
 - Unspecified row values are asserted as observed and listed in the PR,
   instead of waiting for a decision.
+
+Phase 6, checked against `main` at `d3f17e7` on 2026-10-07:
+
+- The grandchild row and both MCP 401 rows already had tests
+  (`sandbox::conformance` and `mcp::http`); Phase 6 adds only the other four
+  rows.
+- `FaultyMailbox` is not built: no Process and MCP row uses it, and
+  `Inbox::set_persist` failures are already tested in `app::task_control`,
+  `app::turn_queue` and `subagent::tasks`.
+- The "closes stdout" and "writes past the output cap" fixtures are not
+  built, because no row uses them. The `SIGTERM`-ignoring child is a shell
+  script inside the conformance check, not a `faults::sandbox` fixture.
+- The HTTP hang row uses a `faults::http` script that reads the request and
+  never sends a response head, so the real `HttpTransport` abandons it;
+  `FaultyTransport` is used for the stdio row.
+- `FaultyDriver` reports `Error::ChildLaunch` for every `Before` rule,
+  because sandbox errors carry no I/O error.
+- The rows live next to the existing harnesses; there is no
+  `tests/fault_process.rs` or `tests/fault_mcp.rs`.

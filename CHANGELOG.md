@@ -75,6 +75,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Rust hosts can replace Otto's memory service through `MemoryExtension`,
+  without implementing Otto's storage schema. The service-neutral core contract
+  and host client enforce declared capabilities, scopes, reviewed preparations,
+  explicit learning grants and honest operation receipts. The existing native
+  recall/review path remains the default; external record-management views and
+  a Mem0 transport are not included. See the
+  [contract](docs/specs/2026-10-07-open-memory-contract.md)
+  ([#419](https://github.com/baiyuqing/otto/pull/419)).
+
 - Stop a sub-agent task from the model side with the new `agent_cancel` tool:
   it takes a task id or name and cancels that task, the same registry call
   `/task cancel`, `POST /v1/sessions/{id}/tasks/{task_id}/cancel` and ACP
@@ -212,11 +221,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Documentation
 
-- Document the open Memory service design and its source research, including
-  capability declarations, reviewed/delegated learning, asynchronous outcomes
-  and forgetting coverage. This documents the intended boundary; runtime
-  adapters and memory behavior are unchanged. See the
-  [design](docs/specs/2026-10-07-open-memory-contract.md)
+- Archive the open Memory contract research in English, preserving source
+  versions, short excerpts, verified facts and unknown guarantees. See the
+  [research records](docs/specs/2026-10-07-open-memory-research/README.md)
   ([#419](https://github.com/baiyuqing/otto/pull/419)).
 
 ## 0.4.1 - 2026-10-07

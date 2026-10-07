@@ -908,6 +908,7 @@ pub(crate) fn prepare_workspace(
 }
 
 pub(crate) struct ComposeOptions {
+    pub(crate) memory_extension: Option<super::wiring::MemoryExtension>,
     pub(crate) sandbox_driver_override: Option<String>,
     pub(crate) no_session: bool,
     pub(crate) overrides: Overrides,
@@ -1055,7 +1056,10 @@ pub(crate) fn compose(
         task_recorder,
         schedule,
         skill_checker,
-        memory: Default::default(),
+        memory: super::wiring::MemoryWiring {
+            extension: options.memory_extension,
+            ..Default::default()
+        },
         reflector,
         logger: options.logger,
         parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
@@ -1106,32 +1110,69 @@ pub(crate) fn open_memory(
 ) -> Result<(), String> {
     let resolved = runtime;
     let workspace_path = builder.workspace_path.clone();
-    if dynamic_content {
-        let secrets = builder.secret_values(Some(resolved));
-        match crate::runtime::wiring::open_memory_service_with_storage(
-            &builder.storage,
-            memory_config,
-            &secrets,
-            stderr,
-        ) {
-            Ok((service, user_scope, usable)) => {
-                let shared = builder.shared_mut();
-                shared.memory.service = service;
-                shared.memory.user_scope = user_scope;
-                shared.memory.usable = usable;
+    if dynamic_content && memory_config.enabled {
+        builder.workspace_scope =
+            crate::runtime::wiring::workspace_memory_scope(memory_config, &workspace_path)?;
+        if let Some(extension) = builder.memory.extension.clone() {
+            extension
+                .user_scope
+                .validate()
+                .map_err(|error| error.to_string())?;
+            let guard_values: Vec<String> = builder
+                .secret_values(Some(runtime))
+                .into_iter()
+                .filter(|value| value.len() <= crate::memory::MAX_EXACT_GUARD_VALUE_BYTES)
+                .collect();
+            let exact = crate::memory::guard::ExactGuard::new(&guard_values)
+                .map_err(|_| "build memory secret guard".to_string())?;
+            let guard = crate::memory::guard::CompositeGuard::new(vec![
+                Box::new(crate::memory::guard::DefaultGuard),
+                Box::new(exact),
+            ]);
+            let client = extension
+                .client()
+                .map_err(|error| error.to_string())?
+                .with_guard(Arc::new(guard))
+                .map_err(|error| builder.redact_error(&error.to_string(), Some(runtime)))?;
+            if memory_config.require_encryption
+                && client.describe().encryption_at_rest != Some(true)
+            {
+                return Err("selected memory service does not guarantee encryption at rest".into());
             }
-            Err(error) => {
-                return Err(builder.redact_error(&error, Some(resolved)));
-            }
-        }
-        match crate::runtime::wiring::workspace_memory_scope(memory_config, &workspace_path) {
-            Ok(scope) => builder.workspace_scope = scope,
-            Err(error) => {
-                return Err(error);
+            let shared = builder.shared_mut();
+            shared.memory.client = Some(Arc::new(client));
+            shared.memory.usable = true;
+        } else {
+            let secrets = builder.secret_values(Some(resolved));
+            match crate::runtime::wiring::open_memory_service_with_storage(
+                &builder.storage,
+                memory_config,
+                &secrets,
+                stderr,
+            ) {
+                Ok((service, user_scope, usable)) => {
+                    let shared = builder.shared_mut();
+                    shared.memory.service = service;
+                    shared.memory.user_scope = user_scope;
+                    shared.memory.usable = usable;
+                    if usable {
+                        let adapter = crate::memory::adapter::BuiltinAdapter::new(
+                            shared.memory.service.clone(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                        shared.memory.client = Some(Arc::new(
+                            crate::memory::client::Client::new(Arc::new(adapter))
+                                .map_err(|error| error.to_string())?,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(builder.redact_error(&error, Some(resolved)));
+                }
             }
         }
     }
-    let advice_audit = if builder.memory.usable {
+    let advice_audit = if builder.memory.usable && builder.memory.extension.is_none() {
         match builder
             .storage
             .memory_advice(&Path::new(home).join(".otto/memory-advice.db"))
@@ -1160,6 +1201,7 @@ pub(crate) fn open_memory(
 // ---- straight-through start ----
 
 pub(crate) struct StartOptions {
+    pub(crate) memory_extension: Option<super::wiring::MemoryExtension>,
     pub(crate) host_entries: Vec<Vec<u8>>,
     pub(crate) config_path: String,
     pub(crate) explicit_config: bool,
@@ -1208,6 +1250,7 @@ pub(crate) async fn start(
     let prepared = prepare_workspace(&loaded, &configured.environment, &storage, &workspace_path)?;
     let composed = compose(
         ComposeOptions {
+            memory_extension: options.memory_extension,
             sandbox_driver_override: None,
             no_session: false,
             overrides: options.overrides.clone(),
@@ -1304,6 +1347,7 @@ driver = "off"
 
         let started = start(
             StartOptions {
+                memory_extension: None,
                 host_entries: vec![
                     format!("HOME={}", home.to_string_lossy()).into_bytes(),
                     b"ALPHA_KEY=sk-alpha".to_vec(),

@@ -1,7 +1,8 @@
 //! A scripted OpenAI-compatible origin server shared by the binary tests.
 //!
-//! It is a plain HTTP/1.1 listener on 127.0.0.1, so the tests that drive the
-//! built binary need no credentials and reach no external network.
+//! It runs on `otto::faults::http`, a plain HTTP/1.1 listener on 127.0.0.1, so
+//! the tests that drive the built binary need no credentials and reach no
+//! external network.
 
 // Each test binary compiles its own copy, so some helpers are unused in some.
 #![allow(dead_code)]
@@ -9,10 +10,10 @@
 #[cfg(unix)]
 pub mod pty;
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+use otto::faults::http;
 
 /// A displayed ACP tool call must close exactly once, including on failure.
 pub fn assert_terminal_tool_update(frames: &[serde_json::Value], id: &str, status: &str) {
@@ -84,85 +85,63 @@ pub fn text_reply(text: &str) -> String {
 /// Serves `script` on an ephemeral loopback port and returns its base URL
 /// and the raw request bodies received so far, in arrival order.
 ///
-/// The listener thread ends when the process does; a test binary that fails
-/// early therefore never blocks on it.
+/// The server runs on its own thread and runtime, which end with the process;
+/// a test binary that fails early therefore never blocks on it, and callers
+/// need no async runtime.
 pub fn serve(script: Script) -> (String, Arc<Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
-    let base_url = format!("http://{}", listener.local_addr().expect("local address"));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&requests);
+    let (url_sender, url_receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut raw = Vec::new();
-            let mut buffer = [0u8; 4096];
-            let head_end = loop {
-                if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-                    break index + 4;
-                }
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break 0,
-                    Ok(read) => raw.extend_from_slice(&buffer[..read]),
-                }
-            };
-            if head_end == 0 {
-                continue;
-            }
-            let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
-            let length = head
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length:"))
-                .and_then(|value| value.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            let mut body = raw[head_end..].to_vec();
-            while body.len() < length {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => body.extend_from_slice(&buffer[..read]),
-                }
-            }
-            captured
-                .lock()
-                .unwrap()
-                .push(String::from_utf8_lossy(&body).into_owned());
-            let index = script.served.fetch_add(1, Ordering::SeqCst);
-            let mut reply = script
-                .replies
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| text_reply("out of script"));
-            // Tests that revoke approvals must use the exact service-generated
-            // ID advertised to the model, never assume a sequential ID format.
-            if reply.contains("$EXACT_APPROVAL_ID") {
-                let request: serde_json::Value =
-                    serde_json::from_slice(&body).expect("provider request");
-                let system = request["messages"]
-                    .as_array()
-                    .expect("messages")
-                    .iter()
-                    .find(|message| message["role"] == "system")
-                    .expect("system message")["content"]
-                    .as_str()
-                    .expect("system prompt")
-                    .to_string();
-                let id = system
-                    .split("Only withdraw request ")
-                    .nth(1)
-                    .expect("bound approval")
-                    .split('.')
-                    .next()
-                    .expect("approval ID");
-                reply = reply.replace("$EXACT_APPROVAL_ID", id);
-            }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                reply.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
-        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the server runtime");
+        runtime.block_on(async move {
+            let server = http::spawn(move |request| {
+                captured.lock().unwrap().push(request.body.clone());
+                http::sse_response(&next_reply(&script, &request.body))
+            })
+            .await;
+            url_sender.send(server.url.clone()).expect("send the URL");
+            std::future::pending::<()>().await;
+        });
     });
+    let base_url = url_receiver.recv().expect("the server binds");
     (base_url, requests)
+}
+
+/// The next scripted reply for the request `body`.
+fn next_reply(script: &Script, body: &str) -> String {
+    let index = script.served.fetch_add(1, Ordering::SeqCst);
+    let mut reply = script
+        .replies
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| text_reply("out of script"));
+    // Tests that revoke approvals must use the exact service-generated
+    // ID advertised to the model, never assume a sequential ID format.
+    if reply.contains("$EXACT_APPROVAL_ID") {
+        let request: serde_json::Value = serde_json::from_str(body).expect("provider request");
+        let system = request["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .find(|message| message["role"] == "system")
+            .expect("system message")["content"]
+            .as_str()
+            .expect("system prompt")
+            .to_string();
+        let id = system
+            .split("Only withdraw request ")
+            .nth(1)
+            .expect("bound approval")
+            .split('.')
+            .next()
+            .expect("approval ID");
+        reply = reply.replace("$EXACT_APPROVAL_ID", id);
+    }
+    reply
 }
 
 /// A compaction summary that passes the structure check, with `note` under

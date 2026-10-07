@@ -281,6 +281,15 @@ pub struct Controller {
     herdr: std::sync::RwLock<Option<Arc<crate::herdr::Reporter>>>,
 }
 
+/// Clears passive presentation routing when one logical user turn ends.
+pub(crate) struct PresentationOriginGuard(Arc<crate::schedule::tools::TurnOrigin>);
+
+impl Drop for PresentationOriginGuard {
+    fn drop(&mut self) {
+        self.0.set(None);
+    }
+}
+
 /// One admitted operation. Dropping it releases admission and performs a
 /// close that arrived while the operation was running.
 pub struct Admission<'a> {
@@ -570,6 +579,21 @@ impl Controller {
     /// `Controller::memory_manager`.
     pub(crate) fn memory_wiring(&self) -> &crate::runtime::wiring::MemoryWiring {
         &self.builder.memory
+    }
+
+    pub fn memory_service(&self) -> Option<Arc<crate::memory::client::Client>> {
+        self.dynamic_content_available()
+            .then(|| self.builder.memory.client.clone())
+            .flatten()
+            .filter(|client| !client.is_closed())
+    }
+
+    pub fn memory_context(
+        &self,
+        origin: otto_core::memory::Origin,
+    ) -> otto_core::memory::MemoryContext {
+        self.builder
+            .memory_context(origin, Some(self.info().session_id))
     }
 
     /// This session's memory workspace scope, unlike `memory_wiring`'s
@@ -1108,7 +1132,7 @@ impl Controller {
     ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        self.begin_user_turn(&runner, origin).await;
+        let _presentation = self.begin_user_turn(&runner, origin).await;
         let task_run = runner
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))
@@ -1253,16 +1277,19 @@ impl Controller {
         &self,
         runner: &Runner,
         origin: Option<crate::schedule::Origin>,
-    ) {
+    ) -> PresentationOriginGuard {
         runner.schedule_origin.set(origin.clone());
+        runner.presentation_origin.set(origin.clone());
+        let presentation = PresentationOriginGuard(Arc::clone(&runner.presentation_origin));
+
         let (Some(origin), Some(store)) = (origin, self.builder.schedule.as_ref()) else {
-            return;
+            return presentation;
         };
         let session_id = runner.session().header().id.clone();
         // A store or append error ends the write-back; the next user turn
         // retries, because the row stays unmarked.
         let Ok(deliveries) = store.pending_writebacks(&origin, &session_id, 10) else {
-            return;
+            return presentation;
         };
         for delivery in deliveries {
             let appended = runner
@@ -1281,9 +1308,10 @@ impl Controller {
                     .mark_appended(delivery.item_id, delivery.due_at)
                     .is_err()
             {
-                return;
+                return presentation;
             }
         }
+        presentation
     }
 
     async fn record_skipped_followup(
@@ -1370,7 +1398,7 @@ impl Controller {
     ) -> Result<(), AgentError> {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
-        self.begin_user_turn(&runner, origin).await;
+        let _presentation = self.begin_user_turn(&runner, origin).await;
         let task_run = runner
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))

@@ -1,6 +1,8 @@
 //! Durable memory contracts, policy, guards, repository port, and service.
 
+pub mod adapter;
 pub mod advice;
+pub mod client;
 pub mod codec;
 pub mod contracts;
 pub mod guard;

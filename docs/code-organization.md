@@ -64,6 +64,9 @@ modules are:
 - `session`: Pi v3 session codec, compaction, and context association types.
 - `agent`: provider/tool turn orchestration and emitted events.
 - `mailbox`: WASM-safe FIFO notification contract, delivery acknowledgement semantics, and the default in-memory adapter. Native runtime code composes persistence or external implementations.
+- `memory`: service-neutral capabilities, scoped requests, context projections,
+  prepared changes and receipts; native `memory::client::Client` admits calls,
+  and `memory::adapter::BuiltinAdapter` projects the existing domain service.
 - `config`, `wire`, and `safetext`: shared configuration resolution, frontend
   DTOs, and secret-safe text handling.
 

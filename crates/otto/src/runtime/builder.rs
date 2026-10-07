@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use otto_core::agent::progress::ProgressPolicy;
 use otto_core::agent::redactor::Redactor;
 use otto_core::agent::{
     Agent, AgentError, CompactionResult, CompactionSettings, EventSink, Options,
@@ -2118,6 +2119,10 @@ impl Builder {
                 reserve_tokens: runtime.compaction.reserve_tokens,
                 keep_recent_tokens: runtime.compaction.keep_recent_tokens,
             },
+            progress: ProgressPolicy {
+                repeated_calls: runtime.progress.repeated_calls,
+                consecutive_failures: runtime.progress.consecutive_failures,
+            },
             memory: match self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
                 true => Some(Arc::new(self.bind_memory()?)),
                 false => None,
@@ -2953,6 +2958,7 @@ mod tests {
                 "agent_wait",
                 "agent_status",
                 "agent_send",
+                "agent_cancel",
                 "remind",
                 "remind_status",
                 "remind_cancel",
@@ -3278,7 +3284,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_wait, agent_status, agent_send, agent_cancel, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");

@@ -97,12 +97,12 @@ impl Service {
             next.revision = current.revision.checked_add(1).ok_or(Error::Conflict)?;
             next.state = State::Pending;
             next.decision = None;
-            let mut metadata = Self::metadata(
+            let mut metadata = self.metadata(
                 &state,
                 &current.scope,
                 settings.revision,
                 ReviewStatus::HumanRequired,
-            );
+            )?;
             metadata.assessment=Some(ReviewAssessment {risk:RiskLevel::Medium,user_authorization:UserAuthorization::Unknown,outcome:ReviewOutcome::Ask,reason:"Authorization context or policy changed before dispatch; review the exact operation again.".into()});
             next.review = Some(metadata);
             if settings.policy == ApprovalPolicy::Never
@@ -393,42 +393,50 @@ impl Service {
         } else {
             ReviewStatus::Queued
         };
-        Ok(Self::metadata(
-            &state,
-            &request.scope,
-            settings.revision,
-            status,
-        ))
+        self.metadata(&state, &request.scope, settings.revision, status)
     }
     fn metadata(
+        &self,
         state: &ReviewState,
         scope: &Scope,
         revision: u64,
         status: ReviewStatus,
-    ) -> ReviewMetadata {
+    ) -> Result<ReviewMetadata> {
         let context = state.contexts.get(&key(scope));
-        ReviewMetadata {
+        let snapshot = if scope.session_id.is_empty() {
+            None
+        } else {
+            self.store.review_snapshot(scope)?
+        };
+        let snapshot = snapshot.or_else(|| {
+            context.map(|context| {
+                (
+                    context.evidence_digest.clone(),
+                    context.policy_digest.clone(),
+                )
+            })
+        });
+        Ok(ReviewMetadata {
             status,
             assessment: None,
             settings_revision: revision,
-            evidence_digest: context
-                .map_or("missing", |context| &context.evidence_digest)
+            evidence_digest: snapshot
+                .as_ref()
+                .map_or("missing", |(evidence, _)| evidence)
                 .into(),
-            policy_digest: context
-                .map(|context| context.policy_digest.clone())
-                .unwrap_or_else(|| {
-                    digest(
-                        &serde_json::to_string(
-                            &state
-                                .configs
-                                .get(&scope.workspace)
-                                .cloned()
-                                .unwrap_or_default(),
-                        )
-                        .expect("approval config encodes"),
+            policy_digest: snapshot.map(|(_, policy)| policy).unwrap_or_else(|| {
+                digest(
+                    &serde_json::to_string(
+                        &state
+                            .configs
+                            .get(&scope.workspace)
+                            .cloned()
+                            .unwrap_or_default(),
                     )
-                }),
-        }
+                    .expect("approval config encodes"),
+                )
+            }),
+        })
     }
     pub(super) fn route_request(&self, id: &str, scope: &Scope) -> Result<Request> {
         let state = self.review_state.read().map_err(|_| Error::Unavailable)?;
@@ -515,7 +523,7 @@ impl Service {
                 .is_none_or(|context| context.trusted_user_messages.is_empty());
         if let Some((allow, transport, reason)) = decision {
             let mut metadata =
-                Self::metadata(&state, scope, settings.revision, ReviewStatus::Completed);
+                self.metadata(&state, scope, settings.revision, ReviewStatus::Completed)?;
             metadata.evidence_digest = "existing-policy".into();
             metadata.policy_digest =
                 digest(&serde_json::to_string(&config).map_err(|_| Error::Unavailable)?);
@@ -547,7 +555,7 @@ impl Service {
         if request.review.is_none() {
             return Ok(request);
         }
-        let captured = Self::metadata(&state, scope, settings.revision, ReviewStatus::Queued);
+        let captured = self.metadata(&state, scope, settings.revision, ReviewStatus::Queued)?;
         let desired = if needs_human
             || request.review.as_ref().is_some_and(|r| {
                 r.status == ReviewStatus::HumanRequired
@@ -562,7 +570,7 @@ impl Service {
         } else {
             ReviewStatus::Queued
         };
-        let metadata = Self::metadata(&state, scope, settings.revision, desired);
+        let metadata = self.metadata(&state, scope, settings.revision, desired)?;
         if request.review.as_ref().is_some_and(|r| {
             r.matches(
                 metadata.settings_revision,

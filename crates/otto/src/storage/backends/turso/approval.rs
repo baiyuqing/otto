@@ -220,6 +220,9 @@ impl ApprovalStore for Store {
             params![scope.workspace, scope.session_id, evidence, policy],
         ).map(|_|()).map_err(storage_error)
     }
+    fn review_snapshot(&self, scope: &Scope) -> Result<Option<(String, String)>> {
+        self.connection.lock().map_err(|_|Error::Unavailable)?.query_row("SELECT evidence_digest,policy_digest FROM approval_review_contexts WHERE workspace=?1 AND session_id=?2",params![scope.workspace,scope.session_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage_error)
+    }
     fn policy_config(
         &self,
         workspace: &str,

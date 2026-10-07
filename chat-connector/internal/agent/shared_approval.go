@@ -27,6 +27,7 @@ type SharedApproval struct {
 	} `json:"decision"`
 	Subject struct {
 		Source  string `json:"source"`
+		Version string `json:"version"`
 		Details string `json:"details"`
 	} `json:"subject"`
 }

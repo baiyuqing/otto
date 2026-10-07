@@ -13,6 +13,7 @@
 //! shares, so two concurrent mutations cannot interleave read and write.
 //! Errors: every failure is returned in band as an error [`ToolResult`].
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use otto_core::model::ToolDefinition;
@@ -33,6 +34,14 @@ use crate::fsops::{PosixPublish, PublishOps};
 const DIFF_CONTEXT_LINES: usize = 3;
 /// The largest diff returned to the model before it is cut on a line boundary.
 const MAX_DIFF_BYTES: usize = 4096;
+/// The most matches an ambiguity error locates.
+const MAX_LISTED_MATCHES: usize = 5;
+/// The longest file line an error shows before it is cut.
+const MAX_SHOWN_LINE_BYTES: usize = 200;
+/// The most lines a not-found error shows from the closest region.
+const MAX_CLOSEST_LINES: usize = 20;
+/// The most file lines one trimmed old_text line may match and still vote.
+const MAX_VOTING_LINES: usize = 100;
 
 /// The wire shape of edit arguments. Optional fields distinguish an absent key
 /// from an empty string so that `"new_text": ""` stays a valid deletion.
@@ -200,7 +209,9 @@ pub fn edit_definition() -> ToolDefinition {
             "An empty new_text deletes the matched text. Batch edits apply together against the original file. When old_text has ",
             "no exact match, a match that ignores trailing whitespace and treats curly quotes, dashes, and ",
             "non-breaking spaces as ASCII is used, and only the part of old_text that new_text changes is rewritten. ",
-            "The result shows a diff and notes when new_text drops the line break that ends old_text, joining the next line.",
+            "The result shows a diff and notes when new_text drops the line break that ends old_text, joining the next line. ",
+            "A match error writes nothing: when old_text matches more than once, it lists the line numbers of up to 5 matches ",
+            "with the line before and after each; when old_text is not found, it shows the current file lines that best align with old_text.",
         ),
         json!({
             "type": "object",
@@ -371,9 +382,9 @@ impl<'a> EditMatcher<'a> {
             // needle would match everywhere.
             return Err(match_error(index, total, &not_found(path)));
         }
-        let (first_match, count) = occurrences(content, old_text, |_| true);
+        let (offsets, count) = occurrences(content, old_text, |_| true);
         if count == 1 {
-            let start = first_match.expect("one match exists");
+            let start = offsets[0];
             return Ok(ResolvedEdit {
                 start,
                 end: start + old_text.len(),
@@ -381,7 +392,12 @@ impl<'a> EditMatcher<'a> {
             });
         }
         if count > 1 {
-            return Err(match_error(index, total, &ambiguous(count, path)));
+            let spans: Vec<_> = offsets
+                .iter()
+                .map(|&at| (at, at + old_text.len()))
+                .collect();
+            let message = ambiguous(content, path, &spans, count);
+            return Err(match_error(index, total, &message));
         }
 
         let (fuzzy, fuzzy_offsets) = self
@@ -399,7 +415,7 @@ impl<'a> EditMatcher<'a> {
         let tail_start = old_text.rfind('\n').map_or(0, |index| index + 1);
         let tail_end = trim_trailing_fuzzy_whitespace(old_text, tail_start, old_text.len());
         let ends_line = tail_start < tail_end && tail_end < old_text.len();
-        let (first_match, count) = occurrences(fuzzy, &fuzzy_old, |at| {
+        let (offsets, count) = occurrences(fuzzy, &fuzzy_old, |at| {
             !ends_line
                 || matches!(
                     fuzzy.as_bytes().get(at + fuzzy_old.len()),
@@ -407,12 +423,21 @@ impl<'a> EditMatcher<'a> {
                 )
         });
         if count == 0 {
-            return Err(match_error(index, total, &not_found(path)));
+            let message = not_found_near(content, old_text, path);
+            return Err(match_error(index, total, &message));
         }
         if count > 1 {
-            return Err(match_error(index, total, &ambiguous(count, path)));
+            let spans: Vec<_> = offsets
+                .iter()
+                .map(|&at| {
+                    let last = fuzzy_offsets[at + fuzzy_old.len() - 1];
+                    (fuzzy_offsets[at], last + rune_len(content, last))
+                })
+                .collect();
+            let message = ambiguous(content, path, &spans, count);
+            return Err(match_error(index, total, &message));
         }
-        let start = first_match.expect("one match exists");
+        let start = offsets[0];
 
         // The file's bytes differ from old_text inside the match (quotes,
         // dashes, trailing whitespace). Keep them wherever new_text leaves
@@ -445,23 +470,25 @@ impl<'a> EditMatcher<'a> {
     }
 }
 
-/// The first occurrence of the non-empty `needle` in `haystack` that `accept`
-/// admits by its offset, and the number of admitted occurrences, counting
-/// overlapping ones: `aa` occurs twice in `aaa`, so it is ambiguous there
-/// rather than unique.
+/// The first [`MAX_LISTED_MATCHES`] occurrences of the non-empty `needle` in
+/// `haystack` that `accept` admits by its offset, and the number of admitted
+/// occurrences, counting overlapping ones: `aa` occurs twice in `aaa`, so it is
+/// ambiguous there rather than unique.
 fn occurrences(
     haystack: &str,
     needle: &str,
     accept: impl Fn(usize) -> bool,
-) -> (Option<usize>, usize) {
+) -> (Vec<usize>, usize) {
     debug_assert!(!needle.is_empty(), "an empty needle matches everywhere");
-    let mut first = None;
+    let mut first = Vec::new();
     let mut count = 0;
     let mut from = 0;
     while let Some(index) = haystack[from..].find(needle) {
         let at = from + index;
         if accept(at) {
-            first.get_or_insert(at);
+            if first.len() < MAX_LISTED_MATCHES {
+                first.push(at);
+            }
             count += 1;
         }
         from = at + rune_len(haystack, at);
@@ -525,10 +552,199 @@ fn not_found(path: &str) -> String {
     format!("old_text was not found in {path}")
 }
 
-fn ambiguous(count: usize, path: &str) -> String {
+/// Lists the first matches of an ambiguous `old_text` as `(start, end)` byte
+/// ranges of `content` with the lines around each; `count` is the total.
+fn ambiguous(content: &str, path: &str, spans: &[(usize, usize)], count: usize) -> String {
+    let lines = file_lines(content);
+    let starts = line_starts(content);
+    let line_of = |offset: usize| search_ints(&starts, offset + 1) - 1;
+    // Per match: the line before, the first and last matched lines with an
+    // elision between them when not adjacent, and the line after.
+    let shown: Vec<Vec<Option<usize>>> = spans
+        .iter()
+        .map(|&(start, end)| {
+            let (first, last) = (line_of(start), line_of(end - 1));
+            let mut rows = Vec::new();
+            if first > 0 {
+                rows.push(Some(first - 1));
+            }
+            rows.push(Some(first));
+            if last > first {
+                if last > first + 1 {
+                    rows.push(None);
+                }
+                rows.push(Some(last));
+            }
+            if last + 1 < lines.len() {
+                rows.push(Some(last + 1));
+            }
+            rows
+        })
+        .collect();
+    let width = number_width(shown.iter().flatten().flatten().max());
+    let mut listing = Vec::new();
+    for (index, (&(start, end), rows)) in spans.iter().zip(&shown).enumerate() {
+        let (first, last) = (line_of(start) + 1, line_of(end - 1) + 1);
+        listing.push(if first == last {
+            format!("match {}, line {first}:", index + 1)
+        } else {
+            format!("match {}, lines {first}-{last}:", index + 1)
+        });
+        listing.extend(rows.iter().map(|row| match row {
+            Some(line) => shown_line(&lines, *line, width),
+            None => "...".to_owned(),
+        }));
+    }
+    if count > spans.len() {
+        listing.push(format!("({} more matches not shown)", count - spans.len()));
+    }
     format!(
-        "old_text matched {count} locations in {path}; include more surrounding context to make it unique"
+        "old_text matched {count} locations in {path}; include more surrounding context to make it unique. Lines around each match:\n{}",
+        cap_listing(listing.join("\n"))
     )
+}
+
+/// Describes the region of `content` whose lines best align with the lines of
+/// `old_text`, which has no match. Every non-blank `old_text` line votes for
+/// the file position that would put it on an equal line, ignoring leading and
+/// trailing whitespace; the position with the most votes wins, the earliest on
+/// a tie. The message holds file lines only, never `old_text`.
+fn not_found_near(content: &str, old_text: &str, path: &str) -> String {
+    let old_lines = file_lines(old_text);
+    let nonblank = old_lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    if nonblank == 0 {
+        return not_found(path);
+    }
+    let lines = file_lines(content);
+    let mut by_text: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, line) in lines.iter().enumerate() {
+        by_text.entry(line.trim()).or_default().push(index);
+    }
+    // votes[j + old_lines.len() - i] counts old_text lines i that equal file
+    // line j when old_text starts at line j - i; the offset keeps the index
+    // non-negative.
+    let mut votes = vec![0u32; lines.len() + old_lines.len()];
+    for (i, line) in old_lines.iter().enumerate() {
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        // ponytail: a line found on more than MAX_VOTING_LINES file lines, such
+        // as `}`, does not vote, which bounds the votes at MAX_VOTING_LINES per
+        // old_text line; an old_text made only of such lines gets the no-match
+        // message.
+        let Some(found) = by_text
+            .get(text)
+            .filter(|found| found.len() <= MAX_VOTING_LINES)
+        else {
+            continue;
+        };
+        for j in found {
+            votes[j + old_lines.len() - i] += 1;
+        }
+    }
+    let (best, top) =
+        votes.iter().enumerate().fold(
+            (0, 0),
+            |best, (at, &count)| if count > best.1 { (at, count) } else { best },
+        );
+    if top == 0 {
+        return format!(
+            "{}; no line of old_text matches a line of the file, ignoring leading and trailing whitespace",
+            not_found(path)
+        );
+    }
+    let start = best as isize - old_lines.len() as isize;
+    let first = start.max(0) as usize;
+    let end = ((start + old_lines.len() as isize) as usize).min(lines.len());
+    let shown_end = end.min(first + MAX_CLOSEST_LINES);
+    let width = number_width(Some(&(shown_end - 1)));
+    let mut listing: Vec<String> = (first..shown_end)
+        .map(|line| shown_line(&lines, line, width))
+        .collect();
+    if end > shown_end {
+        listing.push(format!("({} more lines)", end - shown_end));
+    }
+    format!(
+        "{}. Closest lines in the current file ({top} of {nonblank} old_text lines match, ignoring leading and trailing whitespace):\n{}",
+        not_found(path),
+        cap_listing(listing.join("\n"))
+    )
+}
+
+/// The lines of LF-normalized `content`; a final line break ends the last line
+/// rather than starting an empty one.
+fn file_lines(content: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = content.split('\n').collect();
+    if content.ends_with('\n') {
+        lines.pop();
+    }
+    lines
+}
+
+/// The byte offset at which each line of `content` starts.
+fn line_starts(content: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    starts.extend(
+        content
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'\n')
+            .map(|(index, _)| index + 1),
+    );
+    starts
+}
+
+/// The digits of the 1-based number of the largest 0-based line index shown.
+fn number_width(largest: Option<&usize>) -> usize {
+    largest.map_or(1, |line| (line + 1).to_string().len())
+}
+
+/// One numbered file line, cut to [`MAX_SHOWN_LINE_BYTES`].
+fn shown_line(lines: &[&str], index: usize, width: usize) -> String {
+    let text = lines[index];
+    let text = if text.len() > MAX_SHOWN_LINE_BYTES {
+        let cut = (0..=MAX_SHOWN_LINE_BYTES)
+            .rev()
+            .find(|cut| text.is_char_boundary(*cut))
+            .expect("zero is a boundary");
+        format!("{}...", &text[..cut])
+    } else {
+        text.to_owned()
+    };
+    format!("{:>width$} | {text}", index + 1)
+}
+
+/// Bounds a listing to [`MAX_DIFF_BYTES`].
+fn cap_listing(listing: String) -> String {
+    match truncate_on_line(&listing) {
+        Some(cut) => format!("{cut}\n... (truncated)"),
+        None => listing,
+    }
+}
+
+/// The part of `text` to keep when it exceeds [`MAX_DIFF_BYTES`]: up to the last
+/// line break within the limit, or up to the last rune boundary when the limit
+/// lands inside the first line. `None` when `text` fits.
+fn truncate_on_line(text: &str) -> Option<&str> {
+    if text.len() <= MAX_DIFF_BYTES {
+        return None;
+    }
+    // Cutting on a rune boundary keeps the fallback valid UTF-8 when the budget
+    // lands mid-rune and no newline precedes it.
+    let cut = text.as_bytes()[..MAX_DIFF_BYTES]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .unwrap_or_else(|| {
+            (0..=MAX_DIFF_BYTES)
+                .rev()
+                .find(|index| text.is_char_boundary(*index))
+                .expect("zero is a boundary")
+        });
+    Some(&text[..cut])
 }
 
 /// Prefixes `message` with the edit position.
@@ -699,14 +915,7 @@ struct DiffHunk {
 /// hunks whose context lines meet are printed together.
 fn edit_diff(content: &str, edits: &[ResolvedEdit]) -> String {
     let old_lines: Vec<&str> = content.split('\n').collect();
-    let mut line_starts = vec![0usize];
-    line_starts.extend(
-        content
-            .bytes()
-            .enumerate()
-            .filter(|(_, byte)| *byte == b'\n')
-            .map(|(index, _)| index + 1),
-    );
+    let line_starts = line_starts(content);
     let line_of = |offset: usize| search_ints(&line_starts, offset + 1) - 1;
     let last_line_of = |edit: &ResolvedEdit| {
         if edit.end == edit.start {
@@ -802,21 +1011,10 @@ fn edit_diff(content: &str, edits: &[ResolvedEdit]) -> String {
     }
 
     let diff = out.trim_end_matches('\n');
-    if diff.len() <= MAX_DIFF_BYTES {
-        return diff.to_owned();
+    match truncate_on_line(diff) {
+        Some(cut) => format!("{cut}\n... (diff truncated)"),
+        None => diff.to_owned(),
     }
-    // Cutting on a rune boundary keeps the fallback valid UTF-8 when the budget
-    // lands mid-rune and no newline precedes it.
-    let cut = diff.as_bytes()[..MAX_DIFF_BYTES]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .unwrap_or_else(|| {
-            (0..=MAX_DIFF_BYTES)
-                .rev()
-                .find(|index| diff.is_char_boundary(*index))
-                .expect("zero is a boundary")
-        });
-    format!("{}\n... (diff truncated)", &diff[..cut])
 }
 
 fn write_diff_lines<S: AsRef<str>>(out: &mut String, marker: char, lines: &[S]) {
@@ -992,7 +1190,9 @@ mod tests {
         assert!(ambiguous.is_error);
         assert_eq!(
             ambiguous.content,
-            "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique"
+            "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique. Lines around each match:\n\
+             match 1, line 1:\n1 | same\n2 | same\n\
+             match 2, line 2:\n1 | same\n2 | same"
         );
 
         let absent = run(
@@ -1003,15 +1203,20 @@ mod tests {
         assert!(absent.is_error);
         assert_eq!(
             absent.content,
-            "edit failed: old_text was not found in sample.txt"
+            "edit failed: old_text was not found in sample.txt; no line of old_text matches a line of the file, ignoring leading and trailing whitespace"
         );
     }
 
     #[tokio::test]
     async fn overlapping_occurrences_are_ambiguous() {
-        for (name, file, old_text) in [
-            ("exact", "aaa\n", "aa"),
-            ("fuzzy", "x\u{2019}x\u{2019}x\n", "x'x"),
+        for (name, file, old_text, line) in [
+            ("exact", "aaa\n", "aa", "aaa"),
+            (
+                "fuzzy",
+                "x\u{2019}x\u{2019}x\n",
+                "x'x",
+                "x\u{2019}x\u{2019}x",
+            ),
         ] {
             let (root, path) = sample(file);
             let workspace = workspace(root.path());
@@ -1025,7 +1230,9 @@ mod tests {
             assert!(result.is_error, "{name}: {result:?}");
             assert_eq!(
                 result.content,
-                "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique",
+                format!(
+                    "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique. Lines around each match:\nmatch 1, line 1:\n1 | {line}\nmatch 2, line 1:\n1 | {line}"
+                ),
                 "{name}"
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), file, "{name}");
@@ -1033,7 +1240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn match_errors_do_not_echo_the_requested_text() {
+    async fn match_errors_show_only_bounded_file_lines() {
         let (root, _) = sample("dup\ndup\n");
         let workspace = workspace(root.path());
         let tool = EditTool::new(&workspace);
@@ -1051,16 +1258,213 @@ mod tests {
         );
         assert!(not_found.content.len() <= 200, "{not_found:?}");
 
+        let (root, _) = sample(&"dup\n".repeat(300));
+        let big = crate::tool::testutil::workspace(root.path());
         let ambiguous = run(
-            &tool,
+            &EditTool::new(&big),
             r#"{"path":"sample.txt","old_text":"dup","new_text":"new"}"#,
         )
         .await;
+        assert!(ambiguous.is_error, "{ambiguous:?}");
         assert!(
-            ambiguous.is_error && !ambiguous.content.contains("dup"),
+            ambiguous.content.contains("(295 more matches not shown)"),
             "{ambiguous:?}"
         );
-        assert!(ambiguous.content.len() <= 200, "{ambiguous:?}");
+        assert!(
+            ambiguous.content.len() <= MAX_DIFF_BYTES + 300,
+            "len = {}",
+            ambiguous.content.len()
+        );
+
+        // Twenty 300-byte lines are cut to 203 bytes each, which exceeds the
+        // listing cap.
+        let lines: Vec<String> = (0..30)
+            .map(|index| format!("{index:02}{}", "q".repeat(300)))
+            .collect();
+        let (root, _) = sample(&format!("{}\n", lines.join("\n")));
+        let big = crate::tool::testutil::workspace(root.path());
+        let arguments = serde_json::json!({
+            "path": "sample.txt",
+            "old_text": format!("{}\nmissing", lines.join("\n")),
+            "new_text": "new",
+        })
+        .to_string();
+        let capped = run(&EditTool::new(&big), &arguments).await;
+        assert!(capped.is_error, "{capped:?}");
+        let (_, listing) = capped.content.split_once(":\n").unwrap();
+        assert!(listing.ends_with("\n... (truncated)"), "{capped:?}");
+        assert!(
+            listing.len() <= MAX_DIFF_BYTES + "\n... (truncated)".len(),
+            "len = {}",
+            listing.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_match_lists_lines_around_each_match() {
+        let file = "fn a() {\n    let x = 1;\n    one();\n    two();\n}\nfn b() {\n    let x = 1;\n    one();\n    two();\n}\n";
+        let (root, path) = sample(file);
+        let workspace = workspace(root.path());
+        let arguments = serde_json::json!({
+            "path": "sample.txt",
+            "old_text": "let x = 1;\n    one();\n    two();",
+            "new_text": "X",
+        })
+        .to_string();
+        let result = run(&EditTool::new(&workspace), &arguments).await;
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(
+            result.content,
+            "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique. Lines around each match:\n\
+             match 1, lines 2-4:\n\
+             \x201 | fn a() {\n\
+             \x202 |     let x = 1;\n\
+             ...\n\
+             \x204 |     two();\n\
+             \x205 | }\n\
+             match 2, lines 7-9:\n\
+             \x206 | fn b() {\n\
+             \x207 |     let x = 1;\n\
+             ...\n\
+             \x209 |     two();\n\
+             10 | }"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), file);
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_fuzzy_match_maps_to_file_lines() {
+        let (root, _) = sample("a\nsay(\u{201c}hi\u{201d})\nb\nc\nsay(\u{201c}hi\u{201d})\nd\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","old_text":"say(\"hi\")","new_text":"X"}"#,
+        )
+        .await;
+        assert_eq!(
+            result.content,
+            "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique. Lines around each match:\n\
+             match 1, line 2:\n1 | a\n2 | say(\u{201c}hi\u{201d})\n3 | b\n\
+             match 2, line 5:\n4 | c\n5 | say(\u{201c}hi\u{201d})\n6 | d"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_old_text_shows_the_closest_current_lines() {
+        let (root, path) = sample(
+            "fn alpha() {}\nfn beta() {}\nassert_eq!(a, b);\nfn gamma() {}\nfn delta() {}\nfn omega() {}\n",
+        );
+        let workspace = workspace(root.path());
+        let arguments = serde_json::json!({
+            "path": "sample.txt",
+            "old_text": "fn alpha() {}\nfn beta() {}\nassert_eq!(\n    a,\n    b\n);",
+            "new_text": "X",
+        })
+        .to_string();
+        let result = run(&EditTool::new(&workspace), &arguments).await;
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(
+            result.content,
+            "edit failed: old_text was not found in sample.txt. Closest lines in the current file (2 of 6 old_text lines match, ignoring leading and trailing whitespace):\n\
+             1 | fn alpha() {}\n\
+             2 | fn beta() {}\n\
+             3 | assert_eq!(a, b);\n\
+             4 | fn gamma() {}\n\
+             5 | fn delta() {}\n\
+             6 | fn omega() {}"
+        );
+        assert!(!result.content.contains("assert_eq!(\n"), "{result:?}");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("assert_eq!(a, b);")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_closest_lines_take_the_earliest_tie_and_stop_at_20() {
+        let (root, _) = sample("one\nmid\none\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","old_text":"one\nmissing","new_text":"X"}"#,
+        )
+        .await;
+        assert!(
+            result.content.ends_with(":\n1 | one\n2 | mid"),
+            "{result:?}"
+        );
+
+        let file: String = (1..=30).map(|n| format!("l{n}\n")).collect();
+        std::fs::write(root.path().join("sample.txt"), file).unwrap();
+        let old_text: Vec<String> = std::iter::once("l1".to_owned())
+            .chain((2..=25).map(|n| format!("gone{n}")))
+            .collect();
+        let arguments = serde_json::json!({
+            "path": "sample.txt",
+            "old_text": old_text.join("\n"),
+            "new_text": "X",
+        })
+        .to_string();
+        let result = run(&EditTool::new(&workspace), &arguments).await;
+        let listing: Vec<String> = (1..=20).map(|n| format!("{n:>2} | l{n}")).collect();
+        assert!(
+            result.content.ends_with(&format!(
+                "(1 of 25 old_text lines match, ignoring leading and trailing whitespace):\n{}\n(5 more lines)",
+                listing.join("\n")
+            )),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_not_found_without_any_matching_line_says_so() {
+        let (root, _) = sample("one\ntwo\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","old_text":"zzz\nyyy","new_text":"X"}"#,
+        )
+        .await;
+        assert_eq!(
+            result.content,
+            "edit failed: old_text was not found in sample.txt; no line of old_text matches a line of the file, ignoring leading and trailing whitespace"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_match_error_keeps_its_edit_number_and_listing() {
+        let (root, path) = sample("a\nb\nc\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","edits":[{"old_text":"a","new_text":"A"},{"old_text":"x\nb","new_text":"B"}]}"#,
+        )
+        .await;
+        assert_eq!(
+            result.content,
+            "edit 2 failed: old_text was not found in sample.txt. Closest lines in the current file (1 of 2 old_text lines match, ignoring leading and trailing whitespace):\n1 | a\n2 | b"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\nc\n");
+    }
+
+    #[tokio::test]
+    async fn a_long_file_line_is_cut_in_an_error() {
+        let line = format!("AB{}", "z".repeat(300));
+        let (root, _) = sample(&format!("{line}\n{line}\n"));
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","old_text":"AB","new_text":"X"}"#,
+        )
+        .await;
+        let cut = format!("AB{}...", "z".repeat(198));
+        assert_eq!(
+            result.content,
+            format!(
+                "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique. Lines around each match:\nmatch 1, line 1:\n1 | {cut}\n2 | {cut}\nmatch 2, line 2:\n1 | {cut}\n2 | {cut}"
+            )
+        );
     }
 
     #[tokio::test]
@@ -1737,5 +2141,169 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "edited");
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+            items[self.below(items.len())]
+        }
+    }
+
+    fn text(rng: &mut Rng, alphabet: &[&str], max: usize) -> String {
+        let len = rng.below(max + 1);
+        (0..len).map(|_| rng.pick(alphabet)).collect()
+    }
+
+    fn count(haystack: &str, needle: &str) -> usize {
+        occurrences(haystack, needle, |_| true).1
+    }
+
+    fn ascii(text: &str) -> String {
+        normalize_for_fuzzy_match_with_map(text).0
+    }
+
+    fn edit(old: &str, new: &str) -> Vec<EditReplacement> {
+        vec![EditReplacement {
+            old_text: old.to_owned(),
+            new_text: new.to_owned(),
+        }]
+    }
+
+    fn sub(rng: &mut Rng, content: &str) -> Option<String> {
+        let bounds: Vec<usize> = (0..=content.len())
+            .filter(|i| content.is_char_boundary(*i))
+            .collect();
+        if bounds.len() < 2 {
+            return None;
+        }
+        let a = rng.below(bounds.len() - 1);
+        let b = a + 1 + rng.below(bounds.len() - 1 - a);
+        Some(content[bounds[a]..bounds[b]].to_owned())
+    }
+
+    /// A unique exact match equals `replacen` on the content; any other count is an error.
+    #[test]
+    fn random_exact_edits_match_a_reference_replacement() {
+        let mut rng = Rng(0x1234_5678_9abc_def1);
+        let file_chars = ["a", "b", "\n", " ", "\t", "\u{2019}", "x"];
+        let new_chars = ["a", "c", "\n", " ", "\u{2014}"];
+        let mut checked = 0;
+        for _ in 0..300_000 {
+            let content = text(&mut rng, &file_chars, 60);
+            let nl = if rng.below(2) == 0 || !content.contains('\n') {
+                "\n"
+            } else {
+                "\r\n"
+            };
+            let bom = rng.below(4) == 0;
+            let body = content.replace('\n', nl);
+            let file = if bom { format!("\u{feff}{body}") } else { body };
+            let Some(old) = sub(&mut rng, &content) else {
+                continue;
+            };
+            let new = text(&mut rng, &new_chars, 16);
+            let result = apply_text_edits(&file, "f", &edit(&old, &new));
+            match count(&content, &old) {
+                1 => {
+                    let expected = content.replacen(&old, &new, 1).replace('\n', nl);
+                    let expected = if bom {
+                        format!("\u{feff}{expected}")
+                    } else {
+                        expected
+                    };
+                    let got = result.expect("unique exact match applies").0;
+                    assert_eq!(got, expected, "file={file:?} old={old:?} new={new:?}");
+                    checked += 1;
+                }
+                _ => assert!(result.is_err(), "file={file:?} old={old:?}"),
+            }
+        }
+        assert!(
+            checked >= 200_000,
+            "only {checked} exact cases were checked"
+        );
+    }
+
+    /// A fuzzy match changes only the matched lines, ignoring the whitespace the fuzzy view drops.
+    #[test]
+    fn random_fuzzy_edits_change_only_the_matched_lines() {
+        let mut rng = Rng(0x0fed_cba9_8765_4321);
+        let file_chars = [
+            "a", "b", "\n", " ", " ", "\u{2019}", "\u{201c}", "\u{2014}", "\u{00a0}", "'", "-",
+        ];
+        let new_chars = ["a", "c", "\n", "'", "-", "\u{2019}"];
+        let mut checked = 0;
+        for _ in 0..300_000 {
+            let content = text(&mut rng, &file_chars, 60);
+            let nl = if rng.below(2) == 0 || !content.contains('\n') {
+                "\n"
+            } else {
+                "\r\n"
+            };
+            let file = content.replace('\n', nl);
+            let Some(raw_old) = sub(&mut rng, &content) else {
+                continue;
+            };
+            let old = ascii(&raw_old);
+            if old.trim().is_empty() || count(&content, &old) != 0 {
+                continue;
+            }
+            let new = text(&mut rng, &new_chars, 16);
+            let Ok((got, _, _)) = apply_text_edits(&file, "f", &edit(&old, &new)) else {
+                continue;
+            };
+            // Line endings stay in the file's style.
+            if nl == "\r\n" {
+                assert!(
+                    !got.replace("\r\n", "").contains('\n'),
+                    "file={file:?} old={old:?} new={new:?} got={got:?}"
+                );
+            }
+            let got_lf = got.replace("\r\n", "\n");
+            // Up to the fuzzy folding, the result is the file with the match replaced by new_text.
+            let fuzzy = ascii(&content);
+            let expected = ascii(&fuzzy.replacen(&ascii(&old), &new, 1));
+            // Whitespace the fuzzy view dropped from the file stays in place
+            // while new_text may add or drop spaces, so compare without spaces.
+            let visible = |text: &str| text.chars().filter(|c| *c != ' ').collect::<String>();
+            assert_eq!(
+                visible(&ascii(&got_lf)),
+                visible(&expected),
+                "file={file:?} old={old:?} new={new:?} got={got_lf:?}"
+            );
+            // Lines outside the matched line range keep their exact bytes. An
+            // unchanged result has nothing to compare and is skipped first.
+            if got_lf == content {
+                checked += 1;
+                continue;
+            }
+            let match_at = fuzzy.find(&ascii(&old)).unwrap();
+            let match_first = fuzzy[..match_at].matches('\n').count();
+            let match_last = fuzzy[..match_at + ascii(&old).len()].matches('\n').count();
+            let before: Vec<&str> = content.split('\n').collect();
+            let after: Vec<&str> = got_lf.split('\n').collect();
+            let tail = before.len() - match_last - 1;
+            assert!(
+                before[..match_first] == after[..match_first]
+                    && after.len() >= tail
+                    && before[match_last + 1..] == after[after.len() - tail..],
+                "change outside the matched lines: file={file:?} old={old:?} new={new:?} got={got_lf:?}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 150_000,
+            "only {checked} fuzzy cases were checked"
+        );
     }
 }

@@ -17,6 +17,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Switch the conversation's profile from a chat with one tap: bare `/model`
+  replies with the profiles from the local `~/.config/otto/config.toml` — name,
+  provider and model each — and one inline button per profile in Telegram or one
+  card button per profile in Feishu; choosing one switches that session exactly
+  as typing `/model <profile>` does. A platform without buttons gets the same
+  list as text. The connector reads that file read-only, so the picker shows the
+  user layer only and marks the configured default rather than the session's
+  current profile; switching itself stays Otto's
+  ([user manual](docs/user-manual.md#commands)).
+
 - Switch the model of one session from ACP itself with `/model [profile]`: Otto
   rebuilds the session's runner on another configured profile, makes no model
   request, and leaves the configuration file and every other session unchanged.

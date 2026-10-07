@@ -26,13 +26,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
   request AUTO cannot decide is presented exactly as in MANUAL, and its
   recorded `pending` event is unchanged. See the
   [authority boundary contract](docs/specs/2026-10-07-auto-mode-authority-boundaries.md)
-  and the [user manual](docs/user-manual.md#unified-approvals).
+  and the [user manual](docs/user-manual.md#unified-approvals)
+  ([#401](https://github.com/baiyuqing/otto/pull/401)).
 
 ### Fixes
 
 - The session AUTO policy no longer approves a request raised by the model on
   its own behalf: a plan or approach review is a human judgement, and letting
-  the asking session answer it made the requesting model the approving party.
+  the asking session answer it made the requesting model the approving party
+  ([#401](https://github.com/baiyuqing/otto/pull/401)).
 
 ### Security
 
@@ -40,7 +42,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   cannot be approved by the session policy. The rule is enforced in the
   approval service and rechecked inside the committing transaction, and a
   request persisted without a declared authority class is treated as a user
-  decision.
+  decision ([#401](https://github.com/baiyuqing/otto/pull/401)).
 
 ## 0.4.1 - 2026-10-07
 

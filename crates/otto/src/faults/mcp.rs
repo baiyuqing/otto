@@ -11,15 +11,14 @@
 //! client's call timeout and grace must end the call. `Exit`, `ExitAfter` and
 //! the write faults panic: a plan that asks for them is a test bug.
 
-use std::fmt::Debug;
 use std::future::Future;
+use std::sync::Arc;
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::{Fault, FaultPlan};
 use crate::mcp::{CallError, Outbound, Transport, jsonrpc};
-use std::sync::Arc;
 
 /// The transport operations a rule can select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

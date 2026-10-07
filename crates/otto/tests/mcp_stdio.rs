@@ -592,6 +592,7 @@ async fn test_hung_stdio_request_times_out_and_stops_the_server() -> Result<(), 
         .call("echo", json!({}), &CancellationToken::new())
         .await;
     let elapsed = started.elapsed();
+    plan.assert_all_fired();
     check(
         matches!(first, Err(CallError::Timeout)),
         format!("expected Timeout, got {first:?}"),
@@ -620,7 +621,6 @@ async fn test_hung_stdio_request_times_out_and_stops_the_server() -> Result<(), 
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     check(gone, format!("pid {pid} still alive after the timeout"))?;
-    plan.assert_all_fired();
     Ok(())
 }
 

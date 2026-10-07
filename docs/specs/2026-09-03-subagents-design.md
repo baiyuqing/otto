@@ -1,8 +1,12 @@
 # Sub-agents design
 
 Status: draft, 2026-09-03, pending approval; historical and superseded for the
-current sub-agent API. It is retained for rationale. The proposal includes
-aspirational APIs; only the tool surface and behavior verified in the current
+current sub-agent API. It is retained for rationale. In particular, the
+blocking `agent_wait` and `agent(wait: true)` contracts below were removed by
+the approved
+[non-blocking parent suspension design](2026-10-07-nonblocking-parent-suspension.md).
+The proposal includes aspirational APIs; only the tool surface and behavior
+verified in the current
 [`crates/otto/src/subagent`](../../crates/otto/src/subagent) implementation and the
 [README](../../README.md#delegate-work-to-sub-agents) are current. The tool
 surface described under "The parent's tools" and "Tools available to the

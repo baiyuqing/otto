@@ -1,6 +1,8 @@
 # Otto embedding API
 
-Status: proposed 2026-10-07. Maintainer decisions on 2026-10-07:
+Status: approved 2026-10-07 (`67cc55e`); phase 1 implemented. Line
+references point to `64fe51d`, before the code moves. Maintainer decisions
+on 2026-10-07:
 
 - Another Rust program can construct an Otto agent in process.
 - The runtime it gets is by default the same as the one the `otto` CLI
@@ -71,7 +73,8 @@ is a supported entry point.
    reference](#behavior-reference-otto-acp).
 2. Every component in the [component table](#components) is enabled unless
    the host disables it. A disabled component:
-   - adds no tool definitions
+   - adds no tool definitions, except `Schedule`, whose tools stay and
+     report that scheduled delivery is unavailable
    - opens no database file
    - starts no child process
 
@@ -134,6 +137,7 @@ let otto = Otto::builder()
     .await?;
 
 let session = otto.new_session(None).await?; // None: the startup workspace
+session.set_auto_mode(false)?;                // MANUAL: approvals reach `decide`
 let stop = session
     .prompt(
         Input::Text("fix the failing test"),
@@ -167,6 +171,7 @@ otto.close().await;
 | `Session::compact(..)` | `Controller::compact` |
 | `Session::history()` | `Controller::history` |
 | `Session::info()` | `Controller::info` |
+| `Session::set_auto_mode(bool)` | `approval::Service::set_auto_mode` for the session scope, as ACP `_otto/approval_mode/set` does (`acp/shared_approval.rs:181`) and `/auto on\|off` does |
 | `Session::close()` | `Controller::close_mcp`, then `Controller::close` |
 
 Types:
@@ -178,6 +183,10 @@ Types:
 - `decide` receives `ApprovalRequest` and returns
   `Future<Output = ApprovalDecision>`. The module re-exports both from
   `app::approval`. A headless host passes a closure that returns `Deny`.
+- A new session starts in AUTO approval mode, as in every CLI frontend
+  (`approval::Service::auto_mode` defaults to `true`). AUTO approves
+  requests without calling `decide`. `set_auto_mode(false)` selects MANUAL,
+  in which `decide` is called.
 - `prompt` returns `Stop::EndTurn` or `Stop::Cancelled`.
 - A second `prompt` on a session whose turn is still running returns the
   existing `PROMPT_ACTIVE` error. Sessions run turns concurrently with each
@@ -185,7 +194,9 @@ Types:
 
 Errors are one `#[non_exhaustive] enum Error`. It has these variants:
 `AlreadyRunning`, `Config`, `Workspace`, `SessionNotFound`,
-`PersistenceDisabled`, `PromptActive`, `Closed` and `Agent(AgentError)`.
+`PersistenceDisabled`, `PromptActive`, `Closed`, `Agent(AgentError)` and
+`Close(String)`. `Close` carries the redacted message of a failed
+`Session::close` or `Otto::close`.
 Every message passes through the builder's redaction (`redact_error`), as
 serve does.
 
@@ -213,7 +224,7 @@ and the switch reaches it through the same code path:
 | `Plugins` | no plugin tools, no plugin hooks | `[plugins].enabled = false` |
 | `Subagents` | no subagent tools (`build_subagents` returns empty) | `[agents].enabled = false` |
 | `Reflection` | no reflect tool, no automatic reflection | `[reflection].enabled = false` |
-| `Schedule` | `schedule.db` not opened, no schedule tools | `open_schedule` returned `None` (`cli/run.rs:1564`) |
+| `Schedule` | `schedule.db` not opened; the schedule tools stay and return "scheduled delivery is unavailable: ~/.otto/schedule.db could not be opened" (`schedule/tools.rs:35`) | `open_schedule` returned `None` (`cli/run.rs:1564`) |
 | `SessionPersistence` | no session files; sessions use `SharedSession::memory`; `resume_session` and `list_sessions` return `PersistenceDisabled` | `--no-session` (`Shared.no_session = true`) |
 | `Usage` | `usage.db` not opened | usage store failed to open (`cli/run.rs:701`) |
 | `TaskHistory` | `tasks.db` not opened | task store failed to open (`cli/run.rs:711`) |
@@ -251,7 +262,8 @@ these:
 
 | Behavior | `otto acp` | Embedded |
 | --- | --- | --- |
-| sandbox elevation | `elevate = true` (`cli/run.rs:848`) | the same; commands outside the sandbox grants reach `decide` |
+| sandbox elevation | `elevate = true` (`cli/run.rs:848`) | the same; in MANUAL approval mode, commands outside the sandbox grants reach `decide` |
+| approval mode | AUTO for a new session; `_otto/approval_mode/set` switches it | AUTO for a new session; `Session::set_auto_mode` switches it |
 | logger | `Logger::stderr()` (`cli/run.rs:758`) | `Logger::stderr()`, or `Logger::new(writer)` when `diagnostics` is set |
 | startup warnings | written to stderr | written to stderr, or to the `diagnostics` writer |
 | session create and load | `Controller::create` and `Controller::open` | the same calls |
@@ -281,33 +293,53 @@ one. `otto serve` does the same thing through one `Shared`.
 
 - **New `crates/otto/src/runtime/startup.rs`.** It holds steps 1–16 of
   `run_with_backends`, from environment capture to the memory service, as
-  `pub(crate) async fn start(StartOptions, &mut (dyn Write + Send)) ->
-  Result<Started, String>`. It also holds `load_workspace`, moved from
-  `cli/run.rs`, and `admit_workspace`, moved from `cli/serve.rs`.
-  - The writer argument receives warnings at the moment each step emits
-    them, as `load_workspace` already does. The CLI passes its stderr, so
-    its output keeps the same bytes in the same order.
-  - `StartOptions` carries the values the steps read:
-    - `elevate`
-    - the logger choice
-    - the config source
-    - the environment snapshot
-    - the overrides
-    - the set of disabled components
+  `pub(crate)` phase functions. Each phase is the unchanged code of a
+  contiguous run of steps:
 
-    It does not carry `cli::run::Frontend`, which stays in `cli`.
-  - `Started` holds the `Arc<Shared>`, the startup `Builder`, the sandbox
-    reloader and the handles that the close order needs.
-- **Only non-`pub` items move.** That covers the `pub(crate)` and
-  `pub(super)` helpers (`resolve_home_for`, `load_config_for`,
-  `config_environment_for`, `resolve_sandbox_settings`,
-  `compose_workspace_sandbox`, `load_workspace`) and private functions.
-  `cli::run::run`, `cli::run::run_with_backends` and `cli::run::Frontend`
-  keep their paths and signatures. No other `pub` item changes.
-- **`cli/run.rs::run_with_backends`** calls `startup::start` and keeps only
-  frontend dispatch: workflow, acp, serve, REPL/TUI, herdr and the schedule
-  worker. `cli/serve.rs` calls `startup::load_workspace` and
-  `startup::admit_workspace`.
+  | Phase | Steps |
+  | --- | --- |
+  | `load` | environment snapshot, redaction boundary, home, layered config |
+  | `open_storage` | `Storage::open_home_with` |
+  | `configure` | config diagnostics, config environment, redaction merges, ChatGPT credential capture |
+  | `canonical_workspace` | canonical `--cwd` |
+  | `prepare_workspace` | memory config, workspace marker, session root |
+  | `compose` | shell, sandbox settings, MCP, usage/tasks/schedule/skill-check/reflection stores, approvals, `Shared`, `Builder::for_workspace` |
+  | `initial_runtime` | the initial `Runtime` |
+  | `compose_workspace_sandbox` | sandbox, elevated approval executor, reloader |
+  | `open_memory` | memory service, workspace scope, advice audit |
+
+  The CLI interleaves its own steps between the shared ones: the ACP
+  listener policy check, the session-operation check, the `@file` prompt,
+  `--attach`, `--archive`, `--continue`, frontend selection, resume
+  preparation, the cancellation checks and the startup trace marks. A
+  single `start` function therefore cannot serve the CLI without moving
+  those steps and reordering stderr. The CLI calls the phases with its
+  steps in between; `startup::start` calls the same phases in the same
+  order with no CLI step, `elevate = true` and no sandbox driver override,
+  which is the `otto acp` path.
+  - Each phase takes the `stderr` writer and writes warnings when its step
+    emits them. The CLI passes its stderr, so its output keeps the same
+    bytes in the same order. A test pins that output. One timing changed:
+    the `memory/open` startup trace mark is now recorded after the advice
+    audit opens instead of before it, because both happen inside
+    `open_memory`. The mark's name and text are unchanged.
+  - `Disabled` carries the disabled components. The CLI passes
+    `Disabled::default()`. `startup::start` applies the config keys after
+    `configure`, so the redaction set does not depend on the switches.
+  - `startup.rs` also holds `load_workspace` (from `cli/run.rs`) and
+    `admit_workspace`, `canonicalize_workspace_roots` and `trusted_projects`
+    (from `cli/serve.rs`).
+- **Moved `pub` items keep their old paths.** `cli/sandbox_switch.rs` moves
+  to `runtime/sandbox_switch.rs`, and `cli::sandbox_switch` re-exports it.
+  `CapturedAuth` and `capture_auth_credentials` move to `auth`, and
+  `cli::login` re-exports them. The other moved items are `pub(crate)` or
+  `pub(super)` helpers; `cli::run` re-exports the ones other `cli` modules
+  call. `cli::run::run`, `cli::run::run_with_backends` and
+  `cli::run::Frontend` keep their paths and signatures.
+- **`cli/run.rs::run_with_backends`** calls the phases and keeps the
+  CLI-only steps and frontend dispatch: workflow, acp, serve, REPL/TUI,
+  herdr and the schedule worker. `cli/serve.rs` calls
+  `startup::load_workspace` and `startup::admit_workspace`.
 - **New `crates/otto/src/embed.rs`.** It holds the public types above and
   depends on `runtime` and `app`. `crates/otto/tests/runtime_boundary.rs`
   already rejects imports of `cli`, `tui`, `acp`, `server` and `client` from
@@ -388,13 +420,18 @@ All tests are offline. They use `ProviderClient::Scripted`
 no Seatbelt.
 
 1. **Default parity with `otto acp`.** For one workspace, config and
-   environment, a default `Otto` session and the `otto acp` composition give
-   equal values for:
-   - tool definitions
-   - sandbox info
-   - the elevation flag
+   environment, a default `Otto` session and an in-process `otto acp` run
+   send the scripted provider equal values for:
+   - tool definitions (name, description, schema)
+   - model and thinking
+   - the system prompt, after the per-run paths are normalized
 
-   This catches drift between the two.
+   The test also compares `otto acp` stderr with the diagnostics writer and
+   the file tree under each home. This catches drift between the two.
+   Implemented limits: sandbox info and the elevation flag are not compared
+   directly (both runs use driver `off`, and both pass `elevate = true`
+   through `startup::compose_workspace_sandbox`); subagent tools are empty
+   under the scripted provider; Seatbelt behavior is not exercised.
 2. **No regression.** The existing CLI, serve and ACP tests pass, and no
    assertion in them changes. Only `use` lines that name a moved non-`pub`
    item may change. One test runs a startup that emits warnings, captures
@@ -407,16 +444,28 @@ no Seatbelt.
    - the database file it lists is not created under the test home
    - for `Mcp`, a configured stdio server is not spawned
    - for `SessionPersistence`, no `.jsonl` file is written
+   - for `Schedule`, `schedule.db` is not created and the schedule tools
+     remain
+   - for `Plugins`, the test checks that `[plugins].enabled` is false in the
+     composed config; no plugin fixture is installed
 5. **Disable wins over config.** `[mcp].enabled = true` in config together
    with `disable(Component::Mcp)` gives no MCP tools. The same holds for a
    second workspace opened with `open_workspace`.
-6. **Managed policy applies.** A managed policy that disables a component
-   disables it with no code switch.
+6. **Managed policy applies.** Not implemented as a test. `managed_path()`
+   is fixed (`/Library/Application Support/Otto/policy.toml` on macOS,
+   `/etc/otto/policy.toml` on Linux) and `policy_at` requires root-owned
+   ancestors, so an offline test cannot install one. The order holds by
+   construction: `config::layered::load_user` and `load` apply the managed
+   policy while loading; `Disabled::apply` runs later, in `startup::start`
+   after `load` and `configure` and in `startup::load_workspace` after the
+   project load, and it only sets keys to `false`.
 7. **One instance.** A second `build()` returns `AlreadyRunning`. A `build()`
    after `close()` succeeds.
-8. **Prompt round trip.** A scripted provider requests a bash command that
-   needs approval:
-   - `decide` is called once with that command
+8. **Prompt round trip.** The session is switched to MANUAL with
+   `set_auto_mode(false)`. A scripted provider calls the `request_approval`
+   tool; with driver `off` bash has no approval path, and the
+   approval-capable bash definition exists only under Seatbelt.
+   - `decide` is called once with that request
    - `Deny` produces the denial tool result
    - the turn ends with `EndTurn`
    - the events arrive at `emit` in order
@@ -437,7 +486,8 @@ no Seatbelt.
   - the additive-only rule for `otto::embed`
   - the rule that `startup.rs` is the only composition root
 - `README.md`: a short "Use Otto as a library" section with the git
-  dependency line, pinned to a release tag.
+  dependency line, pinned to a commit with `rev`. The repository has no
+  release tags for the Rust implementation yet.
 - `CHANGELOG.md`: an `Added` entry.
 - Capability descriptions are unchanged, because no model-callable
   capability changes.
@@ -455,6 +505,7 @@ no Seatbelt.
   (`cli/run.rs:1134`). Schedule tools still create entries, and
   an `otto` REPL, TUI or `otto serve` process whose worker scope matches
   runs them.
+- No offline test installs a managed policy; see [Testing](#testing) item 6.
 - The API is Rust only and needs a Tokio runtime.
 - Phase 1 is a git dependency. Builds of the host compile all of `otto`,
   including the TUI and server modules.

@@ -52,6 +52,40 @@ fn sources(path: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// Net `{` minus `}` on one line, ignoring braces inside string and char
+/// literals (format strings hold `{{` and `}}`).
+fn brace_balance(line: &str) -> i32 {
+    let mut balance = 0;
+    let mut in_string = false;
+    let mut chars = line.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\\' if in_string => {
+                chars.next();
+            }
+            '"' => in_string = !in_string,
+            '\'' if !in_string => {
+                // A char literal such as '{' or '\''; a lifetime has no closing quote.
+                let mut ahead = chars.clone();
+                let first = ahead.next();
+                let close = if first == Some('\\') {
+                    ahead.next();
+                    ahead.next()
+                } else {
+                    ahead.next()
+                };
+                if close == Some('\'') {
+                    chars = ahead;
+                }
+            }
+            '{' if !in_string => balance += 1,
+            '}' if !in_string => balance -= 1,
+            _ => {}
+        }
+    }
+    balance
+}
+
 /// Remove `#[cfg(test)]` items so persistence tests may inspect SQL directly.
 fn non_test(source: &str) -> String {
     let lines: Vec<&str> = source.lines().collect();
@@ -69,7 +103,7 @@ fn non_test(source: &str) -> String {
         while index < lines.len() {
             let line = lines[index];
             index += 1;
-            depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            depth += brace_balance(line);
             opened |= line.contains('{');
             if (opened && depth <= 0) || (!opened && line.trim_end().ends_with(';')) {
                 break;
@@ -470,6 +504,39 @@ fn drivers_and_adapters_point_downward() {
         offenders.is_empty(),
         "drivers and repositories may not depend on application services or frontends:\n{}",
         offenders.join("\n")
+    );
+}
+
+fn direct_turso_open_violations(source: &str) -> Vec<String> {
+    let source = without_line_comments(&non_test(source));
+    if source.contains("Connection::open(") {
+        vec!["`Connection::open(` bypasses the injected SqlDriver".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+#[test]
+fn turso_repositories_open_through_the_injected_driver() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/backends/turso");
+    let mut offenders = Vec::new();
+    for path in sources(&root) {
+        let body = std::fs::read_to_string(&path).expect("read repository source");
+        for problem in direct_turso_open_violations(&body) {
+            offenders.push(format!("{}: {problem}", path.display()));
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "repositories open connections with `Connection::open_with_driver` so fault injection reaches them:\n{}",
+        offenders.join("\n")
+    );
+    assert!(!direct_turso_open_violations("fn f() { Connection::open(path); }").is_empty());
+    let braces_in_string = "#[cfg(test)]\nmod t {\n    const S: &str = \"}}\";\n    fn f() { Connection::open(p); }\n}";
+    assert!(direct_turso_open_violations(braces_in_string).is_empty());
+    assert!(
+        direct_turso_open_violations("#[cfg(test)]\nfn f() { Connection::open(path); }").is_empty()
     );
 }
 

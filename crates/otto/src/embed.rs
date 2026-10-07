@@ -9,6 +9,7 @@
 //!
 //! ```no_run
 //! use otto::embed::{ApprovalDecision, Component, ConfigSource, Input, Otto};
+//! use otto_core::approval::ApprovalMode;
 //!
 //! # async fn demo() -> Result<(), otto::embed::Error> {
 //! # let overrides = otto_core::config::Overrides::default();

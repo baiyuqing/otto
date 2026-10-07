@@ -1848,6 +1848,10 @@ fn first_non_empty(candidates: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::faults::files::{FaultyFileDriver, FileOp};
+    use crate::faults::{Fault, FaultError, FaultPlan, Filter, Rule, Trigger};
+    use crate::storage::drivers::posix::PosixDriver;
+    use crate::storage::files::FileDriver;
     use crate::subagent::testsupport::{
         FakeProvider, RouteStep, StubTool, assistant_text, assistant_tool_call, last_user_text,
         match_any, match_prompt, raw, redaction, redactor, stub, test_config, test_prompt_for,
@@ -2657,7 +2661,7 @@ mod tests {
         }]);
         let parent = parent_path.clone();
         config.child_session = Some(Arc::new(move |task_id: &str| {
-            Ok(Some(child_store(&parent, task_id, false)))
+            Ok(Some(child_store(&parent, task_id, None)))
         }));
         let (runner, _) = runner(config);
 
@@ -2821,7 +2825,7 @@ mod tests {
         let parent = parent_path.clone();
         let checking_tasks = Arc::clone(&tasks);
         config.child_session = Some(Arc::new(move |task_id: &str| {
-            let (inner, path) = child_store(&parent, task_id, false);
+            let (inner, path) = child_store(&parent, task_id, None);
             let wrapped: Transcript = Arc::new(OrderCheckingTranscript {
                 inner,
                 tasks: Arc::clone(&checking_tasks),
@@ -2863,7 +2867,7 @@ mod tests {
         let parent = parent_path.clone();
         let checking_tasks = Arc::clone(&tasks);
         config.child_session = Some(Arc::new(move |task_id: &str| {
-            let (inner, path) = child_store(&parent, task_id, false);
+            let (inner, path) = child_store(&parent, task_id, None);
             let wrapped: Transcript = Arc::new(OrderCheckingTranscript {
                 inner,
                 tasks: Arc::clone(&checking_tasks),
@@ -2913,7 +2917,7 @@ mod tests {
         let parent = parent_path.clone();
         let checking_tasks = Arc::clone(&tasks);
         config.child_session = Some(Arc::new(move |task_id: &str| {
-            let (inner, path) = child_store(&parent, task_id, false);
+            let (inner, path) = child_store(&parent, task_id, None);
             let wrapped: Transcript = Arc::new(OrderCheckingTranscript {
                 inner,
                 tasks: Arc::clone(&checking_tasks),
@@ -2960,7 +2964,7 @@ mod tests {
         config.max_parallel = 1;
         let parent = parent_path.clone();
         config.child_session = Some(Arc::new(move |task_id: &str| {
-            Ok(Some(child_store(&parent, task_id, false)))
+            Ok(Some(child_store(&parent, task_id, None)))
         }));
         let (runner, _) = runner(config);
 
@@ -3453,11 +3457,19 @@ mod tests {
         assert_eq!(last.text(), "delegated task");
     }
 
-    /// A child store for task `task_id` beside `parent`, or one whose writes
-    /// fail when `fail` is set.
-    fn child_store(parent: &std::path::Path, task_id: &str, fail: bool) -> (Transcript, String) {
+    /// A child store for task `task_id` beside `parent`. With a `plan`, the
+    /// store's journal runs over a `FaultyFileDriver` for it.
+    fn child_store(
+        parent: &std::path::Path,
+        task_id: &str,
+        plan: Option<Arc<FaultPlan<FileOp>>>,
+    ) -> (Transcript, String) {
         let name = format!("{task_id}-child");
-        let store = crate::session::Store::create_child_lazy(
+        let driver: Arc<dyn FileDriver> = match plan {
+            Some(plan) => Arc::new(FaultyFileDriver::new(Arc::new(PosixDriver), plan)),
+            None => Arc::new(PosixDriver),
+        };
+        let store = crate::session::Store::create_child_lazy_with_driver(
             parent,
             &name,
             otto_core::session::Header {
@@ -3468,9 +3480,9 @@ mod tests {
                 created_at: Utc::now(),
                 ..otto_core::session::Header::default()
             },
+            driver,
         )
         .expect("child store");
-        store.lock().expect("lock").fail_writes = fail;
         let path = crate::session::Store::child_path(parent, &name);
         (Arc::new(store), path.to_string_lossy().into_owned())
     }
@@ -3520,7 +3532,7 @@ mod tests {
         config.parent_session = Some(Arc::new(move || inherited.clone()));
         let parent = parent_path.clone();
         config.child_session = Some(Arc::new(move |task_id: &str| {
-            Ok(Some(child_store(&parent, task_id, false)))
+            Ok(Some(child_store(&parent, task_id, None)))
         }));
         let (runner, _) = runner(config);
 
@@ -3556,8 +3568,23 @@ mod tests {
         provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
         let tasks = Arc::new(Tasks::new());
         let mut config = test_config(&provider, &tasks, Vec::new());
+        // The child's header and runtime record are journal writes 1 and 2;
+        // every later write fails before it reaches the file.
+        let plan = FaultPlan::new(vec![
+            Rule::new(
+                FileOp::Write,
+                Trigger::FromNth(3),
+                Fault::Before(FaultError::Os(libc::EIO)),
+            )
+            .filter(Filter::NameSuffix(".jsonl")),
+        ]);
+        let child_plan = Arc::clone(&plan);
         config.child_session = Some(Arc::new(move |task_id: &str| {
-            Ok(Some(child_store(&parent_path, task_id, true)))
+            Ok(Some(child_store(
+                &parent_path,
+                task_id,
+                Some(Arc::clone(&child_plan)),
+            )))
         }));
         let (runner, _) = runner(config);
 
@@ -3572,6 +3599,7 @@ mod tests {
 
         assert_eq!(done.status, TaskStatus::Failed);
         assert!(!done.error.is_empty());
+        plan.assert_all_fired();
     }
 
     #[tokio::test]

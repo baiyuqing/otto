@@ -112,17 +112,15 @@ fn store_failing_second_append(
 #[test]
 fn before_eio_on_journal_write_poisons_the_store_and_reopen_keeps_earlier_records() {
     let fixture = Fixture::new();
-    let (store, plan) =
-        store_failing_second_append(&fixture, FileOp::Write, Fault::Before(EIO));
+    let (store, plan) = store_failing_second_append(&fixture, FileOp::Write, Fault::Before(EIO));
     let path = store.path();
 
-    let error = store.append_message(&user("second")).expect_err("append fails");
+    let error = store
+        .append_message(&user("second"))
+        .expect_err("append fails");
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
     assert_eq!(texts(&store), ["first"]);
-    for refused in [
-        store.append_message(&user("third")),
-        store.rename("name"),
-    ] {
+    for refused in [store.append_message(&user("third")), store.rename("name")] {
         assert_eq!(
             refused.expect_err("poisoned").kind(),
             PiErrorKind::FatalPersistence
@@ -150,17 +148,26 @@ fn short_write_leaves_an_incomplete_final_line_that_reopen_truncates_with_a_warn
     );
     let path = store.path();
 
-    let error = store.append_message(&user("second")).expect_err("append fails");
+    let error = store
+        .append_message(&user("second"))
+        .expect_err("append fails");
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
     plan.assert_all_fired();
     drop(store);
 
     let torn = std::fs::read_to_string(&path).expect("read journal");
     assert!(!torn.ends_with('\n'), "the final line has no delimiter");
-    assert_eq!(torn.lines().count(), 4, "header, runtime, first, 10-byte prefix");
+    assert_eq!(
+        torn.lines().count(),
+        4,
+        "header, runtime, first, 10-byte prefix"
+    );
 
     let (reopened, warnings) = Store::open(&path).expect("reopen");
-    let messages: Vec<_> = warnings.iter().map(|warning| warning.message.as_str()).collect();
+    let messages: Vec<_> = warnings
+        .iter()
+        .map(|warning| warning.message.as_str())
+        .collect();
     assert_eq!(
         messages,
         [format!("truncated incomplete final session line at {path}")]
@@ -174,8 +181,7 @@ fn short_write_leaves_an_incomplete_final_line_that_reopen_truncates_with_a_warn
 #[test]
 fn after_eio_on_file_sync_poisons_the_store_and_the_reopened_input_is_not_duplicated() {
     let fixture = Fixture::new();
-    let (store, plan) =
-        store_failing_second_append(&fixture, FileOp::FileSync, Fault::After(EIO));
+    let (store, plan) = store_failing_second_append(&fixture, FileOp::FileSync, Fault::After(EIO));
     let path = store.path();
 
     let error = store
@@ -217,9 +223,14 @@ fn before_enospc_on_the_session_directory_sync_fails_create_and_removes_the_jour
     )]);
     let store = fixture.lazy_store(&plan);
 
-    let error = store.append_message(&user("first")).expect_err("create fails");
+    let error = store
+        .append_message(&user("first"))
+        .expect_err("create fails");
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
-    assert!(error.to_string().contains("sync session directory"), "{error}");
+    assert!(
+        error.to_string().contains("sync session directory"),
+        "{error}"
+    );
     assert!(fixture.journals().is_empty(), "{:?}", fixture.journals());
     assert!(store.messages().is_empty());
     plan.assert_all_fired();
@@ -235,7 +246,9 @@ fn before_lock_on_create_fails_and_leaves_no_journal() {
     )]);
     let store = fixture.lazy_store(&plan);
 
-    let error = store.append_message(&user("first")).expect_err("create fails");
+    let error = store
+        .append_message(&user("first"))
+        .expect_err("create fails");
     assert_eq!(error.kind(), PiErrorKind::FatalPersistence);
     assert!(error.to_string().contains("lock session file"), "{error}");
     assert!(fixture.journals().is_empty(), "{:?}", fixture.journals());
@@ -258,8 +271,8 @@ fn before_lock_on_open_fails_and_leaves_the_journal_unchanged() {
         Fault::Before(FaultError::Kind(std::io::ErrorKind::WouldBlock)),
     )]);
     let driver = FaultyFileDriver::new(Arc::new(PosixDriver), Arc::clone(&plan));
-    let error = Prepared::prepare_with_driver(&path, None, Arc::new(driver))
-        .expect_err("open fails");
+    let error =
+        Prepared::prepare_with_driver(&path, None, Arc::new(driver)).expect_err("open fails");
     assert!(error.to_string().contains("lock session file"), "{error}");
     plan.assert_all_fired();
 

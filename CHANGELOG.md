@@ -28,7 +28,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `0` disables one condition and `0`/`0` disables the guard, which is the
   setting for a deliberate poll loop that repeats one identical call. See the
   [user manual](docs/user-manual.md#stopping-a-turn-that-makes-no-progress)
-  ([#404](https://github.com/baiyuqing/otto/pull/404)).
+  ([#407](https://github.com/baiyuqing/otto/pull/407)).
 
 ### Features
 
@@ -39,7 +39,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   before it starts, a running one stops at its next checkpoint, and an
   effectful call settles instead of being abandoned — so the parent can stop a
   child that is stuck or no longer needed without waiting for it
-  ([#404](https://github.com/baiyuqing/otto/pull/404)).
+  ([#407](https://github.com/baiyuqing/otto/pull/407)).
 
 - Each turn now carries a progress guard that ends a turn which repeats one
   identical tool call, or keeps failing, past the configured limits. Two calls
@@ -47,7 +47,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   spacing in the arguments are ignored. Only consecutive conditions are
   detected, so a cycle that alternates between different calls is not stopped
   and remains the case `agent_status` plus `agent_cancel` exists for
-  ([#404](https://github.com/baiyuqing/otto/pull/404)).
+  ([#407](https://github.com/baiyuqing/otto/pull/407)).
 
 - Session **AUTO** approval now decides only a *bounded authorization*: an
   operation that stays inside the sandbox and the workspace and grants nothing

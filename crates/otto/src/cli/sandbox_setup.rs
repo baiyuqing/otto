@@ -245,6 +245,7 @@ pub async fn run(
                     home: home.clone(),
                     host_entries: check_entries,
                     provider_names: sandbox_provider_environment_names(&file, ""),
+                    managed_worktrees: vec![workspace.clone()],
                 };
                 check(
                     |options, cancel| async move { open_sandbox_runtime(&options, &cancel).await },
@@ -541,12 +542,13 @@ mod tests {
             },
             workspace: workspace.clone(),
             shell: "/bin/bash".to_string(),
-            home: workspace,
+            home: workspace.clone(),
             host_entries: vec![
                 format!("PATH={path}").into_bytes(),
                 format!("GH_CONFIG_DIR={config_dir}").into_bytes(),
             ],
             provider_names: vec!["OTTO_API_KEY".to_string()],
+            managed_worktrees: vec![workspace.clone()],
         }
     }
 

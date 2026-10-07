@@ -334,6 +334,10 @@ struct SessionState {
     /// reader of this field holds the session lock, so the queue, `turn` and
     /// `compacting` change together.
     queue: VecDeque<QueuedTurn>,
+    /// Turns restored from the session's saved turn queue on open, oldest
+    /// first. They join the front of `queue` once the recovery wake turn,
+    /// if any, has run (see [`Server::release_restored`]).
+    restored: VecDeque<QueuedTurn>,
     waiting: Option<WaitingApproval>,
     decided: VecDeque<String>,
     /// The turns started for recent client `input_id`s, newest last.
@@ -349,6 +353,12 @@ impl SessionState {
     /// the next queued turn starts when the current one ends, and nothing may
     /// start in between.
     pub(crate) fn busy(&self) -> bool {
+        self.busy_for_wake() || !self.restored.is_empty()
+    }
+
+    /// [`Self::busy`] without the restored turns: they wait for the wake turn
+    /// that resumes an interrupted turn, so they must not hold it back.
+    fn busy_for_wake(&self) -> bool {
         self.turn_running()
             || !self.queue.is_empty()
             || self.compacting.is_some()
@@ -381,9 +391,12 @@ impl SessionState {
         self.decided.push_back(id.to_string());
     }
 
-    /// Ends every queued turn `canceled`; none of them ran.
+    /// Ends every queued turn `canceled`; none of them ran. Their saved
+    /// copies stay in the turn queue journal, so a later open of the
+    /// session restores them; a caller that ends them for good also clears
+    /// the journal.
     fn cancel_queue(&mut self) {
-        for queued in self.queue.drain(..) {
+        for queued in self.queue.drain(..).chain(self.restored.drain(..)) {
             queued.turn.finish(Some(String::new()), true);
         }
     }
@@ -416,6 +429,7 @@ impl OpenSession {
             .turn
             .iter()
             .chain(state.queue.iter().map(|queued| &queued.turn))
+            .chain(state.restored.iter().map(|queued| &queued.turn))
             .find(|turn| turn.id == id)
             .cloned()
     }
@@ -811,6 +825,7 @@ impl Server {
             .insert(id, Arc::clone(&session));
         self.metrics.sessions_open(1);
         self.status_changed.send_modify(|version| *version += 1);
+        self.restore_queued_turns(&session);
         self.start_wake_loop(&session);
         session
     }
@@ -1027,7 +1042,7 @@ impl Server {
     async fn wake_turn(self: &Arc<Self>, session: &Arc<OpenSession>) {
         let prepared = {
             let mut state = session.lock();
-            if state.busy() {
+            if state.busy_for_wake() {
                 None
             } else {
                 let trigger = if session.ctrl.resumes_interrupted_turn() {
@@ -1060,7 +1075,11 @@ impl Server {
             }
         };
         let (turn, wake, trigger) = match prepared {
-            None => return,
+            // No wake turn to wait for: restored turns may run now.
+            None => {
+                self.release_restored(session);
+                return;
+            }
             Some(Err(message)) => {
                 self.log.error("wake_turn_error", &[("error", message)]);
                 return;
@@ -1084,7 +1103,92 @@ impl Server {
         self.log.info("turn_started", &fields);
         self.run_turn(session, &turn, Step::Wake(wake), trigger, None, None)
             .await;
-        // Queued turns that arrived during the wake turn start now.
+        // Restored turns, then queued turns that arrived during the wake
+        // turn, start now.
+        self.release_restored(session);
+        self.start_next(session);
+    }
+
+    /// Rebuilds the turns saved in the session's turn queue before Otto
+    /// stopped, keeping their turn ids. They wait in `restored` for the
+    /// recovery wake turn the session's pending notice starts; with nothing
+    /// pending they are released at once.
+    fn restore_queued_turns(self: &Arc<Self>, session: &Arc<OpenSession>) {
+        let prompts = session.ctrl.restorable_prompts();
+        if prompts.is_empty() {
+            return;
+        }
+        let session_id = session.ctrl.info().session_id;
+        {
+            let mut state = session.lock();
+            for prompt in prompts {
+                let id = if prompt.turn_id.is_empty() {
+                    match new_id() {
+                        Ok(id) => id,
+                        Err(_) => continue,
+                    }
+                } else {
+                    prompt.turn_id.clone()
+                };
+                let turn = Arc::new(
+                    Turn::queued(id, TRIGGER_USER, self.cancel.child_token()).with_log(
+                        Arc::clone(&self.log),
+                        &session_id,
+                        "",
+                    ),
+                );
+                if state.inputs.len() >= MAX_REMEMBERED_INPUTS {
+                    state.inputs.pop_front();
+                }
+                state
+                    .inputs
+                    .push_back((prompt.input_id.clone(), Arc::clone(&turn)));
+                state.restored.push_back(QueuedTurn {
+                    turn,
+                    text: prompt.text,
+                    image: None,
+                    channel: prompt.channel,
+                    origin: prompt.origin,
+                    input_id: Some(prompt.input_id),
+                });
+            }
+        }
+        self.bump_status();
+        let pending_wake = session
+            .ctrl
+            .subagent_tasks()
+            .is_some_and(|tasks| !tasks.notifications().is_empty());
+        if !pending_wake {
+            self.release_restored(session);
+        }
+    }
+
+    /// Moves the restored turns to the front of the queue, queues the notice
+    /// the first of them delivers, and starts it when the session is free.
+    fn release_restored(self: &Arc<Self>, session: &Arc<OpenSession>) {
+        let released = {
+            let mut state = session.lock();
+            if state.restored.is_empty() {
+                return;
+            }
+            let restored: Vec<QueuedTurn> = state.restored.drain(..).collect();
+            let prompts: Vec<app::turn_queue::QueuedPrompt> = restored
+                .iter()
+                .map(|queued| app::turn_queue::QueuedPrompt {
+                    input_id: queued.input_id.clone().unwrap_or_default(),
+                    turn_id: queued.turn.id.clone(),
+                    text: queued.text.clone(),
+                    channel: queued.channel,
+                    origin: queued.origin.clone(),
+                    image_dropped: false,
+                })
+                .collect();
+            for queued in restored.into_iter().rev() {
+                state.queue.push_front(queued);
+            }
+            prompts
+        };
+        session.ctrl.announce_restored_prompts(&released);
         self.start_next(session);
     }
 
@@ -1258,6 +1362,21 @@ impl Server {
             let session_id = session.ctrl.info().session_id;
             let log = Arc::clone(&self.log);
             let (turn, running) = if busy {
+                // The saved copy needs an input id so a restore can tell
+                // whether the turn already started.
+                let queued_input_id = input_id.clone().unwrap_or_else(|| format!("queued:{id}"));
+                if let Some(journal) = session.ctrl.turn_queue() {
+                    journal
+                        .save(&app::turn_queue::QueuedPrompt {
+                            input_id: queued_input_id.clone(),
+                            turn_id: id.clone(),
+                            text: text.clone(),
+                            channel,
+                            origin: origin.clone(),
+                            image_dropped: image.is_some(),
+                        })
+                        .map_err(|_| PROMPT_NOT_PERSISTED.to_string())?;
+                }
                 let turn = Arc::new(Turn::queued(id, TRIGGER_USER, cancel).with_log(
                     log,
                     &session_id,
@@ -1269,7 +1388,7 @@ impl Server {
                     image,
                     channel,
                     origin,
-                    input_id: input_id.clone(),
+                    input_id: Some(queued_input_id),
                 });
                 (turn, None)
             } else {
@@ -1359,11 +1478,15 @@ impl Server {
                 Some(image) => Step::Image(&text, image),
                 None => Step::Text(&text),
             };
-            session.ctrl.set_next_input_id(input_id);
+            session.ctrl.set_next_input_id(input_id.clone());
             server
                 .run_turn(&session, &turn, first, TRIGGER_USER, channel, origin)
                 .await;
             session.ctrl.set_next_input_id(None);
+            // The turn ran: a saved copy of it is no longer waiting.
+            if let (Some(input_id), Some(journal)) = (&input_id, session.ctrl.turn_queue()) {
+                journal.forget(input_id);
+            }
             server.start_next(&session);
             // A notification that landed too late for this turn's own drain is
             // caught by the wake loop's end-of-turn check.
@@ -1373,6 +1496,7 @@ impl Server {
 }
 
 const TURN_ACTIVE: &str = "turn already active";
+const PROMPT_NOT_PERSISTED: &str = app::turn_queue::PROMPT_NOT_PERSISTED;
 const QUEUE_FULL: &str = "turn queue full";
 
 /// 16 random bytes, hex encoded. The same generator as `cmd`'s, duplicated
@@ -1956,6 +2080,10 @@ async fn delete_session(State(server): State<Arc<Server>>, Path(id): Path<String
         return not_found("session not found");
     };
     session.cancel_work();
+    // Deleting ends the session's queued turns for good.
+    if let Some(journal) = session.ctrl.turn_queue() {
+        journal.clear();
+    }
     let ctrl = Arc::clone(&session.ctrl);
     let closed = tokio::task::spawn_blocking(move || ctrl.close()).await;
     match closed {
@@ -2138,6 +2266,13 @@ async fn start_turn(
                 "the turn queue for this session is full",
             );
         }
+        Err(error) if error == PROMPT_NOT_PERSISTED => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "input_not_persisted",
+                PROMPT_NOT_PERSISTED,
+            );
+        }
         Err(error) => return internal_error(&server.log, &error),
     };
 
@@ -2228,14 +2363,27 @@ async fn cancel_turn(
             // queue and the end happen under one lock so `start_next` cannot
             // pick it up in between.
             let removed = server.lookup(&id).is_some_and(|session| {
-                let mut state = session.lock();
-                let before = state.queue.len();
-                state.queue.retain(|queued| queued.turn.id != turn.id);
-                let removed = state.queue.len() != before;
-                if removed {
-                    turn.finish(Some(String::new()), true);
+                let mut guard = session.lock();
+                let state = &mut *guard;
+                let mut cancelled = Vec::new();
+                for queue in [&mut state.queue, &mut state.restored] {
+                    if let Some(position) =
+                        queue.iter().position(|queued| queued.turn.id == turn.id)
+                        && let Some(queued) = queue.remove(position)
+                    {
+                        cancelled.push(queued);
+                    }
                 }
-                removed
+                for queued in &cancelled {
+                    turn.finish(Some(String::new()), true);
+                    // Cancelled for good: a restart must not run it.
+                    if let (Some(input_id), Some(journal)) =
+                        (&queued.input_id, session.ctrl.turn_queue())
+                    {
+                        journal.forget(input_id);
+                    }
+                }
+                !cancelled.is_empty()
             });
             if removed {
                 server.bump_status();
@@ -2876,6 +3024,13 @@ mod tests {
                     .unwrap_or_else(|| Arc::new(crate::subagent::tasks::Tasks::new())),
                 tools,
             );
+            if self.persistent
+                && let Some(journal) =
+                    self.builder
+                        .session_journal(&session, "turns.json", &mut std::io::sink())
+            {
+                runner.task_control().set_turn_queue_journal(journal);
+            }
             Controller::with_builder(
                 Arc::clone(&self.builder),
                 true,
@@ -3556,6 +3711,178 @@ mod tests {
             .await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST);
         assert_eq!(reply.json()["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn queued_turns_survive_a_shutdown_and_run_once_in_order_after_reopen() {
+        let (gate, options) = gated();
+        let harness = Harness::with(HarnessOptions {
+            persistent: true,
+            ..options
+        });
+        let id = harness.create().await;
+        let path = format!("/v1/sessions/{id}/turns");
+        // The first turn holds the session at the gate; two more queue.
+        let first = post_turn(&harness, &id, "running", false).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+            .await
+            .expect("first turn started");
+        let mut queued = Vec::new();
+        for body in [
+            r#"{"text":"second","queue":true,"input_id":"req-2"}"#,
+            r#"{"text":"third","queue":true}"#,
+        ] {
+            let reply = harness.raw("POST", &path, Some(body), &[]).await;
+            assert_eq!(reply.status(), StatusCode::OK);
+            let turn_id = reply
+                .headers()
+                .get("otto-turn-id")
+                .and_then(|value| value.to_str().ok())
+                .expect("turn id")
+                .to_string();
+            let summary = harness
+                .send("GET", &format!("{path}/{turn_id}"), None)
+                .await
+                .json();
+            assert_eq!(summary["status"], turn::TURN_QUEUED, "{summary}");
+            queued.push(turn_id);
+        }
+
+        // A shutdown cancels the running turn and ends the queued ones
+        // `canceled` in memory, but keeps their saved copies.
+        let session = harness.server.lookup(&id).expect("session");
+        session.cancel_work();
+        let removed = harness.server.remove(&id).expect("registered");
+        let ctrl = Arc::clone(&removed.ctrl);
+        tokio::task::spawn_blocking(move || ctrl.close())
+            .await
+            .unwrap()
+            .expect("close");
+        gate.cancel();
+        let calls_before = harness.provider.texts().len();
+
+        // Reopening the session restores and runs them, keeping their ids.
+        let reopened = harness
+            .send(
+                "POST",
+                "/v1/sessions",
+                Some(&serde_json::json!({ "resume": id }).to_string()),
+            )
+            .await;
+        assert_eq!(reopened.status, StatusCode::OK, "{}", reopened.body);
+        // Only the newest turn is retained, so wait on the last one; the
+        // provider calls show both ran, in order.
+        let done = harness.wait_turn_done(&id, &queued[1]).await;
+        assert_eq!(done["status"], turn::TURN_OK, "{done}");
+        let texts = harness.provider.texts();
+        assert_eq!(texts[calls_before..], ["second", "third"], "{texts:?}");
+
+        // The first restored turn delivered the restore notice first.
+        let history = harness
+            .send("GET", &format!("/v1/sessions/{id}/history"), None)
+            .await
+            .json();
+        let history: Vec<String> = history
+            .as_array()
+            .expect("history")
+            .iter()
+            .map(|message| {
+                message["blocks"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        let notice = history
+            .iter()
+            .position(|text| text.contains("Otto stopped before 2 queued prompts"))
+            .expect("restore notice");
+        let second = history
+            .iter()
+            .position(|text| text == "second")
+            .expect("second");
+        assert!(notice < second, "{history:?}");
+
+        // A retry returns the restored turn, and nothing waits any more.
+        let retry = harness
+            .raw(
+                "POST",
+                &path,
+                Some(r#"{"text":"second","queue":true,"input_id":"req-2"}"#),
+                &[],
+            )
+            .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(
+            retry
+                .headers()
+                .get("otto-turn-id")
+                .and_then(|value| value.to_str().ok()),
+            Some(queued[0].as_str()),
+            "the retry returns the restored turn"
+        );
+        assert_eq!(
+            harness.provider.texts().len(),
+            calls_before + 2,
+            "and runs nothing"
+        );
+        let session = harness.server.lookup(&id).expect("session");
+        assert!(
+            session
+                .ctrl
+                .turn_queue()
+                .expect("journal")
+                .pending()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancelled_or_deleted_queued_turn_is_not_restored() {
+        let (gate, options) = gated();
+        let harness = Harness::with(HarnessOptions {
+            persistent: true,
+            ..options
+        });
+        let id = harness.create().await;
+        let path = format!("/v1/sessions/{id}/turns");
+        let _running = post_turn(&harness, &id, "running", false).await;
+        tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+            .await
+            .expect("first turn started");
+        let queued = post_turn(&harness, &id, "cancel me", true).await;
+        let queued_id = queued
+            .headers()
+            .get("otto-turn-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("turn id")
+            .to_string();
+        let kept = post_turn(&harness, &id, "delete me", true).await;
+        assert_eq!(kept.status(), StatusCode::OK);
+        let session = harness.server.lookup(&id).expect("session");
+        let journal = session.ctrl.turn_queue().expect("journal");
+        assert_eq!(journal.pending().len(), 2);
+
+        let cancel = harness
+            .send("POST", &format!("{path}/{queued_id}/cancel"), None)
+            .await;
+        assert_eq!(cancel.status, StatusCode::ACCEPTED);
+        assert_eq!(
+            journal
+                .pending()
+                .iter()
+                .map(|prompt| prompt.text.as_str())
+                .collect::<Vec<_>>(),
+            ["delete me"]
+        );
+
+        let deleted = harness
+            .send("DELETE", &format!("/v1/sessions/{id}"), None)
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        gate.cancel();
+        assert!(journal.pending().is_empty());
     }
 
     /// Runs one turn on `session` to completion.

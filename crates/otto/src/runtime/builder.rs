@@ -1862,6 +1862,9 @@ impl Builder {
         if let Some(journal) = self.session_journal(session, "followups.json", warnings) {
             task_control.set_followup_journal(journal);
         }
+        if let Some(journal) = self.session_journal(session, "turns.json", warnings) {
+            task_control.set_turn_queue_journal(journal);
+        }
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let reflection = Arc::new(crate::tool::reflect::Handle::default());
         if self.boundary_allows_dynamic(Some(runtime)) {

@@ -1313,6 +1313,20 @@ Notes:
   resumed (its automatic resume was used, or Otto stopped between two
   steps), the next task discards them and stores a visible notice with
   their count.
+- **Queued prompts** waiting for the active turn (`otto serve` turns sent
+  with `"queue": true`, which includes the attached TUI and attached ACP, and
+  local ACP `/queue`) are written to `<session-id>.turns.json` before they
+  are accepted; a prompt that cannot be written is not queued. A prompt's
+  entry is removed once it has run, or when it is cancelled, its session is
+  deleted, or the session is archived. When the Otto process stops, or
+  `otto serve` shuts down, before they run, the next frontend that opens the
+  session (`otto serve`, local ACP `session/load`, or the TUI) runs them in
+  their original order after the interrupted turn's automatic resume, each
+  once: a prompt whose message is already in the session is not run again.
+  The first of them delivers a notice saying how many were restored.
+  Images in a queued prompt are not saved; the notice says when one was
+  dropped. Opening nothing runs nothing. The REPL does not restore them;
+  they wait for one of those frontends.
 - **Unread parent messages** (`agent_send`) for a sub-agent task are written
   to `<child transcript>.inbox.json` beside the child's transcript. When the
   task is interrupted and later resumed with `agent` `resume`, they are
@@ -2175,7 +2189,14 @@ turn routes. Its event stream sends nothing until it starts. Cancelling it
 removes it from the queue and ends it `canceled`. A server-started wake turn
 (`trigger` `task` or `recovery`) starts only when no turn is running or queued.
 `POST .../compact` returns `409 turn_active` while a turn runs or is queued.
-On shutdown, queued turns end `canceled` without starting.
+Queued turns are saved with the session before they are accepted (see
+[Sessions](#sessions)); `503 input_not_persisted` means the turn could not be
+saved and was not queued. On shutdown, queued turns end `canceled` for the
+clients connected then, but stay saved: when the session is next opened they
+run in order, after the interrupted turn's automatic resume, with their
+original turn ids, so `GET .../turns/{turn_id}` and an `input_id` retry find
+them again. Cancelling a queued turn or deleting its session removes it for
+good.
 
 Each `POST .../turns` response carries the header `Otto-Turn-Id` with the
 turn's id. In the event stream of a turn started by a client, the first frame
@@ -2258,7 +2279,8 @@ follow-ups are also saved with the session (see [Sessions](#sessions)): when
 the Otto process stops during the task, they run, in order, after the turn
 that automatically resumes it, and a step that already ran is not run again.
 A follow-up that cannot be saved is not queued and `task_queue` returns an
-error. The `otto serve` and ACP turn queues remain in memory.
+error. The `otto serve` and ACP turn queues are saved too (see
+[Turn queue](#turn-queue)).
 
 Tool schemas and the applicable operation policy accompany each task request
 outside the mutable transcript. Compaction and session reload preserve this
@@ -2332,7 +2354,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
 | `POST /v1/sessions/{id}/approvals/message` | Restricted dialogue during an unapproved request: `{"text":"..."}`. Returns `null` when none waits, otherwise `{"text","queued"}`. A true `queued` asks the client to put the original message in its normal task queue. Never approves. |
 | `POST /v1/sessions/{id}/approvals/{approval_id}` | Decide an elevated Bash command a running turn waits for: `{"decision":"allow"}` or `{"decision":"deny"}`. `200 {"decision"}` for the first decision; `409 approval_decided` when it was already decided; `409 approval_failed` when the id is not waiting. See [Approvals inside a turn](#approvals-inside-a-turn). |
-| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `input_id` (1 to 128 ASCII letters, digits, `.`, `_`, `:`, `-`) makes a retry safe: the same `input_id` in the same session returns the turn it already started while the server remembers it (its 256 most recent per session), and `409 duplicate_input` once only the transcript holds it, for example after a restart. It is unrelated to the `X-Request-Id` log-correlation header. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram` or `feishu`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `input_id` (1 to 128 ASCII letters, digits, `.`, `_`, `:`, `-`) makes a retry safe: the same `input_id` in the same session returns the turn it already started while the server remembers it (its 256 most recent per session), and `409 duplicate_input` once only the transcript holds it, for example after a restart. It is unrelated to the `X-Request-Id` log-correlation header. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram` or `feishu`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued; `503 input_not_persisted` when a queued turn could not be saved. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
@@ -2667,8 +2689,12 @@ context/compaction/reflection/skill commands are rejected while the session runs
 a prompt. `/steer <guidance>` bypasses the occupied prompt slot and accepts
 guidance for that run. `/queue <prompt>` acknowledges acceptance immediately,
 then streams the independent answer as later session updates; local ACP keeps
-at most 16 waiting prompts and attached ACP uses the server queue. Cancellation
-clears local queued prompts and cancels this connection's attached follow-ups.
+at most 16 waiting prompts and attached ACP uses the server queue. Local
+queued prompts are saved with the session (see [Sessions](#sessions)): when
+the process stops before they run, `session/load` in a new process runs them
+after the interrupted turn's resume, and their answers arrive as session
+updates. Cancellation clears local queued prompts, including their saved
+copies, and cancels this connection's attached follow-ups.
 
 ACP advertises `_meta.otto.taskControl:true`. `_otto/tasks/steer` and
 `_otto/tasks/control` use the HTTP bodies above plus `sessionId`; replies are

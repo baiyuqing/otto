@@ -845,7 +845,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::builder::TEST_PROVIDER;
+    use crate::runtime::builder::TEST_PROVIDERS;
     use otto_core::{
         agent::Event,
         model::{BlockType, FinishReason, Role},
@@ -985,8 +985,9 @@ api_key_env = "ALPHA_KEY"
         }
     }
 
-    /// Makes every runner the composition builds use `script` until dropped.
-    struct Installed;
+    /// A scripted provider that runners built under a served fixture's home
+    /// use until dropped.
+    struct Installed(Arc<Script>);
 
     impl Installed {
         fn new(replies: Vec<Message>) -> (Self, Arc<Script>) {
@@ -994,14 +995,26 @@ api_key_env = "ALPHA_KEY"
                 replies: Mutex::new(replies.into()),
                 ..Script::default()
             });
-            *TEST_PROVIDER.lock().unwrap() = Some(script.clone());
-            (Self, script)
+            (Self(script.clone()), script)
+        }
+
+        /// Makes runners built under `fixture`'s home use this script.
+        fn serve(&self, fixture: &Fixture) {
+            TEST_PROVIDERS
+                .lock()
+                .unwrap()
+                .push((fixture.home.to_string_lossy().into_owned(), self.0.clone()));
         }
     }
 
     impl Drop for Installed {
         fn drop(&mut self) {
-            *TEST_PROVIDER.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            TEST_PROVIDERS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|(_, provider)| {
+                    !std::ptr::addr_eq(Arc::as_ptr(provider), Arc::as_ptr(&self.0))
+                });
         }
     }
 
@@ -1254,9 +1267,10 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
             )
             .unwrap();
         };
-        let (_provider, script) = Installed::new(vec![reply("one"), reply("two")]);
+        let (provider, script) = Installed::new(vec![reply("one"), reply("two")]);
         for (off, expected) in [(false, true), (true, false)] {
             let fixture = fixture("");
+            provider.serve(&fixture);
             skill(&fixture);
             let mut options = builder(&fixture);
             if off {
@@ -1298,7 +1312,7 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
     #[tokio::test]
     async fn session_persistence_off_writes_no_session_file_and_refuses_resume_and_list() {
         let _serial = LOCK.lock().await;
-        let (_provider, _script) = Installed::new(Vec::new());
+        let (provider, _script) = Installed::new(Vec::new());
         let count = |otto: &Otto| -> usize {
             let root = &otto.inner.builder.session_root;
             walk(root)
@@ -1307,6 +1321,7 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
                 .count()
         };
         let fixture_on = fixture("");
+        provider.serve(&fixture_on);
         let otto = builder(&fixture_on).build().await.unwrap();
         let session = otto.new_session(None).await.unwrap();
         say(&session, "hello").await;
@@ -1315,6 +1330,7 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         otto.close().await.unwrap();
 
         let fixture_off = fixture("");
+        provider.serve(&fixture_off);
         let otto = builder(&fixture_off)
             .disable(Component::SessionPersistence)
             .build()
@@ -1399,7 +1415,7 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
     #[tokio::test]
     async fn a_prompt_that_needs_approval_calls_decide_and_a_denial_ends_the_turn() {
         let _serial = LOCK.lock().await;
-        let (_provider, script) = Installed::new(vec![
+        let (provider, script) = Installed::new(vec![
             tool_call(
                 "request_approval",
                 r#"{"title":"Publish","reason":"push branch","proposal":"git push"}"#,
@@ -1407,6 +1423,7 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
             reply("understood"),
         ]);
         let fixture = fixture("");
+        provider.serve(&fixture);
         let otto = builder(&fixture).build().await.unwrap();
         let session = otto.new_session(None).await.unwrap();
         // A new session approves automatically; `decide` is consulted in MANUAL.
@@ -1649,7 +1666,8 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let _serial = LOCK.lock().await;
         let fixture = fixture("");
 
-        let (_provider, _script) = Installed::new(Vec::new());
+        let (provider, _script) = Installed::new(Vec::new());
+        provider.serve(&fixture);
         let otto = builder(&fixture).build().await.unwrap();
         let session = otto.new_session(None).await.unwrap();
         say(&session, "hello from otto").await;
@@ -1740,6 +1758,7 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let (provider, script) = Installed::new(vec![reply("one"), reply("two")]);
 
         let cli = fixture("");
+        provider.serve(&cli);
         let mut acp = Acp::start(&cli);
         let cli_session = acp.session(&cli).await;
         acp.prompt(&cli_session, "parity").await;
@@ -1747,6 +1766,7 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         assert_eq!(code, 0, "{cli_stderr}");
 
         let embedded = fixture("");
+        provider.serve(&embedded);
         let capture = Capture::default();
         let otto = builder(&embedded)
             .diagnostics(Box::new(capture.clone()))

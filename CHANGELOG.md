@@ -32,6 +32,39 @@ limitations are documented in the [user manual](docs/user-manual.md).
   logs `session_evicted` ([#PR](https://github.com/baiyuqing/otto/pull/PR),
   [user manual](docs/user-manual.md#session-lifetime)).
 
+- Run the direct ACP TCP deployment as one supervised pair: `scripts/otto-tcp.sh
+  start` runs `otto serve --acp-listen` and an `otto-connect` configured with
+  `[agent] address`, so connect starts no `otto acp` process. It reads the same
+  `otto.env` as the launcher, checks the token, the address, the token variable
+  and the workspace before starting, starts connect only after serve announced
+  its ACP listener, and offers `stop`, `restart [serve|connect]`, `status` and
+  `logs`. A process that exits is restarted with backoff, and five consecutive
+  fast failures stop the stack instead of looping. State and logs are mode
+  `0600` under `~/.local/state/otto-tcp`; no secret is written
+  ([user manual](docs/user-manual.md#the-acp-tcp-stack-script),
+  [#393](https://github.com/baiyuqing/otto/pull/393)).
+
+- Embed Otto in another Rust program: `otto::embed::Otto` builds the same
+  runtime `otto acp` builds (tools, sandbox, approvals, session files,
+  warnings) in the host process, serves several sessions and workspaces, and
+  lets the host switch off bash, MCP, memory, skills, plugins, sub-agents,
+  reflection, schedule, session persistence, usage or task history at
+  construction. The CLI, `otto serve` and `otto acp` run the same startup
+  code, and their behavior is unchanged. The dependency is a git dependency
+  ([design](docs/specs/2026-10-07-otto-embedding-api.md),
+  [#392](https://github.com/baiyuqing/otto/pull/392)).
+
+- Switch the conversation's profile from a chat with one tap: bare `/model`
+  replies with the profiles from the local `~/.config/otto/config.toml` — name,
+  provider and model each — and one inline button per profile in Telegram or one
+  card button per profile in Feishu; choosing one switches that session exactly
+  as typing `/model <profile>` does. A platform without buttons gets the same
+  list as text. The connector reads that file read-only, so the picker shows the
+  user layer only and marks the configured default rather than the session's
+  current profile; switching itself stays Otto's
+  ([#391](https://github.com/baiyuqing/otto/pull/391),
+  [user manual](docs/user-manual.md#commands)).
+
 - Switch the model of one session from ACP itself with `/model [profile]`: Otto
   rebuilds the session's runner on another configured profile, makes no model
   request, and leaves the configuration file and every other session unchanged.

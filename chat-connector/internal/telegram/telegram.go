@@ -522,6 +522,11 @@ func normalizeCallback(q *callbackQuery) (bridge.Message, bool) {
 	if parts := strings.Split(q.Data, ":"); len(parts) == 3 && parts[0] == "auto" && (parts[1] == "on" || parts[1] == "off") && len(parts[2]) == 32 && q.From != nil && q.Message != nil {
 		return bridge.Message{Platform: "telegram", ChatID: strconv.FormatInt(q.Message.Chat.ID, 10), SenderID: strconv.FormatInt(q.From.ID, 10), MessageID: strconv.FormatInt(q.Message.MessageID, 10), ModeSession: parts[2], Text: "/auto " + parts[1], Time: time.Now()}, true
 	}
+	// A choice button stands for one command. Only the connector's own profile
+	// switcher may travel this way, so a button can never inject arbitrary text.
+	if name, ok := strings.CutPrefix(q.Data, choicePrefix+"/model "); ok && bridge.ValidProfileArg(name) && q.From != nil && q.Message != nil {
+		return bridge.Message{Platform: "telegram", ChatID: strconv.FormatInt(q.Message.Chat.ID, 10), SenderID: strconv.FormatInt(q.From.ID, 10), MessageID: strconv.FormatInt(q.Message.MessageID, 10), Text: "/model " + name, Time: time.Now()}, true
+	}
 	action, id, ok := strings.Cut(q.Data, ":")
 	if !ok || len(id) != 32 || (action != "approve" && action != "deny") || q.From == nil || q.Message == nil {
 		return bridge.Message{}, false
@@ -548,6 +553,51 @@ func (b *Bot) SendApproval(ctx context.Context, chatID, requestID, text string) 
 	return func(ctx context.Context, status string) error {
 		return b.call(ctx, "editMessageText", map[string]any{"chat_id": chatParam(chatID), "message_id": sent.MessageID, "text": parts[len(parts)-1] + "\n\n" + status, "reply_markup": map[string]any{"inline_keyboard": [][]any{}}}, nil)
 	}, nil
+}
+
+// choicePrefix marks a button whose callback delivers the command it stands
+// for. normalizeCallback accepts only the commands the connector itself sends.
+const choicePrefix = "cmd:"
+
+// maxCallbackData is Telegram's callback_data limit in bytes.
+const maxCallbackData = 64
+
+// SendChoices posts text with one button per choice, two per row. Choosing a
+// button delivers its command to the bridge as a message. A choice whose
+// callback does not fit, an empty list, or text longer than one message is an
+// error, so the caller falls back to plain text.
+func (b *Bot) SendChoices(ctx context.Context, chatID, replyTo, text string, choices []bridge.Choice) error {
+	if len(choices) == 0 {
+		return errors.New("no choices")
+	}
+	if utf16Len(text) > maxUnits {
+		return errors.New("choice message is too long")
+	}
+	var rows [][]any
+	var row []any
+	for _, choice := range choices {
+		data := choicePrefix + choice.Command
+		if len(data) > maxCallbackData {
+			return fmt.Errorf("choice %q does not fit a callback", choice.Label)
+		}
+		row = append(row, map[string]any{"text": choice.Label, "callback_data": data})
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	params := map[string]any{
+		"chat_id":      chatParam(chatID),
+		"text":         text,
+		"reply_markup": map[string]any{"inline_keyboard": rows},
+	}
+	if id, err := strconv.ParseInt(replyTo, 10, 64); err == nil {
+		params["reply_parameters"] = map[string]any{"message_id": id, "allow_sending_without_reply": true}
+	}
+	return b.sendWithRetry(ctx, params)
 }
 
 func (b *Bot) SendApprovalMode(ctx context.Context, chatID, messageID, session string, automatic bool) error {

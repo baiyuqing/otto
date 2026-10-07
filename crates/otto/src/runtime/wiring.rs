@@ -2811,7 +2811,7 @@ mod catalog_tests {
                 config.skills.enabled = Some(false);
                 config.agents.enabled = Some(false);
             }
-            let settings = crate::cli::run::resolve_sandbox_settings(
+            let settings = crate::runtime::startup::resolve_sandbox_settings(
                 &config,
                 &fixture.builder.environment,
                 &fixture.workspace.to_string_lossy(),

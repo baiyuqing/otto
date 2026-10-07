@@ -25,7 +25,9 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `wire`: shared wire DTOs
   - `safetext`: redaction and secret-form detection shared by native and wasm code
 - `crates/otto` (native binary):
-  - `cli`: composition root, flag parsing, process lifecycle, signal handling, the REPL, and concrete dependency injection
+  - `cli`: flag parsing, process lifecycle, signal handling, the REPL, the CLI-only startup steps, and frontend dispatch
+  - `runtime::startup`: the startup composition root shared by `cli::run`, `otto serve` and `embed`: environment capture, config, storage, stores, `Shared`, `Builder`, workspace sandbox and memory service, as phase functions the CLI calls with its own steps in between and `startup::start` calls in sequence
+  - `embed`: the public in-process API; see [Embedding API](#embedding-api)
   - `app`: shared lifecycle, turn admission, session replacement, task/authentication capabilities, profile selection, and session info/history access
   - `session`: native JSONL session storage built on `otto_core::session`
   - `config`: native layer discovery, content-bound executable trust, config paths and loading, and the one writer every config change goes through: a compare-and-swap against the bytes the caller read, an atomic temp-file rename, and a timestamped copy of the replaced contents under `backups/`
@@ -350,7 +352,33 @@ coordinator. See the user manual for both command forms and source details.
 - Frontends use `Controller::tasks` (`app::TaskView` over the wire-shaped `app::Task`), never the mutable `Tasks` registry or the raw mailbox adapter. Call `Controller::prepare_wake` before publishing a wake turn, then `WakeOperation::run` it once or drop it. Dropping an unstarted claim releases it on cancellation/shutdown. `Tasks::updates` is a coalescing `tokio::sync::watch` signal, not a broadcast subscription; add no competing scheduler. Normal and wake turns share cancellation, event delivery, and compaction accounting; one-shot runs propagate wake failures.
 - `otto_core::mailbox::Mailbox` is the shared notification port. It supplies ordered snapshots and per-entry acknowledgement: consumers append the session effect before `ack`, so a failed append leaves that entry and later entries visible for at-least-once redelivery. The bundled `InMemoryMailbox` (`agent::inbox::Inbox`) numbers entries (`Entry::seq`), invokes its optional persistence hook under its lock after each mutation, and signals change callbacks after releasing the lock. Native `runtime::wiring` alone installs the top-level session adapter, mirroring `<id>.inbox.json` through `tool::remind::replace_private` (temporary file, `fsync`, rename, directory `fsync`) and skipping writes once `<id>.jsonl` is gone, so an archive is not recreated by a late enqueue. It restores before producers are shared; restored entries signal the wake path. Child task mailboxes are intentionally ephemeral. Alternative adapters (including external SQL implementations) implement `Mailbox` and must preserve these ordering and acknowledgement semantics; the core contract does not promise distributed leases, delayed retries, or exactly-once delivery.
 - Session failover lives in `crates/otto/src/failover`; the approved design is `docs/specs/2026-09-28-session-failover.md`. A session is lease-managed if and only if `<id>.lease/` exists (`failover::lease::is_lease_managed`); `[failover] enabled` only decides whether an open or a new session creates that directory. Every open that takes the session file lock goes through `session::Prepared`, which acquires the lease before it opens the file descriptor, because a takeover replaces `<id>.jsonl`. The `Store` owns the lease: it checks `Lease::check` before every record write and releases the lease on `close` after a successful `fsync`, or on drop. Child transcripts check the parent's lease and never own one. Tool registries carry `failover::CommitGuard` as their `tool::registry::CallGuard`: `before` refuses a call once the lease is lost, and `after` runs `syncfs` on Linux. Dependency direction: `session` → `failover::lease` → `session::fsops` (a leaf), and `failover::recovery` → `subagent::interrupted` → `session`. `Keeper::global` calls `libc::_exit(75)` when a lease goes stale or is superseded, so tests use `Keeper::new_for_test`, or `Lease::acquire` only on leases that stay renewed and are released before the test ends; a stopped holder is a hand-written `epoch-<n>` and `heartbeat`. `SIGTERM` migration: `main.rs` owns the signal and asks `cli::terminate::Terminate::on_signal` what to do, with `failover::lease::holds_lease()` as input; a migration cancels the process token (the `SIGINT` path), and after the frontend returns `cli::run` (or `server::Server::migrate` for `otto serve`) calls `Controller::migrate` before the normal close. `Controller::migrate` holds an admission while it cancels and waits for every sub-agent task (`Tasks::begin_migration`, `Tasks::wait_final`), queues the moved notification (`failover::recovery::notify_moved`), and closes MCP; dropping the admission then closes the session, which releases the lease. In migration mode the sub-agent runner writes `otto.task_result` `interrupted` through the child's own transcript and pushes no completion notification, because a child transcript stays open and locked while its task entry exists, so `subagent::interrupted::mark_interrupted` (which opens a second `Store`) is only for transcripts of another process. Tests never send a signal to the test process; binary tests signal a spawned `otto`.
-- Use `auth::Service` (`login`/`logout`/`status`) and `Controller::switch_profile`/`set_default_profile` for shared use cases. Credential paths and concrete services belong in the composition root; OAuth and credential files stay in `crates/otto`'s `auth` module. Frontends own presentation, not credential persistence. Preserve the startup credential snapshot (`cli::login::capture_auth_credentials`) and restart requirement, and refresh backend state after a profile switch even when saving the default fails.
+- Use `auth::Service` (`login`/`logout`/`status`) and `Controller::switch_profile`/`set_default_profile` for shared use cases. Credential paths and concrete services belong in the composition root; OAuth and credential files stay in `crates/otto`'s `auth` module. Frontends own presentation, not credential persistence. Preserve the startup credential snapshot (`auth::capture_auth_credentials`, re-exported as `cli::login::capture_auth_credentials`) and restart requirement, and refresh backend state after a profile switch even when saving the default fails.
+
+## Embedding API
+
+`otto::embed` lets another Rust program build the runtime `otto acp` builds,
+in process, and switch components off at construction. The
+[design](specs/2026-10-07-otto-embedding-api.md) and the module rustdoc are
+the contract.
+
+- `runtime/startup.rs` is the only startup composition root. A new startup
+  step goes into a phase function there, so `cli::run`, `otto serve` and
+  `embed` all run it; do not add a startup step to `run_with_backends` or
+  `embed.rs` alone. A CLI-only step (a flag, a frontend) stays in `cli::run`
+  between the phase calls.
+- The compatibility surface is `otto::embed` and the `otto_core` and `otto`
+  types its signatures name or re-export. Other `pub` items in `otto` exist
+  for the frontends and tests and carry no stability promise.
+- `otto::embed` changes only by addition, including before 1.0: no item is
+  removed or renamed and no signature changes incompatibly. `Component`,
+  `Input`, `Error` and `ConfigSource` are `#[non_exhaustive]`; `Otto`,
+  `OttoBuilder` and `Session` have no public fields; a new option is a new
+  builder method.
+- A `Component` switch only disables, and only into a state the CLI already
+  reaches through a config key, a flag or a failed store open. A new
+  component needs such a state first.
+- One `Otto` per process: the config lock is a per-process `fcntl` lock.
+  Tests that build an `Otto` hold the shared test lock in `embed.rs`.
 
 ## Development isolation and ownership
 
@@ -502,6 +530,11 @@ needs no build and no network.
 `scripts/otto.sh` is not a Node helper but the shell launcher documented in the
 user manual; `scripts/otto.test.mjs` exercises it offline against a fake binary
 and a temporary `otto.env`.
+`scripts/otto-tcp.sh` is the supervisor for the ACP TCP deployment (`otto serve
+--acp-listen` plus an `otto-connect` configured with `[agent] address`);
+`scripts/otto-tcp.test.mjs` starts it offline against a fake `otto` and a fake
+`otto-connect` and covers the argument translation, the `connect.toml` checks,
+restart, stop and status.
 `scripts/pi-session-interop.mjs` covers the optional Pi interoperability probe
 described in the user manual. `scripts/skill-exec-measure.mjs` reports what the
 [sub-agent execution design](specs/2026-09-22-skill-subagent-execution.md) says

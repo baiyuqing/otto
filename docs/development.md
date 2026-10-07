@@ -499,6 +499,9 @@ real interactive terminal.
 The Node helpers under `scripts/` are opt-in, but their tests are not: `make
 scripts-test` runs every `scripts/*.test.mjs`, and `check`, `check-tests` and `check-linux` include it. It
 needs no build and no network.
+`scripts/otto.sh` is not a Node helper but the shell launcher documented in the
+user manual; `scripts/otto.test.mjs` exercises it offline against a fake binary
+and a temporary `otto.env`.
 `scripts/pi-session-interop.mjs` covers the optional Pi interoperability probe
 described in the user manual. `scripts/skill-exec-measure.mjs` reports what the
 [sub-agent execution design](specs/2026-09-22-skill-subagent-execution.md) says

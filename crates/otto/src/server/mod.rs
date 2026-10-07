@@ -635,6 +635,8 @@ impl Server {
                     .patch(rename_session)
                     .delete(delete_session),
             )
+            .route("/v1/sessions/{id}/fork", post(fork_session))
+            .route("/v1/sessions/{id}/fork-points", get(fork_points))
             .route("/v1/sessions/{id}/history", get(history))
             .route("/v1/sessions/{id}/context", get(context))
             .route(
@@ -869,6 +871,7 @@ impl Server {
             sandbox: sandbox_wire(&info.sandbox),
             auto_mode: info.auto_mode,
             turn,
+            forked_from: info.forked_from,
         }
     }
 
@@ -1625,6 +1628,8 @@ struct SessionWire {
     sandbox: SandboxWire,
     auto_mode: bool,
     turn: Option<SessionTurnWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forked_from: Option<app::ForkedFrom>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1813,6 +1818,98 @@ async fn get_session(State(server): State<Arc<Server>>, Path(id): Path<String>) 
     match server.lookup(&id) {
         Some(session) => json_response(StatusCode::OK, &server.session_wire(&session)),
         None => not_found("session not found"),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ForkBody {
+    /// The turn-opening user message to stop before; absent forks the whole
+    /// history up to the last turn boundary.
+    #[serde(default)]
+    before: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ForkedWire {
+    #[serde(flatten)]
+    session: SessionWire,
+    /// The text of the message the fork stops before, for the editor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+}
+
+/// `POST /v1/sessions/{id}/fork`: writes a new session from this one's
+/// history and opens it. The source session is unchanged.
+async fn fork_session(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let parsed: ForkBody = if body.iter().all(u8::is_ascii_whitespace) {
+        ForkBody::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(parsed) => parsed,
+            Err(_) => return bad_request("invalid JSON body"),
+        }
+    };
+    let forked = match session.ctrl.fork_file(parsed.before.as_deref()) {
+        Ok(forked) => forked,
+        Err(app::ForkFailure::InvalidPoint(message)) => {
+            return error_response(StatusCode::CONFLICT, "invalid_fork_point", &message);
+        }
+        Err(app::ForkFailure::Failed(message)) if message == app::NOTHING_TO_FORK => {
+            return error_response(StatusCode::CONFLICT, "invalid_fork_point", &message);
+        }
+        Err(app::ForkFailure::Failed(message)) => return internal_error(&server.log, &message),
+    };
+    let workspace = session.ctrl.info().workspace;
+    match server.resume_or_create(&forked.id, Some(&workspace)).await {
+        Ok((opened, _)) => json_response(
+            StatusCode::CREATED,
+            &ForkedWire {
+                session: server.session_wire(&opened),
+                prompt: forked.point.map(|point| point.prompt),
+            },
+        ),
+        Err(error) => internal_error(&server.log, &error),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ForkPointWire {
+    entry_id: String,
+    prompt: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ForkPointsResponse {
+    fork_points: Vec<ForkPointWire>,
+}
+
+/// `GET /v1/sessions/{id}/fork-points`: the user prompts a fork can stop
+/// before, oldest first.
+async fn fork_points(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session.ctrl.fork_points() {
+        Ok(points) => json_response(
+            StatusCode::OK,
+            &ForkPointsResponse {
+                fork_points: points
+                    .into_iter()
+                    .map(|point| ForkPointWire {
+                        entry_id: point.entry_id,
+                        prompt: point.prompt,
+                    })
+                    .collect(),
+            },
+        ),
+        Err(error) => internal_error(&server.log, &error),
     }
 }
 
@@ -2564,7 +2661,7 @@ mod tests {
                         text: deltas.concat(),
                         ..Block::default()
                     }],
-                    None,
+                    Some(otto_core::model::FinishReason::Stop),
                 ),
             };
             otto_core::provider::ProviderSettlement::succeeded(
@@ -2698,6 +2795,7 @@ mod tests {
         /// `None` matches a workspace with no usable sandbox (`GET
         /// /v1/workspaces/diff` answers 501).
         diff_runner: Option<(Arc<dyn crate::sandbox::CommandExecutor>, Vec<String>)>,
+        persistent: bool,
         create_calls: AtomicUsize,
         open_calls: AtomicUsize,
     }
@@ -2708,7 +2806,7 @@ mod tests {
         /// other test-double detail (provider, tasks) stays on the one shared
         /// builder.
         fn controller_for(&self, id: &str, workspace: Option<&str>) -> Controller {
-            let session = SharedSession::memory(Header {
+            let header = Header {
                 version: CURRENT_VERSION,
                 id: id.to_string(),
                 workspace: workspace
@@ -2718,7 +2816,23 @@ mod tests {
                 profile: "alpha".to_string(),
                 model: "test-model".to_string(),
                 created_at: chrono::Utc::now(),
-            });
+            };
+            let session = if self.persistent {
+                // A session file per id under the builder's session root:
+                // an existing one (a fork) is opened, a new one created.
+                let root = std::path::Path::new(&self.builder.session_root);
+                let path = crate::session::session_directory(root, &header.workspace)
+                    .expect("session directory")
+                    .join(format!("{id}.jsonl"));
+                let store = if path.exists() {
+                    crate::session::Store::open(&path).expect("open session").0
+                } else {
+                    crate::session::Store::create(root, header).expect("create session")
+                };
+                SharedSession::new(Arc::new(store))
+            } else {
+                SharedSession::memory(header)
+            };
             let tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>> =
                 match &self.builder.bash_approvals {
                     Some(approvals) => vec![Box::new(ElevatedBash {
@@ -3031,6 +3145,8 @@ mod tests {
         reflection: Option<(Arc<crate::reflection::Store>, std::path::PathBuf)>,
         /// The scheduled-delivery store behind `/v1/schedule/*`.
         schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
+        /// Backs every session with a real session file instead of memory.
+        persistent: bool,
     }
 
     struct Harness {
@@ -3125,6 +3241,7 @@ mod tests {
                 sandbox_reload: options.sandbox_reload,
                 sandbox_reload_others: options.sandbox_reload_others,
                 diff_runner: options.diff_runner,
+                persistent: options.persistent,
                 create_calls: AtomicUsize::new(0),
                 open_calls: AtomicUsize::new(0),
             });
@@ -3412,6 +3529,112 @@ mod tests {
             .await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST);
         assert_eq!(reply.json()["error"]["code"], "bad_request");
+    }
+
+    /// Runs one turn on `session` to completion.
+    async fn complete_turn(harness: &Harness, session: &str, text: &str) {
+        let response = post_turn(harness, session, text, false).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let turn_id = response
+            .headers()
+            .get("otto-turn-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("Otto-Turn-Id header")
+            .to_string();
+        SseReader::new(response).all().await;
+        let summary = harness.wait_turn_done(session, &turn_id).await;
+        assert_eq!(summary["status"], turn::TURN_OK, "{summary}");
+    }
+
+    #[tokio::test]
+    async fn forking_a_session_opens_a_copy_before_the_chosen_prompt() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["answer".to_string()],
+                ..Script::default()
+            },
+            persistent: true,
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        complete_turn(&harness, &id, "first").await;
+        complete_turn(&harness, &id, "second").await;
+
+        let points = harness
+            .send("GET", &format!("/v1/sessions/{id}/fork-points"), None)
+            .await;
+        assert_eq!(points.status, StatusCode::OK, "{}", points.body);
+        let points = points.json()["fork_points"].clone();
+        assert_eq!(points[0]["prompt"], "first");
+        assert_eq!(points[1]["prompt"], "second");
+        let second = points[1]["entry_id"]
+            .as_str()
+            .expect("entry id")
+            .to_string();
+
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/fork"),
+                Some(&serde_json::json!({ "before": second }).to_string()),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        let fork = reply.json();
+        let fork_id = fork["id"].as_str().expect("fork id").to_string();
+        assert_ne!(fork_id, id);
+        assert_eq!(fork["prompt"], "second");
+        assert_eq!(fork["forked_from"]["session_id"], id.as_str());
+        assert_eq!(fork["forked_from"]["entry_id"], second.as_str());
+
+        let history = harness
+            .send("GET", &format!("/v1/sessions/{fork_id}/history"), None)
+            .await
+            .json();
+        let texts: Vec<&str> = history
+            .as_array()
+            .expect("history")
+            .iter()
+            .filter_map(|message| message["blocks"][0]["text"].as_str())
+            .collect();
+        assert_eq!(texts, ["first", "answer"]);
+        let source = harness
+            .send("GET", &format!("/v1/sessions/{id}"), None)
+            .await
+            .json();
+        assert!(source.get("forked_from").is_none(), "{source}");
+
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/fork"),
+                Some(r#"{"before":"ffffffff"}"#),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "invalid_fork_point");
+    }
+
+    #[tokio::test]
+    async fn forking_an_unknown_or_unwritten_session_is_refused() {
+        let harness = Harness::new();
+        let reply = harness
+            .send("POST", "/v1/sessions/missing/fork", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+
+        // A session with no file has nothing to fork.
+        let id = harness.create().await;
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/fork"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "invalid_fork_point");
+        let points = harness
+            .send("GET", &format!("/v1/sessions/{id}/fork-points"), None)
+            .await;
+        assert_eq!(points.status, StatusCode::OK);
+        assert_eq!(points.json()["fork_points"], serde_json::json!([]));
     }
 
     #[tokio::test]

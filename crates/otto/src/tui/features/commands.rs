@@ -98,6 +98,7 @@ const ENTRIES: &[Entry] = &[
     entry!("/model", "switch profiles", true, model),
     entry!("/thinking", "set reasoning effort", true, thinking),
     entry!("/resume", "resume a session", false, resume),
+    entry!("/fork", "fork the session before a prompt", false, fork),
     entry!("/archive", "archive a session", true, archive),
     entry!("/rename", "rename the current session", false, rename),
     entry!("/compact", "compact context", false, compact),
@@ -200,14 +201,18 @@ fn session(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
         key: "session".into(),
         title: "Session".into(),
         text: format!(
-            "{}\nID: {}\nWorkspace: {}\nProfile: {}\nModel: {}/{}\nReasoning: {}",
+            "{}\nID: {}\nWorkspace: {}\nProfile: {}\nModel: {}/{}\nReasoning: {}{}",
             info.session_name,
             info.session_id,
             info.workspace,
             info.profile,
             info.provider,
             info.model,
-            info.thinking
+            info.thinking,
+            info.forked_from
+                .as_ref()
+                .map(|origin| format!("\nForked from: {}", origin.session_id))
+                .unwrap_or_default()
         ),
     })
 }
@@ -216,6 +221,13 @@ fn resume(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
         push(Choice::new(ChoiceKind::Resume, ""))
     } else {
         command("Resume", Command::Resume(args.into()))
+    }
+}
+fn fork(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
+    if args.is_empty() {
+        push(Choice::new(ChoiceKind::Fork, ""))
+    } else {
+        command("Fork", Command::Fork(args.into()))
     }
 }
 fn archive(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {

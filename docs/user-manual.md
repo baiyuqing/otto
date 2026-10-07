@@ -1018,7 +1018,7 @@ Turns:
   serve, and `/agents` reads serve's task records.
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
-`/clear`, `/resume` (the sessions of the workspace), `/rename`, `/compact`,
+`/clear`, `/resume` (the sessions of the workspace), `/fork`, `/rename`, `/compact`,
 `/image`, `/context`, `/agents`, `/auto [on|off]`, `/sandbox`, `/sandbox reload`,
 `/approve [<id>]`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
@@ -1057,6 +1057,12 @@ Shared commands:
 - `/new` closes the current session and starts a fresh one in the same process.
 - `/clear` is an alias for `/new`: it starts a fresh session, so the transcript,
   context counter, and per-session usage reset together.
+- `/fork` opens a picker of the current session's prompts that start a turn,
+  newest first. `Enter` writes a new session with the history before that
+  prompt's turn, switches to it, and puts the prompt in the editor without
+  sending it. See [Sessions](#sessions). Without `--attach` it is rejected
+  while a turn is in flight; in `--no-session` mode it reports that session
+  persistence is disabled.
 - `/rename <name>` renames the current session. The new name is written as
   append-only session metadata and is shown in session lists. It is rejected
   while a turn is in flight.
@@ -1243,6 +1249,18 @@ Notes:
   `--archive PATH` archives one active session for the current `--cwd` and
   exits. It cannot be combined with `--continue`, `--resume`, `--no-session`,
   or `--prompt`.
+- **Forking** writes a new session beside the current one whose history is the
+  current session's history before a chosen prompt's turn, then switches to
+  it with that prompt in the editor, to edit and send again. In the TUI,
+  `/fork` lists the prompts that start a turn, newest first; `/fork <id>`
+  forks before the prompt with that entry id. The fork keeps every earlier
+  entry unchanged, compaction included, so the model sees the same context
+  the source had at that point. The source session is never changed. Its
+  queued inputs, reminders and sub-agent transcripts stay with it; earlier
+  tool results that name a sub-agent task stay as text. A fork never ends
+  inside a turn, so opening it starts no turn of its own. The fork's header
+  records the source file in `parentSession` and its name is the source's
+  name plus ` (fork)`; `/session` shows `Forked from: <id>`.
 - **Sub-agent transcripts** are written beside the parent session, in a
   directory named after the parent file without `.jsonl`:
   `~/.otto/sessions/<workspace-key>/<session-id>/<task-id>-<child-id>.jsonl`.
@@ -2283,6 +2301,8 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}` | Return one open session's info. `404` if the session is not open. |
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
+| `GET /v1/sessions/{id}/fork-points` | `{"fork_points":[{"entry_id","prompt"}]}`: the user prompts that start a turn, oldest first. Empty for a session with no file yet. |
+| `POST /v1/sessions/{id}/fork` | Write a new session from this session's history before the turn that `{"before":"<entry_id>"}` starts, open it, and return it, `201`, with `prompt` (the text of that message) and `forked_from`. Without `before`, the copy keeps everything up to the last finished turn. The source session is not changed, and a running turn on it is left out. `409 invalid_fork_point` when `before` is not a fork point or the session has no history yet. |
 | `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
 | `POST /v1/sessions/{id}/approvals/message` | Restricted dialogue during an unapproved request: `{"text":"..."}`. Returns `null` when none waits, otherwise `{"text","queued"}`. A true `queued` asks the client to put the original message in its normal task queue. Never approves. |
 | `POST /v1/sessions/{id}/approvals/{approval_id}` | Decide an elevated Bash command a running turn waits for: `{"decision":"allow"}` or `{"decision":"deny"}`. `200 {"decision"}` for the first decision; `409 approval_decided` when it was already decided; `409 approval_failed` when the id is not waiting. See [Approvals inside a turn](#approvals-inside-a-turn). |
@@ -2357,9 +2377,14 @@ only way to stop it.
     "bash_available": true,
     "summary": "..."
   },
-  "turn": { "id": "...", "trigger": "user", "status": "..." }
+  "turn": { "id": "...", "trigger": "user", "status": "..." },
+  "forked_from": { "session_id": "...", "entry_id": "..." }
 }
 ```
+
+`forked_from` is present only on a fork: the source session and the user
+message the fork stops before (`entry_id` is absent for a fork of the whole
+history).
 
 `turn` is `null` when no turn has run yet on this session. `trigger` is
 `user` for a turn started by `POST .../turns`, `task` for one the server

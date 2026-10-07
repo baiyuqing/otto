@@ -329,6 +329,10 @@ impl SharedSession {
     pub fn take_recovery(&self) -> Option<crate::session::Recovery> {
         self.0.take_recovery()
     }
+
+    pub fn forked_from(&self) -> Option<otto_core::session::ForkRecord> {
+        self.0.forked_from()
+    }
 }
 
 #[async_trait::async_trait]
@@ -2191,6 +2195,33 @@ impl Builder {
             .and_then(|repository| repository.create_lazy(&session_root, header, failover_seconds))
             .map_err(|error| self.redact_error(&error, Some(runtime)))?;
         Ok(SharedSession::new(handle))
+    }
+}
+
+impl Builder {
+    /// Writes a new session forked from the session file `reference`; see
+    /// [`crate::session::SessionRepository::fork`].
+    pub fn fork_session_file(
+        &self,
+        reference: &str,
+        before: Option<&str>,
+    ) -> Result<crate::session::Forked, otto_core::session::ForkError> {
+        let failed = |message: String| {
+            otto_core::session::ForkError::Session(otto_core::session::PiError::other(message))
+        };
+        let id = random_id().map_err(|error| failed(format!("create session id: {error}")))?;
+        self.storage
+            .sessions()
+            .map_err(failed)?
+            .fork(reference, before, &id)
+    }
+
+    /// The places the session file `reference` can be forked, oldest first.
+    pub fn session_fork_points(
+        &self,
+        reference: &str,
+    ) -> Result<Vec<otto_core::session::ForkPoint>, String> {
+        self.storage.sessions()?.fork_points(reference)
     }
 }
 

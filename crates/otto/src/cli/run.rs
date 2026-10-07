@@ -788,6 +788,7 @@ pub async fn run_with_backends(
         memory: Default::default(),
         reflector,
         logger,
+        parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
     });
     let mut builder = Builder::for_workspace(shared, workspace, workspace_path.clone(), mcp_config);
 
@@ -868,6 +869,7 @@ pub async fn run_with_backends(
     }
     let control = composed.control;
     let approval_executor = composed.approval_executor;
+    let approval_environment = composed.approval_environment;
     let reloader = composed.reloader;
 
     let dynamic_content = builder.boundary_allows_dynamic(Some(&resolved));
@@ -1020,6 +1022,8 @@ pub async fn run_with_backends(
                 acp_token: lookup.get("OTTO_ACP_TOKEN").cloned().unwrap_or_default(),
                 control,
                 reloader,
+                delivery_setup_executor: approval_executor.clone(),
+                delivery_setup_environment: approval_environment.clone(),
                 terminate,
             },
             stdout,
@@ -1699,6 +1703,10 @@ pub(crate) fn resolve_sandbox_settings(
 pub(super) struct WorkspaceSandbox {
     pub(super) control: Arc<SandboxSwitch>,
     pub(super) approval_executor: Option<Arc<Executor>>,
+    /// The exact resolved environment paired with `approval_executor`. A
+    /// constrained delivery setup must use this snapshot, never borrow the
+    /// target's ordinary sandbox environment.
+    pub(super) approval_environment: Option<Vec<String>>,
     pub(super) reloader: Option<Arc<SandboxReloader>>,
 }
 
@@ -1758,6 +1766,7 @@ pub(super) async fn compose_workspace_sandbox(
         builder.sandbox_secrets_complete && redactions_complete && merged_complete;
 
     let mut approval_executor: Option<Arc<Executor>> = None;
+    let mut approval_environment: Option<Vec<String>> = None;
     if sandbox_info.mode == crate::runtime::info::SandboxMode::Seatbelt {
         let elevated_environment = resolve_environment(&EnvironmentOptions {
             host_entries: builder.host_entries.clone(),
@@ -1794,6 +1803,7 @@ pub(super) async fn compose_workspace_sandbox(
                 merge_redactions(&builder.sandbox_secrets, snapshot.redaction_values());
             builder.sandbox_secrets = merged;
             builder.sandbox_secrets_complete &= complete;
+            approval_environment = Some(entries.to_vec());
             approval_executor = Some(executor);
         }
     }
@@ -1823,6 +1833,7 @@ pub(super) async fn compose_workspace_sandbox(
     WorkspaceSandbox {
         control,
         approval_executor,
+        approval_environment,
         reloader,
     }
 }
@@ -1847,7 +1858,7 @@ pub(super) async fn load_workspace(
     canonical_path: &Path,
     cancel: &CancellationToken,
     stderr: &mut (dyn Write + Send),
-) -> Result<(Builder, Option<Arc<SandboxReloader>>), String> {
+) -> Result<(Builder, WorkspaceSandbox), String> {
     let mut scoped = (*shared).clone();
     if shared.config.user_values.is_some() {
         let loaded = crate::config::layered::for_workspace(
@@ -1912,7 +1923,7 @@ pub(super) async fn load_workspace(
     builder.workspace_scope =
         crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
 
-    Ok((builder, composed.reloader))
+    Ok((builder, composed))
 }
 
 fn select_frontend(mode: UiMode, terminal: bool) -> Result<Frontend, String> {
@@ -2404,6 +2415,49 @@ driver = "off"
     /// startup too: both read the same `Shared::sandbox_driver_override`
     /// rather than `load_workspace` dropping it.
     #[tokio::test]
+    async fn load_workspace_binds_a_delivery_worktree_as_its_own_file_root() {
+        let root = tempfile::tempdir().expect("root");
+        let primary = root.path().join("primary");
+        let worktree = primary.join(".otto/delivery-worktrees/delivery-1");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let primary = canonical_directory(&primary).expect("primary canonical");
+        let worktree = canonical_directory(&worktree).expect("worktree canonical");
+        let shared = shared_with_offline_sandbox(root.path());
+        let (builder, _sandbox) = load_workspace(
+            shared,
+            &worktree,
+            &CancellationToken::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .expect("load worktree");
+
+        assert_eq!(builder.workspace_path, worktree.to_string_lossy());
+        assert_eq!(builder.workspace.root(), worktree);
+        assert_ne!(builder.workspace.root(), primary);
+        let runtime = resolve_initial_runtime(
+            &builder.config,
+            &builder.environment,
+            None,
+            &builder.overrides,
+        )
+        .expect("runtime");
+        let session = builder.create_session(&runtime).expect("delivery session");
+        let runner = builder
+            .build_runner_quiet(&session, &runtime)
+            .await
+            .expect("delivery runner");
+        assert_eq!(
+            runner.session().header().workspace,
+            worktree.to_string_lossy()
+        );
+        assert_ne!(
+            runner.session().header().workspace,
+            primary.to_string_lossy()
+        );
+    }
+
+    #[tokio::test]
     async fn load_workspace_honors_the_shared_sandbox_driver_override() {
         let shared_root = tempfile::tempdir().expect("shared root");
         let workspace = tempfile::tempdir().expect("workspace");
@@ -2451,7 +2505,7 @@ driver = "off"
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut stderr = Vec::new();
 
-        let (builder, reloader) =
+        let (builder, sandbox) =
             load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
                 .await
                 .expect("load workspace");
@@ -2463,6 +2517,12 @@ driver = "off"
             String::from_utf8_lossy(&stderr)
         );
         assert!(builder.bash_approvals.is_some());
-        assert!(reloader.is_some());
+        assert!(sandbox.reloader.is_some());
+        assert!(sandbox.approval_executor.is_some());
+        assert!(sandbox.approval_environment.is_some());
+        assert_eq!(
+            sandbox.approval_executor.is_some(),
+            sandbox.approval_environment.is_some()
+        );
     }
 }

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use otto_core::agent::inbox::{Entry, Inbox};
 
+use crate::fsops::{PosixPublish, PublishOps};
 use crate::tool::remind;
 
 /// A fresh input id for a notification enqueued without one: `in_` followed
@@ -106,6 +107,15 @@ fn set_aside(path: &Path, reason: &str) -> String {
 /// ([`remind::session_file_exists`]): a notification pushed after the
 /// session is archived must not recreate the sidecar the archive removed.
 pub(crate) fn write(path: &Path, suffix: &str, entries: &[Entry]) -> Result<(), String> {
+    write_with(path, suffix, entries, &PosixPublish)
+}
+
+fn write_with(
+    path: &Path,
+    suffix: &str,
+    entries: &[Entry],
+    publish: &dyn PublishOps,
+) -> Result<(), String> {
     if entries.is_empty() {
         return match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
@@ -122,7 +132,7 @@ pub(crate) fn write(path: &Path, suffix: &str, entries: &[Entry]) -> Result<(), 
     }
     let body = serde_json::to_vec_pretty(entries)
         .map_err(|error| format!("encode pending inputs: {error}"))?;
-    remind::replace_private(path, &body)
+    remind::replace_private_with(path, &body, publish)
 }
 
 #[cfg(test)]
@@ -130,6 +140,9 @@ mod tests {
     use otto_core::agent::inbox::Notification;
 
     use super::*;
+    use crate::faults::publish::FaultyPublishOps;
+    use crate::faults::{Fault, FaultPlan, Rule, Trigger};
+    use crate::fsops::PublishStep;
 
     fn session_dir() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("dir");
@@ -182,6 +195,68 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).expect("sidecar")).expect("json");
         assert_eq!(stored.len(), 1);
         assert!(stored[0].notification.id.starts_with("in_"));
+    }
+
+    /// Two notifications are enqueued through a sidecar whose publish ends
+    /// the process at the second save's `step`. Returns the plan's rule.
+    fn crash_on_second_save(dir: &Path, step: PublishStep) {
+        let plan = FaultPlan::new(vec![Rule::new(step, Trigger::Nth(2), Fault::Exit)]);
+        let publish = FaultyPublishOps::new(plan);
+        std::fs::write(dir.join("s1.jsonl"), "").expect("session file");
+        let path = dir.join("s1.inbox.json");
+        let inbox = Inbox::new(None);
+        inbox.set_id_source(Box::new(new_input_id));
+        inbox.set_persist(Box::new(move |entries| {
+            write_with(&path, ".inbox.json", entries, &publish)
+        }));
+        for text in ["previous", "prompt"] {
+            let _ = inbox.enqueue(Notification {
+                text: text.into(),
+                ..Notification::default()
+            });
+        }
+    }
+
+    fn reloaded_texts(dir: &Path) -> Vec<String> {
+        let inbox = Inbox::new(None);
+        assert_eq!(load(&inbox, &dir.join("s1.inbox.json")), None);
+        inbox
+            .queued()
+            .into_iter()
+            .map(|entry| entry.notification.text)
+            .collect()
+    }
+
+    #[test]
+    fn a_crash_before_the_sidecar_rename_reloads_the_previous_queue() {
+        use crate::faults::crash::{self, CRASH_EXIT, Role};
+        crash::run(crash::name_of(&|| {}), |role| match role {
+            Role::Child(dir) => crash_on_second_save(dir, PublishStep::Rename),
+            Role::Parent(dir, status) => {
+                assert_eq!(
+                    status.code(),
+                    Some(CRASH_EXIT),
+                    "child did not crash at the fault"
+                );
+                assert_eq!(reloaded_texts(dir), ["previous"]);
+            }
+        });
+    }
+
+    #[test]
+    fn a_crash_before_the_sidecar_directory_sync_reloads_the_previous_queue_and_the_prompt() {
+        use crate::faults::crash::{self, CRASH_EXIT, Role};
+        crash::run(crash::name_of(&|| {}), |role| match role {
+            Role::Child(dir) => crash_on_second_save(dir, PublishStep::DirSync),
+            Role::Parent(dir, status) => {
+                assert_eq!(
+                    status.code(),
+                    Some(CRASH_EXIT),
+                    "child did not crash at the fault"
+                );
+                assert_eq!(reloaded_texts(dir), ["previous", "prompt"]);
+            }
+        });
     }
 
     #[test]

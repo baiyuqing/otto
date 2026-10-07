@@ -264,7 +264,17 @@ impl Inner {
 /// `write_inbox_file` in `runtime::wiring`), so the temporary-file/fsync/rename
 /// pattern exists in exactly one place.
 pub(crate) fn replace_private(path: &Path, body: &[u8]) -> Result<(), String> {
-    replace_private_typed(path, body, &PosixPublish).map_err(|error| error.to_string())
+    replace_private_with(path, body, &PosixPublish)
+}
+
+/// [`replace_private`] with the publish system calls supplied, so tests can
+/// fail or end the process at one.
+pub(crate) fn replace_private_with(
+    path: &Path,
+    body: &[u8],
+    publish: &dyn PublishOps,
+) -> Result<(), String> {
+    replace_private_typed(path, body, publish).map_err(|error| error.to_string())
 }
 
 fn replace_private_typed(

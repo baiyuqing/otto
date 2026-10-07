@@ -1,8 +1,9 @@
 # Herdr agent-state reporting
 
-Status: proposed 2026-10-07. Constraints and scope decided by the maintainer
-on 2026-10-07: report only, implemented inside `crates/otto`, because Herdr
-cannot be changed at this stage.
+Status: proposed 2026-10-07. Maintainer decisions on 2026-10-07: report only,
+implemented inside `crates/otto`, because Herdr cannot be changed at this
+stage; **no configuration key** (the Herdr environment is the only switch);
+the reported label is always `otto`.
 
 ## Problem
 
@@ -52,7 +53,8 @@ sink (`crates/otto-core/src/agent/events.rs`), `app::Info` carries
 3. Make `herdr agent wait <name> --until blocked`, notifications and pane jump
    work for Otto, so a user notices an approval while working elsewhere.
 4. No effect outside Herdr, and no new model-callable capability.
-5. On by default: the gate is the Herdr environment, not a flag.
+5. On by default with nothing to configure: inside a Herdr pane the
+   environment is the only switch.
 
 ## Non-goals
 
@@ -137,9 +139,10 @@ tokio's `net` feature), matching the bundled integrations:
   every frontend that runs a turn reports without knowing about Herdr.
 - The reporter is constructed in the composition root (`cli::run`, next to the
   frontend selection) and released on exit, after the session closes.
-- Configuration: `[herdr] enabled` (default `true`) in the resolved config, so
-  a user can switch reporting off while staying inside Herdr. The environment
-  gate still applies on top.
+- No configuration key. Reporting happens exactly when Herdr started the
+  process; a user who does not want it runs Otto outside a Herdr pane. `source`
+  is fixed to `custom:otto` and the label to `otto`: changing either needs a
+  real use, not a setting.
 - Capability rule: this adds no tool, so the
   [capability descriptions](../development.md#capability-descriptions)
   obligations do not apply.
@@ -205,10 +208,9 @@ Acceptance on a real machine (manual, in the user's Herdr session):
 
 ## Open questions
 
-1. `[herdr] enabled` (default `true`) as the opt-out, or environment only?
-   This design assumes the config key exists.
-2. Label `otto` fixed, or configurable (`[herdr] agent`)? This design assumes
-   fixed.
+Resolved 2026-10-07: **(1)** no configuration key — the Herdr environment is
+the only switch; **(2)** the reported label is always `otto`.
+
 3. `--attach` and `otto serve` in the first release, or later? This design
    assumes later.
 4. `resume_argv`/session reference in the first release, or after the live

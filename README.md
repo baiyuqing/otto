@@ -367,6 +367,48 @@ run outside the sandbox with the real `HOME`; see the
 Read [tools and safety](docs/user-manual.md#tools-and-safety) before granting
 access to a workspace.
 
+## Use Otto as a library
+
+Another Rust program can build the same agent `otto acp` runs, in process,
+with `otto::embed`. Add a git dependency pinned to a commit (the crates are
+not on crates.io):
+
+```toml
+[dependencies]
+otto = { git = "https://github.com/baiyuqing/otto", rev = "<commit>" }
+```
+
+```rust
+use otto::embed::{ApprovalDecision, Component, Input, Otto};
+use tokio_util::sync::CancellationToken;
+
+let otto = Otto::builder()
+    .workspace("/path/to/repo")
+    .disable(Component::Mcp)
+    .build()
+    .await?;
+let session = otto.new_session(None).await?;
+session.set_auto_mode(false)?; // MANUAL: approval requests reach the callback
+let cancel = CancellationToken::new();
+let stop = session
+    .prompt(
+        Input::Text("fix the failing test"),
+        &mut |event| println!("{event:?}"),
+        &cancel,
+        |_request| async { ApprovalDecision::Deny },
+    )
+    .await?;
+otto.close().await?;
+```
+
+The agent reads the same config, environment and `~/.otto` state as the CLI,
+and its sessions are listed and resumed by the CLI. Every component is on
+unless the program disables it; a switch can only turn a component off. One
+`Otto` exists per process. The `otto::embed` rustdoc
+(`cargo doc -p otto --open`) is the reference; the
+[design](docs/specs/2026-10-07-otto-embedding-api.md) records the behavior and
+the limits.
+
 ## Contributing
 
 The code is a Cargo workspace of two crates:

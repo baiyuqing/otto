@@ -30,6 +30,7 @@ use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
 use crate::runtime::builder::Builder;
 use crate::runtime::info::SandboxInfo;
 use crate::runtime::sandbox_runtime::canonical_directory;
+use crate::runtime::startup::{Disabled, load_workspace};
 use crate::runtime::workspace_admission::{
     Admission, admit_workspace, canonicalize_workspace_roots, trusted_projects,
 };
@@ -160,8 +161,14 @@ impl Workspaces {
         if let Some(host) = loaded.get(&path) {
             return Ok((Arc::clone(host), false));
         }
-        let (builder, sandbox) =
-            super::run::load_workspace(Arc::clone(shared), canonical, cancel, stderr).await?;
+        let (builder, sandbox) = load_workspace(
+            Arc::clone(shared),
+            canonical,
+            &Disabled::default(),
+            cancel,
+            stderr,
+        )
+        .await?;
         let builder = Arc::new(builder);
         let workspace_runtime = crate::runtime::builder::resolve_initial_runtime(
             &builder.config,
@@ -522,7 +529,7 @@ trait DeliveryRun: Send {
 #[allow(dead_code)] // Retained only by the not-yet-installed delivery service.
 struct DeliveryRuntime {
     _primary_host: Arc<WorkspaceHost>,
-    worktree_sandbox: super::run::WorkspaceSandbox,
+    worktree_sandbox: crate::runtime::startup::WorkspaceSandbox,
     _worktree_builder: Arc<Builder>,
     worktree_session: crate::runtime::builder::SharedSession,
     worktree_runner: Arc<crate::runtime::builder::Runner>,
@@ -754,9 +761,14 @@ impl DeliveryService {
             .upgrade()
             .ok_or("delivery broker is no longer available")?;
         let mut stderr = std::io::sink();
-        let (builder, sandbox) =
-            super::run::load_workspace(shared, &receipt.preview.plan.path, cancel, &mut stderr)
-                .await?;
+        let (builder, sandbox) = load_workspace(
+            shared,
+            &receipt.preview.plan.path,
+            &Disabled::default(),
+            cancel,
+            &mut stderr,
+        )
+        .await?;
         let builder = Arc::new(builder);
         if builder.workspace_path != receipt.preview.plan.path.to_string_lossy() {
             return Err("delivery worktree builder root is invalid".into());
@@ -3011,9 +3023,10 @@ mod tests {
         let other_sessions = tempfile::tempdir().expect("other sessions");
         let shared = crate::cli::testutil::shared_with_offline_sandbox(other_sessions.path());
         std::fs::write(&shared.config_path, "[sandbox]\ndriver='off'\n").expect("config");
-        let (mut builder, sandbox) = super::super::run::load_workspace(
+        let (mut builder, sandbox) = load_workspace(
             shared,
             &other_path,
+            &Disabled::default(),
             &CancellationToken::new(),
             &mut Vec::new(),
         )

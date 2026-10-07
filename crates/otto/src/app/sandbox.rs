@@ -4,10 +4,10 @@
 //! [`Controller`](super::Controller) built from it reports the same live state
 //! rather than the value captured at startup.
 //!
-//! Ownership: the implementation is `cli::sandbox_switch::SandboxReloader`,
-//! built by the composition root in `cli::run` and shared by the REPL, the TUI
-//! and `otto serve`. A process whose bash never came up gets no control at all,
-//! so `/sandbox reload` reports
+//! Ownership: the implementation is `runtime::sandbox_switch::SandboxReloader`,
+//! built by the composition root in `runtime::startup` and shared by the REPL,
+//! the TUI, `otto serve` and `otto::embed`. A process whose bash never came up
+//! gets no control at all, so `/sandbox reload` reports
 //! [`SANDBOX_RELOAD_UNAVAILABLE`](super::SANDBOX_RELOAD_UNAVAILABLE) rather
 //! than a failure with nothing to re-point.
 

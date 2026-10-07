@@ -32,16 +32,24 @@ type sent struct {
 // fakePlatform records what the bridge sends and lets the test deliver
 // messages.
 type fakePlatform struct {
-	name      string
-	mu        sync.Mutex
-	deliver   func(Message)
-	started   chan struct{}
-	sent      []sent
-	typing    int
-	approvals []string
-	statuses  []string
-	cardErr   error
-	sendErr   error
+	name        string
+	mu          sync.Mutex
+	deliver     func(Message)
+	started     chan struct{}
+	sent        []sent
+	typing      int
+	approvals   []string
+	statuses    []string
+	cardErr     error
+	sendErr     error
+	choicesErr  error
+	choiceCalls []choicesCall
+}
+
+// choicesCall is one SendChoices invocation.
+type choicesCall struct {
+	chat, replyTo, text string
+	choices             []Choice
 }
 
 func newFakePlatform() *fakePlatform { return &fakePlatform{started: make(chan struct{})} }
@@ -85,6 +93,28 @@ func (p *fakePlatform) Typing(context.Context, string) error {
 	return nil
 }
 
+// SendChoices makes the fake a ChoicePlatform: the bridge then posts the
+// profile picker as buttons instead of falling back to plain text.
+func (p *fakePlatform) SendChoices(_ context.Context, chat, replyTo, text string, choices []Choice) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.choicesErr != nil {
+		return p.choicesErr
+	}
+	p.choiceCalls = append(p.choiceCalls, choicesCall{chat, replyTo, text, choices})
+	return nil
+}
+
+// picker returns the last SendChoices call, or false when there was none.
+func (p *fakePlatform) picker() (choicesCall, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.choiceCalls) == 0 {
+		return choicesCall{}, false
+	}
+	return p.choiceCalls[len(p.choiceCalls)-1], true
+}
+
 func (p *fakePlatform) texts() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -120,6 +150,7 @@ type setup struct {
 	mod      func(*Options)
 	manage   *manage.Client
 	agent    *agent.Options // replaces the fake agent's options
+	profiles ProfileSource  // nil leaves bare "/model" to Otto
 }
 
 func newHarness(t *testing.T, s setup) *harness {
@@ -158,6 +189,7 @@ func newHarness(t *testing.T, s setup) *harness {
 		Access:         map[string]Access{h.plat.Name(): {Chats: s.chats, Senders: s.senders}},
 		Store:          s.store,
 		TypingInterval: time.Hour,
+		Profiles:       s.profiles,
 	}
 	if s.textOnly {
 		opts.Platforms = []Platform{textPlatform{h.plat}}

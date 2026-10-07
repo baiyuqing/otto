@@ -346,6 +346,8 @@ impl Scope {
     }
 }
 
+pub const PRESENTATION_ORIGIN_METADATA: &str = "otto.presentation_origin";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Provenance {
     pub origin: Option<Origin>,

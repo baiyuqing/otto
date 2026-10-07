@@ -80,10 +80,12 @@ impl crate::tool::reflect::Reflect for Requested {
         };
         let session_id = self.session.header().id;
         let session_path = self.session.path();
+        let presentation_origin = runner.presentation_origin.get();
         let context = reflection::Context {
             approvals: Some(&self.builder.approvals),
             runner: &runner,
             session_id: &session_id,
+            presentation_origin: presentation_origin.as_ref(),
             session_path: &session_path,
             service,
             user_scope,
@@ -96,7 +98,8 @@ impl crate::tool::reflect::Reflect for Requested {
         watcher.abort();
         match result {
             Ok(report) => {
-                self.notices.push(report.line());
+                self.notices
+                    .push_for(report.line(), presentation_origin.as_ref());
                 Ok(model_text(&report))
             }
             Err(error) => Err(format!("reflection: {error}")),

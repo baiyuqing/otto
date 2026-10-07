@@ -10,6 +10,14 @@ import (
 	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 )
 
+func (c *chat) presentationOrigin() string {
+	return "chat:" + c.p.Name() + ":" + c.id
+}
+
+func (c *chat) presents(r agent.SharedApproval) bool {
+	return r.PresentationOrigin != "" && r.PresentationOrigin == c.presentationOrigin()
+}
+
 type sharedCard struct {
 	session  string
 	request  agent.SharedApproval
@@ -112,7 +120,7 @@ func (c *chat) startApprovalWatch(sid string) {
 				if changeErr == nil {
 					for _, change := range changes {
 						r := change.Request
-						if r.Decision != nil && (r.Decision.Transport == "auto-mode" || r.Decision.Transport == "yolo-mode") {
+						if c.presents(r) && r.Decision != nil && (r.Decision.Transport == "auto-mode" || r.Decision.Transport == "yolo-mode") {
 							// A YOLO decision approved a request the user would
 							// otherwise have seen, so it is always reported.
 							policy := "AUTO"
@@ -146,6 +154,13 @@ func (c *chat) showApprovals(ctx context.Context, sid string, requests []agent.S
 	if !ok {
 		return
 	}
+	routed := requests[:0]
+	for _, r := range requests {
+		if c.presents(r) {
+			routed = append(routed, r)
+		}
+	}
+	requests = routed
 	blocking := false
 	for _, r := range requests {
 		blocking = blocking || r.Blocking

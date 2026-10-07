@@ -662,6 +662,9 @@ pub struct Runner {
     pub(crate) advisor: Option<Arc<crate::memory::advice::Advisor>>,
     /// The origin of the current user turn, read by the schedule tools.
     pub(crate) schedule_origin: Arc<crate::schedule::tools::TurnOrigin>,
+    /// Exact passive-presentation origin for the current logical user turn.
+    /// Unlike scheduling, a wake turn clears this instead of inheriting it.
+    pub(crate) presentation_origin: Arc<crate::schedule::tools::TurnOrigin>,
     /// Where the controller binds the `reflect` tool's port. Present whether
     /// or not the tool is registered.
     pub(crate) reflection: Arc<crate::tool::reflect::Handle>,
@@ -1186,6 +1189,7 @@ impl Runner {
             task_control,
             advisor: None,
             schedule_origin: Default::default(),
+            presentation_origin: Default::default(),
             reflection: Default::default(),
         }
     }
@@ -1869,6 +1873,8 @@ impl Builder {
             .protect_secrets(&redaction_values)
             .map_err(|e| e.to_string())?;
         let max_output = output_cap(runtime.max_output_bytes);
+        let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+        let presentation_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let skills = otto_core::config::resolve_skills(
             &self.config,
             &self.environment,
@@ -1948,7 +1954,14 @@ impl Builder {
                 &runtime.model,
                 self.usage_collector(session, runtime),
             );
-            tools.extend(self.memory_tools(max_output, advisor.clone()));
+            tools.extend(self.memory_tools(
+                max_output,
+                advisor.clone(),
+                Some((
+                    session.header().id.as_str(),
+                    Arc::clone(&presentation_origin),
+                )),
+            ));
             advisor
         } else {
             None
@@ -2064,7 +2077,6 @@ impl Builder {
         if let Some(journal) = self.session_journal(session, "turns.json", warnings) {
             task_control.set_turn_queue_journal(journal);
         }
-        let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let reflection = Arc::new(crate::tool::reflect::Handle::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
             tools.push(Box::new(crate::tool::approval::RequestApproval {
@@ -2075,6 +2087,7 @@ impl Builder {
                     task_id: String::new(),
                     run_id: String::new(),
                 },
+                turn_origin: Some(Arc::clone(&presentation_origin)),
             }));
             for revoke in [false, true] {
                 tools.push(Box::new(crate::tool::approval::Control {
@@ -2140,7 +2153,7 @@ impl Builder {
         }
         let registry =
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
-        let registry = registry.with_approval(
+        let registry = registry.with_approval_origin(
             self.approvals.clone(),
             crate::approval::Scope {
                 workspace: self.workspace_path.clone(),
@@ -2148,6 +2161,7 @@ impl Builder {
                 task_id: String::new(),
                 run_id: String::new(),
             },
+            Some(Arc::clone(&presentation_origin)),
         );
         let registry = with_lease_guard(registry, session, &self.workspace_path);
         let definitions = registry.definitions();
@@ -2273,6 +2287,7 @@ impl Builder {
             task_control,
             advisor,
             schedule_origin,
+            presentation_origin,
             reflection,
         };
         if extensions.has_hooks() && runner.allows_dynamic_content() {

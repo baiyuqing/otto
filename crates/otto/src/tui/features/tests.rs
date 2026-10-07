@@ -30,6 +30,7 @@ fn approval_request() -> crate::approval::Request {
             task_id: String::new(),
             run_id: String::new(),
         },
+        presentation_origin: String::new(),
         subject: crate::approval::Subject {
             tool_call_id: "call-1".into(),
             source: "tool".into(),
@@ -74,49 +75,19 @@ fn candidate(id: &str) -> Candidate {
 }
 
 #[test]
-fn approval_defaults_to_deny_without_dispatch_and_keeps_feedback_with_revision() {
+fn approval_is_a_modal_that_defaults_to_approve_without_feedback() {
     let request = approval_request();
     let mut approval = Approval::shared(&request);
-    let mut state = State::new(&approval.view());
+    let view = approval.view();
+    let mut state = State::new(&view);
 
-    assert_eq!(approval.view().default_action.as_deref(), Some("deny"));
-    assert_eq!(state.selected_action.as_deref(), Some("deny"));
-    state.focus = Focus::Field("feedback".into());
-    state.handle(
-        &approval.view(),
-        Intent::Text("because it is needed".into()),
-    );
-    state.focus = Focus::Actions;
-    state.pending = true;
-
-    assert!(matches!(
-        approval.receive(Reply::Operation {
-            message: "application failed".into(),
-            info: Info::default(),
-            history: None,
-            prompt: None,
-        }),
-        Transition::Stay
-    ));
-    state.pending = false;
-    state.error = Some("application failed".into());
-    state.reconcile(&approval.view());
-    let mut refreshed = request.clone();
-    refreshed.application = crate::approval::ApplicationState::Failed;
-    refreshed.application_error = "application failed".into();
-    approval.receive(Reply::ApprovalSnapshot(crate::approval::Snapshot {
-        requests: vec![refreshed],
-        cursor: 1,
-    }));
-    state.reconcile(&approval.view());
-    assert_eq!(state.drafts["feedback"], "because it is needed");
-    assert_eq!(state.error.as_deref(), Some("application failed"));
-
-    state.focus = Focus::Field("feedback".into());
-    state.handle(&approval.view(), Intent::NextFocus); // feedback -> actions
+    assert!(view.modal);
+    assert!(view.fields.is_empty());
+    assert_eq!(view.default_action.as_deref(), Some("allow"));
+    assert_eq!(state.selected_action.as_deref(), Some("allow"));
     assert_eq!(state.focus, Focus::Actions);
-    state.handle(&approval.view(), Intent::Move(1)); // deny -> allow
-    let activation = state.handle(&approval.view(), Intent::Activate).unwrap();
+
+    let activation = state.handle(&view, Intent::Activate).unwrap();
     assert!(matches!(
         approval.activate(activation),
         Transition::Request(BackendRequest::Command(Command::DecideApproval {
@@ -124,7 +95,41 @@ fn approval_defaults_to_deny_without_dispatch_and_keeps_feedback_with_revision()
             allow: true,
             feedback,
             revision: Some(7),
-        })) if id == "approval-7" && feedback == "because it is needed"
+        })) if id == "approval-7" && feedback.is_empty()
+    ));
+
+    assert!(matches!(
+        approval.receive(Reply::Operation {
+            message: "Approved approval-7.".into(),
+            info: Info::default(),
+            history: None,
+            prompt: None,
+        }),
+        Transition::Close
+    ));
+}
+
+#[test]
+fn approval_refresh_keeps_the_exact_revision_and_approve_default() {
+    let request = approval_request();
+    let mut approval = Approval::shared(&request);
+    let mut refreshed = request.clone();
+    refreshed.revision = 8;
+    approval.receive(Reply::ApprovalSnapshot(crate::approval::Snapshot {
+        requests: vec![refreshed],
+        cursor: 1,
+    }));
+    let view = approval.view();
+    let mut state = State::new(&view);
+    let activation = state.handle(&view, Intent::Activate).unwrap();
+    assert!(matches!(
+        approval.activate(activation),
+        Transition::Request(BackendRequest::Command(Command::DecideApproval {
+            revision: Some(8),
+            allow: true,
+            feedback,
+            ..
+        })) if feedback.is_empty()
     ));
 }
 

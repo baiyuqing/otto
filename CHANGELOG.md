@@ -40,6 +40,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
   and mirror the existing HTTP `GET`/`DELETE /v1/sessions/{id}/tasks/steer`
   routes ([user manual](docs/user-manual.md#tui-behavior),
   [#404](https://github.com/baiyuqing/otto/pull/404)).
+- `edit` now notes in its result when `new_text` drops the line break that
+  ends `old_text`, so the model sees that the next line was joined onto the
+  replaced text and can restore the break instead of leaving broken code.
 
 ### Fixes
 

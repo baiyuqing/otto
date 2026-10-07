@@ -17,6 +17,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Automatic skill contract checks are now a regular `[skills]` feature and
+  default to enabled when `TYPESAFE_API_KEY` is set. Disable them with
+  `[skills].typesafe_skill_check = false`; the old `[experimental]` setting is
+  still accepted as a fallback. See the
+  [user manual](docs/user-manual.md#automatic-contract-check).
+
 - Otto's default system prompt now asks the model to structure and restate new
   action requests, resolve material ambiguity and wait for user confirmation
   before changing files or causing external side effects. Simple questions stay

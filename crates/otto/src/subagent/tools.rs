@@ -46,7 +46,7 @@ const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (defaul
 
 const AGENT_NAME_DESCRIPTION: &str = "Optional task name, unique in this session; usable instead of the task id in agent_wait, agent_status, and /task. 1 to 64 letters, digits, '_' or '-'.";
 
-const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-agent task in this session. With resume set, this continues that task on its own transcript instead of starting a new one: prompt is the next user message delivered to it, and agent, model, context, name, and description must be absent.";
+const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-agent task in this session. With resume set, this continues that task on its own transcript instead of starting a new one: prompt is the next user message delivered to it, and agent, model, name, and description must be absent or empty, and context absent or \"fresh\"; the task keeps its recorded values.";
 
 /// The `agent`, `agent_wait`, `agent_status`, `agent_send` and `agent_cancel`
 /// definitions, without a built [`Runner`]. The redaction boundary check needs
@@ -345,7 +345,11 @@ impl AgentTool {
             ("name", &args.name),
             ("description", &args.description),
         ] {
-            if !value.trim().is_empty() {
+            let value = value.trim();
+            if field == "context" && value == "fresh" {
+                continue;
+            }
+            if !value.is_empty() {
                 return error_result(format!("resume does not accept {field}"));
             }
         }

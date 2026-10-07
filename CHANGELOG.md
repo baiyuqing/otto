@@ -21,7 +21,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   default to enabled when `TYPESAFE_API_KEY` is set. Disable them with
   `[skills].typesafe_skill_check = false`; the old `[experimental]` setting is
   still accepted as a fallback. See the
-  [user manual](docs/user-manual.md#automatic-contract-check).
+  [user manual](docs/user-manual.md#automatic-contract-check)
+  ([#417](https://github.com/baiyuqing/otto/pull/417)).
 
 - Otto's default system prompt now asks the model to structure and restate new
   action requests, resolve material ambiguity and wait for user confirmation

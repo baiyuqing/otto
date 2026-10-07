@@ -15,6 +15,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+## 0.5.0 - 2026-10-07
+
 ### Features
 
 - Keep a long-lived `otto serve` bounded: a session with no request, turn start

@@ -552,6 +552,12 @@ separately proven and tested.
 > non-transport failure, or any operation whose contract requires the
 > receiver's deduplication before repetition.
 
+> Amended 2026-10-07. ChatGPT also retries a stream-reported
+> `server_is_overloaded` or `server_error` that arrives before any reasoning,
+> text or tool-call delta, within the same attempt budget (#339). The
+> statements in this spec that ChatGPT completions do not retry predate that
+> change and the transport amendment above.
+
 ## Phase 1: identity, disposition, and effect-certainty contract
 
 ### Scope

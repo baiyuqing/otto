@@ -1213,7 +1213,8 @@ impl Server {
             usage: info.usage,
             context_input_tokens: info.context_input_tokens,
             sandbox: sandbox_wire(&info.sandbox),
-            auto_mode: info.auto_mode,
+            auto_mode: info.approval_mode.is_automatic(),
+            approval_mode: info.approval_mode.as_str(),
             turn,
             forked_from: info.forked_from,
             plan: info.plan,
@@ -1296,7 +1297,8 @@ impl Server {
                     queued,
                     approvals,
                     tasks,
-                    auto_mode: info.auto_mode,
+                    auto_mode: info.approval_mode.is_automatic(),
+                    approval_mode: info.approval_mode.as_str(),
                 }
             })
             .collect();
@@ -2114,7 +2116,10 @@ struct SessionWire {
     usage: Usage,
     context_input_tokens: i64,
     sandbox: SandboxWire,
+    /// True when the session decides requests automatically, in AUTO or YOLO;
+    /// read `approval_mode` for the exact policy.
     auto_mode: bool,
+    approval_mode: &'static str,
     turn: Option<SessionTurnWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     forked_from: Option<app::ForkedFrom>,
@@ -2161,7 +2166,10 @@ struct HealthzWire {
 /// turn starts.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct StatusSessionWire {
+    /// True when the session decides requests automatically, in AUTO or YOLO;
+    /// read `approval_mode` for the exact policy.
     auto_mode: bool,
+    approval_mode: &'static str,
     id: String,
     workspace: String,
     turn: Option<String>,
@@ -9633,27 +9641,54 @@ mod tests {
         let one = harness.create().await;
         let two = harness.create().await;
         let url = format!("/v1/sessions/{one}/approval-mode");
+        let body = harness.send("GET", &url, None).await.json();
+        assert_eq!(body["automatic"], true);
+        assert_eq!(body["mode"], "auto");
+        let body = harness
+            .send("PUT", &url, Some(r#"{"automatic":false}"#))
+            .await
+            .json();
+        assert_eq!(body["mode"], "manual");
+        let body = harness.send("GET", &url, None).await.json();
+        assert_eq!(body["automatic"], false);
+        assert_eq!(body["mode"], "manual");
+        // The mode form selects YOLO, and the response agrees with itself.
+        let body = harness
+            .send("PUT", &url, Some(r#"{"mode":"yolo"}"#))
+            .await
+            .json();
+        assert_eq!(body["automatic"], true);
+        assert_eq!(body["mode"], "yolo");
+        assert_eq!(harness.send("GET", &url, None).await.json()["mode"], "yolo");
+        // A boolean and a contradicting mode are refused, not guessed.
         assert_eq!(
-            harness.send("GET", &url, None).await.json()["automatic"],
-            true
+            harness
+                .send("PUT", &url, Some(r#"{"automatic":false,"mode":"yolo"}"#))
+                .await
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(harness.send("GET", &url, None).await.json()["mode"], "yolo");
+        assert_eq!(
+            harness
+                .send("PUT", &url, Some(r#"{"mode":"on"}"#))
+                .await
+                .status,
+            StatusCode::BAD_REQUEST
         );
         assert_eq!(
             harness
-                .send("PUT", &url, Some(r#"{"automatic":false}"#))
+                .send("PUT", &url, Some(r#"{"automatic":true}"#))
                 .await
-                .status,
-            StatusCode::OK
-        );
-        assert_eq!(
-            harness.send("GET", &url, None).await.json()["automatic"],
-            false
+                .json()["mode"],
+            "auto"
         );
         assert_eq!(
             harness
                 .send("GET", &format!("/v1/sessions/{two}/approval-mode"), None)
                 .await
-                .json()["automatic"],
-            true
+                .json()["mode"],
+            "auto"
         );
         assert_eq!(
             harness

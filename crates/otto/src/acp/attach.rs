@@ -282,17 +282,12 @@ impl Relay {
         let call = async {
             match command {
                 Command::Auto { args } => {
-                    let automatic = crate::app::parse_auto_mode(args)
+                    let mode = crate::app::parse_auto_mode(args)
                         .map_err(crate::client::Error::Unreachable)?;
                     self.client
-                        .approval_mode(session_id, automatic)
+                        .approval_mode(session_id, mode)
                         .await
-                        .map(|automatic| {
-                            Some(format!(
-                                "Approval mode: {}",
-                                if automatic { "AUTO" } else { "MANUAL" }
-                            ))
-                        })
+                        .map(|mode| Some(format!("Approval mode: {}", mode.label())))
                 }
                 Command::Context => self
                     .client

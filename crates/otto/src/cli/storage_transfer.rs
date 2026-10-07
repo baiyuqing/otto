@@ -1297,6 +1297,7 @@ async fn assemble(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::ApprovalMode;
     use std::os::unix::fs::DirBuilderExt;
 
     fn fixture() -> (tempfile::TempDir, Options) {
@@ -1324,7 +1325,7 @@ mod tests {
             task_id: String::new(),
             run_id: String::new(),
         };
-        service.set_auto_mode(&scope, false).unwrap();
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
         scope
     }
     fn journal(root: &Path) -> Vec<u8> {
@@ -1432,7 +1433,7 @@ mod tests {
             runtime.approvals(&backend.join("approvals.db")).unwrap(),
         )
         .unwrap();
-        assert!(!service.auto_mode(&scope).unwrap());
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Manual);
         drop(service);
         drop(runtime);
         assert_eq!(

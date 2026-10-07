@@ -881,6 +881,18 @@ pub async fn run_with_backends(
         None => controller,
     };
     let controller = Arc::new(controller);
+    // `--yolo` is the startup form of `/auto yolo`: it stores the mode of the
+    // session this process opens, exactly as the command does.
+    if options.yolo {
+        let scope = controller.approval_scope();
+        if let Err(error) = controller
+            .approval_service()
+            .set_mode(&scope, otto_core::approval::ApprovalMode::Yolo)
+        {
+            let _ = control.close().await;
+            return fail(stderr, &redact_with(&tail_redactor, &error.to_string()));
+        }
+    }
     // Only the frontend that *is* the agent in a Herdr pane reports: `otto
     // serve`, `--acp`, `--attach` and headless runs are not it. Reporting is
     // inert unless Herdr started this process.

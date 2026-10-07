@@ -222,29 +222,39 @@ impl Client {
             .map_err(unreachable_error)
     }
 
+    /// Reads the session's approval mode, or sets it when `mode` is given.
+    /// `None` keeps the older server's boolean reading: a response without
+    /// `mode` means AUTO when `automatic` is true and MANUAL otherwise.
     pub async fn approval_mode(
         &self,
         session: &str,
-        automatic: Option<bool>,
-    ) -> Result<bool, Error> {
+        mode: Option<crate::approval::ApprovalMode>,
+    ) -> Result<crate::approval::ApprovalMode, Error> {
         let url = format!("{BASE}/v1/sessions/{session}/approval-mode");
-        let request = match automatic {
-            Some(automatic) => self
+        let request = match mode {
+            Some(mode) => self
                 .http
                 .put(url)
                 .header(CONTENT_TYPE, "application/json")
-                .body(json!({"automatic":automatic}).to_string()),
+                .body(json!({"mode":mode.as_str()}).to_string()),
             None => self.http.get(url),
         };
         #[derive(Deserialize)]
         struct Mode {
+            #[serde(default)]
             automatic: bool,
+            #[serde(default)]
+            mode: Option<crate::approval::ApprovalMode>,
         }
         let response = self.send(request).await?;
-        let mode: Mode =
+        let body: Mode =
             serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
                 .map_err(unreachable_error)?;
-        Ok(mode.automatic)
+        Ok(body.mode.unwrap_or(if body.automatic {
+            crate::approval::ApprovalMode::Auto
+        } else {
+            crate::approval::ApprovalMode::Manual
+        }))
     }
 
     pub async fn approval_message(
@@ -1041,8 +1051,13 @@ struct SessionWire {
     context_input_tokens: i64,
     #[serde(default)]
     sandbox: SandboxWireIn,
+    /// True when the session decides requests automatically, in AUTO or YOLO.
     #[serde(default)]
     auto_mode: bool,
+    /// The exact policy; a server older than the field sends only
+    /// `auto_mode`, which maps to AUTO or MANUAL.
+    #[serde(default)]
+    approval_mode: Option<crate::approval::ApprovalMode>,
     #[serde(default)]
     forked_from: Option<crate::app::ForkedFrom>,
     #[serde(default)]
@@ -1074,7 +1089,11 @@ impl SessionWire {
             _ => SandboxNetwork::default(),
         };
         crate::app::Info {
-            auto_mode: self.auto_mode,
+            approval_mode: self.approval_mode.unwrap_or(if self.auto_mode {
+                crate::approval::ApprovalMode::Auto
+            } else {
+                crate::approval::ApprovalMode::Manual
+            }),
             forked_from: self.forked_from,
             plan: self.plan,
             session_id: self.id,
@@ -1180,8 +1199,12 @@ impl TurnStream {
 /// One row of a `GET /v1/status` snapshot (server: `StatusSessionWire`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct StatusRow {
+    /// True when the session decides requests automatically, in AUTO or YOLO.
     #[serde(default)]
     pub auto_mode: bool,
+    /// The exact policy; absent from a server older than the field.
+    #[serde(default)]
+    pub approval_mode: Option<crate::approval::ApprovalMode>,
     pub id: String,
     #[serde(default)]
     pub workspace: String,
@@ -1499,6 +1522,7 @@ mod tests {
             rows[0],
             StatusRow {
                 auto_mode: false,
+                approval_mode: None,
                 id: "s1".into(),
                 workspace: "/w".into(),
                 turn: Some("running".into()),

@@ -45,6 +45,8 @@ pub struct CliOptions {
     pub socket: String,
     pub listen: String,
     pub acp_listen: String,
+    /// Start this process's session in the YOLO approval mode.
+    pub yolo: bool,
 
     pub explicit_config: bool,
     pub shell_time_set: bool,
@@ -133,6 +135,7 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     options.listen = set.string("listen");
     options.acp_listen = set.string("acp-listen");
     options.attach = set.bool_value("attach");
+    options.yolo = set.bool_value("yolo");
 
     options.explicit_config = set.visited("config");
     options.shell_time_set = set.visited("shell-timeout");
@@ -235,6 +238,18 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
     if options.socket_set && !options.serve && !options.attach {
         return Err(reject("otto: --socket requires the serve subcommand"));
     }
+    if options.yolo && options.attach {
+        return Err(reject(
+            "otto: --yolo applies to the session this process opens; with --attach run /auto yolo instead",
+        ));
+    }
+    if options.yolo && (options.serve || options.acp) {
+        // A server or an agent opens its sessions on a client's request, so
+        // the mode belongs to that client's call, not to this startup.
+        return Err(reject(
+            "otto: --yolo requires a frontend that opens one session; use /auto yolo, _otto/approval_mode/set or PUT /v1/sessions/{id}/approval-mode instead",
+        ));
+    }
     if !options.acp_listen.is_empty() && !options.serve {
         return Err(reject("otto: --acp-listen requires the serve subcommand"));
     }
@@ -316,6 +331,8 @@ Options:
   --archive PATH         archive an active session file
   --socket PATH          unix socket path for the serve subcommand and --attach
   --attach               use the otto serve on the socket instead of running the agent (terminal UI, or acp: relay)
+  --yolo                 start this process's session in the YOLO approval mode
+                         (every request of the session is approved without asking)
   --listen HOST:PORT     loopback TCP address for the serve subcommand (prints a URL with the access token)
   --acp-listen HOST:PORT authenticated loopback ACP TCP (requires OTTO_ACP_TOKEN)
 ";
@@ -361,6 +378,7 @@ const DECLARED: &[(&str, Kind)] = &[
     ("attach", Kind::Bool),
     ("listen", Kind::Str),
     ("acp-listen", Kind::Str),
+    ("yolo", Kind::Bool),
 ];
 
 impl FlagSet {
@@ -548,6 +566,19 @@ mod tests {
                 Err(ParseFailure::Rejected(_))
             ));
         }
+    }
+
+    #[test]
+    fn yolo_applies_only_to_a_single_session_frontend() {
+        assert!(!options(&[]).yolo);
+        assert!(options(&["--yolo"]).yolo);
+        assert!(rejection(&["--yolo", "--attach"]).contains("--attach"));
+        assert!(rejection(&["serve", "--yolo"]).contains("/auto yolo"));
+        assert!(rejection(&["acp", "--yolo"]).contains("/auto yolo"));
+        // The flag is documented in the usage text.
+        let mut usage = Vec::new();
+        print_usage(&mut usage);
+        assert!(String::from_utf8(usage).unwrap().contains("--yolo"));
     }
 
     #[test]

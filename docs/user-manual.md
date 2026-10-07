@@ -18,6 +18,7 @@ what the CLI actually does today.
 5. [Environment variables](#environment-variables)
 6. [Configuration](#configuration)
 7. [Frontends](#frontends)
+    [Herdr](#herdr)
 8. [Slash commands](#slash-commands)
 9. [Sessions](#sessions)
 10. [Context compaction](#context-compaction)
@@ -1041,6 +1042,33 @@ was running when the connection was lost keeps running in serve.
   puts in front of a prompt in its transcript.
 - `Ctrl+C` during an active provider call, tool run, or compaction cancels only
   that turn and returns to the prompt; `Ctrl+C` while idle exits with status 130.
+
+### Herdr
+
+[Herdr](https://herdr.dev) is a terminal workspace manager for coding agents.
+When Herdr starts Otto in a pane, Otto reports its own lifecycle over the socket
+Herdr injects through the environment, so the pane appears as an agent named
+`otto` with the states Herdr's bundled agents have:
+
+| Otto | Herdr state | What it means |
+| --- | --- | --- |
+| A turn is running | `working` | the model is working |
+| A tool call waits for your decision | `blocked` | the sidebar marks the pane, and `herdr agent wait otto --until blocked` returns |
+| The turn ended | `idle` | Otto waits for input |
+
+- Start Otto in a pane the usual way: `herdr pane run <pane> otto`, or type
+  `otto` in a split. Herdr does not detect Otto by itself, so
+  `herdr agent start --kind otto` is not available; the pane command is the way
+  in, and `herdr agent prompt otto ...` works once Otto is running.
+- Otto reports the session file and the command that resumes it
+  (`otto --resume <session file>`), which is what Herdr needs to restore the
+  session after its server restarts. Otto itself never depends on that.
+- Reporting happens only inside a Herdr pane, and only for the frontend that is
+  the pane's agent: `otto serve`, `otto acp`, `otto --attach` and `--prompt`
+  runs do not report.
+- The TUI uses the terminal's alternate screen, so `herdr agent read` sees only
+  the current viewport. Ask Otto to write a long answer to a file when you need
+  all of it.
 
 ## Slash commands
 

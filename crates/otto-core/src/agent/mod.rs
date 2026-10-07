@@ -35,6 +35,7 @@ pub mod inbox;
 pub mod memory;
 pub mod oneshot;
 pub mod overflow;
+pub mod progress;
 pub mod redactor;
 pub mod steering;
 pub mod summary;
@@ -79,6 +80,7 @@ use overflow::{
     automatic_cancellation, automatic_compaction_triggers, automatic_dispatch_error,
     is_typed_context_overflow,
 };
+use progress::{ProgressGuard, ProgressPolicy};
 use redactor::Redactor;
 use tasks::TaskRegistry;
 
@@ -109,6 +111,9 @@ pub struct Options {
     pub request_sizer: Option<Arc<dyn RequestSizer + Send + Sync>>,
     /// The context windows and reserves that drive automatic compaction.
     pub compaction: CompactionSettings,
+    /// The limits that stop a turn making no progress. Every turn uses one,
+    /// including each sub-agent's.
+    pub progress: ProgressPolicy,
     /// The long-term memory binding consulted once per turn, if any.
     pub memory: Option<Arc<dyn MemoryRecall + Send + Sync>>,
     /// How many records one recall may return.
@@ -149,6 +154,7 @@ impl Default for Options {
             }),
             request_sizer: None,
             compaction: CompactionSettings::default(),
+            progress: ProgressPolicy::default(),
             memory: None,
             memory_recall_limit: DEFAULT_RECALL_LIMIT,
             memory_recall_token_budget: DEFAULT_RECALL_TOKEN_BUDGET,
@@ -654,8 +660,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         // Calls a session takeover left without a result come first: nothing
         // may be appended between an assistant message and its tool results.
         let system_context = self.redactor.redact_string(system_context);
-        let mut state = RunDispatchState::default();
+        let mut state = RunDispatchState {
+            progress: ProgressGuard::new(self.options.progress),
+            ..RunDispatchState::default()
+        };
         self.replay_pending_calls(emit, &mut state, control).await?;
+        if let Some(stall) = state.progress.take_stall() {
+            return Err(self.fail(emit, AgentError::NoProgress(stall)));
+        }
 
         if let Err(error) = self.deliver_notifications(emit).await {
             return Err(self.fail(emit, error));
@@ -781,6 +793,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     .run_tool_call(emit, &mut state, control, &block, None, replan)
                     .await?;
                 replan |= batch == crate::approval::BatchControl::Replan;
+            }
+            // The whole batch ran before the guard is read, so a stopped turn
+            // never leaves an assistant tool call without its result.
+            if let Some(stall) = state.progress.take_stall() {
+                return Err(self.fail(emit, AgentError::NoProgress(stall)));
             }
 
             if !had_tool_call {
@@ -965,6 +982,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             self.tools.batch_control(&block.tool_name, &execution)
         };
         let is_error = execution.result.is_error;
+        // Observed here because this is the only point that knows both the
+        // arguments the model sent and whether the result failed.
+        state
+            .progress
+            .observe(&block.tool_name, arguments.get(), is_error);
         let terminal = OperationFact::terminal(
             operation_id.clone(),
             attempt,

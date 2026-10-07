@@ -618,17 +618,15 @@ binaries are distributed, the MIT, BSD and Apache-2.0 terms require one.
 Locally, run the focused tests for the change and then `make check-fast`. Do
 not run `make check` or `make check-linux`; CI runs both on every PR. A full
 gate compiles the workspace in test mode and again in check mode for clippy,
-checks core WASM compatibility and runs the Go race tests. Every
-worktree has its own `target/`, so two worktrees running a full gate at the
-same time each compile the whole dependency tree on every core.
+checks core WASM compatibility and runs the Go race tests.
 
-`make check-fast` first takes the lock file `otto-check-fast.lock` in the
-common git directory (`lockf` on macOS, `flock` on Linux). All worktrees of the
-checkout share that directory, so `check-fast` runs in one worktree at a time;
-a second invocation waits until the first exits, and the lock is released when
-the process exits, including on a crash. Then `scripts/check-changed.mjs`
-lists the paths changed since `git merge-base HEAD origin/main`, including
-uncommitted and untracked files, and runs only the commands those paths need:
+`make check-fast` directly runs `scripts/check-changed.mjs`. Independent
+worktrees can run it at the same time. Worktrees have separate `target/`
+caches; if commands share a target directory, Cargo may serialize builds.
+`check-fast` adds no cross-worktree coordination or performance guarantee.
+The selector lists paths changed since `git merge-base HEAD origin/main`,
+including uncommitted and untracked files, and runs only the commands those
+paths need:
 
 | Changed path | Commands |
 |---|---|

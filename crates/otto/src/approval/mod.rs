@@ -38,7 +38,7 @@ mod tests {
         let path = dir.path().join("approvals.db");
         let service = Service::open(&path).unwrap();
         let scope = proposal().scope;
-        assert!(service.auto_mode(&scope).unwrap());
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Auto);
         // A model-originated plan review is not the session policy's decision.
         let review = service.create(proposal()).unwrap();
         assert_eq!(review.state, State::Pending);
@@ -56,7 +56,7 @@ mod tests {
         assert_eq!(events[0].request.state, State::Pending);
         assert_eq!(events[1].request.state, State::Pending);
         assert_eq!(events[2].request.state, State::Approved);
-        service.set_auto_mode(&scope, false).unwrap();
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
         let mut manual = authorization();
         manual.subject.id = "manual".into();
         let manual = service.create(manual).unwrap();
@@ -75,8 +75,8 @@ mod tests {
         assert_eq!(service.create(workspace).unwrap().state, State::Pending);
         drop(service);
         let service = Service::open(&path).unwrap();
-        assert!(!service.auto_mode(&scope).unwrap());
-        service.set_auto_mode(&scope, true).unwrap();
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Manual);
+        service.set_mode(&scope, ApprovalMode::Auto).unwrap();
         // Switching to AUTO decides the pending bounded authorization and
         // leaves the plan review for the user.
         assert_eq!(
@@ -91,16 +91,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn yolo_mode_decides_every_request_owned_by_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("approvals.db");
+        let service = Service::open(&path).unwrap();
+        let scope = proposal().scope;
+        service.set_mode(&scope, ApprovalMode::Yolo).unwrap();
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Yolo);
+        // Every class AUTO refuses: a plan review, a boundary crossing, a
+        // persistent durable grant, and a request of the session's own child
+        // task. Each is decided and journalled, and the decision names YOLO.
+        let review = service.create(proposal()).unwrap();
+        assert_eq!(review.state, State::Approved);
+        assert_eq!(review.decision.as_ref().unwrap().transport, "yolo-mode");
+        let mut escalation = authorization();
+        escalation.kind = Kind::Authorization;
+        escalation.authority = Authority::Boundary;
+        escalation.subject.id = "escalation".into();
+        assert_eq!(service.create(escalation).unwrap().state, State::Approved);
+        let mut grant = authorization();
+        grant.authority = Authority::Durable;
+        grant.persistent = true;
+        grant.subject.id = "grant".into();
+        assert_eq!(service.create(grant).unwrap().state, State::Approved);
+        let mut child = authorization();
+        child.authority = Authority::Boundary;
+        child.subject.id = "child".into();
+        child.scope.task_id = "child".into();
+        assert_eq!(service.create(child).unwrap().state, State::Approved);
+        // YOLO is still the session's policy, not the workspace's or another
+        // session's: the scope check is unchanged.
+        let mut workspace = authorization();
+        workspace.subject.id = "workspace".into();
+        workspace.scope.session_id.clear();
+        assert_eq!(service.create(workspace).unwrap().state, State::Pending);
+        let mut other = authorization();
+        other.authority = Authority::Boundary;
+        other.subject.id = "other".into();
+        other.scope.session_id = "other".into();
+        assert_eq!(service.create(other).unwrap().state, State::Pending);
+        // The mode survives a restart, and turning it off stops deciding.
+        drop(service);
+        let service = Service::open(&path).unwrap();
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Yolo);
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
+        let mut after = authorization();
+        after.authority = Authority::Boundary;
+        after.subject.id = "after".into();
+        let after = service.create(after).unwrap();
+        assert_eq!(after.state, State::Pending);
+        // Switching back to YOLO approves what is waiting.
+        service.set_mode(&scope, ApprovalMode::Yolo).unwrap();
+        assert_eq!(
+            service.get(&after.id, "/w", Some("s")).unwrap().state,
+            State::Approved
+        );
+    }
+
+    #[test]
+    fn auto_does_not_decide_what_yolo_decides() {
+        // The two policies must not be confused with each other: this fails
+        // if YOLO ever becomes the default or AUTO decides a boundary.
+        let service = Service::in_memory().unwrap();
+        let scope = proposal().scope;
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Auto);
+        assert_eq!(service.create(proposal()).unwrap().state, State::Pending);
+        let mut escalation = authorization();
+        escalation.authority = Authority::Boundary;
+        escalation.subject.id = "escalation".into();
+        assert_eq!(service.create(escalation).unwrap().state, State::Pending);
+    }
+
+    #[tokio::test]
     async fn cancellation_wins_over_enabling_auto_for_a_waiter() {
         let service = Service::in_memory().unwrap();
         let scope = proposal().scope;
-        service.set_auto_mode(&scope, false).unwrap();
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
         let request = service.create(proposal()).unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
         let result = service.wait(&request.id, &scope, &cancel).await.unwrap();
         assert_eq!(result.state, State::Withdrawn);
-        service.set_auto_mode(&scope, true).unwrap();
+        service.set_mode(&scope, ApprovalMode::Auto).unwrap();
         assert_eq!(
             service.get(&request.id, "/w", Some("s")).unwrap().state,
             State::Withdrawn
@@ -162,12 +234,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("PRAGMA user_version=3").unwrap();
+        connection.execute_batch("PRAGMA user_version=4").unwrap();
         assert!(matches!(Service::open(&path), Err(Error::Invalid(_))));
         let version: i64 = connection
             .query_row("PRAGMA user_version", (), |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
     #[test]
     fn decisions_deduplicate_conflict_and_survive_reopen() {
@@ -175,7 +247,7 @@ mod tests {
         let path = dir.path().join("approvals.db");
         let service = Service::open(&path).unwrap();
         service
-            .set_auto_mode(&self::proposal().scope, false)
+            .set_mode(&self::proposal().scope, ApprovalMode::Manual)
             .unwrap();
         let r = service.create(proposal()).unwrap();
         assert_eq!(service.create(proposal()).unwrap().id, r.id);
@@ -221,7 +293,7 @@ mod tests {
     async fn cancelled_wait_withdraws_without_approval() {
         let service = Service::in_memory().unwrap();
         service
-            .set_auto_mode(&self::proposal().scope, false)
+            .set_mode(&self::proposal().scope, ApprovalMode::Manual)
             .unwrap();
         let r = service.create(proposal()).unwrap();
         let cancel = CancellationToken::new();
@@ -250,7 +322,7 @@ mod tests {
         let path = dir.path().join("approvals.db");
         let service = Service::open(&path).unwrap();
         service
-            .set_auto_mode(&self::proposal().scope, false)
+            .set_mode(&self::proposal().scope, ApprovalMode::Manual)
             .unwrap();
         let mut proposal = proposal();
         proposal.kind = Kind::Authorization;
@@ -274,7 +346,7 @@ mod tests {
         drop(connection);
         let service = Service::open(&path).unwrap();
         service
-            .set_auto_mode(&self::proposal().scope, false)
+            .set_mode(&self::proposal().scope, ApprovalMode::Manual)
             .unwrap();
         service
             .register_domain("/w", "native-review", Arc::new(NoReplay))
@@ -291,14 +363,15 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", (), |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
     #[test]
     fn native_review_claim_is_committed_with_the_decision_before_maintenance() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let one = Service::open(&path).unwrap();
-        one.set_auto_mode(&self::proposal().scope, false).unwrap();
+        one.set_mode(&self::proposal().scope, ApprovalMode::Manual)
+            .unwrap();
         let other = Service::open(&path).unwrap();
         let mut proposal = proposal();
         proposal.kind = Kind::Authorization;
@@ -343,7 +416,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let one = Service::open(&path).unwrap();
-        one.set_auto_mode(&self::proposal().scope, false).unwrap();
+        one.set_mode(&self::proposal().scope, ApprovalMode::Manual)
+            .unwrap();
         let two = Service::open(&path).unwrap();
         let r = one.create(proposal()).unwrap();
         one.decide(&r.id, &r.scope, 1, true, "", &Actor::local("one"))
@@ -358,7 +432,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let one = Service::open(&path).unwrap();
-        one.set_auto_mode(&self::proposal().scope, false).unwrap();
+        one.set_mode(&self::proposal().scope, ApprovalMode::Manual)
+            .unwrap();
         let two = Service::open(&path).unwrap();
         let mut p = proposal();
         p.kind = Kind::Authorization;

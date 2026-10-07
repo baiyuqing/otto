@@ -89,7 +89,12 @@ macro_rules! entry {
 }
 
 const ENTRIES: &[Entry] = &[
-    entry!("/auto", "show or change session approval mode", false, auto),
+    entry!(
+        "/auto",
+        "show or set the approval mode: manual, auto or yolo",
+        false,
+        auto
+    ),
     entry!("/help", "show commands", false, help),
     entry!("/init", "create a repository AGENTS.md guide", false, init),
     entry!("/session", "show session details", false, session),

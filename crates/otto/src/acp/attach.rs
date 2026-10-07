@@ -164,7 +164,10 @@ impl Relay {
         &self,
         id: &str,
         workspace: &Path,
-    ) -> Result<Vec<Message>, agent_client_protocol_schema::v1::Error> {
+    ) -> Result<
+        (Vec<Message>, Vec<otto_core::session::PlanStep>),
+        agent_client_protocol_schema::v1::Error,
+    > {
         let resumed = self
             .client
             .open_session(Some(&workspace.to_string_lossy()), Some(id))
@@ -179,8 +182,14 @@ impl Relay {
             .history(id, None)
             .await
             .map_err(|failure| self.fail(failure))?;
+        let plan = self
+            .client
+            .session(id)
+            .await
+            .map_err(|failure| self.fail(failure))?
+            .plan;
         self.register(id);
-        Ok(history)
+        Ok((history, plan))
     }
 
     pub(super) async fn list_sessions(

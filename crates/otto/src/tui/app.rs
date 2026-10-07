@@ -1054,6 +1054,11 @@ impl App {
             self.retry_event = (event.event_type == "provider_retry").then(|| event.clone());
         }
         match event.event_type.as_str() {
+            "plan_updated" => {
+                if let Some(steps) = &event.steps {
+                    self.info.plan = steps.clone();
+                }
+            }
             "reasoning_delta" => append_stream(
                 &mut self.entries,
                 "streaming-reasoning",

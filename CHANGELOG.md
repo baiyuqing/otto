@@ -17,6 +17,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- `agent` with `resume` accepts `context: "fresh"` (the default) as omitted,
+  so a call that fills every field no longer fails with `resume does not
+  accept context`.
+
 - ChatGPT Responses streams no longer fail with `responses stream line
   exceeds 65536 bytes` when one event is larger than 64 KiB. Each event
   arrives on one SSE line, and `response.completed` repeats the request

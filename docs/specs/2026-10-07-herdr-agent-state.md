@@ -1,6 +1,8 @@
 # Herdr agent-state reporting
 
-Status: proposed 2026-10-07. Maintainer decisions on 2026-10-07: report only,
+Status: proposed 2026-10-07, amended 2026-10-07 after a live session: the pane
+is claimed as soon as the frontend starts (State mapping) and Otto is addressed
+by pane id (Decisions 5). Maintainer decisions on 2026-10-07: report only,
 implemented inside `crates/otto`, because Herdr cannot be changed at this
 stage; **no configuration key** (the Herdr environment is the only switch);
 the reported label is always `otto`.
@@ -50,7 +52,7 @@ sink (`crates/otto-core/src/agent/events.rs`), `app::Info` carries
 2. Report the session reference Herdr needs to show and restore the session:
    `agent_session_id`, `agent_session_path`, and `resume_argv`
    (`otto --resume <path>`).
-3. Make `herdr agent wait <name> --until blocked`, notifications and pane jump
+3. Make `herdr agent wait <pane> --until blocked`, notifications and pane jump
    work for Otto, so a user notices an approval while working elsewhere.
 4. No effect outside Herdr, and no new model-callable capability.
 5. On by default with nothing to configure: inside a Herdr pane the
@@ -64,6 +66,12 @@ sink (`crates/otto-core/src/agent/events.rs`), `app::Info` carries
   command instead (`herdr pane run <pane> otto`, or typing `otto` in a split).
 - **Changing Herdr.** No dependency on a Herdr release, no bundled binary, no
   Herdr-side configuration file.
+- **A Herdr agent name.** Herdr keeps the name alias (`herdr agent wait otto`)
+  for the names it assigns itself or the user sets with `herdr agent rename`; a
+  report carries the label `otto` only, so Otto is addressed by its pane id.
+  Verified in a live session on 2026-10-07: the panel and `herdr agent list`
+  show `otto`, while `herdr agent get otto` reports `agent_not_found` until the
+  name is set.
 - **Detecting Herdr from outside a pane.** Only the process Herdr started
   inside the pane can report; Otto does not scan for other panes.
 - **Reading Otto's screen for state.** State comes from the event stream, not
@@ -111,12 +119,23 @@ tokio's `net` feature), matching the bundled integrations:
 
 | Otto event | Reported state |
 | --- | --- |
+| Otto's frontend is ready (the session is open) | `idle`, immediately, then the session reference |
 | A logical turn is admitted (`Controller` run entry) | `working` |
 | `Event::ApprovalChanged` with `request.state == State::Pending` | `blocked`, `message` = the request title, e.g. `Run rm -rf build` |
 | That request leaves `Pending` (`Approved`, `Rejected`, `Withdrawn`, `Expired`) while the turn still runs | `working` |
 | The logical turn ends (success, failure or cancellation) | `idle` |
 | Otto exits | `release_agent` |
 
+- The pane is claimed when the frontend starts, not at the first turn: a Herdr
+  pane is "nobody" until the agent inside it reports, so Otto would be missing
+  from the agent list and unreachable through `herdr agent ...` until the user
+  sent a prompt. That first `idle` is not debounced.
+- The state always goes before the session reference: Herdr answers
+  `pane.report_agent_session` with `resume_not_accepted` ("resume_argv requires
+  the reporter to hold the pane; report its state with pane.report_agent
+  first") when no state report preceded it. A session reference that is
+  reported for a resume or fork is therefore only sent from a reporter that
+  already holds the pane.
 - The state is keyed on the logical turn, not on a single agent run: one turn
   may contain follow-up steps and notification wake turns
   (`crates/otto/src/app/mod.rs`), and reporting `idle` between them would make
@@ -169,10 +188,11 @@ Offline, no live Herdr and no live provider:
   unchanged `(state, message)`, request encoding against the `herdr api
   schema` field names.
 - Integration (`crates/otto/tests/`): a `tokio::net::UnixListener` on a
-  `TempDir` path standing in for Herdr. It asserts the sequence
-  `report_agent(working)` → `report_agent(blocked, message)` →
-  `report_agent(working)` → `report_agent(idle)` for a turn with a
-  human-decided approval, `report_agent_session` with the session id and path,
+  `TempDir` path standing in for Herdr. It asserts that starting the frontend
+  claims the pane first (`report_agent(idle)` → `report_agent_session` with the
+  session id and path) and then the sequence `report_agent(working)` →
+  `report_agent(blocked, message)` → `report_agent(working)` →
+  `report_agent(idle)` for a turn with a human-decided approval, plus
   `release_agent` on exit, and that a missing or closed socket changes nothing
   observable in the run.
 - The test does not start a Herdr session; the protocol fixture is the schema
@@ -181,11 +201,11 @@ Offline, no live Herdr and no live provider:
 Acceptance on a real machine (manual, in the user's Herdr session):
 
 1. `herdr pane split --current --direction right --cwd "$PWD"` and run `otto`
-   in the new pane: `herdr agent list` shows `otto`, `working` while a prompt
-   runs and `idle` after it.
-2. An approval prompt makes `herdr agent wait otto --until blocked` return,
+   in the new pane: `herdr agent list` shows `otto` as soon as the TUI is up,
+   `working` while a prompt runs and `idle` after it.
+2. An approval prompt makes `herdr agent wait <pane> --until blocked` return,
    and the sidebar marks the pane.
-3. `herdr agent prompt otto "…"` submits the text to the TUI.
+3. `herdr agent prompt <pane> "…"` submits the text to the TUI.
 4. Quitting Otto leaves no agent row behind.
 
 ## Documentation
@@ -202,8 +222,9 @@ Acceptance on a real machine (manual, in the user's Herdr session):
   `agent read` only sees the current viewport. Herdr's own guidance for that
   case (ask the agent to write a file) applies; reporting cannot fix it.
 - Herdr restores agents through the session reference, and its documentation
-  describes restore for the bundled integrations. Whether it accepts a
-  custom-reported reference is verified once in a live session; until then
+  describes restore for the bundled integrations. Herdr 0.9.3 accepts and
+  stores a custom-reported reference (verified 2026-10-07 in a live pane), but
+  whether it *restores* one after a server restart is still unverified, so
   `resume_argv` is reported best-effort and no Otto behavior depends on it.
 
 ## Decisions
@@ -216,5 +237,8 @@ Resolved 2026-10-07 by the maintainer:
    REPL). `otto serve`, `otto --attach` and `otto acp` are out of scope.
 4. **The session reference and `resume_argv` are reported in the first
    release**, best-effort.
+5. **Otto reports only; it does not name itself** (2026-10-07). The panel and
+   `herdr agent list` show the label `otto`, and agent commands target the pane;
+   a user who wants the name alias runs `herdr agent rename <pane> otto`.
 
 No open questions remain.

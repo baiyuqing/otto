@@ -2,88 +2,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use super::*;
+use crate::faults::http;
 use crate::skill::check_repository::StoreError;
 use crate::storage::Connection;
 use crate::storage::backends::turso::skill_checks::{SCHEMA, Store};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-
-use super::*;
 
 // ---------------------------------------------------------------------------
-// HTTP stub, mirroring crates/otto/src/provider/openaicompat.rs's TestServer.
+// HTTP stub on the shared loopback server.
 // ---------------------------------------------------------------------------
 
-struct TestServer {
-    base_url: String,
-    accept: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.accept.abort();
-    }
-}
-
-async fn spawn_server<H>(handler: H) -> TestServer
+async fn spawn_server<H>(handler: H) -> http::Server
 where
     H: Fn(&str, &[u8]) -> Vec<u8> + Send + Sync + 'static,
 {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind a loopback port");
-    let base_url = format!(
-        "http://{}",
-        listener.local_addr().expect("listener has an address")
-    );
-    let handler = Arc::new(handler);
-    let accept = tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            let handler = Arc::clone(&handler);
-            tokio::spawn(async move {
-                let Some((head, body)) = read_request(&mut stream).await else {
-                    return;
-                };
-                let response = handler(&head, &body);
-                if !response.is_empty() {
-                    let _ = stream.write_all(&response).await;
-                }
-                let _ = stream.shutdown().await;
-            });
-        }
-    });
-    TestServer { base_url, accept }
-}
-
-async fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
-    let mut raw: Vec<u8> = Vec::new();
-    let mut buffer = [0u8; 4096];
-    let head_end = loop {
-        if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-            break index + 4;
-        }
-        let read = stream.read(&mut buffer).await.ok()?;
-        if read == 0 {
-            return None;
-        }
-        raw.extend_from_slice(&buffer[..read]);
-    };
-    let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
-    let length = head
-        .to_ascii_lowercase()
-        .lines()
-        .find_map(|line| line.strip_prefix("content-length:").map(str::to_string))
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut body = raw[head_end..].to_vec();
-    while body.len() < length {
-        let read = stream.read(&mut buffer).await.ok()?;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&buffer[..read]);
-    }
-    Some((head, body))
+    http::spawn(move |request| handler(&request.head, request.body.as_bytes())).await
 }
 
 fn http_response(status: u16, body: &str) -> Vec<u8> {
@@ -195,7 +128,7 @@ async fn client_sends_bearer_auth_and_all_four_questions() {
         http_response(200, &clean_answers_body())
     })
     .await;
-    let client = Client::new(server.base_url.clone(), "secret-key");
+    let client = Client::new(server.url.clone(), "secret-key");
 
     let answers = check(&client, "SKILL.md text")
         .await
@@ -246,7 +179,7 @@ async fn client_retries_429_then_succeeds_and_writes_one_row() {
         }
     })
     .await;
-    let client = Client::new(server.base_url.clone(), "key").with_backoff(vec![Duration::ZERO]);
+    let client = Client::new(server.url.clone(), "key").with_backoff(vec![Duration::ZERO]);
 
     let answers = check(&client, "state").await.expect("retry then succeed");
 
@@ -263,7 +196,7 @@ async fn client_401_is_not_retried() {
         http_response(401, "unauthorized")
     })
     .await;
-    let client = Client::new(server.base_url.clone(), "key").with_backoff(vec![]);
+    let client = Client::new(server.url.clone(), "key").with_backoff(vec![]);
 
     let error = check(&client, "state").await.expect_err("401 is an error");
 
@@ -284,7 +217,7 @@ async fn client_missing_answer_is_invalid_response() {
         http_response(200, &body)
     })
     .await;
-    let client = Client::new(server.base_url.clone(), "key");
+    let client = Client::new(server.url.clone(), "key");
 
     let error = check(&client, "state").await.expect_err("missing answers");
 
@@ -486,7 +419,7 @@ fn write_skill(directory: &Path, frontmatter: &str) {
 #[tokio::test]
 async fn run_writes_a_rules_row_and_never_contacts_typesafe() {
     let server = spawn_server(|_head, _body| panic!("TypeSafe must not be contacted")).await;
-    let checker = Arc::new(Checker::open_in_memory(&server.base_url, "key"));
+    let checker = Arc::new(Checker::open_in_memory(&server.url, "key"));
     let dir = tempfile::tempdir().expect("tempdir");
     write_skill(
         dir.path(),
@@ -519,7 +452,7 @@ async fn run_calls_typesafe_and_writes_an_answers_row_when_no_rule_fires() {
         http_response(200, &clean_answers_body())
     })
     .await;
-    let checker = Arc::new(Checker::open_in_memory(&server.base_url, "key"));
+    let checker = Arc::new(Checker::open_in_memory(&server.url, "key"));
     let dir = tempfile::tempdir().expect("tempdir");
     write_skill(
         dir.path(),
@@ -547,7 +480,7 @@ async fn run_calls_typesafe_and_writes_an_answers_row_when_no_rule_fires() {
 #[tokio::test]
 async fn run_writes_nothing_and_records_the_failure_reason_on_401() {
     let server = spawn_server(|_head, _body| http_response(401, "unauthorized")).await;
-    let checker = Arc::new(Checker::open_in_memory(&server.base_url, "key"));
+    let checker = Arc::new(Checker::open_in_memory(&server.url, "key"));
     let dir = tempfile::tempdir().expect("tempdir");
     write_skill(
         dir.path(),
@@ -586,7 +519,7 @@ async fn concurrent_runs_for_the_same_key_send_one_request() {
         http_response(200, &clean_answers_body())
     })
     .await;
-    let checker = Arc::new(Checker::open_in_memory(&server.base_url, "key"));
+    let checker = Arc::new(Checker::open_in_memory(&server.url, "key"));
     let dir = tempfile::tempdir().expect("tempdir");
     write_skill(
         dir.path(),
@@ -611,7 +544,7 @@ async fn concurrent_runs_for_the_same_key_send_one_request() {
 #[tokio::test]
 async fn run_does_nothing_when_the_key_already_has_a_row() {
     let server = spawn_server(|_head, _body| panic!("TypeSafe must not be contacted")).await;
-    let checker = Arc::new(Checker::open_in_memory(&server.base_url, "key"));
+    let checker = Arc::new(Checker::open_in_memory(&server.url, "key"));
     let dir = tempfile::tempdir().expect("tempdir");
     write_skill(
         dir.path(),
@@ -657,7 +590,7 @@ async fn run_does_nothing_when_the_key_already_has_a_row() {
 #[tokio::test]
 async fn display_reports_not_checked_yet_before_any_run() {
     let server = spawn_server(|_head, _body| http_response(200, &clean_answers_body())).await;
-    let checker = Checker::open_in_memory(&server.base_url, "key");
+    let checker = Checker::open_in_memory(&server.url, "key");
     let dir = tempfile::tempdir().expect("tempdir");
     write_skill(
         dir.path(),
@@ -677,7 +610,7 @@ async fn display_reports_not_checked_yet_before_any_run() {
 #[tokio::test]
 async fn display_reports_the_last_failure_reason() {
     let server = spawn_server(|_head, _body| http_response(401, "unauthorized")).await;
-    let checker = Checker::open_in_memory(&server.base_url, "key");
+    let checker = Checker::open_in_memory(&server.url, "key");
     let dir = tempfile::tempdir().expect("tempdir");
     write_skill(
         dir.path(),
@@ -708,7 +641,7 @@ async fn display_reports_the_last_failure_reason() {
 #[tokio::test]
 async fn display_renders_the_stored_rules_result() {
     let server = spawn_server(|_head, _body| panic!("TypeSafe must not be contacted")).await;
-    let checker = Checker::open_in_memory(&server.base_url, "key");
+    let checker = Checker::open_in_memory(&server.url, "key");
     let dir = tempfile::tempdir().expect("tempdir");
     write_skill(
         dir.path(),

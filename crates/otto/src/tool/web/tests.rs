@@ -38,10 +38,7 @@ fn fetch(runtime: &Arc<Runtime>) -> WebFetch {
 }
 
 fn args(server: &Server, path: &str) -> String {
-    format!(
-        r#"{{"url":"http://page.test:{}{path}"}}"#,
-        server.addr.port()
-    )
+    format!(r#"{{"url":"http://page.test:{}{path}"}}"#, server.port())
 }
 
 async fn html_server() -> Server {
@@ -75,10 +72,7 @@ async fn fetch_returns_markdown_with_a_header_and_the_untrusted_notice() {
     assert!(text.contains("Untrusted web content"), "{text}");
     assert!(text.contains("# Guide"), "{text}");
     assert!(
-        text.contains(&format!(
-            "(http://page.test:{}/docs/next)",
-            server.addr.port()
-        )),
+        text.contains(&format!("(http://page.test:{}/docs/next)", server.port())),
         "links are absolute: {text}"
     );
     assert!(!text.contains("leaked"), "{text}");
@@ -92,7 +86,7 @@ async fn fetch_pages_through_a_long_document_with_offset_and_limit() {
     }))
     .await;
     let tool = fetch(&runtime());
-    let url = format!("http://page.test:{}/", server.addr.port());
+    let url = format!("http://page.test:{}/", server.port());
     let first = run(&tool, &format!(r#"{{"url":"{url}","limit":30}}"#)).await;
     assert!(
         first
@@ -139,7 +133,7 @@ async fn fetch_caps_output_to_the_byte_budget() {
         &tool,
         &format!(
             r#"{{"url":"http://page.test:{}/","limit":1000000}}"#,
-            server.addr.port()
+            server.port()
         ),
     )
     .await;
@@ -220,12 +214,12 @@ async fn fetch_reaches_new_hosts_without_approval() {
     let runtime = runtime();
     let tool = fetch(&runtime);
     for host in ["page.test", "other.test"] {
-        let arguments = format!(r#"{{"url":"http://{host}:{}/a?x=1"}}"#, server.addr.port());
+        let arguments = format!(r#"{{"url":"http://{host}:{}/a?x=1"}}"#, server.port());
         assert!(tool.approval_spec(&raw(&arguments)).unwrap().is_none());
         let result = run(&tool, &arguments).await;
         assert!(!result.is_error, "{}", result.content);
     }
-    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    assert_eq!(server.count(), 2);
 }
 
 #[tokio::test]
@@ -253,7 +247,7 @@ async fn network_deny_blocks_both_tools_before_any_request() {
         result.content
     );
     assert!(search.approval_spec(&raw(r#"{"query":"x"}"#)).is_err());
-    assert!(server.requests.lock().unwrap().is_empty());
+    assert!(server.count() == 0);
 }
 
 #[tokio::test]
@@ -324,7 +318,7 @@ async fn cancellation_is_reported_without_a_request() {
         "{}",
         result.content
     );
-    assert!(server.requests.lock().unwrap().is_empty());
+    assert!(server.count() == 0);
 }
 
 #[tokio::test]
@@ -359,7 +353,7 @@ fn search_tool_with(
     let secrets = backend.secrets();
     let backend = backend.with_endpoint(&format!(
         "http://search.test:{}/res/v1/web/search",
-        server.addr.port()
+        server.port()
     ));
     WebSearch {
         shared: Shared {
@@ -408,7 +402,7 @@ async fn search_sends_the_key_as_a_header_and_never_returns_it() {
         result.content
     );
     assert!(!result.content.contains("key-123456-abc"));
-    let request = server.requests.lock().unwrap()[0].to_ascii_lowercase();
+    let request = server.requests()[0].head.to_ascii_lowercase();
     assert!(
         request.contains("x-subscription-token: key-123456-abc"),
         "{request}"
@@ -440,7 +434,7 @@ async fn search_validates_arguments_and_runs_without_approval() {
             .await
             .is_error
     );
-    assert!(server.requests.lock().unwrap()[0].contains("count=20"));
+    assert!(server.requests()[0].head.contains("count=20"));
 }
 
 #[tokio::test]
@@ -526,7 +520,7 @@ async fn google_sends_key_and_engine_as_parameters_clamps_count_and_never_return
         result.content
     );
     assert!(!result.content.contains("gkey-1234567") && !result.content.contains("cx-987654"));
-    let request = server.requests.lock().unwrap()[0].clone();
+    let request = server.requests()[0].head.clone();
     assert!(
         request.contains("key=gkey-1234567") && request.contains("cx=cx-987654"),
         "{request}"
@@ -567,7 +561,7 @@ async fn bing_needs_no_key_and_sends_no_credentials() {
         "{}",
         result.content
     );
-    let request = server.requests.lock().unwrap()[0].to_ascii_lowercase();
+    let request = server.requests()[0].head.to_ascii_lowercase();
     assert!(request.contains("accept: text/html"), "{request}");
     for forbidden in ["x-subscription-token", "authorization:", "cookie:"] {
         assert!(!request.contains(forbidden), "{request}");

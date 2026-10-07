@@ -678,6 +678,8 @@ adds or fixes:
 
 Tests may be written before, during, or after the code. Docs-only and other
 non-code changes need no tests.
+For tests that inject transport, storage or process faults, see
+[Fault injection](#fault-injection).
 Keep unit tests next to the module they cover (`#[cfg(test)] mod tests`), and
 integration tests in the crate's `tests/` directory. Prefer
 `#[test]`/`#[tokio::test]` and `tempfile::TempDir`. TTY-specific coverage must
@@ -695,6 +697,60 @@ share a contract. Report failing gates and reruns accurately, check the
 baseline for unchanged failures, and never weaken validation or safety checks
 to obtain a pass. Preserve unrelated behavioral assertions when migrating test
 fixtures.
+
+## Fault injection
+
+The `otto::faults` module holds deterministic fault seams for tests. It is
+compiled only under `cfg(test)` or the `fault-injection` feature; the `otto`
+dev-dependency on itself enables the feature for every integration test, and
+`crates/otto/tests/faults_boundary.rs` fails when production code references
+`faults` or when `faults` imports a frontend, runtime, provider or tool module.
+The design and contract matrices are in
+[fault injection testing](specs/2026-10-07-fault-injection-testing.md).
+
+Fault decorators over a seam take a `FaultPlan<Op>`, where `Op` is the
+decorator's operation enum. A plan is a list of `Rule`s: an operation, a
+`Filter` on the operation's subject (`Any`, `NameSuffix` or `SqlPrefix`), a
+`Trigger` (`Always`, `Nth(n)` or `FromNth(n)`, counting matching calls from 1)
+and a `Fault`:
+
+- `Before(error)` returns the error without performing the operation, so the
+  effect did not happen.
+- `After(error)` performs the operation and then returns the error. It models
+  a lost acknowledgement: the effect happened, the caller sees a failure.
+- `Short { keep, error }` writes the first `keep` bytes, then returns the
+  error.
+- `Exit`, `ExitAfter` and `ShortExit { keep }` end the process with exit code
+  86 before the operation, after it, or after a partial write. No destructor
+  runs.
+- `Hang` blocks an asynchronous operation; synchronous decorators reject it.
+
+A test calls `plan.assert_all_fired()` after the code under test; it panics
+with the rules that never fired. Dropping a plan with rules that was never
+checked panics in debug builds.
+
+HTTP faults use `otto::faults::http`, a raw-TCP loopback server:
+
+- `spawn(handler)` answers each request from a closure; `spawn_repeating`
+  and `spawn_scripted` replay `Script` values, one per connection.
+- A `Script` is a list of `Step` values: `Head`, `DeclareLength`, `Body`,
+  `Chunk`, `Sse`, `Flush`, `Stall`, `Close` and `Reset` (a TCP reset). The
+  constructors `sse_done`, `sse_without_done`, `sse_cut_after`,
+  `malformed_event`, `status`, `stall_before_head`, `stall_after_head`,
+  `stall_after_events` and `truncated` build the common scenarios.
+- `Server::requests()` and `count()` return the requests received. A
+  connection past the last scripted one gets a 500, so an unplanned retry is
+  a visible failure.
+- `refused_port()` returns a port with no listener, and
+  `late_listener(port, after, scripts)` starts listening after a delay.
+
+A test that reads a response from a live socket runs in real time: paused
+tokio time advances into the client's 60 s read timeout while the socket is
+idle. The slowest provider rows wait out the 1, 2 and 4 s retry backoff.
+
+A fault test must prove the fault fired: assert the request count or the
+recorded request, not only that the client returned an error. The provider
+matrix is `crates/otto/tests/fault_provider.rs`; each test name states its row.
 
 ## Docker acceptance
 

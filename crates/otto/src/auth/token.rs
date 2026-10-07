@@ -123,8 +123,10 @@ impl TokenSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::testserver::{self, json_response, redirect_response, status_response};
     use crate::auth::{MAX_CREDENTIAL_FILE_BYTES, expiry, go_time, load};
+    use crate::faults::http::{
+        self as testserver, json_response, redirect_response, status_response,
+    };
 
     fn stub_source(
         path: PathBuf,

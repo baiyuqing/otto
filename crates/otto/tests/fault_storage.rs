@@ -99,7 +99,7 @@ fn rows(path: &Path, table: &str) -> i64 {
 // Fixtures: one write per repository. `n` makes each write a distinct row.
 
 fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
-    use otto::approval::{self, Kind, Proposal, Scope, Subject};
+    use otto::approval::{self, Authority, Kind, Proposal, Scope, Subject};
     let store = factory.approvals(endpoint(address)).ok()?;
     let service = approval::Service::in_memory().unwrap();
     let scope = Scope {
@@ -115,6 +115,10 @@ fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
             let request = service
                 .create(Proposal {
                     kind: Kind::Confirmation,
+                    // A plan-free confirmation the user answers: `#401` kept
+                    // this class session-decidable, which is what a single
+                    // write row here exercises.
+                    authority: Authority::Consent,
                     scope: scope.clone(),
                     subject: Subject {
                         tool_call_id: String::new(),

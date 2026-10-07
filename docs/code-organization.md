@@ -84,8 +84,13 @@ REPL and owns process lifecycle; it is the primary starting point for a new
 command or startup behavior. `src/runtime/` assembles one runnable agent from
 resolved configuration (`builder.rs` holds `Builder` and `Runner`,
 `wiring.rs` connects memory, MCP and sub-agents, `prompt.rs` builds the system
-prompt). `src/app/` exposes the shared application lifecycle used by
-frontends.
+prompt). `runtime/startup.rs` holds the startup composition, from environment
+capture to the memory service, as phase functions; `cli::run`, `otto serve`
+(`load_workspace`, `admit_workspace`) and `embed` all call it. `src/app/`
+exposes the shared application lifecycle used by frontends. `src/embed.rs` is
+the public in-process API (`otto::embed::Otto`) that builds the `otto acp`
+runtime for another Rust program; see the
+[embedding API design](specs/2026-10-07-otto-embedding-api.md).
 
 The frontends (`cli/`, `tui/`, `acp/`, `server/` and `client/`) build on every
 other module, and no other module may import a frontend:

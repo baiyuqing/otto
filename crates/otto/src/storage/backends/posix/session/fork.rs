@@ -17,6 +17,9 @@ use otto_core::session::{
 };
 
 use super::store::{decode_pi_file_read_only, open_path_journal, reject_oversized_session_file};
+use crate::fsops::{
+    PosixPublish, Publish, PublishMode, PublishOps, PublishStep, open_dir_no_follow, publish_file,
+};
 use crate::session::fsops;
 use crate::storage::files::{FileDriver, JournalOpen};
 
@@ -37,6 +40,17 @@ pub fn fork(
     source: &Path,
     before: Option<&str>,
     new_id: &str,
+) -> Result<Forked, ForkError> {
+    fork_with(driver, source, before, new_id, &PosixPublish)
+}
+
+/// [`fork`] with the publish system calls supplied, so tests can fail one.
+pub(crate) fn fork_with(
+    driver: &dyn FileDriver,
+    source: &Path,
+    before: Option<&str>,
+    new_id: &str,
+    publish: &dyn PublishOps,
 ) -> Result<Forked, ForkError> {
     let mut file = open_path_journal(driver, source, JournalOpen::ReadOnly)?;
     reject_oversized_session_file(file.as_ref())?;
@@ -105,7 +119,7 @@ pub fn fork(
         .parent()
         .ok_or_else(|| PiError::invalid("session file has no parent directory"))?;
     let path = directory.join(format!("{new_id}.jsonl"));
-    write_new(driver, directory, &path, &records)?;
+    write_new(directory, &path, &records, publish)?;
     Ok(Forked {
         path,
         id: new_id.to_owned(),
@@ -114,42 +128,41 @@ pub fn fork(
 }
 
 fn write_new(
-    driver: &dyn FileDriver,
     directory: &Path,
     path: &Path,
     records: &[Vec<u8>],
+    publish: &dyn PublishOps,
 ) -> Result<(), PiError> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| PiError::invalid("session file name is not a valid component"))?;
     let temporary = format!("{file_name}.fork-tmp");
-    let root = driver
-        .open_root(directory)
+    let root = open_dir_no_follow(directory)
         .map_err(|error| PiError::other(format!("open session directory: {error}")))?;
-    let written = root
-        .open_journal(&temporary, JournalOpen::CreateNew)
-        .map_err(|error| PiError::other(format!("create fork file: {error}")))
-        .and_then(|mut file| {
-            let mut bytes = Vec::new();
-            for record in records {
-                bytes.extend_from_slice(record);
-                bytes.push(b'\n');
-            }
-            file.write_all(&bytes)
-                .and_then(|()| file.sync_all())
-                .map_err(|error| PiError::other(format!("write fork file: {error}")))
-        })
-        .and_then(|()| {
-            crate::storage::drivers::posix::rename_excl(&directory.join(&temporary), path)
-                .map_err(|error| PiError::other(format!("publish fork file: {error}")))
-        })
-        .and_then(|()| {
-            root.sync_all()
-                .map_err(|error| PiError::other(format!("sync session directory: {error}")))
-        });
-    if written.is_err() {
-        let _ = root.remove_journal(&temporary);
+    let mut bytes = Vec::new();
+    for record in records {
+        bytes.extend_from_slice(record);
+        bytes.push(b'\n');
     }
-    written
+    publish_file(
+        &root,
+        &Publish {
+            name: file_name,
+            temp: &temporary,
+            permissions: 0o600,
+            mode: PublishMode::Exclusive,
+        },
+        &bytes,
+        publish,
+    )
+    .map_err(|error| {
+        let source = error.source;
+        PiError::other(match error.step {
+            PublishStep::CreateTemp => format!("create fork file: {source}"),
+            PublishStep::Write | PublishStep::FileSync => format!("write fork file: {source}"),
+            PublishStep::Rename => format!("publish fork file: {source}"),
+            PublishStep::DirSync => format!("sync session directory: {source}"),
+        })
+    })
 }

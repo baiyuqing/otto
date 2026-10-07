@@ -216,7 +216,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   capability declarations, reviewed/delegated learning, asynchronous outcomes
   and forgetting coverage. This documents the intended boundary; runtime
   adapters and memory behavior are unchanged. See the
-  [design](docs/specs/2026-10-07-open-memory-contract.md).
+  [design](docs/specs/2026-10-07-open-memory-contract.md)
+  ([#419](https://github.com/baiyuqing/otto/pull/419)).
 
 ## 0.4.1 - 2026-10-07
 

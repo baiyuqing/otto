@@ -510,7 +510,7 @@ leaves `make check-fast` green.
 
 1. `faults::plan` and `faults::http`; migrate the copied HTTP servers;
    `tests/fault_provider.rs`.
-2. Thread the SQL driver into the six repositories; `faults::sql`;
+2. Thread the SQL driver into the eight repositories; `faults::sql`;
    `tests/fault_storage.rs` and the conformance fault pass.
 3. `faults::files`; `tests/fault_session.rs`; remove `fail_writes`.
 4. *(Separate approval.)* `fsops::publish_file`, call-site migrations, publish

@@ -765,6 +765,17 @@ constraint is reported as `CommitUnknown`, and after `CommitUnknown` or a
 failed rollback every later call on that connection returns `Closed`. The
 repository matrix is `crates/otto/tests/fault_storage.rs`.
 
+File faults use `otto::faults::files::FaultyFileDriver`, which wraps a
+`FileDriver` (normally `PosixDriver`) and every root and journal it opens, so
+a rule reaches journals under nested directories. A session store takes it
+through `Store::create_lazy_with_driver` and the other `*_with_driver`
+constructors. The rule subject is the path for `OpenRoot`, the root's name
+for `RootSync` and `ListNames`, and the journal's name for journal
+operations; select a journal with `Filter::NameSuffix`. `Short` and
+`ShortExit` apply only to `Write`, which counts `Write::write` calls. Errors
+are `FaultError::Os` or `FaultError::Kind`. The session store matrix is
+`crates/otto/tests/fault_session.rs`.
+
 ## Docker acceptance
 
 After changing `Dockerfile`, `.dockerignore` or `compose.yaml`, build the

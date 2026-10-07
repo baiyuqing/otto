@@ -454,6 +454,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     });
                     return;
                 }
+                // Reasoning is not part of the summary; the response check drops it.
+                if matches!(event, crate::provider::StreamEvent::ReasoningDelta { .. }) {
+                    return;
+                }
                 let crate::provider::StreamEvent::TextDelta { text } = event else {
                     invalid_stream.store(true, Ordering::SeqCst);
                     child.cancel();
@@ -512,15 +516,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     }
 }
 
-/// Rejects a response that carries a non-text block, or whose text blocks add
-/// up to more than `maximum_bytes`. It runs before redaction, on the bytes the
-/// provider actually sent.
+/// Rejects a response that carries a block other than text or reasoning, or
+/// whose text blocks add up to more than `maximum_bytes`. It runs before
+/// redaction, on the bytes the provider actually sent.
 pub fn validate_raw_summary_response_bound(
     message: &Message,
     maximum_bytes: usize,
 ) -> Result<(), String> {
     let mut total = 0usize;
     for block in &message.blocks {
+        if block.block_type == BlockType::Reasoning {
+            continue;
+        }
         if block.block_type != BlockType::Text {
             return Err("response contains a non-text block".into());
         }

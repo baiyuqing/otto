@@ -17,4 +17,5 @@ pub mod sandbox_config;
 pub mod sandbox_runtime;
 pub mod storage;
 pub mod wiring;
+pub mod workspace_admission;
 pub mod workspace_context;

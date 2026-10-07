@@ -281,6 +281,7 @@ pub struct Context<'a> {
     pub approvals: Option<&'a Arc<crate::approval::Service>>,
     pub runner: &'a Runner,
     pub session_id: &'a str,
+    pub presentation_origin: Option<&'a crate::schedule::Origin>,
     /// The session file; empty for a `--no-session` session.
     pub session_path: &'a str,
     pub service: &'a Arc<Service>,
@@ -800,6 +801,7 @@ impl Reflector {
                     &context.runner.session().header().workspace,
                     context.session_id,
                     context.session_path,
+                    context.presentation_origin,
                     run_id,
                     &vetted,
                     self.config.skill_review,
@@ -1128,7 +1130,16 @@ fn propose_request(
         },
         // The store refuses an observation id on a candidate, so the run id
         // travels as metadata for tracing a candidate back to its run.
-        metadata: BTreeMap::from([(RUN_METADATA_KEY.to_owned(), run_id.to_owned())]),
+        metadata: BTreeMap::from_iter(
+            [(RUN_METADATA_KEY.to_owned(), run_id.to_owned())]
+                .into_iter()
+                .chain(context.presentation_origin.map(|origin| {
+                    (
+                        crate::memory::PRESENTATION_ORIGIN_METADATA.to_owned(),
+                        origin.as_str().to_owned(),
+                    )
+                })),
+        ),
         ..ProposeRequest::default()
     }
 }
@@ -1343,6 +1354,7 @@ mod tests {
                         approvals: Some(&approvals),
                         runner: &self.runner,
                         session_id: &header.id,
+                        presentation_origin: None,
                         session_path: &path,
                         service: &self.service,
                         user_scope: &self.user_scope,
@@ -1815,6 +1827,7 @@ mod tests {
                     approvals: None,
                     runner: &fixture.runner,
                     session_id: &header.id,
+                    presentation_origin: None,
                     session_path: "",
                     service: &fixture.service,
                     user_scope: &fixture.user_scope,
@@ -2457,6 +2470,7 @@ mod tests {
                     approvals: None,
                     runner: &fixture.runner,
                     session_id: &header.id,
+                    presentation_origin: None,
                     session_path: &path,
                     service: &fixture.service,
                     user_scope: &fixture.user_scope,

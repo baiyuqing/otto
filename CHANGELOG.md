@@ -15,6 +15,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Fixes
+
+- ChatGPT Responses streams now recognize transient overload/server errors
+  across top-level, nested and SSE-event envelope variants, and retry a clean
+  pre-output close with the existing bounded backoff. The REPL displays each
+  planned retry, exhausted retries end the turn with an actionable error, and
+  malformed streams cannot grow an individual SSE line or event without
+  bound.
+
 ### Usage and compatibility
 
 - Automatic skill contract checks are now a regular `[skills]` feature and
@@ -115,6 +124,34 @@ limitations are documented in the [user manual](docs/user-manual.md).
   replaced text and can restore the break instead of leaving broken code.
 
 ### Fixes
+
+- Approval review in the TUI now opens as a centered modal over the active
+  conversation instead of replacing the whole screen. It has no feedback
+  field, selects **Approve** by default, closes immediately after either
+  successful decision, and presents concurrent requests one at a time in
+  creation order instead of stacking them. Telegram and Feishu approval cards
+  plus passive memory/reflection notices now follow the exact originating chat;
+  workspace-visible or originless reviews remain explicitly discoverable but
+  are no longer broadcast to every chat bound to the session or workspace. See
+  [unified approvals](docs/user-manual.md#unified-approvals)
+  ([#421](https://github.com/baiyuqing/otto/pull/421)).
+
+- Compaction works again for sessions with `thinking` set on a model that
+  returns reasoning, such as ChatGPT. The summary request inherits `thinking`,
+  and the summary path cancelled the stream at the first reasoning delta and
+  rejected the reasoning block, so every automatic and manual compaction
+  failed. Each turn above the proactive trigger then sent one discarded summary
+  request and the original request, and the context grew until the turn
+  stopped at the hard input limit. Reasoning in a summary response is now
+  ignored and is not stored in the checkpoint. The `compaction_warning` message
+  and compaction errors now include the failure cause. See the
+  [user manual](docs/user-manual.md#context-compaction)
+  ([#420](https://github.com/baiyuqing/otto/pull/420)).
+
+- Keep ChatGPT turns running through pre-output HTTP 429 and 500/502/503/504
+  responses. Otto now retries the borrowed provider request up to six times
+  with 1/2/4/8/16/30-second backoff, honoring a numeric `Retry-After` up to 30
+  seconds; it never re-executes a tool or retries once output is visible.
 
 - A process killed while it wrote the first records of a new session no longer
   leaves an empty or torn `<session-id>.jsonl`. Such a file failed to open

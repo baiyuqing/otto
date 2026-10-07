@@ -642,14 +642,24 @@ Key points:
   progress, for every turn including each sub-agent's. `0` disables one
   condition and must be between `0` and `1000`. See
   [Stopping a turn that makes no progress](#stopping-a-turn-that-makes-no-progress).
-- ChatGPT transport failures, and stream errors with code
-  `server_is_overloaded` or `server_error`, are retried up to three times
-  when no output has been streamed yet, waiting 1, 2, then 4 seconds within
-  the same turn deadline. Only the current model request is repeated;
-  previously executed tools are not rerun. HTTP errors (including 429/5xx),
-  other stream error codes (such as `rate_limit_exceeded`), authorization
-  errors, protocol errors, and failures after streamed output are not
-  retried.
+- ChatGPT connection/send/body failures, HTTP 429/500/502/503/504 responses,
+  a clean stream close before its terminal event, and stream errors classified
+  as `server_is_overloaded` or `server_error` are retried up to six times when
+  no output has been streamed yet, waiting 1, 2, 4, 8, 16, then 30 seconds
+  within the same turn deadline. A numeric `Retry-After` header takes
+  precedence and is capped at 30 seconds. Only the current model request is
+  repeated; previously executed tools are not rerun. The TUI shows the retry
+  countdown and the REPL prints each planned retry. Other HTTP statuses, other
+  stream error codes (such as `rate_limit_exceeded`), authorization errors,
+  malformed or oversized stream events, and failures after streamed output
+  are not retried. After the retry limit, the turn ends with an error rather
+  than remaining active.
+
+  A Responses stream accepts error classification in `response.error`, a
+  nested event `error`, or top-level fields, and falls back to the SSE `event:`
+  name when the JSON payload omits `type`. Individual SSE lines are limited to
+  64 KiB and one event payload to 1 MiB.
+
   OpenAI-compatible requests are not automatically retried after dispatch.
   When the connection to an OpenAI-compatible endpoint cannot be
   established (refused, unreachable, or a failed TLS or connect timeout), the
@@ -921,11 +931,15 @@ OTTO_UI=repl otto
   Queries run independently of terminal input and live turn output. Returning
   from a detail screen restores the previous selection and draft.
 - `Esc` returns or dismisses a feature screen without making a decision.
-  Dismissing an approval leaves it pending; `/approve` with no arguments opens
-  pending approvals again. Permission decisions start on **Deny**;
-  memory/reflection reviews start on **Accept**. Neither default submits itself.
-  A submitted action displays its pending state and prevents duplicate clicks;
-  failures preserve input, and safe read failures offer a Retry action.
+  Approvals open as centered modals over the conversation rather than replacing
+  the whole screen. The modal has no feedback field, starts on **Approve** (or
+  **Accept** for a review), and Enter submits that choice. Approve and Deny both
+  close the modal as soon as the decision succeeds; no extra `Esc` is needed.
+  Multiple pending approvals are shown one at a time in creation order. If you
+  dismiss an undecided approval with `Esc`, it remains pending; `/approve` with
+  no arguments opens pending approvals again. A submitted action prevents
+  duplicate clicks; failures keep the modal open, and safe read failures offer
+  a Retry action.
 - Uses the terminal alternate screen buffer.
 - Every transcript entry is one block under a marker in the left gutter, so a
   turn reads as prompt, tool calls, reply. The marker opens the block and an
@@ -1613,6 +1627,12 @@ Rules and defaults:
   - **Reactive overflow recovery:** when the provider returns a typed
     context-overflow error, Otto does one automatic compaction and retries once.
 - The automatic paths are one-shot only; they never loop.
+- When proactive compaction fails and the estimate is below
+  `hard_input_window - reserve_tokens`, Otto emits a `compaction_warning` that
+  names the cause and sends the original request. At or above that limit the
+  turn fails.
+- Reasoning the model returns with a summary is discarded; only the summary
+  text is stored in the checkpoint.
 - `reserve_tokens = 16384` and `keep_recent_tokens = 20000` are the defaults.
 - `context_window` and `compaction_window` must be at least `4096` when set.
 - `compaction_window` requires `context_window` and must not exceed it.
@@ -1766,9 +1786,15 @@ and optional feedback. Later tool calls in that same batch do not run; the model
 must consider your answer first. A plan confirmation gives no additional
 sandbox or external-tool permission. Mandatory domain checks still apply.
 
-- TUI: review the displayed request, use arrows and Enter or y/n; for a general
-  approval press **f** to edit feedback, then Enter to return to the choices.
-  Complete details are also shown in the transcript.
+- TUI: one centered approval modal is shown at a time over the conversation.
+  **Approve** is selected by default; use Enter, arrows, or y/n. The TUI has no
+  feedback field. A successful Approve or Deny closes the modal immediately
+  and advances to the next pending request.
+- Passive chat delivery is separate from approval visibility. An approval made
+  during a Telegram or Feishu turn is presented only to that exact originating
+  chat. Workspace-visible memory reviews remain discoverable from authorized
+  approval or `/memory` lists, but an originless or unrelated request is not
+  broadcast to every chat bound to the session or workspace.
 - Web: the approval queue shows the full proposal, feedback input, approve,
   reject and withdraw controls. It refreshes pending state across clients.
 - Telegram/Feishu: use the request's card buttons, or
@@ -2509,9 +2535,10 @@ executed command, remove permanent grants, or affect another session.
 
 While approval waits, you can ask why it is needed or ask Otto to withdraw it.
 This conversation has only help, approval query/withdrawal and queue tools;
-normal tasks keep waiting in the frontend's queue. In the TUI, press `c` to
-hide the approval panel without deciding and type your message. Telegram and
-Feishu support this with Otto; other ACP agents keep the ordinary queue.
+normal tasks keep waiting in the frontend's queue. In the TUI, press `Esc` to
+dismiss the modal without deciding; `/approve` opens pending requests again.
+Telegram and Feishu support this with Otto; other ACP agents keep the ordinary
+queue.
 Explicit Deny/No, `/deny` in chat and `/stop` continue to work.
 
 ### Session plan

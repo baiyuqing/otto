@@ -163,6 +163,8 @@ pub struct RememberTool {
     user_scope: Scope,
     workspace_scope: Scope,
     advisor: Option<Arc<Advisor>>,
+    session_id: String,
+    turn_origin: Option<Arc<crate::schedule::tools::TurnOrigin>>,
 }
 
 impl RememberTool {
@@ -172,7 +174,19 @@ impl RememberTool {
             user_scope,
             workspace_scope,
             advisor: None,
+            session_id: String::new(),
+            turn_origin: None,
         }
+    }
+
+    pub fn with_turn_context(
+        mut self,
+        session_id: impl Into<String>,
+        origin: Arc<crate::schedule::tools::TurnOrigin>,
+    ) -> Self {
+        self.session_id = session_id.into();
+        self.turn_origin = Some(origin);
+        self
     }
 
     /// Adds advisory review hints to the candidates this tool queues.
@@ -257,6 +271,13 @@ impl Tool for RememberTool {
         } else {
             CandidateAction::Update
         };
+        let mut metadata = std::collections::BTreeMap::new();
+        if let Some(origin) = self.turn_origin.as_ref().and_then(|origin| origin.get()) {
+            metadata.insert(
+                crate::memory::PRESENTATION_ORIGIN_METADATA.into(),
+                origin.as_str().to_owned(),
+            );
+        }
         let request = ProposeRequest {
             action,
             scope,
@@ -264,12 +285,14 @@ impl Tool for RememberTool {
             key: args.key,
             text: args.text,
             labels: args.labels,
+            metadata,
             confidence: args.confidence,
             target_id: args.target_id,
             base_revision: args.base_revision,
             reason: args.reason,
             source: Provenance {
                 origin: Some(Origin::Model),
+                session_id: self.session_id.clone(),
                 ..Provenance::default()
             },
             ..ProposeRequest::default()
@@ -292,11 +315,28 @@ impl Tool for RememberTool {
 pub struct ForgetTool {
     service: Arc<Service>,
     scopes: Vec<Scope>,
+    session_id: String,
+    turn_origin: Option<Arc<crate::schedule::tools::TurnOrigin>>,
 }
 
 impl ForgetTool {
     pub fn new(service: Arc<Service>, scopes: Vec<Scope>) -> Self {
-        Self { service, scopes }
+        Self {
+            service,
+            scopes,
+            session_id: String::new(),
+            turn_origin: None,
+        }
+    }
+
+    pub fn with_turn_context(
+        mut self,
+        session_id: impl Into<String>,
+        origin: Arc<crate::schedule::tools::TurnOrigin>,
+    ) -> Self {
+        self.session_id = session_id.into();
+        self.turn_origin = Some(origin);
+        self
     }
 }
 
@@ -356,14 +396,23 @@ impl Tool for ForgetTool {
         if !self.scopes.contains(&scope) {
             return error_result("scope is not one of the scopes this session is bound to");
         }
+        let mut metadata = std::collections::BTreeMap::new();
+        if let Some(origin) = self.turn_origin.as_ref().and_then(|origin| origin.get()) {
+            metadata.insert(
+                crate::memory::PRESENTATION_ORIGIN_METADATA.into(),
+                origin.as_str().to_owned(),
+            );
+        }
         proposal_result(self.service.propose(&ProposeRequest {
             action: CandidateAction::Forget,
             scope,
+            metadata,
             target_id: args.id,
             base_revision: args.revision,
             reason: args.reason,
             source: Provenance {
                 origin: Some(Origin::Model),
+                session_id: self.session_id.clone(),
                 ..Provenance::default()
             },
             ..ProposeRequest::default()
@@ -442,6 +491,31 @@ mod tests {
             .and_then(|rest| rest.split_once(' '))
             .map(|(id, _)| id.to_owned())
             .unwrap_or_else(|| panic!("unexpected content {content:?}"))
+    }
+
+    #[tokio::test]
+    async fn remember_records_the_session_and_exact_presentation_origin() {
+        let (_directory, service) = service();
+        let origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+        origin.set(Some(
+            crate::schedule::Origin::chat("telegram", "42").unwrap(),
+        ));
+        let tool = RememberTool::new(Arc::clone(&service), scope(), workspace_scope())
+            .with_turn_context("session-1", origin);
+
+        let result = run(&tool, r#"{"kind":"fact","text":"blue","reason":"said so"}"#).await;
+        assert!(!result.is_error, "{result:?}");
+        let candidate = service
+            .get_candidate(&CandidateRef {
+                scope: workspace_scope(),
+                id: candidate_id(&result.content),
+            })
+            .unwrap();
+        assert_eq!(candidate.proposed.source.session_id, "session-1");
+        assert_eq!(
+            candidate.proposed.metadata[crate::memory::PRESENTATION_ORIGIN_METADATA],
+            "chat:telegram:42"
+        );
     }
 
     /// The real store mints the record IDs, so the placeholder is checked by
@@ -747,7 +821,12 @@ mod tests {
     async fn forget_queues_a_forget_candidate_for_human_review() {
         let (_directory, service) = service();
         let target = remember_record(&service, "editor", "prefers vim");
-        let tool = ForgetTool::new(Arc::clone(&service), vec![scope()]);
+        let origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+        origin.set(Some(
+            crate::schedule::Origin::chat("feishu", "oc_42").unwrap(),
+        ));
+        let tool = ForgetTool::new(Arc::clone(&service), vec![scope()])
+            .with_turn_context("session-1", origin);
 
         let arguments = format!(
             r#"{{"scope_namespace":"user","scope_id":"user-1","id":"{target}","revision":1}}"#
@@ -765,6 +844,11 @@ mod tests {
         assert_eq!(candidate.target_id, target);
         assert_eq!(candidate.base_revision, 1);
         assert_eq!(candidate.proposed.source.origin, Some(Origin::Model));
+        assert_eq!(candidate.proposed.source.session_id, "session-1");
+        assert_eq!(
+            candidate.proposed.metadata[crate::memory::PRESENTATION_ORIGIN_METADATA],
+            "chat:feishu:oc_42"
+        );
     }
 
     #[tokio::test]

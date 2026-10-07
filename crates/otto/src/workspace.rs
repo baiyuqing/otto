@@ -5,7 +5,7 @@
 //! directory lock and atomically published through pinned, no-follow handles.
 //! Recorded paths identify historical transcripts, never execution authority.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 
 use otto_core::session::PiError;
@@ -118,31 +118,32 @@ fn uuid() -> Result<String, PiError> {
     ))
 }
 
-fn publish(dir: &fsops::Dir, identity: &Identity) -> Result<(), PiError> {
+fn publish(
+    dir: &fsops::Dir,
+    identity: &Identity,
+    publish_ops: &dyn fsops::PublishOps,
+) -> Result<(), PiError> {
     validate(identity)?;
     let bytes = serde_json::to_vec_pretty(identity).map_err(|_| invalid())?;
     if bytes.len() as u64 > MAX_BYTES {
         return Err(invalid());
     }
-    let name = format!(
+    let temp = format!(
         ".workspace-{}",
         crate::auth::random_hex::<8>().map_err(io_error)?
     );
-    let mut file = fsops::create_at_no_follow(dir, &name, libc::O_WRONLY | libc::O_EXCL, 0o600)
-        .map_err(io_error)?;
-    let result = (|| {
-        file.write_all(&bytes).map_err(io_error)?;
-        file.sync_all().map_err(io_error)?;
-        fsops::rename_at(dir, &name, NAME).map_err(io_error)?;
-        // Opening '.' through the pinned directory also pins the fsync target.
-        fsops::open_at_no_follow(dir, ".", libc::O_RDONLY | libc::O_DIRECTORY)
-            .and_then(|file| file.sync_all())
-            .map_err(io_error)
-    })();
-    if result.is_err() {
-        let _ = fsops::unlink_at(dir, &name);
-    }
-    result
+    fsops::publish_file(
+        dir,
+        &fsops::Publish {
+            name: NAME,
+            temp: &temp,
+            permissions: 0o600,
+            mode: fsops::PublishMode::Replace,
+        },
+        &bytes,
+        publish_ops,
+    )
+    .map_err(|error| io_error(error.source))
 }
 
 /// Initialize on startup, adopting existing state and retaining move history.
@@ -202,7 +203,7 @@ fn update(workspace: &Path, memory_override: &str, fork: bool) -> Result<Identit
         identity.paths.push(path);
     }
     if previous.as_ref() != Some(&identity) {
-        publish(&dir, &identity)?;
+        publish(&dir, &identity, &fsops::PosixPublish)?;
     }
     Ok(identity)
 }
@@ -255,8 +256,58 @@ pub(crate) fn owns_session(workspace: &str, recorded: &str) -> Result<bool, PiEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::faults::publish::FaultyPublishOps;
+    use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
+    use crate::fsops::PublishStep;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    /// Publishes a changed identity over an initialized workspace's marker
+    /// with `step` failing, and returns the result with the `.otto` directory,
+    /// the previous marker bytes and the changed identity.
+    fn publish_failing_at(
+        step: PublishStep,
+    ) -> (tempfile::TempDir, Result<(), PiError>, Vec<u8>, Identity) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut identity = initialize(dir.path(), "").unwrap();
+        let marker = dir.path().join(MARKER);
+        let previous = fs::read(&marker).unwrap();
+        identity.paths.push("/elsewhere".to_owned());
+        let plan = FaultPlan::new(vec![Rule::new(
+            step,
+            Trigger::Always,
+            Fault::Before(FaultError::Os(libc::EIO)),
+        )]);
+        let otto = fsops::open_dir_no_follow(&dir.path().join(".otto")).unwrap();
+        let result = publish(&otto, &identity, &FaultyPublishOps::new(plan.clone()));
+        plan.assert_all_fired();
+        (dir, result, previous, identity)
+    }
+
+    #[test]
+    fn a_rename_failure_keeps_the_previous_identity_and_leaves_no_temporary_file() {
+        let (dir, result, previous, _) = publish_failing_at(PublishStep::Rename);
+        assert!(result.is_err());
+        assert_eq!(fs::read(dir.path().join(MARKER)).unwrap(), previous);
+        let names: Vec<_> = fs::read_dir(dir.path().join(".otto"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with(".workspace-"))
+            .collect();
+        assert!(names.is_empty(), "{names:?}");
+    }
+
+    #[test]
+    fn a_directory_sync_failure_is_an_error_after_the_identity_is_in_place() {
+        let (dir, result, previous, identity) = publish_failing_at(PublishStep::DirSync);
+        assert!(result.is_err());
+        let stored = fs::read(dir.path().join(MARKER)).unwrap();
+        assert_ne!(stored, previous);
+        assert_eq!(
+            serde_json::from_slice::<Identity>(&stored).unwrap(),
+            identity
+        );
+    }
 
     #[test]
     fn initialization_is_stable_adopts_legacy_keys_and_rejects_override_changes() {

@@ -579,6 +579,9 @@ max_output_bytes = 51200
 # subagent_timeout = "1h"
 # workflow_step_timeout = "1h"
 cancellation_grace = "5s"
+# Limits that stop a turn which makes no progress. 0 disables one condition.
+# no_progress_repeats = 8
+# no_progress_failures = 12
 
 [agent.compaction]
 auto = true
@@ -633,6 +636,11 @@ Key points:
   remaining deadline; compaction and follow-up work never reset that budget.
   `cancellation_grace` defaults to `5s` and bounds cooperative cleanup before
   Bash or a shared stdio MCP server is force-stopped.
+- `[agent].no_progress_repeats` (default `8`) and
+  `[agent].no_progress_failures` (default `12`) stop a turn that makes no
+  progress, for every turn including each sub-agent's. `0` disables one
+  condition and must be between `0` and `1000`. See
+  [Stopping a turn that makes no progress](#stopping-a-turn-that-makes-no-progress).
 - ChatGPT transport failures, and stream errors with code
   `server_is_overloaded` or `server_error`, are retried up to three times
   when no output has been streamed yet, waiting 1, 2, then 4 seconds within
@@ -1981,6 +1989,46 @@ when it writes one into a reply or a configuration file and when it picks a
 `model` for a sub-agent. The `chatgpt` provider has no `list_models`; there the
 model is told not to write a model id from memory and to use an id you named or
 the session's model. Child agents do not get this tool.
+
+### Sub-agents
+
+The `agent` tool starts a child task that runs in parallel with the turn, so a
+stuck child cannot hold the parent's turn open. The parent watches it with
+`agent_status`, sends it guidance with `agent_send`, and stops it with
+`agent_cancel`; `agent_wait` blocks the turn until the task ends. Children
+never receive these tools, so a child cannot start or stop another child.
+
+`agent_cancel` takes a task id or name and cancels that task. Cancellation is
+cooperative: a queued task is released before it starts, and a running one
+stops at its next checkpoint; a task inside a tool call stops once that call
+settles, so a call that already changed something is never abandoned
+half-done. The task ends as `canceled` and its `[task-notification]` arrives
+the usual way. `/task cancel <id|name>`,
+`POST /v1/sessions/{id}/tasks/{task_id}/cancel`, and ACP's task cancel reach
+the same operation. A finished task cannot be canceled and answers with an
+error instead.
+
+#### Stopping a turn that makes no progress
+
+A turn whose model keeps issuing the same tool call, or keeps receiving tool
+errors, would otherwise run until a deadline — and deadlines are unlimited
+unless you configure one. Otto watches this itself and ends such a turn with
+the error `no progress: the same <tool> call repeated <n> times in a row`, or
+`no progress: <n> tool calls in a row failed (last: <tool>)`. This applies to
+every turn, including each sub-agent's, which inherits your limits. A turn
+that ends this way is not a persistence failure: the session continues and you
+can send the next prompt.
+
+Two calls count as the same call when the tool name and the arguments are the
+same; key order and spacing in the arguments are ignored. Only *consecutive*
+conditions are detected, so a cycle that alternates between different calls is
+not stopped — use `agent_status` and `agent_cancel` when you see one.
+
+`[agent].no_progress_repeats` (default 8) and
+`[agent].no_progress_failures` (default 12) set the two limits. Set one to `0`
+to disable that condition; set both to `0` to disable the guard. Raise them if
+a deliberate poll loop, such as watching a long build, is being stopped
+early. Values must be between 0 and 1000.
 
 ### Interactive sandbox setup
 

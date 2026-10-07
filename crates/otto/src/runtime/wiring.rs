@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::join_all;
+use otto_core::agent::progress::ProgressPolicy;
 use otto_core::agent::redactor::Redactor;
 use otto_core::config::agents::AgentsRuntime;
 use otto_core::config::memory::MemoryRuntime;
@@ -603,6 +604,10 @@ impl Builder {
                     keep_recent_tokens: runtime.compaction.keep_recent_tokens,
                 },
                 new_operation_id: Arc::new(super::builder::new_operation_id),
+                progress: ProgressPolicy {
+                    repeated_calls: runtime.progress.repeated_calls,
+                    consecutive_failures: runtime.progress.consecutive_failures,
+                },
                 provider_timeout: runtime.resilience.deadlines.provider_timeout,
                 cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
                 task_timeout: runtime.resilience.deadlines.subagent_timeout,
@@ -2719,6 +2724,8 @@ mod catalog_tests {
             "agent",
             "agent_wait",
             "agent_status",
+            "agent_send",
+            "agent_cancel",
             "remind",
             "remind_status",
             "remind_cancel",
@@ -2751,6 +2758,8 @@ mod catalog_tests {
             "agent",
             "agent_wait",
             "agent_status",
+            "agent_send",
+            "agent_cancel",
             "remind",
             "remind_status",
             "remind_cancel",

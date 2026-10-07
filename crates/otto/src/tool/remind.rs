@@ -22,9 +22,6 @@
 //! turn cannot kill it, [`Reminders::cancel`] stops one, and dropping the
 //! registry stops all.
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,6 +36,7 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
+use crate::fsops::{self, PosixPublish, Publish, PublishMode, PublishOps, PublishStep};
 use crate::subagent::format::round_to_seconds;
 
 use super::result::decode_strict_json;
@@ -49,12 +47,6 @@ const MAX_SECONDS: i64 = 3600;
 const MAX_MESSAGE_CHARS: usize = 500;
 const MAX_OUTSTANDING: usize = 8;
 const STATE_MUTEX: &str = "reminder state mutex";
-
-type DirectorySync = fn(&std::fs::File) -> std::io::Result<()>;
-
-fn sync_directory(directory: &std::fs::File) -> std::io::Result<()> {
-    directory.sync_all()
-}
 
 /// Which side of the externally visible filesystem mutation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +163,7 @@ struct Inner {
     path: Option<PathBuf>,
     armed: Mutex<Vec<Armed>>,
     next_id: AtomicUsize,
-    sync_directory: DirectorySync,
+    publish: Arc<dyn PublishOps>,
 }
 
 impl Inner {
@@ -199,7 +191,9 @@ impl Inner {
                     return Err(PersistError::before(format!("remove reminders: {error}")));
                 }
             };
-            return sync_parent_directory(path, self.sync_directory).map_err(|error| {
+            let synced = fsops::open_parent(path)
+                .and_then(|(directory, name)| self.publish.sync_dir(&directory, name));
+            return synced.map_err(|error| {
                 let message = format!("sync reminder directory: {error}");
                 if removed {
                     PersistError::after(message)
@@ -216,7 +210,7 @@ impl Inner {
         let items: Vec<&StoredReminder> = armed.iter().map(|entry| &entry.item).collect();
         let body = serde_json::to_vec_pretty(&items)
             .map_err(|error| PersistError::before(format!("encode reminders: {error}")))?;
-        replace_private_typed(path, &body, self.sync_directory)
+        replace_private_typed(path, &body, self.publish.as_ref())
     }
 
     /// Delivers the timer, unless it was cancelled while its sleep was
@@ -259,23 +253,9 @@ impl Inner {
     }
 }
 
-/// Writes `body` to `path` with mode 0600 and `fsync`s it.
-pub(crate) fn write_private(path: &Path, body: &[u8]) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|error| format!("write reminders: {error}"))?;
-    file.write_all(body)
-        .map_err(|error| format!("write reminders: {error}"))?;
-    file.sync_all()
-        .map_err(|error| format!("sync reminders: {error}"))
-}
-
-/// Writes `body` to `path`'s `.tmp` sibling ([`write_private`]: mode 0600,
-/// `fsync`d), renames it over `path`, then `fsync`s the containing directory.
+/// Publishes `body` as `path` with mode 0600 through
+/// [`fsops::publish_file`]: write the `.tmp` sibling, `fsync` it, rename it
+/// over `path`, then `fsync` the containing directory.
 ///
 /// A rename is only durable once its directory entry is itself synced: a
 /// host crash right after a successful rename can still lose it otherwise.
@@ -284,29 +264,47 @@ pub(crate) fn write_private(path: &Path, body: &[u8]) -> Result<(), String> {
 /// `write_inbox_file` in `runtime::wiring`), so the temporary-file/fsync/rename
 /// pattern exists in exactly one place.
 pub(crate) fn replace_private(path: &Path, body: &[u8]) -> Result<(), String> {
-    replace_private_typed(path, body, sync_directory).map_err(|error| error.to_string())
+    replace_private_typed(path, body, &PosixPublish).map_err(|error| error.to_string())
 }
 
 fn replace_private_typed(
     path: &Path,
     body: &[u8],
-    sync: DirectorySync,
+    publish: &dyn PublishOps,
 ) -> Result<(), PersistError> {
-    let mut tmp = path.to_path_buf();
-    tmp.as_mut_os_string().push(".tmp");
-    write_private(&tmp, body).map_err(PersistError::before)?;
-    std::fs::rename(&tmp, path)
-        .map_err(|error| PersistError::before(format!("persist reminders: {error}")))?;
-    sync_parent_directory(path, sync)
-        .map_err(|error| PersistError::after(format!("sync reminder directory: {error}")))
-}
-
-fn sync_parent_directory(path: &Path, sync: DirectorySync) -> std::io::Result<()> {
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    std::fs::File::open(directory).and_then(|file| sync(&file))
+    let write_error =
+        |error: std::io::Error| PersistError::before(format!("write reminders: {error}"));
+    let (directory, name) = fsops::open_parent(path).map_err(write_error)?;
+    let temp = format!("{name}.tmp");
+    // A temporary file left by an earlier crash: `publish_file` creates the
+    // temporary file exclusively, so it is removed first.
+    match fsops::unlink_at(&directory, &temp) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(write_error(error));
+        }
+        _ => {}
+    }
+    fsops::publish_file(
+        &directory,
+        &Publish {
+            name,
+            temp: &temp,
+            permissions: 0o600,
+            mode: PublishMode::Replace,
+        },
+        body,
+        publish,
+    )
+    .map_err(|error| match error.step {
+        PublishStep::CreateTemp | PublishStep::Write => {
+            PersistError::before(format!("write reminders: {}", error.source))
+        }
+        PublishStep::FileSync => PersistError::before(format!("sync reminders: {}", error.source)),
+        PublishStep::Rename => PersistError::before(format!("persist reminders: {}", error.source)),
+        PublishStep::DirSync => {
+            PersistError::after(format!("sync reminder directory: {}", error.source))
+        }
+    })
 }
 
 /// Whether the session `sidecar` belongs to still has its own `<id>.jsonl`
@@ -363,13 +361,13 @@ impl Reminders {
     }
 
     fn create(mailbox: Arc<dyn Mailbox>, path: Option<PathBuf>) -> Self {
-        Self::create_with_directory_sync(mailbox, path, sync_directory)
+        Self::create_with_publish_ops(mailbox, path, Arc::new(PosixPublish))
     }
 
-    fn create_with_directory_sync(
+    fn create_with_publish_ops(
         mailbox: Arc<dyn Mailbox>,
         path: Option<PathBuf>,
-        sync_directory: DirectorySync,
+        publish: Arc<dyn PublishOps>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -377,7 +375,7 @@ impl Reminders {
                 path,
                 armed: Mutex::new(Vec::new()),
                 next_id: AtomicUsize::new(0),
-                sync_directory,
+                publish,
             }),
             token: CancellationToken::new(),
         }
@@ -709,12 +707,20 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::faults::publish::FaultyPublishOps;
+    use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
     use crate::tool::testutil::{run, run_cancelled};
     use otto_core::mailbox::Inbox;
     use otto_core::model::{EffectCertainty, OperationDisposition, OperationStopReason};
 
-    fn fail_directory_sync(_directory: &std::fs::File) -> std::io::Result<()> {
-        Err(std::io::Error::other("injected directory sync failure"))
+    fn publish_fault(step: PublishStep) -> (Arc<FaultPlan<PublishStep>>, Arc<dyn PublishOps>) {
+        let plan = FaultPlan::new(vec![Rule::new(
+            step,
+            Trigger::Always,
+            Fault::Before(FaultError::Os(libc::EIO)),
+        )]);
+        let ops = Arc::new(FaultyPublishOps::new(plan.clone()));
+        (plan, ops)
     }
 
     fn outcome(result: &ToolResult) -> &otto_core::model::OperationOutcome {
@@ -873,10 +879,11 @@ mod tests {
     #[tokio::test]
     async fn schedule_directory_sync_failure_is_unknown_and_rolls_back_memory() {
         let (_directory, path, inbox) = persist_setup();
-        let reminders = Arc::new(Reminders::create_with_directory_sync(
+        let (plan, ops) = publish_fault(PublishStep::DirSync);
+        let reminders = Arc::new(Reminders::create_with_publish_ops(
             inbox.clone(),
             Some(path.clone()),
-            fail_directory_sync,
+            ops,
         ));
         let tool = RemindTool {
             reminders: Arc::clone(&reminders),
@@ -884,6 +891,7 @@ mod tests {
 
         let result = run(&tool, r#"{"seconds":60,"message":"uncertain"}"#).await;
 
+        plan.assert_all_fired();
         assert!(result.is_error, "{result:?}");
         assert_eq!(outcome(&result).disposition, OperationDisposition::Error);
         assert_eq!(outcome(&result).effect_certainty, EffectCertainty::Unknown);
@@ -896,26 +904,78 @@ mod tests {
         assert_eq!(stored[0].message, "uncertain");
     }
 
+    #[tokio::test]
+    async fn schedule_rename_failure_is_not_started_and_keeps_the_previous_file() {
+        let (directory, path, inbox) = persist_setup();
+        let previous = StoredReminder {
+            id: "r1".into(),
+            fire_at: Utc::now() + TimeDelta::minutes(1),
+            message: "previous".into(),
+        };
+        std::fs::write(&path, serde_json::to_vec_pretty(&[&previous]).unwrap()).unwrap();
+        let (plan, ops) = publish_fault(PublishStep::Rename);
+        let reminders = Arc::new(Reminders::create_with_publish_ops(
+            inbox,
+            Some(path.clone()),
+            ops,
+        ));
+        let tool = RemindTool {
+            reminders: Arc::clone(&reminders),
+        };
+
+        let result = run(&tool, r#"{"seconds":60,"message":"lost"}"#).await;
+
+        plan.assert_all_fired();
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(
+            outcome(&result).effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        let stored = persisted(&path);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].message, "previous");
+        let mut names: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["session.jsonl", "session.reminders.json"]);
+    }
+
+    #[test]
+    fn a_leftover_temporary_file_does_not_stop_a_save() {
+        let (directory, path, _inbox) = persist_setup();
+        let temp = directory.path().join("session.reminders.json.tmp");
+        std::fs::write(&temp, "partial").unwrap();
+
+        replace_private(&path, b"[]").expect("save over a leftover temporary file");
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"[]");
+        assert!(!temp.exists());
+    }
+
     #[test]
     fn empty_save_without_a_sidecar_still_syncs_the_directory_before_reporting_failure() {
         let (_directory, path, inbox) = persist_setup();
-        let reminders =
-            Reminders::create_with_directory_sync(inbox.clone(), Some(path), fail_directory_sync);
+        let (plan, ops) = publish_fault(PublishStep::DirSync);
+        let reminders = Reminders::create_with_publish_ops(inbox.clone(), Some(path), ops);
         let armed = reminders.inner.armed.lock().expect(STATE_MUTEX);
 
         let error = reminders.inner.save(&armed).expect_err("sync must fail");
 
+        plan.assert_all_fired();
         assert_eq!(error.phase, PersistPhase::BeforeEffect);
-        assert!(error.message.contains("injected directory sync failure"));
+        assert!(error.message.contains("sync reminder directory"));
     }
 
     #[tokio::test]
     async fn cancel_remove_directory_sync_failure_is_unknown_and_restores_timer() {
         let (_directory, path, inbox) = persist_setup();
-        let reminders = Arc::new(Reminders::create_with_directory_sync(
+        let (plan, ops) = publish_fault(PublishStep::DirSync);
+        let reminders = Arc::new(Reminders::create_with_publish_ops(
             inbox.clone(),
             Some(path.clone()),
-            fail_directory_sync,
+            ops,
         ));
         let item = StoredReminder {
             id: "r1".into(),
@@ -930,6 +990,7 @@ mod tests {
 
         let result = run(&cancel, r#"{"id":"r1"}"#).await;
 
+        plan.assert_all_fired();
         assert!(result.is_error, "{result:?}");
         assert_eq!(outcome(&result).disposition, OperationDisposition::Error);
         assert_eq!(outcome(&result).effect_certainty, EffectCertainty::Unknown);
@@ -945,10 +1006,11 @@ mod tests {
     #[tokio::test]
     async fn cancel_directory_sync_failure_is_unknown_and_restores_entry_and_token() {
         let (_directory, path, inbox) = persist_setup();
-        let reminders = Arc::new(Reminders::create_with_directory_sync(
+        let (plan, ops) = publish_fault(PublishStep::DirSync);
+        let reminders = Arc::new(Reminders::create_with_publish_ops(
             inbox.clone(),
             Some(path.clone()),
-            fail_directory_sync,
+            ops,
         ));
         let fire_at = Utc::now() + TimeDelta::minutes(1);
         let items = [
@@ -978,6 +1040,7 @@ mod tests {
 
         let result = run(&cancel, r#"{"id":"r2"}"#).await;
 
+        plan.assert_all_fired();
         assert!(result.is_error, "{result:?}");
         assert_eq!(outcome(&result).disposition, OperationDisposition::Error);
         assert_eq!(outcome(&result).effect_certainty, EffectCertainty::Unknown);

@@ -1,10 +1,8 @@
-# Checking a skill's contract automatically (experimental)
+# Checking a skill's contract automatically
 
-Status: approved 2026-09-25. Implemented. Experimental: the rules,
-the questions, the thresholds, the database schema and the `/skills` display
-may change or be removed without a compatibility path. It is enabled at run
-time through the `[experimental]` config table; it is built and tested like
-every other feature, with no build-time switch.
+Status: approved 2026-09-25. Implemented. Graduated from experimental on
+2026-10-07 and enabled by default when `TYPESAFE_API_KEY` is available. It is
+built and tested like every other feature, with no build-time switch.
 
 ## Motivation
 
@@ -40,29 +38,23 @@ action starts a check.
 
 ## Enabling
 
-Disabled by default. Enabled only when all of these hold at runner build
-time:
+Enabled by default when both of these hold at runner build time:
 
 1. `[skills].enabled` is not `false` (existing key, default true).
-2. `[experimental].typesafe_skill_check = true` in
-   `~/.config/otto/config.toml` (new key, default false). Otto has no
-   workspace config file, so a repository cannot enable the check.
-3. `TYPESAFE_API_KEY` is set to a non-empty value.
+2. `TYPESAFE_API_KEY` is set to a non-empty value.
 
 ```toml
-[experimental]
+[skills]
 typesafe_skill_check = true
 ```
 
-When any condition fails no check is started, the database is not opened,
-and `/skills` shows no results. Condition 3 gates the rules as well as the
-request, so the feature is either fully on or fully off.
+Set `[skills].typesafe_skill_check = false` to disable it. When any condition
+fails no check is started, the database is not opened, and `/skills` shows no
+results. The API key gates the rules as well as the request, so the feature is
+either fully on or fully off.
 
-`[experimental]` is a new top-level table for features that may change or be
-removed without a compatibility path. Unlike every other table it does not
-deny unknown keys: an unknown key produces one warning and is ignored, so
-removing an experimental feature does not turn a config that enabled it into
-a parse error.
+The old `[experimental].typesafe_skill_check` setting remains a fallback for
+configuration compatibility. The new `[skills]` setting wins when both exist.
 
 ## Trigger and concurrency
 
@@ -190,34 +182,29 @@ Rows for earlier content are not shown.
 
 ## Code placement
 
-- `crates/otto-core/src/config/mod.rs`: `File` gains
-  `experimental: Experimental` with `typesafe_skill_check: Option<bool>`,
-  without `deny_unknown_fields`, skipped when serializing its default so the
-  config writer does not add an empty table. Plain data; the wasm boundary is
-  unaffected.
+- `crates/otto-core/src/config/skills.rs`: `[skills]` owns
+  `typesafe_skill_check: Option<bool>`. The legacy `[experimental]` field is
+  accepted as a fallback. Plain data; the wasm boundary is unaffected.
 - `crates/otto/src/skill/check.rs`: rules, question set, hashing, TypeSafe
   client (reqwest, base URL and key passed in), verdicts, and the SQLite
   store. Native only.
 - `crates/otto/src/subagent/tools.rs`: the trigger in `AgentTool::execute`,
   through a checker handle the runner is built with; `None` when the feature
   is disabled.
-- `crates/otto/src/cli`: the composition root builds the checker when the
-  three enabling conditions hold, and `/skills` reads the latest rows.
+- `crates/otto/src/cli`: the composition root builds the checker when its
+  enabling conditions hold, and `/skills` reads the latest rows.
 - AGENTS.md task map: add "automatic contract check" to the `skill` entry.
-- User manual: one section marked Experimental, stating the enabling
-  conditions, that `SKILL.md` content is sent to TypeSafe on first
-  delegation, the database file, and that everything may change or be
-  removed.
+- User manual: state the enabling conditions, that `SKILL.md` content is sent
+  to TypeSafe on first delegation, and the database file.
 
 ## Tests
 
 All offline; TypeSafe is a local HTTP stub.
 
-- Enabling: each of the three conditions, when unmet, leaves the runner
-  without a checker, and a delegation sends nothing and opens no database.
-- Config: `[experimental]` absent resolves to disabled; an unknown key under
-  it parses, warns and is ignored; writing a config that never had it does
-  not add the table.
+- Enabling: missing API key, disabled skills, or an explicit disabled setting
+  leaves the runner without a checker; the default plus an API key opens it.
+- Config: `[skills].typesafe_skill_check` parses, while the old experimental
+  setting and unknown experimental keys remain compatible.
 - Trigger: a skill-derived delegation starts one check; an ordinary agent
   definition and a `skill` tool load start none; a key already in the
   database starts none; two concurrent delegations send one request.

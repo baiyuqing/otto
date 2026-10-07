@@ -769,6 +769,33 @@ func TestMenuCommandsAreHandled(t *testing.T) {
 	}
 }
 
+// A session-level /model switch is how a chat leaves a profile whose quota is
+// exhausted, so it must reach Otto even without a management client; /config
+// stays attached-only and points at it.
+func TestModelSwitchReachesTheAgentWithoutAManagementClient(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{})
+	h.say("/model other")
+	h.waitFor(func() bool {
+		return slices.Contains(fake.Calls(h.dir), "start:/model other")
+	}, "agent command prompt")
+	settle()
+
+	h.say("/config profiles")
+	want := "This command requires otto acp --attach connected to a running otto serve. Use /model <profile> to switch this conversation's profile."
+	h.waitFor(func() bool {
+		for _, text := range h.plat.texts() {
+			if text == want {
+				return true
+			}
+		}
+		return false
+	}, "the attached-only notice")
+	if calls := agentWork(h.dir); slices.Contains(calls, "start:/config profiles") {
+		t.Errorf("/config reached the agent: %q", calls)
+	}
+}
+
 func TestMarkdownFlagSeparatesAgentRepliesFromNotices(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})

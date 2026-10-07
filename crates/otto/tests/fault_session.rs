@@ -277,7 +277,7 @@ fn before_lock_on_open_fails_and_leaves_the_journal_unchanged() {
     plan.assert_all_fired();
 
     assert_eq!(std::fs::read(&path).expect("read journal"), before);
-    assert_eq!(fixture.journals(), [path.clone()]);
+    assert_eq!(fixture.journals(), std::slice::from_ref(&path));
     let (reopened, _) = Store::open(&path).expect("reopen");
     assert_eq!(texts(&reopened), ["first"]);
 }

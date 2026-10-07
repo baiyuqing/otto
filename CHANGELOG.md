@@ -29,7 +29,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   sub-agent task, an undelivered notification, or a session a live ACP
   connection pinned. `DELETE /v1/sessions/{id}` still closes a session for
   good, `otto_sessions_evicted_total` counts automatic closes, and each one
-  logs `session_evicted` ([#PR](https://github.com/baiyuqing/otto/pull/PR),
+  logs `session_evicted` ([#394](https://github.com/baiyuqing/otto/pull/394),
   [user manual](docs/user-manual.md#session-lifetime)).
 
 - Run the direct ACP TCP deployment as one supervised pair: `scripts/otto-tcp.sh

@@ -254,7 +254,7 @@ fn footer_text(app: &App) -> String {
     };
     let mut text = format!(
         "{profile_model} | {} | tokens {}/{}",
-        if app.info.auto_mode { "AUTO" } else { "MANUAL" },
+        app.info.approval_mode.label(),
         format_token_count(app.usage.input_tokens),
         format_token_count(app.usage.output_tokens)
     );

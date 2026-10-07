@@ -27,7 +27,7 @@ struct Args {
 pub fn request_definition() -> ToolDefinition {
     definition(
         "request_approval",
-        "Ask the user to approve a proposal or review a prepared action. Decide yourself when consent is needed. Supply exactly one of proposal or subject_ref. This records an approval request and returns its decision and feedback; a proposal review always waits for the user, whatever the session approval mode, and only a bounded authorization inside the sandbox can be decided automatically; later calls in this batch will not execute. Confirmation does not grant tool permissions. Never claim approval before a recorded approval decision.",
+        "Ask the user to approve a proposal or review a prepared action. Decide yourself when consent is needed. Supply exactly one of proposal or subject_ref. This records an approval request and returns its decision and feedback. The session's approval mode, which only the user sets, decides it: MANUAL waits for the user, AUTO approves a bounded authorization inside the sandbox and still asks for a plan review, and YOLO approves every request of the session without asking. Later calls in this batch will not execute. Confirmation does not grant tool permissions. Never claim approval before a recorded approval decision.",
         json!({"type":"object","additionalProperties":false,"properties":{
             "title":{"type":"string"},"reason":{"type":"string"},
             "proposal":{"type":"string"},"subject_ref":{"type":"string"}
@@ -201,6 +201,7 @@ impl Tool for Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::ApprovalMode;
     use otto_core::model::OperationId;
     #[tokio::test]
     async fn child_controls_cannot_read_or_withdraw_another_tasks_request() {
@@ -266,7 +267,7 @@ mod tests {
                 task_id: String::new(),
                 run_id: String::new(),
             };
-            service.set_auto_mode(&scope, false).unwrap();
+            service.set_mode(&scope, ApprovalMode::Manual).unwrap();
             let mut changes = service.changes();
             let tool = RequestApproval {
                 service: service.clone(),

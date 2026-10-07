@@ -1005,7 +1005,9 @@ fn approval_request(value: &str) -> Result<otto_core::approval::Request> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::{Actor, ApplicationState, Kind, Proposal, Scope, Service, Subject};
+    use crate::approval::{
+        Actor, ApplicationState, Authority, Kind, Proposal, Scope, Service, Subject,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct Fence(AtomicBool);
@@ -1049,6 +1051,7 @@ mod tests {
         let request = service
             .create(Proposal {
                 kind: Kind::Authorization,
+                authority: Authority::Durable,
                 scope: scope.clone(),
                 subject: Subject {
                     tool_call_id: String::new(),
@@ -1258,6 +1261,7 @@ mod tests {
         let fresh = service
             .create(Proposal {
                 kind: Kind::Confirmation,
+                authority: Authority::Consent,
                 scope: scope.clone(),
                 subject: Subject {
                     tool_call_id: String::new(),

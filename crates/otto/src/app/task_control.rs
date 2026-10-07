@@ -55,6 +55,8 @@ pub(crate) struct TaskControl {
     steering: Arc<Steering>,
     state: Mutex<State>,
     journal: OnceLock<Arc<dyn Mailbox>>,
+    /// The session's durable turn queue (`turns.json`).
+    turn_queue: OnceLock<Arc<super::turn_queue::TurnQueue>>,
 }
 
 pub(crate) struct Run {
@@ -82,6 +84,18 @@ impl TaskControl {
     /// Whether a logical task is active (its `Run` is alive).
     pub(crate) fn is_active(&self) -> bool {
         self.lock().active.is_some()
+    }
+
+    /// Installs the durable turn-queue journal. A later call is ignored.
+    pub(crate) fn set_turn_queue_journal(&self, journal: Arc<dyn Mailbox>) {
+        let _ = self
+            .turn_queue
+            .set(Arc::new(super::turn_queue::TurnQueue::new(journal)));
+    }
+
+    /// The durable turn queue, when the session has one.
+    pub(crate) fn turn_queue(&self) -> Option<Arc<super::turn_queue::TurnQueue>> {
+        self.turn_queue.get().cloned()
     }
 
     /// Installs the durable follow-up journal. A later call is ignored.

@@ -31,13 +31,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [user manual](docs/user-manual.md#cross-workspace-deliveries)).
 
 - Report Otto's lifecycle to [Herdr](https://herdr.dev) when Herdr starts it in
-  a pane: the pane appears as the agent `otto`, `working` while a turn runs,
-  `blocked` while a tool call waits for your decision, and `idle` when it waits
-  for input. `herdr agent wait otto --until blocked`, `herdr agent prompt` and
-  the sidebar therefore work for Otto, and the reported session file plus
-  `otto --resume` command are what Herdr restores the session with. Nothing is
-  reported outside a Herdr pane, and only the frontend that is the pane's agent
-  reports: `otto serve`, `otto acp`, `--attach` and `--prompt` runs do not
+  a pane: the pane becomes the agent `otto` as soon as Otto starts, `working`
+  while a turn runs, `blocked` while a tool call waits for your decision, and
+  `idle` when it waits for input. `herdr agent wait otto --until blocked`,
+  `herdr agent prompt` and the sidebar therefore work for Otto, and the
+  reported session file plus `otto --resume` command are what Herdr restores
+  the session with. Nothing is reported outside a Herdr pane, and only the
+  frontend that is the pane's agent reports: `otto serve`, `otto acp`,
+  `--attach` and `--prompt` runs do not
   ([design](docs/specs/2026-10-07-herdr-agent-state.md),
   [#384](https://github.com/baiyuqing/otto/pull/384)).
 
@@ -221,6 +222,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
   with a browser instead. ([#355](https://github.com/baiyuqing/otto/pull/355))
 
 ### Features
+
+- Keep queued prompts across a crash or restart: `otto serve` turns sent with
+  `"queue": true` (including from the attached TUI and ACP) and local ACP
+  `/queue` prompts are saved with the session before they are accepted.
+  When the session is next opened, they run once each, in order, after the
+  interrupted turn's automatic resume, keeping their serve turn ids, with a
+  notice. A prompt that cannot be saved is refused (`503
+  input_not_persisted`); cancelling or deleting removes it for good. Images
+  in queued prompts are not saved
+  ([design](docs/specs/2026-10-07-durable-turn-queue.md)).
 
 - Let the model keep a short plan for multi-step work with the new
   `update_plan` tool: up to 20 one-line steps, each `pending`, `in_progress` or

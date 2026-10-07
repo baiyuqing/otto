@@ -752,6 +752,19 @@ A fault test must prove the fault fired: assert the request count or the
 recorded request, not only that the client returned an error. The provider
 matrix is `crates/otto/tests/fault_provider.rs`; each test name states its row.
 
+SQL faults use `otto::faults::sql::FaultySqlDriver`, which wraps an
+`SqlDriver` and every connection, statement and row cursor it opens. Each
+Turso repository has an `open_with_driver` constructor, and
+`tests/storage_boundary.rs` fails if a repository calls `Connection::open`
+directly. The rule subject is the database path for `Open`, `Begin`,
+`Commit`, `Rollback`, `Checkpoint` and `Close`, and the SQL text for
+`ExecuteBatch`, `Execute`, `Prepare`, `Query` and `Step`; select statements
+with `Filter::SqlPrefix`. Errors are `FaultError::Sql`. The decorator applies
+the real driver's poisoning rules: a commit error other than busy or
+constraint is reported as `CommitUnknown`, and after `CommitUnknown` or a
+failed rollback every later call on that connection returns `Closed`. The
+repository matrix is `crates/otto/tests/fault_storage.rs`.
+
 ## Docker acceptance
 
 After changing `Dockerfile`, `.dockerignore` or `compose.yaml`, build the

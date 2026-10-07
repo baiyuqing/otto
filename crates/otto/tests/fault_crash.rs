@@ -124,15 +124,19 @@ fn a_crash_during_a_journal_append_leaves_a_torn_line_that_reopen_truncates_and_
             let (store, _plan) = store(
                 dir,
                 vec![
-                    Rule::new(FileOp::Write, Trigger::Nth(5), Fault::ShortExit { keep: 7 })
-                        .filter(Filter::NameSuffix(".jsonl")),
+                    Rule::new(
+                        FileOp::Write,
+                        Trigger::Nth(5),
+                        Fault::ShortExit { keep: 1500 },
+                    )
+                    .filter(Filter::NameSuffix(".jsonl")),
                 ],
             );
             store.append_message(&user("first")).expect("first");
             store
                 .append_message(&tool_call("call-1", "bash"))
                 .expect("tool call");
-            let _ = store.append_message(&tool_result("call-1", "bash", "done"));
+            let _ = store.append_message(&tool_result("call-1", "bash", &"x".repeat(2000)));
         }
         Role::Parent(dir, status) => {
             assert_eq!(
@@ -163,6 +167,14 @@ fn a_crash_during_a_journal_append_leaves_a_torn_line_that_reopen_truncates_and_
             assert_eq!(messages[2].blocks[0].text, MAY_HAVE_RUN_TOOL_RESULT_TEXT);
             let repaired = std::fs::read_to_string(&path).expect("read journal");
             assert!(repaired.ends_with('\n'));
+            // The torn fragment is longer than the repair record, so a line
+            // left behind by a missing truncation is not overwritten.
+            for line in repaired.lines() {
+                assert!(
+                    serde_json::from_str::<serde_json::Value>(line).is_ok(),
+                    "every journal line is complete JSON after the reopen: {line:.60}"
+                );
+            }
         }
     });
 }

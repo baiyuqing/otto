@@ -1150,16 +1150,29 @@ impl StoreState {
             self.owns_lease = true;
         }
 
+        // The suffix is not `.jsonl`: session scans read only `*.jsonl`.
+        let temp = format!(
+            "{filename}.{}.tmp",
+            crate::auth::random_hex::<8>()
+                .map_err(|error| PiError::other(format!("name session file: {error}")))?
+        );
         let mut file = session_dir
-            .open_journal(filename, JournalOpen::CreateNew)
+            .open_journal(&temp, JournalOpen::CreateNew)
             .map_err(|error| PiError::other(format!("create session file: {error}")))?;
 
+        let mut published = false;
         let result = file
             .lock_exclusive()
             .map_err(|error| PiError::other(format!("lock session file: {error}")))
             .and_then(|_| self.check_lease())
             .and_then(|_| self.write_initial_records(file.as_mut()))
             .and_then(|value| {
+                // A process exit before the publish leaves only the temporary
+                // file, which no session scan reads.
+                session_dir
+                    .publish_journal(&temp, filename)
+                    .map_err(|error| PiError::other(format!("publish session file: {error}")))?;
+                published = true;
                 session_dir
                     .sync_all()
                     .map(|_| value)
@@ -1169,7 +1182,8 @@ impl StoreState {
             Ok(value) => value,
             Err(error) => {
                 drop(file);
-                if let Err(remove) = session_dir.remove_journal(filename)
+                let held = if published { filename } else { &temp };
+                if let Err(remove) = session_dir.remove_journal(held)
                     && remove.kind() != std::io::ErrorKind::NotFound
                 {
                     return Err(PiError::other(format!(

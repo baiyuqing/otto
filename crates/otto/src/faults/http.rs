@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -462,12 +463,28 @@ pub async fn spawn_scripted(scripts: Vec<Script>) -> Server {
     serve(bind().await, script_handler(scripts))
 }
 
+/// Like [`spawn_scripted`], with `script` for every connection.
+pub async fn spawn_repeating(script: Script) -> Server {
+    serve(
+        bind().await,
+        connection_handler(move || Some(script.clone())),
+    )
+}
+
 fn script_handler(
     scripts: Vec<Script>,
-) -> impl Fn(TcpStream, Request) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
-    let scripts = Arc::new(Mutex::new(VecDeque::from(scripts)));
+) -> impl Fn(TcpStream, Request) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    let scripts = Mutex::new(VecDeque::from(scripts));
+    connection_handler(move || scripts.lock().unwrap().pop_front())
+}
+
+/// Runs the script `next` returns on each connection; `None` runs
+/// [`Script::unplanned`].
+fn connection_handler(
+    next: impl Fn() -> Option<Script> + Send + Sync + 'static,
+) -> impl Fn(TcpStream, Request) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     move |mut stream, _| {
-        let script = scripts.lock().unwrap().pop_front();
+        let script = next();
         Box::pin(async move {
             script
                 .unwrap_or_else(Script::unplanned)

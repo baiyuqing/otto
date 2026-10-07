@@ -34,11 +34,17 @@ pub(crate) struct Ticket {
 #[derive(Debug, Clone)]
 pub(crate) enum Request {
     Sessions,
+    /// The current session's fork points, newest first, as session choices
+    /// whose value is the prompt's entry id.
+    ForkPoints,
     Profiles,
     Context,
     SandboxPath(String),
     Agents(ListQuery),
-    AgentDetail { parent: String, id: String },
+    AgentDetail {
+        parent: String,
+        id: String,
+    },
     Reviews,
     ApprovalSnapshot,
     Management(crate::app::management::Request),
@@ -51,6 +57,9 @@ pub(crate) enum Command {
     NewSession,
     Resume(String),
     Archive(String),
+    /// Fork the current session before the prompt with this entry id and
+    /// switch to the fork.
+    Fork(String),
     SwitchProfile(String),
     SwitchProfileThinking {
         profile: String,
@@ -117,6 +126,14 @@ pub(crate) enum Reply {
         info: Info,
         history: Option<Vec<Message>>,
         prompt: Option<String>,
+    },
+    /// The switch to a fork; `draft` is the prompt the fork stops before,
+    /// placed in the editor rather than sent.
+    Forked {
+        message: String,
+        info: Info,
+        history: Vec<Message>,
+        draft: Option<String>,
     },
 }
 
@@ -269,6 +286,13 @@ async fn local(
         }
         request => {
             blocking(controller, move |c| match request {
+                Request::ForkPoints => c.fork_points().map(|points| {
+                    Reply::Sessions(fork_point_choices(
+                        points
+                            .into_iter()
+                            .map(|point| (point.entry_id, point.prompt)),
+                    ))
+                }),
                 Request::Sessions => c.list_sessions(50).map(|result| {
                     Reply::Sessions(
                         result
@@ -374,14 +398,48 @@ fn decide(
     Ok(())
 }
 
+/// Picker rows for fork points given oldest first: newest first, labelled
+/// with the prompt's first line.
+pub(crate) fn fork_point_choices(
+    points: impl DoubleEndedIterator<Item = (String, String)>,
+) -> Vec<SessionChoice> {
+    points
+        .rev()
+        .map(|(entry_id, prompt)| SessionChoice {
+            label: prompt
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or_default()
+                .chars()
+                .take(80)
+                .collect(),
+            value: entry_id,
+        })
+        .collect()
+}
+
+fn forked_message(path: &str) -> String {
+    format!("Forked: {path}\nThe prompt is in the editor; edit it or send it as is.")
+}
+
 async fn local_command(c: Arc<Controller>, command: Command) -> Result<Reply, String> {
     if let Command::Image(path) = command {
         return load_image(path).await;
     }
+    if let Command::Fork(entry_id) = command {
+        let (result, draft) = c.fork_session(Some(&entry_id)).await?;
+        let (info, history) = blocking(c, move |c| Ok((c.info(), c.history()))).await?;
+        return Ok(Reply::Forked {
+            message: forked_message(&result.session_path),
+            info,
+            history,
+            draft,
+        });
+    }
     let mut history = false;
     let mut prompt = None;
     let message = match command {
-        Command::Image(_) => unreachable!(),
+        Command::Image(_) | Command::Fork(_) => unreachable!(),
         Command::NewSession => {
             c.new_session().await?;
             history = true;
@@ -699,6 +757,13 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                 })
                 .collect(),
         )),
+        Request::ForkPoints => Ok(Reply::Sessions(fork_point_choices(
+            client
+                .fork_points(session)
+                .await
+                .map_err(|e| e.to_string())?
+                .into_iter(),
+        ))),
         Request::Context => client
             .context(session)
             .await
@@ -751,6 +816,22 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                     remote.open(None, Some(&id)).await.map_err(mutation_error)?;
                     history = true;
                     format!("Session: {}", remote.session())
+                }
+                Command::Fork(entry_id) => {
+                    let (fork, draft) = client
+                        .fork_session(session, Some(&entry_id))
+                        .await
+                        .map_err(mutation_error)?;
+                    remote.open(None, Some(&fork)).await.map_err(mutation_error)?;
+                    remote.refresh_info().await.map_err(|e| {
+                        format!("operation completed but session refresh failed: {e}")
+                    })?;
+                    return Ok(Reply::Forked {
+                        message: forked_message(&fork),
+                        info: remote.info(),
+                        history: remote.history(),
+                        draft,
+                    });
                 }
                 Command::Rename(name) => {
                     client
@@ -821,7 +902,7 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                     return remote_management(remote, session, request).await;
                 }
                 Command::AdmitInput(text) => match client
-                    .admit_input(session, &text)
+                    .admit_input(session, &text, None)
                     .await
                     .map_err(mutation_error)?
                 {

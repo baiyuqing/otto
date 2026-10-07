@@ -235,9 +235,9 @@ impl Prepared {
         }
     }
 
-    /// Lets a takeover leave calls of the tools `replayable` accepts without a
+    /// Lets recovery leave calls of the tools `replayable` accepts without a
     /// result, for the agent to run again, instead of settling them as
-    /// interrupted. See [`Takeover::replayable`](super::Takeover).
+    /// interrupted. See [`Recovery::replayable`](super::Recovery).
     pub fn with_replayable(mut self, replayable: fn(&str) -> bool) -> Self {
         self.replayable = replayable;
         self
@@ -459,6 +459,8 @@ pub(crate) fn archive_open_file(
     // replaced runner.
     let _ = std::fs::remove_file(Path::new(&candidate_path).with_extension("reminders.json"));
     let _ = std::fs::remove_file(Path::new(&candidate_path).with_extension("inbox.json"));
+    let _ = std::fs::remove_file(Path::new(&candidate_path).with_extension("inputs.json"));
+    let _ = std::fs::remove_file(Path::new(&candidate_path).with_extension("followups.json"));
     // Sub-agent transcripts live in `<stem>/` beside the session file
     // (`Store::create_child_lazy`) and move with it.
     let children = Path::new(&candidate_path).with_extension("");

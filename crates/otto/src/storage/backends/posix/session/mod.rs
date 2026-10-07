@@ -1,5 +1,6 @@
 //! POSIX session journal repository and its stable native façade.
 
+mod fork;
 mod list;
 pub(crate) mod prepared;
 pub(super) mod store;
@@ -9,10 +10,11 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use crate::session::fsops;
+pub use fork::Forked;
 pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
 pub use prepared::{ArchiveResult, Prepared};
 pub(crate) use store::unanswered_calls_from;
-pub use store::{Store, Takeover, UnansweredCall};
+pub use store::{MAX_AUTOMATIC_RESUMES, Recovery, RecoveryCause, Store, UnansweredCall};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -58,8 +60,11 @@ impl SessionHandle for Store {
     fn lease(&self) -> Option<Arc<dyn crate::session::WriterOwnership>> {
         Store::lease(self)
     }
-    fn take_takeover(&self) -> Option<Takeover> {
-        Store::take_takeover(self)
+    fn take_recovery(&self) -> Option<Recovery> {
+        Store::take_recovery(self)
+    }
+    fn forked_from(&self) -> Option<otto_core::session::ForkRecord> {
+        Store::forked_from(self)
     }
 }
 
@@ -76,6 +81,24 @@ impl PosixSessionRepository {
 }
 
 impl SessionRepository for PosixSessionRepository {
+    fn fork(
+        &self,
+        reference: &str,
+        before: Option<&str>,
+        new_id: &str,
+    ) -> Result<Forked, otto_core::session::ForkError> {
+        fork::fork(self.driver.as_ref(), Path::new(reference), before, new_id)
+    }
+
+    fn fork_points(&self, reference: &str) -> Result<Vec<otto_core::session::ForkPoint>, String> {
+        let (entries, _) = Store::read_entries(reference).map_err(|error| error.to_string())?;
+        let leaf = entries
+            .last()
+            .map(|entry| entry.id.as_str())
+            .unwrap_or_default();
+        otto_core::session::fork_points(&entries, leaf).map_err(|error| error.to_string())
+    }
+
     fn validate_existing_root(&self, root: &Path) -> Result<(), String> {
         let root_handle = self
             .driver

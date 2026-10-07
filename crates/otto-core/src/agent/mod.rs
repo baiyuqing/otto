@@ -24,6 +24,7 @@ use chrono::{DateTime, Utc};
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
+mod capabilities;
 pub mod compaction;
 pub mod compaction_select;
 pub mod context_estimate;
@@ -63,10 +64,13 @@ use crate::provider::{
 };
 use crate::session::Session;
 use crate::session::context::pending_tool_calls;
-use crate::session::operation::OperationFact;
+use crate::session::operation::{OperationFact, replay_allowed};
+use crate::session::turn::{
+    TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, encode_turn_record,
+};
 use crate::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
 
-use inbox::Inbox;
+use crate::mailbox::{InMemoryMailbox, Mailbox};
 use memory::{DEFAULT_RECALL_LIMIT, DEFAULT_RECALL_TOKEN_BUDGET, MemoryRecall};
 use overflow::{
     AUTOMATIC_COMPACTION_ATTEMPT_USED_MESSAGE, AUTOMATIC_COMPACTION_HARD_FAILURE_MESSAGE,
@@ -112,12 +116,15 @@ pub struct Options {
     /// How many tokens one recall may spend.
     pub memory_recall_token_budget: i64,
     /// Notifications waiting to be delivered as context messages. Shared with
-    /// whoever pushes into it, which is why it is behind an `Arc`.
-    pub inbox: Arc<Inbox>,
+    /// producers through the public mailbox port.
+    pub mailbox: Arc<dyn Mailbox>,
     /// Turn-bound guidance accepted by a frontend while a run is active.
     pub steering: Arc<steering::Steering>,
     /// The subagent task registry, closed by [`Agent::close`].
     pub tasks: Option<Arc<dyn TaskRegistry + Send + Sync>>,
+    /// The running Otto package version, recorded with the tool set. Empty
+    /// when unknown.
+    pub version: String,
 }
 
 /// The default clock returns the zero time and the default identifier
@@ -145,9 +152,10 @@ impl Default for Options {
             memory: None,
             memory_recall_limit: DEFAULT_RECALL_LIMIT,
             memory_recall_token_budget: DEFAULT_RECALL_TOKEN_BUDGET,
-            inbox: Arc::new(Inbox::default()),
+            mailbox: Arc::new(InMemoryMailbox::default()),
             steering: Arc::new(steering::Steering::default()),
             tasks: None,
+            version: String::new(),
         }
     }
 }
@@ -165,9 +173,23 @@ pub struct Agent<P, T, S> {
     /// The memory block the last user turn recalled, for the context report.
     last_memory_context: std::sync::Mutex<String>,
     hook_turn_id: std::sync::Mutex<String>,
+    /// The client input id of the next run's user message; taken by every
+    /// run, used or not. See [`Agent::set_next_input_id`].
+    next_input_id: std::sync::Mutex<Option<String>>,
 }
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
+    /// Records the client's input id for the user message of the next run,
+    /// so a client retry can be recognised in the transcript
+    /// ([`Session::has_input`]). Every run takes it, whether or not it
+    /// appends a user message.
+    pub fn set_next_input_id(&self, input_id: Option<String>) {
+        *self
+            .next_input_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = input_id;
+    }
+
     /// An agent that redacts nothing.
     pub fn new(provider: P, tools: T, session: S, options: Options) -> Self {
         Self::with_redactor(provider, tools, session, options, Redactor::new(&[]))
@@ -206,6 +228,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             options,
             redactor,
             hook_turn_id: std::sync::Mutex::new(String::new()),
+            next_input_id: std::sync::Mutex::new(None),
             last_memory_context: std::sync::Mutex::default(),
         }
     }
@@ -269,9 +292,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         self.options.tasks.as_ref()
     }
 
-    /// The inbox shared with producers that can add context to this agent.
-    pub fn inbox(&self) -> &Arc<Inbox> {
-        &self.options.inbox
+    /// The mailbox shared with producers that can add context to this agent.
+    pub fn mailbox(&self) -> &Arc<dyn Mailbox> {
+        &self.options.mailbox
     }
 
     /// Releases the memory binding and cancels every tracked task.
@@ -483,14 +506,121 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
         followup: bool,
     ) -> Result<(), AgentError> {
+        let input_id = self
+            .next_input_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         if !self.redactor.allows_dynamic_content() {
             return self.run_with_incomplete_redactions(emit, control);
         }
         let text = trim_go_space(user_text);
-        if text.is_empty() && image.is_none() && self.options.inbox.is_empty() {
+        if text.is_empty() && image.is_none() && self.options.mailbox.is_empty() {
             return Err(self.fail(emit, AgentError::EmptyUserText));
         }
-        let steering = self.options.steering.begin();
+        let wake = text.is_empty() && image.is_none();
+        let (turn_id, resumes) = self
+            .start_turn(wake)
+            .await
+            .map_err(|error| self.fail(emit, error))?;
+        let result = self
+            .run_turn(
+                user_text,
+                image,
+                system_context,
+                emit,
+                control,
+                followup,
+                (&turn_id, resumes.as_deref()),
+                input_id,
+            )
+            .await;
+        self.end_turn(turn_id, &result, control).await;
+        result
+    }
+
+    /// Appends the `otto.turn` start record, the turn's first durable write.
+    /// A wake turn that follows a turn process loss interrupted is recorded
+    /// as that turn's recovery; every other turn starts a new chain. Returns
+    /// the turn id and, when this turn follows an interrupted turn that has
+    /// not used its automatic resume, that turn's id: its journaled steering
+    /// is delivered by this turn.
+    async fn start_turn(&self, wake: bool) -> Result<(String, Option<String>), AgentError> {
+        let turn_id = (self.options.new_operation_id)()
+            .map_err(|message| AgentError::OperationIdentity { message })?
+            .to_string();
+        let interrupted = self.session.interrupted_turn();
+        let resumes = interrupted
+            .as_ref()
+            .filter(|prior| !prior.resume_exhausted())
+            .map(|prior| prior.turn_id.clone());
+        let record = match interrupted {
+            Some(prior) if wake => TurnRecord::started(
+                turn_id.clone(),
+                TurnTrigger::Recovery,
+                prior.attempt.saturating_add(1),
+                Some(prior.turn_id),
+            ),
+            _ => TurnRecord::started(
+                turn_id.clone(),
+                if wake {
+                    TurnTrigger::Wake
+                } else {
+                    TurnTrigger::User
+                },
+                1,
+                None,
+            ),
+        };
+        self.session
+            .append_custom(TURN_CUSTOM_TYPE, &encode_turn_record(&record))
+            .await
+            .map_err(|source| AgentError::Persist {
+                kind: "turn start".into(),
+                source,
+            })?;
+        Ok((turn_id, resumes))
+    }
+
+    /// Appends the `otto.turn` end record. A failed append is not reported:
+    /// the turn keeps its own result, and a store whose write failed rejects
+    /// every later write anyway.
+    async fn end_turn(
+        &self,
+        turn_id: String,
+        result: &Result<(), AgentError>,
+        control: &dyn OperationControl,
+    ) {
+        let outcome = match result {
+            Ok(()) => TurnOutcome::Completed,
+            Err(_) if control.stop_reason().is_some() => TurnOutcome::Cancelled,
+            Err(_) => TurnOutcome::Failed,
+        };
+        let _ = self
+            .session
+            .append_custom(
+                TURN_CUSTOM_TYPE,
+                &encode_turn_record(&TurnRecord::ended(turn_id, outcome)),
+            )
+            .await;
+    }
+
+    /// The body of one admitted turn, between its `otto.turn` records.
+    /// `turn` is this turn's id and the interrupted turn it resumes, if any.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn(
+        &self,
+        user_text: &str,
+        image: Option<Block>,
+        system_context: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+        followup: bool,
+        turn: (&str, Option<&str>),
+        input_id: Option<String>,
+    ) -> Result<(), AgentError> {
+        let text = trim_go_space(user_text);
+        let steering = self.options.steering.begin_turn(turn.0, turn.1);
         emit(Event::AgentStarted);
         if let Some(error) = stopped_provider_error(control) {
             let operation_id = match (self.options.new_operation_id)() {
@@ -531,6 +661,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(self.fail(emit, error));
         }
 
+        if let Err(error) = self.announce_tool_changes().await {
+            return Err(self.fail(emit, error));
+        }
+
         if !text.is_empty() || image.is_some() {
             let redacted = self.redactor.redact_string(user_text);
             let persisted_text = if followup {
@@ -554,6 +688,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 display: followup,
                 created_at: (self.options.now)(),
                 blocks,
+                input_id: input_id.unwrap_or_default(),
                 ..Message::default()
             };
             if let Err(source) = self.session.append(user).await {
@@ -652,7 +787,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 if let Some(error) = stopped_provider_error(control) {
                     return Err(self.fail(emit, AgentError::Provider(error)));
                 }
-                if self.options.inbox.queued().iter().any(|entry| {
+                if self.options.mailbox.queued().iter().any(|entry| {
                     entry.notification.kind == Some(inbox::NotificationKind::UserMessage)
                 }) {
                     if let Err(error) = self.deliver_notifications(emit).await {
@@ -696,6 +831,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         skipped: bool,
     ) -> Result<crate::approval::BatchControl, AgentError> {
         let mut arguments = block.arguments.clone().unwrap_or_else(empty_object);
+        let plan_before = self.session.plan();
         let (operation_id, attempt) = match prior {
             Some((operation_id, attempts)) => (operation_id, attempts + 1),
             None => match (self.options.new_operation_id)() {
@@ -710,7 +846,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             attempt,
             block.tool_call_id.clone(),
             block.tool_name.clone(),
-        );
+        )
+        .with_retry_safety(self.tools.retry_safety(&block.tool_name));
         if let Err(source) = self.session.append_operation_fact(attempt_fact).await {
             return Err(self.fail(
                 emit,
@@ -872,6 +1009,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             result: execution.result,
             outcome: execution.outcome,
         });
+        let plan_after = self.session.plan();
+        if plan_after != plan_before {
+            emit(Event::PlanUpdated { steps: plan_after });
+        }
         let stored = Message {
             id: (self.options.new_id)(),
             role: Role::Tool,
@@ -926,15 +1067,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let ledger = self.session.operation_ledger();
         let mut priors = Vec::with_capacity(pending.len());
         for call in &pending {
-            match ledger.operation_for_tool_call(&call.tool_call_id) {
-                None => priors.push(None),
-                Some(record)
-                    if !record.corrupt && record.terminal.is_none() && record.attempts <= 1 =>
-                {
-                    priors.push(Some((record.operation_id.clone(), record.attempts)));
-                }
-                Some(_) => return Ok(()),
+            let record = ledger.operation_for_tool_call(&call.tool_call_id);
+            if !replay_allowed(record, true) {
+                return Ok(());
             }
+            priors.push(record.map(|record| (record.operation_id.clone(), record.attempts)));
         }
         for (call, prior) in pending.iter().zip(priors) {
             self.run_tool_call(emit, state, control, call, prior, false)
@@ -947,14 +1084,17 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     /// reports it, removing it from the inbox only after its append
     /// returned. A no-op when the inbox is empty. A failed append leaves that
     /// item and every later one queued, so a following call (or a later
-    /// resume, for a persisted inbox) delivers it exactly once more.
+    /// resume, for a persisted inbox) delivers it again. A notification with
+    /// an id is appended through [`Session::append_input_if_absent`], so one
+    /// that was appended before an interruption kept it queued is
+    /// acknowledged without a second message.
     ///
     /// The queue is read once at the top, not drained: an item pushed by
     /// another task while this loop awaits an append is not in this read and
     /// is picked up by the next call, in order, rather than lost or
     /// reordered.
     async fn deliver_notifications(&self, emit: EventSink<'_>) -> Result<(), AgentError> {
-        for entry in self.options.inbox.queued() {
+        for entry in self.options.mailbox.queued() {
             let notification = entry.notification;
             let text = self.redactor.redact_string(&notification.text);
             let user_message = notification.kind == Some(inbox::NotificationKind::UserMessage);
@@ -982,14 +1122,23 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 blocks: vec![Block::text(text.clone())],
                 ..Message::default()
             };
-            self.session
-                .append(message)
-                .await
-                .map_err(|source| AgentError::Persist {
-                    kind: "notification".into(),
-                    source,
-                })?;
-            self.options.inbox.remove_seq(entry.seq);
+            let appended = if notification.id.is_empty() {
+                self.session.append(message).await.map(|()| true)
+            } else {
+                self.session
+                    .append_input_if_absent(&notification.id, message)
+                    .await
+                    .map(|outcome| outcome == crate::session::AppendOutcome::Appended)
+            }
+            .map_err(|source| AgentError::Persist {
+                kind: "notification".into(),
+                source,
+            })?;
+            self.options.mailbox.ack(entry.seq);
+            if !appended {
+                // Delivered before an interruption that kept it queued.
+                continue;
+            }
             emit(Event::Notification {
                 kind: notification.kind,
                 task_id: notification.task_id,
@@ -997,6 +1146,53 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 usage: notification.usage.unwrap_or_default(),
                 present: notification.usage.is_some(),
             });
+        }
+        Ok(())
+    }
+
+    /// Appends the one-time capability change notice as a context message,
+    /// then the `otto.capabilities` record. The message goes first: a failure
+    /// between the two repeats the notice, while the reverse order could lose
+    /// it. The record is also rewritten, without a notice, when only fields
+    /// that produce no notice differ, such as the Otto version.
+    async fn announce_tool_changes(&self) -> Result<(), AgentError> {
+        let current = self.current_capabilities();
+        let observed = self.session.observed_capabilities();
+        let has_history = self.session.latest_compaction().is_some()
+            || self
+                .session
+                .model_messages()
+                .iter()
+                .any(|message| message.role == Role::Assistant);
+        let notice = capabilities::notice(observed.as_ref(), &current, has_history);
+        if !notice.is_empty() {
+            let message = crate::session::context::new_context_message(
+                &(self.options.new_id)(),
+                crate::session::CAPABILITY_UPDATE_CONTEXT_TYPE,
+                true,
+                notice,
+                (self.options.now)(),
+                None,
+            );
+            self.session
+                .append(message)
+                .await
+                .map_err(|source| AgentError::Persist {
+                    kind: "capability update".into(),
+                    source,
+                })?;
+        }
+        if observed.as_ref() != Some(&current) {
+            self.session
+                .append_custom(
+                    crate::session::CAPABILITIES_CUSTOM_TYPE,
+                    &crate::session::encode_capabilities(&current),
+                )
+                .await
+                .map_err(|source| AgentError::Persist {
+                    kind: "capability record".into(),
+                    source,
+                })?;
         }
         Ok(())
     }
@@ -1023,13 +1219,22 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 blocks: vec![Block::text(text.clone())],
                 ..Message::default()
             };
-            self.session
-                .append(message)
-                .await
-                .map_err(|source| AgentError::Persist {
-                    kind: "steering message".into(),
-                    source,
-                })?;
+            let appended = if steering.input_id.is_empty() {
+                self.session.append(message).await.map(|()| true)
+            } else {
+                self.session
+                    .append_input_if_absent(&steering.input_id, message)
+                    .await
+                    .map(|outcome| outcome == crate::session::AppendOutcome::Appended)
+            }
+            .map_err(|source| AgentError::Persist {
+                kind: "steering message".into(),
+                source,
+            })?;
+            self.options.steering.delivered(&steering);
+            if !appended {
+                continue;
+            }
             emit(Event::Notification {
                 kind: Some(inbox::NotificationKind::UserMessage),
                 task_id: String::new(),
@@ -1195,6 +1400,25 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             )),
             Some(error) => Err(error),
             None => Ok(response),
+        }
+    }
+
+    /// The capabilities a request sends: sorted, deduplicated tool names,
+    /// their definition digests and the version.
+    fn current_capabilities(&self) -> crate::session::Capabilities {
+        let definitions = self.tools.definitions();
+        let mut tools: Vec<String> = definitions.iter().map(|d| d.name.clone()).collect();
+        tools.sort();
+        tools.dedup();
+        crate::session::Capabilities {
+            tools,
+            definitions: Some(
+                definitions
+                    .iter()
+                    .map(|d| (d.name.clone(), capabilities::definition_digest(d)))
+                    .collect(),
+            ),
+            version: (!self.options.version.is_empty()).then(|| self.options.version.clone()),
         }
     }
 
@@ -1708,8 +1932,12 @@ mod tests {
             EchoExecutor.definitions()
         }
 
-        fn replayable(&self, name: &str) -> bool {
-            self.replayable.contains(&name)
+        fn retry_safety(&self, name: &str) -> crate::model::RetrySafety {
+            if self.replayable.contains(&name) {
+                crate::model::RetrySafety::ReadOnly
+            } else {
+                crate::model::RetrySafety::NonIdempotent
+            }
         }
 
         async fn execute(
@@ -1790,8 +2018,15 @@ mod tests {
             .collect();
         assert_eq!(
             roles,
-            vec![Role::Assistant, Role::Tool, Role::User, Role::Assistant],
-            "the result follows its call before the user message"
+            vec![
+                Role::Assistant,
+                Role::Tool,
+                Role::Context,
+                Role::User,
+                Role::Assistant
+            ],
+            "the result follows its call; the legacy tool-set notice (history, no record) \
+             precedes the user message"
         );
     }
 
@@ -1821,6 +2056,7 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn run_executes_a_tool_turn_then_a_text_turn() {
+        // op_1 is the turn id of the `otto.turn` records.
         let provider = ScriptedProvider::new(vec![
             (Vec::new(), assistant_tool_call()),
             (
@@ -1842,7 +2078,7 @@ mod tests {
             .expect("run");
 
         let api_call = Event::ProviderApiCall {
-            operation_id: OperationId::new("op_1").expect("operation id"),
+            operation_id: OperationId::new("op_2").expect("operation id"),
             provider: "fake".into(),
             model: "test-model".into(),
             duration: std::time::Duration::ZERO,
@@ -1855,7 +2091,7 @@ mod tests {
             },
         };
         let second_api_call = Event::ProviderApiCall {
-            operation_id: OperationId::new("op_3").expect("operation id"),
+            operation_id: OperationId::new("op_4").expect("operation id"),
             provider: "fake".into(),
             model: "test-model".into(),
             duration: std::time::Duration::ZERO,
@@ -1881,14 +2117,14 @@ mod tests {
                     present: true,
                 },
                 Event::ToolCallStarted {
-                    operation_id: OperationId::new("op_2").expect("operation id"),
+                    operation_id: OperationId::new("op_3").expect("operation id"),
                     attempt: 1,
                     tool_name: "echo".into(),
                     tool_call_id: "call-1".into(),
                     arguments: r#"{"value":1}"#.into(),
                 },
                 Event::ToolCallFinished {
-                    operation_id: OperationId::new("op_2").expect("operation id"),
+                    operation_id: OperationId::new("op_3").expect("operation id"),
                     attempt: 1,
                     tool_name: "echo".into(),
                     tool_call_id: "call-1".into(),
@@ -2088,7 +2324,7 @@ mod tests {
             vec![
                 Event::AgentStarted,
                 Event::ProviderApiCall {
-                    operation_id: OperationId::new("op_1").expect("operation id"),
+                    operation_id: OperationId::new("op_2").expect("operation id"),
                     provider: "fake".into(),
                     model: "test-model".into(),
                     duration: std::time::Duration::ZERO,

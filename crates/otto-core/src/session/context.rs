@@ -8,7 +8,7 @@
 //! Concurrency: no shared state. Errors: every failure is a [`PiError`],
 //! classified by [`PiError::kind`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 
@@ -31,6 +31,7 @@ use super::pi::{
     PiContentBlock, PiContextEdit, PiCustomMessage, PiEntry, PiMessage, PiOttoDetails, PiUsage,
     decode_pi_otto_details, encode_pi_otto_details,
 };
+use super::turn::{InterruptedTurn, TURN_CUSTOM_TYPE, apply_turn_record, decode_turn_record};
 use super::types::{Header, RuntimeMetadata, Snapshot, Warning};
 use super::{PiError, PiErrorKind};
 
@@ -40,6 +41,9 @@ pub const COMPACTION_CONTEXT_TYPE: &str = "compaction";
 pub const BRANCH_CONTEXT_TYPE: &str = "branch_summary";
 /// Custom entry type carrying Otto's runtime metadata.
 pub const OTTO_RUNTIME_CUSTOM_TYPE: &str = "otto.runtime";
+/// Custom entry type carrying the tool names the session's latest run sent;
+/// written at run start when absent or different.
+pub const CAPABILITIES_CUSTOM_TYPE: &str = "otto.capabilities";
 
 const MAX_CONTEXT_WARNINGS: usize = 32;
 const MAX_WARNING_TYPE_BYTES: usize = 32;
@@ -49,6 +53,8 @@ const MAX_WARNING_TYPE_BYTES: usize = 32;
 // types written by other Pi-compatible tools.
 const TASK_NOTIFICATION_CONTEXT_TYPE: &str = "task_notification";
 const PARENT_MESSAGE_CONTEXT_TYPE: &str = "parent_message";
+/// Context type of the one-time tool-set change notice.
+pub const CAPABILITY_UPDATE_CONTEXT_TYPE: &str = "capability_update";
 
 static ENTRY_ID_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("^[0-9a-f]{8}$").expect("entry id pattern compiles"));
@@ -73,6 +79,19 @@ pub struct ResolvedContext {
     pub session_name: String,
     pub thinking_level: String,
     pub operation_ledger: OperationLedger,
+    /// The latest `otto.capabilities` entry on the active path, or `None`
+    /// when there is none or it is malformed.
+    pub observed_capabilities: Option<Capabilities>,
+    /// The newest `otto.turn` start on the active path without a matching
+    /// end; see [`crate::session::turn`].
+    pub interrupted_turn: Option<InterruptedTurn>,
+    /// The steps of the latest valid `otto.plan` record on the active path;
+    /// see [`crate::session::plan`].
+    pub plan: Vec<crate::session::plan::PlanStep>,
+    /// Every input id delivered on the active path, including messages a
+    /// compaction checkpoint has since summarized away, so an input is
+    /// recognised as delivered for as long as its entry is on the path.
+    pub input_ids: HashSet<String>,
 }
 
 impl Default for ResolvedContext {
@@ -86,8 +105,35 @@ impl Default for ResolvedContext {
             session_name: String::new(),
             thinking_level: "off".into(),
             operation_ledger: OperationLedger::default(),
+            observed_capabilities: None,
+            interrupted_turn: None,
+            plan: Vec::new(),
+            input_ids: HashSet::new(),
         }
     }
+}
+
+/// The input ids on the whole active `path`: those of the context
+/// `messages` plus those of entries before the latest compaction checkpoint.
+/// Entries a checkpoint summarized were valid when appended; one that no
+/// longer decodes contributes no id rather than failing the resolution.
+fn path_input_ids(
+    path: &[PiEntry],
+    context_path: &[PiEntry],
+    messages: &[Message],
+) -> HashSet<String> {
+    let in_context: HashSet<&str> = context_path.iter().map(|entry| entry.id.as_str()).collect();
+    let summarized = path
+        .iter()
+        .filter(|entry| !in_context.contains(entry.id.as_str()))
+        .flat_map(|entry| pi_entry_to_context_messages(entry).unwrap_or_default());
+    messages
+        .iter()
+        .cloned()
+        .chain(summarized)
+        .filter(|message| !message.input_id.is_empty())
+        .map(|message| message.input_id)
+        .collect()
 }
 
 /// Entry lookup built once per resolution: id to entry and id to file position.
@@ -210,6 +256,34 @@ pub fn build_context(
                     .ok_or_else(|| PiError::invalid("custom payload is required"))?;
                 if custom.custom_type == OTTO_RUNTIME_CUSTOM_TYPE {
                     latest_runtime = Some(decode_runtime_metadata(custom.data.as_deref())?);
+                } else if custom.custom_type == CAPABILITIES_CUSTOM_TYPE {
+                    let raw = custom.data.as_deref().map(RawValue::get);
+                    resolved.observed_capabilities = decode_capabilities(raw.unwrap_or_default());
+                    if resolved.observed_capabilities.is_none() {
+                        collector.add(format!(
+                            "ignored malformed {CAPABILITIES_CUSTOM_TYPE} entry {}",
+                            entry.id
+                        ));
+                    }
+                } else if custom.custom_type == TURN_CUSTOM_TYPE {
+                    let raw = custom.data.as_deref().map(RawValue::get);
+                    match decode_turn_record(raw.unwrap_or_default()) {
+                        Some(record) => apply_turn_record(&mut resolved.interrupted_turn, &record),
+                        None => collector.add(format!(
+                            "ignored malformed {TURN_CUSTOM_TYPE} entry {}",
+                            entry.id
+                        )),
+                    }
+                } else if custom.custom_type == crate::session::plan::PLAN_CUSTOM_TYPE {
+                    let raw = custom.data.as_deref().map(RawValue::get);
+                    match crate::session::plan::decode_plan(raw.unwrap_or_default()) {
+                        Some(steps) => resolved.plan = steps,
+                        None => collector.add(format!(
+                            "ignored malformed {} entry {}",
+                            crate::session::plan::PLAN_CUSTOM_TYPE,
+                            entry.id
+                        )),
+                    }
                 } else if custom.custom_type == OPERATION_CUSTOM_TYPE {
                     match decode_operation_raw(custom.data.as_deref()).map_err(|error| {
                         PiError::invalid(format!("invalid otto.operation fact: {error}"))
@@ -259,6 +333,7 @@ pub fn build_context(
         collector.add(repair);
     }
     pending_tool_calls(&resolved.messages)?;
+    resolved.input_ids = path_input_ids(&path, &context_path, &resolved.messages);
 
     let edits = context_edits(&path, &context_path, &mut collector);
     for entry in context_path {
@@ -548,12 +623,13 @@ pub fn pi_entry_to_context_messages(entry: &PiEntry) -> Result<Vec<Message>, PiE
                 created_at,
                 None,
             );
-            if let Some(details) = decode_pi_otto_details(custom.details.as_deref())?
-                && !details.task_id.is_empty()
-            {
-                message.context_metadata = Some(ContextMetadata {
-                    task_id: details.task_id,
-                });
+            if let Some(details) = decode_pi_otto_details(custom.details.as_deref())? {
+                message.input_id = details.input_id;
+                if !details.task_id.is_empty() {
+                    message.context_metadata = Some(ContextMetadata {
+                        task_id: details.task_id,
+                    });
+                }
             }
             Ok(vec![message])
         }
@@ -579,6 +655,9 @@ fn pi_message_to_context_message(
             }
             message.role = Role::User;
             message.blocks = blocks;
+            if let Some(details) = decode_pi_otto_details(wire.details.as_deref())? {
+                message.input_id = details.input_id;
+            }
         }
         "assistant" => {
             let blocks = pi_context_text_and_tool_blocks(wire, Role::Assistant)?;
@@ -798,7 +877,10 @@ pub fn new_context_message(
 }
 
 fn custom_context_text(custom_type: &str, text: &str) -> String {
-    if custom_type == TASK_NOTIFICATION_CONTEXT_TYPE || custom_type == PARENT_MESSAGE_CONTEXT_TYPE {
+    if custom_type == TASK_NOTIFICATION_CONTEXT_TYPE
+        || custom_type == PARENT_MESSAGE_CONTEXT_TYPE
+        || custom_type == CAPABILITY_UPDATE_CONTEXT_TYPE
+    {
         return text.to_owned();
     }
     format!("[Custom context: {custom_type}]\n{text}")
@@ -881,6 +963,34 @@ fn sanitize_warning_type(entry_type: &str) -> String {
     sanitized
 }
 
+/// The capability state recorded in an `otto.capabilities` custom entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Capabilities {
+    /// Sorted, deduplicated tool names.
+    pub tools: Vec<String>,
+    /// Digest per tool name of its description and parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definitions: Option<BTreeMap<String, String>>,
+    /// The Otto package version that wrote the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Decodes `otto.capabilities` data, sorting and deduplicating the tool
+/// names; `None` when the data has another shape. Fields absent from older
+/// records decode as `None` and unknown fields are ignored.
+pub fn decode_capabilities(data: &str) -> Option<Capabilities> {
+    let mut capabilities = serde_json::from_str::<Capabilities>(data).ok()?;
+    capabilities.tools.sort();
+    capabilities.tools.dedup();
+    Some(capabilities)
+}
+
+/// Encodes a [`Capabilities`] value as `otto.capabilities` data.
+pub fn encode_capabilities(capabilities: &Capabilities) -> String {
+    serde_json::to_string(capabilities).expect("capabilities serialize")
+}
+
 /// Decodes an `otto.runtime` custom entry's `data` field.
 pub fn decode_runtime_metadata(raw: Option<&RawValue>) -> Result<RuntimeMetadata, PiError> {
     let bytes = raw.map_or(&b""[..], |value| value.get().as_bytes());
@@ -936,6 +1046,15 @@ pub fn model_message_to_pi_entry(
                 return Err(PiError::invalid(
                     "user message contains assistant-only metadata",
                 ));
+            }
+            if !message.input_id.is_empty() {
+                if !crate::model::is_input_id(&message.input_id) {
+                    return Err(PiError::invalid("invalid input id"));
+                }
+                wire.details = Some(encode_pi_otto_details(&PiOttoDetails {
+                    input_id: message.input_id.clone(),
+                    ..PiOttoDetails::default()
+                })?);
             }
         }
         Role::Assistant => {
@@ -1056,9 +1175,17 @@ fn model_context_message_to_pi_entry(
         content_text: Some(content.clone()),
         ..PiCustomMessage::default()
     };
-    if let Some(metadata) = message.context_metadata.as_ref() {
+    if !message.input_id.is_empty() && !crate::model::is_input_id(&message.input_id) {
+        return Err(PiError::invalid("invalid input id"));
+    }
+    if message.context_metadata.is_some() || !message.input_id.is_empty() {
         custom.details = Some(encode_pi_otto_details(&PiOttoDetails {
-            task_id: metadata.task_id.clone(),
+            task_id: message
+                .context_metadata
+                .as_ref()
+                .map(|metadata| metadata.task_id.clone())
+                .unwrap_or_default(),
+            input_id: message.input_id.clone(),
             ..PiOttoDetails::default()
         })?);
     }
@@ -1080,6 +1207,7 @@ fn model_context_message_to_pi_entry(
         context_type: message.context_type.clone(),
         display: message.display,
         context_metadata: message.context_metadata.clone(),
+        input_id: message.input_id.clone(),
         ..Message::default()
     };
     Ok((entry, persisted))
@@ -1788,6 +1916,32 @@ mod tests {
             fn $name() $body
         };
     }
+
+    test!(capabilities_decode_old_records_and_ignore_unknown_fields {
+        let old = decode_capabilities(r#"{"tools":["b","a","a"]}"#).expect("old record");
+        assert_eq!(
+            old,
+            Capabilities {
+                tools: vec!["a".into(), "b".into()],
+                ..Capabilities::default()
+            }
+        );
+        let extra = decode_capabilities(r#"{"tools":["a"],"future":1}"#).expect("extra field");
+        assert_eq!(extra.tools, ["a"]);
+        assert_eq!(decode_capabilities(r#"{"tools":"a"}"#), None);
+    });
+
+    test!(capabilities_round_trip_all_fields {
+        let capabilities = Capabilities {
+            tools: vec!["a".into()],
+            definitions: Some(BTreeMap::from([("a".into(), "d1".into())])),
+            version: Some("0.2.1".into()),
+        };
+        assert_eq!(
+            decode_capabilities(&encode_capabilities(&capabilities)),
+            Some(capabilities)
+        );
+    });
 
     fn entry(entry_type: &str, id: &str, parent_id: Option<&str>) -> PiEntry {
         PiEntry::new(

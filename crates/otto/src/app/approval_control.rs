@@ -138,18 +138,22 @@ impl Controller {
                 let message =
                     format!("The approval dialogue did not finish: {failure}\n{request_status}");
                 if !queued {
-                    runner.inbox().push(otto_core::agent::inbox::Notification {
-                        kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
-                        text: self
-                            .redact_error(&format!("Regarding pending approval {id}:\n{text}")),
-                        ..Default::default()
-                    });
-                    runner.inbox().push(otto_core::agent::inbox::Notification {
-                        text: self.redact_error(&format!(
-                            "Approval dialogue for {id} ended early: {message}"
-                        )),
-                        ..Default::default()
-                    });
+                    runner
+                        .mailbox()
+                        .push(otto_core::agent::inbox::Notification {
+                            kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
+                            text: self
+                                .redact_error(&format!("Regarding pending approval {id}:\n{text}")),
+                            ..Default::default()
+                        });
+                    runner
+                        .mailbox()
+                        .push(otto_core::agent::inbox::Notification {
+                            text: self.redact_error(&format!(
+                                "Approval dialogue for {id} ended early: {message}"
+                            )),
+                            ..Default::default()
+                        });
                 }
                 return Ok(Some(ControlReply {
                     text: message,
@@ -164,15 +168,19 @@ impl Controller {
         // Only the existing runner appends the dialogue summary at its next
         // checkpoint. Never open a second writer on the original transcript.
         if !reply.queued {
-            runner.inbox().push(otto_core::agent::inbox::Notification {
-                kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
-                text: self.redact_error(&format!("Regarding pending approval {id}:\n{text}")),
-                ..Default::default()
-            });
-            runner.inbox().push(otto_core::agent::inbox::Notification {
-                text: self.redact_error(&format!("Approval dialogue for {id}: {}", reply.text)),
-                ..Default::default()
-            });
+            runner
+                .mailbox()
+                .push(otto_core::agent::inbox::Notification {
+                    kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
+                    text: self.redact_error(&format!("Regarding pending approval {id}:\n{text}")),
+                    ..Default::default()
+                });
+            runner
+                .mailbox()
+                .push(otto_core::agent::inbox::Notification {
+                    text: self.redact_error(&format!("Approval dialogue for {id}: {}", reply.text)),
+                    ..Default::default()
+                });
         }
         Ok(Some(reply))
     }
@@ -239,15 +247,19 @@ impl Controller {
             queued: queued.load(Ordering::SeqCst),
         };
         if !reply.queued {
-            runner.inbox().push(otto_core::agent::inbox::Notification {
-                kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
-                text: self.redact_error(&format!("Regarding approval {}: {text}", request.id)),
-                ..Default::default()
-            });
-            runner.inbox().push(otto_core::agent::inbox::Notification {
-                text: self.redact_error(&format!("Approval dialogue: {}", reply.text)),
-                ..Default::default()
-            });
+            runner
+                .mailbox()
+                .push(otto_core::agent::inbox::Notification {
+                    kind: Some(otto_core::agent::inbox::NotificationKind::UserMessage),
+                    text: self.redact_error(&format!("Regarding approval {}: {text}", request.id)),
+                    ..Default::default()
+                });
+            runner
+                .mailbox()
+                .push(otto_core::agent::inbox::Notification {
+                    text: self.redact_error(&format!("Approval dialogue: {}", reply.text)),
+                    ..Default::default()
+                });
         }
         Ok(reply)
     }
@@ -493,7 +505,7 @@ mod tests {
         assert!(!reply.queued);
         assert!(reply.text.contains("no longer pending or has been decided"));
         assert!(approvals.pending(&sid).is_none());
-        let inbox = controller.runner().unwrap().inbox().queued();
+        let inbox = controller.runner().unwrap().mailbox().queued();
         assert!(inbox.iter().any(|entry| {
             entry
                 .notification

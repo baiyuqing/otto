@@ -5,6 +5,11 @@ work in. Child files add scoped rules; repository rules still apply. Use the
 [code organization map](docs/code-organization.md) for ownership and entry
 points and the [development guide](docs/development.md) for detailed contracts.
 
+Keep these files short: each directory's `AGENTS.md` is preferred over its
+`CLAUDE.md`, Otto reads them at startup, and one file over 16 KiB or 64 KiB in
+total fails startup. Describe rules here; link to the canonical contract or
+the owning code instead of restating it.
+
 ## Find the owning layer
 
 | Work | Instructions and entry point |
@@ -40,7 +45,13 @@ advertise other providers or planned roadmap features.
   apply to every feature, fix and refactor.
 - If work is delegated, the parent owns interfaces, integration and acceptance;
   hand off bounded file ownership and preserve other workers' changes.
+- Adding, changing, removing or renaming a model-callable capability updates
+  its [capability descriptions](docs/development.md#capability-descriptions)
+  in the same PR. Descriptions are short and unambiguous and state the
+  capability, inputs and outputs. This rule is mandatory.
 - Version numbers change only in release PRs via `make bump VERSION=X.Y.Z`.
+- Use small, focused commits with imperative subjects such as
+  `feat: add ...` or `docs: document ...`.
 - After implementation and required checks, open a PR without asking again.
 
 ## Safety
@@ -54,6 +65,10 @@ advertise other providers or planned roadmap features.
   It always starts in the selected workspace.
 - Default tests stay offline: no live providers, real credentials or external
   services. PTY acceptance uses controlled test terminals.
+- Install the repository's secret-scanning hook once per clone with
+  `make setup-git-hooks` (it needs `gitleaks` on `PATH`). The hook is shared
+  with this clone's worktrees and blocks a commit whose staged changes hold a
+  finding or that it cannot scan.
 
 ## Verification
 

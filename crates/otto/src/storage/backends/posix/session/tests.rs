@@ -2442,7 +2442,7 @@ fn open_rejects_old_otto_v1_without_mutation() {
 
 #[test]
 fn store_round_trips_role_context_as_custom_message() {
-    for context_type in ["task_notification", "parent_message"] {
+    for context_type in ["task_notification", "parent_message", "capability_update"] {
         let temp = TempDir::new();
         let (store, _) = new_store(&temp);
         store.append_message(&user("hello")).expect("append");
@@ -3046,7 +3046,7 @@ fn prepared_close_of_a_lease_managed_session_releases_the_lease_for_the_next_ope
     );
     let (store2, _warnings) = prepared2.activate().expect("activate");
     assert!(
-        store2.take_takeover().is_none(),
+        store2.take_recovery().is_none(),
         "a fresh acquire records no takeover"
     );
     store2.close().expect("close");
@@ -3157,9 +3157,12 @@ fn takeover_through_prepare_records_the_holder_and_repairs_the_dangling_calls() 
             .expect("prepare takes over");
     let (activated, _warnings) = prepared.activate().expect("activate");
 
-    let takeover = activated.take_takeover().expect("takeover recorded");
-    assert_eq!(takeover.holder.host, "stopped-host");
-    assert_eq!(takeover.holder.pid, 9001);
+    let takeover = activated.take_recovery().expect("takeover recorded");
+    let crate::session::RecoveryCause::TakenOver(holder) = &takeover.cause else {
+        panic!("takeover cause");
+    };
+    assert_eq!(holder.host, "stopped-host");
+    assert_eq!(holder.pid, 9001);
     assert_eq!(takeover.repaired.len(), 2);
     assert_eq!(takeover.repaired[0].name, "read");
     assert!(takeover.repaired[0].may_have_run);
@@ -3246,7 +3249,7 @@ fn takeover_leaves_all_replayable_dangling_calls_unanswered() {
         &[("call-1", "read", 1)],
         read_only_tools,
     );
-    let takeover = store.take_takeover().expect("takeover recorded");
+    let takeover = store.take_recovery().expect("takeover recorded");
     assert!(takeover.repaired.is_empty());
     assert_eq!(takeover.replayable.len(), 2);
     assert_eq!(takeover.replayable[0].name, "read");
@@ -3275,7 +3278,7 @@ fn takeover_repairs_every_call_when_one_is_not_replayable() {
         &[],
         read_only_tools,
     );
-    let takeover = store.take_takeover().expect("takeover recorded");
+    let takeover = store.take_recovery().expect("takeover recorded");
     assert_eq!(takeover.repaired.len(), 2);
     assert!(takeover.replayable.is_empty());
     assert_eq!(tool_result_count(&path), 2);
@@ -3289,7 +3292,7 @@ fn takeover_repairs_a_call_that_was_already_replayed_once() {
         &[("call-1", "read", 2)],
         read_only_tools,
     );
-    let takeover = store.take_takeover().expect("takeover recorded");
+    let takeover = store.take_recovery().expect("takeover recorded");
     assert_eq!(takeover.repaired.len(), 1);
     assert!(takeover.replayable.is_empty());
     assert_eq!(
@@ -3298,6 +3301,181 @@ fn takeover_repairs_a_call_that_was_already_replayed_once() {
         "a second interruption falls back to the interrupted result"
     );
     store.close().expect("close");
+}
+
+// Process loss: a plain reopen (no lease) recovers a session the previous
+// writer left mid-turn the same way a takeover does.
+
+fn turn_record(record: &otto_core::session::TurnRecord) -> String {
+    otto_core::session::encode_turn_record(record)
+}
+
+/// Reopens `path` without a lease, as the next process would after a crash.
+fn reopen_plain(path: &str, replayable: fn(&str) -> bool) -> Store {
+    let prepared = Prepared::prepare(Path::new(path), None)
+        .expect("prepare")
+        .with_replayable(replayable);
+    prepared.activate().expect("activate").0
+}
+
+#[test]
+fn a_plain_reopen_replays_read_only_calls_and_records_process_loss() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_custom_entry(
+            otto_core::session::TURN_CUSTOM_TYPE,
+            &turn_record(&otto_core::session::TurnRecord::started(
+                "op_turn",
+                otto_core::session::TurnTrigger::User,
+                1,
+                None,
+            )),
+        )
+        .expect("turn start");
+    store
+        .append_message(&tool_calls(&[("call-1", "read")]))
+        .expect("append dangling call");
+    let path = store.path();
+    store.close().expect("close without ending the turn");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    let recovery = reopened.take_recovery().expect("process loss recorded");
+    assert_eq!(recovery.cause, crate::session::RecoveryCause::ProcessLost);
+    assert!(recovery.repaired.is_empty());
+    assert_eq!(recovery.replayable.len(), 1);
+    assert_eq!(
+        recovery.interrupted_turn,
+        Some(otto_core::session::InterruptedTurn {
+            turn_id: "op_turn".into(),
+            attempt: 1
+        })
+    );
+    assert!(!recovery.resume_exhausted());
+    assert_eq!(tool_result_count(&path), 0);
+    reopened.close().expect("close");
+}
+
+#[test]
+fn a_plain_reopen_of_a_turn_interrupted_mid_stream_records_it() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_custom_entry(
+            otto_core::session::TURN_CUSTOM_TYPE,
+            &turn_record(&otto_core::session::TurnRecord::started(
+                "op_turn",
+                otto_core::session::TurnTrigger::User,
+                1,
+                None,
+            )),
+        )
+        .expect("turn start");
+    store
+        .append_message(&user("do it"))
+        .expect("append user message");
+    let path = store.path();
+    store.close().expect("close");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    let recovery = reopened.take_recovery().expect("process loss recorded");
+    assert_eq!(recovery.cause, crate::session::RecoveryCause::ProcessLost);
+    assert!(recovery.repaired.is_empty() && recovery.replayable.is_empty());
+    assert_eq!(
+        otto_core::session::Session::interrupted_turn(&reopened).map(|turn| turn.turn_id),
+        Some("op_turn".to_string())
+    );
+    reopened.close().expect("close");
+}
+
+#[test]
+fn a_plain_reopen_after_an_ended_turn_records_no_recovery() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    for record in [
+        otto_core::session::TurnRecord::started(
+            "op_turn",
+            otto_core::session::TurnTrigger::User,
+            1,
+            None,
+        ),
+        otto_core::session::TurnRecord::ended("op_turn", otto_core::session::TurnOutcome::Failed),
+    ] {
+        store
+            .append_custom_entry(otto_core::session::TURN_CUSTOM_TYPE, &turn_record(&record))
+            .expect("turn record");
+    }
+    store
+        .append_message(&user("do it"))
+        .expect("append user message");
+    let path = store.path();
+    store.close().expect("close");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    assert_eq!(reopened.take_recovery(), None);
+    reopened.close().expect("close");
+}
+
+#[test]
+fn a_resumed_turn_interrupted_again_is_repaired_and_not_resumed() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_custom_entry(
+            otto_core::session::TURN_CUSTOM_TYPE,
+            &turn_record(&otto_core::session::TurnRecord::started(
+                "op_second",
+                otto_core::session::TurnTrigger::Recovery,
+                2,
+                Some("op_first".into()),
+            )),
+        )
+        .expect("turn start");
+    store
+        .append_message(&tool_calls(&[("call-1", "read")]))
+        .expect("append dangling call");
+    let path = store.path();
+    store.close().expect("close");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    let recovery = reopened.take_recovery().expect("process loss recorded");
+    assert!(recovery.resume_exhausted());
+    assert_eq!(recovery.repaired.len(), 1);
+    assert!(recovery.replayable.is_empty());
+    assert_eq!(tool_result_count(&path), 1);
+    reopened.close().expect("close");
+}
+
+#[test]
+fn a_call_attempted_under_another_safety_is_not_replayed() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_message(&tool_calls(&[("call-1", "read")]))
+        .expect("append dangling call");
+    store
+        .append_operation_fact(
+            otto_core::session::operation::OperationFact::attempt(
+                otto_core::model::OperationId::new("op-1").expect("operation id"),
+                1,
+                "call-1".to_string(),
+                "read".to_string(),
+            )
+            .with_retry_safety(otto_core::model::RetrySafety::NonIdempotent),
+        )
+        .expect("append attempt");
+    let path = store.path();
+    store.close().expect("close");
+
+    let reopened = reopen_plain(&path, read_only_tools);
+    let recovery = reopened.take_recovery().expect("process loss recorded");
+    assert_eq!(recovery.repaired.len(), 1);
+    assert!(recovery.replayable.is_empty());
+    assert_eq!(
+        recovery.interrupted_turn, None,
+        "a pre-change session has no turn records"
+    );
+    reopened.close().expect("close");
 }
 
 // R6: new sessions.
@@ -3594,4 +3772,488 @@ fn workspace_identity_adopts_legacy_sessions_and_preserves_listing_resume_and_ar
         )
         .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// otto.capabilities
+// ---------------------------------------------------------------------------
+
+fn raw_capabilities_entry(id: &str, parent: &str, data: &str) -> String {
+    format!(
+        "{{\"type\":\"custom\",\"id\":\"{id}\",\"parentId\":\"{parent}\",\"timestamp\":\"1970-01-01T00:00:01Z\",\"customType\":\"otto.capabilities\",\"data\":{data}}}\n"
+    )
+}
+
+fn last_entry_id(path: &str) -> String {
+    json_lines(Path::new(path))
+        .last()
+        .and_then(|line| line["id"].as_str())
+        .expect("leaf id")
+        .to_owned()
+}
+
+#[test]
+fn capabilities_record_survives_reopen_and_the_latest_applies() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    assert_eq!(Session::observed_capabilities(&store), None);
+    store.append_message(&user("hello")).expect("append");
+    store
+        .append_custom_entry("otto.capabilities", r#"{"tools":["a","b"]}"#)
+        .expect("first record");
+    store
+        .append_custom_entry("otto.capabilities", r#"{"tools":["c","b","c"]}"#)
+        .expect("second record");
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, warnings) = Store::open(&path).expect("open");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        Session::observed_capabilities(&reopened).map(|c| c.tools),
+        Some(vec!["b".to_owned(), "c".to_owned()])
+    );
+    assert_eq!(reopened.messages().len(), 1, "the record is not a message");
+    reopened.close().expect("close");
+}
+
+#[test]
+fn capabilities_record_with_all_fields_survives_reopen() {
+    use otto_core::session::{Capabilities, Session, encode_capabilities};
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    let record = Capabilities {
+        tools: vec!["a".to_owned()],
+        definitions: Some([("a".to_owned(), "d1".to_owned())].into()),
+        version: Some("0.2.1".to_owned()),
+    };
+    store
+        .append_custom_entry("otto.capabilities", &encode_capabilities(&record))
+        .expect("record");
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, warnings) = Store::open(&path).expect("open");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(Session::observed_capabilities(&reopened), Some(record));
+    reopened.close().expect("close");
+}
+
+#[test]
+fn capabilities_record_on_another_branch_does_not_apply() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let user_id = last_entry_id(&path);
+    append_raw(
+        &path,
+        raw_capabilities_entry("deadbee1", &user_id, r#"{"tools":["side"]}"#).as_bytes(),
+    );
+    append_raw(
+        &path,
+        raw_capabilities_entry("deadbee2", &user_id, r#"{"tools":["main"]}"#).as_bytes(),
+    );
+
+    let (store, warnings) = Store::open(&path).expect("open");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        Session::observed_capabilities(&store).map(|c| c.tools),
+        Some(vec!["main".to_owned()])
+    );
+    store.close().expect("close");
+}
+
+#[test]
+fn malformed_capabilities_record_is_ignored_with_a_warning() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let user_id = last_entry_id(&path);
+    append_raw(
+        &path,
+        raw_capabilities_entry("deadbee1", &user_id, r#"{"tools":"read"}"#).as_bytes(),
+    );
+
+    let (store, warnings) = Store::open(&path).expect("a malformed record does not block open");
+    assert_eq!(Session::observed_capabilities(&store), None);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.message.contains("malformed otto.capabilities")),
+        "{warnings:?}"
+    );
+    store.close().expect("close");
+}
+
+// Input ids: delivery of a mailbox entry or a client request is recorded on
+// the message and survives a reopen, so it is never appended twice.
+
+#[test]
+fn append_input_if_absent_survives_a_reopen() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    assert!(
+        store
+            .append_input_if_absent("req:1", &user("do it"))
+            .expect("append")
+    );
+    let context = Message {
+        role: Role::Context,
+        context_type: "task_notification".into(),
+        display: true,
+        blocks: vec![Block::text("done")],
+        created_at: created_at(),
+        ..Message::default()
+    };
+    assert!(
+        store
+            .append_input_if_absent("in_2", &context)
+            .expect("append")
+    );
+    assert!(
+        !store
+            .append_input_if_absent("req:1", &user("do it"))
+            .expect("check")
+    );
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, _warnings) = Store::open(Path::new(&path)).expect("reopen");
+    assert!(reopened.has_input("req:1"));
+    assert!(reopened.has_input("in_2"));
+    assert!(
+        !reopened
+            .append_input_if_absent("in_2", &context)
+            .expect("check")
+    );
+    let (_entries, messages) = Store::read_entries(&path).expect("read");
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| !message.input_id.is_empty())
+            .count(),
+        2
+    );
+    reopened.close().expect("close");
+}
+
+#[test]
+fn an_input_id_is_rejected_on_an_assistant_message() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    let mut reply = assistant("hi");
+    reply.input_id = "in_1".into();
+    assert!(store.append_message(&reply).is_err());
+    store.close().expect("close");
+}
+
+// An input delivered before a compaction checkpoint stays delivered: the
+// checkpoint summarizes its message away from the context, but its entry is
+// still on the active path, in memory and after a reopen.
+#[test]
+fn an_input_before_a_compaction_checkpoint_stays_delivered() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    assert!(
+        store
+            .append_input_if_absent("in_old", &user("old"))
+            .expect("append")
+    );
+    store.append_message(&assistant("reply")).expect("append");
+    store.append_message(&user("new")).expect("append");
+    let path = store.path();
+    let anchor = message_entry_id(&path, 3);
+    store
+        .append_compaction(&checkpoint(&anchor))
+        .expect("append compaction");
+    assert!(
+        store
+            .messages()
+            .iter()
+            .all(|message| message.input_id != "in_old")
+    );
+    assert!(store.has_input("in_old"));
+    assert!(
+        !store
+            .append_input_if_absent("in_old", &user("old"))
+            .expect("check")
+    );
+    store.close().expect("close");
+
+    let (reopened, _warnings) = Store::open(Path::new(&path)).expect("reopen");
+    assert!(reopened.has_input("in_old"));
+    assert!(
+        !reopened
+            .append_input_if_absent("in_old", &user("old"))
+            .expect("check")
+    );
+    reopened.close().expect("close");
+}
+
+// ---------------------------------------------------------------------------
+// fork
+// ---------------------------------------------------------------------------
+
+const FORK_ID: &str = "0123456789abcdef0123456789abcdef";
+
+fn write_turn(store: &Store, record: &otto_core::session::TurnRecord) {
+    store
+        .append_custom_entry(
+            otto_core::session::TURN_CUSTOM_TYPE,
+            &otto_core::session::encode_turn_record(record),
+        )
+        .expect("turn record");
+}
+
+/// Appends one completed user turn and returns its prompt's entry id.
+fn completed_turn(store: &Store, turn: &str, prompt: &str) -> String {
+    use otto_core::session::{TurnOutcome, TurnRecord, TurnTrigger};
+    write_turn(
+        store,
+        &TurnRecord::started(turn, TurnTrigger::User, 1, None),
+    );
+    store.append_message(&user(prompt)).expect("prompt");
+    let id = json_lines(Path::new(&store.path()))
+        .last()
+        .and_then(|line| line["id"].as_str().map(str::to_owned))
+        .expect("prompt id");
+    store.append_message(&assistant("reply")).expect("reply");
+    write_turn(store, &TurnRecord::ended(turn, TurnOutcome::Completed));
+    id
+}
+
+fn session_files(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .expect("read session directory")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_fork_copies_the_history_before_a_turn_and_leaves_the_source_alone() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    let kept_messages = store.messages();
+    let second = completed_turn(&store, "t2", "second");
+    store.rename("dev").expect("rename");
+    let source = PathBuf::from(store.path());
+    let before = fs::read(&source).expect("read source");
+
+    let forked = super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        &source,
+        Some(&second),
+        FORK_ID,
+    )
+    .expect("fork");
+    assert_eq!(fs::read(&source).expect("read source"), before);
+    assert_eq!(
+        forked.path,
+        source.with_file_name(format!("{FORK_ID}.jsonl"))
+    );
+    assert_eq!(forked.point.as_ref().expect("point").prompt, "second");
+
+    let lines = json_lines(&forked.path);
+    assert_eq!(lines[0]["id"], FORK_ID);
+    assert_eq!(lines[0]["parentSession"], source.to_string_lossy().as_ref());
+
+    let (fork, warnings) = Store::open(&forked.path).expect("open fork");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(fork.take_recovery().is_none());
+    assert_eq!(fork.interrupted_turn(), None);
+    assert_eq!(fork.messages(), kept_messages);
+    assert_eq!(fork.name(), "dev (fork)");
+    let origin = fork.forked_from().expect("fork record");
+    assert_eq!(origin.source_session_id, store.header().id);
+    assert_eq!(origin.source_entry_id.as_deref(), Some(second.as_str()));
+    assert_eq!(origin.prompt.as_deref(), Some("second"));
+    assert!(store.forked_from().is_none());
+    fork.close().expect("close fork");
+    store.close().expect("close");
+}
+
+#[test]
+fn a_fork_keeps_a_compaction_before_the_cut() {
+    use otto_core::session::Session;
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "one");
+    let anchor = completed_turn(&store, "t2", "two");
+    store
+        .append_compaction(&checkpoint(&anchor))
+        .expect("compact");
+    let model_messages = store.model_messages();
+    let third = completed_turn(&store, "t3", "three");
+
+    let forked = super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        Path::new(&store.path()),
+        Some(&third),
+        FORK_ID,
+    )
+    .expect("fork");
+    let (fork, warnings) = Store::open(&forked.path).expect("open fork");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(fork.model_messages(), model_messages);
+    assert!(fork.latest_compaction().is_some());
+    fork.close().expect("close fork");
+    store.close().expect("close");
+}
+
+#[test]
+fn a_whole_fork_leaves_out_an_interrupted_turn() {
+    use otto_core::session::{Session, TurnRecord, TurnTrigger};
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    let kept_messages = store.messages();
+    write_turn(
+        &store,
+        &TurnRecord::started("t2", TurnTrigger::User, 1, None),
+    );
+    store.append_message(&user("lost")).expect("prompt");
+    store
+        .append_message(&tool_call("call-1", "bash"))
+        .expect("call");
+    assert!(store.interrupted_turn().is_some());
+
+    let forked = super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        Path::new(&store.path()),
+        None,
+        FORK_ID,
+    )
+    .expect("fork");
+    assert!(forked.point.is_none());
+    let (fork, _) = Store::open(&forked.path).expect("open fork");
+    assert!(fork.take_recovery().is_none());
+    assert_eq!(fork.interrupted_turn(), None);
+    assert_eq!(fork.messages(), kept_messages);
+    let origin = fork.forked_from().expect("fork record");
+    assert_eq!(origin.source_entry_id, None);
+    assert_eq!(origin.prompt, None);
+    fork.close().expect("close fork");
+    store.close().expect("close");
+}
+
+#[test]
+fn an_invalid_fork_point_or_a_taken_id_writes_nothing() {
+    use otto_core::session::{ForkError, TurnRecord, TurnTrigger};
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    write_turn(
+        &store,
+        &TurnRecord::started("t2", TurnTrigger::User, 1, None),
+    );
+    store.append_message(&user("prompt")).expect("prompt");
+    store
+        .append_message(&tool_call("call-1", "bash"))
+        .expect("call");
+    store
+        .append_message(&tool_result("call-1", "bash", "ok"))
+        .expect("result");
+    store.append_message(&user("steer")).expect("steer");
+    let steer = message_entry_id(&store.path(), 5);
+    let source = PathBuf::from(store.path());
+    let directory = source.parent().expect("directory").to_path_buf();
+    let files = session_files(&directory);
+
+    for before in [steer.as_str(), "ffffffff"] {
+        let error = super::fork::fork(
+            &crate::storage::drivers::posix::PosixDriver,
+            &source,
+            Some(before),
+            FORK_ID,
+        )
+        .expect_err("invalid fork point");
+        assert!(matches!(error, ForkError::InvalidPoint(_)), "{error}");
+        assert_eq!(session_files(&directory), files);
+    }
+
+    // The destination is never replaced, and the temporary file is removed.
+    let taken = store.header().id;
+    let taken_path = directory.join(format!("{taken}.jsonl"));
+    fs::copy(&source, &taken_path).expect("occupy id");
+    let files = session_files(&directory);
+    super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        &source,
+        None,
+        &taken,
+    )
+    .expect_err("taken id");
+    assert_eq!(session_files(&directory), files);
+    store.close().expect("close");
+}
+
+#[test]
+fn listing_shows_a_fork_and_ignores_a_leftover_temporary_file() {
+    let temp = TempDir::new();
+    let (store, root) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    let source = PathBuf::from(store.path());
+    fs::write(
+        source.with_file_name(format!("{FORK_ID}.jsonl.fork-tmp")),
+        "partial",
+    )
+    .expect("leftover");
+    super::fork::fork(
+        &crate::storage::drivers::posix::PosixDriver,
+        &source,
+        None,
+        "fedcba9876543210fedcba9876543210",
+    )
+    .expect("fork");
+    let listed = list::list(&root, &store.header().workspace, "", 10).expect("list");
+    assert_eq!(listed.sessions.len(), 2, "{listed:?}");
+    assert_eq!(listed.skipped, 0);
+    store.close().expect("close");
+}
+
+#[test]
+fn a_plan_set_before_a_compaction_survives_it_and_a_reopen() {
+    use otto_core::session::{PLAN_CUSTOM_TYPE, PlanStatus, PlanStep, Session, encode_plan};
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    let plan = vec![PlanStep {
+        text: "ship".into(),
+        status: PlanStatus::InProgress,
+    }];
+    store.append_message(&user("one")).expect("append");
+    store
+        .append_custom_entry(PLAN_CUSTOM_TYPE, &encode_plan(&plan))
+        .expect("plan");
+    store.append_message(&assistant("two")).expect("append");
+    store.append_message(&user("three")).expect("append");
+    let anchor = message_entry_id(&store.path(), 3);
+    store
+        .append_compaction(&checkpoint(&anchor))
+        .expect("compact");
+    assert_eq!(store.plan(), plan);
+    // A malformed record is refused and leaves the plan in force.
+    assert!(
+        store
+            .append_custom_entry(PLAN_CUSTOM_TYPE, r#"{"schemaVersion":1}"#)
+            .is_err()
+    );
+    assert_eq!(store.plan(), plan);
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, warnings) = Store::open(&path).expect("open");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(reopened.plan(), plan);
+    reopened.close().expect("close");
 }

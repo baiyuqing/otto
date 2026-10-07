@@ -331,8 +331,12 @@ struct BarrierRecorder {
 
 impl std::io::Write for BarrierRecorder {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        let written = self.recorder.write(data)?;
+        // Open `entered` before the data reaches the recorder: a check that
+        // sees the data must find the gate open without sleeping, because
+        // this write blocks a runtime worker and a tokio timer may not fire
+        // until the write returns.
         self.entered.release();
+        let written = self.recorder.write(data)?;
         self.release.wait();
         Ok(written)
     }

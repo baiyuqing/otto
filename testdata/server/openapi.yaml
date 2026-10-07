@@ -19,6 +19,17 @@ components:
         "Authorization: Bearer <token>". Missing or wrong tokens get 401 with
         WWW-Authenticate: Bearer. The Unix-socket listener has no token.
   schemas:
+    InputId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9._:-]+$"
+      description: >
+        The client's stable id for one input. A retry with the same id in the
+        same session is admitted once: while the server remembers it (its 256
+        most recent ids per session) the original result is returned; once
+        only the session transcript holds it, 409 duplicate_input. Unrelated
+        to the X-Request-Id log-correlation header.
     SteeringMessage:
       type: object
       required: [id, text, status]
@@ -36,6 +47,12 @@ components:
           description: >-
             queued can be withdrawn; delivered is append-only session history;
             withdrawn and discarded were never delivered to the agent.
+        input_id:
+          type: string
+          description: >-
+            The input id the delivered user message carries: the client's
+            input_id, or steer:<turn id>:<n>. Absent when the session keeps no
+            journal.
     Error:
       type: object
       properties:
@@ -229,7 +246,7 @@ components:
           type: string
         trigger:
           type: string
-          enum: [user, task]
+          enum: [user, task, recovery]
         status:
           type: string
           enum: [running, ok, error, canceled]
@@ -260,7 +277,52 @@ components:
           $ref: "#/components/schemas/Sandbox"
         turn:
           $ref: "#/components/schemas/SessionTurn"
+        forked_from:
+          $ref: "#/components/schemas/ForkedFrom"
+        plan:
+          type: array
+          description: The session plan the model keeps with update_plan. Omitted when there is none.
+          items:
+            $ref: "#/components/schemas/PlanStep"
       required: [id, workspace, provider, model, thinking, sandbox, turn]
+    PlanStep:
+      type: object
+      properties:
+        text:
+          type: string
+          maxLength: 200
+        status:
+          type: string
+          enum: [pending, in_progress, completed]
+      required: [text, status]
+    ForkedFrom:
+      type: object
+      description: Where a forked session came from. Omitted for a session that is not a fork.
+      properties:
+        session_id:
+          type: string
+          description: The source session.
+        entry_id:
+          type: string
+          description: The user message the fork stops before. Omitted for a fork of the whole history.
+      required: [session_id]
+    ForkedSession:
+      allOf:
+        - $ref: "#/components/schemas/Session"
+        - type: object
+          properties:
+            prompt:
+              type: string
+              description: The text of the message the fork stops before, for the editor. Omitted for a fork of the whole history.
+    ForkPoint:
+      type: object
+      properties:
+        entry_id:
+          type: string
+          description: The id of a user message that starts a turn; pass it as `before`.
+        prompt:
+          type: string
+      required: [entry_id, prompt]
     SessionListRow:
       type: object
       properties:
@@ -338,7 +400,7 @@ components:
           type: string
         trigger:
           type: string
-          enum: [user, task]
+          enum: [user, task, recovery]
         status:
           type: string
           enum: [queued, running, ok, error, canceled]
@@ -781,6 +843,7 @@ components:
             - compaction_warning
             - memory_warning
             - agent_error
+            - plan_updated
             - notification
             - user_message
             - approval_requested
@@ -828,6 +891,12 @@ components:
           $ref: "#/components/schemas/Compaction"
         plan:
           type: object
+          description: compaction_planned only; the compaction plan.
+        steps:
+          type: array
+          description: plan_updated only; the whole session plan, empty when it was cleared.
+          items:
+            $ref: "#/components/schemas/PlanStep"
         image:
           type: boolean
           description: user_message only; true when the prompt carried an image.
@@ -1423,6 +1492,78 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/fork:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Fork the session into a new one
+      description: >-
+        Writes a new session whose history is this session's history before
+        the turn that `before` starts, opens it and returns it. Without
+        `before`, the copy keeps everything up to the last finished turn. The
+        source session is not changed. Queued inputs, reminders and sub-agents
+        stay with the source.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                before:
+                  type: string
+                  description: A fork point's `entry_id`.
+      responses:
+        "201":
+          description: The new session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForkedSession"
+        "400":
+          description: Invalid JSON body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            `invalid_fork_point`: `before` is not a user message that starts a
+            turn on this session's history, or the session has no history yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/fork-points:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: The prompts the session can be forked before, oldest first
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fork_points:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ForkPoint"
+                required: [fork_points]
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}/history:
     parameters:
       - $ref: "#/components/parameters/sessionID"
@@ -1540,6 +1681,7 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 32000
+                input_id: { $ref: "#/components/schemas/InputId" }
       responses:
         "200":
           description: Deterministic admission disposition
@@ -1553,7 +1695,12 @@ paths:
         "404":
           description: Unknown session
         "409":
-          description: Admission failed before a disposition could be determined
+          description: >
+            input_admission_failed (admission failed before a disposition
+            could be determined) or duplicate_input (the transcript already
+            holds this input_id)
+        "503":
+          description: input_not_persisted; the guidance could not be saved and was not accepted
   /v1/sessions/{id}/tasks/steer:
     parameters:
       - $ref: "#/components/parameters/sessionID"
@@ -1596,6 +1743,7 @@ paths:
                   minLength: 1
                   maxLength: 32000
                   description: Non-whitespace text, limited to 32000 UTF-8 bytes.
+                input_id: { $ref: "#/components/schemas/InputId" }
       responses:
         "200":
           description: Guidance queued
@@ -1607,7 +1755,9 @@ paths:
         "404":
           description: Unknown session
         "409":
-          description: No active task accepts guidance
+          description: task_steer_failed (no active task accepts guidance) or duplicate_input
+        "503":
+          description: input_not_persisted; the guidance could not be saved and was not accepted
   /v1/sessions/{id}/tasks/steer/{message_id}:
     parameters:
       - $ref: "#/components/parameters/sessionID"
@@ -1769,6 +1919,7 @@ paths:
                     feishu. Absent means web. Scheduled items created in this
                     turn are delivered to this origin. A chat origin whose
                     platform differs from channel is rejected with 400.
+                input_id: { $ref: "#/components/schemas/InputId" }
               required: [text]
       responses:
         "200":
@@ -1803,8 +1954,10 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: >
-            turn_active (a turn is running or queued and queue was not set) or
-            queue_full (16 turns are already queued)
+            turn_active (a turn is running or queued and queue was not set),
+            queue_full (16 turns are already queued), or duplicate_input (the
+            transcript already holds this input_id; a retry the server still
+            remembers returns the original turn instead)
           content:
             application/json:
               schema:

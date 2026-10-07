@@ -58,6 +58,23 @@ pub struct Notification {
     pub kind: Option<NotificationKind>,
     pub text: String,
     pub usage: Option<Usage>,
+    /// The stable input id the delivered message carries (see
+    /// [`crate::model::Message::input_id`]). Empty for an in-memory
+    /// notification without one; a durable mailbox assigns one on enqueue.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// The `otto.turn` id a turn-scoped input belongs to; empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+}
+
+/// A mailbox change that could not be made durable.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MailboxError {
+    /// The entry is queued in memory under `seq`, but its persistence
+    /// failed. A caller that must not admit the input acknowledges `seq`.
+    #[error("input not persisted: {reason}")]
+    NotPersisted { seq: u64, reason: String },
 }
 
 impl Notification {
@@ -91,8 +108,12 @@ struct State {
     next_seq: u64,
 }
 
-/// The signature [`Inbox::set_persist`] takes.
-pub type PersistHook = Box<dyn Fn(&[Entry]) + Send + Sync>;
+/// The signature [`Inbox::set_persist`] takes. An error means the entries
+/// are not durable.
+pub type PersistHook = Box<dyn Fn(&[Entry]) -> Result<(), String> + Send + Sync>;
+
+/// The signature [`Inbox::set_id_source`] takes.
+pub type IdSource = Box<dyn Fn() -> String + Send + Sync>;
 
 /// A first-in first-out queue of notifications.
 #[derive(Default)]
@@ -102,6 +123,8 @@ pub struct Inbox {
     /// Set at most once, before the inbox is shared with producers. Runs
     /// under the state lock on every mutation; see the module documentation.
     persist: OnceLock<PersistHook>,
+    /// Set at most once; gives an id to a notification enqueued without one.
+    id_source: OnceLock<IdSource>,
 }
 
 impl std::fmt::Debug for Inbox {
@@ -125,6 +148,7 @@ impl Inbox {
             state: Mutex::new(State::default()),
             on_change,
             persist: OnceLock::new(),
+            id_source: OnceLock::new(),
         }
     }
 
@@ -161,16 +185,50 @@ impl Inbox {
         }
     }
 
-    /// Appends a notification to the back of the queue.
+    /// Installs the source of ids for notifications enqueued without one.
+    /// A later call is ignored. Without a source such a notification keeps
+    /// an empty id and is delivered at least once.
+    pub fn set_id_source(&self, source: IdSource) {
+        let _ = self.id_source.set(source);
+    }
+
+    /// Appends a notification to the back of the queue, ignoring a
+    /// persistence failure. Producers that can report one use
+    /// [`Self::enqueue`].
     pub fn push(&self, notification: Notification) {
-        {
+        let _ = self.enqueue(notification);
+    }
+
+    /// Appends a notification to the back of the queue and returns its
+    /// sequence number. A notification whose non-empty id is already queued
+    /// is not added again; the queued entry's sequence number is returned.
+    /// On a persistence failure the entry stays queued in memory and the
+    /// error carries its sequence number.
+    pub fn enqueue(&self, mut notification: Notification) -> Result<u64, MailboxError> {
+        let result = {
             let mut state = self.lock();
+            if notification.id.is_empty()
+                && let Some(source) = self.id_source.get()
+            {
+                notification.id = source();
+            }
+            if !notification.id.is_empty()
+                && let Some(existing) = state
+                    .items
+                    .iter()
+                    .find(|entry| entry.notification.id == notification.id)
+            {
+                return Ok(existing.seq);
+            }
             let seq = state.next_seq;
             state.next_seq += 1;
             state.items.push(Entry { seq, notification });
-            self.persist(&state.items);
-        }
+            self.persist(&state.items)
+                .map(|()| seq)
+                .map_err(|reason| MailboxError::NotPersisted { seq, reason })
+        };
         self.notify();
+        result
     }
 
     /// Returns every queued notification in push order and empties the queue.
@@ -179,7 +237,7 @@ impl Inbox {
             let mut state = self.lock();
             let items = std::mem::take(&mut state.items);
             if !items.is_empty() {
-                self.persist(&state.items);
+                let _ = self.persist(&state.items);
             }
             items
         };
@@ -201,7 +259,7 @@ impl Inbox {
                 })
                 .map(|index| state.items.remove(index));
             if removed.is_some() {
-                self.persist(&state.items);
+                let _ = self.persist(&state.items);
             }
             removed
         };
@@ -224,7 +282,7 @@ impl Inbox {
                 .position(|entry| entry.seq == seq)
                 .map(|index| state.items.remove(index));
             if removed.is_some() {
-                self.persist(&state.items);
+                let _ = self.persist(&state.items);
             }
             removed
         };
@@ -267,9 +325,10 @@ impl Inbox {
     }
 
     /// Calls the persistence hook, if any. The caller holds the state lock.
-    fn persist(&self, items: &[Entry]) {
-        if let Some(hook) = self.persist.get() {
-            hook(items);
+    fn persist(&self, items: &[Entry]) -> Result<(), String> {
+        match self.persist.get() {
+            Some(hook) => hook(items),
+            None => Ok(()),
         }
     }
 
@@ -293,6 +352,7 @@ mod tests {
             kind: Some(kind),
             text: format!("{task_id} {}", kind.as_str()),
             usage: None,
+            ..Default::default()
         }
     }
 
@@ -439,6 +499,7 @@ mod tests {
         let recorder = Arc::clone(&persists);
         inbox.set_persist(Box::new(move |_entries| {
             recorder.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
         }));
 
         inbox.load(vec![
@@ -475,6 +536,7 @@ mod tests {
         let recorder = Arc::clone(&persists);
         inbox.set_persist(Box::new(move |_entries| {
             recorder.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
         }));
 
         inbox.load(Vec::new());
@@ -527,6 +589,7 @@ mod tests {
                     .map(|entry| entry.notification.task_id.clone())
                     .collect(),
             );
+            Ok(())
         }));
 
         inbox.push(notification("t1", NotificationKind::Message));
@@ -553,10 +616,12 @@ mod tests {
         let first = Arc::clone(&first_calls);
         inbox.set_persist(Box::new(move |_| {
             first.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }));
         let second = Arc::clone(&second_calls);
         inbox.set_persist(Box::new(move |_| {
             second.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }));
 
         inbox.push(notification("t1", NotificationKind::Message));

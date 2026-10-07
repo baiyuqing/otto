@@ -18,6 +18,7 @@ what the CLI actually does today.
 5. [Environment variables](#environment-variables)
 6. [Configuration](#configuration)
 7. [Frontends](#frontends)
+    [Herdr](#herdr)
 8. [Slash commands](#slash-commands)
 9. [Sessions](#sessions)
 10. [Context compaction](#context-compaction)
@@ -591,6 +592,11 @@ Key points:
   errors, protocol errors, and failures after streamed output are not
   retried.
   OpenAI-compatible requests are not automatically retried after dispatch.
+  When the connection to an OpenAI-compatible endpoint cannot be
+  established (refused, unreachable, or a failed TLS or connect timeout), the
+  request never left Otto, so it is tried again up to three times, 1, 2,
+  then 4 seconds apart within the same turn deadline, and reported as not
+  started if all attempts fail.
 
 Deadline checks are cooperative at synchronous filesystem and Turso
 boundaries: Otto checks before and after the call, but does not detach an
@@ -751,6 +757,28 @@ thinking effort, and ignores
 the process's provider/model/profile/base-URL overrides; its stored profile
 selects the endpoint and key environment.
 
+A resumed session always receives the tools of the current configuration. When
+that tool set differs from the one recorded for the session, or the session has
+history and was written before Otto recorded tool sets, Otto appends one
+`capability_update` message before the run's user message. It is shown in the
+transcript and stays in the session history, so every later request contains
+it. It lists the added and removed tool names and the names of tools whose
+description or parameters changed. When the Otto version differs from the
+recorded one, the message also states both versions, and when `otto_help` is
+available it states that earlier `otto_help` results labelled with the old
+version describe the previous version. When the earlier tool set was not
+recorded (sessions written by older Otto versions, and sub-agents started with
+`context: inherit`), it lists the current tool names instead. A new session
+gets no such message.
+
+Otto stores, in an `otto.capabilities` session entry, the tool names, one
+digest per tool of its description and parameters, and the Otto package
+version. A field missing from an entry written by an older Otto is unknown and
+produces no line. A version change with no tool change and no `otto_help`
+produces no message. The message lists names, not content. Changes to the
+manual sections, the system prompt policy text, workspace instructions, and the
+skill and agent catalogs are not reported individually.
+
 UI mode precedence:
 
 1. `--ui`
@@ -861,7 +889,8 @@ OTTO_UI=repl otto
   `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and the
   seconds since the turn started. The phase is `waiting for model`,
   `reasoning`, `responding`, `compacting`, or `running TOOL ARGS` (arguments
-  truncated to 60 characters). During a ChatGPT transport retry, it shows
+  truncated to 60 characters). During a ChatGPT transport retry or an
+  OpenAI-compatible connection retry, it shows
   `retry A/M after REASON, waiting Ns`, with a live countdown, followed by
   `requesting` once the delay ends. `A/M` counts retries (1/3 through 3/3);
   the phase and turn elapsed times keep updating. Esc or Ctrl+C cancels the
@@ -990,7 +1019,7 @@ Turns:
   serve, and `/agents` reads serve's task records.
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
-`/clear`, `/resume` (the sessions of the workspace), `/rename`, `/compact`,
+`/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
 `/image`, `/context`, `/agents`, `/auto [on|off]`, `/sandbox`, `/sandbox reload`,
 `/approve [<id>]`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
@@ -1014,6 +1043,33 @@ was running when the connection was lost keeps running in serve.
 - `Ctrl+C` during an active provider call, tool run, or compaction cancels only
   that turn and returns to the prompt; `Ctrl+C` while idle exits with status 130.
 
+### Herdr
+
+[Herdr](https://herdr.dev) is a terminal workspace manager for coding agents.
+When Herdr starts Otto in a pane, Otto reports its own lifecycle over the socket
+Herdr injects through the environment, so the pane appears as an agent named
+`otto` with the states Herdr's bundled agents have:
+
+| Otto | Herdr state | What it means |
+| --- | --- | --- |
+| A turn is running | `working` | the model is working |
+| A tool call waits for your decision | `blocked` | the sidebar marks the pane, and `herdr agent wait otto --until blocked` returns |
+| The turn ended | `idle` | Otto waits for input |
+
+- Start Otto in a pane the usual way: `herdr pane run <pane> otto`, or type
+  `otto` in a split. Herdr does not detect Otto by itself, so
+  `herdr agent start --kind otto` is not available; the pane command is the way
+  in, and `herdr agent prompt otto ...` works once Otto is running.
+- Otto reports the session file and the command that resumes it
+  (`otto --resume <session file>`), which is what Herdr needs to restore the
+  session after its server restarts. Otto itself never depends on that.
+- Reporting happens only inside a Herdr pane, and only for the frontend that is
+  the pane's agent: `otto serve`, `otto acp`, `otto --attach` and `--prompt`
+  runs do not report.
+- The TUI uses the terminal's alternate screen, so `herdr agent read` sees only
+  the current viewport. Ask Otto to write a long answer to a file when you need
+  all of it.
+
 ## Slash commands
 
 In the TUI, typing `/` opens a filtered suggestion panel; `Enter` executes only
@@ -1024,11 +1080,18 @@ Shared commands:
 - `/help` shows command help.
 - `/init` asks the agent to inspect the repository and create a concise root
   `AGENTS.md` contributor guide. If the file already exists, it is left unchanged.
+- `/plan` shows the [session plan](#session-plan) as a checklist.
 - `/session` shows session details (ID, path, provider, model, thinking effort,
   and sandbox state, plus the session name once `/rename` has set one).
 - `/new` closes the current session and starts a fresh one in the same process.
 - `/clear` is an alias for `/new`: it starts a fresh session, so the transcript,
   context counter, and per-session usage reset together.
+- `/fork` opens a picker of the current session's prompts that start a turn,
+  newest first. `Enter` writes a new session with the history before that
+  prompt's turn, switches to it, and puts the prompt in the editor without
+  sending it. See [Sessions](#sessions). Without `--attach` it is rejected
+  while a turn is in flight; in `--no-session` mode it reports that session
+  persistence is disabled.
 - `/rename <name>` renames the current session. The new name is written as
   append-only session metadata and is shown in session lists. It is rejected
   while a turn is in flight.
@@ -1215,6 +1278,18 @@ Notes:
   `--archive PATH` archives one active session for the current `--cwd` and
   exits. It cannot be combined with `--continue`, `--resume`, `--no-session`,
   or `--prompt`.
+- **Forking** writes a new session beside the current one whose history is the
+  current session's history before a chosen prompt's turn, then switches to
+  it with that prompt in the editor, to edit and send again. In the TUI,
+  `/fork` lists the prompts that start a turn, newest first; `/fork <id>`
+  forks before the prompt with that entry id. The fork keeps every earlier
+  entry unchanged, compaction included, so the model sees the same context
+  the source had at that point. The source session is never changed. Its
+  queued inputs, reminders and sub-agent transcripts stay with it; earlier
+  tool results that name a sub-agent task stay as text. A fork never ends
+  inside a turn, so opening it starts no turn of its own. The fork's header
+  records the source file in `parentSession` and its name is the source's
+  name plus ` (fork)`; `/session` shows `Forked from: <id>`.
 - **Sub-agent transcripts** are written beside the parent session, in a
   directory named after the parent file without `.jsonl`:
   `~/.otto/sessions/<workspace-key>/<session-id>/<task-id>-<child-id>.jsonl`.
@@ -1241,14 +1316,66 @@ Notes:
   and the REPL, the TUI, `otto serve`, and `otto acp` start a wake turn to
   deliver them.
   A turn started by user input delivers pending notifications before the
-  user's message. Delivery is at least once: a notification appended to the session just
-  before Otto exits can be delivered again after the session is reopened.
-  Archiving the session deletes the file. A write failure is not reported.
-  `--no-session` keeps notifications in memory only.
-- When a session is reopened after an exit in the middle of a tool call, the
-  first call in the last assistant message that has no result is recorded as
-  an error result saying the call may have run; the calls after it are
-  recorded as not executed. The model sees these results on its next turn.
+  user's message. Each notification has an input id, recorded on the message
+  that delivers it, so one appended to the session just before Otto exits is
+  not delivered again after the session is reopened. Archiving the session
+  deletes the file. When the file cannot be written, `agent_send` and
+  `agent_report` return an error and the message is not sent; a background
+  notification (a finished task, a timer) stays queued in memory, and a
+  timer whose notification was not saved fires again after a restart. An
+  unreadable file is renamed to `<session-id>.inbox.json.corrupt-<seconds>`
+  with a warning on standard error. `--no-session` keeps notifications in
+  memory only.
+- **Guidance for a running turn** (steering from the TUI, `/inputs`,
+  `/tasks/steer`, or ACP) is also written to `<session-id>.inputs.json`
+  until it is delivered. Delivery, withdrawal, and every way a turn ends
+  remove it. When the Otto process stops during the turn, the turn that
+  resumes it after the session is reopened delivers that guidance first;
+  the next turn that does not resume it discards it. Guidance that cannot be
+  written is not accepted.
+- **Agent-scheduled follow-ups** (`task_queue`) are written to
+  `<session-id>.followups.json` until their step runs; every way the logical
+  task ends removes the rest. When the Otto process stops during the task,
+  the wake turn that resumes it runs them afterwards in order, skipping a
+  step whose message is already in the session. When the task is not
+  resumed (its automatic resume was used, or Otto stopped between two
+  steps), the next task discards them and stores a visible notice with
+  their count.
+- **Unread parent messages** (`agent_send`) for a sub-agent task are written
+  to `<child transcript>.inbox.json` beside the child's transcript. When the
+  task is interrupted and later resumed with `agent` `resume`, they are
+  delivered before the resume prompt, and the recovery notice counts them.
+- Each turn writes an `otto.turn` start entry before anything else and an end
+  entry (`completed`, `failed`, or `cancelled`) when it returns. Neither
+  reaches the model.
+- When a session is reopened after its Otto process stopped in the middle of a
+  turn (killed, out of memory, crashed, or the host lost power), Otto
+  recovers it:
+  - Tool calls in the last assistant message without results are run again
+    when every one of them names `read`, `ls`, `grep`, `find`,
+    `memory_search`, `agent_status`, `remind_status`, or `list_models`, the
+    tool had the same read-only declaration when the call started, and the
+    call was not already run again once. Otherwise the first such call is
+    recorded as an error result saying the call may have run, and the calls
+    after it as not executed.
+  - Otto queues one notification saying the previous process stopped,
+    listing the calls run again, the calls without results, and each
+    sub-agent task that had not finished. Each listed task is recorded as
+    `interrupted`, so the model can continue it with `agent` `resume`.
+  - The notification starts a wake turn in the REPL, the TUI, `otto serve`,
+    and `otto acp`, which continues the interrupted turn from the transcript.
+    The resumed request is a new provider request; partial model output from
+    before the stop is not kept. With `--prompt`, the notification is
+    delivered before the prompt.
+  - Otto resumes a turn on its own at most once. When the resumed turn is
+    itself interrupted, the next open records error results for its calls
+    without results, queues no notification, and prints
+    `recovery: turn <id> was interrupted again after its automatic resume; not resuming`
+    to standard error; the next prompt continues normally.
+  - A turn that ended with an error or was cancelled is not resumed. Sessions
+    written before `otto.turn` entries existed are recovered only when they
+    end with calls without results. Nothing is resumed until a frontend opens
+    the session; `otto serve` does not reopen sessions on start.
 - Manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
   bounded file metadata.
@@ -1279,17 +1406,13 @@ lease in `<session-id>.lease/` beside the session file.
 - On a takeover Otto moves the old log to
   `<session-id>.lease/fenced-<n>.jsonl` and continues from a copy that holds
   only its complete records, so a write from the stopped host after that point
-  does not reach the session. Tool calls without results get the error results
-  described above, except when every such call names `read`, `ls`, `grep`,
-  `find`, or `memory_search`: Otto then runs them again itself, before the
-  next model request, as the next attempt of the same operation, and lists
-  them in the notification as run again. A call that was already run again
-  once and was interrupted again gets the error result instead. Otto then queues one notification to the model that names
-  the stopped host and pid, the calls without results (marked "may have run"
-  or "not executed"), and each sub-agent task that had not finished, and starts
-  a wake turn in the REPL, the TUI, `otto serve`, and `otto acp`. With `--prompt`, the
-  notification is delivered before the prompt. Each listed task is recorded as
-  `interrupted`; a task that cannot be recorded is reported as a warning on
+  does not reach the session. The session is then recovered as after a
+  stopped process (see the session file description above): read-only calls
+  without results are run again, other calls get error results, and one
+  notification names the stopped host and pid, the calls without results
+  (marked "may have run" or "not executed"), and each sub-agent task that had
+  not finished, and starts a wake turn that continues the interrupted turn.
+  A task that cannot be recorded as `interrupted` is reported as a warning on
   standard error. No notification is queued when there is nothing to report
   (no call without a result, no unfinished task, and the session ends on a
   finished assistant reply), or when sub-agents are disabled or no provider is
@@ -1389,6 +1512,10 @@ What a checkpoint keeps:
   block carries forward across later compactions. When it would exceed 16 KiB,
   the oldest messages are dropped. A message longer than 2,000 characters is
   cut and marked `[user message truncated for compaction]`.
+- The text of every summarized `capability_update` message is appended the same
+  way in a `<capability-updates>` block after `<user-messages>`. When it would
+  exceed 16 KiB, the oldest notices are dropped. A notice longer than 8,000
+  characters is cut and marked `[capability update truncated for compaction]`.
 - The paths the summarized tool calls read and modified are appended in
   `<read-files>` and `<modified-files>` blocks.
 
@@ -2074,7 +2201,7 @@ ends. A session queues at most 16 turns; the 17th request returns
 A queued turn has an id and can be read, followed and cancelled through the
 turn routes. Its event stream sends nothing until it starts. Cancelling it
 removes it from the queue and ends it `canceled`. A server-started wake turn
-(`trigger` `task`) starts only when no turn is running or queued.
+(`trigger` `task` or `recovery`) starts only when no turn is running or queued.
 `POST .../compact` returns `409 turn_active` while a turn runs or is queued.
 On shutdown, queued turns end `canceled` without starting.
 
@@ -2105,6 +2232,31 @@ hide the approval panel without deciding and type your message. Telegram and
 Feishu support this with Otto; other ACP agents keep the ordinary queue.
 Explicit Deny/No, `/deny` in chat and `/stop` continue to work.
 
+### Session plan
+
+For work of three or more steps, the main task model keeps a short plan with
+the `update_plan` tool: up to 20 steps, each one line of at most 200
+characters with the status `pending`, `in_progress`, or `completed`, and at
+most one step `in_progress`. Each call replaces the whole plan; an empty list
+clears it. The tool records progress only and runs nothing. Sub-agents do not
+get it.
+
+The plan is saved with the session as an `otto.plan` record, so it survives
+Otto stopping, `--resume`, `/resume`, and `/fork` (a fork keeps the plan in
+force at its cut). When a compaction summarizes the call that set the plan,
+the summary carries the current plan as a `<plan>` checklist, so the model
+keeps it.
+
+Where it appears:
+
+- **TUI:** one line above the status line, `Plan 2/5 · <step in progress>`,
+  dropped first when the terminal is short; `/plan` shows the whole checklist.
+  Both work with `--attach`.
+- **ACP:** a `plan` `session/update` after every change, with every entry at
+  priority `medium`; `session/load` sends the current plan after the history.
+- **HTTP:** a `plan_updated` SSE event (see [Events](#events)) and the session
+  object's `plan` field.
+
 ### Active-task guidance and model follow-ups
 
 In Telegram and Feishu, speak naturally while Otto is working: “investigate
@@ -2129,8 +2281,12 @@ follow-ups scheduled by other follow-ups. These are labelled as agent-originated
 context and cannot create user authority. ACP/server keep them behind approval;
 denial, cancellation, or failure clears remaining model follow-ups. Direct
 terminal prompts that end awaiting approval clear remaining follow-ups with a
-visible, stored notice; resubmit them after resolving approval. Pending queues
-are in memory and are not recovered after a process restart.
+visible, stored notice; resubmit them after resolving approval. Accepted
+follow-ups are also saved with the session (see [Sessions](#sessions)): when
+the Otto process stops during the task, they run, in order, after the turn
+that automatically resumes it, and a step that already ran is not run again.
+A follow-up that cannot be saved is not queued and `task_queue` returns an
+error. The `otto serve` and ACP turn queues remain in memory.
 
 Tool schemas and the applicable operation policy accompany each task request
 outside the mutable transcript. Compaction and session reload preserve this
@@ -2199,10 +2355,12 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}` | Return one open session's info. `404` if the session is not open. |
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
+| `GET /v1/sessions/{id}/fork-points` | `{"fork_points":[{"entry_id","prompt"}]}`: the user prompts that start a turn, oldest first. Empty for a session with no file yet. |
+| `POST /v1/sessions/{id}/fork` | Write a new session from this session's history before the turn that `{"before":"<entry_id>"}` starts, open it, and return it, `201`, with `prompt` (the text of that message) and `forked_from`. Without `before`, the copy keeps everything up to the last finished turn. The source session is not changed, and a running turn on it is left out. `409 invalid_fork_point` when `before` is not a fork point or the session has no history yet. |
 | `GET /v1/sessions/{id}/history?before_turn=<turn_id>` | Return the session's message history. With `before_turn`, return only the messages that existed when that turn started, so a client can replay a running turn's events from sequence `0` without showing its prompt and finished steps twice; `404` when the turn is not retained or has not started. |
 | `POST /v1/sessions/{id}/approvals/message` | Restricted dialogue during an unapproved request: `{"text":"..."}`. Returns `null` when none waits, otherwise `{"text","queued"}`. A true `queued` asks the client to put the original message in its normal task queue. Never approves. |
 | `POST /v1/sessions/{id}/approvals/{approval_id}` | Decide an elevated Bash command a running turn waits for: `{"decision":"allow"}` or `{"decision":"deny"}`. `200 {"decision"}` for the first decision; `409 approval_decided` when it was already decided; `409 approval_failed` when the id is not waiting. See [Approvals inside a turn](#approvals-inside-a-turn). |
-| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram` or `feishu`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `input_id` (1 to 128 ASCII letters, digits, `.`, `_`, `:`, `-`) makes a retry safe: the same `input_id` in the same session returns the turn it already started while the server remembers it (its 256 most recent per session), and `409 duplicate_input` once only the transcript holds it, for example after a restart. It is unrelated to the `X-Request-Id` log-correlation header. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `"queue": true` queues the turn while another runs (see [Turn queue](#turn-queue)). The response header `Otto-Turn-Id` names the turn. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. An optional `origin` (`terminal`, `web`, or `chat:<platform>:<chat id>`) is the turn's origin for [`schedule`](#schedule); it defaults to `web`, and an invalid value, or a chat platform that differs from the optional `channel` (`telegram` or `feishu`), is `400`. `409 turn_active` while a turn runs and `queue` is not set; `409 queue_full` with 16 turns queued. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. The session's queued turns and its most recent started turn are retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read a retained turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. A queued turn's stream sends nothing until it starts. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. A queued turn is removed from the queue. |
@@ -2215,8 +2373,8 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/notices` | The lines background reflection queued for this session, `{"notices":[{"id":1,"text":"..."}],"last":1}`; pass `?after=<last>` to read only newer ones. They are not removed by reading, so every client sees each one, and only the 20 newest are kept. |
 | `GET /v1/sessions/{id}/wake-replies` | The assistant text of this session's finished wake turns, in the shape and with the rules of `.../notices`. `otto acp --attach` reads it to send wake replies to its ACP client. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn runs or is queued, or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
-| `POST /v1/sessions/{id}/inputs` | Admit ordinary `{"text":"..."}` without model routing or implicit queuing. Returns `"steered"` when bound to the active run's next safe boundary, `"idle"` when the caller may explicitly start a new turn, or `"approval_pending"` while an approval owns input. Nonblank text is limited to 32,000 UTF-8 bytes. |
-| `POST /v1/sessions/{id}/tasks/steer` | Explicit steering endpoint. It returns `{id,text,status:"queued"}` immediately, so clients display the exact guidance while it waits for the next safe boundary. |
+| `POST /v1/sessions/{id}/inputs` | Admit ordinary `{"text":"..."}` without model routing or implicit queuing. Returns `"steered"` when bound to the active run's next safe boundary, `"idle"` when the caller may explicitly start a new turn, or `"approval_pending"` while an approval owns input. Nonblank text is limited to 32,000 UTF-8 bytes. An optional `input_id` admits a retry once (`409 duplicate_input` after delivery). `503 input_not_persisted` when the guidance could not be saved; it was not accepted. |
+| `POST /v1/sessions/{id}/tasks/steer` | Explicit steering endpoint. It returns `{id,text,status:"queued",input_id}` immediately, so clients display the exact guidance while it waits for the next safe boundary. An optional `input_id` returns the same message for a retry while it is queued and `409 duplicate_input` after delivery; `503 input_not_persisted` when it could not be saved. |
 | `GET /v1/sessions/{id}/tasks/steer` | Lists transient steering items and their `queued`, `delivered`, `withdrawn`, or `discarded` status for the active run. |
 | `DELETE /v1/sessions/{id}/tasks/steer/{message_id}` | Withdraws exactly one still-`queued` steer. Delivered guidance is append-only session history and cannot be removed; a non-queued or unknown item returns `409 task_steer_withdraw_failed`. |
 | `POST /v1/sessions/{id}/tasks/control` | Interpret `{"text":"...","channel":"telegram"}` (`channel` optional, `telegram` or `feishu`) using the restricted control dialogue. Returns null if no active dialogue applies, otherwise `{"text","queued"}`. `queued:true` means the caller must submit the original message as a queued turn; this route does not itself admit a follow-up. `409 task_control_failed` reports routing failure. |
@@ -2273,13 +2431,23 @@ only way to stop it.
     "bash_available": true,
     "summary": "..."
   },
-  "turn": { "id": "...", "trigger": "user", "status": "..." }
+  "turn": { "id": "...", "trigger": "user", "status": "..." },
+  "forked_from": { "session_id": "...", "entry_id": "..." },
+  "plan": [{ "text": "...", "status": "in_progress" }]
 }
 ```
 
+`plan` is the [session plan](#session-plan), omitted when there is none.
+
+`forked_from` is present only on a fork: the source session and the user
+message the fork stops before (`entry_id` is absent for a fork of the whole
+history).
+
 `turn` is `null` when no turn has run yet on this session. `trigger` is
-`user` for a turn started by `POST .../turns` and `task` for one the server
-started to deliver a finished sub-agent task. The session object
+`user` for a turn started by `POST .../turns`, `task` for one the server
+started to deliver a finished sub-agent task or another notification, and
+`recovery` for one that resumes a turn interrupted when the previous Otto
+process stopped. The session object
 never includes the session's file path; the session ID is the handle used by
 every endpoint.
 
@@ -2309,7 +2477,9 @@ payload. Event names are the `agent.Event` type names: `agent_started`,
 `text_delta`, `reasoning_delta`, `tool_call_started`, `tool_call_finished`, `provider_usage`,
 `provider_retry`, `compaction_planned`, `compaction_started`, `compaction_completed`,
 `compaction_warning`, `memory_warning`, `agent_finished`, and `agent_error`,
-plus `notification` when a sub-agent task finishes. `reasoning_delta` carries
+plus `notification` when a sub-agent task finishes, and `plan_updated` after a
+tool call changes the [session plan](#session-plan), carrying the whole plan as
+`steps: [{text, status}]` (empty when it was cleared). `reasoning_delta` carries
 `text` like `text_delta`. `provider_retry` carries
 `retry: {attempt, max_attempts, delay_ms, reason}`, where `attempt` is the
 1-based attempt about to start and `reason` is an HTTP status such as
@@ -2396,12 +2566,13 @@ this build does not know, Otto prints one warning at startup and runs without
 recording. A write error later in the process stops recording for that
 process without output. Neither affects the task.
 
-`agent_send` messages and `agent_report` calls are runtime delivery only: they
-are not rows in `tasks.db`. If the child receives an `agent_send` message, it
-is written into that child's transcript as parent-message context when the
-child reaches the next normal notification checkpoint.
+`agent_send` messages and `agent_report` calls are not rows in `tasks.db`. If
+the child receives an `agent_send` message, it is written into that child's
+transcript as parent-message context when the child reaches the next normal
+notification checkpoint; until then it waits in the child's pending-message
+file (see [Sessions](#sessions)).
 
-### Shutdown
+### Agent server shutdown
 
 `otto serve` shuts down on `SIGINT` or `SIGTERM`: it stops accepting new
 requests, cancels every active turn and compaction, closes every session,
@@ -2468,7 +2639,7 @@ is rejected.
 | `session/new` | Creates a session. No session file is written until the first prompt. |
 | `session/load` | Opens a session of this workspace by its 32-character id, sends the stored conversation as `session/update` notifications, then responds. The response also carries `sessionId`. |
 | `session/list` | The newest 20 sessions of the workspace, titled by session name or the last user message (truncated to 80 characters). |
-| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Optional `_meta.otto.chat` (`<platform>:<chat id>`) is the turn's chat origin for [`schedule`](#schedule); an invalid value, or a platform that differs from `_meta.otto.channel`, is ignored with a warning on stderr. Returns `end_turn`, or `cancelled` after `session/cancel`. |
+| `session/prompt` | Runs one turn. Text blocks are joined with newlines; a `resource_link` block becomes a line `<name>: <uri>`. Optional `_meta.otto.channel` (`telegram` or `feishu`) selects fixed guidance for this turn without altering the user's text or permissions. Optional `_meta.otto.chat` (`<platform>:<chat id>`) is the turn's chat origin for [`schedule`](#schedule); an invalid value, or a platform that differs from `_meta.otto.channel`, is ignored with a warning on stderr. Optional `_meta.otto.inputId` is the prompt's [`input_id`](#agent-server): a retry with the same value in the same session runs once, and a malformed value is rejected; `_meta.otto.requestId` only correlates logs. Returns `end_turn`, or `cancelled` after `session/cancel`. |
 | `_otto/approvals/message` | Restricted pending-approval dialogue with `sessionId` and `text`; advertised by `_meta.otto.approvalDialogue`. Returns `null` or `{"text","queued"}`. Available in local and attach mode. |
 | `session/cancel` | Cancels the session's running prompt and any pending permission request. |
 | `_otto/memory/pending` | Extension. Params `{sessionId, cursor?, limit?}` (`limit` 1 to 50, default 20); returns `{candidates, nextCursor}` with candidates as `{id, action, kind, key, text, reason, origin, scope}` plus an optional string `advice` (the one-line advice, omitted when there is none); `nextCursor` is `""` on the last page. |
@@ -2554,7 +2725,9 @@ through the chat connector.
 During a prompt Otto sends assistant text as `agent_message_chunk`,
 reasoning as `agent_thought_chunk`, and each tool call as a `tool_call`
 followed by a `tool_call_update` with status `completed` or `failed`.
-`bash` calls have kind `execute` and the command as title.
+`bash` calls have kind `execute` and the command as title. When a tool call
+changes the [session plan](#session-plan), Otto sends a `plan` update with the
+whole plan.
 
 ### Elevated `bash` uses `session/request_permission`
 
@@ -2583,7 +2756,7 @@ If the wake turn writes assistant text, Otto sends it after the turn as one
 for each session and increases by one. A wake turn that writes no text sends
 nothing.
 
-### Shutdown
+### ACP agent server shutdown
 
 End of file on stdin, `SIGINT`, or `SIGTERM` cancels every running prompt,
 answers each with `cancelled`, closes every session, and exits `0`. A
@@ -2681,6 +2854,10 @@ later turn from another frontend. With an older ACP agent that does not
 advertise this capability, the connector retains the previous text-prefix
 behavior for channel hints.
 
+Each prompt carries `chat:<platform>:<chat id>:<message id>` as
+`_meta.otto.inputId`, so a message the platform redelivers, or one the
+connector sends again after a restart, runs once in its session.
+
 ### Building and running
 
 Building requires Go at the version in `chat-connector/go.mod`.
@@ -2701,7 +2878,7 @@ Feishu rejects exits with status 1 and `otto-connect: <message>`. A Feishu
 connection that fails for another reason, such as no network, is retried by
 the SDK and each failure is logged as `feishu connection error`.
 
-### Configuration
+### Chat connector configuration
 
 `~/.config/otto/connect.toml`, or the file given with `--config`:
 

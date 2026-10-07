@@ -316,6 +316,9 @@ func (a *agent) Prompt(ctx context.Context, p acp.PromptRequest) (acp.PromptResp
 		if id, _ := otto["requestId"].(string); id != "" {
 			a.log("request_id:%s", id)
 		}
+		if id, _ := otto["inputId"].(string); id != "" {
+			a.log("input_id:%s", id)
+		}
 	}
 	defer func() { a.log("end:%s", text) }()
 

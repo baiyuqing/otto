@@ -955,15 +955,21 @@ same decision authority is injected into the parent and child native registries,
 HTTP, ACP and terminal surfaces. Models discover `request_approval` in actual
 runner definitions and system guidance, and choose when conversational consent
 is needed. Models can query/withdraw but cannot decide an approval. Session-owned requests
-default to automatic decisions under the persisted AUTO policy; user-only
-`/auto off` selects manual review. Each native producer declares the authority
-class of its request, and AUTO decides only a bounded authorization that stays
-inside the sandbox and the workspace: a plan review, a boundary crossing and a
-durable grant always wait for the user, whatever the mode. The service enforces
-this and every backend rechecks it inside the committing transaction. Creation
+default to automatic decisions under the persisted policy; user-only
+`/auto manual|auto|yolo` selects manual review, the default AUTO policy, or
+YOLO. Each native producer declares the authority class of its request, and
+`ApprovalMode::decides` is the single policy predicate: MANUAL decides nothing,
+AUTO decides only a bounded authorization that stays inside the sandbox and the
+workspace, and YOLO decides every request of that session, including its child
+tasks. The service applies it and every backend rechecks the persisted mode
+inside the committing transaction, so a stale automatic decision cannot land;
+the decision transport names the mode (`auto-mode` or `yolo-mode`). A
+workspace-wide or other-session request is never decided by a session policy,
+and only an admitted user action can set the mode. Creation
 and decision remain distinct journal events. See
-[session automatic approval](specs/2026-10-05-session-auto-mode.md) and
-[authority boundaries](specs/2026-10-07-auto-mode-authority-boundaries.md).
+[session automatic approval](specs/2026-10-05-session-auto-mode.md),
+[authority boundaries](specs/2026-10-07-auto-mode-authority-boundaries.md) and
+[YOLO mode](specs/2026-10-07-yolo-approval-mode.md).
 
 Authorization is prepared before tool dispatch, bound to the logical operation,
 exact arguments and relevant domain version. Decisions/events commit together.

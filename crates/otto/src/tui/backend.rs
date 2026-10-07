@@ -47,6 +47,7 @@ pub(crate) enum Request {
     },
     Reviews,
     ApprovalSnapshot,
+    ApprovalActivity,
     Management(crate::app::management::Request),
     Command(Command),
 }
@@ -72,6 +73,7 @@ pub(crate) enum Command {
     },
     Rename(String),
     AutoMode(String),
+    Permissions(String),
     SandboxReload,
     SandboxAllow(String),
     SandboxNetwork(String),
@@ -126,6 +128,7 @@ pub(crate) enum Reply {
     },
     Reviews(Vec<Candidate>),
     ApprovalSnapshot(crate::approval::Snapshot),
+    ApprovalActivity(crate::approval::ApprovalActivity),
     Steering(Vec<otto_core::agent::steering::Message>),
     Management(crate::app::management::Reply),
     Operation {
@@ -353,6 +356,7 @@ async fn local(
                     })
                 }
                 Request::Reviews => {
+                    let snapshot = c.approval_snapshot().map_err(|error| error.to_string())?;
                     let (service, user, workspace) = c
                         .memory_manager()
                         .ok_or_else(|| "Memory review is unavailable.".to_string())?;
@@ -363,13 +367,33 @@ async fn local(
                             limit: 20,
                             cursor: String::new(),
                         })
-                        .map(|page| Reply::Reviews(page.candidates))
+                        .map(|page| {
+                            Reply::Reviews(
+                                page.candidates
+                                    .into_iter()
+                                    .filter(|candidate| {
+                                        crate::approval::memory::is_human_pending(
+                                            candidate,
+                                            &snapshot.requests,
+                                        )
+                                    })
+                                    .collect(),
+                            )
+                        })
                         .map_err(|error| error.to_string())
                 }
                 Request::ApprovalSnapshot => c
                     .approval_snapshot()
                     .map(Reply::ApprovalSnapshot)
                     .map_err(|error| error.to_string()),
+                Request::ApprovalActivity => {
+                    let scope = c.approval_scope();
+                    c.approval_snapshot().map_err(|error| error.to_string())?;
+                    c.approval_service()
+                        .activity_snapshot(&scope.workspace, Some(&scope.session_id))
+                        .map(Reply::ApprovalActivity)
+                        .map_err(|error| error.to_string())
+                }
                 Request::Command(_) | Request::Management(_) => unreachable!(),
             })
             .await
@@ -504,6 +528,9 @@ async fn local_command(c: Arc<Controller>, command: Command) -> Result<Reply, St
             .await?
         }
         Command::AutoMode(args) => blocking(c.clone(), move |c| c.auto_mode_command(&args)).await?,
+        Command::Permissions(args) => {
+            blocking(c.clone(), move |c| c.permissions_command(&args)).await?
+        }
         Command::SandboxReload => format!("Sandbox: {}", c.reload_sandbox().await?.summary()),
         Command::SandboxAllow(path) => {
             let path = blocking(c.clone(), move |c| c.resolve_sandbox_read_path(&path)).await?;
@@ -798,6 +825,11 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                 missing: detail.transcript_missing,
             })
         }
+        Request::ApprovalActivity => client
+            .approval_activity(session)
+            .await
+            .map(Reply::ApprovalActivity)
+            .map_err(|e| e.to_string()),
         Request::ApprovalSnapshot => {
             let value = client
                 .shared_approval("_otto/approvals/list", session, "", 0, "", "", 0)
@@ -853,12 +885,10 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                     format!("Session name: {name}")
                 }
                 Command::AutoMode(args) => {
-                    let mode = crate::app::parse_auto_mode(&args)?;
-                    let mode = client
-                        .approval_mode(session, mode)
-                        .await
-                        .map_err(mutation_error)?;
-                    format!("Approval mode: {}", mode.label())
+                    client.auto_mode_command(session, &args).await.map_err(mutation_error)?
+                }
+                Command::Permissions(args) => {
+                    client.permissions_command(session, &args).await.map_err(mutation_error)?
                 }
                 Command::SandboxReload => format!(
                     "Sandbox: {}",

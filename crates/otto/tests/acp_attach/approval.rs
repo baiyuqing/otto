@@ -1,4 +1,179 @@
 use super::*;
+fn call_holding_permissions(
+    client: &mut Client,
+    method: &str,
+    params: Value,
+    held: &mut Vec<Value>,
+    frames: &mut Vec<Value>,
+) -> Value {
+    let id = client.start(method, params);
+    loop {
+        let frame = client.recv();
+        if frame["id"] == json!(id) && frame.get("method").is_none() {
+            return frame;
+        }
+        if frame["method"] == "session/request_permission" {
+            held.push(frame.clone());
+        }
+        frames.push(frame);
+    }
+}
+
+#[test]
+fn relay_tightening_mode_while_a_card_is_open_rejects_both_stale_answers_and_reprompts() {
+    use std::os::unix::fs::PermissionsExt;
+    for old_choice in ["allow_once", "reject_once"] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let target = home.path().join("revised-effect.txt");
+        let script = workspace.path().join("reviewed.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf 'effect\\n' >> '{}'\n", target.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let served = Arc::new(AtomicUsize::new(0));
+        let (base_url,_) = serve(Script {replies:vec![
+            tool_call_reply("revised-call","bash",&json!({"command":"./reviewed.sh",
+                "sandbox_permissions":"require_escalated","justification":"Append the requested fixture line outside the workspace."}).to_string()),
+            text_reply(&json!({"risk":"medium","user_authorization":"high","outcome":"ask","reason":"Confirm this exact fixture operation."}).to_string()),text_reply("done")
+        ],served:served.clone()});
+        configure(home.path(), &base_url, None);
+        let serve = Serve::start(home.path(), workspace.path(), "seatbelt");
+        let mut client = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+        client.initialize();
+        let session_id = client.new_session(workspace.path());
+        let prompt_id = client.start(
+            "session/prompt",
+            prompt(
+                &session_id,
+                &format!("Append exactly one effect line to {}.", target.display()),
+            ),
+        );
+        let mut initial_frames = Vec::new();
+        let old = loop {
+            let frame = client.recv();
+            if frame["method"] == "session/request_permission" {
+                break frame;
+            }
+            assert_ne!(
+                frame["id"],
+                json!(prompt_id),
+                "prompt finished before the first permission: {frame}"
+            );
+            initial_frames.push(frame);
+        };
+        let old_metadata = &old["params"]["_meta"]["otto"];
+        let old_revision = old_metadata["revision"].as_u64().unwrap();
+        let mut held = Vec::new();
+        let changed = call_holding_permissions(
+            &mut client,
+            "_otto/approval_mode/set",
+            json!({"sessionId":session_id,"mode":"manual"}),
+            &mut held,
+            &mut initial_frames,
+        );
+        assert_eq!(changed["result"]["mode"], "manual", "{changed}");
+        let activity = call_holding_permissions(
+            &mut client,
+            "_otto/approvals/list",
+            json!({"sessionId":session_id}),
+            &mut held,
+            &mut initial_frames,
+        );
+        let pending = activity["result"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == old_metadata["approvalId"])
+            .unwrap();
+        assert!(
+            pending["revision"].as_u64().unwrap() > old_revision,
+            "request must actually be revised: {activity}"
+        );
+        assert!(!target.exists());
+        client.send(json!({"jsonrpc":"2.0","id":old["id"],"result":{
+            "outcome":{"outcome":"selected","optionId":old_choice}
+        }}));
+        let mut fresh_permissions = 0;
+        let mut answer_fresh = |frame: &Value| {
+            assert_eq!(frame["method"], "session/request_permission");
+            let fresh = &frame["params"]["_meta"]["otto"];
+            assert_eq!(fresh["approvalId"], old_metadata["approvalId"]);
+            assert!(fresh["revision"].as_u64().unwrap() > old_revision);
+            assert_eq!(fresh["subjectVersion"], old_metadata["subjectVersion"]);
+            assert!(
+                !target.exists(),
+                "old {old_choice} must not authorize or reject the revised operation"
+            );
+            fresh_permissions += 1;
+            json!({"outcome":{"outcome":"selected","optionId":"allow_once"}})
+        };
+        for frame in held {
+            let result = answer_fresh(&frame);
+            client.send(json!({"jsonrpc":"2.0","id":frame["id"],"result":result}));
+        }
+        let (frames, response) = client.finish(prompt_id, &mut answer_fresh);
+        assert_eq!(fresh_permissions, 1);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        initial_frames.extend(frames);
+        assert_terminal_tool_update(&initial_frames, "revised-call", "completed");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "effect\n");
+        assert_eq!(served.load(Ordering::SeqCst), 3);
+        assert_eq!(client.close(), Some(0));
+    }
+}
+
+#[test]
+fn relay_auto_review_ask_becomes_a_permission_request_and_applies_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let target = home.path().join("relay-effect.txt");
+    let script = workspace.path().join("reviewed.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nprintf 'effect\\n' >> '{}'\n", target.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let served = Arc::new(AtomicUsize::new(0));
+    let (base_url,_) = serve(Script {replies:vec![
+        tool_call_reply("relay-reviewed-call","bash",&json!({"command":"./reviewed.sh",
+            "sandbox_permissions":"require_escalated","justification":"Append the requested fixture line outside the workspace."}).to_string()),
+        text_reply(&json!({"risk":"medium","user_authorization":"medium","outcome":"ask",
+            "reason":"A person must confirm this exact fixture operation."}).to_string()),text_reply("done")
+    ],served:served.clone()});
+    configure(home.path(), &base_url, None);
+    let serve = Serve::start(home.path(), workspace.path(), "seatbelt");
+    let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+    relay.initialize();
+    let session_id = relay.new_session(workspace.path());
+    let id = relay.start(
+        "session/prompt",
+        prompt(
+            &session_id,
+            &format!("Append exactly one effect line to {}.", target.display()),
+        ),
+    );
+    let mut permissions = 0;
+    let (frames, response) = relay.finish(id, &mut |frame| {
+        assert_eq!(frame["method"], "session/request_permission");
+        assert!(!target.exists());
+        permissions += 1;
+        json!({"outcome":{"outcome":"selected","optionId":"allow_once"}})
+    });
+    assert_eq!(
+        permissions, 1,
+        "a review ask must not wait invisibly in attach mode"
+    );
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert_terminal_tool_update(&frames, "relay-reviewed-call", "completed");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "effect\n");
+    assert_eq!(served.load(Ordering::SeqCst), 3);
+    assert_eq!(relay.close(), Some(0));
+}
 
 fn manual_session(client: &mut Client, workspace: &Path) -> String {
     let session_id = client.new_session(workspace);

@@ -10,25 +10,47 @@ import (
 var ErrSharedApprovalUnsupported = errors.New("agent does not support unified approvals")
 
 type SharedApproval struct {
-	ID                 string `json:"id"`
-	Revision           uint64 `json:"revision"`
-	Kind               string `json:"kind"`
-	Title              string `json:"title"`
-	Reason             string `json:"reason"`
-	Persistent         bool   `json:"persistent"`
-	Blocking           bool   `json:"blocking"`
-	PresentationOrigin string `json:"presentation_origin"`
-	State              string `json:"state"`
-	Application        string `json:"application"`
-	ApplicationError   string `json:"application_error"`
+	Review             *ReviewMetadata `json:"review,omitempty"`
+	ID                 string          `json:"id"`
+	Revision           uint64          `json:"revision"`
+	Kind               string          `json:"kind"`
+	Title              string          `json:"title"`
+	Reason             string          `json:"reason"`
+	Persistent         bool            `json:"persistent"`
+	Blocking           bool            `json:"blocking"`
+	PresentationOrigin string          `json:"presentation_origin"`
+	State              string          `json:"state"`
+	Application        string          `json:"application"`
+	ApplicationError   string          `json:"application_error"`
 	Decision           *struct {
 		Transport string `json:"transport"`
 	} `json:"decision"`
 	Subject struct {
 		Source  string `json:"source"`
+		Version string `json:"version"`
 		Details string `json:"details"`
 	} `json:"subject"`
 }
+
+type ReviewAssessment struct {
+	Risk              string `json:"risk"`
+	UserAuthorization string `json:"user_authorization"`
+	Outcome           string `json:"outcome"`
+	Reason            string `json:"reason"`
+}
+
+type ReviewMetadata struct {
+	Status           string            `json:"status"`
+	Assessment       *ReviewAssessment `json:"assessment"`
+	SettingsRevision uint64            `json:"settings_revision"`
+	EvidenceDigest   string            `json:"evidence_digest"`
+	PolicyDigest     string            `json:"policy_digest"`
+}
+
+func (r SharedApproval) HumanPending() bool {
+	return r.State == "pending" && (r.Review == nil || r.Review.Status == "human_required")
+}
+
 type ApprovalSnapshot struct {
 	Requests []SharedApproval `json:"requests"`
 	Cursor   int64            `json:"cursor"`

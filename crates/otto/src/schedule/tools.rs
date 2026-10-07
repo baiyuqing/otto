@@ -34,7 +34,7 @@ const LIST_BODY_CHARS: usize = 80;
 const NO_ORIGIN: &str = "scheduled delivery is unavailable in this conversation: it has no chat, terminal or web UI origin to deliver to (scheduled runs, sub-agents and editor ACP clients cannot create items)";
 const NO_STORE: &str = "scheduled delivery is unavailable: ~/.otto/schedule.db could not be opened";
 
-const SCHEDULE_DESCRIPTION: &str = "Schedule something for the user: a fixed text message (`text`) or a prompt that runs in a new session at the due time and whose final reply is delivered (`prompt`). Use this when the user asks to be told something later or repeatedly, or asks for a check to run later; `remind` is only your own timer inside this conversation. Give exactly one of `text` / `prompt` and exactly one of `seconds` (1 to 2592000) / `at`. `at` is `HH:MM` (next occurrence) or `YYYY-MM-DD HH:MM` (at most 30 days ahead) in the host's local time zone. `repeat` is `once` (default), `daily` or `weekdays`; `daily` and `weekdays` need `at` as `HH:MM`. An empty string counts as an absent field. Items are delivered to the chat, terminal or web UI this turn came from, even after /new. A prompt run has no user: approval requests are denied. Tell the user the resolved time from the result.";
+const SCHEDULE_DESCRIPTION: &str = "Schedule a fixed text message (`text`) or a prompt whose final reply is delivered (`prompt`). Use this for a user-requested later message or check; `remind` is your own timer inside this conversation. Give exactly one of text/prompt and exactly one of seconds (1 to 2592000)/at. at is HH:MM (next occurrence) or YYYY-MM-DD HH:MM (at most 30 days ahead), in the host's local time zone. repeat is once (default), daily or weekdays; repeats need at as HH:MM. Empty strings count as absent. Returns the item id, resolved time and destination of this chat, terminal or web UI, even after /new. A prompt runs in a new session within its approved creation scope and frozen original user evidence; generated prompt text creates no new authority. AUTO may review additional ordinary operations; unresolved human choices cannot run unattended.";
 const LIST_DESCRIPTION: &str = "List the scheduled items of this chat or surface: active ones, then those that finished, failed or were cancelled in the last 7 days. Use the id with schedule_cancel.";
 const CANCEL_DESCRIPTION: &str = "Cancel an active scheduled item by id, as schedule_list shows it (for example s7). A recurring item stops for good.";
 
@@ -84,10 +84,28 @@ pub fn definitions() -> Vec<ToolDefinition> {
 
 pub fn tools(context: &Context) -> Vec<Box<dyn Tool + Send + Sync>> {
     vec![
-        Box::new(ScheduleTool(context.clone())),
+        Box::new(ScheduleTool(context.clone(), None)),
         Box::new(ListTool(context.clone())),
         Box::new(CancelTool(context.clone())),
     ]
+}
+
+pub fn tools_with_session(
+    context: &Context,
+    session: Arc<dyn crate::session::SessionHandle>,
+) -> Vec<Box<dyn Tool + Send + Sync>> {
+    vec![
+        Box::new(ScheduleTool(context.clone(), Some(session))),
+        Box::new(ListTool(context.clone())),
+        Box::new(CancelTool(context.clone())),
+    ]
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ScheduledAuthority {
+    pub body_digest: String,
+    pub source_session: String,
+    pub context: crate::approval::reviewer::ReviewContext,
 }
 
 fn schedule_definition() -> ToolDefinition {
@@ -162,7 +180,7 @@ fn one_line(body: &str, max: usize) -> String {
     }
 }
 
-struct ScheduleTool(Context);
+struct ScheduleTool(Context, Option<Arc<dyn crate::session::SessionHandle>>);
 
 #[async_trait::async_trait]
 impl Tool for ScheduleTool {
@@ -228,6 +246,29 @@ impl Tool for ScheduleTool {
             Err(CreateError::Limit) => return preflight_error(CreateError::Limit),
             Err(error) => return error_result(error),
         };
+        if item.kind == Kind::Prompt
+            && let Some(session) = &self.1
+        {
+            let context = session
+                .custom_data(crate::approval::reviewer::CONTEXT_CUSTOM_TYPE)
+                .and_then(|data| serde_json::from_str(&data).ok())
+                .unwrap_or_default();
+            let authority = ScheduledAuthority {
+                body_digest: crate::approval::digest(&item.body),
+                source_session: item.session_id.clone(),
+                context,
+            };
+            if otto_core::session::Session::append_custom(
+                session.as_ref(),
+                &format!("otto.schedule.{}", item.label()),
+                &serde_json::to_string(&authority).expect("typed schedule authority"),
+            )
+            .await
+            .is_err()
+            {
+                return error_result("Schedule was created but its authorization evidence could not be saved; unattended additional authority requires human review.").transport_unknown();
+            }
+        }
         let noun = match item.kind {
             Kind::Prompt => "run",
             Kind::Text => "delivery",
@@ -451,11 +492,7 @@ mod tests {
         let names: Vec<_> = definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names, NAMES);
         let schedule = &definitions()[0];
-        assert!(
-            schedule
-                .description
-                .contains("`remind` is only your own timer")
-        );
+        assert!(schedule.description.contains("`remind` is your own timer"));
         // A caller that sets every property needs a non-repeating `repeat`.
         let parameters: serde_json::Value =
             serde_json::from_str(schedule.parameters.as_ref().unwrap().get()).unwrap();

@@ -1190,6 +1190,14 @@ impl Connection {
             (Backend::Local(local), command) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
                 match command {
+                    command::Command::Permissions { args } => {
+                        let text = session
+                            .controller
+                            .permissions_command(args)
+                            .map_err(|e| invalid_params(&e))?;
+                        self.say(session_id, &text);
+                        end_turn()
+                    }
                     command::Command::Auto { args } => {
                         let text = session
                             .controller
@@ -1373,18 +1381,44 @@ impl Connection {
                         &request.approval_id,
                         &scope.workspace,
                         Some(&scope.session_id),
-                    ) && (shared.kind == crate::approval::Kind::Confirmation
-                        || self
-                            .client_capabilities
-                            .lock()
-                            .expect("ACP capabilities")
-                            .pointer("/_meta/otto/approvals/version")
-                            .and_then(serde_json::Value::as_u64)
-                            == Some(1))
-                    {
-                        return self
-                            .confirmation(&session.controller, &shared, cancel)
-                            .await;
+                    ) {
+                        let shared = match session
+                            .controller
+                            .approval_service()
+                            .wait_actionable(&shared.id, &shared.scope, cancel)
+                            .await
+                        {
+                            Ok(shared) => shared,
+                            Err(_) => return ApprovalDecision::Deny,
+                        };
+                        if !shared.is_human_pending() {
+                            return match shared.state {
+                                crate::approval::State::Approved => ApprovalDecision::Allow,
+                                _ if cancel.is_cancelled() => ApprovalDecision::Cancelled,
+                                _ => ApprovalDecision::Deny,
+                            };
+                        }
+                        if shared.kind == crate::approval::Kind::Confirmation
+                            || self
+                                .client_capabilities
+                                .lock()
+                                .expect("ACP capabilities")
+                                .pointer("/_meta/otto/approvals/version")
+                                .and_then(serde_json::Value::as_u64)
+                                == Some(1)
+                        {
+                            return self
+                                .confirmation(&session.controller, &shared, cancel)
+                                .await;
+                        }
+                        return approval::shared_request_permission(
+                            self,
+                            &session.controller,
+                            &shared,
+                            &request,
+                            cancel,
+                        )
+                        .await;
                     }
                     request_permission(
                         self,
@@ -1770,11 +1804,11 @@ fn initialize_result(local: bool) -> Reply {
     let capabilities = match local {
         true => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "scheduleDeliveryChats": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
+            json!({"memoryReview": true, "approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "scheduleDeliveryChats": true, "approvalMode":{"version":1},"approvalPolicy":{"version":1},"approvals":{"version":1}}),
         )])),
         false => capabilities.meta(serde_json::Map::from_iter([(
             "otto".to_string(),
-            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "scheduleDeliveryChats": true, "approvalMode":{"version":1},"approvals":{"version":1}}),
+            json!({"approvalDialogue":true, "channelContext": true, "taskControl": true, "scheduleDelivery": true, "scheduleDeliveryChats": true, "approvalMode":{"version":1},"approvalPolicy":{"version":1},"approvals":{"version":1}}),
         )])),
     };
     result(
@@ -2020,6 +2054,12 @@ impl Dispatcher {
                             },
                         },
                     };
+                    connection.reply(id, reply);
+                });
+            }
+            "_otto/approval_policy/get" | "_otto/approval_policy/set" => {
+                self.tasks.spawn(async move {
+                    let reply = connection.approval_policy(&method, params).await;
                     connection.reply(id, reply);
                 });
             }

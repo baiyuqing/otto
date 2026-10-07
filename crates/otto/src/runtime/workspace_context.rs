@@ -228,7 +228,7 @@ async fn git_status_line(
     Some(format!("git: {}, {modified} modified", branch.trim()))
 }
 
-async fn run_git(
+pub(crate) async fn run_git(
     executor: &Arc<dyn CommandExecutor>,
     dir: &str,
     environment: &[String],
@@ -248,25 +248,47 @@ async fn run_git(
         env: environment.to_vec(),
         ..Default::default()
     };
-    let mut out: Vec<u8> = Vec::new();
+    struct BoundedOutput {
+        bytes: Vec<u8>,
+        exceeded: bool,
+    }
+    impl std::io::Write for BoundedOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let available = (12 * 1024usize).saturating_sub(self.bytes.len());
+            self.bytes
+                .extend_from_slice(&bytes[..available.min(bytes.len())]);
+            self.exceeded |= bytes.len() > available;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut out = BoundedOutput {
+        bytes: Vec::new(),
+        exceeded: false,
+    };
     let mut discard = std::io::sink();
     let streams = Streams {
         stdout: &mut out,
         stderr: &mut discard,
     };
-    let execution = executor.execute(request, streams, cancel);
-    let (status, result) = match tokio::time::timeout_at(deadline, execution).await {
+    let mut execution = Box::pin(executor.execute(request, streams, cancel));
+    let (status, result) = match tokio::time::timeout_at(deadline, &mut execution).await {
         Ok(outcome) => outcome,
         Err(_) => {
             cancel.cancel();
+            let _ =
+                tokio::time::timeout(crate::sandbox::DEFAULT_CANCELLATION_GRACE, execution).await;
             return None;
         }
     };
+    drop(execution);
     result.ok()?;
-    if status.code != 0 || status.signaled {
+    if status.code != 0 || status.signaled || out.exceeded {
         return None;
     }
-    Some(String::from_utf8_lossy(&out).into_owned())
+    Some(String::from_utf8_lossy(&out.bytes).into_owned())
 }
 
 /// A sorted one-level listing of the workspace, directories marked with a

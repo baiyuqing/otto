@@ -9,6 +9,19 @@ pub struct Adapter {
     pub memory: Arc<crate::memory::Service>,
     pub scopes: Vec<Scope>,
 }
+
+/// Candidate queues show actionable human requests, never an in-flight review.
+pub fn is_human_pending(candidate: &crate::memory::Candidate, requests: &[Request]) -> bool {
+    let suffix = format!(
+        "/{}/{}/{}",
+        candidate.proposed.scope.namespace, candidate.proposed.scope.id, candidate.id
+    );
+    requests.iter().any(|request| {
+        request.subject.source == "memory"
+            && request.subject.id.ends_with(&suffix)
+            && request.is_human_pending()
+    })
+}
 impl Adapter {
     fn reference(&self, request: &Request) -> Result<CandidateRef> {
         let reference: CandidateRef =
@@ -26,6 +39,34 @@ impl Domain for Adapter {
             .memory
             .get_candidate(&reference)
             .map_err(|_| Error::Unavailable)?;
+        let expected = if request.state == State::Approved {
+            CandidateState::Accepted
+        } else {
+            CandidateState::Rejected
+        };
+        if request.application == super::ApplicationState::Applied
+            && candidate.state == expected
+            && candidate.decided_at.is_some()
+        {
+            // Memory intentionally clears decided proposal bodies. Its
+            // committed candidate receipt and authority application receipt
+            // preserve the original reference/digest without inventing text.
+            return Ok(format!(
+                "Memory candidate {}: {}. Original authorized subject digest: {}. Result record: {}; revision: {}.",
+                candidate.id,
+                candidate.state.as_str(),
+                request.subject.version,
+                candidate.result_record_id,
+                candidate.result_revision
+            ));
+        }
+        if super::digest(&format!(
+            "{}:{}:{:?}",
+            candidate.created_at, candidate.base_revision, candidate.proposed
+        )) != request.subject.version
+        {
+            return Err(Error::Conflict);
+        }
         let mut details = format!(
             "{} {}/{}\n\n{}\n\nReason: {}\nBase revision: {}",
             candidate.action.as_str(),
@@ -127,7 +168,7 @@ pub fn publish(
             authority: Authority::Durable,
             scope: super::Scope {
                 workspace: workspace.into(),
-                session_id: String::new(),
+                session_id: candidate.proposed.source.session_id.clone(),
                 task_id: String::new(),
                 run_id: String::new(),
             },

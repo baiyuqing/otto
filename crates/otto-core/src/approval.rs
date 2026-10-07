@@ -2,6 +2,162 @@
 //! time, storage and domain application; models never supply decision authority.
 use serde::{Deserialize, Serialize};
 
+mod rules;
+pub use rules::{ApprovalRule, RuleDecision, command_argv, evaluate_rules};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    #[default]
+    OnRequest,
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalReviewer {
+    User,
+    #[default]
+    AutoReview,
+    Bypass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalSettings {
+    pub policy: ApprovalPolicy,
+    pub reviewer: ApprovalReviewer,
+    pub revision: u64,
+}
+
+impl Default for ApprovalSettings {
+    fn default() -> Self {
+        Self::from_mode(ApprovalMode::Auto)
+    }
+}
+
+impl ApprovalSettings {
+    pub fn from_mode(mode: ApprovalMode) -> Self {
+        Self {
+            policy: ApprovalPolicy::OnRequest,
+            reviewer: match mode {
+                ApprovalMode::Manual => ApprovalReviewer::User,
+                ApprovalMode::Auto => ApprovalReviewer::AutoReview,
+                ApprovalMode::Yolo => ApprovalReviewer::Bypass,
+            },
+            revision: 1,
+        }
+    }
+
+    /// Compatibility projection for clients that only understand modes.
+    pub fn mode(&self) -> ApprovalMode {
+        if self.policy == ApprovalPolicy::Never {
+            return ApprovalMode::Auto;
+        }
+        match self.reviewer {
+            ApprovalReviewer::User => ApprovalMode::Manual,
+            ApprovalReviewer::AutoReview => ApprovalMode::Auto,
+            ApprovalReviewer::Bypass => ApprovalMode::Yolo,
+        }
+    }
+
+    pub fn is_automatic(&self) -> bool {
+        self.policy == ApprovalPolicy::Never || self.reviewer != ApprovalReviewer::User
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.revision == 0 {
+            return Err("approval settings revision must be positive");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStatus {
+    Queued,
+    Reviewing,
+    HumanRequired,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOutcome {
+    Allow,
+    Deny,
+    Ask,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserAuthorization {
+    Unknown,
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewAssessment {
+    pub risk: RiskLevel,
+    pub user_authorization: UserAuthorization,
+    pub outcome: ReviewOutcome,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewMetadata {
+    pub status: ReviewStatus,
+    pub assessment: Option<ReviewAssessment>,
+    pub settings_revision: u64,
+    pub evidence_digest: String,
+    pub policy_digest: String,
+}
+
+impl ReviewMetadata {
+    /// A persisted assessment authorizes only the exact reviewed evidence and policy.
+    pub fn matches(
+        &self,
+        settings_revision: u64,
+        evidence_digest: &str,
+        policy_digest: &str,
+    ) -> bool {
+        self.settings_revision == settings_revision
+            && self.evidence_digest == evidence_digest
+            && self.policy_digest == policy_digest
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.settings_revision == 0
+            || self.evidence_digest.is_empty()
+            || self.policy_digest.is_empty()
+            || self.evidence_digest.len() > 256
+            || self.policy_digest.len() > 256
+            || self.assessment.as_ref().is_some_and(|assessment| {
+                assessment.reason.trim().is_empty() || assessment.reason.len() > 8192
+            })
+            || (matches!(self.status, ReviewStatus::Queued | ReviewStatus::Reviewing)
+                && self.assessment.is_some())
+        {
+            return Err("invalid approval review metadata");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
@@ -139,6 +295,8 @@ pub struct Request {
     pub decision: Option<Decision>,
     pub application: ApplicationState,
     pub application_error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewMetadata>,
 }
 
 impl ApprovalMode {
@@ -188,6 +346,14 @@ impl ApprovalMode {
 }
 
 impl Request {
+    pub fn is_human_pending(&self) -> bool {
+        self.state == State::Pending
+            && self
+                .review
+                .as_ref()
+                .is_none_or(|review| review.status == ReviewStatus::HumanRequired)
+    }
+
     /// Whether the session AUTO policy may decide this request without the
     /// user. The conjunction is deliberate: a wrong producer declaration must
     /// not make a plan review or a persistent grant decidable by policy.
@@ -196,6 +362,12 @@ impl Request {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
+        if let Some(review) = &self.review {
+            review.validate()?;
+            if self.state == State::Pending && review.status == ReviewStatus::Completed {
+                return Err("pending approval cannot have completed review");
+            }
+        }
         if self.schema_version != 1
             || self.revision == 0
             || self.id.is_empty()
@@ -244,6 +416,195 @@ pub enum BatchControl {
 mod tests {
     use super::*;
 
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
+    fn settings_preserve_legacy_projection_and_independent_policy() {
+        for mode in [ApprovalMode::Manual, ApprovalMode::Auto, ApprovalMode::Yolo] {
+            let settings = ApprovalSettings::from_mode(mode);
+            assert_eq!(settings.mode(), mode);
+            assert_eq!(settings.revision, 1);
+            assert_eq!(settings.is_automatic(), mode.is_automatic());
+            assert_eq!(
+                serde_json::from_str::<ApprovalSettings>(
+                    &serde_json::to_string(&settings).unwrap()
+                )
+                .unwrap(),
+                settings
+            );
+        }
+        for reviewer in [
+            ApprovalReviewer::User,
+            ApprovalReviewer::AutoReview,
+            ApprovalReviewer::Bypass,
+        ] {
+            let settings = ApprovalSettings {
+                policy: ApprovalPolicy::Never,
+                reviewer,
+                revision: 1,
+            };
+            assert_eq!(settings.mode(), ApprovalMode::Auto);
+            assert!(settings.is_automatic());
+        }
+        assert_eq!(
+            ApprovalSettings::default(),
+            ApprovalSettings::from_mode(ApprovalMode::Auto)
+        );
+        assert!(
+            ApprovalSettings {
+                revision: 0,
+                ..ApprovalSettings::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    fn metadata(status: ReviewStatus) -> ReviewMetadata {
+        ReviewMetadata {
+            status,
+            assessment: None,
+            settings_revision: 1,
+            evidence_digest: "evidence".into(),
+            policy_digest: "policy".into(),
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
+    fn legacy_requests_and_review_states_select_human_pending() {
+        let mut request = request(Authority::Boundary, Kind::Authorization, false);
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(!encoded.contains("\"review\""));
+        assert!(
+            serde_json::from_str::<Request>(&encoded)
+                .unwrap()
+                .is_human_pending()
+        );
+        for status in [
+            ReviewStatus::Queued,
+            ReviewStatus::Reviewing,
+            ReviewStatus::Completed,
+            ReviewStatus::HumanRequired,
+        ] {
+            request.review = Some(metadata(status));
+            assert_eq!(
+                request.is_human_pending(),
+                status == ReviewStatus::HumanRequired
+            );
+        }
+        request.state = State::Rejected;
+        assert!(!request.is_human_pending());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
+    fn review_metadata_rejects_stale_bindings_and_invalid_assessments() {
+        let mut review = metadata(ReviewStatus::Queued);
+        assert!(review.validate().is_ok());
+        assert!(review.matches(1, "evidence", "policy"));
+        assert!(!review.matches(2, "evidence", "policy"));
+        assert!(!review.matches(1, "changed", "policy"));
+        assert!(!review.matches(1, "evidence", "changed"));
+        review.status = ReviewStatus::Completed;
+        // Human, rule and bypass decisions have no model assessment. Native
+        // model decisions independently require an assessment and exact bindings.
+        assert!(review.validate().is_ok());
+        review.assessment = Some(ReviewAssessment {
+            risk: RiskLevel::Low,
+            user_authorization: UserAuthorization::High,
+            outcome: ReviewOutcome::Allow,
+            reason: "Bounded operation".into(),
+        });
+        assert!(review.validate().is_ok());
+        for status in [ReviewStatus::Queued, ReviewStatus::Reviewing] {
+            review.status = status;
+            assert!(review.validate().is_err());
+        }
+        review.status = ReviewStatus::Completed;
+        assert_eq!(
+            serde_json::from_str::<ReviewMetadata>(&serde_json::to_string(&review).unwrap())
+                .unwrap(),
+            review
+        );
+        review.assessment.as_mut().unwrap().reason.clear();
+        assert!(review.validate().is_err());
+        review = metadata(ReviewStatus::Reviewing);
+        review.settings_revision = 0;
+        assert!(review.validate().is_err());
+        review = metadata(ReviewStatus::Queued);
+        review.evidence_digest.clear();
+        assert!(review.validate().is_err());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
+    fn completed_terminal_decisions_need_no_model_assessment() {
+        for transport in ["human", "approval-rule", "yolo-mode"] {
+            for state in [State::Approved, State::Rejected] {
+                let mut request = request(Authority::Boundary, Kind::Authorization, false);
+                request.state = state;
+                request.review = Some(metadata(ReviewStatus::Completed));
+                request.decision = Some(Decision {
+                    option_id: if state == State::Approved {
+                        "approve"
+                    } else {
+                        "reject"
+                    }
+                    .into(),
+                    feedback: String::new(),
+                    actor: if transport == "human" {
+                        "user"
+                    } else {
+                        "approval-policy"
+                    }
+                    .into(),
+                    transport: transport.into(),
+                    decided_at: 2,
+                });
+                assert!(request.validate().is_ok());
+                assert!(!request.is_human_pending());
+                let decoded: Request =
+                    serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+                assert_eq!(decoded, request);
+                assert!(decoded.review.unwrap().assessment.is_none());
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
+    fn pending_completed_reviews_fail_persisted_request_validation() {
+        let mut request = request(Authority::Boundary, Kind::Authorization, false);
+        request.review = Some(metadata(ReviewStatus::Completed));
+        for assessment in [
+            None,
+            Some(ReviewAssessment {
+                risk: RiskLevel::Low,
+                user_authorization: UserAuthorization::High,
+                outcome: ReviewOutcome::Allow,
+                reason: "Authorized operation".into(),
+            }),
+        ] {
+            request.review.as_mut().unwrap().assessment = assessment;
+            let decoded: Request =
+                serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+            assert_eq!(
+                decoded.validate(),
+                Err("pending approval cannot have completed review")
+            );
+        }
+        request.state = State::Approved;
+        request.review = Some(metadata(ReviewStatus::HumanRequired));
+        request.review.as_mut().unwrap().assessment = Some(ReviewAssessment {
+            risk: RiskLevel::Medium,
+            user_authorization: UserAuthorization::Unknown,
+            outcome: ReviewOutcome::Ask,
+            reason: "Needs a user decision".into(),
+        });
+        // A later admitted human decision need not replace the model's Ask.
+        assert!(request.validate().is_ok());
+    }
+
     fn request(authority: Authority, kind: Kind, persistent: bool) -> Request {
         Request {
             options: Vec::new(),
@@ -276,6 +637,7 @@ mod tests {
             decision: None,
             application: ApplicationState::NotStarted,
             application_error: String::new(),
+            review: None,
         }
     }
 

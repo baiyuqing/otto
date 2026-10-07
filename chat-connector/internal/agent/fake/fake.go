@@ -123,6 +123,7 @@ type agent struct {
 	conn atomic.Pointer[acp.AgentSideConnection] // set after the SDK starts reading
 
 	mu        sync.Mutex
+	policyMu  sync.Mutex
 	cancels   map[string]chan struct{} // current prompt of each session
 	blocked   int                      // "block" prompts waiting for session/cancel
 	approvals map[string]bool
@@ -181,6 +182,9 @@ func (a *agent) Initialize(_ context.Context, req acp.InitializeRequest) (acp.In
 	}
 	caps := acp.AgentCapabilities{LoadSession: true, SessionCapabilities: acp.SessionCapabilities{List: &acp.SessionListCapabilities{}}}
 	meta := map[string]any{}
+	if os.Getenv("FAKE_APPROVAL_POLICY") != "" {
+		meta["approvalPolicy"] = map[string]any{"version": 1}
+	}
 	if os.Getenv("FAKE_NO_MEMORY") == "" {
 		meta["memoryReview"] = true
 	}
@@ -443,7 +447,15 @@ func (a *agent) HandleExtensionMethod(_ context.Context, method string, params j
 		lines = strings.Split(s, "\n")
 	}
 	switch method {
+	case "_otto/approval_policy/get", "_otto/approval_policy/set":
+		if os.Getenv("FAKE_APPROVAL_POLICY") == "" {
+			return nil, &acp.RequestError{Code: -32601, Message: "unsupported approval policy"}
+		}
+		return a.policyMethod(method, params)
 	case "_otto/approval_mode/get", "_otto/approval_mode/set":
+		if os.Getenv("FAKE_APPROVAL_POLICY") != "" {
+			return a.policyMethod(method, params)
+		}
 		var input struct {
 			SessionID string `json:"sessionId"`
 			Automatic *bool  `json:"automatic"`

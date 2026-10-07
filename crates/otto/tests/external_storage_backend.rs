@@ -275,6 +275,238 @@ mod tests {
         .expect("advice audit contract");
     }
 
+    #[test]
+    fn independent_approval_store_rejects_stale_settings_and_automatic_application() {
+        use otto::approval::repository::ApprovalStore;
+        use otto::approval::{ApprovalMode, ApprovalPolicy, ApprovalReviewer};
+        let temp = tempfile::tempdir().unwrap();
+        let backend = JsonBackend::new(temp.path().join("authority.json"), "probe:authority");
+        let service = approval::Service::from_store(backend.store.clone()).unwrap();
+        let scope = proposal().scope;
+        let initial = service.settings(&scope).unwrap();
+        let current = service
+            .set_settings(
+                &scope,
+                initial.revision,
+                ApprovalPolicy::OnRequest,
+                ApprovalReviewer::User,
+            )
+            .unwrap();
+        assert!(
+            service
+                .set_settings(
+                    &scope,
+                    initial.revision,
+                    ApprovalPolicy::Never,
+                    ApprovalReviewer::AutoReview
+                )
+                .is_err()
+        );
+        assert_eq!(service.settings(&scope).unwrap(), current);
+        service.set_mode(&scope, ApprovalMode::Yolo).unwrap();
+        let request = service.create(proposal()).unwrap();
+        assert_eq!(request.state, approval::State::Approved);
+        assert!(backend.store.authorization_current(&request).unwrap());
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
+        assert!(
+            !backend.store.authorization_current(&request).unwrap(),
+            "a previously approved operation cannot start after tightening policy"
+        );
+        drop(service);
+        drop(backend);
+        let reopened = JsonBackend::new(temp.path().join("authority.json"), "probe:authority");
+        assert_eq!(
+            reopened.store.settings(&scope).unwrap().unwrap().reviewer,
+            ApprovalReviewer::User
+        );
+        assert!(!reopened.store.authorization_current(&request).unwrap());
+    }
+
+    #[test]
+    fn independent_store_fences_human_decisions_before_policy_row_refresh() {
+        use otto::approval::repository::ApprovalStore;
+        let temp = tempfile::tempdir().unwrap();
+        let backend = JsonBackend::new(temp.path().join("human.json"), "probe:human");
+        let service = approval::Service::from_store(backend.store.clone()).unwrap();
+        let scope = proposal().scope;
+        service
+            .set_mode(&scope, approval::ApprovalMode::Manual)
+            .unwrap();
+        let mut context = approval::reviewer::ReviewContext {
+            trusted_user_messages: vec!["Review the exact operation.".into()],
+            policy_digest: "fixed-instructions".into(),
+            ..Default::default()
+        };
+        context.refresh_digest();
+        service
+            .set_review_context(&scope.workspace, &scope.session_id, context)
+            .unwrap();
+        let request = service.create(proposal()).unwrap();
+        let bytes = std::fs::read(temp.path().join("human.json")).unwrap();
+        let persisted = backend.store.review_snapshot(&scope).unwrap().unwrap();
+        assert_eq!(
+            persisted.0,
+            request.review.as_ref().unwrap().evidence_digest
+        );
+        assert_eq!(persisted.1, request.review.as_ref().unwrap().policy_digest);
+        assert_eq!(
+            std::fs::read(temp.path().join("human.json")).unwrap(),
+            bytes,
+            "snapshot getter is read-only"
+        );
+        drop(service);
+        drop(backend);
+        let backend = JsonBackend::new(temp.path().join("human.json"), "probe:human");
+        let service = approval::Service::from_store(backend.store.clone()).unwrap();
+        let resumed = service.create(proposal()).unwrap();
+        assert_eq!(resumed.id, request.id);
+        assert_eq!(
+            resumed.revision, request.revision,
+            "unrestored live context must not fabricate a new missing basis"
+        );
+        assert_eq!(resumed.review, request.review);
+        assert_eq!(
+            resumed.state,
+            approval::State::Pending,
+            "a persisted digest alone cannot approve anything"
+        );
+        let previous = backend.store.settings(&scope).unwrap().unwrap();
+        let mut next = previous;
+        next.revision += 1;
+        // Simulate a different process publishing settings before this process
+        // has refreshed the pending request's presentation snapshot.
+        backend
+            .store
+            .set_settings(&scope, previous.revision, next)
+            .unwrap();
+        assert!(
+            service
+                .decide(
+                    &request.id,
+                    &scope,
+                    request.revision,
+                    true,
+                    "",
+                    &approval::Actor::local("independent-test")
+                )
+                .is_err()
+        );
+        assert_eq!(
+            service
+                .get(&request.id, &scope.workspace, Some(&scope.session_id))
+                .unwrap()
+                .state,
+            approval::State::Pending
+        );
+        service
+            .set_mode(&scope, approval::ApprovalMode::Manual)
+            .unwrap();
+        let fresh = service
+            .get(&request.id, &scope.workspace, Some(&scope.session_id))
+            .unwrap();
+        assert!(fresh.revision > request.revision);
+        assert_eq!(
+            service
+                .decide(
+                    &fresh.id,
+                    &scope,
+                    fresh.revision,
+                    true,
+                    "",
+                    &approval::Actor::local("independent-test")
+                )
+                .unwrap()
+                .state,
+            approval::State::Approved
+        );
+    }
+
+    #[tokio::test]
+    async fn independent_approval_store_reviews_with_a_lease_and_invalidates_old_evidence() {
+        use otto::approval::repository::ApprovalStore;
+        use otto::approval::reviewer::{ReviewContext, ReviewProvider};
+        struct Reviewer;
+        #[async_trait::async_trait]
+        impl ReviewProvider for Reviewer {
+            async fn assess(
+                &self,
+                _: &approval::Request,
+                _: &ReviewContext,
+                _: &tokio_util::sync::CancellationToken,
+            ) -> std::result::Result<approval::ReviewAssessment, String> {
+                Ok(approval::ReviewAssessment {
+                    risk: approval::RiskLevel::Low,
+                    user_authorization: approval::UserAuthorization::High,
+                    outcome: approval::ReviewOutcome::Allow,
+                    reason: "Exact authorized operation.".into(),
+                })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let backend = JsonBackend::new(temp.path().join("review.json"), "probe:review");
+        let service = Arc::new(approval::Service::from_store(backend.store.clone()).unwrap());
+        let mut operation = proposal();
+        operation.kind = Kind::Authorization;
+        operation.authority = Authority::Boundary;
+        operation.subject.source = "sandbox".into();
+        let scope = operation.scope.clone();
+        service
+            .register_reviewer(&scope.workspace, &scope.session_id, Arc::new(Reviewer))
+            .unwrap();
+        let mut context = ReviewContext {
+            trusted_user_messages: vec!["Run the exact operation.".into()],
+            policy_digest: "fixed-instructions".into(),
+            ..Default::default()
+        };
+        context.refresh_digest();
+        service
+            .set_review_context(&scope.workspace, &scope.session_id, context.clone())
+            .unwrap();
+        service.start();
+        let request = service.create(operation).unwrap();
+        let approved = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            service.wait(
+                &request.id,
+                &scope,
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(approved.state, approval::State::Approved);
+        assert_eq!(approved.decision.as_ref().unwrap().transport, "auto-review");
+        assert!(backend.store.authorization_current(&approved).unwrap());
+        let before = backend.store.settings(&scope).unwrap().unwrap_or_default();
+        backend
+            .store
+            .policy_config(
+                &scope.workspace,
+                approval::ApprovalSettings::default(),
+                "new-workspace-policy",
+            )
+            .unwrap();
+        assert_eq!(
+            backend.store.settings(&scope).unwrap().unwrap_or_default(),
+            before,
+            "exact session settings need not change during workspace policy update"
+        );
+        assert!(
+            !backend.store.authorization_current(&approved).unwrap(),
+            "policy changes invalidate stale authority before root context is republished"
+        );
+        context.trusted_user_messages = vec!["Do not run the operation.".into()];
+        context.refresh_digest();
+        service
+            .set_review_context(&scope.workspace, &scope.session_id, context)
+            .unwrap();
+        assert!(
+            !backend.store.authorization_current(&approved).unwrap(),
+            "persisted context invalidates an unstarted automatic authorization"
+        );
+    }
+
     #[tokio::test]
     async fn storage_credentials_and_project_preferences_stay_below_public_boundaries() {
         use otto::runtime::boundary::{BoundaryInputs, boundary_secret_values};

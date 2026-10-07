@@ -24,6 +24,70 @@ pub(super) struct Input {
 }
 
 impl Connection {
+    pub(super) async fn approval_policy(&self, method: &str, params: Value) -> Reply {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Input {
+            session_id: String,
+            expected_revision: Option<u64>,
+            policy: Option<crate::approval::ApprovalPolicy>,
+            reviewer: Option<crate::approval::ApprovalReviewer>,
+        }
+        let input: Input = serde_json::from_value(params)
+            .map_err(|_| invalid_params("invalid approval policy request"))?;
+        let update = if method.ends_with("/set") {
+            let revision = input
+                .expected_revision
+                .filter(|r| *r > 0)
+                .ok_or_else(|| invalid_params("positive expectedRevision is required"))?;
+            Some((
+                revision,
+                input
+                    .policy
+                    .ok_or_else(|| invalid_params("policy is required"))?,
+                input
+                    .reviewer
+                    .ok_or_else(|| invalid_params("reviewer is required"))?,
+            ))
+        } else {
+            if input.expected_revision.is_some()
+                || input.policy.is_some()
+                || input.reviewer.is_some()
+            {
+                return Err(invalid_params("get takes only sessionId"));
+            }
+            None
+        };
+        let settings = match &self.backend {
+            Backend::Local(local) => {
+                let session = local
+                    .session(&input.session_id)
+                    .ok_or_else(unknown_session)?;
+                let ctrl = &session.controller;
+                match update {
+                    Some((revision, policy, reviewer)) => ctrl.approval_service().set_settings(
+                        &ctrl.approval_scope(),
+                        revision,
+                        policy,
+                        reviewer,
+                    ),
+                    None => ctrl.approval_service().settings(&ctrl.approval_scope()),
+                }
+                .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?
+            }
+            Backend::Attach(relay) => relay
+                .client
+                .approval_policy(&input.session_id, update)
+                .await
+                .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?,
+        };
+        result(
+            json!({"policy":settings.policy,"reviewer":settings.reviewer,"revision":settings.revision,
+            "mode":settings.mode(),"automatic":settings.is_automatic(),
+            "reviewer_active":settings.policy != crate::approval::ApprovalPolicy::Never}),
+        )
+    }
+
     pub(super) async fn shared_approval(&self, method: &str, params: Value) -> Reply {
         let input: Input = serde_json::from_value(params)
             .map_err(|_| invalid_params("invalid approval request"))?;
@@ -37,7 +101,14 @@ impl Connection {
                 let service = ctrl.approval_service();
                 let fail = |e: crate::approval::Error| error(INTERNAL_ERROR, e.to_string());
                 match method {
-                    "_otto/approvals/list" => result(ctrl.approval_snapshot().map_err(fail)?),
+                    "_otto/approvals/list" => {
+                        ctrl.approval_snapshot().map_err(fail)?;
+                        result(
+                            service
+                                .activity_snapshot(&scope.workspace, Some(&scope.session_id))
+                                .map_err(fail)?,
+                        )
+                    }
                     "_otto/approvals/watch" => result(
                         service
                             .events(&scope.workspace, Some(&scope.session_id), input.after)
@@ -104,6 +175,22 @@ impl Connection {
         request: &crate::approval::Request,
         cancel: &CancellationToken,
     ) -> ApprovalDecision {
+        let current = match ctrl
+            .approval_service()
+            .wait_actionable(&request.id, &request.scope, cancel)
+            .await
+        {
+            Ok(current) => current,
+            Err(_) => return ApprovalDecision::Deny,
+        };
+        let request = &current;
+        if !request.is_human_pending() {
+            return match request.state {
+                crate::approval::State::Approved => ApprovalDecision::Allow,
+                _ if cancel.is_cancelled() => ApprovalDecision::Cancelled,
+                _ => ApprovalDecision::Deny,
+            };
+        }
         let capabilities = self
             .client_capabilities
             .lock()
@@ -158,8 +245,16 @@ impl Connection {
                     .pointer("/result/content/feedback")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let _ =
-                    ctrl.decide_shared_approval(&request.id, allow, feedback, "acp-elicitation");
+                if let Ok(decided) = ctrl.approval_service().decide(
+                    &request.id,
+                    &request.scope,
+                    request.revision,
+                    allow,
+                    feedback,
+                    &crate::approval::Actor::local("acp-elicitation"),
+                ) {
+                    let _ = ctrl.approval_service().finish_decision(decided).await;
+                }
             }
         } else {
             self.send(
@@ -208,7 +303,7 @@ impl Connection {
             }
             None
         };
-        let mode = match &self.backend {
+        let settings = match &self.backend {
             Backend::Local(local) => {
                 let session = local
                     .session(&input.session_id)
@@ -220,15 +315,28 @@ impl Connection {
                         .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?;
                 }
                 ctrl.approval_service()
-                    .mode(&ctrl.approval_scope())
+                    .settings(&ctrl.approval_scope())
                     .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?
             }
-            Backend::Attach(relay) => relay
-                .client
-                .approval_mode(&input.session_id, selected)
-                .await
-                .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?,
+            Backend::Attach(relay) => {
+                let mode = relay
+                    .client
+                    .approval_mode(&input.session_id, selected)
+                    .await
+                    .map_err(|e| error(INTERNAL_ERROR, e.to_string()))?;
+                match relay.client.approval_policy(&input.session_id, None).await {
+                    Ok(settings) => settings,
+                    Err(crate::client::Error::Http { status: 404, .. }) => {
+                        crate::approval::ApprovalSettings::from_mode(mode)
+                    }
+                    Err(e) => return Err(error(INTERNAL_ERROR, e.to_string())),
+                }
+            }
         };
-        result(json!({"automatic":mode.is_automatic(),"mode":mode.as_str()}))
+        result(
+            json!({"automatic":settings.is_automatic(),"mode":settings.mode(),
+            "policy":settings.policy,"reviewer":settings.reviewer,"revision":settings.revision,
+            "reviewer_active":settings.policy != crate::approval::ApprovalPolicy::Never}),
+        )
     }
 }

@@ -223,7 +223,7 @@ struct RememberArgs {
 pub fn remember_definition() -> ToolDefinition {
     definition(
         "remember",
-        "Propose a fact or preference to remember; a human reviews it before it takes effect",
+        "Propose a fact or preference to remember. Returns a version-bound candidate and its state. Otto's approval authority reviews its content and scope before applying it; AUTO uses original user evidence and MANUAL requires a person. Pending is not a completed memory change.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -359,7 +359,7 @@ struct ForgetArgs {
 pub fn forget_definition() -> ToolDefinition {
     definition(
         "forget",
-        "Propose forgetting a remembered record found via memory_search; a human reviews it before it takes effect. If only the record ID is available, first call memory_search with id to read its current scope and revision.",
+        "Propose forgetting a remembered record found via memory_search. Returns a version-bound candidate and its state; Otto's approval authority reviews scope before applying it. If only the record ID is available, first call memory_search with id to read its current scope and revision. Pending is not a completed deletion.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -424,7 +424,7 @@ impl Tool for ForgetTool {
 /// Tells the model how the person decides a queued candidate, so it can point
 /// them there instead of claiming nobody can. It grants the model nothing:
 /// every path named here is a human command.
-const REVIEW_HINT: &str = "You cannot approve it yourself. The user decides it: in a chat client they send /memory to list pending candidates, then /memory accept <id> or /memory reject <id>; in the terminal they use /memory review. If the user says approve, tell them this.";
+const REVIEW_HINT: &str = "You cannot approve it yourself. Otto's approval authority reviews this exact candidate against original user evidence and live policy. If a human decision is needed, use /memory in chat or /memory review in the terminal. Report its actual state; queued does not mean applied.";
 
 fn proposal_result(outcome: crate::memory::Result<Vec<crate::memory::Candidate>>) -> ToolResult {
     let candidates = match outcome {
@@ -434,7 +434,7 @@ fn proposal_result(outcome: crate::memory::Result<Vec<crate::memory::Candidate>>
     match candidates.first() {
         None => text_result("proposal was not queued for review"),
         Some(candidate) => text_result(format!(
-            "candidate {} queued for human review (state={}). {REVIEW_HINT}",
+            "candidate {} queued for approval review (state={}). {REVIEW_HINT}",
             candidate.id,
             candidate.state.as_str()
         )),
@@ -701,7 +701,7 @@ mod tests {
         assert!(!result.is_error, "{result:?}");
         assert!(
             result.content.contains(
-                " queued for human review (state=pending). You cannot approve it yourself."
+                " queued for approval review (state=pending). You cannot approve it yourself."
             ),
             "{result:?}"
         );

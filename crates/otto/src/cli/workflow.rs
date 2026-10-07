@@ -272,7 +272,11 @@ pub async fn build_controller(
         model: runtime.model.clone(),
         created_at: Utc::now(),
     })));
-    let owner = Arc::new(builder.build_runner(&session, runtime).await?);
+    let owner = Arc::new(
+        builder
+            .build_workflow_runner(&session, runtime, stderr)
+            .await?,
+    );
     let runner = owner
         .subagents()
         .ok_or_else(|| "workflow runtime requires enabled agents".to_string())?;

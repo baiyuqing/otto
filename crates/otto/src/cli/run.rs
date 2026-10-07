@@ -663,6 +663,7 @@ pub async fn run_with_backends(
     }
     let control = composed.control;
     let approval_executor = composed.approval_executor;
+    let approval_environment = composed.approval_environment;
     let reloader = composed.reloader;
 
     let dynamic_content = builder.boundary_allows_dynamic(Some(&resolved));
@@ -780,6 +781,8 @@ pub async fn run_with_backends(
                 acp_token: lookup.get("OTTO_ACP_TOKEN").cloned().unwrap_or_default(),
                 control,
                 reloader,
+                delivery_setup_executor: approval_executor.clone(),
+                delivery_setup_environment: approval_environment.clone(),
                 terminate,
             },
             stdout,
@@ -1718,6 +1721,50 @@ driver = "off"
     /// startup too: both read the same `Shared::sandbox_driver_override`
     /// rather than `load_workspace` dropping it.
     #[tokio::test]
+    async fn load_workspace_binds_a_delivery_worktree_as_its_own_file_root() {
+        let root = tempfile::tempdir().expect("root");
+        let primary = root.path().join("primary");
+        let worktree = primary.join(".otto/delivery-worktrees/delivery-1");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let primary = canonical_directory(&primary).expect("primary canonical");
+        let worktree = canonical_directory(&worktree).expect("worktree canonical");
+        let shared = shared_with_offline_sandbox(root.path());
+        let (builder, _sandbox) = load_workspace(
+            shared,
+            &worktree,
+            &Disabled::default(),
+            &CancellationToken::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .expect("load worktree");
+
+        assert_eq!(builder.workspace_path, worktree.to_string_lossy());
+        assert_eq!(builder.workspace.root(), worktree);
+        assert_ne!(builder.workspace.root(), primary);
+        let runtime = crate::runtime::builder::resolve_initial_runtime(
+            &builder.config,
+            &builder.environment,
+            None,
+            &builder.overrides,
+        )
+        .expect("runtime");
+        let session = builder.create_session(&runtime).expect("delivery session");
+        let runner = builder
+            .build_runner_quiet(&session, &runtime)
+            .await
+            .expect("delivery runner");
+        assert_eq!(
+            runner.session().header().workspace,
+            worktree.to_string_lossy()
+        );
+        assert_ne!(
+            runner.session().header().workspace,
+            primary.to_string_lossy()
+        );
+    }
+
+    #[tokio::test]
     async fn load_workspace_honors_the_shared_sandbox_driver_override() {
         let shared_root = tempfile::tempdir().expect("shared root");
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1770,7 +1817,7 @@ driver = "off"
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut stderr = Vec::new();
 
-        let (builder, reloader) = load_workspace(
+        let (builder, sandbox) = load_workspace(
             Arc::clone(&shared),
             &canonical,
             &Disabled::default(),
@@ -1787,6 +1834,12 @@ driver = "off"
             String::from_utf8_lossy(&stderr)
         );
         assert!(builder.bash_approvals.is_some());
-        assert!(reloader.is_some());
+        assert!(sandbox.reloader.is_some());
+        assert!(sandbox.approval_executor.is_some());
+        assert!(sandbox.approval_environment.is_some());
+        assert_eq!(
+            sandbox.approval_executor.is_some(),
+            sandbox.approval_environment.is_some()
+        );
     }
 }

@@ -5,6 +5,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -265,6 +266,16 @@ func format(args []interface{}) string {
 }
 
 func cardMessage(e *types.CardActionEvent) (bridge.Message, bool) {
+	// A choice button delivers the command it stands for; only the connector's
+	// own profile switcher travels this way.
+	if action, _ := e.Action.Value["action"].(string); action == "command" {
+		command, _ := e.Action.Value["command"].(string)
+		name, ok := strings.CutPrefix(command, "/model ")
+		if !ok || !bridge.ValidProfileArg(name) || e.ChatID == "" || e.Operator.OpenID == "" {
+			return bridge.Message{}, false
+		}
+		return bridge.Message{Platform: "feishu", ChatID: e.ChatID, SenderID: e.Operator.OpenID, Text: "/model " + name, Time: time.Now()}, true
+	}
 	id, _ := e.Action.Value["request_id"].(string)
 	action, _ := e.Action.Value["action"].(string)
 	if len(id) != 32 || (action != "approve" && action != "deny") || e.ChatID == "" || e.Operator.OpenID == "" {
@@ -275,6 +286,36 @@ func cardMessage(e *types.CardActionEvent) (bridge.Message, bool) {
 		text = "/allow"
 	}
 	return bridge.Message{Platform: "feishu", ChatID: e.ChatID, SenderID: e.Operator.OpenID, ApprovalID: id, Text: text, Time: time.Now()}, true
+}
+
+// choicesCard renders one card with a button per choice. Choosing a button
+// delivers its command to the bridge as a message.
+func choicesCard(text string, choices []bridge.Choice) string {
+	elements := []any{map[string]any{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": text}}}
+	buttons := []any{}
+	for _, choice := range choices {
+		buttons = append(buttons, map[string]any{
+			"tag":   "button",
+			"text":  map[string]any{"tag": "plain_text", "content": choice.Label},
+			"type":  "default",
+			"value": map[string]any{"action": "command", "command": choice.Command},
+		})
+	}
+	elements = append(elements, map[string]any{"tag": "action", "actions": buttons})
+	raw, _ := json.Marshal(map[string]any{"config": map[string]any{"wide_screen_mode": true}, "elements": elements})
+	return string(raw)
+}
+
+// SendChoices posts text as a card whose buttons deliver their command. The
+// card is not updated afterwards: the switch replies with its own message.
+func (p *Platform) SendChoices(ctx context.Context, chatID, _ string, text string, choices []bridge.Choice) error {
+	if len(choices) == 0 {
+		return errors.New("no choices")
+	}
+	if _, err := p.ch.Send(ctx, &types.SendInput{ChatID: chatID, Card: choicesCard(text, choices)}); err != nil {
+		return fmt.Errorf("feishu choices: %w", err)
+	}
+	return nil
 }
 
 func approvalCard(requestID, text, status string) string {

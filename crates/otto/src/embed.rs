@@ -91,7 +91,8 @@ use crate::app::approval::Step;
 use crate::app::{CLOSED, Controller, PROMPT_ACTIVE, SandboxControl};
 use crate::runtime::builder::Builder;
 use crate::runtime::sandbox_switch::SandboxReloader;
-use crate::runtime::startup::{self, Admission, Disabled, StartOptions, WorkspaceSandbox};
+use crate::runtime::startup::{self, Disabled, StartOptions, WorkspaceSandbox};
+use crate::runtime::workspace_admission::{self as admission, Admission};
 use crate::session::{self as sessionfs, MAX_LIST_SESSIONS};
 
 pub use crate::app::approval::{ApprovalDecision, ApprovalRequest, Stop};
@@ -385,7 +386,7 @@ impl OttoBuilder {
         let roots =
             otto_core::config::resolve_server(&builder.config, &builder.environment, "", "")
                 .map_err(|error| error.to_string())
-                .and_then(|server| startup::canonicalize_workspace_roots(&server.workspace_roots))
+                .and_then(|server| admission::canonicalize_workspace_roots(&server.workspace_roots))
                 .map_err(|message| Error::Config(builder.redact_error(&message, Some(&runtime))));
         let roots = match roots {
             Ok(roots) => roots,
@@ -515,11 +516,11 @@ impl Otto {
     async fn workspace_target(&self, path: &Path) -> Result<(PathBuf, Option<Loaded>), Error> {
         let inner = &self.inner;
         let requested = path.to_string_lossy();
-        let canonical = startup::admit_workspace(
+        let canonical = admission::admit_workspace(
             &requested,
             &inner.workspace,
             &inner.roots,
-            &startup::trusted_projects(&inner.config_path),
+            &admission::trusted_projects(&inner.config_path),
         )
         .map_err(|admission| match admission {
             Admission::Invalid => Error::Workspace(format!(
@@ -537,7 +538,7 @@ impl Otto {
             return Ok((canonical, Some(found.clone())));
         }
         let mut writer = inner.diagnostics.clone();
-        let (builder, reloader) = startup::load_workspace(
+        let (builder, sandbox) = startup::load_workspace(
             Arc::clone(&inner.builder.shared),
             &canonical,
             &inner.disabled,
@@ -546,7 +547,7 @@ impl Otto {
         )
         .await
         .map_err(|message| Error::Workspace(self.redact(&message)))?;
-        let entry = (Arc::new(builder), reloader);
+        let entry = (Arc::new(builder), sandbox.reloader);
         loaded.insert(canonical.clone(), entry.clone());
         Ok((canonical, Some(entry)))
     }

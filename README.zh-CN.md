@@ -45,6 +45,16 @@ Otto 构建不再依赖 npm 或前端产物。
 如果只想在当前 checkout 中保留本地二进制，可运行 `make build`，然后执行
 `./otto --help`。
 
+如果不想每次重敲启动参数，可复制启动器模板，改用脚本启动：
+
+```bash
+cp otto.env.example otto.env   # provider、model、工作区、沙箱
+make run                       # 等价于 scripts/otto.sh
+```
+
+`otto.env` 不会进入 Git，按 shell profile 的方式加载；详见
+[启动脚本](docs/user-manual.md#launcher-script)。
+
 ## 在 Mac 上使用 Docker
 
 启动 Docker Desktop 后，在仓库目录运行：

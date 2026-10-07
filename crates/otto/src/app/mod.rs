@@ -269,6 +269,10 @@ pub struct Controller {
     /// Set by [`Controller::push_scheduled`]; the TUI rings the terminal bell
     /// once per [`Controller::take_bell`].
     bell: std::sync::atomic::AtomicBool,
+    /// Reports this session's lifecycle to the Herdr pane that started the
+    /// process. `None` outside Herdr and for every frontend that is not the
+    /// pane's agent.
+    herdr: std::sync::RwLock<Option<Arc<crate::herdr::Reporter>>>,
 }
 
 /// One admitted operation. Dropping it releases admission and performs a
@@ -329,10 +333,44 @@ impl Controller {
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
             bell: std::sync::atomic::AtomicBool::new(false),
+            herdr: std::sync::RwLock::new(None),
         };
         controller.notify_memory_state();
         controller.bind_reflection();
         controller
+    }
+
+    /// Starts reporting this session's lifecycle to the Herdr pane that
+    /// started the process. `cli::run` calls this for the frontends that are
+    /// the pane's agent; without it nothing is reported.
+    pub fn install_herdr(&self, reporter: Arc<crate::herdr::Reporter>) {
+        *self
+            .herdr
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reporter);
+    }
+
+    fn herdr_reporter(&self) -> Option<Arc<crate::herdr::Reporter>> {
+        self.herdr
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// What Herdr shows and restores for this session. Read without the
+    /// [`Controller::info`] snapshot, which clones the transcript.
+    fn herdr_session(&self) -> crate::herdr::SessionRef {
+        let state = self.lock();
+        match state.current.as_ref() {
+            Some(current) => crate::herdr::SessionRef {
+                id: current.session.header().id,
+                path: current.path(),
+            },
+            None => crate::herdr::SessionRef {
+                id: String::new(),
+                path: String::new(),
+            },
+        }
     }
 
     /// Queues the notices about memory that needs the user's attention:
@@ -1027,11 +1065,20 @@ impl Controller {
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
         let observation = auto_reflection::RunObservation::default();
+        let reporter = self.herdr_reporter();
+        let session = match &reporter {
+            Some(_) => self.herdr_session(),
+            None => crate::herdr::SessionRef {
+                id: String::new(),
+                path: String::new(),
+            },
+        };
+        let mut observed = auto_reflection::observing_prompt(&mut *emit, &observation);
         let result = runner
             .run_with_system_context(
                 text,
                 system_context,
-                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
+                &mut crate::herdr::observing(&mut observed, reporter.as_deref(), &session),
                 cancel,
             )
             .await;
@@ -2312,6 +2359,7 @@ impl Controller {
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
             bell: std::sync::atomic::AtomicBool::new(false),
+            herdr: std::sync::RwLock::new(None),
         };
         controller.notify_memory_state();
         controller.bind_reflection();

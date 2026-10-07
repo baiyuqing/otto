@@ -24,6 +24,21 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [user manual](docs/user-manual.md#automatic-contract-check)
   ([#417](https://github.com/baiyuqing/otto/pull/417)).
 
+- **A session can now decide every request: the YOLO approval mode.**
+  `/auto manual|auto|yolo` (and `/auto on|off`, unchanged) selects the
+  session's policy, `otto --yolo` starts one session in YOLO, and the HTTP and
+  ACP mode APIs accept `{"mode":"yolo"}` alongside the boolean form.
+  A YOLO session approves every request that carries its id — a plan review,
+  an unsandboxed command, an external MCP call, a persistent sandbox read
+  grant, a scheduled `prompt` item, a memory, skill or profile change, and its
+  own child tasks — without a dialog; the recorded decision names `yolo-mode`.
+  MANUAL and AUTO are unchanged, only a user action can set the mode, and a
+  workspace-wide or other-session request still reaches the user. The mode
+  lives in `approvals.db` (`user_version` 3), which migrates a stored boolean
+  to the mode form with its meaning. See the
+  [YOLO mode contract](docs/specs/2026-10-07-yolo-approval-mode.md) and the
+  [user manual](docs/user-manual.md#unified-approvals).
+
 - Otto's default system prompt now asks the model to structure and restate new
   action requests, resolve material ambiguity and wait for user confirmation
   before changing files or causing external side effects. Simple questions stay

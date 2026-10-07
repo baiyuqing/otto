@@ -112,11 +112,17 @@ func (c *chat) startApprovalWatch(sid string) {
 				if changeErr == nil {
 					for _, change := range changes {
 						r := change.Request
-						if r.Decision != nil && r.Decision.Transport == "auto-mode" {
+						if r.Decision != nil && (r.Decision.Transport == "auto-mode" || r.Decision.Transport == "yolo-mode") {
+							// A YOLO decision approved a request the user would
+							// otherwise have seen, so it is always reported.
+							policy := "AUTO"
+							if r.Decision.Transport == "yolo-mode" {
+								policy = "YOLO"
+							}
 							if r.Application == "failed" || r.Application == "unknown" {
 								c.send(ctx, "", fmt.Sprintf("Approval %s was automatically approved; application %s: %s", r.ID, r.Application, r.ApplicationError))
 							} else if r.Application == "not_started" || r.Application == "not_required" {
-								c.send(ctx, "", fmt.Sprintf("Approval requested: %s\n%s\nReason: %s\nRequest: %s\nAutomatically approved (AUTO).", r.Title, r.Subject.Details, r.Reason, r.ID))
+								c.send(ctx, "", fmt.Sprintf("Approval requested: %s\n%s\nReason: %s\nRequest: %s\nAutomatically approved (%s).", r.Title, r.Subject.Details, r.Reason, r.ID, policy))
 							}
 						}
 						cursor = change.Sequence

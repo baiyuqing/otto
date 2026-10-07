@@ -128,7 +128,7 @@ pub fn system_prompt_for(
         prompt.push_str("\n<otto_help_policy>For questions about Otto itself, consult otto_help before answering; use its installed-version documentation and the current session capabilities. A user command or HTTP/ACP API is not automatically a model-callable tool. Never invent commands or endpoints. Use approval_pending and approval_revoke for pending requests when available; only the user can approve.\n</otto_help_policy>\n");
     }
     if tool_names.contains(&"request_approval") {
-        prompt.push_str("\n<approval_policy>You can call request_approval to seek user consent for a plan, approach or additional action. Decide whether and when it is needed from the user request and prior authorization; do not ask again for unchanged approved scope. Supply the concrete proposal and reason, or a prepared subject_ref. A proposal review always waits for the user, whatever the session approval mode: only a bounded authorization inside the sandbox can be decided automatically, so never present an approval as already granted. The tool waits for an actual decision and returns feedback. After it returns, replan using that decision. A confirmation never grants sandbox or other tool permissions. Memory has its own exact, version-bound review: when the user asks to remember something, call remember directly and never first create request_approval for that same memory operation; a model-originated remember proposal receives exactly its memory review and no generic confirmation. Only the user or their explicitly authorized client policy can decide; never fabricate approval. Use pending-query and withdrawal tools when available.</approval_policy>\n");
+        prompt.push_str("\n<approval_policy>You can call request_approval to seek user consent for a plan, approach or additional action. Decide whether and when it is needed from the user request and prior authorization; do not ask again for unchanged approved scope. Supply the concrete proposal and reason, or a prepared subject_ref. Whether a request waits for the user is the session's approval mode, which only the user sets and no tool argument can change: MANUAL waits for every request, AUTO approves a bounded authorization inside the sandbox and still asks for a plan review, a sandbox escalation or a durable grant, and YOLO approves every request of that session without asking. Never present an approval as already granted before the tool returns a decision; a decision made this way is still recorded and reported to the user. The tool waits for an actual decision and returns feedback. After it returns, replan using that decision. A confirmation never grants sandbox or other tool permissions. Memory has its own exact, version-bound review: when the user asks to remember something, call remember directly and never first create request_approval for that same memory operation; a model-originated remember proposal receives exactly its memory review and no generic confirmation. Only the user or their explicitly authorized client policy can decide; never fabricate approval. Use pending-query and withdrawal tools when available.</approval_policy>\n");
     }
     if tool_names.contains(&crate::tool::reflect::NAME) {
         prompt.push_str("\n<reflection_policy>When the user asks for a retrospective, a review of the session, or to distil lessons or skills from it, call reflect. It writes the retrospective to the run log under ~/.otto/reflection/runs/ and queues memory and skill proposals for the user's review. Do not write retrospective files yourself. Afterwards, give the user the main points, the run log path, and what awaits their review.</reflection_policy>\n");
@@ -271,12 +271,22 @@ mod tests {
     }
 
     #[test]
-    fn the_approval_policy_states_that_a_review_is_never_decided_automatically() {
+    fn the_approval_policy_names_every_session_mode_and_keeps_the_decision_with_the_user() {
         let prompt = system_prompt_for(&definitions(&["request_approval"]), off(), "", "", "");
         assert!(
-            prompt.contains(
-                "A proposal review always waits for the user, whatever the session approval mode"
-            ),
+            prompt.contains("MANUAL waits for every request"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("AUTO approves a bounded authorization inside the sandbox"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("YOLO approves every request of that session without asking"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("which only the user sets and no tool argument can change"),
             "{prompt}"
         );
     }

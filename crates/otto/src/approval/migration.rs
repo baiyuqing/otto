@@ -5,13 +5,36 @@ fn json_error(_: serde_json::Error) -> Error {
     Error::Invalid("invalid approval record encoding".into())
 }
 
+/// The stored mode of one session. `automatic` is the pre-mode form of the
+/// same preference: `false` was MANUAL and `true` was AUTO. It is accepted on
+/// decode only, so an interrupted cross-backend migration that exported a
+/// boolean payload still imports with its meaning, and the mode form is what
+/// every new export writes.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StoredMode {
+    Automatic { automatic: bool },
+    Mode { mode: crate::approval::ApprovalMode },
+}
+
+impl From<StoredMode> for crate::approval::ApprovalMode {
+    fn from(stored: StoredMode) -> Self {
+        match stored {
+            StoredMode::Automatic { automatic: true } => Self::Auto,
+            StoredMode::Automatic { automatic: false } => Self::Manual,
+            StoredMode::Mode { mode } => mode,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApprovalRecord {
     Mode {
         workspace: String,
         session_id: String,
-        automatic: bool,
+        /// Written as the mode; decoded from either form.
+        mode: StoredMode,
     },
     Request {
         subject_key: String,
@@ -32,6 +55,18 @@ pub enum ApprovalRecord {
     },
 }
 impl ApprovalRecord {
+    /// The mode record of one session, in the current export form.
+    pub fn mode(
+        workspace: String,
+        session_id: String,
+        mode: crate::approval::ApprovalMode,
+    ) -> Self {
+        Self::Mode {
+            workspace,
+            session_id,
+            mode: StoredMode::Mode { mode },
+        }
+    }
     pub fn metadata(&self) -> Result<(String, String)> {
         Ok(match self {
             ApprovalRecord::Mode {

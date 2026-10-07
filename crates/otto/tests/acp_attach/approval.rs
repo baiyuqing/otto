@@ -225,6 +225,35 @@ fn reject_once_ends_the_turn_without_a_retry() {
 }
 
 #[test]
+fn the_relay_reads_and_sets_the_session_mode() {
+    let (home, workspace, serve, _) = start_with_read(false);
+    let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));
+    relay.initialize();
+    let session_id = relay.new_session(workspace.path());
+    let (_, set) = relay.call(
+        "_otto/approval_mode/set",
+        json!({"sessionId": session_id, "mode": "yolo"}),
+    );
+    assert_eq!(set["result"]["mode"], "yolo", "{set}");
+    let (_, fetched) = relay.call("_otto/approval_mode/get", json!({"sessionId": session_id}));
+    assert_eq!(fetched["result"]["mode"], "yolo", "{fetched}");
+    // The relay reads the mode the serve process persisted.
+    let (status, body) = http(
+        &serve.socket,
+        "GET",
+        &format!("/v1/sessions/{session_id}/approval-mode"),
+        None,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["mode"],
+        "yolo",
+        "{body}"
+    );
+    assert_eq!(relay.close(), Some(0));
+}
+
+#[test]
 fn a_decision_over_http_withdraws_the_open_permission_request() {
     let (home, workspace, serve, served) = start();
     let mut relay = Client::attach(home.path(), workspace.path(), Some(&serve.socket));

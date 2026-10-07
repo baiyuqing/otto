@@ -9,6 +9,7 @@
 //!
 //! ```no_run
 //! use otto::embed::{ApprovalDecision, Component, ConfigSource, Input, Otto};
+//! use otto_core::approval::ApprovalMode;
 //!
 //! # async fn demo() -> Result<(), otto::embed::Error> {
 //! # let overrides = otto_core::config::Overrides::default();
@@ -25,7 +26,7 @@
 //!     .await?;
 //!
 //! let session = otto.new_session(None).await?; // None: the startup workspace
-//! session.set_auto_mode(false)?;                // MANUAL: approvals reach `decide`
+//! session.set_approval_mode(ApprovalMode::Manual)?; // approvals reach `decide`
 //! let stop = session
 //!     .prompt(
 //!         Input::Text("fix the failing test"),
@@ -82,6 +83,7 @@ use std::time::SystemTime;
 
 use otto_core::agent::steering::Message as SteeringMessage;
 use otto_core::agent::{AgentError, CompactionResult, EventSink};
+use otto_core::approval::ApprovalMode;
 use otto_core::config::Overrides;
 use otto_core::config::resolve::Runtime;
 use otto_core::model::{Block, Message};
@@ -789,7 +791,7 @@ impl Session {
     /// session, a bounded authorization that stays inside the sandbox is
     /// approved without calling `decide`; a plan review and any request that
     /// leaves the sandbox or the workspace still comes to `decide`; see
-    /// [`Session::set_auto_mode`]. A second call on this session while a turn
+    /// [`Session::set_approval_mode`]. A second call on this session while a turn
     /// runs returns [`Error::PromptActive`].
     pub async fn prompt<F, Fut>(
         &self,
@@ -836,19 +838,33 @@ impl Session {
         self.controller.history()
     }
 
-    /// Sets the approval mode of this session: `true` is AUTO, which approves
-    /// a bounded authorization without calling `decide`; `false` is MANUAL.
-    /// A plan review and any request outside the sandbox always reaches
-    /// `decide`, whatever the mode. The mode is
-    /// stored in `~/.otto/approvals.db` per workspace and session, as
-    /// `/auto on|off` and ACP `_otto/approval_mode/set` store it.
-    /// [`Info::auto_mode`] reports the mode in effect.
-    pub fn set_auto_mode(&self, automatic: bool) -> Result<(), Error> {
+    /// Sets the approval mode of this session. In `Auto`, the default, a
+    /// bounded authorization that stays inside the sandbox and the workspace
+    /// is approved without calling `decide`, while a plan review and any
+    /// request that leaves the sandbox or the workspace still reaches
+    /// `decide`. In `Manual` every request reaches `decide`. In `Yolo` every
+    /// request of the session is approved without calling `decide`, including
+    /// a plan review, a sandbox escalation and a durable grant; a
+    /// workspace-wide request and another session's request still reach
+    /// `decide`. The mode is stored in `~/.otto/approvals.db` per workspace
+    /// and session, as `/auto` and ACP `_otto/approval_mode/set` store it.
+    /// [`Info::approval_mode`] reports the mode in effect.
+    pub fn set_approval_mode(&self, mode: ApprovalMode) -> Result<(), Error> {
         let controller = &self.controller;
         controller
             .approval_service()
-            .set_auto_mode(&controller.approval_scope(), automatic)
+            .set_mode(&controller.approval_scope(), mode)
             .map_err(|e| Error::Agent(AgentError::Other(e.to_string())))
+    }
+
+    /// [`Session::set_approval_mode`] with the boolean it replaced: `true` is
+    /// AUTO and `false` is MANUAL. YOLO has no boolean form.
+    pub fn set_auto_mode(&self, automatic: bool) -> Result<(), Error> {
+        self.set_approval_mode(if automatic {
+            ApprovalMode::Auto
+        } else {
+            ApprovalMode::Manual
+        })
     }
 
     /// Identity, model, usage, sandbox and plan of the session.
@@ -1454,9 +1470,16 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         provider.serve(&fixture);
         let otto = builder(&fixture).build().await.unwrap();
         let session = otto.new_session(None).await.unwrap();
-        assert!(session.info().auto_mode, "a new session starts in AUTO");
+        assert_eq!(session.info().approval_mode, ApprovalMode::Auto);
         session.set_auto_mode(false).unwrap();
-        assert!(!session.info().auto_mode);
+        assert_eq!(session.info().approval_mode, ApprovalMode::Manual);
+        // The embedding API selects every mode. Assert it, then put the
+        // session back in MANUAL: this round trip is about `decide` receiving
+        // the request, and YOLO would approve it without calling `decide`.
+        session.set_approval_mode(ApprovalMode::Yolo).unwrap();
+        assert_eq!(session.info().approval_mode, ApprovalMode::Yolo);
+        session.set_approval_mode(ApprovalMode::Manual).unwrap();
+        assert_eq!(session.info().approval_mode, ApprovalMode::Manual);
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&events);

@@ -4398,6 +4398,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_tool_resume_accepts_fresh_context_and_empty_fields() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        interrupted_fixture(
+            &parent_path,
+            "t1",
+            "go",
+            None,
+            true,
+            false,
+            interrupted::INTERRUPTED_STATUS,
+        );
+
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![assistant_text("all done", Usage::default())],
+        );
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+        let tools = crate::subagent::tools::tools(&runner);
+        let agent_tool = tools
+            .iter()
+            .find(|tool| tool.definition().name == "agent")
+            .expect("the agent tool is registered");
+
+        let result = agent_tool
+            .execute(
+                &raw(
+                    r#"{"agent":"","context":"fresh","description":"","model":"","name":"","prompt":"Retry the audit.","resume":"t1","wait":false}"#,
+                ),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        wait_final(&tasks, "t1").await;
+    }
+
+    #[tokio::test]
+    async fn agent_tool_rejects_resume_with_inherit_context() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        interrupted_fixture(
+            &parent_path,
+            "t1",
+            "go",
+            None,
+            true,
+            false,
+            interrupted::INTERRUPTED_STATUS,
+        );
+
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+        let tools = crate::subagent::tools::tools(&runner);
+        let agent_tool = tools
+            .iter()
+            .find(|tool| tool.definition().name == "agent")
+            .expect("the agent tool is registered");
+
+        let result = agent_tool
+            .execute(
+                &raw(r#"{"resume":"t1","prompt":"continue","context":"inherit"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("context"), "{}", result.content);
+    }
+
+    #[tokio::test]
     async fn agent_tool_rejects_resume_without_a_prompt() {
         let dir = tempfile::tempdir().expect("dir");
         let parent_path = dir.path().join("parent.jsonl");

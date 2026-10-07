@@ -351,4 +351,7 @@ fn start_without_serve_prints_the_reason_and_exits_with_status_1() {
         )),
         "{stderr}"
     );
+    // The line has to name why serve is unreachable: the absent socket, not
+    // only `reqwest`'s request error, which reads like a transport failure.
+    assert!(stderr.contains("No such file or directory"), "{stderr}");
 }

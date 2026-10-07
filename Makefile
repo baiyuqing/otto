@@ -7,13 +7,16 @@ SKILLS_INSTALL_DIR ?= $(HOME)/.otto/skills
 
 CHAT_CONNECTOR_DIR := chat-connector
 
-.PHONY: setup-git-hooks all build install check-fast check check-tests check-linux rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
+.PHONY: setup-git-hooks all build run install check-fast check check-tests check-linux rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test license-check bump release-tag test-tui connect-check connect-build clean help
 
 all: build
 
 build: ## compile the Rust binary (release) to ./$(BINARY)
 	cargo build --release
 	cp target/release/$(BINARY) ./$(BINARY)
+
+run: ## start Otto in the foreground with the settings from otto.env (run `build` first)
+	./scripts/otto.sh
 
 install: build connect-build ## install Otto, otto-connect and bundled skills
 	install -d "$(INSTALL_DIR)"

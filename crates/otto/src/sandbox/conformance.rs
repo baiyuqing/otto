@@ -715,6 +715,51 @@ pub(crate) async fn deadline_cancellation_removes_the_process_group(case: &dyn C
     executor.close().expect("close");
 }
 
+pub(crate) async fn an_ignored_term_escalates_to_kill_and_removes_the_group(case: &dyn Contract) {
+    const GRACE: Duration = Duration::from_millis(100);
+    let (fixture, _) = setup(case).await;
+    let (_driver, executor) = open(case, &fixture).await;
+    let (recorder, mut lines) = Recorder::new();
+    let cancel = CancellationToken::new();
+    let handle = {
+        let executor = executor.clone();
+        let cancel = cancel.clone();
+        let request = shell_request(
+            case,
+            &fixture,
+            r#"trap '' TERM; echo "$$"; while :; do sleep 1; done"#,
+        );
+        tokio::spawn(async move {
+            let mut stdout = recorder;
+            let mut stderr = std::io::sink();
+            executor
+                .execute_with_grace(
+                    request,
+                    Streams {
+                        stdout: &mut stdout,
+                        stderr: &mut stderr,
+                    },
+                    &cancel,
+                    GRACE,
+                )
+                .await
+        })
+    };
+    // The PID is printed after the trap is installed.
+    let pid = parse_pid(&await_line(&mut lines, "TERM-ignoring leader PID").await);
+    let cancelled_at = Instant::now();
+    cancel.cancel();
+    let (status, result) = await_execution(handle, "cancellation of a TERM-ignoring child").await;
+    assert!(
+        cancelled_at.elapsed() >= GRACE,
+        "SIGKILL preceded the {GRACE:?} grace"
+    );
+    assert_eq!(result, Err(Error::Cancelled));
+    assert_signaled(&status);
+    assert_gone(pid).await;
+    executor.close().expect("close");
+}
+
 pub(crate) async fn normal_leader_exit_removes_a_background_process(case: &dyn Contract) {
     let (fixture, _) = setup(case).await;
     let (_driver, executor) = open(case, &fixture).await;
@@ -1122,6 +1167,10 @@ macro_rules! driver_contract {
         $crate::sandbox::conformance::contract_check!(
             $case,
             deadline_cancellation_removes_the_process_group
+        );
+        $crate::sandbox::conformance::contract_check!(
+            $case,
+            an_ignored_term_escalates_to_kill_and_removes_the_group
         );
         $crate::sandbox::conformance::contract_check!(
             $case,

@@ -10,8 +10,10 @@
 pub mod crash;
 pub mod files;
 pub mod http;
+pub mod mcp;
 pub mod plan;
 pub mod publish;
+pub mod sandbox;
 pub mod sql;
 
 pub use plan::{Fault, FaultError, FaultPlan, Filter, Fired, Rule, SqlFault, Trigger};

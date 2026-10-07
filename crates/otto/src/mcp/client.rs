@@ -921,6 +921,63 @@ mod tests {
         (Arc::new(client), close_calls)
     }
 
+    /// A real client over a real HTTP transport. The server answers each
+    /// request on its own connection: discover, tool list, then a first
+    /// `tools/call` that it accepts and never answers, then a second one.
+    #[tokio::test]
+    async fn a_stalled_http_request_times_out_and_the_next_request_succeeds() {
+        use crate::faults::http::{Script, spawn_scripted};
+
+        let discover = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"{MODERN_VERSION}"}}}}"#
+        );
+        let server = spawn_scripted(vec![
+            Script::status(200, &discover),
+            Script::status(200, r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#),
+            Script::stall_before_head(),
+            Script::status(
+                200,
+                r#"{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"ok"}]}}"#,
+            ),
+        ])
+        .await;
+        let transport = super::super::http::HttpTransport::new(
+            server.url.clone(),
+            vec![],
+            None,
+            Duration::from_secs(30),
+        )
+        .expect("http transport");
+        let client = Client::connect_with_grace(
+            "test".to_string(),
+            Box::new(transport),
+            Duration::from_secs(5),
+            Duration::from_millis(150),
+            Duration::from_millis(100),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("connect");
+
+        let first = client
+            .call("slow", json!({}), &CancellationToken::new())
+            .await;
+        assert_eq!(first.unwrap_err(), CallError::Timeout);
+
+        let second = client
+            .call("slow", json!({}), &CancellationToken::new())
+            .await
+            .expect("the next request succeeds on the same client");
+        assert_eq!(
+            second.content,
+            vec![crate::mcp::ContentBlock::Text {
+                text: "ok".to_string()
+            }]
+        );
+        assert_eq!(server.count(), 4);
+        client.close().await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn http_timeout_drops_only_one_request_after_grace() {
         let grace = Duration::from_millis(25);

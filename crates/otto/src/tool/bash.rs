@@ -2615,6 +2615,52 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
         }
     }
 
+    #[tokio::test]
+    async fn a_driver_launch_failure_is_not_started_and_runs_nothing() {
+        use crate::faults::sandbox::{FaultyDriver, SandboxOp};
+        use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
+
+        let (_dir, workspace) = temp_workspace();
+        let plan = FaultPlan::new(vec![Rule::new(
+            SandboxOp::Execute,
+            Trigger::Nth(1),
+            Fault::Before(FaultError::Os(libc::EAGAIN)),
+        )]);
+        let executor = Executor::new(
+            Arc::new(FaultyDriver::new(
+                Arc::new(crate::sandbox::direct::DirectDriver::new()),
+                plan.clone(),
+            )),
+            Policy {
+                filesystem: FilesystemMode::Unconfined,
+                network: NetworkMode::Allow,
+            },
+            workspace.root(),
+        )
+        .expect("the executor opens");
+        let tool = BashTool::new(
+            &workspace,
+            Arc::new(executor),
+            "/bin/sh",
+            strings(&["PATH=/usr/bin:/bin"]),
+            Duration::from_secs(3),
+            4096,
+            &[],
+        )
+        .expect("the configuration is valid");
+
+        let result = run(&tool, "touch marker").await;
+
+        assert!(result.is_error, "{result:?}");
+        assert_eq!(result.content, SANDBOX_EXECUTION_UNAVAILABLE);
+        assert_eq!(
+            outcome(&result).effect_certainty,
+            otto_core::model::EffectCertainty::NotStarted
+        );
+        assert!(!workspace.root().join("marker").exists());
+        plan.assert_all_fired();
+    }
+
     #[test]
     fn the_constructor_rejects_every_invalid_boundary_with_one_safe_error() {
         let (dir, workspace) = temp_workspace();

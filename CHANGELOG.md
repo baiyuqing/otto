@@ -154,7 +154,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `fsops::publish_file`, and `faults::publish` injects create, write, sync and
   rename faults into it; reflection skill files now also sync their directory
   after the rename
-  ([#409](https://github.com/baiyuqing/otto/pull/409)).
+  ([#409](https://github.com/baiyuqing/otto/pull/409)). `faults::sandbox` and
+  `faults::mcp` wrap the sandbox driver and the MCP transport; new tests check
+  that a failed launch is reported as not started, that a child ignoring
+  `SIGTERM` is killed with its group after the grace on every driver, and that
+  a hung MCP request times out, stopping a stdio server and leaving an HTTP
+  client usable ([#413](https://github.com/baiyuqing/otto/pull/413)).
 
 - Main's `connect-check` no longer fails on the connector's end-to-end
   reflection test. That test scripted ten identical `read {"path":"notes.txt"}`

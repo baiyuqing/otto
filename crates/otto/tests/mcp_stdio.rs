@@ -19,6 +19,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use otto::faults::mcp::{FaultyTransport, McpOp};
+use otto::faults::{Fault, FaultPlan, Filter, Rule, Trigger};
 use otto::mcp::client::Client;
 use otto::mcp::jsonrpc::modern_meta;
 use otto::mcp::stdio::StdioTransport;
@@ -62,6 +64,7 @@ fn main() {
     run!(test_close_terminates_child_and_is_idempotent);
     run!(test_close_escalates_stubborn_child_promptly);
     run!(test_env_restriction);
+    run!(test_hung_stdio_request_times_out_and_stops_the_server);
 
     if failed {
         std::process::exit(1);
@@ -556,6 +559,68 @@ async fn test_close_escalates_stubborn_child_promptly() -> Result<(), String> {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     check(gone, format!("pid {pid} still alive after close"))?;
+    Ok(())
+}
+
+/// A transport that never answers `tools/call` and ignores cancellation: the
+/// call times out after the grace, and stdio stops the shared server.
+async fn test_hung_stdio_request_times_out_and_stops_the_server() -> Result<(), String> {
+    let grace = Duration::from_millis(100);
+    let (command, env) = fake_server_command("modern", &[]);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let transport = StdioTransport::spawn_with_grace(&command, &[], &env, &cwd, grace)
+        .await
+        .map_err(|e| e.to_string())?;
+    let pid = transport.pid();
+    let plan = FaultPlan::new(vec![
+        Rule::new(McpOp::Request, Trigger::Nth(1), Fault::Hang)
+            .filter(Filter::NameSuffix("tools/call")),
+    ]);
+    let client = Client::connect_with_grace(
+        "test-server".to_string(),
+        Box::new(FaultyTransport::new(Box::new(transport), plan.clone())),
+        Duration::from_secs(5),
+        Duration::from_millis(150),
+        grace,
+        &CancellationToken::new(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let started = Instant::now();
+    let first = client
+        .call("echo", json!({}), &CancellationToken::new())
+        .await;
+    let elapsed = started.elapsed();
+    plan.assert_all_fired();
+    check(
+        matches!(first, Err(CallError::Timeout)),
+        format!("expected Timeout, got {first:?}"),
+    )?;
+    check(
+        elapsed < Duration::from_secs(2),
+        format!("the hung call took {elapsed:?}"),
+    )?;
+    println!("hung call returned after {elapsed:?}");
+    let second = client
+        .call("echo", json!({}), &CancellationToken::new())
+        .await;
+    check(
+        matches!(second, Err(CallError::Stopping)),
+        format!("expected Stopping, got {second:?}"),
+    )?;
+    let mut gone = false;
+    for _ in 0..50 {
+        if matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None),
+            Err(nix::errno::Errno::ESRCH)
+        ) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    check(gone, format!("pid {pid} still alive after the timeout"))?;
     Ok(())
 }
 

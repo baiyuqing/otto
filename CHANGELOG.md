@@ -53,7 +53,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   in `~/Library/Caches/otto-sandbox-*` — a leaked tree per affected session.
   Cleanup now restores the owner's access through the same descriptors it
   already validated against the recorded inode identities, then removes the
-  tree; the identity checks and the symlink refusal are unchanged.
+  tree; the identity checks and the symlink refusal are unchanged
+  ([#408](https://github.com/baiyuqing/otto/pull/408)).
 - Stop dropping the input typed during a turn without saying so. Ordinary text
   submitted while a turn runs is guidance for that turn, but the TUI never
   recorded it: `Ctrl+U` did nothing, the transcript never showed `Queued for

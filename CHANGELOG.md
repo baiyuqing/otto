@@ -15,6 +15,34 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Features
+
+- Steer the active turn from the TUI and take the guidance back. `/steer
+  <guidance>` delivers guidance at the next safe boundary as an explicit
+  command that never starts a turn, and `/inputs` lists what the active run has
+  accepted with its message id and status (`queued`, `delivered`, `withdrawn`,
+  `discarded`), so a still-queued item can be withdrawn with `/inputs withdraw
+  <id>` or `Ctrl+U` for the newest one. Both work locally and with `--attach`,
+  and mirror the existing HTTP `GET`/`DELETE /v1/sessions/{id}/tasks/steer`
+  routes ([user manual](docs/user-manual.md#tui-behavior)).
+
+### Fixes
+
+- Stop dropping the input typed during a turn without saying so. Ordinary text
+  submitted while a turn runs is guidance for that turn, but the TUI never
+  recorded it: `Ctrl+U` did nothing, the transcript never showed `Queued for
+  current turn: …`, and the composer and transcript branches that advertised
+  those clues were unreachable (`queued_input_sent` was set only by tests).
+  Cancelling with `Esc`, a provider failure, or the turn deadline then
+  destroyed the guidance silently, because a run end discards the guidance it
+  never delivered. The TUI now shows the queued guidance while it waits,
+  withdraws it with `Ctrl+U`, and every frontend reports a turn that ended
+  without delivering it: once, as a visible `agent_steering` context message
+  and a notification that quotes the message, with the text put back in the
+  composer when it was empty. The unreachable queued-input withdrawal wiring
+  this replaces (`queue_user_message`/`withdraw_user_message` from the TUI) is
+  gone.
+
 ## 0.4.1 - 2026-10-07
 
 ### Features

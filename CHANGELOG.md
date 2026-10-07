@@ -215,7 +215,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   approval cancellation run their chat as `telegram` again. Since #421 a
   card is shown only in the chat named by the approval's presentation
   origin, which the connector sends only for `telegram` and `feishu`; on the
-  harness default platform `fake` no card was sent and the tests timed out.
+  harness default platform `fake` no card was sent and the tests timed out
+  ([#424](https://github.com/baiyuqing/otto/pull/424)).
 
 - `make check-fast` runs its existing change selector directly, without a
   cross-worktree `lockf`/`flock` wrapper. Independent worktrees can start checks

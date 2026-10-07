@@ -263,12 +263,9 @@ impl Inner {
 /// [`Inner::save`]) and the inbox sidecar (`<id>.inbox.json`, via
 /// `write_inbox_file` in `runtime::wiring`), so the temporary-file/fsync/rename
 /// pattern exists in exactly one place.
-pub(crate) fn replace_private(path: &Path, body: &[u8]) -> Result<(), String> {
-    replace_private_with(path, body, &PosixPublish)
-}
-
-/// [`replace_private`] with the publish system calls supplied, so tests can
-/// fail or end the process at one.
+///
+/// The publish system calls are supplied so tests can fail or end the process
+/// at one; production callers pass `&PosixPublish`.
 pub(crate) fn replace_private_with(
     path: &Path,
     body: &[u8],
@@ -958,7 +955,8 @@ mod tests {
         let temp = directory.path().join("session.reminders.json.tmp");
         std::fs::write(&temp, "partial").unwrap();
 
-        replace_private(&path, b"[]").expect("save over a leftover temporary file");
+        replace_private_with(&path, b"[]", &PosixPublish)
+            .expect("save over a leftover temporary file");
 
         assert_eq!(std::fs::read(&path).unwrap(), b"[]");
         assert!(!temp.exists());

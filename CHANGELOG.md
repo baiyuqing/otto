@@ -25,7 +25,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   list as text. The connector reads that file read-only, so the picker shows the
   user layer only and marks the configured default rather than the session's
   current profile; switching itself stays Otto's
-  ([user manual](docs/user-manual.md#commands)).
+  ([#391](https://github.com/baiyuqing/otto/pull/391),
+  [user manual](docs/user-manual.md#commands)).
 
 - Switch the model of one session from ACP itself with `/model [profile]`: Otto
   rebuilds the session's runner on another configured profile, makes no model

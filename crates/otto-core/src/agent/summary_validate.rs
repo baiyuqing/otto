@@ -69,6 +69,9 @@ pub fn validate_summary_message(message: &Message, maximum_bytes: usize) -> Resu
     }
     let mut text = String::new();
     for block in &message.blocks {
+        if block.block_type == BlockType::Reasoning {
+            continue;
+        }
         if block.block_type != BlockType::Text {
             return Err(
                 "compaction summary response must contain text only and no tool calls".into(),

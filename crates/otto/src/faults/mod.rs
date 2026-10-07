@@ -11,6 +11,7 @@ pub mod crash;
 pub mod files;
 pub mod http;
 pub mod plan;
+pub mod publish;
 pub mod sql;
 
 pub use plan::{Fault, FaultError, FaultPlan, Filter, Fired, Rule, SqlFault, Trigger};

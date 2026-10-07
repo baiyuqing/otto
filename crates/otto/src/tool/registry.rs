@@ -294,8 +294,10 @@ impl ToolExecutor for Registry {
         self.ordered.iter().map(|tool| tool.definition()).collect()
     }
 
-    fn replayable(&self, name: &str) -> bool {
-        self.lookup(name).is_some() && super::safety::is_replayable(name)
+    fn retry_safety(&self, name: &str) -> otto_core::model::RetrySafety {
+        self.lookup(name)
+            .and_then(|_| super::safety::declared_safety(name))
+            .unwrap_or(otto_core::model::RetrySafety::NonIdempotent)
     }
 
     fn batch_control(

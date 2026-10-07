@@ -258,12 +258,14 @@ impl Client {
         &self,
         session_id: &str,
         text: &str,
+        input_id: Option<&str>,
     ) -> Result<ActiveInputAdmission, Error> {
+        let mut body = json!({"text": text});
+        if let Some(input_id) = input_id {
+            body["input_id"] = json!(input_id);
+        }
         let response = self
-            .send(self.post(
-                &format!("{BASE}/v1/sessions/{session_id}/inputs"),
-                &json!({"text": text}),
-            ))
+            .send(self.post(&format!("{BASE}/v1/sessions/{session_id}/inputs"), &body))
             .await?;
         decode(response).await
     }
@@ -419,13 +421,16 @@ impl Client {
             None,
             Some(&Origin::terminal()),
             None,
+            None,
         )
         .await
     }
 
     /// Starts a queued turn with optional per-turn chat channel metadata and
     /// origin. Without an origin the server records the turn as `web`.
-    /// `request_id` is sent as `X-Request-Id` for log correlation.
+    /// `request_id` is sent as `X-Request-Id` for log correlation;
+    /// `input_id` is the body's idempotency key, so a retry is not run twice.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_turn_with_channel(
         &self,
         session_id: &str,
@@ -434,8 +439,12 @@ impl Client {
         channel: Option<Channel>,
         origin: Option<&Origin>,
         request_id: Option<&str>,
+        input_id: Option<&str>,
     ) -> Result<TurnStream, Error> {
         let mut body = json!({ "text": text, "queue": true });
+        if let Some(input_id) = input_id {
+            body["input_id"] = json!(input_id);
+        }
         if let Some(channel) = channel {
             body["channel"] = serde_json::to_value(channel).expect("Channel serializes");
         }
@@ -496,6 +505,56 @@ impl Client {
             .await?;
         let wire: SessionWire = decode(response).await?;
         Ok(wire.into_info())
+    }
+
+    /// `GET /v1/sessions/{id}/fork-points`, oldest first, as (entry id,
+    /// prompt) pairs.
+    pub async fn fork_points(&self, session_id: &str) -> Result<Vec<(String, String)>, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/fork-points")),
+            )
+            .await?;
+        #[derive(Deserialize)]
+        struct Point {
+            entry_id: String,
+            prompt: String,
+        }
+        #[derive(Deserialize)]
+        struct Points {
+            fork_points: Vec<Point>,
+        }
+        Ok(decode::<Points>(response)
+            .await?
+            .fork_points
+            .into_iter()
+            .map(|point| (point.entry_id, point.prompt))
+            .collect())
+    }
+
+    /// `POST /v1/sessions/{id}/fork`: the fork's session id and the prompt it
+    /// stops before.
+    pub async fn fork_session(
+        &self,
+        session_id: &str,
+        before: Option<&str>,
+    ) -> Result<(String, Option<String>), Error> {
+        let body = match before {
+            Some(before) => json!({ "before": before }),
+            None => json!({}),
+        };
+        let response = self
+            .send(self.post(&format!("{BASE}/v1/sessions/{session_id}/fork"), &body))
+            .await?;
+        #[derive(Deserialize)]
+        struct Forked {
+            id: String,
+            #[serde(default)]
+            prompt: Option<String>,
+        }
+        let forked = decode::<Forked>(response).await?;
+        Ok((forked.id, forked.prompt))
     }
 
     /// `PATCH /v1/sessions/{id}`.
@@ -919,6 +978,10 @@ struct SessionWire {
     sandbox: SandboxWireIn,
     #[serde(default)]
     auto_mode: bool,
+    #[serde(default)]
+    forked_from: Option<crate::app::ForkedFrom>,
+    #[serde(default)]
+    plan: Vec<otto_core::session::PlanStep>,
 }
 
 #[derive(Default, Deserialize)]
@@ -947,6 +1010,8 @@ impl SessionWire {
         };
         crate::app::Info {
             auto_mode: self.auto_mode,
+            forked_from: self.forked_from,
+            plan: self.plan,
             session_id: self.id,
             session_name: self.name,
             workspace: self.workspace,
@@ -1217,6 +1282,7 @@ mod tests {
                 Some(Channel::Feishu),
                 Some(&Origin::chat("feishu", "oc_1").unwrap()),
                 None,
+                Some("chat:feishu:oc_1:m1"),
             )
             .await
             .unwrap();
@@ -1242,7 +1308,8 @@ mod tests {
                 "text": "chat text",
                 "queue": true,
                 "channel": "feishu",
-                "origin": "chat:feishu:oc_1"
+                "origin": "chat:feishu:oc_1",
+                "input_id": "chat:feishu:oc_1:m1"
             })
         );
     }
@@ -1273,7 +1340,7 @@ mod tests {
         });
         let client = Client::new(&socket).expect("client");
         client
-            .start_turn_with_channel("s1", "a", None, None, None, Some("req-1"))
+            .start_turn_with_channel("s1", "a", None, None, None, Some("req-1"), None)
             .await
             .unwrap();
         client.start_turn("s1", "b", None).await.unwrap();
@@ -1381,6 +1448,35 @@ mod tests {
             (
                 "PATCH /v1/sessions/s1".into(),
                 json!({ "name": "new name" })
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_calls_post_the_fork_point_and_decode_the_new_session() {
+        let (client, seen, _dir) = stub(|_, path| {
+            if path.ends_with("/fork-points") {
+                json_body(
+                    StatusCode::OK,
+                    r#"{"fork_points":[{"entry_id":"00000001","prompt":"first"}]}"#,
+                )
+            } else {
+                json_body(StatusCode::CREATED, r#"{"id":"s2","prompt":"first"}"#)
+            }
+        });
+        assert_eq!(
+            client.fork_points("s1").await.unwrap(),
+            [("00000001".to_string(), "first".to_string())]
+        );
+        assert_eq!(
+            client.fork_session("s1", Some("00000001")).await.unwrap(),
+            ("s2".to_string(), Some("first".to_string()))
+        );
+        assert_eq!(
+            request(&seen, 1),
+            (
+                "POST /v1/sessions/s1/fork".into(),
+                json!({ "before": "00000001" })
             )
         );
     }

@@ -165,6 +165,38 @@ impl Session for MemoryHandle {
         self.inner.append_operation_fact(fact).await
     }
 
+    fn operation_history(&self) -> Vec<otto_core::session::OperationFact> {
+        self.inner.operation_history()
+    }
+
+    fn operation_ledger(&self) -> otto_core::session::OperationLedger {
+        self.inner.operation_ledger()
+    }
+
+    fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+        self.inner.observed_capabilities()
+    }
+
+    fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+        self.inner.plan()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: otto_core::model::Message,
+    ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         self.inner.append_custom(custom_type, data).await
     }
@@ -298,8 +330,12 @@ impl SharedSession {
         self.0.lease()
     }
 
-    pub fn take_takeover(&self) -> Option<crate::session::Takeover> {
-        self.0.take_takeover()
+    pub fn take_recovery(&self) -> Option<crate::session::Recovery> {
+        self.0.take_recovery()
+    }
+
+    pub fn forked_from(&self) -> Option<otto_core::session::ForkRecord> {
+        self.0.forked_from()
     }
 }
 
@@ -333,6 +369,38 @@ impl Session for SharedSession {
         fact: otto_core::session::OperationFact,
     ) -> Result<(), SessionError> {
         self.0.append_operation_fact(fact).await
+    }
+
+    fn operation_history(&self) -> Vec<otto_core::session::OperationFact> {
+        self.0.operation_history()
+    }
+
+    fn operation_ledger(&self) -> otto_core::session::OperationLedger {
+        self.0.operation_ledger()
+    }
+
+    fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+        self.0.observed_capabilities()
+    }
+
+    fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+        self.0.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+        self.0.plan()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: otto_core::model::Message,
+    ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+        self.0.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.0.has_input(input_id)
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
@@ -844,6 +912,11 @@ impl Runner {
         &self.system_prompt
     }
 
+    /// Records the client's input id for the next run's user message.
+    pub fn set_next_input_id(&self, input_id: Option<String>) {
+        self.agent.set_next_input_id(input_id);
+    }
+
     pub(crate) fn task_control(&self) -> Arc<crate::app::task_control::TaskControl> {
         Arc::clone(&self.task_control)
     }
@@ -857,8 +930,9 @@ impl Runner {
         self.agent.context_report()
     }
 
-    pub fn inbox(&self) -> &Arc<otto_core::agent::inbox::Inbox> {
-        self.agent.inbox()
+    /// The session mailbox shared with notification producers.
+    pub fn mailbox(&self) -> &Arc<dyn otto_core::mailbox::Mailbox> {
+        self.agent.mailbox()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -936,7 +1010,7 @@ impl Runner {
             .map(|subagents| subagents.max_output_bytes())
             .unwrap_or(0);
         crate::failover::recovery::notify_moved(
-            tasks.notifications(),
+            tasks.notifications().as_ref(),
             &children_dir,
             &ids,
             max_output_bytes,
@@ -971,6 +1045,8 @@ impl Runner {
         let registry = Registry::new(tools).expect("test tool registry");
         let definitions = registry.definitions();
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
+        let inbox = tasks.notifications().clone();
+        let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = inbox.clone();
         Self {
             agent: Agent::new(
                 ProviderClient::Scripted(provider),
@@ -981,7 +1057,7 @@ impl Runner {
                     provider_name: "openai-compatible".to_string(),
                     request_sizer: Some(Arc::new(ScriptedSizer)),
                     now: Box::new(Utc::now),
-                    inbox: Arc::clone(tasks.notifications()),
+                    mailbox: Arc::clone(&mailbox),
                     steering: task_control.steering(),
                     tasks: Some(Arc::clone(&tasks)
                         as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
@@ -993,9 +1069,7 @@ impl Runner {
             system_prompt: String::new(),
             definitions,
             usage: None,
-            reminders: Some(Arc::new(crate::tool::remind::Reminders::new(Arc::clone(
-                tasks.notifications(),
-            )))),
+            reminders: Some(Arc::new(crate::tool::remind::Reminders::new(inbox))),
             tasks: Some(tasks),
             subagents: None,
             skills: Catalog::default(),
@@ -1846,6 +1920,12 @@ impl Builder {
         mark_build_trace(&mut trace, "runner/subagents");
 
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
+        if let Some(journal) = self.session_journal(session, "inputs.json", warnings) {
+            task_control.steering().set_journal(journal);
+        }
+        if let Some(journal) = self.session_journal(session, "followups.json", warnings) {
+            task_control.set_followup_journal(journal);
+        }
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let reflection = Arc::new(crate::tool::reflect::Handle::default());
         if self.boundary_allows_dynamic(Some(runtime)) {
@@ -1882,6 +1962,11 @@ impl Builder {
             ));
             tools.push(Box::new(crate::tool::task_control::TaskQueue::new(
                 Arc::clone(&task_control),
+                &redaction_values,
+            )));
+            // Parent-only: a child's plan would be shown nowhere.
+            tools.push(Box::new(crate::tool::plan::UpdatePlan::new(
+                Arc::new(session.clone()),
                 &redaction_values,
             )));
             // Parent-only, like the timer tools: a child has no session file
@@ -2007,8 +2092,11 @@ impl Builder {
                 .tasks
                 .clone()
                 .map(|tasks| tasks as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
-            inbox: subagents.inbox.unwrap_or_default(),
+            mailbox: subagents
+                .inbox
+                .unwrap_or_else(|| Arc::new(otto_core::mailbox::InMemoryMailbox::default())),
             steering: task_control.steering(),
+            version: env!("CARGO_PKG_VERSION").into(),
             ..Options::default()
         };
         let hook_port = options.hooks.clone();
@@ -2193,6 +2281,33 @@ impl Builder {
             .and_then(|repository| repository.create_lazy(&session_root, header, failover_seconds))
             .map_err(|error| self.redact_error(&error, Some(runtime)))?;
         Ok(SharedSession::new(handle))
+    }
+}
+
+impl Builder {
+    /// Writes a new session forked from the session file `reference`; see
+    /// [`crate::session::SessionRepository::fork`].
+    pub fn fork_session_file(
+        &self,
+        reference: &str,
+        before: Option<&str>,
+    ) -> Result<crate::session::Forked, otto_core::session::ForkError> {
+        let failed = |message: String| {
+            otto_core::session::ForkError::Session(otto_core::session::PiError::other(message))
+        };
+        let id = random_id().map_err(|error| failed(format!("create session id: {error}")))?;
+        self.storage
+            .sessions()
+            .map_err(failed)?
+            .fork(reference, before, &id)
+    }
+
+    /// The places the session file `reference` can be forked, oldest first.
+    pub fn session_fork_points(
+        &self,
+        reference: &str,
+    ) -> Result<Vec<otto_core::session::ForkPoint>, String> {
+        self.storage.sessions()?.fork_points(reference)
     }
 }
 
@@ -2812,6 +2927,7 @@ mod tests {
                 "schedule_list",
                 "schedule_cancel",
                 "task_queue",
+                "update_plan",
                 "otto_help"
             ]
         );
@@ -3126,7 +3242,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");
@@ -3388,6 +3504,30 @@ mod tests {
             fact: otto_core::session::OperationFact,
         ) -> Result<(), SessionError> {
             self.inner.append_operation_fact(fact).await
+        }
+
+        fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+            self.inner.observed_capabilities()
+        }
+
+        fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+            self.inner.interrupted_turn()
+        }
+
+        fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+            self.inner.plan()
+        }
+
+        async fn append_input_if_absent(
+            &self,
+            input_id: &str,
+            message: otto_core::model::Message,
+        ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+            self.inner.append_input_if_absent(input_id, message).await
+        }
+
+        fn has_input(&self, input_id: &str) -> bool {
+            self.inner.has_input(input_id)
         }
 
         async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {

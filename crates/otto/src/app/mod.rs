@@ -64,6 +64,7 @@ pub const SANDBOX_RELOAD_UNAVAILABLE: &str = "sandbox reload is not available";
 pub const SESSION_OPERATION_UNAVAILABLE: &str = "session operation is unavailable";
 /// The server answers it with 409 `turn_active`.
 pub const PROMPT_ACTIVE: &str = "a prompt is already active";
+pub const NOTHING_TO_FORK: &str = "the session has no history to fork yet";
 pub const CLOSED: &str = "controller is closed";
 pub const SESSION_RENAME_UNAVAILABLE: &str = "session rename is unavailable";
 pub const INVALID_SESSION_NAME: &str = "session is invalid: session name is required";
@@ -111,6 +112,44 @@ pub struct Info {
     pub context_input_tokens_pending: bool,
     pub sandbox: SandboxInfo,
     pub auto_mode: bool,
+    /// Where this session was forked from, when it is a fork.
+    pub forked_from: Option<ForkedFrom>,
+    /// The session plan in force; empty when there is none.
+    pub plan: Vec<otto_core::session::PlanStep>,
+}
+
+/// The session and prompt a fork was taken from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForkedFrom {
+    pub session_id: String,
+    /// The user message the fork stops before; absent for a whole fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
+}
+
+impl From<otto_core::session::ForkRecord> for ForkedFrom {
+    fn from(record: otto_core::session::ForkRecord) -> Self {
+        Self {
+            session_id: record.source_session_id,
+            entry_id: record.source_entry_id,
+        }
+    }
+}
+
+/// Why a fork was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkFailure {
+    /// The id names no user prompt that starts a turn on the history.
+    InvalidPoint(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for ForkFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPoint(message) | Self::Failed(message) => f.write_str(message),
+        }
+    }
 }
 
 /// What a completed session replacement reports.
@@ -230,6 +269,10 @@ pub struct Controller {
     /// Set by [`Controller::push_scheduled`]; the TUI rings the terminal bell
     /// once per [`Controller::take_bell`].
     bell: std::sync::atomic::AtomicBool,
+    /// Reports this session's lifecycle to the Herdr pane that started the
+    /// process. `None` outside Herdr and for every frontend that is not the
+    /// pane's agent.
+    herdr: std::sync::RwLock<Option<Arc<crate::herdr::Reporter>>>,
 }
 
 /// One admitted operation. Dropping it releases admission and performs a
@@ -290,10 +333,44 @@ impl Controller {
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
             bell: std::sync::atomic::AtomicBool::new(false),
+            herdr: std::sync::RwLock::new(None),
         };
         controller.notify_memory_state();
         controller.bind_reflection();
         controller
+    }
+
+    /// Starts reporting this session's lifecycle to the Herdr pane that
+    /// started the process. `cli::run` calls this for the frontends that are
+    /// the pane's agent; without it nothing is reported.
+    pub fn install_herdr(&self, reporter: Arc<crate::herdr::Reporter>) {
+        *self
+            .herdr
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reporter);
+    }
+
+    fn herdr_reporter(&self) -> Option<Arc<crate::herdr::Reporter>> {
+        self.herdr
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// What Herdr shows and restores for this session. Read without the
+    /// [`Controller::info`] snapshot, which clones the transcript.
+    fn herdr_session(&self) -> crate::herdr::SessionRef {
+        let state = self.lock();
+        match state.current.as_ref() {
+            Some(current) => crate::herdr::SessionRef {
+                id: current.session.header().id,
+                path: current.path(),
+            },
+            None => crate::herdr::SessionRef {
+                id: String::new(),
+                path: String::new(),
+            },
+        }
     }
 
     /// Queues the notices about memory that needs the user's attention:
@@ -565,7 +642,35 @@ impl Controller {
             context_input_tokens_pending: snapshot.context_input_tokens_pending,
             sandbox,
             auto_mode,
+            forked_from: current.session.forked_from().map(ForkedFrom::from),
+            plan: otto_core::session::Session::plan(&current.session),
         }
+    }
+
+    /// Whether the current session's transcript holds a message delivering
+    /// input `input_id` (a client retry of an input already delivered).
+    pub fn has_input(&self, input_id: &str) -> bool {
+        let state = self.lock();
+        state.current.as_ref().is_some_and(|current| {
+            otto_core::session::Session::has_input(&current.session, input_id)
+        })
+    }
+
+    /// Records the client's input id for the next turn's user message; see
+    /// `Agent::set_next_input_id`.
+    pub fn set_next_input_id(&self, input_id: Option<String>) {
+        if let Some(runner) = self.current_runner() {
+            runner.set_next_input_id(input_id);
+        }
+    }
+
+    /// Whether the session's last turn was interrupted by process loss, so
+    /// the next wake turn resumes it (see `otto_core::session::turn`).
+    pub fn resumes_interrupted_turn(&self) -> bool {
+        let state = self.lock();
+        state.current.as_ref().is_some_and(|current| {
+            otto_core::session::Session::interrupted_turn(&current.session).is_some()
+        })
     }
 
     pub fn history(&self) -> Vec<Message> {
@@ -941,6 +1046,8 @@ impl Controller {
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))
             .map_err(AgentError::Other)?;
+        self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
+            .await?;
         self.run_prompt_step(&runner, text, system_context, &mut *emit, cancel)
             .await?;
         self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
@@ -958,11 +1065,20 @@ impl Controller {
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
         let observation = auto_reflection::RunObservation::default();
+        let reporter = self.herdr_reporter();
+        let session = match &reporter {
+            Some(_) => self.herdr_session(),
+            None => crate::herdr::SessionRef {
+                id: String::new(),
+                path: String::new(),
+            },
+        };
+        let mut observed = auto_reflection::observing_prompt(&mut *emit, &observation);
         let result = runner
             .run_with_system_context(
                 text,
                 system_context,
-                &mut auto_reflection::observing_prompt(&mut *emit, &observation),
+                &mut crate::herdr::observing(&mut observed, reporter.as_deref(), &session),
                 cancel,
             )
             .await;
@@ -978,17 +1094,88 @@ impl Controller {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        while let Some(text) = task_run.next_followup() {
+        while let Some(followup) = task_run.next_followup() {
             if self.pending_approval().is_some() {
                 task_run.clear_followups();
                 self.record_skipped_followup(runner, emit).await?;
                 return Ok(());
             }
-            task_run.set_current_task(&text);
-            self.run_followup_step(runner, &text, system_context, &mut *emit, cancel)
+            if otto_core::session::Session::has_input(runner.session(), &followup.input_id) {
+                // Its step ran before an interruption kept it journaled.
+                task_run.followup_done(&followup);
+                continue;
+            }
+            task_run.set_current_task(&followup.text);
+            runner.set_next_input_id(Some(followup.input_id.clone()));
+            self.run_followup_step(runner, &followup.text, system_context, &mut *emit, cancel)
                 .await?;
+            task_run.followup_done(&followup);
         }
         Ok(())
+    }
+
+    /// Records, as a persisted and visible `agent_followup` notice, that
+    /// `count` follow-ups of an earlier task were discarded because Otto
+    /// stopped before they started and that task is not being resumed.
+    pub(crate) async fn record_unrun_followups(
+        &self,
+        runner: &Runner,
+        count: usize,
+        emit: EventSink<'_>,
+    ) -> Result<(), AgentError> {
+        if count == 0 {
+            return Ok(());
+        }
+        let text = format!(
+            "{count} agent-scheduled follow-up(s) from an earlier task were not run because Otto stopped before they started. Schedule them again if they are still needed."
+        );
+        runner
+            .session()
+            .append(Message {
+                role: otto_core::model::Role::Context,
+                blocks: vec![Block::text(&text)],
+                created_at: chrono::Utc::now(),
+                context_type: "agent_followup".into(),
+                display: true,
+                ..Message::default()
+            })
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        emit(otto_core::agent::Event::Notification {
+            kind: Some(NotificationKind::TaskReport),
+            task_id: "agent_followup".into(),
+            text,
+            usage: Usage::default(),
+            present: false,
+        });
+        Ok(())
+    }
+
+    /// Runs the journaled follow-ups of the task a wake turn just resumed,
+    /// in order, under the same rules as any follow-up.
+    pub(crate) async fn run_resumed_followups(
+        &self,
+        runner: &Runner,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        let task_run = runner
+            .task_control()
+            .begin_resuming(&runner.session().header().id, "", true)
+            .map_err(AgentError::Other)?;
+        self.run_followups_held(runner, &task_run, "", emit, cancel)
+            .await
+    }
+
+    /// Whether the session's last turn was interrupted by process loss and
+    /// still has its automatic resume: the next wake turn resumes it and
+    /// adopts its journaled follow-ups.
+    pub(crate) fn resumable_interrupted_turn(&self) -> bool {
+        let state = self.lock();
+        state.current.as_ref().is_some_and(|current| {
+            otto_core::session::Session::interrupted_turn(&current.session)
+                .is_some_and(|turn| !turn.resume_exhausted())
+        })
     }
 
     /// Sets the turn origin the schedule tools read and appends the scheduled
@@ -1121,6 +1308,8 @@ impl Controller {
             .task_control()
             .begin(&runner.session().header().id, &runner.redact_text(text))
             .map_err(AgentError::Other)?;
+        self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
+            .await?;
         let observation = auto_reflection::RunObservation::default();
         let result = runner
             .run_with_image_system_context(
@@ -1507,6 +1696,79 @@ impl Controller {
         })
     }
 
+    /// The places the current session can be forked, oldest first. A session
+    /// with no file yet has none.
+    pub fn fork_points(&self) -> Result<Vec<otto_core::session::ForkPoint>, String> {
+        let path = {
+            let state = self.lock();
+            if state.closed {
+                return Err(CLOSED.to_string());
+            }
+            if !self.dynamic_content {
+                return Err(PERSISTENCE_DISABLED.to_string());
+            }
+            state
+                .current
+                .as_ref()
+                .map(|current| current.session.path())
+                .unwrap_or_default()
+        };
+        if path.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.builder
+            .session_fork_points(&path)
+            .map_err(|error| self.builder.redact_error(&error, None))
+    }
+
+    /// Writes a new session forked from the current one, stopping before the
+    /// turn the user message `before` opens, or at the last turn boundary
+    /// without `before`. The current session is unchanged and stays open.
+    pub fn fork_file(&self, before: Option<&str>) -> Result<crate::session::Forked, ForkFailure> {
+        let path = {
+            let state = self.lock();
+            if state.closed {
+                return Err(ForkFailure::Failed(CLOSED.to_string()));
+            }
+            if !self.dynamic_content {
+                return Err(ForkFailure::Failed(PERSISTENCE_DISABLED.to_string()));
+            }
+            state
+                .current
+                .as_ref()
+                .map(|current| current.session.path())
+                .unwrap_or_default()
+        };
+        if path.is_empty() {
+            return Err(ForkFailure::Failed(NOTHING_TO_FORK.to_string()));
+        }
+        self.builder
+            .fork_session_file(&path, before)
+            .map_err(|error| match error {
+                otto_core::session::ForkError::InvalidPoint(_) => {
+                    ForkFailure::InvalidPoint(error.to_string())
+                }
+                otto_core::session::ForkError::Session(error) => {
+                    ForkFailure::Failed(self.builder.redact_error(&error.to_string(), None))
+                }
+            })
+    }
+
+    /// Forks the current session (see [`Controller::fork_file`]) and switches
+    /// to the fork. Returns the switch result and the prompt the fork stops
+    /// before, for the editor.
+    pub async fn fork_session(
+        &self,
+        before: Option<&str>,
+    ) -> Result<(ResumeResult, Option<String>), String> {
+        if self.lock().busy {
+            return Err(PROMPT_ACTIVE.to_string());
+        }
+        let forked = self.fork_file(before).map_err(|error| error.to_string())?;
+        let result = self.resume_session(&forked.path.to_string_lossy()).await?;
+        Ok((result, forked.point.map(|point| point.prompt)))
+    }
+
     /// Archiving the current session delegates so a picker row behaves like
     /// `/archive`.
     pub async fn archive_session(&self, path: &str) -> Result<ArchiveResult, String> {
@@ -1601,7 +1863,21 @@ impl Controller {
     /// Accepts guidance for the exact active run, at its next safe provider
     /// boundary. The acceptance is transient and never wakes a later run.
     pub fn steer(&self, text: &str) -> Result<otto_core::agent::steering::Message, String> {
+        self.steer_input(text, None)
+    }
+
+    /// [`Self::steer`] with the client's `input_id`: a retry while the
+    /// guidance is queued returns the same message, and one after it was
+    /// delivered fails with [`task_control::DUPLICATE_INPUT`].
+    pub fn steer_input(
+        &self,
+        text: &str,
+        input_id: Option<&str>,
+    ) -> Result<otto_core::agent::steering::Message, String> {
         let text = task_control::checked_text(text)?;
+        if input_id.is_some_and(|id| self.has_input(id)) {
+            return Err(task_control::DUPLICATE_INPUT.into());
+        }
         if self.pending_approval().is_some() {
             return Err("the task is waiting for approval; guidance is not accepted yet".into());
         }
@@ -1610,7 +1886,9 @@ impl Controller {
             return Err("there is no active task accepting guidance".to_string());
         };
         let session_id = runner.session().header().id.clone();
-        runner.task_control().steer(&session_id, ticket, text)
+        runner
+            .task_control()
+            .steer(&session_id, ticket, text, input_id)
     }
 
     /// Lists the transient steering lifecycle for the current active run.
@@ -1633,7 +1911,20 @@ impl Controller {
     /// active. It never queues a later turn: callers explicitly choose that
     /// separate operation after receiving [`ActiveInputAdmission::Idle`].
     pub fn admit_active_input(&self, text: &str) -> Result<ActiveInputAdmission, String> {
+        self.admit_active_input_with(text, None)
+    }
+
+    /// [`Self::admit_active_input`] with the client's `input_id`; see
+    /// [`Self::steer_input`].
+    pub fn admit_active_input_with(
+        &self,
+        text: &str,
+        input_id: Option<&str>,
+    ) -> Result<ActiveInputAdmission, String> {
         let text = task_control::checked_text(text)?;
+        if input_id.is_some_and(|id| self.has_input(id)) {
+            return Err(task_control::DUPLICATE_INPUT.into());
+        }
         if self.pending_approval().is_some() {
             return Ok(ActiveInputAdmission::ApprovalPending);
         }
@@ -1642,7 +1933,10 @@ impl Controller {
             return Ok(ActiveInputAdmission::Idle);
         };
         let session_id = runner.session().header().id.clone();
-        match runner.task_control().steer(&session_id, ticket, text) {
+        match runner
+            .task_control()
+            .steer(&session_id, ticket, text, input_id)
+        {
             Ok(_) => Ok(ActiveInputAdmission::Steered),
             // The active run can close after observing its ticket. This text
             // was not accepted and must not be silently queued elsewhere.
@@ -1715,7 +2009,7 @@ impl Controller {
             let Some(current) = state.current.as_ref() else {
                 return Err(CLOSED.to_string());
             };
-            current.runner.inbox().len()
+            current.runner.mailbox().len()
         };
         if pending == 0 {
             return Ok(None);
@@ -1741,7 +2035,7 @@ impl Controller {
             };
             Arc::clone(&current.runner)
         };
-        runner.inbox().push(Notification {
+        runner.mailbox().push(Notification {
             kind: Some(NotificationKind::UserMessage),
             text: text.to_string(),
             ..Notification::default()
@@ -1759,7 +2053,7 @@ impl Controller {
             Arc::clone(&current.runner)
         };
         runner
-            .inbox()
+            .mailbox()
             .remove("", NotificationKind::UserMessage)
             .is_some()
     }
@@ -2065,6 +2359,7 @@ impl Controller {
             auto_cancel: CancellationToken::new(),
             approval_control: tokio::sync::Mutex::new(()),
             bell: std::sync::atomic::AtomicBool::new(false),
+            herdr: std::sync::RwLock::new(None),
         };
         controller.notify_memory_state();
         controller.bind_reflection();
@@ -2310,6 +2605,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forking_switches_to_a_copy_before_the_chosen_prompt() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        assert!(controller.fork_points().expect("fork points").is_empty());
+        assert_eq!(
+            controller.fork_file(None).expect_err("no file yet"),
+            ForkFailure::Failed(NOTHING_TO_FORK.to_string())
+        );
+
+        let reply = |text: &str| Message {
+            role: otto_core::model::Role::Assistant,
+            blocks: vec![otto_core::model::Block::text(text)],
+            finish_reason: Some(otto_core::model::FinishReason::Stop),
+            created_at: chrono::Utc::now(),
+            ..Message::default()
+        };
+        let session = controller.current_session();
+        session.append(user("first")).await.expect("append");
+        session.append(reply("one")).await.expect("append");
+        session.append(user("second")).await.expect("append");
+        session.append(reply("two")).await.expect("append");
+        let source = controller.info();
+        let source_bytes = std::fs::read(&source.session_path).expect("read source");
+
+        let points = controller.fork_points().expect("fork points");
+        assert_eq!(
+            points
+                .iter()
+                .map(|point| point.prompt.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert!(matches!(
+            controller.fork_file(Some("ffffffff")),
+            Err(ForkFailure::InvalidPoint(_))
+        ));
+
+        let (result, draft) = controller
+            .fork_session(Some(&points[1].entry_id))
+            .await
+            .expect("fork");
+        assert_eq!(draft.as_deref(), Some("second"));
+        let info = controller.info();
+        assert_eq!(info.session_path, result.session_path);
+        assert_ne!(info.session_id, source.session_id);
+        assert_eq!(
+            info.forked_from,
+            Some(ForkedFrom {
+                session_id: source.session_id.clone(),
+                entry_id: Some(points[1].entry_id.clone()),
+            })
+        );
+        assert_eq!(
+            controller
+                .history()
+                .iter()
+                .map(Message::text)
+                .collect::<Vec<_>>(),
+            ["first", "one"]
+        );
+        assert_eq!(
+            std::fs::read(&source.session_path).expect("read source"),
+            source_bytes
+        );
+        assert_eq!(source.forked_from, None);
+    }
+
+    #[tokio::test]
     async fn info_reports_the_current_session_and_the_resolved_profile() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
@@ -2439,6 +2803,57 @@ mod tests {
         assert!(
             matches!(events.as_slice(), [otto_core::agent::Event::Notification { text, .. }] if text == &notice.text())
         );
+        assert!(task_run.next_followup().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_followup_whose_step_already_ran_is_not_run_again() {
+        use otto_core::session::Session;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let (controller, _approvals, _) =
+            controller_with_approvals(workspace.path(), sessions.path()).await;
+        let runner = controller.runner().expect("runner");
+        let session_id = runner.session().header().id.clone();
+        let task_run = runner
+            .task_control()
+            .begin(&session_id, "initial task")
+            .expect("logical task");
+        runner
+            .task_control()
+            .queue_followup("inspect the pushed branch")
+            .expect("followup");
+        // The step's agent_followup message was appended before Otto stopped.
+        let queued = task_run.next_followup().expect("queued");
+        runner
+            .session()
+            .append_input_if_absent(
+                &queued.input_id,
+                otto_core::model::Message {
+                    role: otto_core::model::Role::Context,
+                    context_type: "agent_followup".into(),
+                    display: true,
+                    blocks: vec![Block::text("[Agent follow-up]\ninspect the pushed branch")],
+                    created_at: chrono::Utc::now(),
+                    ..otto_core::model::Message::default()
+                },
+            )
+            .await
+            .expect("earlier step");
+        task_run.requeue(queued);
+        let mut events = Vec::new();
+        // No provider is scripted: running the step would fail.
+        controller
+            .run_followups_held(
+                &runner,
+                &task_run,
+                "",
+                &mut |event| events.push(event),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the step is skipped");
         assert!(task_run.next_followup().is_none());
     }
 

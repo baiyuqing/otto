@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::join_all;
-use otto_core::agent::inbox::Inbox;
 use otto_core::agent::redactor::Redactor;
 use otto_core::config::agents::AgentsRuntime;
 use otto_core::config::memory::MemoryRuntime;
@@ -232,7 +231,7 @@ pub struct CatalogWiring {
 pub struct SubagentWiring {
     pub runner: Option<Arc<SubagentRunner>>,
     pub tasks: Option<Arc<Tasks>>,
-    pub inbox: Option<Arc<Inbox>>,
+    pub inbox: Option<Arc<dyn otto_core::mailbox::Mailbox>>,
     /// The session's timer registry, absent when the timer tools are not
     /// registered. `/timers` and archiving read the active runner's.
     pub reminders: Option<Arc<Reminders>>,
@@ -622,6 +621,7 @@ impl Builder {
                 session_for_children,
                 Arc::clone(&self.storage),
             )),
+            child_mailbox: (!self.no_session).then(child_mailbox),
             checker: self.skill_checker.clone(),
             lease: Some(Arc::new(move || session_for_lease.lease())),
             workspace_path: PathBuf::from(&self.workspace_path),
@@ -640,7 +640,7 @@ impl Builder {
         }
 
         let runner = Arc::new(runner);
-        let inbox = Arc::clone(tasks.notifications());
+        let inbox = Arc::clone(tasks.notifications_inbox());
         // The persist hook resolves the sidecar path at write time rather than
         // capturing `inbox_persist` here: a lazy session store's `path()` is
         // still empty at this point (nothing has been written to it yet), so
@@ -648,25 +648,21 @@ impl Builder {
         // persistence for a session that gets its first write only after this
         // function returns (see `Store::path`).
         let no_session = self.no_session;
-        inbox.set_persist(Box::new(move |entries| {
-            if no_session {
-                return;
-            }
+        super::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
             let path = session_for_inbox.path();
-            if path.is_empty() {
-                return;
-            }
-            write_inbox_file(&Path::new(&path).with_extension("inbox.json"), entries)
-        }));
+            (!no_session && !path.is_empty()).then(|| Path::new(&path).with_extension("inbox.json"))
+        });
         // A session with no persisted inbox path (`--no-session`, or nothing
         // written yet) never takes over a lease either, so it never has a
         // takeover to report; the recovery scan lives in this branch rather
         // than running unconditionally.
         if let Some(path) = inbox_persist {
-            load_inbox(&inbox, &path);
+            if let Some(warning) = super::sidecar_mailbox::load(&inbox, &path) {
+                let _ = writeln!(stderr, "warning: {warning}");
+            }
             let recovery_warnings = failover::recovery::notify(
-                &inbox,
-                session_for_recovery.take_takeover(),
+                inbox.as_ref(),
+                session_for_recovery.take_recovery(),
                 &children_dir,
                 runtime.max_output_bytes.max(0) as usize,
                 &otto_core::session::Session::messages(&session_for_recovery),
@@ -678,8 +674,8 @@ impl Builder {
         tools.extend(subagent::tools::tools(&runner));
         // Parent-only; the child registry drops the timer tools by name.
         let reminders = Arc::new(match persist {
-            Some(path) => Reminders::with_persist(Arc::clone(&inbox), path),
-            None => Reminders::new(Arc::clone(&inbox)),
+            Some(path) => Reminders::with_persist(inbox.clone(), path),
+            None => Reminders::new(inbox.clone()),
         });
         tools.extend(remind::tools(&reminders));
         Ok(SubagentWiring {
@@ -688,6 +684,34 @@ impl Builder {
             inbox: Some(inbox),
             reminders: Some(reminders),
         })
+    }
+
+    /// A durable journal beside the session file, `<id>.<extension>`, for
+    /// inputs a turn accepted and has not consumed yet: `inputs.json` for
+    /// steering, `followups.json` for model follow-ups. `None` for
+    /// `--no-session`. The path is resolved at write time, as for the inbox,
+    /// because a new session has no file until its first write.
+    pub(crate) fn session_journal(
+        &self,
+        session: &SharedSession,
+        extension: &'static str,
+        stderr: &mut dyn Write,
+    ) -> Option<Arc<dyn otto_core::mailbox::Mailbox>> {
+        if self.no_session {
+            return None;
+        }
+        let journal = Arc::new(otto_core::mailbox::InMemoryMailbox::new(None));
+        let for_path = session.clone();
+        super::sidecar_mailbox::install(&journal, &format!(".{extension}"), move || {
+            let path = for_path.path();
+            (!path.is_empty()).then(|| Path::new(&path).with_extension(extension))
+        });
+        if let Some(path) = self.sidecar_path(session, extension)
+            && let Some(warning) = super::sidecar_mailbox::load(&journal, &path)
+        {
+            let _ = writeln!(stderr, "warning: {warning}");
+        }
+        Some(journal)
     }
 
     /// Where a top-level session sidecar (`reminders.json`, `inbox.json`)
@@ -1710,52 +1734,31 @@ fn child_sessions(parent: SharedSession, storage: Arc<super::storage::Storage>) 
     })
 }
 
-/// Loads `<id>.inbox.json` into `inbox`, if the file exists and decodes.
-/// Otherwise the inbox starts empty, exactly like a missing or corrupt
-/// `<id>.reminders.json`. Must run before the inbox is shared with any
-/// producer, so the loaded items are the ones a wake decision sees.
-fn load_inbox(inbox: &Inbox, path: &Path) {
-    let loaded: Vec<otto_core::agent::inbox::Entry> = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    inbox.load(loaded);
-}
-
-/// Mirrors the inbox's current entries to `path` via
-/// [`remind::replace_private`], the same temporary-file/`fsync`/rename/
-/// directory-`fsync` pattern `Reminders` uses for `<id>.reminders.json`,
-/// including removing the file once the inbox is empty. A write failure is
-/// dropped, the same as a reminder file write failure from a timer firing in
-/// the background (`Inner::fire`): there is no foreground caller to report it
-/// to.
-///
-/// Skips the write once the session's own file is gone
-/// ([`remind::session_file_exists`]): a notification pushed after this
-/// session is archived — a sub-agent finishing late, or a timer racing the
-/// archive on another thread — must not recreate the sidecar the archive
-/// already removed.
-fn write_inbox_file(path: &Path, entries: &[otto_core::agent::inbox::Entry]) {
-    if entries.is_empty() {
-        let _ = std::fs::remove_file(path);
-        return;
-    }
-    if !remind::session_file_exists(path, ".inbox.json") {
-        return;
-    }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Ok(body) = serde_json::to_vec_pretty(entries) else {
-        return;
-    };
-    let _ = remind::replace_private(path, &body);
+/// Builds a child's durable mailbox, `<child transcript>.inbox.json`, and
+/// restores the parent messages it had not read. An unreadable sidecar is
+/// moved aside and the child is told so in its first notification.
+pub(crate) fn child_mailbox() -> crate::subagent::runner::ChildMailbox {
+    Arc::new(|transcript: &str| {
+        let mailbox = Arc::new(otto_core::mailbox::InMemoryMailbox::new(None));
+        let sidecar = Path::new(transcript).with_extension("inbox.json");
+        let warning = super::sidecar_mailbox::load(&mailbox, &sidecar);
+        super::sidecar_mailbox::install(&mailbox, ".inbox.json", move || Some(sidecar.clone()));
+        if let Some(warning) = warning {
+            mailbox.push(otto_core::agent::inbox::Notification {
+                kind: Some(otto_core::agent::inbox::NotificationKind::Message),
+                text: format!("[parent-message] {warning}"),
+                ..Default::default()
+            });
+        }
+        mailbox as Arc<dyn otto_core::mailbox::Mailbox>
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memory::{NAMESPACE_USER, NAMESPACE_WORKSPACE, RememberRequest, SearchRequest};
+    use otto_core::agent::inbox::Inbox;
 
     #[test]
     fn children_of_an_in_memory_parent_stay_in_memory() {
@@ -1850,11 +1853,11 @@ mod tests {
         .expect("write sidecar");
 
         let inbox = Inbox::new(None);
-        load_inbox(&inbox, &path);
+        assert_eq!(super::super::sidecar_mailbox::load(&inbox, &path), None);
         let hook_path = path.clone();
-        inbox.set_persist(Box::new(move |entries| {
-            write_inbox_file(&hook_path, entries)
-        }));
+        super::super::sidecar_mailbox::install(&inbox, ".inbox.json", move || {
+            Some(hook_path.clone())
+        });
 
         let queued = inbox.queued();
         assert_eq!(
@@ -2049,7 +2052,7 @@ mod tests {
     // A takeover is simulated the same way `session::tests` does: a lease
     // directory is written by hand (no live `Lease` of this process's own),
     // with `lease_seconds` = 6. `Prepared::prepare`/`activate` then performs
-    // a real takeover, populating the returned store's `take_takeover()` and
+    // a real takeover, populating the returned store's `take_recovery()` and
     // handing this process a live `Keeper::global` lease. `L` must stay at
     // or above 6: the watchdog fences a live global-keeper lease at 5L/6
     // staleness, and the renewal thread ticks every 1s, so L < 6 leaves no
@@ -2215,6 +2218,7 @@ mod tests {
                     kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
                     text: "already queued".to_string(),
                     usage: None,
+                    ..Default::default()
                 },
             }])
             .expect("encode inbox"),
@@ -2306,6 +2310,89 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_reopen_after_process_loss_notifies_and_marks_children_interrupted() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let session_root = root.path().join("sessions");
+        std::fs::create_dir_all(&session_root).expect("create session root");
+
+        let parent = crate::session::Store::create(&session_root, recovery_test_header(&workspace))
+            .expect("create parent");
+        parent
+            .append_custom_entry(
+                otto_core::session::TURN_CUSTOM_TYPE,
+                &otto_core::session::encode_turn_record(&otto_core::session::TurnRecord::started(
+                    "op_lost",
+                    otto_core::session::TurnTrigger::User,
+                    1,
+                    None,
+                )),
+            )
+            .expect("turn start");
+        parent
+            .append_message(&recovery_dangling_call("call-1", "bash"))
+            .expect("append dangling call");
+        let parent_path = parent.path();
+        let child = crate::session::Store::create_child_lazy(
+            &parent_path,
+            "t1-child",
+            otto_core::session::Header {
+                id: "child".into(),
+                workspace: workspace.to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: chrono::Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("create child");
+        child
+            .append_custom_entry(
+                crate::subagent::runner::TASK_SPEC_CUSTOM_TYPE,
+                &serde_json::json!({
+                    "id": "t1",
+                    "name": "worker",
+                    "description": "",
+                    "model": "test-model",
+                    "context": "fresh",
+                    "prompt": "do it",
+                    "definition": null,
+                })
+                .to_string(),
+            )
+            .expect("append task_spec");
+        child.close().expect("close child");
+        // The process stops: the parent is closed without ending its turn,
+        // and no lease directory exists.
+        parent.close().expect("close without ending the turn");
+        let children_dir = Path::new(&parent_path).with_extension("");
+
+        let (activated, _warnings) =
+            crate::session::Store::open(Path::new(&parent_path)).expect("reopen");
+        let session = SharedSession::new(Arc::new(activated));
+        let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
+        let wiring =
+            recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+
+        let queued = wiring.inbox.expect("inbox").queued();
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        let text = &queued[0].notification.text;
+        assert!(text.contains("previous Otto process"), "{text}");
+        assert!(text.contains("Continue the interrupted turn"), "{text}");
+        assert!(text.contains("bash"), "{text}");
+        assert!(text.contains("t1"), "{text}");
+        let record = crate::subagent::interrupted::scan(&children_dir)
+            .into_iter()
+            .find(|record| record.task_id == "t1")
+            .expect("the child transcript was scanned");
+        assert_eq!(
+            record.final_status,
+            Some(crate::subagent::interrupted::INTERRUPTED_STATUS.to_string()),
+        );
+    }
+
+    #[test]
     fn a_takeover_with_no_dangling_state_and_no_children_pushes_nothing() {
         let root = tempfile::tempdir().expect("root");
         let workspace = root.path().join("workspace");
@@ -2330,10 +2417,10 @@ mod tests {
         .activate()
         .expect("activate");
         assert!(
-            activated.take_takeover().is_some(),
+            activated.take_recovery().is_some(),
             "sanity: the parent must actually have been taken over"
         );
-        // Re-open to get an un-taken `take_takeover()` back for the build,
+        // Re-open to get an un-taken `take_recovery()` back for the build,
         // since the sanity check above just consumed it.
         activated.close().expect("close");
         let (activated, _warnings) = crate::session::Store::open(Path::new(&parent_path))
@@ -2382,13 +2469,13 @@ mod tests {
         // sidecar the first call persisted, so it still shows that one
         // entry; the assertion is that the count does not grow to 2, which
         // it would if `notify` pushed again from a takeover that
-        // `take_takeover()` had already consumed on the first call.
+        // `take_recovery()` had already consumed on the first call.
         let second =
             recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
         assert_eq!(
             second.inbox.expect("inbox").len(),
             1,
-            "take_takeover() already consumed the record on the first call, so the second call must not push again"
+            "take_recovery() already consumed the record on the first call, so the second call must not push again"
         );
     }
 }

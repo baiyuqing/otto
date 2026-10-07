@@ -25,6 +25,7 @@ use otto_core::model::{
     Block, EffectCertainty, Message, OperationDisposition, OperationOutcome, OperationStopReason,
     Role, ToolResultMetadata, Usage,
 };
+use otto_core::session::InterruptedTurn;
 use otto_core::session::compaction::{
     compaction_details_present, compaction_usage_to_pi, is_real_compaction_context_entry,
     latest_compaction_metadata, project_compaction_metadata, validate_compaction_checkpoint,
@@ -33,6 +34,7 @@ use otto_core::session::context::{
     add_resolved_usage, format_persisted_timestamp, format_rfc3339_nano, missing_tool_results,
     model_message_to_pi_entry, parse_rfc3339, pending_tool_calls, snapshot_from_state,
 };
+use otto_core::session::operation::replay_allowed;
 use otto_core::session::pi::{
     PiCompaction, PiCustom, PiEntry, PiFile, PiSessionInfo, PiThinkingLevelChange,
 };
@@ -55,7 +57,7 @@ const OPERATION_RESULT_UNAVAILABLE_TEXT: &str = "tool result unavailable after p
 /// One tool call left unanswered when a session was taken over mid-turn:
 /// the name and arguments the model called with, and whether it is the one
 /// call that may have already reached the tool before the interruption.
-/// Shared between the takeover repair in [`Store::from_file`] and
+/// Shared between the recovery repair in [`Store::from_file`] and
 /// `subagent::interrupted`'s scan of an interrupted child transcript, since
 /// both report the same kind of unanswered call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,19 +92,44 @@ pub(crate) fn unanswered_calls_from(pending: &[Block]) -> Vec<UnansweredCall> {
 /// again. At most one of the last two is non-empty.
 type RepairOutcome = (Vec<Warning>, Vec<UnansweredCall>, Vec<UnansweredCall>);
 
-/// Recorded when [`Prepared::activate`](super::prepared::Prepared::activate)
-/// builds a store from a taken-over lease epoch: the holder the epoch was
-/// taken from, and the calls the store's dangling-tool-call repair gave
-/// synthetic results to, in the order they were repaired.
+/// Why [`Store::from_file`] recovered a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Takeover {
-    pub holder: lease::Holder,
+pub enum RecoveryCause {
+    /// [`Prepared::activate`](super::prepared::Prepared::activate) took over
+    /// another holder's lease epoch.
+    TakenOver(lease::Holder),
+    /// The previous writer stopped without finishing its turn: the file
+    /// ends with unanswered tool calls or an `otto.turn` start without its
+    /// end. The exclusive file lock guarantees that writer is gone.
+    ProcessLost,
+}
+
+/// Recorded when [`Store::from_file`] opens a session the previous writer
+/// left mid-turn, or by taking over a lease epoch: the cause, the calls the
+/// store's dangling-tool-call repair gave synthetic results to, in the order
+/// they were repaired, and the interrupted turn, if one was recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recovery {
+    pub cause: RecoveryCause,
     pub repaired: Vec<UnansweredCall>,
     /// Calls left without a result on purpose: every pending call of the
     /// trailing assistant message is replayable, so the store neither
     /// settled nor answered them and the agent runs them again before the
     /// next provider request. Empty whenever `repaired` is not.
     pub replayable: Vec<UnansweredCall>,
+    /// The newest `otto.turn` start without its end, when the file has one.
+    pub interrupted_turn: Option<InterruptedTurn>,
+}
+
+pub use otto_core::session::turn::MAX_AUTOMATIC_RESUMES;
+
+impl Recovery {
+    /// Whether the interrupted turn already used its automatic resume.
+    pub fn resume_exhausted(&self) -> bool {
+        self.interrupted_turn
+            .as_ref()
+            .is_some_and(InterruptedTurn::resume_exhausted)
+    }
 }
 
 /// Everything the store mutates, behind one lock.
@@ -111,12 +138,21 @@ pub(crate) struct StoreState {
     pub(crate) header: Header,
     pub(crate) root: PathBuf,
     pub(crate) messages: Vec<Message>,
+    /// Input ids delivered on the active path, kept across compaction; see
+    /// [`otto_core::session::context::ResolvedContext::input_ids`].
+    pub(crate) input_ids: HashSet<String>,
     pub(crate) operation_ledger: OperationLedger,
     pub(crate) aggregate_usage: Usage,
     pub(crate) usage_present: bool,
     pub(crate) latest_compaction: Option<CompactionMetadata>,
     pub(crate) thinking_level: String,
     pub(crate) session_name: Option<String>,
+    /// The `otto.fork` record, read once on open: only a fork's creation
+    /// writes one.
+    pub(crate) forked_from: Option<otto_core::session::ForkRecord>,
+    /// The plan in force: folded on open, then replaced by each appended
+    /// valid `otto.plan` record.
+    pub(crate) plan: Vec<otto_core::session::PlanStep>,
     pub(crate) entries: Vec<PiEntry>,
     pub(crate) entry_ids: HashSet<String>,
     pub(crate) leaf_id: Option<String>,
@@ -146,9 +182,10 @@ pub(crate) struct StoreState {
     /// directory on the first durable write; consumed and cleared by
     /// [`StoreState::ensure_file`].
     pub(crate) enable_failover: Option<u64>,
-    /// Recorded once, by `Prepared::activate`, when this store was opened by
-    /// taking over another holder's lease epoch.
-    pub(crate) takeover: Option<Takeover>,
+    /// Recorded once, by [`Store::from_file`], when this store was opened
+    /// from a session its previous writer left mid-turn or by taking over
+    /// another holder's lease epoch.
+    pub(crate) recovery: Option<Recovery>,
     /// Test-only fault injection for the durable-write path.
     #[cfg(test)]
     pub(crate) fail_writes: bool,
@@ -178,7 +215,7 @@ impl std::fmt::Debug for KeeperRef {
     }
 }
 
-fn open_path_journal(
+pub(super) fn open_path_journal(
     driver: &dyn FileDriver,
     path: &Path,
     mode: JournalOpen,
@@ -234,12 +271,15 @@ impl Store {
                 header,
                 root: root.as_ref().to_path_buf(),
                 messages: Vec::new(),
+                input_ids: HashSet::new(),
                 operation_ledger: OperationLedger::default(),
                 aggregate_usage: Usage::default(),
                 usage_present: false,
                 latest_compaction: None,
                 thinking_level: String::new(),
                 session_name: None,
+                forked_from: None,
+                plan: Vec::new(),
                 entries: Vec::new(),
                 entry_ids: HashSet::new(),
                 leaf_id: None,
@@ -256,7 +296,7 @@ impl Store {
                 writer_ownership: None,
                 owns_lease: false,
                 enable_failover: None,
-                takeover: None,
+                recovery: None,
                 #[cfg(test)]
                 fail_writes: false,
             }),
@@ -341,7 +381,7 @@ impl Store {
     /// acquired opening `path`, when the session is lease-managed, together
     /// with whether the acquisition took over another holder's epoch; the
     /// resulting store owns that lease (releases it on
-    /// [`Store::close`]/drop) and records a [`Takeover`] when it does.
+    /// [`Store::close`]/drop) and records a [`Recovery`] when it does, or when the file was left mid-turn.
     pub(crate) fn from_file(
         mut file: Box<dyn JournalFile>,
         path: &str,
@@ -364,6 +404,7 @@ impl Store {
             Some((lease, acquired)) => (Some(lease), Some(acquired)),
             None => (None, None),
         };
+        let interrupted_turn = state.interrupted_turn.clone();
         let owns_lease = lease_value.is_some();
         let writer_ownership = lease_value
             .as_ref()
@@ -374,12 +415,15 @@ impl Store {
                 header: state.header,
                 root: PathBuf::new(),
                 messages: state.messages,
+                input_ids: state.input_ids,
                 operation_ledger: state.operation_ledger,
                 aggregate_usage: state.aggregate_usage,
                 usage_present: state.usage_present,
                 latest_compaction: state.latest_compaction,
                 thinking_level: state.thinking_level,
                 session_name: state.session_name,
+                forked_from: otto_core::session::fork_origin(&decoded.entries),
+                plan: state.plan,
                 entries: decoded.entries.clone(),
                 entry_ids: state.entry_ids,
                 leaf_id: state.leaf_id,
@@ -396,21 +440,39 @@ impl Store {
                 writer_ownership,
                 owns_lease,
                 enable_failover: None,
-                takeover: None,
+                recovery: None,
                 #[cfg(test)]
                 fail_writes: false,
             }),
         };
-        let taken_over = matches!(acquired, Some(lease::Acquired::TakenOver(_)));
-        let replayable: fn(&str) -> bool = if taken_over { replayable } else { |_| false };
+        let mut recovery = Recovery {
+            cause: RecoveryCause::ProcessLost,
+            repaired: Vec::new(),
+            replayable: Vec::new(),
+            interrupted_turn,
+        };
+        let replayable: fn(&str) -> bool = if recovery.resume_exhausted() {
+            |_| false
+        } else {
+            replayable
+        };
         let (repair_warnings, repaired, deferred) = store.repair_dangling_tool_calls(replayable)?;
         warnings.extend(repair_warnings);
-        if let Some(lease::Acquired::TakenOver(holder)) = acquired {
-            store.lock()?.takeover = Some(Takeover {
-                holder,
-                repaired,
-                replayable: deferred,
-            });
+        recovery.repaired = repaired;
+        recovery.replayable = deferred;
+        let recovered = match acquired {
+            Some(lease::Acquired::TakenOver(holder)) => {
+                recovery.cause = RecoveryCause::TakenOver(holder);
+                true
+            }
+            _ => {
+                !recovery.repaired.is_empty()
+                    || !recovery.replayable.is_empty()
+                    || recovery.interrupted_turn.is_some()
+            }
+        };
+        if recovered {
+            store.lock()?.recovery = Some(recovery);
         }
         let mut guard = store.lock()?;
         if let Some(file) = guard.file.as_mut() {
@@ -437,11 +499,16 @@ impl Store {
         })
     }
 
-    /// Takes the takeover record left by [`Store::from_file`] when this
-    /// store was opened by taking over another holder's lease epoch.
-    /// `None` on every call after the first.
-    pub fn take_takeover(&self) -> Option<Takeover> {
-        self.lock().expect("session mutex").takeover.take()
+    /// Takes the recovery record left by [`Store::from_file`] when this
+    /// store was opened from a session left mid-turn or by taking over
+    /// another holder's lease epoch. `None` on every call after the first.
+    /// The `otto.fork` record naming where this session was forked from.
+    pub fn forked_from(&self) -> Option<otto_core::session::ForkRecord> {
+        self.lock().ok()?.forked_from.clone()
+    }
+
+    pub fn take_recovery(&self) -> Option<Recovery> {
+        self.lock().expect("session mutex").recovery.take()
     }
 
     /// Sets `lease` for check-only use: every durable write is checked
@@ -643,9 +710,21 @@ impl Store {
                 }
             };
         }
+        let plan = if custom_type == otto_core::session::PLAN_CUSTOM_TYPE {
+            Some(
+                otto_core::session::decode_plan(data)
+                    .ok_or_else(|| PiError::invalid("malformed otto.plan data"))?,
+            )
+        } else {
+            None
+        };
         let mut state = self.lock()?;
         state.writable()?;
-        state.append_custom_entry_unchecked(custom_type, data)
+        state.append_custom_entry_unchecked(custom_type, data)?;
+        if let Some(plan) = plan {
+            state.plan = plan;
+        }
+        Ok(())
     }
 
     /// Records a new display name for the session.
@@ -673,6 +752,39 @@ impl Store {
     /// call returns an error.
     pub fn append_message(&self, message: &Message) -> Result<(), PiError> {
         let mut state = self.lock()?;
+        state.append_message(message)
+    }
+
+    /// Appends `message` with input id `input_id` unless a message with that
+    /// id is already on the active path; see
+    /// [`Session::append_input_if_absent`]. Returns whether it appended.
+    pub fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: &Message,
+    ) -> Result<bool, PiError> {
+        let mut state = self.lock()?;
+        if state.input_ids.contains(input_id) {
+            return Ok(false);
+        }
+        let mut message = message.clone();
+        message.input_id = input_id.to_owned();
+        state.append_message(&message)?;
+        Ok(true)
+    }
+
+    /// Whether a message with input id `input_id` is on the active path.
+    pub fn has_input(&self, input_id: &str) -> bool {
+        self.lock()
+            .map(|state| state.input_ids.contains(input_id))
+            .unwrap_or(false)
+    }
+}
+
+impl StoreState {
+    /// [`Store::append_message`] under the store lock.
+    fn append_message(&mut self, message: &Message) -> Result<(), PiError> {
+        let state = self;
         state.writable()?;
         message
             .validate()
@@ -697,10 +809,15 @@ impl Store {
         {
             compaction.first_post_checkpoint_message_id = persisted.id.clone();
         }
+        if !persisted.input_id.is_empty() {
+            state.input_ids.insert(persisted.input_id.clone());
+        }
         state.messages.push(persisted);
         Ok(())
     }
+}
 
+impl Store {
     /// Records a compaction checkpoint and returns the metadata now in force.
     ///
     /// Every check runs before the write: the checkpoint is validated, its
@@ -762,6 +879,7 @@ impl Store {
         state.entry_ids.insert(entry_id.clone());
         state.leaf_id = Some(entry_id);
         state.messages = resolved.messages;
+        state.input_ids = resolved.input_ids;
         state.operation_ledger = resolved.operation_ledger;
         state.aggregate_usage = resolved.usage;
         state.usage_present = resolved.usage_present;
@@ -917,13 +1035,12 @@ impl Store {
         }
         let state = self.lock()?;
         Ok(pending.iter().all(|call| {
-            replayable(&call.tool_name)
-                && state
+            replay_allowed(
+                state
                     .operation_ledger
-                    .operation_for_tool_call(&call.tool_call_id)
-                    .is_none_or(|record| {
-                        !record.corrupt && record.terminal.is_none() && record.attempts <= 1
-                    })
+                    .operation_for_tool_call(&call.tool_call_id),
+                replayable(&call.tool_name),
+            )
         }))
     }
 }
@@ -1255,6 +1372,22 @@ impl Session for Store {
             .map_err(|error| SessionError::Persist(error.to_string()))
     }
 
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: Message,
+    ) -> Result<otto_core::session::AppendOutcome, SessionError> {
+        match Store::append_input_if_absent(self, input_id, &message) {
+            Ok(true) => Ok(otto_core::session::AppendOutcome::Appended),
+            Ok(false) => Ok(otto_core::session::AppendOutcome::AlreadyPresent),
+            Err(error) => Err(SessionError::Persist(error.to_string())),
+        }
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        Store::has_input(self, input_id)
+    }
+
     fn latest_compaction(&self) -> Option<CompactionMetadata> {
         Store::latest_compaction(self)
     }
@@ -1274,6 +1407,30 @@ impl Session for Store {
 
     fn operation_ledger(&self) -> OperationLedger {
         Store::operation_ledger(self)
+    }
+
+    fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+        let state = self.lock().expect("session mutex");
+        let leaf = state.leaf_id.as_deref().unwrap_or_default();
+        build_context(&state.entries, leaf)
+            .expect("stored session remains a valid context")
+            .0
+            .observed_capabilities
+    }
+
+    fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+        let state = self.lock().expect("session mutex");
+        let leaf = state.leaf_id.as_deref().unwrap_or_default();
+        build_context(&state.entries, leaf)
+            .expect("stored session remains a valid context")
+            .0
+            .interrupted_turn
+    }
+
+    fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+        self.lock()
+            .map(|state| state.plan.clone())
+            .unwrap_or_default()
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
@@ -1325,6 +1482,7 @@ pub(crate) fn validate_domain_header(header: &Header) -> Result<String, PiError>
 pub(crate) struct ResolvedStoreState {
     pub(crate) header: Header,
     pub(crate) messages: Vec<Message>,
+    pub(crate) input_ids: HashSet<String>,
     pub(crate) aggregate_usage: Usage,
     pub(crate) usage_present: bool,
     pub(crate) latest_compaction: Option<CompactionMetadata>,
@@ -1333,6 +1491,8 @@ pub(crate) struct ResolvedStoreState {
     pub(crate) entry_ids: HashSet<String>,
     pub(crate) leaf_id: Option<String>,
     pub(crate) operation_ledger: OperationLedger,
+    pub(crate) interrupted_turn: Option<otto_core::session::InterruptedTurn>,
+    pub(crate) plan: Vec<otto_core::session::PlanStep>,
     pub(crate) warnings: Vec<Warning>,
 }
 
@@ -1363,6 +1523,7 @@ pub(crate) fn resolve_pi_store_state(decoded: &PiFile) -> Result<ResolvedStoreSt
             created_at,
         },
         messages: resolved.messages,
+        input_ids: resolved.input_ids,
         aggregate_usage: resolved.usage,
         usage_present: resolved.usage_present,
         latest_compaction,
@@ -1371,6 +1532,8 @@ pub(crate) fn resolve_pi_store_state(decoded: &PiFile) -> Result<ResolvedStoreSt
         entry_ids,
         leaf_id,
         operation_ledger: resolved.operation_ledger,
+        interrupted_turn: resolved.interrupted_turn,
+        plan: resolved.plan,
         warnings,
     })
 }

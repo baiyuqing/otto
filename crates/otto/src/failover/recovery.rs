@@ -1,24 +1,28 @@
-//! Turns a session-lease takeover into a notification the resumed agent
-//! sees at the start of its next turn, and marks the child transcripts the
-//! notification describes as interrupted.
+//! Turns a session recovery (process loss or a session-lease takeover)
+//! into a notification the resumed agent sees at the start of its next turn,
+//! and marks the child transcripts the notification describes as
+//! interrupted.
 //!
 //! [`crate::session::Store::from_file`] repairs dangling tool calls at open
-//! time and records what it did as a [`crate::session::Takeover`]; the
+//! time and records what it did as a [`crate::session::Recovery`]; the
 //! parent's own sub-agent children are not part of that record, since they
 //! are separate transcripts, so this module re-derives their state with
 //! [`crate::subagent::interrupted::scan`]. [`notify`] is called once, from
 //! `runtime::wiring::Builder::build_subagents`, after sub-agent wiring is up: a
-//! session that never takes over a lease, or whose caller disables
-//! sub-agents entirely (`build_subagents` returns before an inbox exists),
-//! never reaches it, so no notification is pushed in either case.
+//! session that was not left mid-turn and never takes over a lease, or whose
+//! caller disables sub-agents entirely (`build_subagents` returns before an
+//! inbox exists), never reaches it, so no notification is pushed in either
+//! case. The pushed notification is what resumes an interrupted turn: every
+//! frontend runs a wake turn for a non-empty inbox.
 
 use std::path::Path;
 
-use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
+use otto_core::agent::inbox::{Notification, NotificationKind};
+use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, Role};
 
 use crate::failover::lease;
-use crate::session::{Takeover, UnansweredCall};
+use crate::session::{Recovery, RecoveryCause, UnansweredCall};
 use crate::subagent::interrupted::{self, ChildRecord};
 
 /// Truncation limits for the pieces of the recovery text that come from
@@ -27,12 +31,16 @@ use crate::subagent::interrupted::{self, ChildRecord};
 const CALL_ARGUMENTS_PREVIEW_BYTES: usize = 2048;
 const PROMPT_PREVIEW_BYTES: usize = 500;
 
-/// Reports the takeover `session` recorded (see
-/// [`crate::session::Store::take_takeover`]) to `inbox`, and marks every
+/// Reports the recovery `session` recorded (see
+/// [`crate::session::Store::take_recovery`]) to `inbox`, and marks every
 /// interrupted child transcript under `children_dir` as interrupted. A
-/// no-op when there was no takeover, or when the takeover left nothing to
-/// report: no dangling parent call, no interrupted child, and the parent's
-/// own transcript already ends on a finished assistant turn.
+/// no-op when there was no recovery, or when it left nothing to report: no
+/// dangling parent call, no interrupted child, and the parent's own
+/// transcript already ends on a finished assistant turn.
+///
+/// When the interrupted turn already used its automatic resume
+/// ([`Recovery::resume_exhausted`]), nothing is pushed, so no wake turn
+/// starts; one warning says so and the user's next prompt continues.
 ///
 /// The notification push always happens first, so the model sees the
 /// recovery notice (including a `resume` pointer for the child) even when a
@@ -42,13 +50,13 @@ const PROMPT_PREVIEW_BYTES: usize = 500;
 /// interrupted is rejected, and the caller is the only place that can report
 /// why.
 pub fn notify(
-    inbox: &Inbox,
-    takeover: Option<Takeover>,
+    inbox: &dyn Mailbox,
+    recovery: Option<Recovery>,
     children_dir: &Path,
     max_output_bytes: usize,
     parent_messages: &[Message],
 ) -> Vec<String> {
-    let Some(takeover) = takeover else {
+    let Some(recovery) = recovery else {
         return Vec::new();
     };
     let interrupted_children: Vec<ChildRecord> = interrupted::scan(children_dir)
@@ -56,23 +64,39 @@ pub fn notify(
         .filter(|child| child.final_status.is_none())
         .collect();
 
-    if takeover.repaired.is_empty()
-        && takeover.replayable.is_empty()
-        && interrupted_children.is_empty()
-        && ends_with_a_finished_assistant_turn(parent_messages)
+    let mut warnings = Vec::new();
+    if recovery.resume_exhausted() {
+        if let Some(turn) = &recovery.interrupted_turn {
+            warnings.push(format!(
+                "recovery: turn {} was interrupted again after its automatic resume; not resuming",
+                turn.turn_id
+            ));
+        }
+    } else if !recovery.repaired.is_empty()
+        || !recovery.replayable.is_empty()
+        || !interrupted_children.is_empty()
+        || !ends_with_a_finished_assistant_turn(parent_messages)
     {
-        return Vec::new();
+        let text = render(&recovery, &interrupted_children, max_output_bytes);
+        // A stable id keeps a notice that was queued before another
+        // interruption from being queued or delivered twice.
+        let id = match (&recovery.interrupted_turn, &recovery.cause) {
+            (Some(turn), _) => format!("recovery:{}", turn.turn_id),
+            (None, RecoveryCause::TakenOver(holder)) => format!("takeover:{}", holder.epoch),
+            (None, RecoveryCause::ProcessLost) => String::new(),
+        };
+        if let Err(error) = inbox.enqueue(Notification {
+            task_id: String::new(),
+            kind: Some(NotificationKind::Message),
+            text,
+            usage: None,
+            id,
+            ..Default::default()
+        }) {
+            warnings.push(format!("recovery: {error}"));
+        }
     }
 
-    let text = render(&takeover, &interrupted_children, max_output_bytes);
-    inbox.push(Notification {
-        task_id: String::new(),
-        kind: Some(NotificationKind::Message),
-        text,
-        usage: None,
-    });
-
-    let mut warnings = Vec::new();
     for child in &interrupted_children {
         if let Err(error) = interrupted::mark_interrupted(&child.path) {
             warnings.push(format!(
@@ -98,7 +122,7 @@ pub fn notify(
 /// the migration cancelled it, or its transcript write failed) is reported
 /// as one warning instead of being included in the notification.
 pub fn notify_moved(
-    inbox: &Inbox,
+    inbox: &dyn Mailbox,
     children_dir: &Path,
     task_ids: &[String],
     max_output_bytes: usize,
@@ -132,6 +156,7 @@ pub fn notify_moved(
         kind: Some(NotificationKind::Message),
         text,
         usage: None,
+        ..Default::default()
     });
     warnings
 }
@@ -143,15 +168,27 @@ fn ends_with_a_finished_assistant_turn(messages: &[Message]) -> bool {
     )
 }
 
-fn render(takeover: &Takeover, interrupted: &[ChildRecord], max_output_bytes: usize) -> String {
-    let header = format!(
-        "This session was taken over from another host: the previous holder was fenced at epoch {}, host {}, pid {}.\n",
-        takeover.holder.epoch, takeover.holder.host, takeover.holder.pid
-    );
+fn render(recovery: &Recovery, interrupted: &[ChildRecord], max_output_bytes: usize) -> String {
+    let mut header = match &recovery.cause {
+        RecoveryCause::TakenOver(holder) => format!(
+            "This session was taken over from another host: the previous holder was fenced at epoch {}, host {}, pid {}.\n",
+            holder.epoch, holder.host, holder.pid
+        ),
+        RecoveryCause::ProcessLost => {
+            "The previous Otto process for this session stopped before its turn finished.\n"
+                .to_string()
+        }
+    };
+    if recovery.interrupted_turn.is_some() {
+        header.push_str(
+            "Continue the interrupted turn from the transcript. Do not assume a call without \
+             a result ran unless its result says so.\n",
+        );
+    }
     render_body(
         &header,
-        &takeover.repaired,
-        &takeover.replayable,
+        &recovery.repaired,
+        &recovery.replayable,
         interrupted,
         max_output_bytes,
     )
@@ -171,7 +208,7 @@ fn render_body(
 
     if !replayed.is_empty() {
         text.push_str(
-            "\nRead-only calls left unanswered when the session was taken over were run \
+            "\nRead-only calls left unanswered when the session was interrupted were run \
              again; their results are in the transcript above and reflect the workspace now:\n",
         );
         for call in replayed {
@@ -184,7 +221,7 @@ fn render_body(
     }
 
     if !repaired.is_empty() {
-        text.push_str("\nCalls left unanswered in this session when it was taken over:\n");
+        text.push_str("\nCalls left unanswered in this session when it was interrupted:\n");
         for call in repaired {
             text.push_str(&render_call(call));
         }
@@ -207,6 +244,12 @@ fn render_body(
             truncate_bytes(&child.prompt, PROMPT_PREVIEW_BYTES)
         ));
         text.push_str(&format!("started: {}\n", child.started));
+        let pending = pending_parent_messages(&child.path);
+        if pending > 0 {
+            text.push_str(&format!(
+                "parent messages not yet read: {pending} (delivered when the task is resumed)\n"
+            ));
+        }
         if !child.unanswered.is_empty() {
             text.push_str("calls left unanswered:\n");
             for call in &child.unanswered {
@@ -224,6 +267,15 @@ fn render_body(
          prompt. A task not continued this way stays interrupted.\n",
     );
     text
+}
+
+/// How many `agent_send` messages the child at `transcript` had not read,
+/// from its mailbox sidecar; 0 when there is none or it cannot be read.
+fn pending_parent_messages(transcript: &Path) -> usize {
+    std::fs::read_to_string(transcript.with_extension("inbox.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(&raw).ok())
+        .map_or(0, |entries| entries.len())
 }
 
 fn render_call(call: &UnansweredCall) -> String {
@@ -256,17 +308,32 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> &str {
 mod tests {
     use super::*;
     use crate::failover::lease;
+    use crate::session::MAX_AUTOMATIC_RESUMES;
+    use otto_core::agent::inbox::Inbox;
     use otto_core::model::{Block, FinishReason};
 
-    fn takeover(repaired: Vec<UnansweredCall>) -> Takeover {
-        Takeover {
-            holder: lease::Holder {
+    fn takeover(repaired: Vec<UnansweredCall>) -> Recovery {
+        Recovery {
+            cause: RecoveryCause::TakenOver(lease::Holder {
                 epoch: 3,
                 host: "old-host".to_string(),
                 pid: 4242,
-            },
+            }),
             repaired,
             replayable: Vec::new(),
+            interrupted_turn: None,
+        }
+    }
+
+    fn process_lost(attempt: Option<u32>) -> Recovery {
+        Recovery {
+            cause: RecoveryCause::ProcessLost,
+            repaired: Vec::new(),
+            replayable: Vec::new(),
+            interrupted_turn: attempt.map(|attempt| otto_core::session::InterruptedTurn {
+                turn_id: "op_turn".to_string(),
+                attempt,
+            }),
         }
     }
 
@@ -608,5 +675,63 @@ mod tests {
         assert_eq!(inbox.len(), 1, "the notification must still be pushed");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("t1"), "{warnings:?}");
+    }
+
+    #[test]
+    fn process_loss_reports_the_interrupted_turn_and_asks_to_continue() {
+        let inbox = Inbox::new(None);
+        let dir = tempfile::tempdir().expect("dir");
+        let user = Message {
+            role: Role::User,
+            blocks: vec![Block::text("do it")],
+            ..Message::default()
+        };
+        let warnings = notify(
+            &inbox,
+            Some(process_lost(Some(1))),
+            &dir.path().join("children"),
+            1000,
+            &[user],
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let queued = inbox.queued();
+        assert_eq!(queued.len(), 1);
+        let text = &queued[0].notification.text;
+        assert!(text.contains("previous Otto process"), "{text}");
+        assert!(text.contains("Continue the interrupted turn"), "{text}");
+        assert!(!text.contains("taken over"), "{text}");
+    }
+
+    #[test]
+    fn an_exhausted_resume_pushes_nothing_and_warns() {
+        let inbox = Inbox::new(None);
+        let dir = tempfile::tempdir().expect("dir");
+        let mut recovery = process_lost(Some(MAX_AUTOMATIC_RESUMES + 1));
+        recovery.repaired = vec![call("bash", "{}", true)];
+        let warnings = notify(
+            &inbox,
+            Some(recovery),
+            &dir.path().join("children"),
+            1000,
+            &[assistant("", true)],
+        );
+        assert!(inbox.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("op_turn"), "{warnings:?}");
+        assert!(warnings[0].contains("not resuming"), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_notice_counts_parent_messages_an_interrupted_child_had_not_read() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut child = interrupted_child("t1");
+        child.path = dir.path().join("t1-child.jsonl");
+        std::fs::write(
+            child.path.with_extension("inbox.json"),
+            r#"[{"seq":0,"text":"a"},{"seq":1,"text":"b"}]"#,
+        )
+        .expect("sidecar");
+        let text = render(&takeover(Vec::new()), std::slice::from_ref(&child), 100);
+        assert!(text.contains("parent messages not yet read: 2"), "{text}");
     }
 }

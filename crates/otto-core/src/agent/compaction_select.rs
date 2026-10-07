@@ -20,7 +20,9 @@ use crate::session::CompactionMetadata;
 
 use super::AgentError;
 use super::context_estimate::{estimate_message, saturating_add};
-use super::summary_details::{compaction_user_messages, strip_compaction_blocks};
+use super::summary_details::{
+    compaction_capability_updates, compaction_user_messages, strip_compaction_blocks,
+};
 
 /// The prefix a compaction summary message carries in the transcript, so a
 /// frontend can label it.
@@ -33,6 +35,8 @@ pub struct CompactionSelection {
     pub previous_summary: String,
     /// The user messages the summary in force carries verbatim, oldest first.
     pub previous_user_messages: Vec<String>,
+    /// The notices the summary in force carries verbatim, oldest first.
+    pub previous_capability_updates: Vec<String>,
     /// Messages before the current turn, summarized in structured mode.
     pub historical_source: Vec<Message>,
     /// The start of the current turn, summarized in turn-prefix mode.
@@ -70,6 +74,7 @@ pub fn select_compaction(
     let selection = CompactionSelection {
         previous_summary: strip_compaction_blocks(&previous_summary).to_owned(),
         previous_user_messages: compaction_user_messages(&previous_summary),
+        previous_capability_updates: compaction_capability_updates(&previous_summary),
         ..CompactionSelection::default()
     };
 

@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use otto_core::agent::inbox::{Inbox, Notification};
+use otto_core::mailbox::{Mailbox, Notification};
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
 use serde::{Deserialize, Serialize};
@@ -166,7 +166,7 @@ struct Armed {
 /// sleeping timer does not keep [`Reminders`] itself alive: dropping the
 /// registry must still cancel.
 struct Inner {
-    inbox: Arc<Inbox>,
+    mailbox: Arc<dyn Mailbox>,
     /// `None` for `--no-session`, which has nothing to write.
     path: Option<PathBuf>,
     armed: Mutex<Vec<Armed>>,
@@ -222,7 +222,9 @@ impl Inner {
     /// Delivers the timer, unless it was cancelled while its sleep was
     /// waking. The notification is pushed into the inbox before the timer is
     /// removed from the sidecar file, so an exit between the two only risks
-    /// firing this timer again on the next resume, never losing it.
+    /// firing this timer again on the next resume, never losing it; its id,
+    /// derived from the timer id and fire time, keeps that second firing from
+    /// being queued or delivered twice.
     ///
     /// The `armed` lock is held across the find, the push, and the removal.
     /// `Reminders::cancel` also removes under this lock, so a cancel that
@@ -237,14 +239,23 @@ impl Inner {
         let Some(index) = armed.iter().position(|entry| entry.item.id == id) else {
             return;
         };
-        let message = armed[index].item.message.clone();
-        self.inbox.push(Notification {
-            task_id: "timer".into(),
-            text: format!("[timer] {message}"),
-            ..Notification::default()
-        });
+        let item = armed[index].item.clone();
+        let persisted = self
+            .mailbox
+            .enqueue(Notification {
+                task_id: "timer".into(),
+                text: format!("[timer] {}", item.message),
+                id: format!("remind:{}:{}", item.id, item.fire_at.timestamp_millis()),
+                ..Notification::default()
+            })
+            .is_ok();
         armed.remove(index);
-        let _ = self.save(&armed);
+        // A notification that did not reach the mailbox sidecar keeps its
+        // timer in the reminders file, so a restart fires it again; the
+        // stable id keeps that from delivering it twice.
+        if persisted {
+            let _ = self.save(&armed);
+        }
     }
 }
 
@@ -328,19 +339,19 @@ pub struct Reminders {
 }
 
 impl Reminders {
-    pub fn new(inbox: Arc<Inbox>) -> Self {
-        Self::create(inbox, None)
+    pub fn new(mailbox: Arc<dyn Mailbox>) -> Self {
+        Self::create(mailbox, None)
     }
 
     /// Restores any timers already stored at `path`, then keeps writing new
     /// ones there. A timer that is already due fires as soon as the runtime
     /// polls it.
-    pub fn with_persist(inbox: Arc<Inbox>, path: PathBuf) -> Self {
+    pub fn with_persist(mailbox: Arc<dyn Mailbox>, path: PathBuf) -> Self {
         let stored: Vec<StoredReminder> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
-        let reminders = Self::create(inbox, Some(path));
+        let reminders = Self::create(mailbox, Some(path));
         reminders
             .inner
             .next_id
@@ -351,18 +362,18 @@ impl Reminders {
         reminders
     }
 
-    fn create(inbox: Arc<Inbox>, path: Option<PathBuf>) -> Self {
-        Self::create_with_directory_sync(inbox, path, sync_directory)
+    fn create(mailbox: Arc<dyn Mailbox>, path: Option<PathBuf>) -> Self {
+        Self::create_with_directory_sync(mailbox, path, sync_directory)
     }
 
     fn create_with_directory_sync(
-        inbox: Arc<Inbox>,
+        mailbox: Arc<dyn Mailbox>,
         path: Option<PathBuf>,
         sync_directory: DirectorySync,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                inbox,
+                mailbox,
                 path,
                 armed: Mutex::new(Vec::new()),
                 next_id: AtomicUsize::new(0),
@@ -699,6 +710,7 @@ mod tests {
 
     use super::*;
     use crate::tool::testutil::{run, run_cancelled};
+    use otto_core::mailbox::Inbox;
     use otto_core::model::{EffectCertainty, OperationDisposition, OperationStopReason};
 
     fn fail_directory_sync(_directory: &std::fs::File) -> std::io::Result<()> {
@@ -714,7 +726,7 @@ mod tests {
 
     fn tool_and_inbox() -> (RemindTool, Arc<Reminders>, Arc<Inbox>) {
         let inbox = Arc::new(Inbox::default());
-        let reminders = Arc::new(Reminders::new(Arc::clone(&inbox)));
+        let reminders = Arc::new(Reminders::new(inbox.clone()));
         (
             RemindTool {
                 reminders: Arc::clone(&reminders),
@@ -774,7 +786,7 @@ mod tests {
     async fn dropping_the_registry_cancels_an_unfired_timer() {
         let inbox = Arc::new(Inbox::default());
         {
-            let reminders = Reminders::new(Arc::clone(&inbox));
+            let reminders = Reminders::new(inbox.clone());
             reminders
                 .schedule(Duration::ZERO, "gone".into())
                 .expect("schedule");
@@ -862,7 +874,7 @@ mod tests {
     async fn schedule_directory_sync_failure_is_unknown_and_rolls_back_memory() {
         let (_directory, path, inbox) = persist_setup();
         let reminders = Arc::new(Reminders::create_with_directory_sync(
-            Arc::clone(&inbox),
+            inbox.clone(),
             Some(path.clone()),
             fail_directory_sync,
         ));
@@ -887,11 +899,8 @@ mod tests {
     #[test]
     fn empty_save_without_a_sidecar_still_syncs_the_directory_before_reporting_failure() {
         let (_directory, path, inbox) = persist_setup();
-        let reminders = Reminders::create_with_directory_sync(
-            Arc::clone(&inbox),
-            Some(path),
-            fail_directory_sync,
-        );
+        let reminders =
+            Reminders::create_with_directory_sync(inbox.clone(), Some(path), fail_directory_sync);
         let armed = reminders.inner.armed.lock().expect(STATE_MUTEX);
 
         let error = reminders.inner.save(&armed).expect_err("sync must fail");
@@ -904,7 +913,7 @@ mod tests {
     async fn cancel_remove_directory_sync_failure_is_unknown_and_restores_timer() {
         let (_directory, path, inbox) = persist_setup();
         let reminders = Arc::new(Reminders::create_with_directory_sync(
-            Arc::clone(&inbox),
+            inbox.clone(),
             Some(path.clone()),
             fail_directory_sync,
         ));
@@ -937,7 +946,7 @@ mod tests {
     async fn cancel_directory_sync_failure_is_unknown_and_restores_entry_and_token() {
         let (_directory, path, inbox) = persist_setup();
         let reminders = Arc::new(Reminders::create_with_directory_sync(
-            Arc::clone(&inbox),
+            inbox.clone(),
             Some(path.clone()),
             fail_directory_sync,
         ));
@@ -1033,7 +1042,7 @@ mod tests {
     #[tokio::test]
     async fn a_schedule_is_written_beside_the_session() {
         let (_directory, path, inbox) = persist_setup();
-        let reminders = Arc::new(Reminders::with_persist(Arc::clone(&inbox), path.clone()));
+        let reminders = Arc::new(Reminders::with_persist(inbox.clone(), path.clone()));
         let tool = RemindTool {
             reminders: Arc::clone(&reminders),
         };
@@ -1053,7 +1062,7 @@ mod tests {
             r#"[{"id":"r1","fire_at":"2020-01-01T00:00:00Z","message":"due"}]"#,
         )
         .expect("write");
-        let _reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        let _reminders = Reminders::with_persist(inbox.clone(), path.clone());
         wait_until_fired(&inbox).await;
         let items = inbox.drain();
         assert_eq!(items.len(), 1, "{items:?}");
@@ -1077,7 +1086,7 @@ mod tests {
                 probe.store(true, Ordering::SeqCst);
             }
         }))));
-        let reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        let reminders = Reminders::with_persist(inbox.clone(), path.clone());
         reminders
             .schedule(Duration::ZERO, "check ordering".into())
             .expect("schedule");
@@ -1102,7 +1111,7 @@ mod tests {
         // in-process inbox (at-least-once delivery), but must not recreate
         // the sidecar file for a session that no longer exists.
         let (directory, path, inbox) = persist_setup();
-        let reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        let reminders = Reminders::with_persist(inbox.clone(), path.clone());
         let item = reminders
             .schedule(Duration::from_secs(60), "late".into())
             .expect("schedule");
@@ -1153,7 +1162,7 @@ mod tests {
     async fn dropping_the_registry_keeps_unfired_reminders_on_disk() {
         let (_directory, path, inbox) = persist_setup();
         {
-            let reminders = Arc::new(Reminders::with_persist(Arc::clone(&inbox), path.clone()));
+            let reminders = Arc::new(Reminders::with_persist(inbox.clone(), path.clone()));
             let tool = RemindTool {
                 reminders: Arc::clone(&reminders),
             };
@@ -1173,7 +1182,7 @@ mod tests {
             r#"[{"id":"r3","fire_at":"2999-01-01T00:00:00Z","message":"restored"}]"#,
         )
         .expect("write");
-        let reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        let reminders = Reminders::with_persist(inbox.clone(), path.clone());
 
         let fresh = reminders
             .schedule(Duration::from_secs(60), "new".into())
@@ -1206,7 +1215,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_a_timer_stops_it_and_rewrites_the_file() {
         let (_directory, path, inbox) = persist_setup();
-        let reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        let reminders = Reminders::with_persist(inbox.clone(), path.clone());
         reminders
             .schedule(Duration::from_secs(60), "keep".into())
             .expect("schedule");
@@ -1236,7 +1245,7 @@ mod tests {
         // lock at the same instant instead of relying on `tokio::select!`'s
         // branch-selection timing.
         let (_directory, path, inbox) = persist_setup();
-        let reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        let reminders = Reminders::with_persist(inbox.clone(), path.clone());
         let item = reminders
             .schedule(Duration::from_secs(60), "race".into())
             .expect("schedule");
@@ -1278,7 +1287,7 @@ mod tests {
     #[tokio::test]
     async fn clearing_stops_every_timer_and_removes_the_file() {
         let (_directory, path, inbox) = persist_setup();
-        let reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        let reminders = Reminders::with_persist(inbox.clone(), path.clone());
         reminders
             .schedule(Duration::ZERO, "one".into())
             .expect("schedule");
@@ -1297,7 +1306,7 @@ mod tests {
     #[tokio::test]
     async fn the_status_tool_lists_outstanding_timers() {
         let inbox = Arc::new(Inbox::default());
-        let reminders = Arc::new(Reminders::new(Arc::clone(&inbox)));
+        let reminders = Arc::new(Reminders::new(inbox.clone()));
         let status = RemindStatusTool {
             reminders: Arc::clone(&reminders),
         };
@@ -1324,7 +1333,7 @@ mod tests {
     #[tokio::test]
     async fn the_cancel_tool_stops_a_timer_by_id() {
         let inbox = Arc::new(Inbox::default());
-        let reminders = Arc::new(Reminders::new(Arc::clone(&inbox)));
+        let reminders = Arc::new(Reminders::new(inbox.clone()));
         let cancel = RemindCancelTool {
             reminders: Arc::clone(&reminders),
         };

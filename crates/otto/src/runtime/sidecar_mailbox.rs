@@ -198,7 +198,7 @@ mod tests {
     }
 
     /// Two notifications are enqueued through a sidecar whose publish ends
-    /// the process at the second save's `step`. Returns the plan's rule.
+    /// the process at the second save's `step`.
     fn crash_on_second_save(dir: &Path, step: PublishStep) {
         let plan = FaultPlan::new(vec![Rule::new(step, Trigger::Nth(2), Fault::Exit)]);
         let publish = FaultyPublishOps::new(plan);

@@ -1,6 +1,6 @@
 //! Model initiation is discretionary; only admitted user handlers can decide.
 use super::{Tool, definition, error_result, text_result};
-use crate::approval::{Kind, Proposal, Scope, Service, State, Subject};
+use crate::approval::{Authority, Kind, Proposal, Scope, Service, State, Subject};
 use async_trait::async_trait;
 use otto_core::approval::BatchControl;
 use otto_core::model::ToolDefinition;
@@ -27,7 +27,7 @@ struct Args {
 pub fn request_definition() -> ToolDefinition {
     definition(
         "request_approval",
-        "Ask the user to approve a proposal or review a prepared action. Decide yourself when consent is needed. Supply exactly one of proposal or subject_ref. This records an approval request and returns its decision and feedback; AUTO sessions approve automatically, MANUAL sessions wait for the user; later calls in this batch will not execute. Confirmation does not grant tool permissions. Never claim approval before a recorded approval decision.",
+        "Ask the user to approve a proposal or review a prepared action. Decide yourself when consent is needed. Supply exactly one of proposal or subject_ref. This records an approval request and returns its decision and feedback; a proposal review always waits for the user, whatever the session approval mode, and only a bounded authorization inside the sandbox can be decided automatically; later calls in this batch will not execute. Confirmation does not grant tool permissions. Never claim approval before a recorded approval decision.",
         json!({"type":"object","additionalProperties":false,"properties":{
             "title":{"type":"string"},"reason":{"type":"string"},
             "proposal":{"type":"string"},"subject_ref":{"type":"string"}
@@ -61,6 +61,7 @@ impl Tool for RequestApproval {
         let request = match (args.proposal, args.subject_ref) {
             (Some(proposal), None) => self.service.create(Proposal {
                 kind: Kind::Confirmation,
+                authority: Authority::Consent,
                 scope: self.scope.clone(),
                 subject: Subject {
                     tool_call_id: call.tool_call_id.into(),
@@ -213,6 +214,7 @@ mod tests {
         let request = service
             .create(Proposal {
                 kind: Kind::Confirmation,
+                authority: Authority::Consent,
                 scope: scope.clone(),
                 subject: Subject {
                     tool_call_id: String::new(),

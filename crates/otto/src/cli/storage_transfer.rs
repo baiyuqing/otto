@@ -1530,6 +1530,7 @@ mod tests {
         let request = service
             .create(crate::approval::Proposal {
                 kind: crate::approval::Kind::Authorization,
+                authority: crate::approval::Authority::Durable,
                 scope: scope.clone(),
                 subject: crate::approval::Subject {
                     tool_call_id: String::new(),

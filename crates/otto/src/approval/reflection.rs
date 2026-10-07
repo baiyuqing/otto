@@ -1,6 +1,6 @@
 //! Durable skill review artifacts. The guard still constructs every Vetted;
 //! only reflection::skillwrite mutates skill files.
-use super::{Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
+use super::{Authority, Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
 use crate::reflection::{guard, repository::ReflectionStore, skillwrite, transcript};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -162,6 +162,7 @@ pub fn publish(
     let details = serde_json::to_string(&artifact).map_err(|_| Error::Unavailable)?;
     service.create(Proposal {
         kind: Kind::Authorization,
+        authority: Authority::Durable,
         scope: super::Scope {
             workspace: workspace.into(),
             session_id: String::new(),

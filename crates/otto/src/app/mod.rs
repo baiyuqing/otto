@@ -800,7 +800,13 @@ impl Controller {
     #[cfg(test)]
     pub(crate) fn tool_names(&self) -> Vec<String> {
         self.runner()
-            .map(|runner| runner.definitions().iter().map(|d| d.name.clone()).collect())
+            .map(|runner| {
+                runner
+                    .definitions()
+                    .iter()
+                    .map(|d| d.name.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

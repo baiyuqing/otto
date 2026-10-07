@@ -265,7 +265,10 @@ struct Diagnostics(Arc<Mutex<Box<dyn Write + Send>>>);
 
 impl Write for Diagnostics {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).write(bytes)
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .write(bytes)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -378,10 +381,11 @@ impl OttoBuilder {
             workspace_path,
             sandbox,
         } = started;
-        let roots = otto_core::config::resolve_server(&builder.config, &builder.environment, "", "")
-            .map_err(|error| error.to_string())
-            .and_then(|server| startup::canonicalize_workspace_roots(&server.workspace_roots))
-            .map_err(|message| Error::Config(builder.redact_error(&message, Some(&runtime))));
+        let roots =
+            otto_core::config::resolve_server(&builder.config, &builder.environment, "", "")
+                .map_err(|error| error.to_string())
+                .and_then(|server| startup::canonicalize_workspace_roots(&server.workspace_roots))
+                .map_err(|message| Error::Config(builder.redact_error(&message, Some(&runtime))));
         let roots = match roots {
             Ok(roots) => roots,
             Err(error) => {
@@ -489,7 +493,9 @@ impl Otto {
     }
 
     fn redact(&self, message: &str) -> String {
-        self.inner.builder.redact_error(message, Some(&self.inner.runtime))
+        self.inner
+            .builder
+            .redact_error(message, Some(&self.inner.runtime))
     }
 
     /// Loads another workspace and returns its canonical path, as `POST
@@ -500,7 +506,9 @@ impl Otto {
     /// resolved with the component switches applied.
     pub async fn open_workspace(&self, path: impl AsRef<Path>) -> Result<PathBuf, Error> {
         self.ensure_open()?;
-        self.workspace_target(path.as_ref()).await.map(|(path, _)| path)
+        self.workspace_target(path.as_ref())
+            .await
+            .map(|(path, _)| path)
     }
 
     async fn workspace_target(&self, path: &Path) -> Result<(PathBuf, Option<Loaded>), Error> {
@@ -578,7 +586,11 @@ impl Otto {
             None => controller,
         };
         let controller = Arc::new(controller);
-        let mut sessions = self.inner.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        let mut sessions = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         sessions.retain(|session| session.strong_count() > 0);
         sessions.push(Arc::downgrade(&controller));
         Session {
@@ -692,12 +704,11 @@ impl Otto {
         }
         inner.cancel.cancel();
         let mut failure: Option<String> = None;
-        let controllers: Vec<Arc<Controller>> = std::mem::take(
-            &mut *inner.sessions.lock().unwrap_or_else(|p| p.into_inner()),
-        )
-        .iter()
-        .filter_map(Weak::upgrade)
-        .collect();
+        let controllers: Vec<Arc<Controller>> =
+            std::mem::take(&mut *inner.sessions.lock().unwrap_or_else(|p| p.into_inner()))
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect();
         for controller in controllers {
             if let Err(message) = close_controller(controller).await {
                 failure.get_or_insert(message);
@@ -890,7 +901,10 @@ api_key_env = "ALPHA_KEY"
 
     fn environment(fixture: &Fixture) -> Vec<(String, String)> {
         vec![
-            ("HOME".to_string(), fixture.home.to_string_lossy().into_owned()),
+            (
+                "HOME".to_string(),
+                fixture.home.to_string_lossy().into_owned(),
+            ),
             ("ALPHA_KEY".to_string(), "sk-alpha".to_string()),
         ]
     }
@@ -997,7 +1011,12 @@ api_key_env = "ALPHA_KEY"
 
     async fn say(session: &Session, text: &str) -> Stop {
         session
-            .prompt(Input::Text(text), &mut |_| {}, &CancellationToken::new(), deny)
+            .prompt(
+                Input::Text(text),
+                &mut |_| {},
+                &CancellationToken::new(),
+                deny,
+            )
             .await
             .expect("prompt")
     }
@@ -1039,7 +1058,10 @@ api_key_env = "ALPHA_KEY"
     async fn switch(component: Component, extra: &str, tools: &[&str], files: &[&str]) {
         let _serial = LOCK.lock().await;
         let (control_tools, control_files) = observe(&fixture(extra), &[]).await;
-        assert!(has(&control_tools, tools), "control tools {control_tools:?}");
+        assert!(
+            has(&control_tools, tools),
+            "control tools {control_tools:?}"
+        );
         for file in files {
             assert!(
                 control_files.iter().any(|f| f == file),
@@ -1047,7 +1069,10 @@ api_key_env = "ALPHA_KEY"
             );
         }
         let (tools_off, files_off) = observe(&fixture(extra), &[component]).await;
-        assert!(lacks(&tools_off, tools), "{component:?} tools {tools_off:?}");
+        assert!(
+            lacks(&tools_off, tools),
+            "{component:?} tools {tools_off:?}"
+        );
         for file in files {
             assert!(
                 !files_off.iter().any(|f| f == file),
@@ -1061,20 +1086,38 @@ api_key_env = "ALPHA_KEY"
         switch(Component::Bash, "", &["bash"], &[]).await;
         let _serial = LOCK.lock().await;
         let fixture = fixture("");
-        let otto = builder(&fixture).disable(Component::Bash).build().await.unwrap();
+        let otto = builder(&fixture)
+            .disable(Component::Bash)
+            .build()
+            .await
+            .unwrap();
         let session = otto.new_session(None).await.unwrap();
         assert!(!session.info().sandbox.bash_available);
         otto.close().await.unwrap();
         let control = builder(&fixture).build().await;
         assert!(control.is_ok(), "bash stays available without the switch");
         let control = control.unwrap();
-        assert!(control.new_session(None).await.unwrap().info().sandbox.bash_available);
+        assert!(
+            control
+                .new_session(None)
+                .await
+                .unwrap()
+                .info()
+                .sandbox
+                .bash_available
+        );
         control.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn memory_off_removes_the_memory_tools() {
-        switch(Component::Memory, "", &["memory_search", "remember", "forget"], &[]).await;
+        switch(
+            Component::Memory,
+            "",
+            &["memory_search", "remember", "forget"],
+            &[],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1098,7 +1141,10 @@ api_key_env = "ALPHA_KEY"
         switch(Component::Schedule, "", &[], &["schedule.db"]).await;
         let _serial = LOCK.lock().await;
         let (tools, _) = observe(&fixture(""), &[Component::Schedule]).await;
-        assert!(has(&tools, &["schedule", "schedule_list", "schedule_cancel"]));
+        assert!(has(
+            &tools,
+            &["schedule", "schedule_list", "schedule_cancel"]
+        ));
     }
 
     #[tokio::test]
@@ -1146,7 +1192,10 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let off = fixture(MARKER_SERVER);
         let otto = builder(&off).disable(Component::Mcp).build().await.unwrap();
         let session = otto.new_session(None).await.unwrap();
-        assert!(!spawned(&off).await, "the switch leaves the server unspawned");
+        assert!(
+            !spawned(&off).await,
+            "the switch leaves the server unspawned"
+        );
         drop(session);
         otto.close().await.unwrap();
     }
@@ -1156,7 +1205,8 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
     #[tokio::test]
     async fn disable_wins_over_config_in_every_workspace() {
         let _serial = LOCK.lock().await;
-        let extra = format!("{MARKER_SERVER}\n[server]\nworkspace_roots = [\"{{ROOT}}/projects\"]\n");
+        let extra =
+            format!("{MARKER_SERVER}\n[server]\nworkspace_roots = [\"{{ROOT}}/projects\"]\n");
         let second = |fixture: &Fixture| {
             let path = fixture.root.join("projects/two");
             std::fs::create_dir_all(&path).unwrap();
@@ -1167,7 +1217,10 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let two = second(&control);
         let otto = builder(&control).build().await.unwrap();
         let session = otto.new_session(Some(&two)).await.unwrap();
-        assert!(spawned(&control).await, "the second workspace spawns without the switch");
+        assert!(
+            spawned(&control).await,
+            "the second workspace spawns without the switch"
+        );
         drop(session);
         otto.close().await.unwrap();
 
@@ -1180,7 +1233,10 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let canonical = two.canonicalize().unwrap();
         let loaded = otto.inner.loaded.lock().await;
         let (builder, _) = loaded.get(&canonical).expect("workspace was loaded");
-        assert!(!builder.mcp.enabled, "the second workspace config has MCP off");
+        assert!(
+            !builder.mcp.enabled,
+            "the second workspace config has MCP off"
+        );
         drop(loaded);
         drop(session);
         otto.close().await.unwrap();
@@ -1245,7 +1301,10 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let (_provider, _script) = Installed::new(Vec::new());
         let count = |otto: &Otto| -> usize {
             let root = &otto.inner.builder.session_root;
-            walk(root).into_iter().filter(|p| p.extension().is_some_and(|e| e == "jsonl")).count()
+            walk(root)
+                .into_iter()
+                .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+                .count()
         };
         let fixture_on = fixture("");
         let otto = builder(&fixture_on).build().await.unwrap();
@@ -1263,7 +1322,11 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
             .unwrap();
         let session = otto.new_session(None).await.unwrap();
         say(&session, "hello").await;
-        assert_eq!(session.history().len(), 2, "the conversation is kept in memory");
+        assert_eq!(
+            session.history().len(),
+            2,
+            "the conversation is kept in memory"
+        );
         assert_eq!(count(&otto), 0);
         assert!(matches!(
             otto.list_sessions(None, 10).await,
@@ -1281,7 +1344,9 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let mut found = Vec::new();
         let mut pending = vec![root.to_path_buf()];
         while let Some(directory) = pending.pop() {
-            let Ok(entries) = std::fs::read_dir(&directory) else { continue };
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -1365,7 +1430,11 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         assert!(matches!(stop, Stop::EndTurn));
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "decide runs once");
-        assert!(seen[0].command.contains("git push"), "{:?}", seen[0].command);
+        assert!(
+            seen[0].command.contains("git push"),
+            "{:?}",
+            seen[0].command
+        );
 
         let requests = script.requests.lock().unwrap();
         assert_eq!(requests.len(), 2, "the denial result reaches the model");
@@ -1376,7 +1445,8 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
             .find(|block| block.block_type == BlockType::ToolResult)
             .expect("a tool result block");
         assert!(
-            result.text.contains("\"approved\":false") || result.text.contains("\"approved\": false"),
+            result.text.contains("\"approved\":false")
+                || result.text.contains("\"approved\": false"),
             "{}",
             result.text
         );
@@ -1385,7 +1455,8 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let position = |wanted: fn(&Event) -> bool| events.iter().position(wanted);
         let started = position(|e| matches!(e, Event::AgentStarted)).expect("AgentStarted");
         let call = position(|e| matches!(e, Event::ToolCallStarted { .. })).expect("call started");
-        let finished = position(|e| matches!(e, Event::ToolCallFinished { .. })).expect("call finished");
+        let finished =
+            position(|e| matches!(e, Event::ToolCallFinished { .. })).expect("call finished");
         let done = position(|e| matches!(e, Event::AgentFinished)).expect("AgentFinished");
         assert!(started < call && call < finished && finished < done);
         drop(session);
@@ -1425,6 +1496,291 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
              warning: task history store unavailable, continuing without task recording\n\
              warning: schedule store unavailable, continuing without scheduled deliveries\n\
              warning: sandbox is off; bash runs unsandboxed as your user\n"
+        );
+    }
+
+    /// Blocking stdin for `otto acp` that the test feeds one line at a time,
+    /// because a request needs the session id the previous reply returned.
+    struct Lines {
+        rx: std::sync::mpsc::Receiver<Vec<u8>>,
+        buffer: Vec<u8>,
+        position: usize,
+    }
+
+    impl std::io::Read for Lines {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let available = std::io::BufRead::fill_buf(self)?;
+            let count = available.len().min(out.len());
+            out[..count].copy_from_slice(&available[..count]);
+            std::io::BufRead::consume(self, count);
+            Ok(count)
+        }
+    }
+
+    impl std::io::BufRead for Lines {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if self.position >= self.buffer.len() {
+                match self.rx.recv() {
+                    Ok(next) => {
+                        self.buffer = next;
+                        self.position = 0;
+                    }
+                    Err(_) => return Ok(&[]),
+                }
+            }
+            Ok(&self.buffer[self.position..])
+        }
+        fn consume(&mut self, count: usize) {
+            self.position += count;
+        }
+    }
+
+    /// `otto acp --cwd <workspace>` run in-process through the CLI entry
+    /// point, with the fixture's home as the whole environment.
+    struct Acp {
+        input: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+        stdout: Capture,
+        stderr: Capture,
+        task: tokio::task::JoinHandle<i32>,
+        next: u64,
+    }
+
+    impl Acp {
+        fn start(fixture: &Fixture) -> Self {
+            let (input, rx) = std::sync::mpsc::channel();
+            let (stdout, stderr) = (Capture::default(), Capture::default());
+            let (mut out, mut err) = (stdout.clone(), stderr.clone());
+            let args = vec![
+                "acp".to_string(),
+                "--cwd".to_string(),
+                fixture.workspace.to_string_lossy().into_owned(),
+            ];
+            let entries: Vec<Vec<u8>> = environment(fixture)
+                .iter()
+                .map(|(name, value)| entry(name, value))
+                .collect();
+            let task = tokio::spawn(async move {
+                crate::cli::run::run(
+                    &args,
+                    Box::new(Lines {
+                        rx,
+                        buffer: Vec::new(),
+                        position: 0,
+                    }),
+                    &mut out,
+                    &mut err,
+                    entries,
+                    false,
+                    &CancellationToken::new(),
+                    &crate::cli::terminate::Terminate::new(),
+                )
+                .await
+            });
+            Self {
+                input: Some(input),
+                stdout,
+                stderr,
+                task,
+                next: 0,
+            }
+        }
+
+        /// Sends one request and returns the `result` of its reply, or panics
+        /// with the error the reply carries.
+        async fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+            self.next += 1;
+            let id = self.next;
+            let frame =
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+            let line = format!("{frame}\n");
+            self.input
+                .as_ref()
+                .unwrap()
+                .send(line.into_bytes())
+                .unwrap();
+            for _ in 0..600 {
+                for line in self.stdout.text().lines() {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    if value["id"] == id && value.get("method").is_none() {
+                        assert!(value.get("error").is_none(), "{method}: {value}");
+                        return value["result"].clone();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("no reply to {method}; stdout: {}", self.stdout.text());
+        }
+
+        async fn session(&mut self, fixture: &Fixture) -> String {
+            self.call("initialize", serde_json::json!({"protocolVersion": 1}))
+                .await;
+            let reply = self
+                .call(
+                    "session/new",
+                    serde_json::json!({"cwd": fixture.workspace, "mcpServers": []}),
+                )
+                .await;
+            reply["sessionId"].as_str().expect("session id").to_string()
+        }
+
+        async fn prompt(&mut self, session: &str, text: &str) {
+            self.call(
+                "session/prompt",
+                serde_json::json!({"sessionId": session, "prompt": [{"type": "text", "text": text}]}),
+            )
+            .await;
+        }
+
+        /// Ends stdin and returns the exit code and stderr.
+        async fn finish(mut self) -> (i32, String) {
+            self.input = None;
+            let code = self.task.await.expect("acp task");
+            (code, self.stderr.text())
+        }
+    }
+
+    #[tokio::test]
+    async fn sessions_made_by_otto_and_by_the_cli_open_in_each_other() {
+        let _serial = LOCK.lock().await;
+        let fixture = fixture("");
+
+        let (_provider, _script) = Installed::new(Vec::new());
+        let otto = builder(&fixture).build().await.unwrap();
+        let session = otto.new_session(None).await.unwrap();
+        say(&session, "hello from otto").await;
+        let from_otto = session.id().to_string();
+        drop(session);
+        otto.close().await.unwrap();
+
+        let mut acp = Acp::start(&fixture);
+        let from_cli = acp.session(&fixture).await;
+        acp.prompt(&from_cli, "hello from the cli").await;
+        let listed = acp
+            .call(
+                "session/list",
+                serde_json::json!({"cwd": fixture.workspace}),
+            )
+            .await
+            .to_string();
+        assert!(
+            listed.contains(&from_otto),
+            "the CLI lists the Otto session: {listed}"
+        );
+        acp.call(
+            "session/load",
+            serde_json::json!({"sessionId": from_otto, "cwd": fixture.workspace, "mcpServers": []}),
+        )
+        .await;
+        let (code, stderr) = acp.finish().await;
+        assert_eq!(code, 0, "{stderr}");
+
+        let otto = builder(&fixture).build().await.unwrap();
+        let summaries = otto.list_sessions(None, 10).await.unwrap();
+        for id in [&from_otto, &from_cli] {
+            assert!(summaries.iter().any(|s| &s.id == id), "Otto lists {id}");
+        }
+        let resumed = otto.resume_session(&from_cli, None).await.unwrap();
+        assert!(
+            format!("{:?}", resumed.history()).contains("hello from the cli"),
+            "Otto resumes the CLI session with its messages"
+        );
+        drop(resumed);
+        otto.close().await.unwrap();
+    }
+
+    /// The files under `~/.otto` and the session root of a fixture, as
+    /// relative paths with the session id replaced.
+    fn tree(fixture: &Fixture, session: &str) -> Vec<String> {
+        let mut names: Vec<String> = walk(&fixture.home)
+            .iter()
+            .filter(|path| {
+                let name = path.to_string_lossy();
+                !name.ends_with("-wal") && !name.ends_with("-shm") && !name.contains("/memory/")
+            })
+            .map(|path| {
+                let relative = path.strip_prefix(&fixture.home).unwrap();
+                let mut parts: Vec<String> = relative
+                    .components()
+                    .map(|part| {
+                        part.as_os_str()
+                            .to_string_lossy()
+                            .replace(session, "<session>")
+                    })
+                    .collect();
+                // `.otto/sessions/<hash of the workspace path>/<id>.jsonl`
+                if parts.len() == 4 && parts[1] == "sessions" {
+                    parts[2] = "<workspace>".to_string();
+                }
+                parts.join("/")
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn normalize(text: &str, fixture: &Fixture, session: &str) -> String {
+        text.replace(&*fixture.root.to_string_lossy(), "<root>")
+            .replace(session, "<session>")
+    }
+
+    /// For one config, environment and prompt, a default `Otto` and
+    /// `otto acp` send the provider the same request (model, system prompt
+    /// and tool definitions), write the same diagnostics, and leave the same
+    /// files under the home. A behavior of one composition that the provider
+    /// request, the diagnostics and the file tree do not reflect is not
+    /// compared.
+    #[tokio::test]
+    async fn a_default_otto_matches_otto_acp() {
+        let _serial = LOCK.lock().await;
+        let (provider, script) = Installed::new(vec![reply("one"), reply("two")]);
+
+        let cli = fixture("");
+        let mut acp = Acp::start(&cli);
+        let cli_session = acp.session(&cli).await;
+        acp.prompt(&cli_session, "parity").await;
+        let (code, cli_stderr) = acp.finish().await;
+        assert_eq!(code, 0, "{cli_stderr}");
+
+        let embedded = fixture("");
+        let capture = Capture::default();
+        let otto = builder(&embedded)
+            .diagnostics(Box::new(capture.clone()))
+            .build()
+            .await
+            .unwrap();
+        let session = otto.new_session(None).await.unwrap();
+        say(&session, "parity").await;
+        let otto_session = session.id().to_string();
+        drop(session);
+        otto.close().await.unwrap();
+        drop(provider);
+
+        let requests = script.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let (from_cli, from_otto) = (&requests[0], &requests[1]);
+        assert!(
+            from_cli.tools.len() > 20,
+            "the request carries the tool set"
+        );
+        assert_eq!(from_cli.tools, from_otto.tools, "tool definitions");
+        assert_eq!(from_cli.model, from_otto.model);
+        assert_eq!(from_cli.thinking, from_otto.thinking);
+        assert_eq!(
+            normalize(&from_cli.system_prompt, &cli, &cli_session),
+            normalize(&from_otto.system_prompt, &embedded, &otto_session),
+            "system prompt"
+        );
+        assert_eq!(
+            normalize(&cli_stderr, &cli, &cli_session),
+            normalize(&capture.text(), &embedded, &otto_session),
+            "diagnostics"
+        );
+        assert_eq!(
+            tree(&cli, &cli_session),
+            tree(&embedded, &otto_session),
+            "files under the home"
         );
     }
 }

@@ -4026,6 +4026,17 @@ async fn every_turn_writes_a_start_and_a_matching_end() {
         );
         assert_eq!(ended_outcome(&turns[index * 2 + 1]), outcome);
     }
+    let ended_error = |record: &crate::session::TurnRecord| match record {
+        crate::session::TurnRecord::Ended { error, .. } => error.clone(),
+        other => panic!("expected an end record, got {other:?}"),
+    };
+    assert_eq!(ended_error(&turns[1]), None);
+    assert!(
+        ended_error(&turns[3]).is_some_and(|error| error.contains("boom")),
+        "{:?}",
+        turns[3]
+    );
+    assert_eq!(ended_error(&turns[5]), None);
     assert_eq!(agent.session().interrupted_turn(), None);
 }
 

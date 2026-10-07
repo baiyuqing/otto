@@ -28,7 +28,7 @@ struct Args {
 pub fn request_definition() -> ToolDefinition {
     definition(
         "request_approval",
-        "Ask the user to approve a proposal or review a prepared action. Decide yourself when consent is needed. Supply exactly one of proposal or subject_ref. This records an approval request and returns its decision and feedback. The session's approval mode, which only the user sets, decides it: MANUAL waits for the user, AUTO approves a bounded authorization inside the sandbox and still asks for a plan review, and YOLO approves every request of the session without asking. Later calls in this batch will not execute. Confirmation does not grant tool permissions. Never claim approval before a recorded approval decision.",
+        "Ask the user to approve a proposal or review a prepared action. Decide yourself when consent is needed. Supply exactly one of proposal or subject_ref; an empty value counts as omitted. This records an approval request and returns its decision and feedback. The session's approval mode, which only the user sets, decides it: MANUAL waits for the user, AUTO approves a bounded authorization inside the sandbox and still asks for a plan review, and YOLO approves every request of the session without asking. Later calls in this batch will not execute. Confirmation does not grant tool permissions. Never claim approval before a recorded approval decision.",
         json!({"type":"object","additionalProperties":false,"properties":{
             "title":{"type":"string"},"reason":{"type":"string"},
             "proposal":{"type":"string"},"subject_ref":{"type":"string"}
@@ -59,7 +59,8 @@ impl Tool for RequestApproval {
         if cancel.is_cancelled() {
             return error_result(super::CONTEXT_CANCELED).cancelled_not_started();
         }
-        let request = match (args.proposal, args.subject_ref) {
+        let omit_blank = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+        let request = match (omit_blank(args.proposal), omit_blank(args.subject_ref)) {
             (Some(proposal), None) => self.service.create_with_origin(
                 Proposal {
                     kind: Kind::Confirmation,
@@ -267,7 +268,24 @@ mod tests {
     }
     #[tokio::test]
     async fn model_request_waits_for_a_real_decision_and_returns_feedback() {
-        for allow in [true, false] {
+        for (allow, arguments) in [
+            (
+                true,
+                r#"{"title":"Review approach","reason":"Scope confirmation","proposal":"Change the parser"}"#,
+            ),
+            (
+                false,
+                r#"{"title":"Review approach","reason":"Scope confirmation","proposal":"Change the parser"}"#,
+            ),
+            (
+                true,
+                r#"{"title":"Review approach","reason":"Scope confirmation","proposal":"Change the parser","subject_ref":""}"#,
+            ),
+            (
+                false,
+                r#"{"title":"Review approach","reason":"Scope confirmation","proposal":"Change the parser","subject_ref":"  "}"#,
+            ),
+        ] {
             let service = Arc::new(Service::in_memory().unwrap());
             let scope = Scope {
                 workspace: "/w".into(),
@@ -284,9 +302,7 @@ mod tests {
             };
             let run = tokio::spawn(async move {
                 let operation = OperationId::new("confirm-operation").unwrap();
-                let args = super::super::testutil::raw(
-                    r#"{"title":"Review approach","reason":"Scope confirmation","proposal":"Change the parser"}"#,
-                );
+                let args = super::super::testutil::raw(arguments);
                 tool.execute_call(
                     ToolCall {
                         tool_call_id: "call-1",

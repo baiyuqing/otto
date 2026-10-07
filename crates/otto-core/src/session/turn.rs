@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 pub const TURN_CUSTOM_TYPE: &str = "otto.turn";
 pub const TURN_SCHEMA_VERSION: u32 = 1;
 
+/// Longest error text an end record stores, in bytes.
+pub const TURN_ERROR_MAX_BYTES: usize = 4096;
+
 /// How many times Otto resumes an interrupted turn on its own: a resumed
 /// turn that is itself interrupted is not resumed again, so a request or a
 /// tool that kills the process cannot loop.
@@ -37,6 +40,12 @@ pub enum TurnRecord {
         #[serde(rename = "turnId")]
         turn_id: String,
         outcome: TurnOutcome,
+        /// The redacted error text of a failed turn, truncated to
+        /// `TURN_ERROR_MAX_BYTES` on a character boundary. Absent for
+        /// completed and cancelled turns and in records written before this
+        /// field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 
@@ -96,6 +105,19 @@ impl TurnRecord {
             schema_version: TURN_SCHEMA_VERSION,
             turn_id: turn_id.into(),
             outcome,
+            error: None,
+        }
+    }
+
+    /// The end record of a failed turn; `error` is cut to
+    /// `TURN_ERROR_MAX_BYTES`.
+    pub fn failed(turn_id: impl Into<String>, error: &str) -> Self {
+        let end = error.floor_char_boundary(TURN_ERROR_MAX_BYTES);
+        Self::Ended {
+            schema_version: TURN_SCHEMA_VERSION,
+            turn_id: turn_id.into(),
+            outcome: TurnOutcome::Failed,
+            error: Some(error[..end].to_string()),
         }
     }
 
@@ -172,6 +194,34 @@ mod tests {
             encode_turn_record(&TurnRecord::ended("t1", TurnOutcome::Cancelled)),
             r#"{"event":"ended","schemaVersion":1,"turnId":"t1","outcome":"cancelled"}"#
         );
+    }
+
+    #[test]
+    fn failed_end_record_carries_the_error() {
+        let record = TurnRecord::failed("t1", "boom");
+        let json = encode_turn_record(&record);
+        assert_eq!(
+            json,
+            r#"{"event":"ended","schemaVersion":1,"turnId":"t1","outcome":"failed","error":"boom"}"#
+        );
+        assert_eq!(decode_turn_record(&json), Some(record));
+        let old = r#"{"event":"ended","schemaVersion":1,"turnId":"t1","outcome":"failed"}"#;
+        assert_eq!(
+            decode_turn_record(old),
+            Some(TurnRecord::ended("t1", TurnOutcome::Failed))
+        );
+    }
+
+    #[test]
+    fn failed_error_is_cut_on_a_char_boundary() {
+        // 3-byte chars: 4096 is not a multiple of 3, so the cut moves back.
+        let long = "界".repeat(TURN_ERROR_MAX_BYTES);
+        let TurnRecord::Ended { error, .. } = TurnRecord::failed("t", &long) else {
+            panic!("expected an end record");
+        };
+        let error = error.expect("error stored");
+        assert_eq!(error.len(), TURN_ERROR_MAX_BYTES / 3 * 3);
+        assert!(long.starts_with(&error));
     }
 
     #[test]

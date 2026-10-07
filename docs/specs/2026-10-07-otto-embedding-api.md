@@ -1,9 +1,13 @@
 # Otto embedding API
 
-Status: proposed 2026-10-07. Maintainer decisions on 2026-10-07: another Rust
-program can construct an Otto agent in process. The runtime it gets is by
-default the same as the one the `otto` CLI builds. The host disables
-individual components in code when it constructs the object.
+Status: proposed 2026-10-07. Maintainer decisions on 2026-10-07:
+
+- Another Rust program can construct an Otto agent in process.
+- The runtime it gets is by default the same as the one the `otto` CLI
+  builds. The host disables individual components in code when it constructs
+  the object.
+- No breaking change. Existing behavior and public interfaces stay as they
+  are, and the embedded runtime behaves the same as the CLI.
 
 ## Problem
 
@@ -60,20 +64,30 @@ is a supported entry point.
 ## Goals
 
 1. A Rust host constructs the agent with
-   `otto::embed::Otto::builder()...build()`. The same workspace, config and
-   environment give the same tools, sandbox, session store and policy as the
-   `otto` CLI.
+   `otto::embed::Otto::builder()...build()`. With no component disabled, the
+   result behaves the same as `otto acp` started with the same `--cwd`,
+   config and environment. That means the same tools, sandbox, approvals,
+   session files, logs and warnings. See [behavior
+   reference](#behavior-reference-otto-acp).
 2. Every component in the [component table](#components) is enabled unless
    the host disables it. A disabled component:
    - adds no tool definitions
    - opens no database file
    - starts no child process
+
+   Each disabled state is a state the CLI already reaches through a config
+   key, a flag or an unavailable store. No switch creates a runtime state the
+   CLI cannot produce.
 3. One `Otto` serves several sessions and several workspaces, as `otto serve`
    does.
 4. The CLI, `otto serve`, `otto acp` and the embedding API run the same
    composition code. No second copy of `run_with_backends` exists.
-5. The API surface covered by version compatibility is small and named:
-   the `otto::embed` module and the `otto_core` types it exposes.
+5. No breaking change. The following stay unchanged:
+   - CLI, serve and ACP behavior
+   - existing public Rust items, config, on-disk formats and wire protocols
+
+   See [no breaking change](#no-breaking-change).
+6. After it ships, `otto::embed` changes only by addition.
 
 ## Non-goals
 
@@ -97,6 +111,9 @@ is a supported entry point.
 - **Inline config text.** A host writes a file and passes its path.
 - **Session operations beyond the v1 list** in [API](#api): fork, archive,
   rename, profile switch, memory review and reflection commands.
+- **Switches for file tools and web tools.** The CLI has no state without
+  them. Under goal 2 they wait until such a state exists. Adding them later
+  is a new `Component` variant, which is not a breaking change.
 - **A schedule worker in the host process.** See [Limitations](#limitations).
 
 ## Design
@@ -111,13 +128,10 @@ let otto = Otto::builder()
     .config(ConfigSource::Default)         // default; or ConfigSource::Path(..)
     .environment(std::env::vars())         // default: the process environment
     .overrides(overrides)                  // optional otto_core::config::Overrides
+    .diagnostics(Box::new(log_file))       // default: the process stderr, as `otto acp`
     .disable(Component::Mcp)               // any number of times
     .build()
     .await?;
-
-for warning in otto.warnings() {
-    eprintln!("{warning}");
-}
 
 let session = otto.new_session(None).await?; // None: the startup workspace
 let stop = session
@@ -141,11 +155,11 @@ otto.close().await;
 | `OttoBuilder::environment(iter)` | replaces the environment snapshot, as the `cli::run` `environment_entries` contract does |
 | `OttoBuilder::overrides(Overrides)` | `otto_core::config::Overrides`, the values of `--profile`, `--model`, `--provider`, `--base-url`, `--thinking` and related flags |
 | `OttoBuilder::disable(Component)` | [component table](#components) |
+| `OttoBuilder::diagnostics(writer)` | where warnings and log lines go. Default: the process stderr, which is where `otto acp` writes them |
 | `OttoBuilder::build()` | `runtime::startup::start`, then `Builder::for_workspace` |
-| `Otto::warnings()` | the startup warnings the CLI writes to stderr |
 | `Otto::open_workspace(path)` | `admit_workspace` (`cli/serve.rs:243`), then `load_workspace`, the same as `POST /v1/workspaces` |
-| `Otto::new_session(workspace)` | `Controller::create` (`app/mod.rs:2382`), as `ServeFactory::create` (`cli/serve.rs:481`) does |
-| `Otto::resume_session(id, workspace)` | `Controller::open` (`app/mod.rs:2390`), as `ServeFactory::open` (`cli/serve.rs:501`) does; repair warnings are returned |
+| `Otto::new_session(workspace)` | `Controller::create` (`app/mod.rs:2382`), as ACP `session/new` does (`acp/mod.rs:1494`) |
+| `Otto::resume_session(id, workspace)` | `Controller::open` (`app/mod.rs:2390`), as ACP `session/load` does (`acp/mod.rs:1520`); repair warnings are written as `warning: {redacted}` to the diagnostics writer, as ACP does |
 | `Otto::list_sessions(workspace, limit)` | `Controller::list_sessions` / `listed_for` |
 | `Otto::close()` | the CLI close tail, see [Close](#close) |
 | `Session::prompt(input, emit, cancel, decide)` | `Controller::run_with_approvals` (`app/approval.rs:95`) |
@@ -178,31 +192,31 @@ serve does.
 ### Components
 
 `Component` is `#[non_exhaustive]`, so adding a component is not a breaking
-change. Each switch is applied in one of two ways:
+change. Every switch puts the runtime into a state the CLI already reaches,
+and the switch reaches it through the same code path:
 
 - **Config key.** Where a config key already turns the component off, the
   switch sets that key to `false` on every `File` the runtime resolves. This
   happens after `ManagedPolicy::apply`, at startup and in `load_workspace`
-  for each additional workspace. The disabled path is then the one the config
-  key already takes and its existing tests cover.
-- **Startup field.** Where no key exists, the switch leaves a `Shared` or
-  `Builder` field empty. The table names the field.
+  for each additional workspace. The change exists only in memory. No config
+  file is written.
+- **Existing fallback.** Where no key exists, the switch takes the branch the
+  CLI already takes when a flag is set or a store fails to open. It does not
+  print the warning the failure branch prints.
 
-| `Component` | Disabled effect | Applied through |
+| `Component` | Disabled effect | Existing CLI state reused |
 | --- | --- | --- |
-| `Bash` | no `bash` tool, no sandbox executor, no sandbox reloader; workspace context skips `git status` (already gated on `bash_configured()`) | `Builder.command_executor = None` |
-| `FileTools` | no read/write/edit/list/search file tools | `builtin_file_tools` returns no tools |
-| `Web` | no `web_fetch`, no `web_search` (including the `chatgpt` hosted search) | `web_tools` returns no tools |
+| `Bash` | no `bash` tool, no sandbox executor, no sandbox reloader; workspace context skips `git status` | the sandbox reports bash unavailable (`bash_available = false`, checked by `bash_configured()`) |
 | `Mcp` | no MCP server process, no MCP tools | `[mcp].enabled = false` |
 | `Memory` | memory service not opened (`Service::null(Disabled)`), no memory tools, no memory advisor | `[memory].enabled = false` |
 | `Skills` | no skill catalog, no `skill` tool | `[skills].enabled = false` |
 | `Plugins` | no plugin tools, no plugin hooks | `[plugins].enabled = false` |
 | `Subagents` | no subagent tools (`build_subagents` returns empty) | `[agents].enabled = false` |
 | `Reflection` | no reflect tool, no automatic reflection | `[reflection].enabled = false` |
-| `Schedule` | `schedule.db` not opened, no schedule tools | `Shared.schedule = None` |
-| `SessionPersistence` | no session files; sessions use `SharedSession::memory`; `resume_session` and `list_sessions` return `PersistenceDisabled` | `Shared.no_session = true` |
-| `Usage` | `usage.db` not opened | `Shared.usage = None` |
-| `TaskHistory` | `tasks.db` not opened | `Shared.task_recorder = None` |
+| `Schedule` | `schedule.db` not opened, no schedule tools | `open_schedule` returned `None` (`cli/run.rs:1564`) |
+| `SessionPersistence` | no session files; sessions use `SharedSession::memory`; `resume_session` and `list_sessions` return `PersistenceDisabled` | `--no-session` (`Shared.no_session = true`) |
+| `Usage` | `usage.db` not opened | usage store failed to open (`cli/run.rs:701`) |
+| `TaskHistory` | `tasks.db` not opened | task store failed to open (`cli/run.rs:711`) |
 
 The following are not switchable in v1. They are part of the turn loop or
 the safety boundary:
@@ -227,17 +241,26 @@ the safety boundary:
   ChatGPT credentials come from `otto login`, through the same
   `capture_auth_credentials` path as the CLI.
 
-### Approvals and elevation
+### Behavior reference: `otto acp`
 
-- `compose_workspace_sandbox` is called with `elevate = true`, as for
-  `otto serve` and `otto acp`. Commands outside the sandbox's grants reach
-  `decide` instead of failing outright.
-- The logger defaults to `Logger::discard()`.
-- Startup and runner warnings go to `Otto::warnings()` and
-  `resume_session`'s return value. Runners are built with
-  `build_runner_quiet`, as `Controller::create` already does
-  (`app/mod.rs:2439`). The embedding API writes nothing to the host's
-  stdout or stderr.
+The CLI frontends differ from each other in elevation, logging and the
+schedule worker. Among them, `otto acp` is the one whose shape matches an
+embedded host: sessions created by a program, and approvals answered by the
+program. So the embedded runtime takes the `otto acp` value for each of
+these:
+
+| Behavior | `otto acp` | Embedded |
+| --- | --- | --- |
+| sandbox elevation | `elevate = true` (`cli/run.rs:848`) | the same; commands outside the sandbox grants reach `decide` |
+| logger | `Logger::stderr()` (`cli/run.rs:758`) | `Logger::stderr()`, or `Logger::new(writer)` when `diagnostics` is set |
+| startup warnings | written to stderr | written to stderr, or to the `diagnostics` writer |
+| session create and load | `Controller::create` and `Controller::open` | the same calls |
+| runner build | `build_runner_quiet` (through `Controller::create`) | the same |
+| schedule worker | none (`cli/run.rs:1134` starts one only for REPL and TUI) | none |
+| session files | `~/.otto` session root, append-only JSONL | the same files; the CLI lists and resumes them, and the reverse also works |
+
+The `diagnostics` writer only changes where the text goes. The text and its
+order are the ones `otto acp` writes.
 
 ### One instance per process
 
@@ -258,13 +281,29 @@ one. `otto serve` does the same thing through one `Shared`.
 
 - **New `crates/otto/src/runtime/startup.rs`.** It holds steps 1–16 of
   `run_with_backends`, from environment capture to the memory service, as
-  `pub(crate) async fn start(StartOptions) -> Result<Started, String>`. It
-  also holds `load_workspace`, moved from `cli/run.rs`, and
-  `admit_workspace`, moved from `cli/serve.rs`.
-  - `StartOptions` carries the frontend kind, the config source, the
-    environment snapshot, the overrides and the set of disabled components.
+  `pub(crate) async fn start(StartOptions, &mut (dyn Write + Send)) ->
+  Result<Started, String>`. It also holds `load_workspace`, moved from
+  `cli/run.rs`, and `admit_workspace`, moved from `cli/serve.rs`.
+  - The writer argument receives warnings at the moment each step emits
+    them, as `load_workspace` already does. The CLI passes its stderr, so
+    its output keeps the same bytes in the same order.
+  - `StartOptions` carries the values the steps read:
+    - `elevate`
+    - the logger choice
+    - the config source
+    - the environment snapshot
+    - the overrides
+    - the set of disabled components
+
+    It does not carry `cli::run::Frontend`, which stays in `cli`.
   - `Started` holds the `Arc<Shared>`, the startup `Builder`, the sandbox
-    reloader, the warnings and the handles that the close order needs.
+    reloader and the handles that the close order needs.
+- **Only non-`pub` items move.** That covers the `pub(crate)` and
+  `pub(super)` helpers (`resolve_home_for`, `load_config_for`,
+  `config_environment_for`, `resolve_sandbox_settings`,
+  `compose_workspace_sandbox`, `load_workspace`) and private functions.
+  `cli::run::run`, `cli::run::run_with_backends` and `cli::run::Frontend`
+  keep their paths and signatures. No other `pub` item changes.
 - **`cli/run.rs::run_with_backends`** calls `startup::start` and keeps only
   frontend dispatch: workflow, acp, serve, REPL/TUI, herdr and the schedule
   worker. `cli/serve.rs` calls `startup::load_workspace` and
@@ -293,18 +332,39 @@ approval-executor drain and the memory-service close are not awaited.
 
 Covered: `otto::embed` and the `otto_core` types its signatures name
 (`agent::Event`, `agent::EventSink`, `config::Overrides`, `AgentError`). All
-other `pub` items in `otto` stay `pub` for the frontends and tests, and they
-carry no compatibility promise. The `otto::embed` rustdoc and
-`docs/development.md` state this.
+other `pub` items in `otto` stay `pub` for the frontends and tests. The
+`otto::embed` rustdoc and `docs/development.md` state this.
 
-While the version is below 1.0, a breaking change to `otto::embed` bumps the
-minor version and gets a `Changed` entry in `CHANGELOG.md`.
+`otto::embed` changes only by addition, including below 1.0:
+
+- no item is removed or renamed
+- no signature changes incompatibly
+- `Component`, `Input` and `Error` are `#[non_exhaustive]`
+- `Otto`, `OttoBuilder` and `Session` have no public fields
+- configuration is set through builder methods, so a new option is a new
+  method
+
+When a behavior must change, a new item is added next to the old one, and
+the old one keeps working.
 
 ## Compatibility and safety
 
-- **CLI, serve and acp.** Their behavior does not change. The move to
-  `runtime/startup.rs` is a refactor. The existing CLI, serve and ACP tests
-  are the regression check.
+### No breaking change
+
+Phase 1 changes none of the following:
+
+- CLI flags, exit codes, stdout and stderr text and their order
+- `otto serve` HTTP API, ACP messages, `otto acp` stderr output
+- config keys, config file format, managed policy handling
+- session JSONL format, `~/.otto` store schemas and file names
+- `pub` Rust items outside `otto::embed`, and the `otto-core` API
+- the dependency versions the `otto` binary builds with
+
+The move to `runtime/startup.rs` changes where code lives, not what it does.
+Step order, error text and warning text stay the same.
+
+### Other guarantees
+
 - **Session history.** The embedding API writes sessions through the same
   `Builder::create_session` and `Controller` code as the CLI. The
   append-only format is unchanged.
@@ -327,40 +387,55 @@ All tests are offline. They use `ProviderClient::Scripted`
 (`runtime/builder.rs:433`), and sandbox driver `off` where the platform has
 no Seatbelt.
 
-1. **Default parity.** For one workspace and config, the tool definitions of
-   a default `Otto` session equal those of the CLI composition. This catches
-   drift between the two.
-2. **Each switch.** One test per `Component`:
+1. **Default parity with `otto acp`.** For one workspace, config and
+   environment, a default `Otto` session and the `otto acp` composition give
+   equal values for:
+   - tool definitions
+   - sandbox info
+   - the elevation flag
+
+   This catches drift between the two.
+2. **No regression.** The existing CLI, serve and ACP tests pass, and no
+   assertion in them changes. Only `use` lines that name a moved non-`pub`
+   item may change. One test runs a startup that emits warnings, captures
+   stderr, and compares it with a fixture taken before the move.
+3. **Session interoperability.** A session created through `Otto` is listed
+   and resumed by the CLI composition, and a CLI session is resumed through
+   `Otto`.
+4. **Each switch.** One test per `Component`:
    - the tool names the table lists are absent
    - the database file it lists is not created under the test home
    - for `Mcp`, a configured stdio server is not spawned
    - for `SessionPersistence`, no `.jsonl` file is written
-3. **Disable wins over config.** `[mcp].enabled = true` in config together
+5. **Disable wins over config.** `[mcp].enabled = true` in config together
    with `disable(Component::Mcp)` gives no MCP tools. The same holds for a
    second workspace opened with `open_workspace`.
-4. **Managed policy applies.** A managed policy that disables a component
+6. **Managed policy applies.** A managed policy that disables a component
    disables it with no code switch.
-5. **One instance.** A second `build()` returns `AlreadyRunning`. A `build()`
+7. **One instance.** A second `build()` returns `AlreadyRunning`. A `build()`
    after `close()` succeeds.
-6. **Prompt round trip.** A scripted provider requests a bash command that
+8. **Prompt round trip.** A scripted provider requests a bash command that
    needs approval:
    - `decide` is called once with that command
    - `Deny` produces the denial tool result
    - the turn ends with `EndTurn`
    - the events arrive at `emit` in order
-7. **Warnings.** A config that produces a known startup warning returns it
-   from `Otto::warnings()`.
-8. **Boundary.** `runtime_boundary.rs` passes with `embed.rs` present.
-9. **Example.** The `otto::embed` module docs contain a `no_run` doc-test of
-   the example above, so `cargo test --doc` compiles it.
+9. **Diagnostics.** A config that produces a known startup warning writes
+   the same text to the `diagnostics` writer that `otto acp` writes to
+   stderr.
+10. **Boundary.** `runtime_boundary.rs` passes with `embed.rs` present.
+11. **Example.** The `otto::embed` module docs contain a `no_run` doc-test of
+    the example above, so `cargo test --doc` compiles it.
 
 ## Documentation
 
 - `otto::embed` rustdoc is the canonical reference.
 - `docs/code-organization.md`: entries for `runtime/startup.rs` and
   `embed.rs`.
-- `docs/development.md`: the compatibility surface, and the rule that
-  `startup.rs` is the only composition root.
+- `docs/development.md`:
+  - the compatibility surface
+  - the additive-only rule for `otto::embed`
+  - the rule that `startup.rs` is the only composition root
 - `README.md`: a short "Use Otto as a library" section with the git
   dependency line, pinned to a release tag.
 - `CHANGELOG.md`: an `Added` entry.
@@ -375,9 +450,9 @@ no Seatbelt.
   workspace, as the CLI does.
 - `~/.otto` is always opened, even with every component disabled. That
   covers storage, the config lock and `approvals.db`.
-- No schedule worker runs in the host process. In the CLI the worker runs
-  only for the REPL and TUI frontends (`cli/run.rs:1134`), so the host
-  process behaves like `otto acp`. Schedule tools still create entries, and
+- No schedule worker runs in the host process, the same as `otto acp`. In
+  the CLI the worker runs only for the REPL and TUI frontends
+  (`cli/run.rs:1134`). Schedule tools still create entries, and
   an `otto` REPL, TUI or `otto serve` process whose worker scope matches
   runs them.
 - The API is Rust only and needs a Tokio runtime.
@@ -387,7 +462,12 @@ no Seatbelt.
 ## Phase 2: publication on crates.io
 
 Phase 2 is a separate spec and PR. It is listed here so that phase 1 does
-not block it. These items must be resolved:
+not block it. The no-breaking-change rule applies to it too:
+
+- the `otto` binary keeps the dependency versions it builds with
+- the user manual that the `otto` help tool embeds stays byte-identical
+
+These items must be resolved:
 
 1. Remove `publish = false` from the workspace `Cargo.toml`. Give the
    `otto-core` path dependency a `version`.
@@ -401,8 +481,8 @@ not block it. These items must be resolved:
 3. **Exact dependency pins.** `docs/development.md:449-451` requires `=x.y.z`
    pins. In a published library they force those exact versions into the
    host's dependency resolution and fail it on any conflict. Two options:
-   - caret ranges plus the committed `Cargo.lock` for the binary, which
-     changes the documented rule
+   - caret ranges plus the committed `Cargo.lock`. The lock file keeps the
+     binary's resolved versions, but the documented rule changes.
    - keep exact pins and accept the conflicts
 4. The release steps (`docs/development.md:729-744`) add
    `cargo publish -p otto-core`, then `cargo publish -p otto`.
@@ -416,14 +496,20 @@ Resolved 2026-10-07 by the maintainer:
 1. **In-process embedding for other Rust programs.**
 2. **Default construction equals the CLI with everything enabled.** The host
    disables components in code at construction.
+3. **No breaking change, consistent behavior.** Existing behavior and
+   interfaces do not change. The embedded runtime behaves the same as the
+   CLI, and `otto::embed` changes only by addition.
 
 Proposed in this spec, accepted by approving it:
 
-3. The component list and the way each switch is applied, as in the
-   [component table](#components).
-4. Switches only disable. There is no code switch that runs bash unsandboxed.
-5. One `Otto` per process.
-6. Config source is `Default` or `Path`. There is no inline config and no
+4. `otto acp` is the [behavior reference](#behavior-reference-otto-acp).
+   This covers elevation, logging, warnings, session paths and the absence
+   of a schedule worker.
+5. The component list and the way each switch is applied, as in the
+   [component table](#components). Every disabled state reuses an existing
+   CLI state. File-tool and web-tool switches are left out for that reason.
+6. Switches only disable. There is no code switch that runs bash unsandboxed.
+7. One `Otto` per process.
+8. Config source is `Default` or `Path`. There is no inline config and no
    `api_key` setter.
-7. No schedule worker in the host process, as for `otto acp`.
-8. crates.io publication is phase 2, under its own spec.
+9. crates.io publication is phase 2, under its own spec.

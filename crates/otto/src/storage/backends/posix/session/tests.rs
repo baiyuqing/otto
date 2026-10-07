@@ -519,6 +519,21 @@ fn create_lazy_defers_file_until_first_append() {
     let path = store.path();
     assert!(!path.is_empty());
     assert_eq!(json_lines(Path::new(&path)).len(), 3);
+    store.append_message(&user("again")).expect("append");
+    assert_eq!(
+        json_lines(Path::new(&path)).len(),
+        4,
+        "the published file is the open journal"
+    );
+    let names: Vec<_> = fs::read_dir(Path::new(&path).parent().expect("session dir"))
+        .expect("read session dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        names,
+        [Path::new(&path).file_name().expect("name")],
+        "no temporary name is left"
+    );
     store.close().expect("close");
 }
 

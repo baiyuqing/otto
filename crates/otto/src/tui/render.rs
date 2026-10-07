@@ -11,7 +11,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, TurnStatus};
 use super::commands::Completion;
-use super::entries::Entry;
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN,
     escape_single_line_text, footer_workspace, format_cache_hit_rate, format_context_percentage,
@@ -80,23 +79,26 @@ fn draw_shell(frame: &mut Frame, app: &App, area: Rect) {
     let content_area = side_margin(area);
     let panel_tasks = visible_panel_tasks(&app.tasks);
     let plan = plan_line(&app.info.plan);
+    let queued_height = queued_banner_lines(app).len() as u16;
     let (composer_height, panel_height) = composer_and_panel_height(
         app,
         content_area.width,
         content_area.height,
         panel_row_count(panel_tasks.len()) + u16::from(plan.is_some()),
+        queued_height,
     );
     let suggestions = app.suggestions();
     let suggestion_height = (suggestions.len() as u16).min(
         content_area
             .height
-            .saturating_sub(composer_height + panel_height + 2),
+            .saturating_sub(composer_height + panel_height + queued_height + 2),
     );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
             Constraint::Length(suggestion_height),
+            Constraint::Length(queued_height),
             Constraint::Length(composer_height),
             Constraint::Length(panel_height),
             Constraint::Length(1),
@@ -104,8 +106,9 @@ fn draw_shell(frame: &mut Frame, app: &App, area: Rect) {
         .split(content_area);
     draw_transcript(frame, app, chunks[0]);
     draw_suggestions(frame, app, &suggestions, chunks[1]);
-    draw_composer(frame, app, chunks[2]);
-    let mut panel_area = chunks[3];
+    draw_queued_banner(frame, app, chunks[2]);
+    draw_composer(frame, app, chunks[3]);
+    let mut panel_area = chunks[4];
     if let Some(plan) = plan
         && panel_area.height > 0
     {
@@ -123,7 +126,7 @@ fn draw_shell(frame: &mut Frame, app: &App, area: Rect) {
         panel_area.height -= 1;
     }
     draw_panel(frame, &panel_tasks, panel_area);
-    draw_footer(frame, app, chunks[4]);
+    draw_footer(frame, app, chunks[5]);
     if let Some(selection) = &app.selection {
         selection.highlight(frame.buffer_mut());
     }
@@ -180,8 +183,9 @@ fn composer_and_panel_height(
     width: u16,
     height: u16,
     panel_rows_wanted: u16,
+    queued_rows: u16,
 ) -> (u16, u16) {
-    let budget = height.saturating_sub(1 /* transcript */ + 1 /* status line */);
+    let budget = height.saturating_sub(1 /* transcript */ + queued_rows + 1 /* status line */);
     let natural_composer = composer_height(app, width, COMPOSER_MIN_INNER_ROWS);
     if let Some(spare) = budget.checked_sub(natural_composer) {
         return (natural_composer, panel_rows_wanted.min(spare));
@@ -194,35 +198,6 @@ const STARTUP_LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ 
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = transcript::lines(&app.entries, app.show_details, area.width as usize);
-    // Text the session does not hold yet: the next input the user queued, and
-    // the guidance the active run has taken but not delivered. Neither is in
-    // the transcript history nor in the composer any more, so it is drawn here
-    // under the label that says which of the two it is.
-    let waiting = app
-        .queued_input
-        .as_ref()
-        .map(|line| ("Queued next input", line.clone()))
-        .into_iter()
-        .chain(
-            app.queued_steer
-                .as_ref()
-                .map(|steer| ("Queued for current turn", steer.text.clone())),
-        );
-    for (label, text) in waiting {
-        let queued = Entry {
-            kind: Some(super::entries::EntryKind::User),
-            raw: format!("{label}: {text}"),
-            ..Entry::default()
-        };
-        if !lines.is_empty() {
-            lines.push(Line::default());
-        }
-        lines.extend(transcript::lines(
-            &[queued],
-            app.show_details,
-            area.width as usize,
-        ));
-    }
     if lines.is_empty() {
         lines.extend(
             STARTUP_LOGO
@@ -348,8 +323,10 @@ fn footer_text(app: &App) -> String {
     }
 }
 
-/// The command list drawn directly above the composer while the value being
-/// typed is a command prefix, with [`super::app::App::suggestion`]'s row
+const QUEUED_BACKGROUND: Color = Color::DarkGray;
+
+/// The command list drawn above the queued banner and composer while the value
+/// being typed is a command prefix, with [`super::app::App::suggestion`]'s row
 /// highlighted.
 ///
 /// A [`List`] rather than a [`Paragraph`] so that ratatui's own [`ListState`]
@@ -378,6 +355,46 @@ fn draw_suggestions(frame: &mut Frame, app: &App, suggestions: &[Completion], ar
     let mut state =
         ListState::default().with_selected(Some(app.suggestion.min(suggestions.len() - 1)));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn queued_banner_style() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .bg(QUEUED_BACKGROUND)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn queued_banner_lines(app: &App) -> Vec<Line<'static>> {
+    let style = queued_banner_style();
+    app.queued_input
+        .as_ref()
+        .map(|text| ("◆ QUEUED NEXT INPUT  ", text))
+        .into_iter()
+        .chain(
+            app.queued_steer
+                .as_ref()
+                .map(|steer| ("◆ QUEUED FOR CURRENT TURN  ", &steer.text)),
+        )
+        .map(|(label, text)| {
+            Line::from(vec![
+                Span::styled(label, style),
+                Span::styled(escape_single_line_text(text), style),
+            ])
+            .style(style)
+        })
+        .collect()
+}
+
+/// Draws queued text in a fixed, high-contrast band immediately above the
+/// composer. Unlike transcript entries, these rows cannot scroll out of view.
+fn draw_queued_banner(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(queued_banner_lines(app)).style(queued_banner_style()),
+        area,
+    );
 }
 
 /// Lays the composer value out into the rows the box will show, and reports
@@ -947,28 +964,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn committed_queued_input_draws_in_transcript_not_composer() {
+    async fn queued_input_is_pinned_in_a_banded_row_above_the_composer() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.entries = (0..12)
+            .map(|index| Entry {
+                kind: Some(EntryKind::Assistant),
+                raw: format!("old transcript row {index}"),
+                ..Default::default()
+            })
+            .collect();
+        app.scroll = Some(0);
         app.start_turn();
         app.queued_input = Some("/memory search vim".to_string());
 
-        let screen = rendered(&app, 72, 12);
+        let width = 72;
+        let height = 12;
+        let rows = screen_rows(&app, width, height);
+        let banner_row = rows
+            .iter()
+            .position(|row| row.contains("◆ QUEUED NEXT INPUT  /memory search vim"))
+            .expect("queued banner row");
+        assert!(rows[banner_row + 1].contains("Queued next input · Ctrl+U withdraw"));
+        assert!(
+            !rows.iter().any(|row| row.contains("❯ Queued next input")),
+            "queued input must not be a transcript entry: {rows:?}"
+        );
 
-        assert!(
-            screen.contains("❯ Queued next input: /memory search vim"),
-            "{screen}"
-        );
-        assert!(
-            screen.contains("Queued next input · Ctrl+U withdraw"),
-            "{screen}"
-        );
+        let buffer = drawn(&app, width, height);
+        for x in SIDE_MARGIN..width - SIDE_MARGIN {
+            assert_eq!(
+                buffer.cell((x, banner_row as u16)).map(|cell| cell.bg),
+                Some(QUEUED_BACKGROUND),
+                "queued banner must shade the full content row at x={x}"
+            );
+        }
     }
 
-    /// Guidance the active turn has accepted but not delivered is neither in the
-    /// transcript history nor in the composer, so the frame has to say both that
-    /// it waits and how to take it back.
+    /// Guidance the active turn has accepted but not delivered is pinned above
+    /// the composer, so the frame says both that it waits and how to take it back.
     #[tokio::test]
-    async fn queued_guidance_draws_in_the_transcript_and_the_composer_title() {
+    async fn queued_guidance_draws_in_the_banner_and_the_composer_title() {
         use crate::tui::backend::{Completion, Reply, Ticket};
         use otto_core::agent::steering::{Message, Status};
 
@@ -997,7 +1032,7 @@ mod tests {
 
         let screen = rendered(&app, 72, 12);
         assert!(
-            screen.contains("❯ Queued for current turn: use the other branch"),
+            screen.contains("◆ QUEUED FOR CURRENT TURN  use the other branch"),
             "{screen}"
         );
         assert!(
@@ -1016,7 +1051,7 @@ mod tests {
         assert!(!screen.contains("Ctrl+U withdraw"), "{screen}");
 
         app.apply_completion(read(vec![message(Status::Queued)]));
-        assert!(rendered(&app, 72, 12).contains("Queued for current turn: use the other branch"));
+        assert!(rendered(&app, 72, 12).contains("◆ QUEUED FOR CURRENT TURN  use the other branch"));
         app.apply_event(&otto_core::wire::events::WireEvent {
             event_type: otto_core::wire::events::USER_MESSAGE.into(),
             text: "use the other branch".into(),

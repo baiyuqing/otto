@@ -211,7 +211,7 @@ fn store_failing_writes_from(temp: &TempDir, from_write: u32) -> (Store, Arc<Fau
             Trigger::FromNth(from_write),
             Fault::Before(FaultError::Os(libc::EIO)),
         )
-        .filter(Filter::NameSuffix(".jsonl")),
+        .filter(Filter::NameContains(".jsonl")),
     ]);
     let driver = FaultyFileDriver::new(Arc::new(PosixDriver), Arc::clone(&plan));
     let store = Store::create_lazy_with_driver(
@@ -519,6 +519,21 @@ fn create_lazy_defers_file_until_first_append() {
     let path = store.path();
     assert!(!path.is_empty());
     assert_eq!(json_lines(Path::new(&path)).len(), 3);
+    store.append_message(&user("again")).expect("append");
+    assert_eq!(
+        json_lines(Path::new(&path)).len(),
+        4,
+        "the published file is the open journal"
+    );
+    let names: Vec<_> = fs::read_dir(Path::new(&path).parent().expect("session dir"))
+        .expect("read session dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        names,
+        [Path::new(&path).file_name().expect("name")],
+        "no temporary name is left"
+    );
     store.close().expect("close");
 }
 
@@ -4278,6 +4293,60 @@ fn a_fork_directory_sync_failure_is_reported_after_the_fork_is_in_place() {
     assert!(fork.forked_from().is_some());
     fork.close().expect("close fork");
     store.close().expect("close");
+}
+
+#[test]
+fn a_crash_after_the_fork_rename_leaves_a_complete_fork_and_no_temporary_file() {
+    use crate::faults::crash::{self, CRASH_EXIT, Role as Part};
+    crash::run(crash::name_of(&|| {}), |part| match part {
+        Part::Child(dir) => {
+            let workspace = dir.join("workspace");
+            fs::create_dir_all(&workspace).expect("create workspace");
+            let store =
+                Store::create(dir.join("root"), test_header(&workspace)).expect("create store");
+            completed_turn(&store, "t1", "first");
+            // The rename has happened and the directory sync has not.
+            let plan = FaultPlan::new(vec![Rule::new(
+                crate::fsops::PublishStep::DirSync,
+                Trigger::Always,
+                Fault::Exit,
+            )]);
+            let _ = super::fork::fork_with(
+                &PosixDriver,
+                Path::new(&store.path()),
+                None,
+                FORK_ID,
+                &crate::faults::publish::FaultyPublishOps::new(plan),
+            );
+        }
+        Part::Parent(dir, status) => {
+            assert_eq!(
+                status.code(),
+                Some(CRASH_EXIT),
+                "child did not crash at the fault"
+            );
+            let directory = list::session_directory(
+                &dir.join("root"),
+                &dir.join("workspace").to_string_lossy(),
+            )
+            .expect("session directory");
+            let source = directory.join("550e8400-e29b-41d4-a716-446655440000.jsonl");
+
+            let fork_path = directory.join(format!("{FORK_ID}.jsonl"));
+            assert!(
+                !session_files(&directory)
+                    .iter()
+                    .any(|name| name.ends_with(".fork-tmp")),
+                "{:?}",
+                session_files(&directory)
+            );
+            let (fork, warnings) = Store::open(&fork_path).expect("the fork is present and opens");
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert!(fork.forked_from().is_some());
+            let (original, _) = Store::open(&source).expect("source");
+            assert_eq!(fork.messages().len(), original.messages().len());
+        }
+    });
 }
 
 #[test]

@@ -1348,7 +1348,11 @@ keeps its own storage root, separate from Pi:
 
 A new session file is created lazily: starting Otto reserves a session, but the
 JSONL file is only written on the first user prompt. Starting and quitting
-without a prompt leaves no session file behind.
+without a prompt leaves no session file behind. The first records are written
+to `<session-id>.jsonl.<hex>.tmp`, synced, and then given the name
+`<session-id>.jsonl`, so a process killed during that write leaves no
+`<session-id>.jsonl`. It can leave the `.tmp` file, which Otto never reads and
+which can be deleted.
 
 ```bash
 ./otto --cwd /path/to/project --continue

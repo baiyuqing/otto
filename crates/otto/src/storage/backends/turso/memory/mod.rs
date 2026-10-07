@@ -35,6 +35,7 @@ pub fn map_storage_error(error: crate::storage::Error) -> Error {
                 ErrorKind::Corrupt
             }
         }
+        DriverError::CommitUnknown => ErrorKind::CommitUnknown,
         DriverError::Corrupt(_) | DriverError::NotAdb(_) => ErrorKind::Corrupt,
         DriverError::Misuse(_) | DriverError::Closed => ErrorKind::Closed,
         _ => ErrorKind::Unavailable,
@@ -218,21 +219,17 @@ impl Store {
     ) -> Result<T> {
         let mut inner = self.locked()?;
         let connection = inner.connection.as_ref().expect("checked by locked");
-        connection
-            .execute_batch("BEGIN IMMEDIATE")
+        let transaction = connection
+            .unchecked_transaction()
             .map_err(map_storage_error)?;
         match body(connection) {
             Ok((value, generation)) => {
-                connection
-                    .execute_batch("COMMIT")
-                    .map_err(map_storage_error)?;
+                transaction.commit().map_err(map_storage_error)?;
                 inner.generation = generation;
                 Ok(value)
             }
-            Err(error) => {
-                let _ = connection.execute_batch("ROLLBACK");
-                Err(error)
-            }
+            // Dropping the transaction rolls it back.
+            Err(error) => Err(error),
         }
     }
 }

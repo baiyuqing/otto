@@ -30,7 +30,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use nix::dir::Dir;
-use nix::fcntl::{OFlag, openat, readlinkat, renameat};
+use nix::fcntl::{OFlag, openat, readlinkat};
 use nix::libc;
 use nix::sys::stat::{FileStat, Mode, SFlag, fstatat};
 use nix::unistd::{UnlinkatFlags, unlinkat};
@@ -349,29 +349,23 @@ impl Root {
         Ok(())
     }
 
-    /// Renames `from` to `to`, both resolved inside the tree without
-    /// following a final symbolic link. `check` receives the resolved
-    /// components of `to` (see [`Self::walk`]) immediately before `renameat`
-    /// and refuses the rename by returning an error. It sees the names the
-    /// destination directory handle was opened through, so a symbolic link
-    /// swapped in after an earlier check on the path cannot bypass it.
-    pub fn rename(
+    /// Pins the directory that holds `name`, resolved inside the tree without
+    /// following a final symbolic link, and returns it with the final
+    /// component. `check` receives the resolved components (see
+    /// [`Self::walk`]) and refuses by returning an error. Operations on the
+    /// returned directory cannot be redirected by a later symbolic-link swap.
+    pub fn open_parent(
         &self,
-        from: &Path,
-        to: &Path,
+        name: &Path,
         check: &dyn Fn(&[OsString]) -> io::Result<()>,
-    ) -> io::Result<()> {
-        self.do_in_root(from, false, &mut |from_fd, from_name| {
-            self.walk(to, false, &mut |to_fd, resolved| {
-                check(resolved)?;
-                renameat(
-                    from_fd,
-                    from_name,
-                    to_fd,
-                    resolved[resolved.len() - 1].as_os_str(),
-                )
-                .map_err(nix_error)
-            })
+    ) -> io::Result<(crate::fsops::Dir, String)> {
+        self.walk(name, false, &mut |dirfd, resolved| {
+            check(resolved)?;
+            let last = resolved[resolved.len() - 1]
+                .to_str()
+                .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "file name is not UTF-8"))?
+                .to_owned();
+            Ok((crate::fsops::Dir::from(dirfd.try_clone_to_owned()?), last))
         })
     }
 
@@ -528,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn mkdir_all_creates_every_level_and_rename_moves_within_the_root() {
+    fn mkdir_all_creates_every_level_and_open_parent_pins_the_directory() {
         let (dir, root) = temp_root();
         root.mkdir_all(Path::new("a/b/c"), Mode::from_bits_truncate(0o755))
             .expect("mkdir_all");
@@ -537,41 +531,41 @@ mod tests {
             .expect("idempotent");
 
         std::fs::write(dir.path().join("a/b/c/from"), "x").expect("write");
-        root.rename(Path::new("a/b/c/from"), Path::new("a/to"), &|_| Ok(()))
-            .expect("rename");
-        assert!(dir.path().join("a/to").exists());
-        root.remove(Path::new("a/to")).expect("remove");
-        assert!(!dir.path().join("a/to").exists());
+        let (parent, name) = root
+            .open_parent(Path::new("a/b/c/from"), &|_| Ok(()))
+            .expect("open_parent");
+        assert_eq!(name, "from");
+        crate::fsops::rename_at(&parent, "from", "to").expect("rename in the pinned directory");
+        assert!(dir.path().join("a/b/c/to").exists());
+        root.remove(Path::new("a/b/c/to")).expect("remove");
+        assert!(!dir.path().join("a/b/c/to").exists());
     }
 
     #[test]
-    fn rename_check_sees_the_destination_after_symlinks_and_can_refuse() {
+    fn open_parent_check_sees_the_destination_after_symlinks_and_can_refuse() {
         let (dir, root) = temp_root();
         std::fs::create_dir_all(dir.path().join("real/inner")).expect("mkdir");
         std::os::unix::fs::symlink("real", dir.path().join("link")).expect("symlink");
-        std::fs::write(dir.path().join("from"), "x").expect("write");
 
         let seen = std::cell::RefCell::new(Vec::new());
         let error = root
-            .rename(
-                Path::new("from"),
-                Path::new("./link/inner/../to"),
-                &|resolved| {
-                    seen.replace(resolved.to_vec());
-                    Err(io::Error::from(ErrorKind::PermissionDenied))
-                },
-            )
+            .open_parent(Path::new("./link/inner/../to"), &|resolved| {
+                seen.replace(resolved.to_vec());
+                Err(io::Error::from(ErrorKind::PermissionDenied))
+            })
             .expect_err("check refuses");
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
         assert_eq!(
             *seen.borrow(),
             [OsString::from("real"), OsString::from("to")]
         );
-        assert!(dir.path().join("from").exists());
-        assert!(!dir.path().join("real/to").exists());
 
-        root.rename(Path::new("from"), Path::new("link/to"), &|_| Ok(()))
-            .expect("rename");
+        let (parent, name) = root
+            .open_parent(Path::new("link/to"), &|_| Ok(()))
+            .expect("open_parent");
+        assert_eq!(name, "to");
+        std::fs::write(dir.path().join("real/from"), "x").expect("write");
+        crate::fsops::rename_at(&parent, "from", "to").expect("rename");
         assert!(dir.path().join("real/to").exists());
     }
 

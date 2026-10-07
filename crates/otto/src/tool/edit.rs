@@ -25,8 +25,9 @@ use tokio_util::sync::CancellationToken;
 use super::read::read_validated_text_file;
 use super::result::decode_strict_json;
 use super::workspace::Workspace;
-use super::write::{DirectorySync, sync_directory, write_file_atomic};
+use super::write::write_file_atomic;
 use super::{Tool, definition, empty_as_none, error_result, preflight_error, text_result};
+use crate::fsops::{PosixPublish, PublishOps};
 
 /// Lines of unchanged context kept on either side of a hunk.
 const DIFF_CONTEXT_LINES: usize = 3;
@@ -126,23 +127,20 @@ fn replacement(old_text: Option<&str>, new_text: Option<&str>) -> Result<EditRep
 /// Replaces text in a workspace file.
 pub struct EditTool<'a> {
     workspace: &'a Workspace,
-    sync_directory: DirectorySync,
+    publish: &'a dyn PublishOps,
 }
 
 impl<'a> EditTool<'a> {
     pub fn new(workspace: &'a Workspace) -> Self {
         Self {
             workspace,
-            sync_directory,
+            publish: &PosixPublish,
         }
     }
 
     #[cfg(test)]
-    fn with_directory_sync(workspace: &'a Workspace, sync_directory: DirectorySync) -> Self {
-        Self {
-            workspace,
-            sync_directory,
-        }
+    fn with_publish_ops(workspace: &'a Workspace, publish: &'a dyn PublishOps) -> Self {
+        Self { workspace, publish }
     }
 
     fn execute_locked(&self, rel_path: &str, edits: &[EditReplacement]) -> ToolResult {
@@ -165,12 +163,9 @@ impl<'a> EditTool<'a> {
             Ok(relative) => relative,
             Err(error) => return error_result(error),
         };
-        if let Err(error) = write_file_atomic(
-            self.workspace,
-            &relative,
-            replaced.as_bytes(),
-            self.sync_directory,
-        ) {
+        if let Err(error) =
+            write_file_atomic(self.workspace, &relative, replaced.as_bytes(), self.publish)
+        {
             return error.into_tool_result();
         }
         text_result(format!("edited {rel_path}\n{diff}"))
@@ -811,11 +806,18 @@ fn common_lines(a: &[&str], b: &[&str]) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::faults::publish::FaultyPublishOps;
+    use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
+    use crate::fsops::PublishStep;
     use crate::tool::testutil::{run, workspace};
     use otto_core::model::{EffectCertainty, OperationDisposition};
 
-    fn fail_directory_sync(_directory: &std::fs::File) -> std::io::Result<()> {
-        Err(std::io::Error::other("injected directory sync failure"))
+    fn publish_fault(step: PublishStep) -> std::sync::Arc<FaultPlan<PublishStep>> {
+        FaultPlan::new(vec![Rule::new(
+            step,
+            Trigger::Always,
+            Fault::Before(FaultError::Os(libc::EIO)),
+        )])
     }
 
     fn sample(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -890,13 +892,16 @@ mod tests {
     async fn directory_sync_failure_after_edit_rename_is_unknown() {
         let (root, path) = sample("before\n");
         let workspace = workspace(root.path());
-        let tool = EditTool::with_directory_sync(&workspace, fail_directory_sync);
+        let plan = publish_fault(PublishStep::DirSync);
+        let ops = FaultyPublishOps::new(plan.clone());
+        let tool = EditTool::with_publish_ops(&workspace, &ops);
 
         let result = run(
             &tool,
             r#"{"path":"sample.txt","old_text":"before","new_text":"after"}"#,
         )
         .await;
+        plan.assert_all_fired();
 
         assert!(result.is_error, "{result:?}");
         let outcome = result
@@ -905,6 +910,33 @@ mod tests {
         assert_eq!(outcome.disposition, OperationDisposition::Error);
         assert_eq!(outcome.effect_certainty, EffectCertainty::Unknown);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "after\n");
+    }
+
+    #[tokio::test]
+    async fn rename_failure_keeps_the_file_and_leaves_no_temporary_file() {
+        let (root, path) = sample("before\n");
+        let workspace = workspace(root.path());
+        let plan = publish_fault(PublishStep::Rename);
+        let ops = FaultyPublishOps::new(plan.clone());
+        let tool = EditTool::with_publish_ops(&workspace, &ops);
+
+        let result = run(
+            &tool,
+            r#"{"path":"sample.txt","old_text":"before","new_text":"after"}"#,
+        )
+        .await;
+
+        plan.assert_all_fired();
+        assert!(result.is_error, "{result:?}");
+        // A plain error result: only a post-rename failure overrides the
+        // outcome to `Unknown`.
+        assert!(result.outcome_override.is_none(), "{result:?}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "before\n");
+        let names: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["sample.txt"]);
     }
 
     #[tokio::test]

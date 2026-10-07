@@ -530,6 +530,11 @@ needs no build and no network.
 `scripts/otto.sh` is not a Node helper but the shell launcher documented in the
 user manual; `scripts/otto.test.mjs` exercises it offline against a fake binary
 and a temporary `otto.env`.
+`scripts/otto-tcp.sh` is the supervisor for the ACP TCP deployment (`otto serve
+--acp-listen` plus an `otto-connect` configured with `[agent] address`);
+`scripts/otto-tcp.test.mjs` starts it offline against a fake `otto` and a fake
+`otto-connect` and covers the argument translation, the `connect.toml` checks,
+restart, stop and status.
 `scripts/pi-session-interop.mjs` covers the optional Pi interoperability probe
 described in the user manual. `scripts/skill-exec-measure.mjs` reports what the
 [sub-agent execution design](specs/2026-09-22-skill-subagent-execution.md) says

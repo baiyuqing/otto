@@ -89,6 +89,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- `edit` match errors now show where to look. When `old_text` matches more
+  than once, the error lists the line numbers of up to 5 matches with the
+  line before and after each match. When `old_text` is not found, the error
+  shows the file lines that best align with `old_text`, ignoring leading and
+  trailing whitespace, and how many `old_text` lines match there. The listing
+  holds only current file lines, never `old_text`, and is capped at 4096
+  bytes. In recorded sessions, 229 of 2825 `edit` calls failed with one of
+  these two errors ([#423](https://github.com/baiyuqing/otto/pull/423)).
+
 - Rust hosts can replace Otto's memory service through `MemoryExtension`,
   without implementing Otto's storage schema. The service-neutral core contract
   and host client enforce declared capabilities, scopes, reviewed preparations,
@@ -215,6 +224,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
   decision ([#401](https://github.com/baiyuqing/otto/pull/401)).
 
 ### Build and CI
+
+- The chat connector end-to-end tests for memory cards, plan approval and
+  approval cancellation run their chat as `telegram` again. Since #421 a
+  card is shown only in the chat named by the approval's presentation
+  origin, which the connector sends only for `telegram` and `feishu`; on the
+  harness default platform `fake` no card was sent and the tests timed out
+  ([#424](https://github.com/baiyuqing/otto/pull/424)).
 
 - `make check-fast` runs its existing change selector directly, without a
   cross-worktree `lockf`/`flock` wrapper. Independent worktrees can start checks

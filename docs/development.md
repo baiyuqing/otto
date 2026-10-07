@@ -1013,10 +1013,34 @@ candidate store; the approval journal retains references and digests only.
 HTTP exposes `/v1/approvals`, per-request decisions/withdrawal and resumable
 changes/events. ACP uses standard permission requests for tool authorization,
 negotiated elicitation for confirmation, and `_otto/approvals/*` for durable
-queues. Connector cards and commands bind the exact request/version; feedback
-returns to the waiting model. MCP calls pass the same native authorization
-boundary; unsupported inbound elicitation modes are not advertised and cannot
-be interpreted as authorization.
+queues. `Request::presentation_origin` is trusted passive-delivery metadata,
+not authority: approval `Scope` still decides who may list or decide a request.
+Parent-turn producers snapshot the current exact `schedule::Origin`; originless
+background requests remain explicitly discoverable but are never inferred as a
+chat broadcast. HTTP notices, ACP metadata and connector cards preserve that
+origin through attach mode, and the connector presents only an exact admitted
+chat match. Connector cards and commands bind the exact request/version;
+feedback returns to waiting models and non-TUI clients, while the TUI deliberately
+has no feedback field. MCP calls pass the same native authorization boundary;
+unsupported inbound elicitation modes are not advertised and cannot be
+interpreted as authorization.
+
+The TUI renders approval presenters as centered modal overlays over the normal
+session shell. It selects Approve by default, closes immediately after either
+successful decision, and presents pending requests one at a time in creation
+order; an undecided `Esc` dismissal remains pending and can be reopened from
+`/approve`.
+
+Memory proposal routing lives in the candidate's internal
+`otto.presentation_origin` metadata until the corresponding approval is
+published. Accepting a candidate removes that internal key before the memory
+record is written. Existing candidates have no origin, remain explicitly
+reviewable, and are not passively broadcast.
+
+External chat notification routes are exact destinations, not session or
+workspace subscriptions. Originless session-open memory notices stay available
+to local and explicit API readers but do not fan out through the connector.
+Wake replies keep their separately documented session-subscriber behavior.
 
 Design: [unified approval](specs/2026-10-04-unified-approval.md).
 

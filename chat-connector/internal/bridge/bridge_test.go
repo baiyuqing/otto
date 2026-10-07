@@ -70,19 +70,24 @@ func TestRestoredBindingsAndBackgroundRepliesRespectAllowlist(t *testing.T) {
 	}
 }
 
-func TestReflectionNoticeReachesOnlyTheChatBoundToItsSession(t *testing.T) {
+func TestReflectionNoticeReachesOnlyItsOriginChat(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, setup{})
+	h := newHarness(t, setup{platform: "telegram"})
+	origin := "chat:telegram:c1"
 	h.say("hello")
 	h.waitSent(1)
-	sid := h.store.Session("fake:c1")
+	sid := h.store.Session("telegram:c1")
 	h.b.chat(h.plat, "c2")
-	if err := h.store.SetSession("fake:c2", "other-session"); err != nil {
+	if err := h.store.SetSession("telegram:c2", "other-session"); err != nil {
 		t.Fatal(err)
 	}
 	callsBefore := slices.Clone(fake.Calls(h.dir))
 	chunk := &acp.SessionUpdateAgentMessageChunk{
-		Meta:    map[string]any{"otto": map[string]any{"reflectionNotice": true, "noticeId": float64(1)}},
+		Meta: map[string]any{"otto": map[string]any{
+			"reflectionNotice":   true,
+			"noticeId":           float64(1),
+			"presentationOrigin": origin,
+		}},
 		Content: acp.TextBlock("reflection: 1 candidate queued"),
 	}
 	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: chunk})
@@ -96,14 +101,37 @@ func TestReflectionNoticeReachesOnlyTheChatBoundToItsSession(t *testing.T) {
 	}
 }
 
-func TestReflectionNoticeWaitsForTheCurrentChatReply(t *testing.T) {
+func TestOriginlessReflectionNoticeIsNotBroadcast(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, setup{})
+	h.say("hello")
+	h.waitSent(1)
+	sid := h.store.Session("fake:c1")
+	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
+		Meta: map[string]any{"otto": map[string]any{
+			"reflectionNotice": true,
+			"noticeId":         float64(1),
+		}},
+		Content: acp.TextBlock("memory proposals are pending"),
+	}})
+	settle()
+	if got := h.plat.texts(); len(got) != 1 {
+		t.Fatalf("originless notice was broadcast: %q", got)
+	}
+}
+
+func TestReflectionNoticeWaitsForTheCurrentChatReply(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, setup{platform: "telegram"})
 	h.say("block")
 	h.waitCall("start:block")
-	sid := h.store.Session("fake:c1")
+	sid := h.store.Session("telegram:c1")
 	chunk := &acp.SessionUpdateAgentMessageChunk{
-		Meta:    map[string]any{"otto": map[string]any{"reflectionNotice": true, "noticeId": float64(2)}},
+		Meta: map[string]any{"otto": map[string]any{
+			"reflectionNotice":   true,
+			"noticeId":           float64(2),
+			"presentationOrigin": "chat:telegram:c1",
+		}},
 		Content: acp.TextBlock("reflection: completed"),
 	}
 	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: chunk})
@@ -125,7 +153,11 @@ func TestReflectionNoticeIsDroppedAfterTheChatSwitchesSessions(t *testing.T) {
 	h.waitCall("start:block")
 	sid := h.store.Session("fake:c1")
 	chunk := &acp.SessionUpdateAgentMessageChunk{
-		Meta:    map[string]any{"otto": map[string]any{"reflectionNotice": true, "noticeId": float64(3)}},
+		Meta: map[string]any{"otto": map[string]any{
+			"reflectionNotice":   true,
+			"noticeId":           float64(3),
+			"presentationOrigin": "chat:fake:c1",
+		}},
 		Content: acp.TextBlock("old session reflection"),
 	}
 	h.b.Update(sid, acp.SessionUpdate{AgentMessageChunk: chunk})

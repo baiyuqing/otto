@@ -560,13 +560,17 @@ impl ToolExecutor for ChildTools {
         if let Err(message) = self.permits_write_tool(call.name, call.arguments) {
             return local(crate::tool::error_result(message).not_started());
         }
-        if let Some((service, mut scope)) = self.registry.approval_binding() {
+        if let Some((service, mut scope, _)) = self.registry.approval_binding() {
             scope.task_id = self.task_id.clone();
             if call.name == "request_approval" {
                 return local(
-                    crate::tool::approval::RequestApproval { service, scope }
-                        .execute_call(call, control.cancellation_token())
-                        .await,
+                    crate::tool::approval::RequestApproval {
+                        service,
+                        scope,
+                        turn_origin: None,
+                    }
+                    .execute_call(call, control.cancellation_token())
+                    .await,
                 );
             }
             if matches!(call.name, "approval_pending" | "approval_revoke") {
@@ -783,6 +787,7 @@ impl Runner {
             child_tools.push(Box::new(crate::tool::approval::RequestApproval {
                 service: service.clone(),
                 scope: scope.clone(),
+                turn_origin: None,
             }));
         }
         let child_registry = Registry::new(child_tools)

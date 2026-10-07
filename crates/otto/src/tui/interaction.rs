@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct View {
+    /// Draw this surface over the normal shell instead of replacing it.
+    pub modal: bool,
     pub title: String,
     pub description: String,
     pub columns: Vec<String>,

@@ -94,6 +94,7 @@ fn request(state: ApprovalState) -> Request {
             task_id: String::new(),
             run_id: String::new(),
         },
+        presentation_origin: String::new(),
         subject: Subject {
             tool_call_id: String::new(),
             source: "bash".to_owned(),

@@ -1,5 +1,5 @@
 use super::super::backend::{Command, Reply, Request};
-use super::super::interaction::{Action, Activation, Field, Row, View};
+use super::super::interaction::{Action, Activation, Row, View};
 use super::{Presenter, Transition};
 use crate::approval::{Request as ApprovalRequest, State as ApprovalState};
 
@@ -10,7 +10,6 @@ pub(crate) struct Approval {
     revision: Option<u64>,
     pending: bool,
     outcome: String,
-    feedback: bool,
     review: bool,
 }
 
@@ -57,7 +56,6 @@ impl Approval {
                     format!("\n{}", request.application_error)
                 }
             ),
-            feedback: true,
             review: matches!(request.subject.source.as_str(), "memory" | "reflection"),
         }
     }
@@ -79,7 +77,6 @@ impl Approval {
             revision: None,
             pending: true,
             outcome: String::new(),
-            feedback: false,
             review: false,
         }
     }
@@ -91,20 +88,18 @@ impl Presenter for Approval {
     }
     fn view(&self) -> View {
         View {
+            modal: true,
             title: self.title.clone(),
             description: self.outcome.clone(),
             document: self.details.clone(),
-            fields: if self.feedback {
-                vec![Field {
-                    id: "feedback".into(),
-                    label: "Feedback (optional)".into(),
-                    max_bytes: 8192,
-                    ..Default::default()
-                }]
-            } else {
-                Vec::new()
-            },
             actions: vec![
+                Action {
+                    id: "allow".into(),
+                    label: if self.review { "Accept" } else { "Approve" }.into(),
+                    enabled: self.pending,
+                    shortcut: Some(if self.review { 'a' } else { 'y' }),
+                    ..Default::default()
+                },
                 Action {
                     id: "deny".into(),
                     label: if self.review { "Reject" } else { "Deny" }.into(),
@@ -112,20 +107,13 @@ impl Presenter for Approval {
                     shortcut: Some(if self.review { 'r' } else { 'n' }),
                     ..Default::default()
                 },
-                Action {
-                    id: "allow".into(),
-                    label: if self.review { "Accept" } else { "Allow" }.into(),
-                    enabled: self.pending,
-                    shortcut: Some(if self.review { 'a' } else { 'y' }),
-                    ..Default::default()
-                },
             ],
-            default_action: Some(if self.review { "allow" } else { "deny" }.into()),
+            default_action: Some("allow".into()),
             ..Default::default()
         }
     }
     fn activate(&mut self, activation: Activation) -> Transition {
-        let Activation::Action { id, fields, .. } = activation else {
+        let Activation::Action { id, .. } = activation else {
             return Transition::Stay;
         };
         if !self.pending || !matches!(id.as_str(), "allow" | "deny") {
@@ -141,16 +129,13 @@ impl Presenter for Approval {
         Transition::Request(Request::Command(Command::DecideApproval {
             id: self.id.clone(),
             allow: id == "allow",
-            feedback: fields.get("feedback").cloned().unwrap_or_default(),
+            feedback: String::new(),
             revision: self.revision,
         }))
     }
     fn receive(&mut self, reply: Reply) -> Transition {
         match reply {
-            Reply::Operation { message, .. } => {
-                self.pending = false;
-                self.outcome = message;
-            }
+            Reply::Operation { .. } => return Transition::Close,
             Reply::ApprovalSnapshot(snapshot) => {
                 if let Some(request) = snapshot
                     .requests

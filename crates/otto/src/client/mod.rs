@@ -168,6 +168,8 @@ pub struct ReflectionRunLog {
 pub struct ReflectionNotice {
     pub id: u64,
     pub text: String,
+    #[serde(default)]
+    pub presentation_origin: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1663,8 +1665,9 @@ mod tests {
             ),
             "/v1/sessions/s1/notices" => json_body(
                 StatusCode::OK,
-                r#"{"notices":[{"id":3,"text":"reflection: done"}],"last":3}"#,
+                r#"{"notices":[{"id":3,"text":"reflection: done","presentation_origin":"chat:telegram:42"}],"last":3}"#,
             ),
+
             _ => json_body(StatusCode::OK, r#"{"name":"lint","result":"removed"}"#),
         });
         assert_eq!(
@@ -1685,6 +1688,7 @@ mod tests {
         );
         let notices = client.reflection_notices("s1", 2).await.unwrap();
         assert_eq!(notices.notices[0].id, 3);
+        assert_eq!(notices.notices[0].presentation_origin, "chat:telegram:42");
         assert_eq!(notices.last, 3);
         assert_eq!(
             request(&seen, 0).1,

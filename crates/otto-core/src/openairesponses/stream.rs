@@ -26,10 +26,13 @@ use crate::provider::{Response, StreamEvent};
 
 use super::protocol::{WireError, WireEvent, finish_reason, valid_arguments};
 
-/// Maximum bytes buffered for one SSE field line, excluding its line ending.
-const MAX_SSE_LINE_BYTES: usize = 64 * 1024;
 /// Maximum bytes buffered across the `data:` fields of one SSE event.
 const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
+/// Maximum bytes buffered for one SSE field line, excluding its line ending.
+/// The Responses stream sends each event's JSON on one `data:` line, so the
+/// line cap must not be lower than the event cap; it only bounds memory for
+/// non-data lines.
+const MAX_SSE_LINE_BYTES: usize = MAX_SSE_EVENT_BYTES + b"data: ".len();
 
 /// Everything the assembler can reject.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -830,7 +833,7 @@ mod tests {
     fn rejects_oversized_events_before_accumulating_the_last_data_line() {
         let mut assembler = StreamAssembler::new();
         let mut sink = |_: StreamEvent| {};
-        let line = vec![b'x'; MAX_SSE_LINE_BYTES - b"data:".len()];
+        let line = vec![b'x'; 64 * 1024];
         let mut accepted = 0usize;
         loop {
             let mut field = b"data:".to_vec();
@@ -851,6 +854,44 @@ mod tests {
         }
         assert_eq!(assembler.data_lines.len(), accepted);
         assert!(assembler.data_bytes <= MAX_SSE_EVENT_BYTES);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn accepts_completed_event_larger_than_64_kib_on_one_line() {
+        let instructions = "x".repeat(200 * 1024);
+        let body = format!(
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\",\"instructions\":\"{instructions}\"}}}}\n\n"
+        );
+        assert!(body.len() > 64 * 1024);
+        for chunk in [0, 4096] {
+            let (result, _) = assemble(body.as_bytes(), chunk);
+            assert!(result.is_ok(), "{result:?}");
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn data_line_limit_matches_event_limit() {
+        let mut sink = |_: StreamEvent| {};
+        let mut assembler = StreamAssembler::new();
+        let mut at_limit = b"data: ".to_vec();
+        at_limit.extend(std::iter::repeat_n(b'x', MAX_SSE_EVENT_BYTES));
+        assert_eq!(assembler.push(&at_limit, &mut sink), Ok(()));
+        assert_eq!(assembler.push(b"\n", &mut sink), Ok(()));
+        assert_eq!(assembler.data_bytes, MAX_SSE_EVENT_BYTES);
+
+        let mut assembler = StreamAssembler::new();
+        // Without the optional space, the line stays within the line cap.
+        let mut over = b"data:".to_vec();
+        over.extend(std::iter::repeat_n(b'x', MAX_SSE_EVENT_BYTES + 1));
+        assert_eq!(assembler.push(&over, &mut sink), Ok(()));
+        assert_eq!(
+            assembler.push(b"\n", &mut sink),
+            Err(StreamError::EventTooLarge {
+                limit: MAX_SSE_EVENT_BYTES
+            })
+        );
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

@@ -12,7 +12,10 @@ pub(crate) struct Reviews {
 
 impl Presenter for Reviews {
     fn covers_approval(&self, request: &crate::approval::Request) -> bool {
-        request.subject.source == "memory"
+        (!self.loaded && request.subject.source == "memory" && request.is_human_pending())
+            || self.rows.iter().any(|candidate| {
+                crate::approval::memory::is_human_pending(candidate, std::slice::from_ref(request))
+            })
     }
     fn key(&self) -> String {
         "reviews".into()

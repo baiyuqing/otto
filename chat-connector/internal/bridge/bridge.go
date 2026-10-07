@@ -291,6 +291,7 @@ type Command struct {
 // advertises; TestMenuCommandsAreHandled checks it.
 var Commands = []Command{
 	{"auto", "Session approval mode: /auto [on|off]", false},
+	{"permissions", "Inspect approval policy or choose policy/reviewer", false},
 	{"new", "Start a new session on the next message", false},
 	{"stop", "Cancel the running turn and clear the queue", false},
 	{"steer", "Guide the active task: /steer <guidance>", false},
@@ -346,6 +347,10 @@ func (b *Bridge) deliver(m Message) {
 	text := strings.TrimSpace(m.Text)
 	if arg, ok := commandArg(text, "auto"); ok {
 		c.cmdAuto(m, arg)
+		return
+	}
+	if arg, ok := commandArg(text, "permissions"); ok {
+		c.cmdPermissions(m, arg)
 		return
 	}
 	if c.cmdManage(m, text) {
@@ -618,11 +623,13 @@ type chat struct {
 	reply              strings.Builder
 	brk                bool // a tool call followed text; the next text starts a paragraph
 	// proposed is set when the turn called remember or forget.
-	proposed    bool
-	memoryMu    sync.Mutex             // serializes card refreshes and memory reviews
-	memoryCards map[string]*memoryCard // request token -> original session/candidate
-	manageMu    sync.Mutex
-	change      *pendingChange // one connector-bound config confirmation
+	proposed          bool
+	memoryMu          sync.Mutex             // serializes card refreshes and memory reviews
+	memoryCards       map[string]*memoryCard // request token -> original session/candidate
+	manageMu          sync.Mutex
+	change            *pendingChange // one connector-bound config confirmation
+	approvalStatusSID string
+	approvalStatuses  map[string]agent.SharedApproval
 }
 
 type pendingChange struct {

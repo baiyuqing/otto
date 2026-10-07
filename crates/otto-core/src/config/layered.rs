@@ -206,9 +206,11 @@ impl Merged {
     }
 
     pub fn file(&self) -> Result<File, ConfigError> {
-        Value::Table(self.values.clone())
+        let file: File = Value::Table(self.values.clone())
             .try_into()
-            .map_err(|_| ConfigError::new("invalid merged configuration"))
+            .map_err(|_| ConfigError::new("invalid merged configuration"))?;
+        file.approval.validate()?;
+        Ok(file)
     }
 
     /// Explain never exposes env/header bindings, including their templates.

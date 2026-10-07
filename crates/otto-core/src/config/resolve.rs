@@ -164,6 +164,7 @@ fn resolve_impl(
     credentials: bool,
 ) -> Result<Runtime, ConfigError> {
     let explicit_profile = !overrides.profile.is_empty();
+    file.approval.validate()?;
     let mut selected_profile = overrides.profile.clone();
     if selected_profile.is_empty() {
         selected_profile = env_value(env, "OTTO_PROFILE");

@@ -85,6 +85,12 @@ impl TaskControl {
     pub(crate) fn is_active(&self) -> bool {
         self.lock().active.is_some()
     }
+    pub(crate) fn authorization_scope(&self) -> Option<String> {
+        self.lock()
+            .active
+            .as_ref()
+            .map(|active| active.scope.clone())
+    }
 
     /// Installs the durable turn-queue journal. A later call is ignored.
     pub(crate) fn set_turn_queue_journal(&self, journal: Arc<dyn Mailbox>) {

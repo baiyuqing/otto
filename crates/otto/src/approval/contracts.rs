@@ -16,6 +16,21 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ApprovalCounts {
+    pub human_pending: usize,
+    pub reviewing: usize,
+    pub application_failed: usize,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApprovalActivity {
+    pub requests: Vec<Request>,
+    pub cursor: i64,
+    pub reviewing: Vec<Request>,
+    pub recent_decisions: Vec<Request>,
+    pub counts: ApprovalCounts,
+}
+
 /// Constructed by admitted native/HTTP/ACP/chat handlers, never model arguments.
 #[derive(Debug, Clone)]
 pub struct Actor {

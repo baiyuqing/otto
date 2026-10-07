@@ -243,7 +243,7 @@ const WORKSPACE_EXECUTORS: &[&str] = &[
 /// `env` entries would take every command out of the sandbox, so
 /// [`excluded_command_entry`] does not derive an entry from them; a user can
 /// still write one in the configuration file.
-const COMMAND_RUNNERS: &[&str] = &[
+pub(crate) const COMMAND_RUNNERS: &[&str] = &[
     "sh",
     "bash",
     "zsh",

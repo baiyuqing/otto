@@ -38,6 +38,9 @@ pub trait PromptRunner: Send + Sync {
     /// Maps its own cancellation to an outcome; the worker decides whether to
     /// record it.
     async fn run(&self, workspace: &str, text: &str, cancel: &CancellationToken) -> RunOutcome;
+    async fn run_item(&self, item: &Item, text: &str, cancel: &CancellationToken) -> RunOutcome {
+        self.run(&item.workspace, text, cancel).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -190,7 +193,7 @@ async fn run_one(
     let started = std::time::Instant::now();
     let text = run_text(&item, Utc::now());
     let run_cancel = cancel.child_token();
-    let run = role.runner.run(&item.workspace, &text, &run_cancel);
+    let run = role.runner.run_item(&item, &text, &run_cancel);
     tokio::pin!(run);
     let timeout = tokio::time::sleep(RUN_TIMEOUT);
     tokio::pin!(timeout);

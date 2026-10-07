@@ -19,7 +19,7 @@ the runtime, session history, and default memory storage.
 - **Choose where you work.** Terminal TUI, REPL, headless scripts, browser UI,
   and Telegram/Feishu through `otto-connect`. Connect to `otto serve` to share
   sessions across the terminal, browser, and chats.
-- **Keep useful context.** Persistent sessions, memory that requires human
+- **Keep useful context.** Persistent sessions, memory with shared approval
   review, reusable skills and plugin packages, and selective reflection after completed work.
 - **Carry work forward.** Workspace tools, web fetch and search, and MCP integrations, bounded
   sub-agents, timers, durable workflows with approvals and restart recovery, and
@@ -190,8 +190,8 @@ The selected model and OpenAI-compatible endpoint must support image input.
   `/timers cancel <id>` stops one.
 - [Scheduled deliveries](docs/user-manual.md#schedule): `schedule` sends a
   message or the reply of a prompt run at a later time, once or daily, to the
-  chat, terminal or browser UI that asked for it. A prompt run needs the
-  user's approval when it is created.
+  chat, terminal or browser UI that asked for it. A prompt run needs authorization
+  through the session's approval policy when it is created.
 - [Local server](docs/user-manual.md#agent-server): `otto serve` exposes an
   authenticated API over a Unix socket or a loopback TCP port. The browser UI
   lives in [otto-plus](https://github.com/baiyuqing/otto-plus).
@@ -356,9 +356,14 @@ never retried automatically.
   token persistence. The Unix socket relies on file permissions for access
   control.
 
-Sessions default to **AUTO** approval: requests and automatic decisions remain
-visible and recorded. `/auto off` selects manual approval; `/auto on` restores
-AUTO for this session. The preference survives resume. Terminal and Web status
+Sessions default to **AUTO** smart approval: confined work runs directly; requests
+for additional authority receive an isolated review against your task and the
+exact operation. User questions, explicit checkpoints and security permission
+changes still wait for you. Reviews and decisions are recorded; a review shows
+no approval card or modal until it needs your decision. `/auto off` selects
+manual approval; `/auto on` restores AUTO for this session. `/permissions`
+shows the policy and reviewer; `/permissions policy never` rejects additional
+authority without prompting. These settings survive resume. Terminal and Web status
 bars show the mode; Telegram and Feishu support the same commands, and Telegram
 also offers mode buttons. See [unified approvals](docs/user-manual.md#unified-approvals).
 

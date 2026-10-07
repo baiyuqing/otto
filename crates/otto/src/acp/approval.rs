@@ -15,6 +15,110 @@ use tokio_util::sync::CancellationToken;
 use super::Connection;
 use crate::app::ApprovalDecision as Decision;
 
+/// A canonical permission stays bound to the exact displayed subject/revision.
+/// Policy changes cancel its old dialog; only a fresh human-required snapshot
+/// may open the next dialog or accept a reply.
+pub(super) async fn shared_request_permission(
+    connection: &Connection,
+    controller: &crate::app::Controller,
+    initial: &crate::approval::Request,
+    prompt: &crate::app::ApprovalRequest,
+    cancel: &CancellationToken,
+) -> Decision {
+    let service = controller.approval_service();
+    let mut changes = service.changes();
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(200));
+    loop {
+        let request = match service
+            .wait_actionable(&initial.id, &initial.scope, cancel)
+            .await
+        {
+            Ok(request) => request,
+            Err(_) => return Decision::Deny,
+        };
+        if cancel.is_cancelled() {
+            return Decision::Cancelled;
+        }
+        if !request.is_human_pending() {
+            return if request.state == crate::approval::State::Approved {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            };
+        }
+        let input = serde_json::from_str::<Value>(&request.subject.details).unwrap_or(Value::Null);
+        let command = input
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                if request.subject == initial.subject {
+                    &prompt.command
+                } else {
+                    &request.subject.details
+                }
+            });
+        let read_path = input
+            .get("read_path")
+            .and_then(Value::as_str)
+            .unwrap_or(&prompt.read_path);
+        let mut params = permission_params(
+            &controller.info().session_id,
+            &request.subject.tool_call_id,
+            command,
+            read_path,
+            &request.reason,
+        );
+        params["_meta"] = json!({"otto":{"approvalId":request.id,"revision":request.revision,
+            "subjectVersion":request.subject.version}});
+        let (id, mut reply) = connection.send_request("session/request_permission", params);
+        let answer = loop {
+            tokio::select! {
+                () = cancel.cancelled() => break None,
+                frame = &mut reply => break Some(frame),
+                _ = changes.changed() => {},
+                _ = poll.tick() => {},
+            }
+            let current = match service.get(
+                &request.id,
+                &request.scope.workspace,
+                Some(&request.scope.session_id),
+            ) {
+                Ok(current) => current,
+                Err(_) => break None,
+            };
+            if current.state != crate::approval::State::Pending
+                || current.revision != request.revision
+                || current.subject != request.subject
+            {
+                break None;
+            }
+        };
+        connection.forget_request(id);
+        let Some(answer) = answer else {
+            connection.send(
+                json!({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":id}}),
+            );
+            continue;
+        };
+        let decision = answer.map_or(Decision::Deny, |frame| decide(&frame));
+        match service.decide(
+            &request.id,
+            &request.scope,
+            request.revision,
+            decision == Decision::Allow,
+            "",
+            &crate::approval::Actor::local("acp-permission"),
+        ) {
+            Ok(request) if request.state == crate::approval::State::Approved => {
+                return Decision::Allow;
+            }
+            Ok(_) => return Decision::Deny,
+            Err(crate::approval::Error::Conflict) => continue,
+            Err(_) => return Decision::Deny,
+        }
+    }
+}
+
 // Option IDs are opaque. Keep the legacy ID; the kind and label describe persistence.
 const ALLOW_ONCE: &str = "allow_once";
 const REJECT_ONCE: &str = "reject_once";

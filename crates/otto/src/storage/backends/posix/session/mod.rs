@@ -27,6 +27,22 @@ use otto_core::session::{Header, ListResult, SessionInfo, Warning};
 const MAX_VALIDATED_SESSION_ROOT_ENTRIES: usize = 10_000;
 
 impl SessionHandle for Store {
+    fn custom_data(&self, custom_type: &str) -> Option<String> {
+        let state = self.state.lock().ok()?;
+        let (index, _) = otto_core::session::context::index_context_entries(&state.entries).ok()?;
+        let path = otto_core::session::context::active_context_path(
+            &state.entries,
+            state.leaf_id.as_deref().unwrap_or(""),
+            &index,
+        )
+        .ok()?;
+        path.iter().rev().find_map(|entry| {
+            let custom = entry.custom.as_ref()?;
+            (custom.custom_type == custom_type)
+                .then(|| custom.data.as_ref().map(|data| data.get().to_owned()))
+                .flatten()
+        })
+    }
     fn header(&self) -> Header {
         Store::header(self)
     }
@@ -81,6 +97,37 @@ impl PosixSessionRepository {
 }
 
 impl SessionRepository for PosixSessionRepository {
+    fn custom_data_for(
+        &self,
+        root: &Path,
+        workspace: &str,
+        session_id: &str,
+        custom_type: &str,
+    ) -> Option<String> {
+        if !crate::session::is_session_id(session_id) {
+            return None;
+        }
+        let path = session_directory(root, workspace)
+            .ok()?
+            .join(format!("{session_id}.jsonl"));
+        let (info, _) = inspect(&path).ok()?;
+        if info.id != session_id {
+            return None;
+        }
+        self.custom_data(&path.to_string_lossy(), custom_type)
+    }
+    fn custom_data(&self, reference: &str, custom_type: &str) -> Option<String> {
+        let (entries, _) = Store::read_entries(reference).ok()?;
+        let (index, _) = otto_core::session::context::index_context_entries(&entries).ok()?;
+        let leaf = entries.last().map_or("", |entry| entry.id.as_str());
+        let path = otto_core::session::context::active_context_path(&entries, leaf, &index).ok()?;
+        path.iter().rev().find_map(|entry| {
+            let custom = entry.custom.as_ref()?;
+            (custom.custom_type == custom_type)
+                .then(|| custom.data.as_ref().map(|data| data.get().to_owned()))
+                .flatten()
+        })
+    }
     fn fork(
         &self,
         reference: &str,

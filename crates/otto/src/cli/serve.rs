@@ -2280,6 +2280,7 @@ mod tests {
             decision: None,
             application: crate::approval::ApplicationState::Applying,
             application_error: String::new(),
+            review: None,
         }
     }
 

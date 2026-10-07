@@ -61,6 +61,7 @@ type process struct {
 	memoryReview     bool
 	approvalDialogue bool
 	sharedApprovals  bool
+	approvalPolicy   bool
 	channelContext   bool
 	taskControl      bool
 	// endedAt and waitErr are valid after exited is closed.
@@ -230,6 +231,7 @@ func (a *Agent) initialize(ctx context.Context, p *process) (*process, error) {
 	otto, _ := resp.AgentCapabilities.Meta["otto"].(map[string]any)
 	p.approvalDialogue, _ = otto["approvalDialogue"].(bool)
 	p.sharedApprovals = advertisesSharedApprovals(resp.AgentCapabilities.Meta)
+	p.approvalPolicy = advertisesApprovalPolicy(resp.AgentCapabilities.Meta)
 	p.channelContext, _ = otto["channelContext"].(bool)
 	p.taskControl, _ = otto["taskControl"].(bool)
 	return p, nil

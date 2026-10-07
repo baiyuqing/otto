@@ -13,7 +13,7 @@
 模型请求会发送给所选服务；“本地优先”指运行时、会话历史和默认记忆存储位于本地，并不表示模型在本地运行。
 
 - **多种入口：** 终端中的全屏 TUI、REPL 和脚本模式，独立的 [otto-plus](https://github.com/baiyuqing/otto-plus) Web UI，以及通过 `otto-connect` 接入的 Telegram、飞书。
-- **持续协作：** 持久化会话、需人工审核的记忆候选、可复用 Skills、按需或自动反思、有边界的子代理、定时器和可恢复的持久化 workflow。
+- **持续协作：** 持久化会话、统一审批的记忆候选、可复用 Skills、按需或自动反思、有边界的子代理、定时器和可恢复的持久化 workflow。
 - **限定访问范围：** 文件工具限制在工作区内；macOS 默认通过 Seatbelt 沙箱执行 Shell 命令。
 
 ## 代码架构
@@ -174,7 +174,9 @@ provider 仅支持 `openai-compatible` 和 `chatgpt`。
 Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏。
 会话文件可能包含工作区文件、提示词、图片和工具结果，应按敏感数据处理。
 
-记忆候选需要人工审核；反思生成的 Skills 会经过证据与安全检查后写入，并可用 `/skill revert` 撤销。当前不支持插件、自动发现项目配置或嵌套子代理。
+会话默认使用 **AUTO** 智能审批：工作区内的受限操作直接执行，额外权限请求依据原始用户任务和具体操作接受独立审核。明确的人工检查点、问题和安全权限修改仍需你决定；审核期间不弹审批卡片或窗口。`/auto off` 切换人工审批，`/auto on` 恢复 AUTO；`/permissions policy never` 无提示拒绝额外权限，且不关闭沙箱。设置在恢复会话后保留。升级后需重启 Otto、`otto serve` 和连接器；审批数据库升级到版本 4，降级二进制前须恢复升级备份。详见[统一审批](docs/user-manual.md#unified-approvals)。
+
+反思生成的 Skills 会经过证据与安全检查后写入，并可用 `/skill revert` 撤销。当前不支持嵌套子代理。
 其他限制见[英文 README](README.md#safety-and-limitations)，完整访问规则见
 [工具与安全](docs/user-manual.md#tools-and-safety)。
 

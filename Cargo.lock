@@ -2346,6 +2346,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "nix",
+ "otto",
  "otto-core",
  "pulldown-cmark",
  "ratatui",

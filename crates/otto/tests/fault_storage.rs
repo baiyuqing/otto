@@ -108,7 +108,9 @@ fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
         task_id: String::new(),
         run_id: String::new(),
     };
-    service.set_auto_mode(&scope, false).unwrap();
+    service
+        .set_mode(&scope, otto::approval::ApprovalMode::Manual)
+        .unwrap();
     let listed = store.clone();
     Some(Handle {
         write: Box::new(move |n| {

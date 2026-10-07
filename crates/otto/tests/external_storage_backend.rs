@@ -83,7 +83,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let native = Storage::default();
         let service = approval::Service::in_memory().unwrap();
-        service.set_auto_mode(&proposal().scope, false).unwrap();
+        service
+            .set_mode(&proposal().scope, otto::approval::ApprovalMode::Manual)
+            .unwrap();
         let expected = service.create(proposal()).unwrap();
         let mut next = expected.clone();
         next.state = approval::State::Withdrawn;
@@ -442,7 +444,9 @@ mod tests {
         let service =
             approval::Service::from_store(storage.approvals(&home.join("unused.db")).unwrap())
                 .unwrap();
-        service.set_auto_mode(&proposal().scope, false).unwrap();
+        service
+            .set_mode(&proposal().scope, otto::approval::ApprovalMode::Manual)
+            .unwrap();
         let request = service.create(proposal()).unwrap();
         let events = service
             .events("/contract", Some("memory:contract"), 0)
@@ -503,7 +507,9 @@ mod tests {
         let home = temp.path().join("home");
         std::fs::create_dir(&home).unwrap();
         let service = approval::Service::open(&home.join(".otto/approvals.db")).unwrap();
-        service.set_auto_mode(&proposal().scope, false).unwrap();
+        service
+            .set_mode(&proposal().scope, otto::approval::ApprovalMode::Manual)
+            .unwrap();
         let expected = service.create(proposal()).unwrap();
         let events = service.events("/contract", None, 0).unwrap();
         drop(service);

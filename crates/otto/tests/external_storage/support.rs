@@ -10,7 +10,7 @@ use std::sync::{
 use async_trait::async_trait;
 use otto::approval::migration::ApprovalRecord;
 use otto::approval::repository::{ApprovalStore, Claim, ClaimChange};
-use otto::approval::{self, Change, Request, Scope, Snapshot, State};
+use otto::approval::{self, ApprovalMode, Change, Request, Scope, Snapshot, State};
 use otto::runtime::storage::backend::{MigrationContext, PreparedImport};
 use otto::runtime::storage::{
     Endpoint, NamespaceIdentity, RepositoryFactory, RepositoryRequirements, StorageEndpoint,
@@ -176,6 +176,23 @@ impl JsonStore {
                 })
         })
     }
+    /// The persisted mode of one scope; AUTO is the default, as in the SQL
+    /// backend's missing row.
+    fn mode_in(data: &Data, scope: &Scope) -> ApprovalMode {
+        Self::values(data)
+            .into_iter()
+            .find_map(|value| match value {
+                ApprovalRecord::Mode {
+                    workspace,
+                    session_id,
+                    mode,
+                } if workspace == scope.workspace && session_id == scope.session_id => {
+                    Some(ApprovalMode::from(mode))
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
     fn ready(&self) -> bool {
         let data = self.data.lock().unwrap();
         data.initialized || data.sealed
@@ -183,29 +200,25 @@ impl JsonStore {
 }
 
 impl ApprovalStore for JsonStore {
-    fn mode(&self, scope: &Scope) -> approval::Result<Option<bool>> {
+    fn mode(&self, scope: &Scope) -> approval::Result<Option<ApprovalMode>> {
         Ok(Self::values(&self.data.lock().unwrap())
             .into_iter()
             .find_map(|value| match value {
                 ApprovalRecord::Mode {
                     workspace,
                     session_id,
-                    automatic,
+                    mode,
                 } if workspace == scope.workspace && session_id == scope.session_id => {
-                    Some(automatic)
+                    Some(mode.into())
                 }
                 _ => None,
             }))
     }
-    fn set_mode(&self, scope: &Scope, automatic: bool) -> approval::Result<()> {
+    fn set_mode(&self, scope: &Scope, mode: ApprovalMode) -> approval::Result<()> {
         self.mutate(|data| {
             Self::put(
                 data,
-                ApprovalRecord::Mode {
-                    workspace: scope.workspace.clone(),
-                    session_id: scope.session_id.clone(),
-                    automatic,
-                },
+                ApprovalRecord::mode(scope.workspace.clone(), scope.session_id.clone(), mode),
             )
         })
     }
@@ -326,26 +339,67 @@ impl ApprovalStore for JsonStore {
             return Err(approval::Error::Conflict);
         }
         self.mutate(|data| {
-            let current = Self::requests(data).into_iter().find(|r| r.id == expected.id).ok_or(approval::Error::NotFound)?;
-            if current != *expected { return Err(approval::Error::Conflict) }
-            if automatic && Self::values(data).into_iter().any(|value| matches!(value, ApprovalRecord::Mode { workspace, session_id, automatic: false } if workspace == expected.scope.workspace && session_id == expected.scope.session_id)) { return Err(approval::Error::Conflict) }
+            let current = Self::requests(data)
+                .into_iter()
+                .find(|r| r.id == expected.id)
+                .ok_or(approval::Error::NotFound)?;
+            if current != *expected {
+                return Err(approval::Error::Conflict);
+            }
+            if automatic && !Self::mode_in(data, &expected.scope).decides(expected) {
+                return Err(approval::Error::Conflict);
+            }
             match claim {
                 ClaimChange::None => (),
                 ClaimChange::Start(claim) => {
-                    if Self::claim_in(data, &expected.id).is_some() { return Err(approval::Error::Conflict) }
-                    data.claims.insert(expected.id.clone(), StoredClaim::from(&claim));
+                    if Self::claim_in(data, &expected.id).is_some() {
+                        return Err(approval::Error::Conflict);
+                    }
+                    data.claims
+                        .insert(expected.id.clone(), StoredClaim::from(&claim));
                 }
                 ClaimChange::Finish(owner) => {
-                    if Self::claim_in(data, &expected.id).is_none_or(|claim| claim.owner != owner) { return Err(approval::Error::Conflict) }
+                    if Self::claim_in(data, &expected.id).is_none_or(|claim| claim.owner != owner) {
+                        return Err(approval::Error::Conflict);
+                    }
                 }
             }
-            let subject_key = Self::values(data).into_iter().find_map(|value| match value { ApprovalRecord::Request { subject_key, request } if approval::codec::decode_persisted(&request).unwrap().id == expected.id => Some(subject_key), _ => None }).unwrap();
+            let subject_key = Self::values(data)
+                .into_iter()
+                .find_map(|value| match value {
+                    ApprovalRecord::Request {
+                        subject_key,
+                        request,
+                    } if approval::codec::decode_persisted(&request).unwrap().id == expected.id => {
+                        Some(subject_key)
+                    }
+                    _ => None,
+                })
+                .unwrap();
             let record = &data.records[&format!("request:{}", expected.id)];
-            let original = match serde_json::from_slice::<ApprovalRecord>(&record.payload).unwrap() { ApprovalRecord::Request { request, .. } => request, _ => unreachable!() };
+            let original = match serde_json::from_slice::<ApprovalRecord>(&record.payload).unwrap()
+            {
+                ApprovalRecord::Request { request, .. } => request,
+                _ => unreachable!(),
+            };
             let body = approval::codec::merge_persisted(&original, next)?;
-            Self::put(data, ApprovalRecord::Request { subject_key, request: body.clone() })?;
-            let sequence = Self::events_from(data).last().map_or(1, |event| event.sequence + 1);
-            Self::put(data, ApprovalRecord::Event { sequence, request: body })?;
+            Self::put(
+                data,
+                ApprovalRecord::Request {
+                    subject_key,
+                    request: body.clone(),
+                },
+            )?;
+            let sequence = Self::events_from(data)
+                .last()
+                .map_or(1, |event| event.sequence + 1);
+            Self::put(
+                data,
+                ApprovalRecord::Event {
+                    sequence,
+                    request: body,
+                },
+            )?;
             Ok(next.clone())
         })
     }

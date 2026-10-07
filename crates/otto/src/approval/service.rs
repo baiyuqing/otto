@@ -294,23 +294,28 @@ impl Service {
         self.changes.send_modify(|v| *v = v.wrapping_add(1));
     }
 
-    /// A missing preference means AUTO for a session; workspace-only requests,
-    /// independent tasks and every request that is not a bounded authorization
-    /// still require manual approval.
-    pub fn auto_mode(&self, scope: &Scope) -> Result<bool> {
-        if scope.session_id.is_empty() || !scope.task_id.is_empty() {
-            return Ok(false);
+    /// The session policy for `scope`. A missing preference means AUTO for a
+    /// session. A workspace-only request and, under AUTO, an independent task
+    /// are never decided by a session policy and report MANUAL; YOLO reaches
+    /// the session's own child tasks.
+    pub fn mode(&self, scope: &Scope) -> Result<ApprovalMode> {
+        if scope.session_id.is_empty() {
+            return Ok(ApprovalMode::Manual);
         }
-        Ok(self.store.mode(scope)?.unwrap_or(true))
+        let mode = self.store.mode(scope)?.unwrap_or_default();
+        if !scope.task_id.is_empty() && mode != ApprovalMode::Yolo {
+            return Ok(ApprovalMode::Manual);
+        }
+        Ok(mode)
     }
 
-    pub fn set_auto_mode(&self, scope: &Scope, automatic: bool) -> Result<()> {
+    pub fn set_mode(&self, scope: &Scope, mode: ApprovalMode) -> Result<()> {
         if scope.workspace.is_empty() || scope.session_id.is_empty() || !scope.task_id.is_empty() {
             return Err(Error::Invalid("approval mode requires a session"));
         }
-        self.store.set_mode(scope, automatic)?;
+        self.store.set_mode(scope, mode)?;
         self.changed();
-        if automatic {
+        if mode != ApprovalMode::Manual {
             for request in self
                 .snapshot(&scope.workspace, Some(&scope.session_id))?
                 .requests
@@ -330,18 +335,23 @@ impl Service {
 
     fn auto_approve(&self, id: &str, scope: &Scope) -> Result<Request> {
         self.mutate_checked(id, scope, true, |request| {
-            if request.state != State::Pending
-                || !request.auto_decidable()
-                || !self.auto_mode(scope)?
-            {
+            let mode = self.mode(scope)?;
+            if request.state != State::Pending || !mode.decides(request) {
                 return Ok(false);
             }
             Self::record_decision(
                 request,
                 request.revision,
                 true,
-                "Automatically approved in AUTO mode.",
-                &Actor::local("auto-mode"),
+                match mode {
+                    ApprovalMode::Yolo => "Automatically approved in YOLO mode.",
+                    _ => "Automatically approved in AUTO mode.",
+                },
+                &Actor::local(if mode == ApprovalMode::Yolo {
+                    "yolo-mode"
+                } else {
+                    "auto-mode"
+                }),
                 false,
             )
         })
@@ -663,8 +673,7 @@ impl Service {
                     Ok(request) => request,
                     Err(Error::Conflict)
                         if self.store.load(id)? != expected
-                            || (automatic && !expected.auto_decidable())
-                            || (automatic && !self.auto_mode(scope)?) =>
+                            || (automatic && !self.mode(scope)?.decides(&expected)) =>
                     {
                         continue;
                     }
@@ -733,10 +742,10 @@ mod tests {
         events: Mutex<Vec<Change>>,
     }
     impl ApprovalStore for TestStore {
-        fn mode(&self, _: &Scope) -> Result<Option<bool>> {
-            Ok(Some(false))
+        fn mode(&self, _: &Scope) -> Result<Option<ApprovalMode>> {
+            Ok(Some(ApprovalMode::Manual))
         }
-        fn set_mode(&self, _: &Scope, _: bool) -> Result<()> {
+        fn set_mode(&self, _: &Scope, _: ApprovalMode) -> Result<()> {
             Ok(())
         }
         fn create(&self, _: &str, request: &Request) -> Result<(Request, bool)> {

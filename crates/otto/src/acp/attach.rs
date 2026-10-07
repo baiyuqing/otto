@@ -233,7 +233,9 @@ impl Relay {
         session_id: &str,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, agent_client_protocol_schema::v1::Error> {
-        use super::command::{Command, compaction_text, context_text};
+        use super::command::{
+            Command, compaction_text, context_text, model_switched_text, model_text,
+        };
         let command = match command {
             Command::Reflect { focus } => {
                 return self.reflect_runs_command(session_id, focus, cancel).await;
@@ -282,6 +284,31 @@ impl Relay {
                     .compact(session_id, focus)
                     .await
                     .map(|done| done.map(|done| compaction_text(&done))),
+                Command::Model { profile } => {
+                    if profile.is_empty() {
+                        let available = self.client.profiles().await?;
+                        return self.client.session(session_id).await.map(|info| {
+                            Some(model_text(
+                                &info.profile,
+                                &info.provider,
+                                &info.model,
+                                &info.thinking,
+                                &available,
+                            ))
+                        });
+                    }
+                    self.client
+                        .switch_profile(session_id, profile)
+                        .await
+                        .map(|info| {
+                            Some(model_switched_text(
+                                &info.profile,
+                                &info.provider,
+                                &info.model,
+                                &info.thinking,
+                            ))
+                        })
+                }
                 Command::Reflect { .. }
                 | Command::Skill { .. }
                 | Command::Steer { .. }

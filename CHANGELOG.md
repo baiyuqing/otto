@@ -75,6 +75,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- `edit` match errors now show where to look. When `old_text` matches more
+  than once, the error lists the line numbers of up to 5 matches with the
+  line before and after each match. When `old_text` is not found, the error
+  shows the file lines that best align with `old_text`, ignoring leading and
+  trailing whitespace, and how many `old_text` lines match there. The listing
+  holds only current file lines, never `old_text`, and is capped at 4096
+  bytes. In recorded sessions, 229 of 2825 `edit` calls failed with one of
+  these two errors.
+
 - Stop a sub-agent task from the model side with the new `agent_cancel` tool:
   it takes a task id or name and cancels that task, the same registry call
   `/task cancel`, `POST /v1/sessions/{id}/tasks/{task_id}/cancel` and ACP

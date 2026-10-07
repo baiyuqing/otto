@@ -34,7 +34,8 @@ use otto_core::openaicompat::protocol::{build_request, serialized_request_size};
 use otto_core::openaicompat::stream::StreamAssembler;
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
-    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, Response, StreamSink,
+    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, Response, StreamEvent,
+    StreamSink,
 };
 
 use crate::gourl::{self, Encoding};
@@ -58,6 +59,32 @@ const REDACTED: &str = "[REDACTED]";
 /// Largest `GET /models` body read. A larger catalog is an error rather than
 /// an unbounded buffer.
 const MAX_MODELS_BODY: usize = 8 << 20;
+
+/// Attempts for a completion whose connection could not be established: the
+/// request never left Otto, so trying again cannot duplicate provider work.
+const CONNECT_RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
+    max_attempts: 4,
+    base: Duration::from_secs(1),
+    max: Duration::from_secs(4),
+    retry_after_cap: Duration::from_secs(4),
+};
+/// `Retry` event reason for a connection that could not be established.
+const CONNECT_RETRY_REASON: &str = "connection failed";
+
+// Fixed exponential backoff (1, 2, 4 s); no randomness dependency.
+struct Backoff;
+impl crate::retry::JitterSource for Backoff {
+    fn full_jitter(&mut self, upper_bound: Duration) -> Duration {
+        upper_bound
+    }
+}
+
+/// How one attempt failed: before the request was sent (no connection), or
+/// at any later point.
+enum AttemptError {
+    NotSent(ProviderError),
+    Sent(ProviderError),
+}
 
 /// A usable client: the base URL passed validation and the HTTP client built.
 struct Ready {
@@ -212,8 +239,20 @@ impl Client {
         payload: &[u8],
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
-    ) -> Result<Response, ProviderError> {
-        check_running(control)?;
+    ) -> Result<Response, AttemptError> {
+        check_running(control).map_err(AttemptError::Sent)?;
+        self.attempt_sent(ready, payload, emit, control).await
+    }
+
+    /// [`Self::attempt`] after the stop check; a connection that could not
+    /// be established is [`AttemptError::NotSent`].
+    async fn attempt_sent(
+        &self,
+        ready: &Ready,
+        payload: &[u8],
+        emit: StreamSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<Response, AttemptError> {
         let send = ready
             .http
             .post(format!("{}/chat/completions", ready.base_url))
@@ -222,17 +261,33 @@ impl Client {
             .header("Accept", "text/event-stream")
             .body(payload.to_vec())
             .send();
-        let response = match await_control(control, send).await? {
+        let response = match await_control(control, send)
+            .await
+            .map_err(AttemptError::Sent)?
+        {
             Ok(response) => response,
             Err(error) => {
-                check_running(control)?;
-                return Err(ProviderError::Other(format!(
-                    "send chat completion request: {}",
-                    error_chain(&error)
-                )));
+                check_running(control).map_err(AttemptError::Sent)?;
+                let message = format!("send chat completion request: {}", error_chain(&error));
+                return Err(if error.is_connect() {
+                    AttemptError::NotSent(ProviderError::Other(message))
+                } else {
+                    AttemptError::Sent(ProviderError::Other(message))
+                });
             }
         };
+        self.read_response(response, emit, control)
+            .await
+            .map_err(AttemptError::Sent)
+    }
 
+    /// Reads a sent request's response: an error status, or the whole stream.
+    async fn read_response(
+        &self,
+        response: reqwest::Response,
+        emit: StreamSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<Response, ProviderError> {
         let status = response.status();
         if !status.is_success() {
             return Err(self
@@ -360,9 +415,12 @@ impl Client {
 
 #[async_trait::async_trait]
 impl Provider for Client {
-    /// Sends exactly one chat completion and assembles its streamed response.
-    /// Transport errors, 429/5xx statuses, and interrupted streams are never
-    /// retried because a transport cannot prove that the request had no effect.
+    /// Sends one chat completion and assembles its streamed response.
+    /// Only a connection that could not be established is tried again (at
+    /// most 4 attempts, 1/2/4 s apart, within the operation deadline): that
+    /// request never left Otto. Send errors after connecting, 429/5xx
+    /// statuses, and interrupted streams are never retried, because a
+    /// transport cannot prove that the request had no effect.
     async fn complete(
         &self,
         request: &Request,
@@ -397,8 +455,41 @@ impl Provider for Client {
         if let Err(error) = check_running(control) {
             return provider_failure(error, 0, EffectCertainty::NotStarted, control);
         }
-        match self.attempt(ready, &payload, emit, control).await {
-            Ok(response) => ProviderSettlement::succeeded(response, 1),
+        let mut attempts = 0;
+        let result = loop {
+            attempts += 1;
+            match self.attempt(ready, &payload, &mut *emit, control).await {
+                Err(AttemptError::NotSent(error)) => {
+                    let Some(delay) = crate::retry::next_delay(
+                        CONNECT_RETRY_POLICY,
+                        attempts,
+                        None,
+                        control.remaining().unwrap_or(Duration::MAX),
+                        Duration::from_secs(1),
+                        &mut Backoff,
+                    ) else {
+                        return ProviderSettlement::failed(
+                            self.safe_error(error),
+                            attempts,
+                            EffectCertainty::NotStarted,
+                        );
+                    };
+                    emit(StreamEvent::Retry {
+                        attempt: attempts + 1,
+                        max_attempts: CONNECT_RETRY_POLICY.max_attempts,
+                        delay,
+                        reason: CONNECT_RETRY_REASON.to_owned(),
+                    });
+                    if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
+                        return not_started_stop(error, attempts, control);
+                    }
+                }
+                Err(AttemptError::Sent(error)) => break Err(error),
+                Ok(response) => break Ok(response),
+            }
+        };
+        match result {
+            Ok(response) => ProviderSettlement::succeeded(response, attempts),
             Err(error) => {
                 let certainty = match &error {
                     ProviderError::DeadlineExceeded | ProviderError::Cancelled => {
@@ -416,9 +507,9 @@ impl Provider for Client {
                 };
                 let error = self.safe_error(error);
                 if certainty == EffectCertainty::Completed {
-                    ProviderSettlement::failed(error, 1, certainty)
+                    ProviderSettlement::failed(error, attempts, certainty)
                 } else {
-                    provider_failure(error, 1, certainty, control)
+                    provider_failure(error, attempts, certainty, control)
                 }
             }
         }
@@ -471,6 +562,21 @@ async fn with_cancel<T>(cancel: &CancellationToken, future: impl Future<Output =
         biased;
         value = future => Some(value),
         () = cancel.cancelled() => None,
+    }
+}
+
+/// A stop while waiting to retry a connection: no attempt reached the
+/// endpoint, so the operation is `NotStarted`.
+fn not_started_stop(
+    error: ProviderError,
+    attempts: u32,
+    control: &dyn OperationControl,
+) -> ProviderSettlement {
+    match control.stop_reason() {
+        Some(reason) => {
+            ProviderSettlement::stopped(error, attempts, EffectCertainty::NotStarted, reason)
+        }
+        None => ProviderSettlement::failed(error, attempts, EffectCertainty::NotStarted),
     }
 }
 
@@ -854,6 +960,77 @@ mod tests {
                 "status {status} emitted a retry"
             );
         }
+    }
+
+    /// A connection that is refused never reached the endpoint: it is tried
+    /// again 1, 2 and 4 s later, then fails as not started. Paused time skips
+    /// the backoff.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_connection_is_retried_three_times_and_not_started() {
+        let client = Client::new("http://127.0.0.1:1", "key");
+        let mut events = Vec::new();
+        let settlement = client
+            .complete(
+                &model_request(),
+                &mut |event| events.push(event),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(settlement.attempts, 4);
+        assert_eq!(
+            settlement.outcome.effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        assert!(settlement.result.is_err());
+        assert_eq!(
+            events,
+            (2..=4)
+                .map(|attempt| StreamEvent::Retry {
+                    attempt,
+                    max_attempts: 4,
+                    delay: Duration::from_secs(1 << (attempt - 2)),
+                    reason: "connection failed".into(),
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The endpoint starts listening after the first refusal; the retry
+    /// sends the same request and succeeds.
+    #[tokio::test]
+    async fn a_connection_retry_recovers_once_the_endpoint_listens() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+        let address = probe.local_addr().expect("address");
+        drop(probe);
+        let client = Client::new(&format!("http://{address}"), "key");
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let listener = TcpListener::bind(address).await.expect("rebind");
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let _ = read_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{DONE_STREAM}",
+                DONE_STREAM.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        let mut retries = 0;
+        let settlement = client
+            .complete(
+                &model_request(),
+                &mut |event| {
+                    if matches!(event, StreamEvent::Retry { .. }) {
+                        retries += 1;
+                    }
+                },
+                &CancellationToken::new(),
+            )
+            .await;
+        server.await.expect("server");
+        assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
+        assert_eq!(settlement.attempts, 2);
+        assert_eq!(retries, 1);
     }
 
     #[tokio::test]

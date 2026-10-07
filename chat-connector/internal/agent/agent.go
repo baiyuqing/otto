@@ -210,15 +210,17 @@ func (a *Agent) List(ctx context.Context) ([]acp.SessionInfo, error) {
 // not be cancelled to stop a turn: the agent ignores the SDK's request
 // cancellation, so use Cancel and keep waiting.
 func (a *Agent) Prompt(ctx context.Context, id, text string) (acp.StopReason, error) {
-	return a.PromptWithChannel(ctx, id, text, "", "", "", text)
+	return a.PromptWithChannel(ctx, id, text, "", "", "", "", text)
 }
 
 // PromptWithChannel sends structured channel metadata when the connected
 // agent advertises support, and uses legacyText with older agents. chat is
 // "<platform>:<chat id>" and is sent as _meta.otto.chat next to the channel.
 // A non-empty requestID is sent as _meta.otto.requestId whether or not the
-// agent advertises channelContext.
-func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, chat, requestID, legacyText string) (acp.StopReason, error) {
+// agent advertises channelContext; it only correlates logs. A non-empty
+// inputID is sent as _meta.otto.inputId, the idempotency key: Otto runs a
+// prompt with an inputId it already received in this session once.
+func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, chat, requestID, inputID, legacyText string) (acp.StopReason, error) {
 	p := a.live()
 	if p == nil || !p.isOpen(id) {
 		return "", ErrNotOpen
@@ -236,6 +238,9 @@ func (a *Agent) PromptWithChannel(ctx context.Context, id, text, channel, chat, 
 	}
 	if requestID != "" {
 		meta["requestId"] = requestID
+	}
+	if inputID != "" {
+		meta["inputId"] = inputID
 	}
 	if len(meta) > 0 {
 		request.Meta = map[string]any{"otto": meta}

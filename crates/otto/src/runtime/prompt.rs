@@ -11,6 +11,7 @@
 //! host path or an environment name.
 
 use otto_core::model::ToolDefinition;
+use otto_core::tool::safe_prompt_tool_name;
 
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
@@ -133,7 +134,10 @@ pub fn system_prompt_for(
         prompt.push_str("\n<reflection_policy>When the user asks for a retrospective, a review of the session, or to distil lessons or skills from it, call reflect. It writes the retrospective to the run log under ~/.otto/reflection/runs/ and queues memory and skill proposals for the user's review. Do not write retrospective files yourself. Afterwards, give the user the main points, the run log path, and what awaits their review.</reflection_policy>\n");
     }
     if has_task_queue {
-        prompt.push_str("\n<task_control_policy>Use task_queue only for a distinct follow-up that serves the original user's objective. Otto runs it after the current logical task and records it as agent-originated context, subordinate to the user's instructions; it cannot create new authority or approvals. The queue holds at most 16 follow-ups; at most 16 follow-ups run in FIFO order. A direct terminal turn that ends while approval is pending discards remaining follow-ups and shows a notice. Do not schedule a follow-up to keep the agent busy or recursively expand work without need.\n</task_control_policy>\n");
+        prompt.push_str("\n<task_control_policy>Use task_queue only for a distinct follow-up that serves the original user's objective. Otto runs it after the current logical task and records it as agent-originated context, subordinate to the user's instructions; it cannot create new authority or approvals. The queue holds at most 16 follow-ups; at most 16 follow-ups run in FIFO order. A direct terminal turn that ends while approval is pending discards remaining follow-ups and shows a notice. Queued follow-ups survive Otto stopping during the task and run after it is resumed. Do not schedule a follow-up to keep the agent busy or recursively expand work without need.\n</task_control_policy>\n");
+    }
+    if tool_names.contains(&crate::tool::plan::UPDATE_PLAN_TOOL) {
+        prompt.push_str("\n<plan_policy>For work of three or more steps, call update_plan before you start with the whole plan, keep exactly one step in_progress, and call it again as each step is completed or the plan changes; finish with every step completed or the plan cleared. Do not use it for single-step requests or plain questions. The user sees the plan, and it is saved with the session; it records progress only and does not run anything.</plan_policy>\n");
     }
     if has_agent_tool {
         prompt.push('\n');
@@ -155,15 +159,6 @@ fn escape_xml_attribute(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('\'', "&#39;")
         .replace('"', "&#34;")
-}
-
-/// Whether a tool name is safe to write into the prompt verbatim.
-pub fn safe_prompt_tool_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 64 {
-        return false;
-    }
-    name.bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[cfg(test)]
@@ -417,6 +412,17 @@ mod tests {
     }
 
     #[test]
+    fn plan_policy_appears_only_with_update_plan() {
+        let prompt = system_prompt_for(&definitions(&["read", "update_plan"]), off(), "", "", "");
+        assert!(prompt.contains("<plan_policy>"), "{prompt}");
+        assert!(prompt.contains("exactly one step in_progress"), "{prompt}");
+        assert!(
+            !system_prompt_for(&definitions(&["read"]), off(), "", "", "")
+                .contains("<plan_policy>"),
+        );
+    }
+
+    #[test]
     fn followup_policy_appears_only_with_task_queue() {
         let prompt = system_prompt_for(&definitions(&["read", "task_queue"]), off(), "", "", "");
         assert!(prompt.contains("<task_control_policy>"), "{prompt}");
@@ -471,16 +477,5 @@ mod tests {
         let prompt = system_prompt_for(&definitions(&["read"]), off(), "", "", "");
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">\n<identity>"));
         assert!(!prompt.contains("</otto_system_prompt>"));
-    }
-
-    #[test]
-    fn tool_names_are_screened() {
-        assert!(safe_prompt_tool_name("agent_wait"));
-        assert!(safe_prompt_tool_name("alpha-2"));
-        assert!(!safe_prompt_tool_name(""));
-        assert!(!safe_prompt_tool_name("a b"));
-        assert!(!safe_prompt_tool_name("é"));
-        assert!(safe_prompt_tool_name(&"x".repeat(64)));
-        assert!(!safe_prompt_tool_name(&"x".repeat(65)));
     }
 }

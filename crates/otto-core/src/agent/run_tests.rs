@@ -597,6 +597,7 @@ async fn pending_notifications_are_delivered_before_the_user_message() {
             output_tokens: 1,
             cached_input_tokens: 0,
         }),
+        ..Default::default()
     });
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -604,7 +605,7 @@ async fn pending_notifications_are_delivered_before_the_user_message() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -662,7 +663,7 @@ async fn the_inbox_is_drained_again_before_the_next_provider_request() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -673,6 +674,7 @@ async fn the_inbox_is_drained_again_before_the_next_provider_request() {
         kind: Some(NotificationKind::Message),
         text: "from the parent".into(),
         usage: None,
+        ..Default::default()
     });
     agent
         .run("hello", &mut |_| {}, &CancellationToken::new())
@@ -707,7 +709,7 @@ async fn user_input_queued_during_a_provider_call_continues_the_same_turn() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -777,6 +779,7 @@ async fn empty_text_with_a_notification_is_a_wake_turn() {
         kind: Some(NotificationKind::TaskReport),
         text: "report".into(),
         usage: None,
+        ..Default::default()
     });
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -784,7 +787,7 @@ async fn empty_text_with_a_notification_is_a_wake_turn() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -806,12 +809,14 @@ async fn a_notification_without_a_generated_task_id_still_persists() {
         kind: Some(NotificationKind::Message),
         text: "[feishu] hello".into(),
         usage: None,
+        ..Default::default()
     });
     inbox.push(Notification {
         task_id: "timer".into(),
         text: "[timer] due".into(),
         usage: None,
         kind: None,
+        ..Default::default()
     });
     let provider = FakeProvider::new(vec![Turn::text("ok")]);
     let agent = Agent::new(
@@ -819,7 +824,7 @@ async fn a_notification_without_a_generated_task_id_still_persists() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -2619,6 +2624,30 @@ impl Session for FailingSession {
         self.inner.append_operation_fact(fact).await
     }
 
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.inner.observed_capabilities()
+    }
+
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.inner.plan()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: crate::model::Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2686,6 +2715,30 @@ impl Session for OperationFailingSession {
         self.inner.operation_ledger()
     }
 
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.inner.observed_capabilities()
+    }
+
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.inner.plan()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: crate::model::Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2747,6 +2800,30 @@ impl Session for AsyncOrderingSession {
     fn operation_ledger(&self) -> crate::session::OperationLedger {
         self.inner.operation_ledger()
     }
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.inner.observed_capabilities()
+    }
+
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.inner.plan()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: crate::model::Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -2928,19 +3005,21 @@ async fn a_failed_notification_append_leaves_it_and_later_ones_queued() {
         kind: Some(NotificationKind::TaskFinished),
         text: "first".into(),
         usage: None,
+        ..Default::default()
     });
     inbox.push(Notification {
         task_id: "t2".into(),
         kind: Some(NotificationKind::TaskFinished),
         text: "second".into(),
         usage: None,
+        ..Default::default()
     });
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("never sent")]),
         EchoExecutor::default(),
         FailingSession::new(0),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -2963,7 +3042,7 @@ async fn a_failed_notification_append_leaves_it_and_later_ones_queued() {
         EchoExecutor::default(),
         MemorySession::new(),
         Options {
-            inbox: inbox.clone(),
+            mailbox: inbox.clone(),
             ..options()
         },
     );
@@ -3492,4 +3571,784 @@ async fn compaction_hooks_gate_the_provider_and_observe_only_committed_checkpoin
             );
         }
     }
+}
+
+// -- capability notice -----------------------------------------------------
+
+const NOTICE_OPEN: &str = "<runtime_capability_update>";
+
+fn recorded_tools(session: &MemorySession) -> Vec<String> {
+    session.observed_capabilities().expect("record").tools
+}
+
+async fn session_with_record(tools: &str) -> MemorySession {
+    let session = MemorySession::new();
+    session
+        .append_custom(
+            crate::session::CAPABILITIES_CUSTOM_TYPE,
+            &format!(r#"{{"tools":{tools}}}"#),
+        )
+        .await
+        .expect("seed record");
+    session
+}
+
+fn notices(messages: &[Message]) -> Vec<&Message> {
+    messages
+        .iter()
+        .filter(|message| message.context_type == crate::session::CAPABILITY_UPDATE_CONTEXT_TYPE)
+        .collect()
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_new_session_gets_a_record_and_no_notice() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("one")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent
+        .run("hi", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+    assert!(notices(&agent.session().messages()).is_empty());
+    assert_eq!(recorded_tools(agent.session()), vec!["echo".to_owned()]);
+    assert_eq!(
+        agent.provider().normal_requests()[0].system_prompt,
+        "be brief"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_differing_record_appends_one_notice_before_the_user_message() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("one"), Turn::text("two")]),
+        EchoExecutor::default(),
+        session_with_record(r#"["web_search"]"#).await,
+        options(),
+    );
+    agent
+        .run("hi", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+    let messages = agent.session().messages();
+    assert_eq!(messages[0].role, Role::Context);
+    assert!(messages[0].display);
+    assert_eq!(messages[1].role, Role::User);
+    let notice = messages[0].text();
+    assert!(notice.starts_with(NOTICE_OPEN));
+    assert!(notice.contains("\nAdded: echo\nRemoved: web_search\n"));
+    assert_eq!(recorded_tools(agent.session()), vec!["echo".to_owned()]);
+
+    agent
+        .run("again", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+    assert_eq!(notices(&agent.session().messages()).len(), 1);
+    let requests = agent.provider().normal_requests();
+    for request in &requests {
+        assert_eq!(request.system_prompt, "be brief");
+        assert_eq!(request.messages[0].text(), notice);
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_changed_definition_digest_appends_one_notice() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("one"), Turn::text("two")]),
+        EchoExecutor::default(),
+        session_with_record(r#"["echo"],"definitions":{"echo":"0000000000000000"}"#).await,
+        options(),
+    );
+    for prompt in ["hi", "again"] {
+        agent
+            .run(prompt, &mut |_| {}, &CancellationToken::new())
+            .await
+            .expect("run");
+    }
+    let messages = agent.session().messages();
+    let found = notices(&messages);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].text().contains("\nChanged definitions: echo\n"));
+    let recorded = agent.session().observed_capabilities().expect("record");
+    assert_ne!(
+        recorded.definitions.expect("digests")["echo"],
+        "0000000000000000"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn history_without_a_record_gets_the_legacy_notice_once() {
+    let session = MemorySession::new();
+    for (role, text) in [(Role::User, "old"), (Role::Assistant, "old reply")] {
+        session
+            .append(Message {
+                role,
+                blocks: vec![Block::text(text)],
+                ..Message::default()
+            })
+            .await
+            .expect("append");
+    }
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("one"), Turn::text("two")]),
+        EchoExecutor::default(),
+        session,
+        options(),
+    );
+    for prompt in ["hi", "again"] {
+        agent
+            .run(prompt, &mut |_| {}, &CancellationToken::new())
+            .await
+            .expect("run");
+    }
+    let messages = agent.session().messages();
+    let found = notices(&messages);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].text().contains("was not recorded"));
+    assert!(found[0].text().contains("Current tools: echo\n"));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_matching_record_appends_nothing() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("one")]),
+        EchoExecutor::default(),
+        session_with_record(r#"["echo"]"#).await,
+        options(),
+    );
+    agent
+        .run("hi", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+    assert_eq!(agent.session().messages().len(), 2);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_summarized_notice_is_carried_in_the_capability_updates_block() {
+    async fn exchange(session: &MemorySession, index: usize, text: &str) {
+        for (id, role, text) in [
+            (format!("u{index}"), Role::User, text),
+            (format!("a{index}"), Role::Assistant, "ok"),
+        ] {
+            session
+                .append(Message {
+                    id,
+                    role,
+                    blocks: vec![Block::text(text)],
+                    ..Message::default()
+                })
+                .await
+                .expect("append");
+        }
+    }
+
+    // A matching record, so the run between the compactions adds no notice.
+    let session = session_with_record(r#"["echo"]"#).await;
+    session
+        .append(crate::session::context::new_context_message(
+            "n0",
+            crate::session::CAPABILITY_UPDATE_CONTEXT_TYPE,
+            true,
+            "<runtime_capability_update>\nAdded: agent\n</runtime_capability_update>".into(),
+            clock(),
+            None,
+        ))
+        .await
+        .expect("notice");
+    exchange(&session, 0, "first").await;
+    exchange(&session, 1, "second").await;
+    exchange(&session, 2, "third").await;
+    let agent = Agent::new(
+        FakeProvider::new(vec![
+            Turn::summary(&structured_summary()),
+            Turn::text("ok"),
+            Turn::summary(&structured_summary()),
+        ]),
+        EchoExecutor::default(),
+        session,
+        options(),
+    );
+    let block = "<capability-updates>\n\"\\u003cruntime_capability_update\\u003e\\nAdded: agent\\n\\u003c/runtime_capability_update\\u003e\"\n</capability-updates>";
+    agent
+        .compact("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("first compaction");
+    agent
+        .run("next", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run after compaction");
+    let next_request_text: String = agent.provider().normal_requests()[0]
+        .messages
+        .iter()
+        .map(Message::text)
+        .collect();
+    assert!(next_request_text.contains(block), "{next_request_text}");
+
+    exchange(agent.session(), 3, "fourth").await;
+    agent
+        .compact("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("second compaction");
+    let summary = agent
+        .session()
+        .latest_compaction()
+        .expect("a checkpoint")
+        .summary;
+    assert_eq!(summary.matches(block).count(), 1, "{summary}");
+    let second_request = agent.provider().summary_requests()[1].messages[0].text();
+    assert!(
+        !second_request.contains("capability-updates"),
+        "the carried block reached the summarizer: {second_request}"
+    );
+}
+
+// -- turn records ----------------------------------------------------------
+
+/// A [`MemorySession`] that also keeps every `otto.turn` record it is given.
+#[derive(Default)]
+struct TurnRecordingSession {
+    inner: MemorySession,
+    turns: Mutex<Vec<crate::session::TurnRecord>>,
+}
+
+impl TurnRecordingSession {
+    fn turns(&self) -> Vec<crate::session::TurnRecord> {
+        self.turns.lock().expect("turns").clone()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Session for TurnRecordingSession {
+    fn messages(&self) -> Vec<Message> {
+        self.inner.messages()
+    }
+    async fn append(&self, message: Message) -> Result<(), crate::session::SessionError> {
+        self.inner.append(message).await
+    }
+    fn latest_compaction(&self) -> Option<crate::session::CompactionMetadata> {
+        self.inner.latest_compaction()
+    }
+    async fn append_compaction(
+        &self,
+        checkpoint: crate::session::CompactionCheckpoint,
+    ) -> Result<crate::session::CompactionMetadata, crate::session::SessionError> {
+        self.inner.append_compaction(checkpoint).await
+    }
+    async fn append_operation_fact(
+        &self,
+        fact: crate::session::OperationFact,
+    ) -> Result<(), crate::session::SessionError> {
+        self.inner.append_operation_fact(fact).await
+    }
+    fn operation_ledger(&self) -> crate::session::OperationLedger {
+        self.inner.operation_ledger()
+    }
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.inner.observed_capabilities()
+    }
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.inner.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.inner.plan()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: crate::model::Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.inner.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.inner.has_input(input_id)
+    }
+    async fn append_custom(
+        &self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), crate::session::SessionError> {
+        if custom_type == crate::session::TURN_CUSTOM_TYPE {
+            self.turns
+                .lock()
+                .expect("turns")
+                .push(crate::session::decode_turn_record(data).expect("valid turn record"));
+        }
+        self.inner.append_custom(custom_type, data).await
+    }
+}
+
+fn started_trigger(
+    record: &crate::session::TurnRecord,
+) -> (crate::session::TurnTrigger, u32, Option<String>) {
+    match record {
+        crate::session::TurnRecord::Started {
+            trigger,
+            attempt,
+            resumes,
+            ..
+        } => (*trigger, *attempt, resumes.clone()),
+        other => panic!("expected a start record, got {other:?}"),
+    }
+}
+
+fn ended_outcome(record: &crate::session::TurnRecord) -> crate::session::TurnOutcome {
+    match record {
+        crate::session::TurnRecord::Ended { outcome, .. } => *outcome,
+        other => panic!("expected an end record, got {other:?}"),
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn every_turn_writes_a_start_and_a_matching_end() {
+    use crate::session::{TurnOutcome, TurnTrigger};
+    let provider = FakeProvider::new(vec![
+        Turn::text("ok"),
+        Turn {
+            events: Vec::new(),
+            outcome: Err(ProviderError::Other("boom".into())),
+        },
+    ]);
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        TurnRecordingSession::default(),
+        options(),
+    );
+    agent
+        .run("first", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("completed turn");
+    agent
+        .run("second", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect_err("failed turn");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    agent
+        .run("third", &mut |_| {}, &cancel)
+        .await
+        .expect_err("cancelled turn");
+
+    let turns = agent.session().turns();
+    assert_eq!(turns.len(), 6, "{turns:?}");
+    for (index, outcome) in [
+        TurnOutcome::Completed,
+        TurnOutcome::Failed,
+        TurnOutcome::Cancelled,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            started_trigger(&turns[index * 2]),
+            (TurnTrigger::User, 1, None)
+        );
+        assert_eq!(ended_outcome(&turns[index * 2 + 1]), outcome);
+    }
+    assert_eq!(agent.session().interrupted_turn(), None);
+}
+
+/// A session whose last turn started and never ended, as process loss
+/// leaves it.
+async fn interrupted_session() -> TurnRecordingSession {
+    let session = TurnRecordingSession::default();
+    session
+        .inner
+        .append_custom(
+            crate::session::TURN_CUSTOM_TYPE,
+            &crate::session::encode_turn_record(&crate::session::TurnRecord::started(
+                "op_old",
+                crate::session::TurnTrigger::User,
+                1,
+                None,
+            )),
+        )
+        .await
+        .expect("seed start record");
+    session
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_wake_turn_after_an_interrupted_turn_is_its_recovery() {
+    use crate::session::TurnTrigger;
+    let inbox = Arc::new(Inbox::default());
+    inbox.push(Notification {
+        kind: Some(NotificationKind::Message),
+        text: "The previous Otto process stopped".into(),
+        ..Notification::default()
+    });
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("resumed")]),
+        EchoExecutor::default(),
+        interrupted_session().await,
+        Options {
+            mailbox: inbox,
+            ..options()
+        },
+    );
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("recovery turn");
+    let turns = agent.session().turns();
+    assert_eq!(
+        started_trigger(&turns[0]),
+        (TurnTrigger::Recovery, 2, Some("op_old".to_string()))
+    );
+    assert_eq!(agent.session().interrupted_turn(), None);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_prompt_after_an_interrupted_turn_starts_a_new_chain() {
+    use crate::session::TurnTrigger;
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("ok")]),
+        EchoExecutor::default(),
+        interrupted_session().await,
+        options(),
+    );
+    agent
+        .run("go on", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("prompt turn");
+    assert_eq!(
+        started_trigger(&agent.session().turns()[0]),
+        (TurnTrigger::User, 1, None)
+    );
+}
+
+// -- input ids --------------------------------------------------------------
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_notification_already_in_the_transcript_is_acknowledged_without_a_second_message() {
+    let session = MemorySession::new();
+    let delivered = Message {
+        role: Role::Context,
+        context_type: "task_notification".into(),
+        display: true,
+        blocks: vec![Block::text("done")],
+        ..Message::default()
+    };
+    session
+        .append_input_if_absent("in_1", delivered)
+        .await
+        .expect("first delivery");
+    let inbox = Arc::new(Inbox::default());
+    inbox.push(Notification {
+        text: "done".into(),
+        id: "in_1".into(),
+        ..Notification::default()
+    });
+    inbox.push(Notification {
+        text: "new".into(),
+        id: "in_2".into(),
+        ..Notification::default()
+    });
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("ok")]),
+        EchoExecutor::default(),
+        session,
+        Options {
+            mailbox: inbox.clone(),
+            ..options()
+        },
+    );
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("wake turn");
+    assert!(inbox.is_empty(), "both entries are acknowledged");
+    let ids: Vec<String> = agent
+        .session()
+        .messages()
+        .into_iter()
+        .filter(|message| !message.input_id.is_empty())
+        .map(|message| message.input_id)
+        .collect();
+    assert_eq!(ids, ["in_1", "in_2"]);
+}
+
+#[test]
+fn enqueue_skips_an_id_already_queued() {
+    let inbox = Inbox::default();
+    let first = inbox
+        .enqueue(Notification {
+            id: "in_1".into(),
+            ..Notification::default()
+        })
+        .expect("enqueue");
+    let again = inbox
+        .enqueue(Notification {
+            id: "in_1".into(),
+            text: "retry".into(),
+            ..Notification::default()
+        })
+        .expect("enqueue");
+    assert_eq!(first, again);
+    assert_eq!(inbox.len(), 1);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_recovery_turn_delivers_the_interrupted_turns_steering_once() {
+    let journal = Arc::new(Inbox::default());
+    journal.push(Notification {
+        kind: Some(NotificationKind::UserMessage),
+        text: "also update the docs".into(),
+        id: "steer:op_old:1".into(),
+        scope: "op_old".into(),
+        ..Notification::default()
+    });
+    let steering = Arc::new(super::steering::Steering::default());
+    steering.set_journal(journal.clone());
+    let inbox = Arc::new(Inbox::default());
+    inbox.push(Notification {
+        kind: Some(NotificationKind::Message),
+        text: "The previous Otto process stopped".into(),
+        ..Notification::default()
+    });
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("resumed")]),
+        EchoExecutor::default(),
+        interrupted_session().await,
+        Options {
+            mailbox: inbox,
+            steering,
+            ..options()
+        },
+    );
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("recovery turn");
+    let steered: Vec<Message> = agent
+        .session()
+        .messages()
+        .into_iter()
+        .filter(|message| message.role == Role::User)
+        .collect();
+    assert_eq!(steered.len(), 1);
+    assert_eq!(steered[0].text(), "also update the docs");
+    assert_eq!(steered[0].input_id, "steer:op_old:1");
+    assert!(journal.is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn the_next_input_id_marks_one_runs_user_message() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("one"), Turn::text("two")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent.set_next_input_id(Some("req-1".into()));
+    agent
+        .run("first", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("first run");
+    agent
+        .run("second", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("second run");
+    let users: Vec<(String, String)> = agent
+        .session()
+        .messages()
+        .into_iter()
+        .filter(|message| message.role == Role::User)
+        .map(|message| (message.text(), message.input_id))
+        .collect();
+    assert_eq!(
+        users,
+        [
+            ("first".to_string(), "req-1".to_string()),
+            ("second".to_string(), String::new())
+        ]
+    );
+    assert!(agent.session().has_input("req-1"));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_followup_step_message_carries_its_input_id() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("done")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent.set_next_input_id(Some("followup:task:1".into()));
+    agent
+        .run_followup_with_system_context_control(
+            "check the branch",
+            "",
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("follow-up step");
+    let followup = agent
+        .session()
+        .messages()
+        .into_iter()
+        .find(|message| message.context_type == "agent_followup")
+        .expect("agent_followup message");
+    assert_eq!(followup.input_id, "followup:task:1");
+    assert!(agent.session().has_input("followup:task:1"));
+}
+
+// -- plan ------------------------------------------------------------------
+
+/// A session one `Arc` shares between the agent and a tool.
+struct SharedMemory(Arc<MemorySession>);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Session for SharedMemory {
+    fn messages(&self) -> Vec<Message> {
+        self.0.messages()
+    }
+    async fn append(&self, message: Message) -> Result<(), crate::session::SessionError> {
+        self.0.append(message).await
+    }
+    fn latest_compaction(&self) -> Option<crate::session::CompactionMetadata> {
+        self.0.latest_compaction()
+    }
+    async fn append_compaction(
+        &self,
+        checkpoint: crate::session::CompactionCheckpoint,
+    ) -> Result<crate::session::CompactionMetadata, crate::session::SessionError> {
+        self.0.append_compaction(checkpoint).await
+    }
+    async fn append_operation_fact(
+        &self,
+        fact: crate::session::OperationFact,
+    ) -> Result<(), crate::session::SessionError> {
+        self.0.append_operation_fact(fact).await
+    }
+    fn operation_history(&self) -> Vec<crate::session::OperationFact> {
+        self.0.operation_history()
+    }
+    fn operation_ledger(&self) -> crate::session::OperationLedger {
+        self.0.operation_ledger()
+    }
+    fn observed_capabilities(&self) -> Option<crate::session::Capabilities> {
+        self.0.observed_capabilities()
+    }
+    fn interrupted_turn(&self) -> Option<crate::session::InterruptedTurn> {
+        self.0.interrupted_turn()
+    }
+    fn plan(&self) -> Vec<crate::session::PlanStep> {
+        self.0.plan()
+    }
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: Message,
+    ) -> Result<crate::session::AppendOutcome, crate::session::SessionError> {
+        self.0.append_input_if_absent(input_id, message).await
+    }
+    fn has_input(&self, input_id: &str) -> bool {
+        self.0.has_input(input_id)
+    }
+    async fn append_custom(
+        &self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), crate::session::SessionError> {
+        self.0.append_custom(custom_type, data).await
+    }
+}
+
+/// An `echo` tool that writes its `steps` argument as the session plan.
+struct PlanWriter(Arc<MemorySession>);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl ToolExecutor for PlanWriter {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        EchoExecutor::default().definitions()
+    }
+
+    async fn execute(
+        &self,
+        call: crate::tool::ToolCall<'_>,
+        _control: &dyn OperationControl,
+    ) -> crate::tool::ToolExecution {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            steps: Vec<crate::session::PlanStep>,
+        }
+        let steps = serde_json::from_str::<Args>(call.arguments.get())
+            .expect("steps")
+            .steps;
+        self.0
+            .append_custom(
+                crate::session::PLAN_CUSTOM_TYPE,
+                &crate::session::encode_plan(&steps),
+            )
+            .await
+            .expect("plan");
+        crate::tool::ToolExecution::completed(ToolResult::default())
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_tool_call_that_changes_the_plan_emits_plan_updated_once() {
+    let memory = Arc::new(MemorySession::new());
+    let steps = r#"{"steps":[{"text":"ship","status":"in_progress"}]}"#;
+    let provider = FakeProvider::new(vec![
+        Turn::tool_call("call-1", steps),
+        // The same plan again changes nothing and emits nothing.
+        Turn::tool_call("call-2", steps),
+        Turn::text("done"),
+    ]);
+    let agent = Agent::new(
+        provider,
+        PlanWriter(Arc::clone(&memory)),
+        SharedMemory(Arc::clone(&memory)),
+        options(),
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    agent
+        .run(
+            "plan it",
+            &mut |event| sink.lock().unwrap().push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+    let updates: Vec<_> = collect(&events)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::PlanUpdated { steps } => Some(steps),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 1, "{updates:?}");
+    assert_eq!(updates[0][0].text, "ship");
+    let names = names(&collect(&events));
+    let finished = names
+        .iter()
+        .position(|name| *name == "tool_call_finished")
+        .unwrap();
+    assert_eq!(names[finished + 1], "plan_updated");
 }

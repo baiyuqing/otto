@@ -21,15 +21,23 @@ use crate::model::{BlockType, Message, Role, ValidationError};
 pub mod codec;
 pub mod compaction;
 pub mod context;
+pub mod fork;
 pub mod operation;
 pub mod pi;
+pub mod plan;
+pub mod turn;
 pub mod types;
 
 pub use codec::{PiRecord, decode_pi_entry, decode_pi_file, decode_pi_header, encode_pi_record};
 pub use context::{
-    BRANCH_CONTEXT_TYPE, COMPACTION_CONTEXT_TYPE, ContextEntryIndex, OTTO_RUNTIME_CUSTOM_TYPE,
-    ResolvedContext, active_context_path, build_context, index_context_entries, is_pi_entry_id,
-    new_context_message,
+    BRANCH_CONTEXT_TYPE, CAPABILITIES_CUSTOM_TYPE, CAPABILITY_UPDATE_CONTEXT_TYPE,
+    COMPACTION_CONTEXT_TYPE, Capabilities, ContextEntryIndex, OTTO_RUNTIME_CUSTOM_TYPE,
+    ResolvedContext, active_context_path, build_context, decode_capabilities, encode_capabilities,
+    index_context_entries, is_pi_entry_id, new_context_message,
+};
+pub use fork::{
+    FORK_CUSTOM_TYPE, FORK_SCHEMA_VERSION, ForkError, ForkPlan, ForkPoint, ForkRecord,
+    decode_fork_record, encode_fork_record, fork_origin, fork_points, plan_fork,
 };
 pub use operation::{
     DecodedOperationFact, OPERATION_CUSTOM_TYPE, OPERATION_SCHEMA_VERSION, OperationFact,
@@ -41,6 +49,14 @@ pub use pi::{
     PiCompaction, PiContentBlock, PiContextEdit, PiCost, PiCustom, PiCustomMessage, PiEntry,
     PiFile, PiHeader, PiLabel, PiMessage, PiModelChange, PiOttoDetails, PiSessionInfo,
     PiThinkingLevelChange, PiUsage, decode_pi_otto_details, encode_pi_otto_details,
+};
+pub use plan::{
+    MAX_PLAN_STEP_CHARS, MAX_PLAN_STEPS, PLAN_CUSTOM_TYPE, PLAN_SCHEMA_VERSION, PlanStatus,
+    PlanStep, decode_plan, encode_plan, plan_checklist, plan_summary, validate_plan,
+};
+pub use turn::{
+    InterruptedTurn, TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, decode_turn_record,
+    encode_turn_record,
 };
 pub use types::{
     CURRENT_VERSION, CompactionCheckpoint, CompactionDetails, CompactionMetadata, Header,
@@ -226,6 +242,44 @@ pub trait Session {
     ///
     /// [`pi_entry_to_context_messages`]: crate::session::context::pi_entry_to_context_messages
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError>;
+
+    /// The latest `otto.capabilities` record on the active path, or `None`
+    /// when there is none. Like `append_custom`, it has no
+    /// default body: every implementation forwards or states its behavior.
+    fn observed_capabilities(&self) -> Option<Capabilities>;
+
+    /// The newest `otto.turn` start on the active path with no matching end:
+    /// a turn process loss interrupted. `None` when every recorded turn
+    /// ended or none was recorded. No default body, like
+    /// [`Self::observed_capabilities`].
+    fn interrupted_turn(&self) -> Option<InterruptedTurn>;
+
+    /// The steps of the latest valid `otto.plan` record on the active path;
+    /// empty when there is none or the latest one cleared the plan. No
+    /// default body, like [`Self::observed_capabilities`].
+    fn plan(&self) -> Vec<PlanStep>;
+
+    /// Appends `message` as the delivery of input `input_id` unless a message
+    /// with that input id is already on the active path. The check and the
+    /// append run under one lock; a file-backed store persists before it
+    /// returns [`AppendOutcome::Appended`]. [`AppendOutcome::AlreadyPresent`]
+    /// is the same committed delivery outcome. No default body: every
+    /// implementor, including wrappers, forwards or states its behavior.
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: Message,
+    ) -> Result<AppendOutcome, SessionError>;
+
+    /// Whether a message with input id `input_id` is on the active path.
+    fn has_input(&self, input_id: &str) -> bool;
+}
+
+/// What [`Session::append_input_if_absent`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendOutcome {
+    Appended,
+    AlreadyPresent,
 }
 
 /// Tool calls from the most recent assistant message that have no result yet.
@@ -245,9 +299,53 @@ struct State {
     checkpoint_counter: u64,
     operation_facts: Vec<OperationFact>,
     operation_ledger: OperationLedger,
+    observed_capabilities: Option<Capabilities>,
+    interrupted_turn: Option<InterruptedTurn>,
+    plan: Vec<PlanStep>,
+    /// Input ids of every appended message, for
+    /// [`Session::append_input_if_absent`].
+    seen_inputs: HashSet<String>,
 }
 
 impl State {
+    /// Appends one validated message under the session lock.
+    fn append(&mut self, mut message: Message) -> Result<(), SessionError> {
+        let state = self;
+        if message.id.trim().is_empty() {
+            message.id = state.generate_id();
+        }
+        if state.seen_ids.contains(&message.id) {
+            return Err(SessionError::Sequence("duplicate message id"));
+        }
+        state.check_sequence(&message)?;
+        if state
+            .latest_compaction
+            .as_ref()
+            .is_some_and(|latest| latest.first_post_checkpoint_message_id.is_empty())
+        {
+            if message.id.trim().is_empty() {
+                return Err(SessionError::Sequence(
+                    "first post-checkpoint message id is required",
+                ));
+            }
+            if !matches!(message.role, Role::User | Role::Assistant | Role::Tool) {
+                return Err(SessionError::Sequence(
+                    "first post-checkpoint message must have a normal role",
+                ));
+            }
+            let id = message.id.clone();
+            if let Some(latest) = state.latest_compaction.as_mut() {
+                latest.first_post_checkpoint_message_id = id;
+            }
+        }
+        state.seen_ids.insert(message.id.clone());
+        if !message.input_id.is_empty() {
+            state.seen_inputs.insert(message.input_id.clone());
+        }
+        state.record(message);
+        Ok(())
+    }
+
     /// The ordering rule, applied incrementally: a tool-result message must
     /// resolve a call from the immediately preceding assistant message, and no
     /// other message may come between the two.
@@ -363,39 +461,33 @@ impl Session for MemorySession {
         self.state.lock().expect("session mutex").messages.clone()
     }
 
-    async fn append(&self, mut message: Message) -> Result<(), SessionError> {
+    async fn append(&self, message: Message) -> Result<(), SessionError> {
         message.validate()?;
         let mut state = self.state.lock().expect("session mutex");
-        if message.id.trim().is_empty() {
-            message.id = state.generate_id();
+        state.append(message)
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        mut message: Message,
+    ) -> Result<AppendOutcome, SessionError> {
+        message.input_id = input_id.to_owned();
+        message.validate()?;
+        let mut state = self.state.lock().expect("session mutex");
+        if state.seen_inputs.contains(input_id) {
+            return Ok(AppendOutcome::AlreadyPresent);
         }
-        if state.seen_ids.contains(&message.id) {
-            return Err(SessionError::Sequence("duplicate message id"));
-        }
-        state.check_sequence(&message)?;
-        if state
-            .latest_compaction
-            .as_ref()
-            .is_some_and(|latest| latest.first_post_checkpoint_message_id.is_empty())
-        {
-            if message.id.trim().is_empty() {
-                return Err(SessionError::Sequence(
-                    "first post-checkpoint message id is required",
-                ));
-            }
-            if !matches!(message.role, Role::User | Role::Assistant | Role::Tool) {
-                return Err(SessionError::Sequence(
-                    "first post-checkpoint message must have a normal role",
-                ));
-            }
-            let id = message.id.clone();
-            if let Some(latest) = state.latest_compaction.as_mut() {
-                latest.first_post_checkpoint_message_id = id;
-            }
-        }
-        state.seen_ids.insert(message.id.clone());
-        state.record(message);
-        Ok(())
+        state.append(message)?;
+        Ok(AppendOutcome::Appended)
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .seen_inputs
+            .contains(input_id)
     }
 
     fn latest_compaction(&self) -> Option<CompactionMetadata> {
@@ -483,7 +575,51 @@ impl Session for MemorySession {
             .clone()
     }
 
+    fn observed_capabilities(&self) -> Option<Capabilities> {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .observed_capabilities
+            .clone()
+    }
+
+    fn interrupted_turn(&self) -> Option<InterruptedTurn> {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .interrupted_turn
+            .clone()
+    }
+
+    fn plan(&self) -> Vec<PlanStep> {
+        self.state.lock().expect("session mutex").plan.clone()
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        if custom_type == TURN_CUSTOM_TYPE {
+            let record = decode_turn_record(data)
+                .ok_or_else(|| SessionError::Persist("malformed otto.turn data".into()))?;
+            turn::apply_turn_record(
+                &mut self.state.lock().expect("session mutex").interrupted_turn,
+                &record,
+            );
+            return Ok(());
+        }
+        if custom_type == CAPABILITIES_CUSTOM_TYPE {
+            let capabilities = decode_capabilities(data)
+                .ok_or_else(|| SessionError::Persist("malformed otto.capabilities data".into()))?;
+            self.state
+                .lock()
+                .expect("session mutex")
+                .observed_capabilities = Some(capabilities);
+            return Ok(());
+        }
+        if custom_type == PLAN_CUSTOM_TYPE {
+            let steps = decode_plan(data)
+                .ok_or_else(|| SessionError::Persist("malformed otto.plan data".into()))?;
+            self.state.lock().expect("session mutex").plan = steps;
+            return Ok(());
+        }
         if custom_type != OPERATION_CUSTOM_TYPE {
             return Ok(());
         }

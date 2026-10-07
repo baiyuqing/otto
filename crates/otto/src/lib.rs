@@ -18,6 +18,7 @@ pub mod delivery;
 pub mod failover;
 pub(crate) mod fsops;
 mod gourl;
+pub mod herdr;
 pub mod log;
 pub mod mcp;
 pub mod memory;

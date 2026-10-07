@@ -164,7 +164,10 @@ impl Relay {
         &self,
         id: &str,
         workspace: &Path,
-    ) -> Result<Vec<Message>, agent_client_protocol_schema::v1::Error> {
+    ) -> Result<
+        (Vec<Message>, Vec<otto_core::session::PlanStep>),
+        agent_client_protocol_schema::v1::Error,
+    > {
         let resumed = self
             .client
             .open_session(Some(&workspace.to_string_lossy()), Some(id))
@@ -179,8 +182,14 @@ impl Relay {
             .history(id, None)
             .await
             .map_err(|failure| self.fail(failure))?;
+        let plan = self
+            .client
+            .session(id)
+            .await
+            .map_err(|failure| self.fail(failure))?
+            .plan;
         self.register(id);
-        Ok(history)
+        Ok((history, plan))
     }
 
     pub(super) async fn list_sessions(
@@ -434,13 +443,13 @@ impl Relay {
         session_id: &str,
         text: &str,
         (channel, origin): (Option<Channel>, Option<&Origin>),
-        request_id: Option<&str>,
+        (request_id, input_id): (Option<&str>, Option<&str>),
         cancel: &CancellationToken,
     ) -> Reply {
         let stream = tokio::select! {
             biased;
             () = self.lost.cancelled() => return Err(error(INTERNAL_ERROR, LOST)),
-            started = self.client.start_turn_with_channel(session_id, text, None, channel, origin, request_id) => {
+            started = self.client.start_turn_with_channel(session_id, text, None, channel, origin, request_id, input_id) => {
                 started.map_err(|failure| self.fail(failure))?
             }
         };
@@ -462,7 +471,7 @@ impl Relay {
         }
         let stream = self
             .client
-            .start_turn_with_channel(session_id, text, None, channel, origin, request_id)
+            .start_turn_with_channel(session_id, text, None, channel, origin, request_id, None)
             .await
             .map_err(|failure| self.fail(failure))?;
         Ok(stream)

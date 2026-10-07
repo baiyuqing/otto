@@ -15,6 +15,19 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Features
+
+- Report Otto's lifecycle to [Herdr](https://herdr.dev) when Herdr starts it in
+  a pane: the pane appears as the agent `otto`, `working` while a turn runs,
+  `blocked` while a tool call waits for your decision, and `idle` when it waits
+  for input. `herdr agent wait otto --until blocked`, `herdr agent prompt` and
+  the sidebar therefore work for Otto, and the reported session file plus
+  `otto --resume` command are what Herdr restores the session with. Nothing is
+  reported outside a Herdr pane, and only the frontend that is the pane's agent
+  reports: `otto serve`, `otto acp`, `--attach` and `--prompt` runs do not
+  ([design](docs/specs/2026-10-07-herdr-agent-state.md),
+  [#384](https://github.com/baiyuqing/otto/pull/384)).
+
 ### User experience
 
 - Rename the independent Go chat connector source directory to `chat-connector/`, making its Telegram/Feishu-to-ACP role clear while preserving the `otto-connect` command and existing `~/.otto/connect/state.json` state location.
@@ -33,6 +46,51 @@ limitations are documented in the [user manual](docs/user-manual.md).
   confirms; permission grants remain default Deny.
 - Prevent a generic conversational confirmation from being requested before the
   exact memory review for the same model-originated `remember` proposal.
+
+### Architecture and reliability
+
+- Add public `otto_core::conformance` checks for the `Session` and `Mailbox`
+  ports (default-on `conformance` feature), run against every session
+  implementation and wrapper and the durable inbox adapter, including across
+  a reopen. They found and fixed two bugs: session wrappers hid the operation
+  ledger, so crash recovery could replay a tool call recorded as not
+  read-only or already retried; and the session file forgot input ids from
+  before a compaction checkpoint, so such an input could be delivered twice
+  ([design](docs/specs/2026-10-06-session-and-mailbox-conformance.md)).
+- Retry OpenAI-compatible requests whose connection could not be
+  established, up to three times 1, 2 and 4 seconds apart within the turn
+  deadline. Such a request never reached the endpoint, so it cannot run
+  twice; failures after connecting remain single-attempt
+  ([#378](https://github.com/baiyuqing/otto/pull/378),
+  [user manual](docs/user-manual.md#configuration)).
+- Keep `task_queue` follow-ups across a crash: they are saved in
+  `<id>.followups.json`, run in order after the turn that automatically
+  resumes their task (a step that already ran is skipped), and are otherwise
+  discarded with a visible notice. A follow-up that cannot be saved is
+  rejected ([#377](https://github.com/baiyuqing/otto/pull/377),
+  [user manual](docs/user-manual.md#sessions)).
+- Make accepted inputs durable and deliver them once. Notifications carry
+  stable input ids, so one appended just before Otto stops is not delivered
+  again; guidance for a running turn is kept in `<id>.inputs.json` for that
+  turn's automatic resume after a crash; unread `agent_send` messages survive
+  until the sub-agent is resumed; and HTTP turns, inputs and steering accept
+  an `input_id` (ACP `_meta.otto.inputId`, sent by otto-connect for every chat
+  message) so client retries run once (`409 duplicate_input`). Inputs that
+  cannot be saved are rejected (`503 input_not_persisted`, tool errors) and
+  an unreadable inbox file is set aside with a warning instead of being
+  emptied. Consumers now depend on the `Mailbox` port
+  ([#376](https://github.com/baiyuqing/otto/pull/376),
+  [user manual](docs/user-manual.md#sessions)).
+- Recover sessions after a plain process crash the same way as after a lease
+  takeover: read-only calls without results run again, a recovery notice lists
+  what was interrupted, unfinished sub-agent tasks become resumable, and a
+  wake turn continues the interrupted turn once. New `otto.turn` session
+  entries tell an interrupted turn apart from a failed or cancelled one, each
+  tool attempt records its retry safety so a reclassified tool is not replayed,
+  `agent_status`, `remind_status` and `list_models` are now replayable, and
+  `otto serve` reports resuming turns with trigger `recovery`
+  ([#375](https://github.com/baiyuqing/otto/pull/375), [user manual](docs/user-manual.md#sessions)).
+- Introduce a shared, WASM-safe `Mailbox` contract for agent notifications. Agent execution and runner-facing producers now depend on ordered snapshot and acknowledgement semantics instead of a concrete queue; the bundled in-memory mailbox remains the default, while native composition retains session-sidecar persistence and provides the extension boundary for alternative durable adapters.
 
 ### Storage and migration
 
@@ -150,6 +208,44 @@ limitations are documented in the [user manual](docs/user-manual.md).
   with a browser instead. ([#355](https://github.com/baiyuqing/otto/pull/355))
 
 ### Features
+
+- Let the model keep a short plan for multi-step work with the new
+  `update_plan` tool: up to 20 one-line steps, each `pending`, `in_progress` or
+  `completed`. The plan is saved with the session, so it survives Otto
+  stopping, resume and fork, and compaction carries it in a `<plan>` block.
+  The TUI shows `Plan 2/5 · <step>` above the status line and `/plan` shows
+  the checklist; ACP clients receive standard `plan` updates, also on
+  `session/load`; HTTP adds a `plan_updated` SSE event and the session
+  object's `plan` field
+  ([design](docs/specs/2026-10-07-session-plan.md)).
+
+- Fork a session before an earlier prompt: TUI `/fork` (local and attached)
+  lists the prompts that start a turn, writes a new session with the history
+  before the chosen one, switches to it and puts the prompt in the editor.
+  `POST /v1/sessions/{id}/fork` and `GET /v1/sessions/{id}/fork-points` do the
+  same over HTTP, and the session object reports `forked_from`. The source
+  session is never changed, a fork never ends inside a turn, and queued
+  inputs, reminders and sub-agents stay with the source
+  ([design](docs/specs/2026-10-06-session-fork.md)).
+
+- Tell the model when a resumed session's tool set differs from the tool set
+  recorded for it. At run start Otto appends a `capability_update` message,
+  shown in the transcript, before the user message. It lists added and removed
+  tools, or the current tools for sessions written before the record. Otto
+  stores the tool names in an `otto.capabilities` session entry. Compaction
+  carries summarized notices verbatim in a `<capability-updates>` block.
+  ([#373](https://github.com/baiyuqing/otto/pull/373))
+
+- Extend the resumed-session `capability_update` message to name tools whose
+  description or parameters changed and the Otto version change. When the
+  version changed and `otto_help` is available, it states that earlier
+  `otto_help` results labelled with the old version describe the previous
+  version. The `otto.capabilities` entry now also stores a digest per tool
+  definition and the Otto version; entries from earlier versions produce no
+  such lines. The duplicate `Shutdown` and `Configuration` manual headings
+  under the agent server, ACP agent server and chat connector are renamed so
+  `otto_help` can return each section.
+  ([#374](https://github.com/baiyuqing/otto/pull/374))
 
 - Open versioned lifecycle hooks and custom command tools on installed plugin
   snapshots, with sandbox execution, exact-argument authorization and
@@ -477,6 +573,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([#341](https://github.com/baiyuqing/otto/pull/341))
 
 ### Documentation
+
+- Add a mandatory contributor rule: a PR that adds, changes, removes or
+  renames a model-callable capability updates its tool description, schema
+  field descriptions, prompt policy section, sub-agent exclusion and user
+  manual. Descriptions are short and unambiguous and state the capability,
+  inputs and outputs. ([#373](https://github.com/baiyuqing/otto/pull/373))
 
 - Add and maintain English/Chinese README guidance, the user manual,
   architecture/development contracts, the code organization map, and historical

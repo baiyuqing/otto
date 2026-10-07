@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-use crate::model::{OperationId, OperationOutcome, ValidationError};
+use crate::model::{OperationId, OperationOutcome, RetrySafety, ValidationError};
 
 pub const OPERATION_CUSTOM_TYPE: &str = "otto.operation";
 pub const OPERATION_SCHEMA_VERSION: u32 = 1;
@@ -25,6 +25,15 @@ pub enum OperationFact {
         tool_call_id: String,
         #[serde(rename = "toolName")]
         tool_name: String,
+        /// The tool's declared retry safety when this attempt started.
+        /// Absent in facts written before it was recorded; older readers
+        /// ignore it.
+        #[serde(
+            rename = "retrySafety",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        retry_safety: Option<RetrySafety>,
     },
     Terminal {
         #[serde(rename = "schemaVersion")]
@@ -62,7 +71,18 @@ impl OperationFact {
             kind: OperationKind::ToolCall,
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
+            retry_safety: None,
         }
+    }
+
+    /// Records the tool's declared retry safety on an attempt fact; a no-op
+    /// on a terminal fact.
+    #[must_use]
+    pub fn with_retry_safety(mut self, safety: RetrySafety) -> Self {
+        if let Self::Attempt { retry_safety, .. } = &mut self {
+            *retry_safety = Some(safety);
+        }
+        self
     }
 
     pub fn terminal(
@@ -210,8 +230,32 @@ pub struct OperationRecord {
     pub tool_call_id: String,
     pub tool_name: String,
     pub attempts: u32,
+    /// The retry safety recorded with the latest attempt, if any.
+    pub retry_safety: Option<RetrySafety>,
     pub terminal: Option<OperationOutcome>,
     pub corrupt: bool,
+}
+
+/// Whether a tool call left without a result by process loss may run again.
+/// `record` is the call's folded operation, `None` when no attempt was
+/// recorded; `current_read_only` is whether the tool is declared
+/// [`RetrySafety::ReadOnly`] now. Both the declaration in force now and the
+/// one recorded with the attempt must allow it: the current one can veto a
+/// recorded `ReadOnly`, and a tool reclassified as `ReadOnly` later is not
+/// replayed for an attempt recorded under another safety. An attempt written
+/// before safety was recorded follows the current declaration alone. At most
+/// one recorded attempt, so a call that killed its process once is not run a
+/// third time.
+pub fn replay_allowed(record: Option<&OperationRecord>, current_read_only: bool) -> bool {
+    current_read_only
+        && record.is_none_or(|record| {
+            !record.corrupt
+                && record.terminal.is_none()
+                && record.attempts <= 1
+                && record
+                    .retry_safety
+                    .is_none_or(|safety| safety == RetrySafety::ReadOnly)
+        })
 }
 
 /// Active history, indexed both by operation and by session-unique tool call.
@@ -336,6 +380,7 @@ impl OperationLedger {
                 attempt,
                 tool_call_id,
                 tool_name,
+                retry_safety,
                 ..
             } => {
                 self.tool_calls
@@ -343,12 +388,16 @@ impl OperationLedger {
                     .or_insert_with(|| operation_id.clone());
                 self.operations
                     .entry(operation_id.clone())
-                    .and_modify(|record| record.attempts = attempt)
+                    .and_modify(|record| {
+                        record.attempts = attempt;
+                        record.retry_safety = retry_safety;
+                    })
                     .or_insert(OperationRecord {
                         operation_id,
                         tool_call_id,
                         tool_name,
                         attempts: attempt,
+                        retry_safety,
                         terminal: None,
                         corrupt: false,
                     });
@@ -450,5 +499,71 @@ mod tests {
         assert!(record.corrupt);
         assert_eq!(record.terminal, Some(success()));
         assert_eq!(ledger.warnings().len(), 1);
+    }
+
+    #[test]
+    fn attempt_records_retry_safety_and_older_facts_omit_it() {
+        let attempt = OperationFact::attempt(id("op_1"), 1, "call-1", "read")
+            .with_retry_safety(RetrySafety::ReadOnly);
+        let encoded = encode_operation_fact(&attempt).expect("encode");
+        assert_eq!(
+            encoded,
+            r#"{"event":"attempt","schemaVersion":1,"operationId":"op_1","attempt":1,"kind":"tool_call","toolCallId":"call-1","toolName":"read","retrySafety":"read_only"}"#
+        );
+        let mut ledger = OperationLedger::default();
+        let DecodedOperationFact::Fact(fact) = decode_operation_fact(&encoded).expect("decode")
+        else {
+            panic!("supported fact");
+        };
+        ledger.apply(fact).expect("apply");
+        assert_eq!(
+            ledger.operation(&id("op_1")).expect("record").retry_safety,
+            Some(RetrySafety::ReadOnly)
+        );
+        let legacy = r#"{"event":"attempt","schemaVersion":1,"operationId":"op_2","attempt":1,"kind":"tool_call","toolCallId":"call-2","toolName":"read"}"#;
+        let DecodedOperationFact::Fact(fact) = decode_operation_fact(legacy).expect("decode")
+        else {
+            panic!("supported fact");
+        };
+        ledger.apply(fact).expect("apply legacy");
+        assert_eq!(
+            ledger.operation(&id("op_2")).expect("record").retry_safety,
+            None
+        );
+    }
+
+    #[test]
+    fn replay_requires_both_the_recorded_and_the_current_declaration() {
+        let record = |safety: Option<RetrySafety>, attempts: u32| OperationRecord {
+            operation_id: id("op_1"),
+            tool_call_id: "call-1".into(),
+            tool_name: "read".into(),
+            attempts,
+            retry_safety: safety,
+            terminal: None,
+            corrupt: false,
+        };
+        let read_only = record(Some(RetrySafety::ReadOnly), 1);
+        assert!(replay_allowed(Some(&read_only), true));
+        assert!(replay_allowed(None, true));
+        assert!(replay_allowed(Some(&record(None, 1)), true));
+        // The current declaration vetoes a recorded ReadOnly.
+        assert!(!replay_allowed(Some(&read_only), false));
+        assert!(!replay_allowed(None, false));
+        // A later reclassification to ReadOnly does not cover an older attempt.
+        assert!(!replay_allowed(
+            Some(&record(Some(RetrySafety::NonIdempotent), 1)),
+            true
+        ));
+        assert!(!replay_allowed(
+            Some(&record(Some(RetrySafety::ReadOnly), 2)),
+            true
+        ));
+        let mut settled = read_only.clone();
+        settled.terminal = Some(success());
+        assert!(!replay_allowed(Some(&settled), true));
+        let mut corrupt = read_only;
+        corrupt.corrupt = true;
+        assert!(!replay_allowed(Some(&corrupt), true));
     }
 }

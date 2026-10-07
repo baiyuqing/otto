@@ -6,11 +6,12 @@
 //! content rules, so a tool call looks the same live and after `session/load`.
 
 use agent_client_protocol_schema::v1::{
-    ContentBlock, ContentChunk, SessionUpdate, TextContent, ToolCall, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, SessionUpdate,
+    TextContent, ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use otto_core::agent::Event;
 use otto_core::model::{BlockType, Message, OperationDisposition, Role};
+use otto_core::session::{PlanStatus, PlanStep};
 use otto_core::wire::events::{WireEvent, to_wire};
 use serde_json::Value;
 
@@ -122,8 +123,30 @@ pub fn event_update(event: &WireEvent) -> Option<SessionUpdate> {
                 failed(result.is_error, result.disposition),
             )
         }),
+        "plan_updated" => event.steps.as_deref().map(plan_update),
         _ => None,
     }
+}
+
+/// The ACP `plan` update for the whole session plan. Otto plans have no
+/// priority, so every entry is `medium`; an empty plan clears the client's.
+pub fn plan_update(steps: &[PlanStep]) -> SessionUpdate {
+    SessionUpdate::Plan(Plan::new(
+        steps
+            .iter()
+            .map(|step| {
+                PlanEntry::new(
+                    step.text.clone(),
+                    PlanEntryPriority::Medium,
+                    match step.status {
+                        PlanStatus::Pending => PlanEntryStatus::Pending,
+                        PlanStatus::InProgress => PlanEntryStatus::InProgress,
+                        PlanStatus::Completed => PlanEntryStatus::Completed,
+                    },
+                )
+            })
+            .collect(),
+    ))
 }
 
 /// One update per stored block, in history order.
@@ -183,6 +206,46 @@ mod tests {
 
     fn to_json(update: &SessionUpdate) -> Value {
         serde_json::to_value(update).expect("update serializes")
+    }
+
+    #[test]
+    fn a_plan_update_becomes_an_acp_plan_with_every_step() {
+        let steps = vec![
+            PlanStep {
+                text: "read".into(),
+                status: PlanStatus::Completed,
+            },
+            PlanStep {
+                text: "write".into(),
+                status: PlanStatus::InProgress,
+            },
+            PlanStep {
+                text: "ship".into(),
+                status: PlanStatus::Pending,
+            },
+        ];
+        let update = event_update(&local_wire(&Event::PlanUpdated {
+            steps: steps.clone(),
+        }))
+        .expect("plan update");
+        assert_eq!(
+            to_json(&update),
+            json!({
+                "sessionUpdate": "plan",
+                "entries": [
+                    {"content": "read", "priority": "medium", "status": "completed"},
+                    {"content": "write", "priority": "medium", "status": "in_progress"},
+                    {"content": "ship", "priority": "medium", "status": "pending"}
+                ]
+            })
+        );
+        // A cleared plan clears the client's too.
+        let cleared = event_update(&local_wire(&Event::PlanUpdated { steps: Vec::new() }))
+            .expect("plan update");
+        assert_eq!(
+            to_json(&cleared),
+            json!({"sessionUpdate": "plan", "entries": []})
+        );
     }
 
     fn started(name: &str, arguments: &str) -> Event {

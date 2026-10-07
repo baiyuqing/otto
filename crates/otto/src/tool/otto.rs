@@ -280,6 +280,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manual_titles_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for (_, heading) in manual_headings(MANUAL) {
+            let title = heading.trim_start_matches('#').trim().to_lowercase();
+            assert!(seen.insert(title.clone()), "duplicate manual title {title}");
+        }
+    }
+
     #[tokio::test]
     async fn revoke_is_session_and_id_scoped_and_wakes_the_waiter() {
         let workspace = tempfile::tempdir().unwrap();

@@ -47,6 +47,7 @@ use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
 use otto_core::agent::redactor::Redactor;
 use otto_core::agent::{Agent, CompactionSettings, Event, EventSink, Options};
+use otto_core::mailbox::Mailbox;
 use otto_core::model::{Message, OperationStopReason, Role, ToolDefinition};
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
@@ -71,9 +72,10 @@ use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result}
 
 /// Tools a child never receives: the agent-control tools, because delegation
 /// depth is fixed at one; the memory tools, because a child gets no memory
-/// binding; the timer tools, which read and wake the parent session; and the schedule
-/// tools, which deliver to the parent conversation's origin.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 14] = [
+/// binding; the timer tools, which read and wake the parent session; the schedule
+/// tools, which deliver to the parent conversation's origin; and `update_plan`,
+/// because a child's plan would be shown nowhere.
+pub const EXCLUDED_CHILD_TOOLS: [&str; 15] = [
     "agent",
     "agent_wait",
     "agent_status",
@@ -88,6 +90,7 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 14] = [
     "schedule",
     "schedule_list",
     "schedule_cancel",
+    "update_plan",
 ];
 
 /// Appended to a child's system prompt inside `<subagent_role>` when it has
@@ -259,6 +262,10 @@ pub type Transcript = Arc<dyn Session + Send + Sync>;
 pub type ChildSession =
     Arc<dyn Fn(&str) -> Result<Option<(Transcript, String)>, String> + Send + Sync>;
 
+/// Builds the durable mailbox for the child whose transcript is at the given
+/// path, restoring the parent messages it had not read when it stopped.
+pub type ChildMailbox = Arc<dyn Fn(&str) -> Arc<dyn Mailbox> + Send + Sync>;
+
 struct SharedTranscript(Transcript);
 
 #[async_trait::async_trait]
@@ -293,6 +300,38 @@ impl Session for SharedTranscript {
         self.0.append_operation_fact(fact).await
     }
 
+    fn operation_history(&self) -> Vec<otto_core::session::OperationFact> {
+        self.0.operation_history()
+    }
+
+    fn operation_ledger(&self) -> otto_core::session::OperationLedger {
+        self.0.operation_ledger()
+    }
+
+    fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+        self.0.observed_capabilities()
+    }
+
+    fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+        self.0.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+        self.0.plan()
+    }
+
+    async fn append_input_if_absent(
+        &self,
+        input_id: &str,
+        message: otto_core::model::Message,
+    ) -> Result<otto_core::session::AppendOutcome, otto_core::session::SessionError> {
+        self.0.append_input_if_absent(input_id, message).await
+    }
+
+    fn has_input(&self, input_id: &str) -> bool {
+        self.0.has_input(input_id)
+    }
+
     async fn append_custom(
         &self,
         custom_type: &str,
@@ -309,7 +348,7 @@ pub struct ChildTools {
     allowed: Option<BTreeSet<String>>,
     write_policy: WritePolicy,
     write_paths: Vec<String>,
-    parent_inbox: Arc<Inbox>,
+    parent_inbox: Arc<dyn Mailbox>,
     task_id: String,
     max_output_bytes: usize,
     /// Remaining `agent_report` calls; see [`REPORT_BUDGET`] and
@@ -358,7 +397,7 @@ impl ChildTools {
     /// [`ChildTools::report`].
     fn agent_report_definition() -> ToolDefinition {
         let description = format!(
-            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, or interim findings; put those in your final report. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent."
+            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, or interim findings; put those in your final report. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent. A report that cannot be saved to the parent's pending-notification file also returns an error and does not reach the parent."
         );
         definition(
             "agent_report",
@@ -386,12 +425,18 @@ impl ChildTools {
             self.max_output_bytes,
         )
         .content;
-        self.parent_inbox.push(Notification {
-            task_id: self.task_id.clone(),
-            kind: Some(NotificationKind::TaskReport),
-            text,
-            usage: None,
-        });
+        if let Err(otto_core::agent::inbox::MailboxError::NotPersisted { seq, reason }) =
+            self.parent_inbox.enqueue(Notification {
+                task_id: self.task_id.clone(),
+                kind: Some(NotificationKind::TaskReport),
+                text,
+                usage: None,
+                ..Default::default()
+            })
+        {
+            self.parent_inbox.ack(seq);
+            return error_result(format!("report not sent: {reason}"));
+        }
         text_result("report sent to parent")
     }
 }
@@ -640,6 +685,10 @@ pub struct Config {
     /// The workspace the commit guard syncs to disk after a child tool call
     /// finishes. Ignored when `lease` is `None`.
     pub workspace_path: PathBuf,
+    /// Makes a file-backed child's mailbox durable beside its transcript, so
+    /// `agent_send` messages it has not read survive a restart and reach it
+    /// when it is resumed. `None` keeps child mailboxes in memory.
+    pub child_mailbox: Option<ChildMailbox>,
 }
 
 /// One delegation request.
@@ -909,7 +958,7 @@ impl Runner {
                     context,
                     now,
                     Vec::new(),
-                    transcript,
+                    transcript.map(|transcript| (transcript, String::new())),
                     None,
                     self.task_deadline(parent_deadline),
                 )
@@ -928,7 +977,7 @@ impl Runner {
             context,
             now,
             snapshot,
-            transcript,
+            transcript.map(|transcript| (transcript, String::new())),
             None,
             self.task_deadline(parent_deadline),
         )
@@ -1000,7 +1049,7 @@ impl Runner {
             record.context.clone(),
             now,
             Vec::new(),
-            Some(transcript),
+            Some((transcript, record.path.to_string_lossy().into_owned())),
             Some(record.task_id.clone()),
             self.task_deadline(None),
         )
@@ -1100,7 +1149,7 @@ impl Runner {
         context: String,
         now: DateTime<Utc>,
         snapshot: Vec<Message>,
-        transcript: Option<Transcript>,
+        transcript: Option<(Transcript, String)>,
         resume_id: Option<String>,
         deadline: Deadline,
     ) -> Result<Task, StartError> {
@@ -1146,7 +1195,12 @@ impl Runner {
             armed: true,
         };
         let transcript = match (transcript, &self.config.child_session) {
-            (Some(transcript), _) => transcript,
+            (Some((transcript, path)), _) => {
+                if !path.is_empty() {
+                    self.config.tasks.set_session_path(&task.id, &path);
+                }
+                transcript
+            }
             (None, None) => Arc::new(MemorySession::new()),
             (None, Some(build)) => match build(&task.id) {
                 Ok(Some((transcript, path))) => {
@@ -1170,6 +1224,18 @@ impl Runner {
             },
         };
         let _ = slot.set(Arc::clone(&transcript));
+        if let Some(build) = &self.config.child_mailbox
+            && let Some(path) = self
+                .config
+                .tasks
+                .get(&task.id)
+                .map(|task| task.session_path)
+                .filter(|path| !path.is_empty())
+        {
+            self.config
+                .tasks
+                .replace_child_inbox(&task.id, build(&path));
+        }
 
         // Durable custom entries are awaited before `start` returns, so even
         // a task that remains queued has its complete specification on disk.
@@ -1251,7 +1317,7 @@ impl Runner {
             .config
             .tasks
             .child_inbox(&task.id)
-            .unwrap_or_else(|| Arc::new(Inbox::new(None)));
+            .unwrap_or_else(|| Arc::new(Inbox::new(None)) as Arc<dyn Mailbox>);
         let options = Options {
             hooks: template
                 .plugins
@@ -1295,7 +1361,8 @@ impl Runner {
             // this private queue with agent_send.
             memory: None,
             tasks: None,
-            inbox: child_inbox,
+            mailbox: child_inbox,
+            version: env!("CARGO_PKG_VERSION").into(),
             ..Options::default()
         };
 
@@ -1540,6 +1607,7 @@ impl Runner {
                 kind: Some(NotificationKind::TaskFinished),
                 text: completion_text(&final_task, self.config.max_output_bytes),
                 usage: final_task.usage_present.then_some(final_task.usage),
+                ..Default::default()
             });
         }
         (result, error_text, migrating)
@@ -1793,6 +1861,14 @@ mod tests {
     /// closure.
     const _: () = ();
 
+    #[tokio::test]
+    async fn a_shared_transcript_keeps_the_session_contract() {
+        let fresh = || SharedTranscript(Arc::new(otto_core::session::MemorySession::new()));
+        otto_core::conformance::session(&fresh, None)
+            .await
+            .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
     fn runner(config: Config) -> (Arc<Runner>, Vec<String>) {
         let (runner, warnings) = Runner::new(config).expect("the test config is valid");
         (Arc::new(runner), warnings)
@@ -1948,7 +2024,7 @@ mod tests {
         registry: Arc<Registry>,
         write_policy: WritePolicy,
         write_paths: Vec<String>,
-        parent_inbox: Arc<Inbox>,
+        parent_inbox: Arc<dyn Mailbox>,
     ) -> ChildTools {
         child_tools_with_budget(
             registry,
@@ -1963,7 +2039,7 @@ mod tests {
         registry: Arc<Registry>,
         write_policy: WritePolicy,
         write_paths: Vec<String>,
-        parent_inbox: Arc<Inbox>,
+        parent_inbox: Arc<dyn Mailbox>,
         budget: usize,
     ) -> ChildTools {
         ChildTools {
@@ -2047,7 +2123,7 @@ mod tests {
             registry,
             WritePolicy::SingleWriter,
             Vec::new(),
-            Arc::clone(&parent_inbox),
+            parent_inbox.clone(),
         );
         assert!(
             tool_names(&tools.definitions()).contains(&"agent_report".to_string()),
@@ -2080,7 +2156,7 @@ mod tests {
             registry,
             WritePolicy::SingleWriter,
             Vec::new(),
-            Arc::clone(&parent_inbox),
+            parent_inbox.clone(),
             REPORT_BUDGET,
         );
 
@@ -2121,7 +2197,7 @@ mod tests {
             registry,
             WritePolicy::SingleWriter,
             Vec::new(),
-            Arc::clone(&parent_inbox),
+            parent_inbox.clone(),
             1,
         );
 
@@ -2153,7 +2229,7 @@ mod tests {
             allowed: None,
             write_policy: WritePolicy::SingleWriter,
             write_paths: Vec::new(),
-            parent_inbox: Arc::clone(&parent_inbox),
+            parent_inbox: parent_inbox.clone(),
             task_id: task.id.clone(),
             max_output_bytes: 16384,
             reports_left,
@@ -2679,6 +2755,30 @@ mod tests {
             fact: otto_core::session::OperationFact,
         ) -> Result<(), otto_core::session::SessionError> {
             self.inner.append_operation_fact(fact).await
+        }
+
+        fn observed_capabilities(&self) -> Option<otto_core::session::Capabilities> {
+            self.inner.observed_capabilities()
+        }
+
+        fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
+            self.inner.interrupted_turn()
+        }
+
+        fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+            self.inner.plan()
+        }
+
+        async fn append_input_if_absent(
+            &self,
+            input_id: &str,
+            message: otto_core::model::Message,
+        ) -> Result<otto_core::session::AppendOutcome, otto_core::session::SessionError> {
+            self.inner.append_input_if_absent(input_id, message).await
+        }
+
+        fn has_input(&self, input_id: &str) -> bool {
+            self.inner.has_input(input_id)
         }
 
         async fn append_custom(
@@ -3305,7 +3405,7 @@ mod tests {
         let provider = FakeProvider::new();
         provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
         let tasks = Arc::new(Tasks::new());
-        let mut config = test_config(&provider, &tasks, Vec::new());
+        let mut config = test_config(&provider, &tasks, vec![stub("write"), stub("grep")]);
         let source = parent.clone();
         config.parent_session = Some(Arc::new(move || source.clone()));
         let (runner, _) = runner(config);
@@ -3322,9 +3422,30 @@ mod tests {
         wait_final(&tasks, &task.id).await;
 
         let messages = provider.requests()[0].messages.clone();
-        assert_eq!(messages.len(), want_snapshot.len() + 1, "{messages:#?}");
+        // The child has history and no tool-set record, so its first run adds
+        // the legacy tool-set notice between the snapshot and the prompt.
+        assert_eq!(messages.len(), want_snapshot.len() + 2, "{messages:#?}");
         assert_eq!(&messages[..want_snapshot.len()], want_snapshot.as_slice());
-        let last = &messages[want_snapshot.len()];
+        let notice = &messages[want_snapshot.len()];
+        assert_eq!(notice.role, Role::Context);
+        assert_eq!(notice.context_type, "capability_update");
+        let mut names: Vec<String> = provider.requests()[0]
+            .tools
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
+        assert!(!names.is_empty());
+        names.sort();
+        let text = notice.text();
+        assert!(text.contains("was not recorded"), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line == format!("Current tools: {}", names.join(", "))),
+            "{text}"
+        );
+        assert!(!text.contains("Added:"), "{text}");
+        assert!(!text.contains("Removed:"), "{text}");
+        let last = &messages[want_snapshot.len() + 1];
         assert_eq!(last.role, Role::User);
         assert_eq!(last.text(), "delegated task");
     }
@@ -3802,6 +3923,24 @@ mod tests {
         dangling: bool,
         status: &str,
     ) -> PathBuf {
+        interrupted_fixture_with_capabilities(
+            parent, task_id, prompt, definition, started, dangling, status, None,
+        )
+    }
+
+    /// [`interrupted_fixture`] that also records `capabilities` as the child's
+    /// `otto.capabilities` entry when set.
+    #[allow(clippy::too_many_arguments)]
+    fn interrupted_fixture_with_capabilities(
+        parent: &std::path::Path,
+        task_id: &str,
+        prompt: &str,
+        definition: Option<TaskSpecDefinition>,
+        started: bool,
+        dangling: bool,
+        status: &str,
+        capabilities: Option<&[String]>,
+    ) -> PathBuf {
         let name = format!("{task_id}-child");
         let store = crate::session::Store::create_child_lazy(
             parent,
@@ -3845,6 +3984,17 @@ mod tests {
                 .append_message(&dangling_call())
                 .expect("append dangling call");
         }
+        if let Some(names) = capabilities {
+            store
+                .append_custom_entry(
+                    otto_core::session::CAPABILITIES_CUSTOM_TYPE,
+                    &otto_core::session::encode_capabilities(&otto_core::session::Capabilities {
+                        tools: names.to_vec(),
+                        ..Default::default()
+                    }),
+                )
+                .expect("append capabilities");
+        }
 
         let result = serde_json::to_string(&TaskResultData { status, error: "" })
             .expect("serialize task_result");
@@ -3866,6 +4016,56 @@ mod tests {
         let mut config = test_config(provider, tasks, Vec::new());
         config.children_dir = Some(Arc::new(move || Some(dir.clone())));
         config
+    }
+
+    #[tokio::test]
+    async fn resume_delivers_parent_messages_the_child_had_not_read() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        let path = interrupted_fixture(
+            &parent_path,
+            "t1",
+            "look at this",
+            None,
+            true,
+            true,
+            interrupted::INTERRUPTED_STATUS,
+        );
+        let sidecar = path.with_extension("inbox.json");
+        std::fs::write(
+            &sidecar,
+            r#"[{"seq":0,"task_id":"t1","kind":"message","text":"[parent-message] use the v2 API","usage":null,"id":"in_1"}]"#,
+        )
+        .expect("pending parent message");
+
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![assistant_text("all done", Usage::default())],
+        );
+        let tasks = Arc::new(Tasks::new());
+        let mut config = config_with_children_dir(&provider, &tasks, children_dir);
+        config.child_mailbox = Some(crate::runtime::wiring::child_mailbox());
+        let (runner, _) = runner(config);
+        runner
+            .resume("t1", "continue please".to_string())
+            .await
+            .expect("resume");
+        let final_task = wait_final(&tasks, "t1").await;
+        assert_eq!(final_task.status, TaskStatus::Succeeded);
+
+        let requests = provider.requests();
+        let request = &requests[0];
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message.text().contains("use the v2 API")),
+            "the unread parent message reaches the resumed child: {:?}",
+            request.messages
+        );
+        assert!(!sidecar.exists(), "delivered messages leave the sidecar");
     }
 
     #[tokio::test]
@@ -3982,6 +4182,88 @@ mod tests {
         assert_eq!(requests[0].messages.len(), 1, "{:?}", requests[0].messages);
         assert_eq!(requests[0].messages[0].role, Role::User);
         assert_eq!(requests[0].messages[0].text(), "start now");
+    }
+
+    /// Resumes a started, dangling child whose recorded tool set is
+    /// `recorded`, with a runner that offers `stub("read")`, `stub("grep")` and
+    /// the child-only `agent_report`. Returns the first provider request.
+    async fn resume_with_recorded_tools(recorded: &[&str]) -> otto_core::provider::Request {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        let recorded: Vec<String> = recorded.iter().map(|name| (*name).to_string()).collect();
+        interrupted_fixture_with_capabilities(
+            &parent_path,
+            "t1",
+            "look at this",
+            None,
+            true,
+            true,
+            interrupted::INTERRUPTED_STATUS,
+            Some(&recorded),
+        );
+
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let mut config = config_with_children_dir(&provider, &tasks, children_dir);
+        config.tools = vec![stub("read"), stub("grep")];
+        let (runner, _) = runner(config);
+
+        runner
+            .resume("t1", "continue please".to_string())
+            .await
+            .expect("resume succeeds");
+        wait_final(&tasks, "t1").await;
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        requests[0].clone()
+    }
+
+    #[tokio::test]
+    async fn resume_announces_a_changed_tool_set_once_before_the_prompt() {
+        let request = resume_with_recorded_tools(&["agent_report", "grep", "retired_tool"]).await;
+
+        let notices: Vec<usize> = request
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.context_type == "capability_update")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(notices.len(), 1, "{:#?}", request.messages);
+        let index = notices[0];
+        let notice = &request.messages[index];
+        assert_eq!(notice.role, Role::Context);
+        let text = notice.text();
+        assert!(text.lines().any(|line| line == "Added: read"), "{text}");
+        assert!(
+            text.lines().any(|line| line == "Removed: retired_tool"),
+            "{text}"
+        );
+        assert!(!text.contains("was not recorded"), "{text}");
+        // After the stored history (prompt, dangling call and its result),
+        // immediately before the resume prompt.
+        assert!(index >= 3, "{:#?}", request.messages);
+        assert_eq!(index, request.messages.len() - 2, "{:#?}", request.messages);
+        let last = request.messages.last().expect("messages");
+        assert_eq!(last.role, Role::User);
+        assert_eq!(last.text(), "continue please");
+    }
+
+    #[tokio::test]
+    async fn resume_with_an_unchanged_tool_set_adds_no_notice() {
+        let request = resume_with_recorded_tools(&["agent_report", "grep", "read"]).await;
+
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| message.context_type != "capability_update"),
+            "{:#?}",
+            request.messages
+        );
+        assert_eq!(last_user_text(&request), "continue please");
     }
 
     #[tokio::test]

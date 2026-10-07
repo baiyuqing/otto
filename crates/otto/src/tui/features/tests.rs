@@ -201,12 +201,94 @@ fn thinking_apply_and_save_use_the_same_selected_effort() {
     ));
 }
 
+#[test]
+fn fork_picker_lists_prompts_newest_first_and_forks_the_selected_one() {
+    let mut choice = Choice::new(ChoiceKind::Fork, "");
+    assert!(matches!(choice.refresh(), Some(BackendRequest::ForkPoints)));
+    choice.receive(Reply::Sessions(crate::tui::backend::fork_point_choices(
+        [
+            ("00000001".to_string(), "first\nmore".to_string()),
+            ("00000002".to_string(), "\nsecond".to_string()),
+        ]
+        .into_iter(),
+    )));
+    let view = choice.view();
+    assert_eq!(
+        view.rows
+            .iter()
+            .map(|row| (row.id.as_str(), row.cells[0].as_str()))
+            .collect::<Vec<_>>(),
+        [("00000002", "second"), ("00000001", "first")]
+    );
+    let fork = choice.activate(Activation::Open("00000001".into()));
+    assert!(matches!(
+        fork,
+        Transition::Request(BackendRequest::Command(Command::Fork(id))) if id == "00000001"
+    ));
+}
+
+#[test]
+fn fork_picker_says_when_there_is_nothing_to_fork() {
+    let mut choice = Choice::new(ChoiceKind::Fork, "");
+    assert!(choice.view().document.is_empty());
+    choice.receive(Reply::Sessions(Vec::new()));
+    assert_eq!(
+        choice.view().document,
+        "This session has no prompt to fork before yet."
+    );
+}
+
 fn custom_command(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     Ok(Transition::Push(Box::new(Document {
         key: "custom".into(),
         title: "Custom presenter".into(),
         text: format!("custom {args}"),
     })))
+}
+
+#[test]
+fn plan_command_and_line_show_the_session_plan_and_events_update_it() {
+    use otto_core::session::{PlanStatus, PlanStep};
+    let catalog = Catalog::default();
+    let document = |info: &Info| {
+        let Transition::Push(presenter) = catalog.open("/plan", info, false).unwrap() else {
+            panic!("plan should open a document");
+        };
+        presenter.view().document
+    };
+    assert!(document(&Info::default()).starts_with("No plan."));
+    assert_eq!(crate::tui::render::plan_line(&[]), None);
+
+    let remote = Arc::new(Remote::offline(Vec::new()));
+    let backend = Backend::Attach(&remote);
+    let mut app = crate::tui::app::App::with_catalog(&backend, Catalog::default());
+    app.apply_event(&otto_core::wire::events::to_wire(
+        &otto_core::agent::Event::PlanUpdated {
+            steps: vec![
+                PlanStep {
+                    text: "read".into(),
+                    status: PlanStatus::Completed,
+                },
+                PlanStep {
+                    text: "write".into(),
+                    status: PlanStatus::InProgress,
+                },
+            ],
+        },
+    ));
+    assert_eq!(
+        crate::tui::render::plan_line(&app.info.plan).as_deref(),
+        Some("Plan 1/2 · write")
+    );
+    assert_eq!(
+        document(&app.info),
+        "1 of 2 completed; in progress: write\n\n[x] read\n[>] write"
+    );
+
+    app.apply_event(&otto_core::wire::events::to_wire(
+        &otto_core::agent::Event::PlanUpdated { steps: Vec::new() },
+    ));
+    assert_eq!(crate::tui::render::plan_line(&app.info.plan), None);
 }
 
 #[test]

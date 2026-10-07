@@ -996,11 +996,20 @@ OTTO_UI=repl otto
   of every session's tasks, running or finished. The panel takes no rows
   when the session has no queued or running task.
 - The footer is always the terminal's last row, below the composer and the
-  sub-agent panel. It shows profile/model, reasoning effort, the sandbox
-  state (`seatbelt · workspace-write · network allowed`, `sandbox off ·
-  WARNING: bash is unsandboxed`, or `bash disabled · sandbox unavailable`),
-  the workspace, token totals, the context percentage, and the session ID
-  when space allows.
+  sub-agent panel. Its fields, most important first: the model, the approval
+  mode (`AUTO` or `MANUAL`), the session's token totals with the cached share
+  of the prompt (`tokens 12.4k/802 (cached 9.8k, 79.0%)`, or `tokens 0/0`
+  before the first report), the context percentage, the sandbox state
+  (`sb · write · net`, `sb · write · no-net`, or the full `seatbelt ·
+  workspace-write · network allowed`, `sandbox off · WARNING: bash is
+  unsandboxed`, and `bash disabled · sandbox unavailable`), the reasoning
+  effort, the workspace, and the session ID. Ratatui clips the row at the
+  terminal's right edge, so a narrow terminal loses the tail and keeps the
+  head: the token totals and the cached share stay readable down to about 60
+  columns, while the sandbox state, the reasoning effort, the workspace and
+  the session ID can be cut off. The cached share is `cached input tokens /
+  input tokens`, the same weighted ratio `GET /v1/usage` reports as
+  `cache_hit_rate`.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
 
 ### TUI keys

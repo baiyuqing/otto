@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -37,7 +37,7 @@ const MAXIMUM_MARKDOWN_BYTES: usize = guard::MAXIMUM_BODY_BYTES
     + crate::skill::MAX_SKILL_DESCRIPTION_CHARS * 4
     + crate::skill::MAX_SKILL_NAME_LENGTH
     + 128;
-use crate::fsops;
+use crate::fsops::{self, PosixPublish, Publish, PublishMode, PublishOps};
 use crate::tool::root::Root;
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
@@ -599,23 +599,35 @@ pub fn validate_python(scripts: &BTreeMap<String, String>) -> Result<(), &'stati
     }
 }
 
-/// Writes `content` to `path` through a temp file in the same directory, then
-/// renames it into place.
+/// Writes `content` to `path` through [`fsops::publish_file`]: a temp file in
+/// the same directory, renamed into place, then the directory is `fsync`ed.
 fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
+    write_atomically_with(path, content, &PosixPublish)
+}
+
+fn write_atomically_with(
+    path: &Path,
+    content: &str,
+    publish: &dyn PublishOps,
+) -> std::io::Result<()> {
     let directory = path
         .parent()
         .ok_or_else(|| std::io::Error::other("path has no parent"))?;
     fs::create_dir_all(directory)?;
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".reflection-file-")
-        .tempfile_in(directory)?;
-    temporary.write_all(content.as_bytes())?;
-    temporary
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(0o644))?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    let (parent, name) = fsops::open_parent(path)?;
+    let temp = format!(".reflection-file-{}", crate::auth::random_hex::<8>()?);
+    fsops::publish_file(
+        &parent,
+        &Publish {
+            name,
+            temp: &temp,
+            permissions: 0o644,
+            mode: PublishMode::Replace,
+        },
+        content.as_bytes(),
+        publish,
+    )
+    .map_err(|error| error.source)
 }
 
 #[cfg(test)]
@@ -623,6 +635,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::faults::publish::FaultyPublishOps;
+    use crate::faults::{Fault, FaultError, FaultPlan, Rule, Trigger};
+    use crate::fsops::PublishStep;
     use crate::reflection::guard::{self, Candidate, Verdict};
     use crate::reflection::transcript::Entry;
     use crate::skill::Catalog;
@@ -1194,5 +1209,44 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    fn write_failing_at(step: PublishStep) -> (tempfile::TempDir, PathBuf, std::io::Result<()>) {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("SKILL.md");
+        fs::write(&path, "old").expect("previous");
+        let plan = FaultPlan::new(vec![Rule::new(
+            step,
+            Trigger::Always,
+            Fault::Before(FaultError::Os(libc::EIO)),
+        )]);
+        let result = write_atomically_with(&path, "new", &FaultyPublishOps::new(plan.clone()));
+        plan.assert_all_fired();
+        (dir, path, result)
+    }
+
+    #[test]
+    fn the_directory_is_synced_after_the_rename() {
+        let (_dir, path, result) = write_failing_at(PublishStep::DirSync);
+        assert_eq!(
+            result.expect_err("sync fails").raw_os_error(),
+            Some(libc::EIO)
+        );
+        assert_eq!(fs::read_to_string(path).expect("read"), "new");
+    }
+
+    #[test]
+    fn a_rename_failure_keeps_the_previous_file_and_leaves_no_temporary_file() {
+        let (dir, path, result) = write_failing_at(PublishStep::Rename);
+        assert_eq!(
+            result.expect_err("rename fails").raw_os_error(),
+            Some(libc::EIO)
+        );
+        assert_eq!(fs::read_to_string(path).expect("read"), "old");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["SKILL.md"]);
     }
 }

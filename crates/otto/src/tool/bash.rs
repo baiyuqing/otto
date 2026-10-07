@@ -784,8 +784,20 @@ impl Tool for BashTool {
             String::new()
         };
         let version=serde_json::json!({"arguments":crate::approval::digest(arguments.get()),"config":config_version,"path":read_path}).to_string();
-        Ok(Some(super::ApprovalSpec { version,source:"sandbox".into(),
-            title:if read_path.is_empty() { "Run an unsandboxed command?" } else { "Save persistent sandbox read access?" }.into(),
+        // One escalation leaves the sandbox for a single command; a read path
+        // is a persistent grant outside the workspace.
+        let (authority, title) = if read_path.is_empty() {
+            (
+                crate::approval::Authority::Boundary,
+                "Run an unsandboxed command?",
+            )
+        } else {
+            (
+                crate::approval::Authority::Durable,
+                "Save persistent sandbox read access?",
+            )
+        };
+        Ok(Some(super::ApprovalSpec { version,source:"sandbox".into(),authority,title:title.into(),
             reason:args.justification, persistent:!read_path.is_empty(),
             details:serde_json::json!({"command":args.command,"workspace":self.workspace_root,"read_path":read_path}).to_string(),
         }))

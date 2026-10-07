@@ -28,6 +28,8 @@ pub trait ApprovalStore: Send + Sync {
     fn take_claim(&self, id: &str, expected: &Claim, next: &Claim) -> Result<bool>;
     /// Recheck the complete persisted snapshot, optional AUTO mode, and claim
     /// ownership; publish the request and its event together or publish neither.
+    /// An automatic decision additionally rechecks
+    /// [`automatic_decision_allowed`] against the persisted mode.
     fn commit(
         &self,
         expected: &Request,
@@ -35,4 +37,12 @@ pub trait ApprovalStore: Send + Sync {
         claim: ClaimChange,
         automatic: bool,
     ) -> Result<Request>;
+}
+
+/// A commit may publish an automatic decision only for an auto-decidable
+/// request while the same scope still selects AUTO. Backends recheck this
+/// inside the committing transaction, so a decision computed before the
+/// request or the mode changed cannot land.
+pub fn automatic_decision_allowed(mode: bool, request: &Request) -> bool {
+    mode && request.auto_decidable()
 }

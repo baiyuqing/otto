@@ -4281,6 +4281,60 @@ fn a_fork_directory_sync_failure_is_reported_after_the_fork_is_in_place() {
 }
 
 #[test]
+fn a_crash_after_the_fork_rename_leaves_a_complete_fork_and_no_temporary_file() {
+    use crate::faults::crash::{self, CRASH_EXIT, Role as Part};
+    crash::run(crash::name_of(&|| {}), |part| match part {
+        Part::Child(dir) => {
+            let workspace = dir.join("workspace");
+            fs::create_dir_all(&workspace).expect("create workspace");
+            let store =
+                Store::create(dir.join("root"), test_header(&workspace)).expect("create store");
+            completed_turn(&store, "t1", "first");
+            // The rename has happened and the directory sync has not.
+            let plan = FaultPlan::new(vec![Rule::new(
+                crate::fsops::PublishStep::DirSync,
+                Trigger::Always,
+                Fault::Exit,
+            )]);
+            let _ = super::fork::fork_with(
+                &PosixDriver,
+                Path::new(&store.path()),
+                None,
+                FORK_ID,
+                &crate::faults::publish::FaultyPublishOps::new(plan),
+            );
+        }
+        Part::Parent(dir, status) => {
+            assert_eq!(
+                status.code(),
+                Some(CRASH_EXIT),
+                "child did not crash at the fault"
+            );
+            let directory = list::session_directory(
+                &dir.join("root"),
+                &dir.join("workspace").to_string_lossy(),
+            )
+            .expect("session directory");
+            let source = directory.join("550e8400-e29b-41d4-a716-446655440000.jsonl");
+
+            let fork_path = directory.join(format!("{FORK_ID}.jsonl"));
+            assert!(
+                !session_files(&directory)
+                    .iter()
+                    .any(|name| name.ends_with(".fork-tmp")),
+                "{:?}",
+                session_files(&directory)
+            );
+            let (fork, warnings) = Store::open(&fork_path).expect("the fork is present and opens");
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert!(fork.forked_from().is_some());
+            let (original, _) = Store::open(&source).expect("source");
+            assert_eq!(fork.messages().len(), original.messages().len());
+        }
+    });
+}
+
+#[test]
 fn listing_shows_a_fork_and_ignores_a_leftover_temporary_file() {
     let temp = TempDir::new();
     let (store, root) = new_store(&temp);

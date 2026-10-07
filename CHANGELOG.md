@@ -84,6 +84,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Rust hosts can replace Otto's memory service through `MemoryExtension`,
+  without implementing Otto's storage schema. The service-neutral core contract
+  and host client enforce declared capabilities, scopes, reviewed preparations,
+  explicit learning grants and honest operation receipts. The existing native
+  recall/review path remains the default; external record-management views and
+  a Mem0 transport are not included. See the
+  [contract](docs/specs/2026-10-07-open-memory-contract.md)
+  ([#419](https://github.com/baiyuqing/otto/pull/419)).
+
 - Stop a sub-agent task from the model side with the new `agent_cancel` tool:
   it takes a task id or name and cancels that task, the same registry call
   `/task cancel`, `POST /v1/sessions/{id}/tasks/{task_id}/cancel` and ACP
@@ -202,6 +211,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- `make check-fast` runs its existing change selector directly, without a
+  cross-worktree `lockf`/`flock` wrapper. Independent worktrees can start checks
+  concurrently; the selected checks are unchanged. See
+  [local verification](docs/development.md#local-verification)
+  ([#419](https://github.com/baiyuqing/otto/pull/419)).
+
 - Add test-only fault injection. The `fault-injection` Cargo feature exposes
   `otto::faults` to integration tests and no shipped build enables it;
   `tests/faults_boundary.rs` fails if production code names it. `faults::http`
@@ -246,6 +261,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
   went red from #407 until each scripted call was given a distinct argument;
   the call count and the reflection assertion are unchanged
   ([#411](https://github.com/baiyuqing/otto/pull/411)).
+
+### Documentation
+
+- Archive the open Memory contract research in English, preserving source
+  versions, short excerpts, verified facts and unknown guarantees. See the
+  [research records](docs/specs/2026-10-07-open-memory-research/README.md)
+  ([#419](https://github.com/baiyuqing/otto/pull/419)).
 
 ## 0.4.1 - 2026-10-07
 

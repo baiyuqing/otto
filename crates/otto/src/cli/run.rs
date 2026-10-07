@@ -176,7 +176,7 @@ pub async fn run(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_backends(
     args: &[String],
-    mut stdin: Box<dyn BufRead + Send + 'static>,
+    stdin: Box<dyn BufRead + Send + 'static>,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
     environment_entries: Vec<Vec<u8>>,
@@ -185,6 +185,41 @@ pub async fn run_with_backends(
     terminate: &super::terminate::Terminate,
     backends: &crate::runtime::storage::BackendRegistry,
 ) -> i32 {
+    run_with_extensions(
+        args,
+        stdin,
+        stdout,
+        stderr,
+        environment_entries,
+        terminal,
+        cancel,
+        terminate,
+        backends,
+        None,
+    )
+    .await
+}
+
+/// Process entry point for host-provided storage and memory services.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_extensions(
+    args: &[String],
+    mut stdin: Box<dyn BufRead + Send + 'static>,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    environment_entries: Vec<Vec<u8>>,
+    terminal: bool,
+    cancel: &CancellationToken,
+    terminate: &super::terminate::Terminate,
+    backends: &crate::runtime::storage::BackendRegistry,
+    memory_extension: Option<crate::runtime::wiring::MemoryExtension>,
+) -> i32 {
+    if memory_extension.is_some() && args.first().is_some_and(|argument| argument == "memory") {
+        return fail(
+            stderr,
+            "memory operation is unsupported by the native record management interface; use the Rust memory service API",
+        );
+    }
     if args
         .first()
         .is_some_and(|a| matches!(a.as_str(), "config" | "plugin"))
@@ -574,6 +609,7 @@ pub async fn run_with_backends(
     );
     let composed = match startup::compose(
         startup::ComposeOptions {
+            memory_extension,
             sandbox_driver_override: sandbox_driver_override.clone(),
             no_session: options.no_session,
             overrides: overrides_from(&options),
@@ -686,6 +722,7 @@ pub async fn run_with_backends(
     }
     startup_trace.mark("memory/open");
     let memory_service = Arc::clone(&builder.memory.service);
+    let memory_client = builder.memory.client.clone();
     if cancel.is_cancelled() {
         let _ = control.close().await;
         return 130;
@@ -709,7 +746,14 @@ pub async fn run_with_backends(
             .map(|executor| executor.close())
             .transpose()
             .err();
+        let memory_error = match &memory_client {
+            Some(client) => client.close(&CancellationToken::new()).await.err(),
+            None => None,
+        };
         let _ = memory_service.close();
+        if let Some(error) = memory_error {
+            return fail(stderr, &format!("close memory: {error}"));
+        }
         if sandbox_error.is_err() || approval_error.is_some() {
             return fail(stderr, "close sandbox: sandbox runtime close failed");
         }
@@ -1001,7 +1045,14 @@ pub async fn run_with_backends(
         .map(|executor| executor.close())
         .transpose()
         .err();
+    let memory_error = match &memory_client {
+        Some(client) => client.close(&CancellationToken::new()).await.err(),
+        None => None,
+    };
     let _ = memory_service.close();
+    if let Some(error) = memory_error {
+        return fail(stderr, &format!("close memory: {error}"));
+    }
     if let Err(message) = controller_error {
         return fail(
             stderr,

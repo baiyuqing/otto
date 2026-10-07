@@ -581,6 +581,21 @@ impl Controller {
         &self.builder.memory
     }
 
+    pub fn memory_service(&self) -> Option<Arc<crate::memory::client::Client>> {
+        self.dynamic_content_available()
+            .then(|| self.builder.memory.client.clone())
+            .flatten()
+            .filter(|client| !client.is_closed())
+    }
+
+    pub fn memory_context(
+        &self,
+        origin: otto_core::memory::Origin,
+    ) -> otto_core::memory::MemoryContext {
+        self.builder
+            .memory_context(origin, Some(self.info().session_id))
+    }
+
     /// This session's memory workspace scope, unlike `memory_wiring`'s
     /// process-wide service and user scope.
     pub(crate) fn workspace_memory_scope(&self) -> &crate::memory::Scope {

@@ -4067,6 +4067,55 @@ A leading `~/` in `[memory.turso].path` is the home directory. There are no
 not select a SQLite engine. Turso uses a different full-text tokenizer and
 BM25 implementation, so search ordering can change.
 
+### Rust memory service extensions
+
+A Rust host can inject an independent `otto_core::memory::MemoryService` using
+`otto::embed::MemoryExtension` and `OttoBuilder::memory_service`, or the custom
+CLI entry point `cli::run::run_with_extensions`. Implementations declare their
+capabilities; they do not implement Otto's Turso schema or `MemoryStore`.
+The shipped CLI still uses its existing local memory configuration.
+
+```rust
+// `service` is an Arc<dyn otto_core::memory::MemoryService> supplied by the host.
+let extension = otto::embed::MemoryExtension::new(
+    service,
+    otto_core::memory::Scope {
+        namespace: "user".into(),
+        id: "host-user".into(),
+    },
+);
+let otto = otto::embed::Otto::builder()
+    .workspace("/path/to/workspace")
+    .memory_service(extension)
+    .build()
+    .await?;
+```
+
+`new` borrows the provider; `owned` gives one host responsibility for shutdown.
+Closing a session does not delete memories or close the shared provider.
+Memory disablement, the content boundary and `require_encryption` still apply;
+an unknown encryption guarantee does not satisfy that requirement.
+
+The default extension mode is ReviewedChanges. It exposes read tools; a trusted
+host obtains `Session::memory_service()` and `memory_context(origin)` to inspect
+items and manage prepared changes. Existing native-record management commands
+are unsupported for an independent service. They do not fabricate revisions or
+write to a different local store.
+
+`with_learning(LearningGrant)` explicitly authorizes delegated learning for
+specified scopes, input classes and background processing. Supported model
+`remember` operations submit explicit content; supported `forget` operations
+request retrieval suppression. These tools return receipts distinguishing
+completion, partial results, pending work and unknown outcomes. Input authority
+is not approval of every derived memory. Returned content remains untrusted
+reference material and cannot become a standing instruction through metadata.
+`opaque_revision` uses the service's revision when supplied; a native numeric
+revision is not substituted for it.
+
+No external transport or universal network protocol is bundled. See the
+[service contract](specs/2026-10-07-open-memory-contract.md) for capabilities,
+prepared snapshot recovery and deletion coverage.
+
 ### Migrating an existing database
 
 Stop every Otto process using the database, then run:

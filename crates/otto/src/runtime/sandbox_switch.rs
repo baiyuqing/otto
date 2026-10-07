@@ -1,6 +1,6 @@
 //! The process sandbox switch and the `[sandbox]` reloader.
 //!
-//! The composition root in [`super::run`] opens one sandbox and hands it to a
+//! The composition root (`cli::run`, and the embedding startup) opens one sandbox and hands it to a
 //! [`SandboxSwitch`]; the bash tool captures the switch as its executor, so
 //! `/sandbox reload`, `POST /v1/sandbox/reload` and the TUI all replace the
 //! runtime underneath a live session instead of restarting the process. A
@@ -184,15 +184,15 @@ fn reload_reason(info: &SandboxInfo) -> &'static str {
 /// workspace, shell, home, host environment, and the provider key name the
 /// sandbox environment was resolved from.
 pub struct SandboxReloader {
-    pub(super) control: Arc<SandboxSwitch>,
-    pub(super) config_path: PathBuf,
-    pub(super) explicit_config: bool,
-    pub(super) driver_override: Option<String>,
-    pub(super) environment: HashMap<String, String>,
-    pub(super) api_key_env: String,
-    pub(super) reopen: OpenOptions,
-    pub(super) cancel: CancellationToken,
-    pub(super) excluded: Option<Arc<crate::tool::bash::ExcludedCommands>>,
+    pub(crate) control: Arc<SandboxSwitch>,
+    pub(crate) config_path: PathBuf,
+    pub(crate) explicit_config: bool,
+    pub(crate) driver_override: Option<String>,
+    pub(crate) environment: HashMap<String, String>,
+    pub(crate) api_key_env: String,
+    pub(crate) reopen: OpenOptions,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) excluded: Option<Arc<crate::tool::bash::ExcludedCommands>>,
 }
 
 #[async_trait::async_trait]
@@ -203,7 +203,7 @@ impl SandboxControl for SandboxReloader {
 
     async fn reload(&self) -> Result<SandboxInfo, String> {
         let file = self.load_config()?;
-        let settings = super::run::resolve_sandbox_settings(
+        let settings = crate::runtime::startup::resolve_sandbox_settings(
             &file,
             &self.environment,
             &self.reopen.workspace,
@@ -211,7 +211,7 @@ impl SandboxControl for SandboxReloader {
         )?;
         let options = OpenOptions {
             settings: settings_from_config(&settings),
-            provider_names: super::run::sandbox_provider_environment_names(
+            provider_names: crate::runtime::startup::sandbox_provider_environment_names(
                 &file,
                 &self.api_key_env,
             ),

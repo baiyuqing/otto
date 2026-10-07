@@ -23,7 +23,10 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, FixedOffset};
+use otto_core::safetext::{self, SecretCollector};
 use serde::{Deserialize, Serialize};
+
+use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
 
 pub const MAX_CREDENTIAL_FILE_BYTES: usize = 1 << 20;
 
@@ -322,6 +325,67 @@ pub fn status_line(path: &Path) -> (String, bool) {
 #[cfg(test)]
 pub(crate) fn expiry(text: &str) -> DateTime<FixedOffset> {
     DateTime::parse_from_rfc3339(text).expect("valid RFC 3339 timestamp")
+}
+
+/// What `captureAuthCredentials` returns: the path it read, the credentials
+/// when they loaded, and the values the redaction boundary must mask.
+#[derive(Debug, Default)]
+pub struct CapturedAuth {
+    pub path: String,
+    pub credentials: Credentials,
+    pub loaded: bool,
+    pub complete: bool,
+    pub redaction_values: Vec<String>,
+}
+
+pub fn capture_auth_credentials(path: &Path) -> CapturedAuth {
+    let mut capture = CapturedAuth {
+        path: path.to_string_lossy().into_owned(),
+        complete: true,
+        ..CapturedAuth::default()
+    };
+    if capture.path.is_empty() {
+        capture.complete = false;
+        return capture;
+    }
+    let credentials = match load(path) {
+        Ok(credentials) => credentials,
+        // A missing file is the normal state before `otto login`: nothing is
+        // secret, so the boundary stays open.
+        Err(AuthError::NoCredentials) => return capture,
+        Err(_) => {
+            capture.complete = false;
+            return capture;
+        }
+    };
+    let mut redactions = SecretCollector::new();
+    let mut exact = SecretCollector::new();
+    for value in [
+        &credentials.access_token,
+        &credentials.refresh_token,
+        &credentials.id_token,
+        &credentials.account_id,
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        if !redactions.add(value)
+            || !exact.add_form(value)
+            || value.len() > MAX_EXACT_GUARD_VALUE_BYTES
+        {
+            capture.complete = false;
+            return capture;
+        }
+    }
+    let values = redactions.values();
+    if safetext::dynamic_redaction_marker(&values).is_none() {
+        capture.complete = false;
+        return capture;
+    }
+    capture.credentials = credentials;
+    capture.loaded = true;
+    capture.redaction_values = values;
+    capture
 }
 
 #[cfg(test)]

@@ -107,7 +107,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
 }
 
 /// A [`Shared`] with an offline (`driver = "off"`) sandbox, for tests that
-/// load a workspace at runtime (`run::load_workspace`,
+/// load a workspace at runtime (`runtime::startup::load_workspace`,
 /// `serve::Workspaces::load`) without a Seatbelt subprocess or a dependence
 /// on the host running the tests.
 pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {

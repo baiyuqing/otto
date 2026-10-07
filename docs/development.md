@@ -814,6 +814,26 @@ destination name, and `Short` and `ShortExit` apply only to `Write`. Each
 call site takes the ops through a test constructor or a `*_with` function,
 and its unit tests map each step to that site's error and effect certainty.
 
+Sandbox launch faults use `otto::faults::sandbox::FaultyDriver`, a
+`sandbox::Driver` over a `FaultPlan<SandboxOp>`; the rule subject is
+`argv[0]`, and `Before` returns `Error::ChildLaunch` without running the
+inner driver. MCP faults use `otto::faults::mcp::FaultyTransport`, an
+`mcp::Transport` over a `FaultPlan<McpOp>`; the rule subject is the JSON-RPC
+method (empty for `Close`), and `Hang` ignores the cancellation token, so the
+client's call timeout and grace end the call. Signal and reaping faults use
+real child processes in `sandbox::conformance`, registered in
+`driver_contract!`, so the direct driver and Seatbelt each run them. The
+process and MCP rows map to these tests:
+
+| Row | Test |
+| --- | --- |
+| child ignores `SIGTERM` | `sandbox::conformance::an_ignored_term_escalates_to_kill_and_removes_the_group` |
+| background grandchild outlives the leader | `sandbox::conformance::normal_leader_exit_removes_a_background_process`, `deadline_cancellation_removes_the_process_group` |
+| `Before` on `Execute` | `tool::bash::tests::a_driver_launch_failure_is_not_started_and_runs_nothing` |
+| MCP request hangs past the timeout (stdio) | `test_hung_stdio_request_times_out_and_stops_the_server` in `crates/otto/tests/mcp_stdio.rs` |
+| MCP request stalls past the timeout (HTTP) | `mcp::client::tests::a_stalled_http_request_times_out_and_the_next_request_succeeds` |
+| MCP HTTP 401, refresh succeeds or fails | `mcp::http::tests::unauthorized_then_refresh_then_retry_succeeds`, `unauthorized_then_refresh_fails_needs_login` |
+
 ## Docker acceptance
 
 After changing `Dockerfile`, `.dockerignore` or `compose.yaml`, build the

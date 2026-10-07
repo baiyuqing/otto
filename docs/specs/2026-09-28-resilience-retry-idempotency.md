@@ -540,6 +540,18 @@ an additional prohibition: no completion retries after any reasoning, text, or
 tool-call delta. ChatGPT remains no-retry unless its owned backend contract is
 separately proven and tested.
 
+> Amended 2026-10-07. Both native transports now retry a dispatched request
+> whose transport failed before any stream event reached the caller — a
+> connection reset, a connection closed before the message completed, a broken
+> pipe or a stalled read — within the attempt budget, and never after a
+> reasoning, text or tool-call delta. This is a deliberate, bounded exception
+> to Phase 2's "stop generic post-dispatch unknown retries": the lost stream
+> proves that no output exists, so repeating it can only duplicate provider
+> work or billing, and the settlement keeps `transport_lost` with `Unknown`
+> certainty. The exception does not cover a retry after visible output, a
+> non-transport failure, or any operation whose contract requires the
+> receiver's deduplication before repetition.
+
 ## Phase 1: identity, disposition, and effect-certainty contract
 
 ### Scope

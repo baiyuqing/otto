@@ -2,7 +2,7 @@
 //!
 //! The wire codec lives in [`otto_core::openaicompat`]; this module owns only
 //! the parts that need the network: base-URL validation, connection settings,
-//! the single-attempt policy, bounded error-body reader, and API-key redaction.
+//! the bounded retry policy, bounded error-body reader, and API-key redaction.
 //!
 //! Ownership: a [`Client`] owns its base URL, its API key, and its
 //! [`reqwest::Client`]. The request passed to `complete` is borrowed and never
@@ -60,16 +60,21 @@ const REDACTED: &str = "[REDACTED]";
 /// an unbounded buffer.
 const MAX_MODELS_BODY: usize = 8 << 20;
 
-/// Attempts for a completion whose connection could not be established: the
-/// request never left Otto, so trying again cannot duplicate provider work.
-const CONNECT_RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
+/// Attempts for one completion, shared by both retryable failure classes: a
+/// connection that could not be established, and a dispatched request whose
+/// transport failed before any stream event reached the caller.
+const RETRY_POLICY: crate::retry::Policy = crate::retry::Policy {
     max_attempts: 4,
     base: Duration::from_secs(1),
     max: Duration::from_secs(4),
     retry_after_cap: Duration::from_secs(4),
 };
-/// `Retry` event reason for a connection that could not be established.
+/// `Retry` event reason for a connection that could not be established: the
+/// request never left Otto.
 const CONNECT_RETRY_REASON: &str = "connection failed";
+/// `Retry` event reason for a dispatched request whose transport failed
+/// before any stream event reached the caller.
+const TRANSPORT_RETRY_REASON: &str = "connection interrupted";
 
 // Fixed exponential backoff (1, 2, 4 s); no randomness dependency.
 struct Backoff;
@@ -79,10 +84,18 @@ impl crate::retry::JitterSource for Backoff {
     }
 }
 
-/// How one attempt failed: before the request was sent (no connection), or
-/// at any later point.
+/// How one attempt failed.
 enum AttemptError {
+    /// The connection could not be established, so the request never left
+    /// Otto and trying again cannot duplicate provider work.
     NotSent(ProviderError),
+    /// The request was dispatched and the transport failed before any stream
+    /// event reached the caller. Output cannot be replayed, so nothing
+    /// visible is duplicated, but the endpoint may already have started the
+    /// completion.
+    Interrupted(ProviderError),
+    /// No retry: output was already visible, or the failure is not a
+    /// transport failure.
     Sent(ProviderError),
 }
 
@@ -244,8 +257,10 @@ impl Client {
         self.attempt_sent(ready, payload, emit, control).await
     }
 
-    /// [`Self::attempt`] after the stop check; a connection that could not
-    /// be established is [`AttemptError::NotSent`].
+    /// [`Self::attempt`] after the stop check: a connection that could not
+    /// be established is [`AttemptError::NotSent`], and a transport failure
+    /// after dispatch with nothing emitted yet is
+    /// [`AttemptError::Interrupted`].
     async fn attempt_sent(
         &self,
         ready: &Ready,
@@ -271,70 +286,89 @@ impl Client {
                 let message = format!("send chat completion request: {}", error_chain(&error));
                 return Err(if error.is_connect() {
                     AttemptError::NotSent(ProviderError::Other(message))
+                } else if is_transient_transport(&error) {
+                    // The request may already be at the endpoint even though
+                    // its response never arrived.
+                    AttemptError::Interrupted(ProviderError::Other(message))
                 } else {
                     AttemptError::Sent(ProviderError::Other(message))
                 });
             }
         };
-        self.read_response(response, emit, control)
-            .await
-            .map_err(AttemptError::Sent)
+        self.read_response(response, emit, control).await
     }
 
     /// Reads a sent request's response: an error status, or the whole stream.
+    ///
+    /// A transport failure that happens before any event reached `emit` is
+    /// [`AttemptError::Interrupted`], so the retry policy may repeat the
+    /// attempt. Once a reasoning, text or tool-call delta has been handed to
+    /// the caller nothing can be repeated, so the failure is
+    /// [`AttemptError::Sent`].
     async fn read_response(
         &self,
         response: reqwest::Response,
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
-    ) -> Result<Response, ProviderError> {
+    ) -> Result<Response, AttemptError> {
         let status = response.status();
         if !status.is_success() {
-            return Err(self
-                .error_response(status.as_u16(), response, control)
-                .await);
+            return Err(AttemptError::Sent(
+                self.error_response(status.as_u16(), response, control)
+                    .await,
+            ));
         }
 
         let mut assembler = StreamAssembler::new();
         let mut body = Box::pin(response.bytes_stream());
+        let mut emitted = false;
+        let mut forward = |event: StreamEvent| {
+            emitted = true;
+            emit(event);
+        };
         while !assembler.is_done() {
-            let chunk = match await_control(control, body.try_next()).await? {
+            let chunk = match await_control(control, body.try_next())
+                .await
+                .map_err(AttemptError::Sent)?
+            {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
                 Err(error) => {
-                    check_running(control)?;
-                    return Err(ProviderError::Other(format!(
-                        "read chat completion stream: {}",
-                        error_chain(&error)
-                    )));
+                    check_running(control).map_err(AttemptError::Sent)?;
+                    let message = format!("read chat completion stream: {}", error_chain(&error));
+                    return Err(if !emitted && is_transient_transport(&error) {
+                        AttemptError::Interrupted(ProviderError::Other(message))
+                    } else {
+                        AttemptError::Sent(ProviderError::Other(message))
+                    });
                 }
             };
             {
-                if let Err(error) = assembler.push(&chunk, &mut *emit) {
-                    check_running(control)?;
-                    return Err(ProviderError::Other(error.to_string()));
+                if let Err(error) = assembler.push(&chunk, &mut forward) {
+                    check_running(control).map_err(AttemptError::Sent)?;
+                    return Err(AttemptError::Sent(ProviderError::Other(error.to_string())));
                 }
                 // Once a complete response has been received and validated, it
                 // wins a simultaneous stop. Before then, the stop reason wins.
                 if assembler.is_done() {
-                    return match assembler.finish(&mut *emit) {
+                    return match assembler.finish(&mut forward) {
                         Ok(response) => Ok(response),
                         Err(error) => {
-                            check_running(control)?;
-                            Err(ProviderError::Other(error.to_string()))
+                            check_running(control).map_err(AttemptError::Sent)?;
+                            Err(AttemptError::Sent(ProviderError::Other(error.to_string())))
                         }
                     };
                 }
-                check_running(control)?;
+                check_running(control).map_err(AttemptError::Sent)?;
             }
         }
         let result = assembler
-            .finish(&mut *emit)
-            .map_err(|error| ProviderError::Other(error.to_string()));
+            .finish(&mut forward)
+            .map_err(|error| AttemptError::Sent(ProviderError::Other(error.to_string())));
         match result {
             Ok(response) => Ok(response),
             Err(error) => {
-                check_running(control)?;
+                check_running(control).map_err(AttemptError::Sent)?;
                 Err(error)
             }
         }
@@ -416,11 +450,15 @@ impl Client {
 #[async_trait::async_trait]
 impl Provider for Client {
     /// Sends one chat completion and assembles its streamed response.
-    /// Only a connection that could not be established is tried again (at
-    /// most 4 attempts, 1/2/4 s apart, within the operation deadline): that
-    /// request never left Otto. Send errors after connecting, 429/5xx
-    /// statuses, and interrupted streams are never retried, because a
-    /// transport cannot prove that the request had no effect.
+    ///
+    /// An attempt is repeated while it has produced nothing visible: a
+    /// connection that could not be established never left Otto, and a
+    /// dispatched request whose transport failed before any stream event
+    /// reached the caller has no output to duplicate. Both share one policy
+    /// (at most 4 attempts, 1/2/4 s apart, within the operation deadline) and
+    /// report every planned retry as a `Retry` event. A failure after any
+    /// reasoning, text or tool-call delta, an HTTP status, and a stream-codec
+    /// error are never retried.
     async fn complete(
         &self,
         request: &Request,
@@ -458,34 +496,42 @@ impl Provider for Client {
         let mut attempts = 0;
         let result = loop {
             attempts += 1;
-            match self.attempt(ready, &payload, &mut *emit, control).await {
-                Err(AttemptError::NotSent(error)) => {
-                    let Some(delay) = crate::retry::next_delay(
-                        CONNECT_RETRY_POLICY,
-                        attempts,
-                        None,
-                        control.remaining().unwrap_or(Duration::MAX),
-                        Duration::from_secs(1),
-                        &mut Backoff,
-                    ) else {
-                        return ProviderSettlement::failed(
-                            self.safe_error(error),
-                            attempts,
-                            EffectCertainty::NotStarted,
-                        );
-                    };
-                    emit(StreamEvent::Retry {
-                        attempt: attempts + 1,
-                        max_attempts: CONNECT_RETRY_POLICY.max_attempts,
-                        delay,
-                        reason: CONNECT_RETRY_REASON.to_owned(),
-                    });
-                    if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
-                        return not_started_stop(error, attempts, control);
-                    }
-                }
-                Err(AttemptError::Sent(error)) => break Err(error),
-                Ok(response) => break Ok(response),
+            // `dispatched` records whether a retry could repeat provider work,
+            // which the settlement must keep as unknown effect certainty.
+            let (error, reason, dispatched) =
+                match self.attempt(ready, &payload, &mut *emit, control).await {
+                    Ok(response) => break Ok(response),
+                    Err(AttemptError::Sent(error)) => break Err(error),
+                    Err(AttemptError::NotSent(error)) => (error, CONNECT_RETRY_REASON, false),
+                    Err(AttemptError::Interrupted(error)) => (error, TRANSPORT_RETRY_REASON, true),
+                };
+            let Some(delay) = crate::retry::next_delay(
+                RETRY_POLICY,
+                attempts,
+                None,
+                control.remaining().unwrap_or(Duration::MAX),
+                Duration::from_secs(1),
+                &mut Backoff,
+            ) else {
+                let error = self.safe_error(error);
+                return if dispatched {
+                    provider_failure(error, attempts, EffectCertainty::Unknown, control)
+                } else {
+                    ProviderSettlement::failed(error, attempts, EffectCertainty::NotStarted)
+                };
+            };
+            emit(StreamEvent::Retry {
+                attempt: attempts + 1,
+                max_attempts: RETRY_POLICY.max_attempts,
+                delay,
+                reason: reason.to_owned(),
+            });
+            if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
+                return if dispatched {
+                    provider_failure(error, attempts, EffectCertainty::Unknown, control)
+                } else {
+                    not_started_stop(error, attempts, control)
+                };
             }
         };
         match result {
@@ -645,6 +691,14 @@ async fn await_control<T>(
     }
 }
 
+/// Whether a failed send or body read is a transport failure the retry policy
+/// may repeat. A local builder or redirect-policy error is a decision Otto
+/// made rather than a network failure, so it stays terminal; this mirrors the
+/// ChatGPT transport's classification.
+fn is_transient_transport(error: &reqwest::Error) -> bool {
+    !error.is_builder() && !error.is_redirect()
+}
+
 /// Joins an error with its causes, so a wrapped transport error names the
 /// reason instead of hiding it behind a generic summary.
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
@@ -736,7 +790,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use otto_core::model::{Block, Message, Role};
+    use otto_core::model::{Block, Message, OperationDisposition, Role};
     use otto_core::provider::StreamEvent;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -777,12 +831,33 @@ mod tests {
         }
     }
 
+    /// A control that has not stopped but has only `remaining` of budget, so
+    /// the retry policy is limited by the budget alone.
+    struct BudgetControl {
+        token: CancellationToken,
+        remaining: Duration,
+    }
+
+    impl OperationControl for BudgetControl {
+        fn cancellation_token(&self) -> &CancellationToken {
+            &self.token
+        }
+
+        fn remaining(&self) -> Option<Duration> {
+            Some(self.remaining)
+        }
+
+        fn stop_reason(&self) -> Option<OperationStopReason> {
+            None
+        }
+    }
+
     /// A loopback HTTP/1.1 origin server.
     ///
     /// The accept loop is aborted when the guard is dropped, so a test never
     /// leaks a listener. Handlers return the exact bytes to write, which lets
     /// the same helper serve well-formed responses and the truncated or absent
-    /// ones the single-attempt tests need.
+    /// ones the transport-retry tests need.
     struct TestServer {
         base_url: String,
         accept: tokio::task::JoinHandle<()>,
@@ -926,7 +1001,7 @@ mod tests {
         );
     }
 
-    // --- single attempt --------------------------------------------------
+    // --- transport retry -------------------------------------------------
 
     #[tokio::test]
     async fn rate_limits_and_server_errors_are_not_retried() {
@@ -1033,24 +1108,63 @@ mod tests {
         assert_eq!(retries, 1);
     }
 
+    /// The endpoint accepts the request and closes before any response. The
+    /// request may already be at the endpoint, so the retry is reported and
+    /// the settlement would keep unknown effect certainty.
     #[tokio::test]
-    async fn send_errors_are_not_retried() {
+    async fn a_connection_closed_before_the_response_is_retried() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
         let server = spawn_server(move |_head, _body| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            Vec::new()
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Vec::new();
+            }
+            http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
         })
         .await;
 
-        complete(&Client::new(&server.base_url, "key"), &model_request())
-            .await
-            .expect_err("the first send failure is returned");
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let mut events = Vec::new();
+        let mut emit = |event| events.push(event);
+        let settlement = Client::new(&server.base_url, "key")
+            .complete(&model_request(), &mut emit, &CancellationToken::new())
+            .await;
+        assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
+        assert_eq!(settlement.attempts, 2);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(retry_reasons(&events), [TRANSPORT_RETRY_REASON]);
     }
 
+    /// The response stream is cut before any delta; nothing was visible, so
+    /// the retry sends the same request again and returns the whole response.
     #[tokio::test]
-    async fn stream_cut_before_any_delta_is_not_retried() {
+    async fn a_stream_cut_before_any_delta_is_retried() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let server = spawn_server(move |_head, _body| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                return truncated_stream("");
+            }
+            http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
+        })
+        .await;
+
+        let mut events = Vec::new();
+        let mut emit = |event| events.push(event);
+        let settlement = Client::new(&server.base_url, "key")
+            .complete(&model_request(), &mut emit, &CancellationToken::new())
+            .await;
+        assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
+        assert_eq!(settlement.attempts, 2);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(retry_reasons(&events), [TRANSPORT_RETRY_REASON]);
+    }
+
+    /// A connection reset that keeps repeating is tried 1, 2 and 4 seconds
+    /// later (real time: paused time would trip the read timeout on the
+    /// loopback socket), then reported as a lost transport whose effect is
+    /// unknown.
+    #[tokio::test]
+    async fn a_repeated_stream_cut_stops_as_transport_lost() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
         let server = spawn_server(move |_head, _body| {
@@ -1059,12 +1173,69 @@ mod tests {
         })
         .await;
 
-        complete(&Client::new(&server.base_url, "key"), &model_request())
-            .await
-            .expect_err("the first interrupted stream is returned");
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let mut events = Vec::new();
+        let mut emit = |event| events.push(event);
+        let settlement = Client::new(&server.base_url, "key")
+            .complete(&model_request(), &mut emit, &CancellationToken::new())
+            .await;
+        assert_eq!(settlement.attempts, 4);
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(retry_reasons(&events), [TRANSPORT_RETRY_REASON; 3]);
+        assert_eq!(
+            settlement.outcome.effect_certainty,
+            EffectCertainty::Unknown
+        );
+        assert_eq!(
+            settlement.outcome.disposition,
+            OperationDisposition::Interrupted
+        );
+        assert_eq!(
+            settlement.outcome.stop_reason,
+            Some(OperationStopReason::TransportLost)
+        );
+        let error = settlement.result.unwrap_err().to_string();
+        assert!(
+            error.starts_with("read chat completion stream:"),
+            "error = {error}"
+        );
     }
 
+    /// A stream cut is not retried when the remaining budget cannot hold the
+    /// backoff and another attempt.
+    #[tokio::test]
+    async fn a_stream_cut_without_retry_budget_is_not_retried() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let server = spawn_server(move |_head, _body| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            truncated_stream("")
+        })
+        .await;
+
+        let control = BudgetControl {
+            token: CancellationToken::new(),
+            remaining: Duration::from_secs(1),
+        };
+        let mut events = Vec::new();
+        let mut emit = |event| events.push(event);
+        let settlement = Client::new(&server.base_url, "key")
+            .complete(&model_request(), &mut emit, &control)
+            .await;
+        assert_eq!(settlement.attempts, 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(events.is_empty());
+        assert_eq!(
+            settlement.outcome.effect_certainty,
+            EffectCertainty::Unknown
+        );
+        assert_eq!(
+            settlement.outcome.stop_reason,
+            Some(OperationStopReason::TransportLost)
+        );
+    }
+
+    /// A delta already reached the caller, so the output cannot be replayed
+    /// and the failure stays single-attempt.
     #[tokio::test]
     async fn stream_cut_after_a_delta_is_not_retried() {
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -1089,6 +1260,17 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, StreamEvent::Retry { .. }))
         );
+    }
+
+    /// The `Retry` event reason of every retry in `events`.
+    fn retry_reasons(events: &[StreamEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Retry { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     // --- redirect --------------------------------------------------------

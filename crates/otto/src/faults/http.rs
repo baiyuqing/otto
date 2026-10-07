@@ -61,6 +61,11 @@ impl Server {
         self.requests.lock().unwrap().clone()
     }
 
+    /// The port the server listens on.
+    pub fn port(&self) -> u16 {
+        self.url.rsplit(':').next().unwrap().parse().unwrap()
+    }
+
     pub fn count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }

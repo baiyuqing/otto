@@ -217,20 +217,14 @@ pub(super) fn redacted(url: &Url) -> String {
 
 #[cfg(test)]
 pub(super) mod testserver {
-    //! A one-connection-at-a-time HTTP server on loopback, for offline tests.
+    //! Canned-response helpers over the shared loopback server.
 
-    use std::net::SocketAddr;
-    use std::sync::{Arc, Mutex};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use std::sync::Arc;
+
+    pub(crate) use crate::faults::http::Server;
 
     /// One canned response: raw bytes written after the request is read.
     pub(crate) type Handler = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
-
-    pub(crate) struct Server {
-        pub addr: SocketAddr,
-        pub requests: Arc<Mutex<Vec<String>>>,
-    }
 
     pub(crate) fn response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
         let mut out = format!("HTTP/1.1 {status}\r\nConnection: close\r\n").into_bytes();
@@ -242,36 +236,9 @@ pub(super) mod testserver {
         out
     }
 
+    /// Answers each request with `handler(request head)`.
     pub(crate) async fn serve(handler: Handler) -> Server {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&requests);
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    return;
-                };
-                let handler = Arc::clone(&handler);
-                let seen = Arc::clone(&seen);
-                tokio::spawn(async move {
-                    let mut buffer = Vec::new();
-                    let mut chunk = [0u8; 1024];
-                    while !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
-                        match stream.read(&mut chunk).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
-                        }
-                    }
-                    let request = String::from_utf8_lossy(&buffer).into_owned();
-                    seen.lock().unwrap().push(request.clone());
-                    let reply = handler(&request);
-                    let _ = stream.write_all(&reply).await;
-                    let _ = stream.shutdown().await;
-                });
-            }
-        });
-        Server { addr, requests }
+        crate::faults::http::spawn(move |request| handler(&request.head)).await
     }
 }
 
@@ -285,7 +252,7 @@ mod tests {
     }
 
     fn url(server: &testserver::Server, path: &str) -> Url {
-        Url::parse(&format!("http://page.test:{}{path}", server.addr.port())).unwrap()
+        Url::parse(&format!("http://page.test:{}{path}", server.port())).unwrap()
     }
 
     #[tokio::test]
@@ -313,8 +280,8 @@ mod tests {
             .get(url(&server, "/"), "text/plain", &[], &cancel)
             .await
             .unwrap();
-        let requests = server.requests.lock().unwrap();
-        let second = requests[1].to_ascii_lowercase();
+        let requests = server.requests();
+        let second = requests[1].head.to_ascii_lowercase();
         assert!(second.starts_with("get / http/1.1"), "{second}");
         assert!(second.contains("user-agent: otto/"), "{second}");
         assert!(second.contains("accept: text/plain"), "{second}");
@@ -372,7 +339,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        assert_eq!(server.count(), 1);
     }
 
     #[tokio::test]
@@ -452,12 +419,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_stops_a_stalled_request() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            let _held = listener.accept().await;
-            tokio::time::sleep(Duration::from_secs(60)).await;
-        });
+        let server = crate::faults::http::spawn_scripted(vec![
+            crate::faults::http::Script::stall_before_head(),
+        ])
+        .await;
+        let port = server.port();
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         tokio::spawn(async move {

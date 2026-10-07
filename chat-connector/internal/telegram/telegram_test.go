@@ -832,7 +832,7 @@ func TestApprovalModeMessageShowsModeAndOffersBothShortcuts(t *testing.T) {
 	api := newAPI(t, func(method string, body map[string]any) resp { return okR(map[string]any{"message_id": 42}) })
 	bot := New(testToken, nil)
 	bot.APIBase = api.srv.URL
-	if err := bot.SendApprovalMode(context.Background(), "123", "", session, true); err != nil {
+	if err := bot.SendApprovalMode(context.Background(), "123", "", session, "auto"); err != nil {
 		t.Fatal(err)
 	}
 	body := api.byMethod("sendMessage")[0].body
@@ -858,8 +858,8 @@ func TestApprovalModeClicksShowSelectionAndRemoveButtons(t *testing.T) {
 			})
 			bot := New(testToken, nil)
 			bot.APIBase = api.srv.URL
-			for _, automatic := range []bool{true, true, false} {
-				err := bot.SendApprovalMode(context.Background(), "123", "42", strings.Repeat("b", 32), automatic)
+			for _, mode := range []string{"auto", "yolo", "manual"} {
+				err := bot.SendApprovalMode(context.Background(), "123", "42", strings.Repeat("b", 32), mode)
 				wantError := strings.Contains(desc, "not found")
 				if (err != nil) != wantError {
 					t.Fatalf("edit error = %v, want error %v", err, wantError)
@@ -874,6 +874,9 @@ func TestApprovalModeClicksShowSelectionAndRemoveButtons(t *testing.T) {
 			}
 			for i, edit := range edits {
 				mode := "AUTO"
+				if i == 1 {
+					mode = "YOLO"
+				}
 				if i == 2 {
 					mode = "MANUAL"
 				}

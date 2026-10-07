@@ -327,7 +327,7 @@ impl Tool for McpTool {
             authority:crate::approval::Authority::Boundary,
             title:format!("Authorize {}?",self.name),
             reason:"This external tool can affect an external system.".into(),persistent:false,
-            details:serde_json::json!({"tool":self.name,"arguments":serde_json::from_str::<serde_json::Value>(arguments.get()).map_err(|_| error_result("invalid MCP arguments"))?}).to_string(),
+            details:serde_json::json!({"tool":self.name,"arguments":serde_json::from_str::<serde_json::Value>(arguments.get()).map_err(|_| error_result("invalid MCP arguments"))?,"untrusted_tool_description":self.description}).to_string(),
         }))
     }
 

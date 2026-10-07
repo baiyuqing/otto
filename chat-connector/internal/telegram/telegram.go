@@ -602,7 +602,24 @@ func (b *Bot) SendChoices(ctx context.Context, chatID, replyTo, text string, cho
 }
 
 func (b *Bot) SendApprovalMode(ctx context.Context, chatID, messageID, session, mode string) error {
-	params := map[string]any{"chat_id": chatParam(chatID), "text": "Approval mode: " + agent.ApprovalModeLabel(mode) + "\nSession: " + session, "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "AUTO", "callback_data": "auto:on:" + session}, map[string]any{"text": "MANUAL", "callback_data": "auto:off:" + session}}}}}
+	return b.sendApprovalControls(ctx, chatID, messageID, session, "Approval mode: "+agent.ApprovalModeLabel(mode)+"\nSession: "+session)
+}
+
+func (b *Bot) SendApprovalPolicy(ctx context.Context, chatID, messageID, session string, policy agent.ApprovalPolicy) error {
+	label := agent.ApprovalModeLabel(policy.Mode)
+	if policy.Policy == "never" {
+		label = "NEVER"
+	}
+	active := "inactive"
+	if policy.ReviewerActive {
+		active = "active"
+	}
+	text := fmt.Sprintf("Approval policy: %s\nPolicy: %s\nReviewer: %s (%s)\nSession: %s", label, policy.Policy, policy.Reviewer, active, session)
+	return b.sendApprovalControls(ctx, chatID, messageID, session, text)
+}
+
+func (b *Bot) sendApprovalControls(ctx context.Context, chatID, messageID, session, text string) error {
+	params := map[string]any{"chat_id": chatParam(chatID), "text": text, "reply_markup": map[string]any{"inline_keyboard": [][]any{{map[string]any{"text": "AUTO", "callback_data": "auto:on:" + session}, map[string]any{"text": "MANUAL", "callback_data": "auto:off:" + session}}}}}
 	if messageID == "" {
 		return b.call(ctx, "sendMessage", params, nil)
 	}

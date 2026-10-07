@@ -2,14 +2,19 @@
 pub mod codec;
 pub mod config;
 mod contracts;
+mod coordinator;
 pub mod memory;
 pub mod migration;
+mod policy;
 pub mod reflection;
 pub mod repository;
+pub mod reviewer;
 mod service;
 pub mod workflow;
 pub use contracts::*;
 pub use service::{Service, digest};
+#[cfg(test)]
+mod coordinator_tests;
 
 // Compatibility constructors; runtime composition supplies ports to services.
 impl Service {
@@ -50,7 +55,10 @@ mod tests {
         bounded.subject.id = "bounded".into();
         let bounded = service.create(bounded).unwrap();
         assert_eq!(bounded.state, State::Approved);
-        assert_eq!(bounded.decision.as_ref().unwrap().transport, "auto-mode");
+        assert_eq!(
+            bounded.decision.as_ref().unwrap().transport,
+            "bounded-authority"
+        );
         let events = service.events("/w", Some("s"), 0).unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].request.state, State::Pending);
@@ -87,7 +95,8 @@ mod tests {
             service.get(&review.id, "/w", Some("s")).unwrap().state,
             State::Pending
         );
-        assert_eq!(service.snapshot("/w", Some("s")).unwrap().requests.len(), 3);
+        // The root's live AUTO preset also covers its own bounded child.
+        assert_eq!(service.snapshot("/w", Some("s")).unwrap().requests.len(), 2);
     }
 
     #[tokio::test]
@@ -234,12 +243,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("approvals.db");
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("PRAGMA user_version=4").unwrap();
+        connection.execute_batch("PRAGMA user_version=5").unwrap();
         assert!(matches!(Service::open(&path), Err(Error::Invalid(_))));
         let version: i64 = connection
             .query_row("PRAGMA user_version", (), |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
     #[test]
     fn decisions_deduplicate_conflict_and_survive_reopen() {
@@ -363,7 +372,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", (), |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
     #[test]
     fn native_review_claim_is_committed_with_the_decision_before_maintenance() {

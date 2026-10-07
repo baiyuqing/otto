@@ -37,18 +37,37 @@ pub async fn decide(
         Ok(parsed) if parsed.decision == "deny" => (ApprovalDecision::Deny, "deny"),
         _ => return bad_request("decision must be \"allow\" or \"deny\""),
     };
-    if session
-        .ctrl
-        .approval_service()
-        .get(&approval_id, &session.ctrl.info().workspace, Some(&id))
-        .is_ok()
+    if let Ok(request) =
+        session
+            .ctrl
+            .approval_service()
+            .get(&approval_id, &session.ctrl.info().workspace, Some(&id))
     {
-        return match session.ctrl.decide_shared_approval(
-            &approval_id,
-            decision == ApprovalDecision::Allow,
-            "",
-            "http",
-        ) {
+        let revision = session
+            .lock()
+            .waiting
+            .as_ref()
+            .filter(|waiting| waiting.id == approval_id)
+            .and_then(|waiting| waiting.shared_revision)
+            .unwrap_or(request.revision);
+        return match session
+            .ctrl
+            .approval_service()
+            .decide(
+                &approval_id,
+                &request.scope,
+                revision,
+                decision == ApprovalDecision::Allow,
+                "",
+                &crate::approval::Actor::local("http"),
+            )
+            .and_then(|request| {
+                session
+                    .ctrl
+                    .approval_service()
+                    .apply_available(&request.scope.workspace)?;
+                Ok(request)
+            }) {
             Ok(request) => {
                 server.bump_status();
                 json_response(StatusCode::OK, &request)
@@ -143,7 +162,11 @@ pub async fn list_shared(
     let Some(ctrl) = server.controller_for_route(&query.session_id).await else {
         return not_found("session not found");
     };
-    match ctrl.approval_snapshot() {
+    let scope = ctrl.approval_scope();
+    match ctrl.approval_snapshot().and_then(|_| {
+        ctrl.approval_service()
+            .activity_snapshot(&scope.workspace, Some(&scope.session_id))
+    }) {
         Ok(snapshot) => json_response(StatusCode::OK, &snapshot),
         Err(error) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -340,13 +363,6 @@ struct ModeBody {
 }
 
 impl ModeBody {
-    fn of(mode: crate::approval::ApprovalMode) -> Self {
-        Self {
-            automatic: Some(mode.is_automatic()),
-            mode: Some(mode),
-        }
-    }
-
     /// The mode this body selects: the explicit mode, the boolean's meaning
     /// (MANUAL or AUTO), or nothing when a read leaves both out.
     fn selected(&self) -> Option<crate::approval::ApprovalMode> {
@@ -373,12 +389,77 @@ pub async fn mode(State(server): State<Arc<Server>>, Path(id): Path<String>) -> 
     match session
         .ctrl
         .approval_service()
-        .mode(&session.ctrl.approval_scope())
+        .settings(&session.ctrl.approval_scope())
     {
-        Ok(mode) => json_response(StatusCode::OK, &ModeBody::of(mode)),
+        Ok(settings) => json_response(StatusCode::OK, &policy_body(settings)),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "approval_mode_failed",
+            &e.to_string(),
+        ),
+    }
+}
+
+pub(crate) fn policy_body(settings: crate::approval::ApprovalSettings) -> serde_json::Value {
+    serde_json::json!({"policy":settings.policy,"reviewer":settings.reviewer,
+        "revision":settings.revision,"mode":settings.mode(),
+        "automatic":settings.is_automatic(),
+        "reviewer_active":settings.policy != crate::approval::ApprovalPolicy::Never})
+}
+
+pub async fn policy(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session
+        .ctrl
+        .approval_service()
+        .settings(&session.ctrl.approval_scope())
+    {
+        Ok(settings) => json_response(StatusCode::OK, &policy_body(settings)),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "approval_policy_failed",
+            &e.to_string(),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyInput {
+    expected_revision: u64,
+    policy: crate::approval::ApprovalPolicy,
+    reviewer: crate::approval::ApprovalReviewer,
+}
+
+pub async fn set_policy(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let Ok(input) = serde_json::from_slice::<PolicyInput>(&body) else {
+        return bad_request("expected expected_revision, policy and reviewer");
+    };
+    if input.expected_revision == 0 {
+        return bad_request("expected_revision must be positive");
+    }
+    match session.ctrl.approval_service().set_settings(
+        &session.ctrl.approval_scope(),
+        input.expected_revision,
+        input.policy,
+        input.reviewer,
+    ) {
+        Ok(settings) => {
+            server.bump_status();
+            json_response(StatusCode::OK, &policy_body(settings))
+        }
+        Err(e) => error_response(
+            StatusCode::CONFLICT,
+            "approval_policy_conflict",
             &e.to_string(),
         ),
     }
@@ -408,7 +489,18 @@ pub async fn set_mode(
     {
         Ok(()) => {
             server.bump_status();
-            json_response(StatusCode::OK, &ModeBody::of(mode))
+            match session
+                .ctrl
+                .approval_service()
+                .settings(&session.ctrl.approval_scope())
+            {
+                Ok(settings) => json_response(StatusCode::OK, &policy_body(settings)),
+                Err(e) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "approval_policy_failed",
+                    &e.to_string(),
+                ),
+            }
         }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -92,6 +92,10 @@ impl Controller {
         }
         let runner = self.runner()?;
         let runtime = self.current_runtime()?;
+        runner
+            .record_user_authorization(text)
+            .await
+            .map_err(|error| error.to_string())?;
         let queued = Arc::new(AtomicBool::new(false));
         let mut tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>> = [false, true]
             .into_iter()
@@ -209,6 +213,10 @@ impl Controller {
         let runner = self.runner()?;
         let runtime = self.current_runtime()?;
         let queued = Arc::new(AtomicBool::new(false));
+        runner
+            .record_user_authorization(text)
+            .await
+            .map_err(|error| error.to_string())?;
         let mut tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>> = [false, true]
             .into_iter()
             .map(|revoke| {

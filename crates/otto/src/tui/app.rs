@@ -670,7 +670,7 @@ impl App {
     pub(crate) fn sync_shared_approval(&mut self, requests: &[crate::approval::Request]) {
         let present: HashSet<_> = requests
             .iter()
-            .filter(|r| r.state == crate::approval::State::Pending)
+            .filter(|r| r.is_human_pending())
             .map(|r| r.id.clone())
             .collect();
         self.hidden_approvals.retain(|id| present.contains(id));
@@ -732,7 +732,7 @@ impl App {
             .any(|surface| surface.model.key().starts_with("approval:"));
         if !approval_open
             && let Some(request) = requests.iter().find(|r| {
-                r.state == crate::approval::State::Pending
+                r.is_human_pending()
                     && !existing.contains(&r.id)
                     && !covered.contains(&r.id)
                     && !self.hidden_approvals.contains(&r.id)
@@ -1291,7 +1291,7 @@ impl App {
             "notification" => self.push_system(format!("[task {}] {}", event.task_id, event.text)),
             APPROVAL_REQUESTED => {
                 if let Some(req) = &event.approval {
-                    if req.state == crate::approval::State::Pending {
+                    if req.is_human_pending() {
                         self.show_approval(features::Approval::shared(req));
                     }
                 } else {
@@ -1339,18 +1339,25 @@ impl App {
                             }
                         ));
                     }
-                    // A request the session mode decides is reported and then
-                    // decided by the policy; one it does not decide opens the
-                    // interactive card.
-                    let decided = self.info.approval_mode.decides(request);
-                    if request.state == crate::approval::State::Pending && decided {
+                    if let Some(decision) = &request.decision {
                         self.push_system(format!(
-                            "[approval] requested: {} ({})\n{}\nReason: {}",
-                            request.title, request.id, request.subject.details, request.reason
+                            "[approval] {} ({}) {:?} · {}\n{}",
+                            request.title,
+                            request.id,
+                            request.state,
+                            decision.transport,
+                            decision.feedback
                         ));
                     }
                     if request.state == crate::approval::State::Pending
-                        && !decided
+                        && !request.is_human_pending()
+                    {
+                        self.push_system(format!(
+                            "[approval] reviewing: {} ({})\n{}\nReason: {}",
+                            request.title, request.id, request.subject.details, request.reason
+                        ));
+                    }
+                    if request.is_human_pending()
                         && !self.hidden_approvals.contains(&request.id)
                         && !self
                             .surfaces
@@ -1358,7 +1365,7 @@ impl App {
                             .any(|s| s.model.key() == format!("approval:{}", request.id))
                     {
                         self.show_approval(features::Approval::shared(request));
-                    } else if request.state != crate::approval::State::Pending {
+                    } else if !request.is_human_pending() {
                         let key = format!("approval:{}", request.id);
                         let ids: Vec<_> = self
                             .surfaces
@@ -1519,6 +1526,7 @@ mod tests {
             decision: None,
             application: crate::approval::ApplicationState::NotRequired,
             application_error: String::new(),
+            review: None,
         }
     }
     fn enter() -> KeyEvent {
@@ -1922,6 +1930,21 @@ mod tests {
             Some(Action::Prompt("after configuration".into()))
         );
     }
+    #[test]
+    fn reviewing_approval_never_opens_an_approval_surface() {
+        let (mut app, _) = app();
+        let mut request = approval("reviewing");
+        request.review = Some(crate::approval::ReviewMetadata {
+            status: crate::approval::ReviewStatus::Reviewing,
+            assessment: None,
+            settings_revision: 1,
+            evidence_digest: "evidence".into(),
+            policy_digest: "policy".into(),
+        });
+        app.sync_shared_approval(&[request]);
+        assert_eq!(app.surfaces.iter().count(), 0);
+    }
+
     #[test]
     fn memory_review_surface_consumes_its_approval_without_an_extra_dialog() {
         let (mut app, remote) = app();

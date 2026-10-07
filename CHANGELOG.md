@@ -17,6 +17,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- AUTO now reviews requests for additional authority against the original user
+  task, including shell escalations, MCP calls and ordinary persistent writes.
+  Explicit checkpoints and security permission changes still require a user.
+  `/permissions` exposes separate policy/reviewer controls; `never` rejects
+  additional authority without prompting. Approval storage migrates to version
+  4 after a backup; use MANUAL to disable smart review and restore the backup
+  before running an older binary. See [unified approvals](docs/user-manual.md#unified-approvals).
+
 - Sub-agent waiting is now runtime-owned and non-blocking. The `agent` tool
   always returns immediately, child reports and completion wake an idle parent
   through its mailbox, and active guidance remains independently admissible.

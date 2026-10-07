@@ -23,6 +23,9 @@ pub enum Step<'a> {
     Image(&'a str, Block),
     /// An agent-originated queued task, stored as display-only context.
     Followup(&'a str),
+    /// A stored schedule prompt, generated from a previously authorized item.
+    /// Its User wire role is never itself evidence of a human instruction.
+    Scheduled(&'a str),
     Wake(WakeOperation<'a>),
 }
 
@@ -176,6 +179,9 @@ impl Controller {
             Some(self.begin_operation().map_err(AgentError::Other)?)
         };
         let runner = self.runner().map_err(AgentError::Other)?;
+        if let Step::Text(text) | Step::Image(text, _) = &first {
+            runner.record_user_authorization(text).await?;
+        }
         let _presentation = if matches!(first, Step::Text(_) | Step::Image(..)) {
             Some(self.begin_user_turn(&runner, origin).await)
         } else {
@@ -186,7 +192,9 @@ impl Controller {
         };
         let session_id = runner.session().header().id.clone();
         let original_task = match &first {
-            Step::Text(text) | Step::Followup(text) => runner.redact_text(text),
+            Step::Text(text) | Step::Followup(text) | Step::Scheduled(text) => {
+                runner.redact_text(text)
+            }
             Step::Image(text, _) => runner.redact_text(text),
             Step::Wake(_) => String::new(),
         };
@@ -305,7 +313,7 @@ impl Controller {
                 };
                 let run = async {
                     match step.take() {
-                        Some(Step::Text(text)) => {
+                        Some(Step::Text(text) | Step::Scheduled(text)) => {
                             let _admission = match first_admission.take() {
                                 Some(admission) => admission,
                                 None => self
@@ -487,7 +495,7 @@ impl Controller {
                 _ = tick.tick() => {
                     let pending = self.approval_service().snapshot(&scope.workspace,Some(&scope.session_id))
                         .map_err(|e| AgentError::Other(e.to_string()))?;
-                    if let Some(request) = pending.requests.into_iter().find(|r| r.blocking && presented.insert(r.id.clone())) {
+                    if let Some(request) = pending.requests.into_iter().find(|r| r.blocking && presented.insert((r.id.clone(), r.revision, r.subject.version.clone()))) {
                         let decision = decide(ApprovalRequest {
                             approval_id: request.id.clone(),tool_call_id: request.subject.tool_call_id.clone(),
                             command:serde_json::from_str::<serde_json::Value>(&request.subject.details).ok().and_then(|input|input["command"].as_str().map(str::to_string)).unwrap_or_else(||format!("{}\n{}",request.title,request.subject.details)),
@@ -497,7 +505,15 @@ impl Controller {
                         if decision == ApprovalDecision::Cancelled || cancel.is_cancelled() {
                             let _ = self.approval_service().withdraw(&request.id,&request.scope,request.revision);
                         } else {
-                            let _ = self.decide_shared_approval(&request.id,decision == ApprovalDecision::Allow,"","frontend");
+                            let service = self.approval_service();
+                            if let Ok(current) = service.get(&request.id, &request.scope.workspace, Some(&request.scope.session_id))
+                                && current.scope == request.scope && current.revision == request.revision
+                                && current.subject.version == request.subject.version
+                                && service.decide(&request.id, &request.scope, request.revision,
+                                    decision == ApprovalDecision::Allow, "", &crate::approval::Actor::local("frontend")).is_ok()
+                            {
+                                let _ = service.apply_available(&request.scope.workspace);
+                            }
                         }
                     }
                 }
@@ -515,6 +531,128 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stale_callback_allow_or_deny_cannot_decide_reopened_revision() {
+        for stale in [ApprovalDecision::Allow, ApprovalDecision::Deny] {
+            let workspace = tempfile::tempdir().unwrap();
+            let sessions = tempfile::tempdir().unwrap();
+            let controller =
+                Arc::new(crate::cli::testutil::controller(workspace.path(), sessions.path()).await);
+            let scope = controller.approval_scope();
+            let service = controller.approval_service().clone();
+            service
+                .set_mode(&scope, crate::approval::ApprovalMode::Manual)
+                .unwrap();
+            let request = service
+                .create(crate::approval::Proposal {
+                    kind: crate::approval::Kind::Authorization,
+                    authority: crate::approval::Authority::Boundary,
+                    scope: scope.clone(),
+                    subject: crate::approval::Subject {
+                        tool_call_id: "call".into(),
+                        source: "mcp".into(),
+                        id: "prepared".into(),
+                        version: "v1".into(),
+                        details: "exact prepared call".into(),
+                    },
+                    title: "Prepared effect".into(),
+                    reason: "User choice".into(),
+                    persistent: false,
+                    blocking: true,
+                    expires_at: None,
+                })
+                .unwrap();
+            let (shown, shown_rx) = tokio::sync::oneshot::channel();
+            let shown = Arc::new(std::sync::Mutex::new(Some(shown)));
+            let release = CancellationToken::new();
+            let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let runner_controller = controller.clone();
+            let runner_service = service.clone();
+            let runner_request = request.clone();
+            let callback_request = request.clone();
+            let runner_release = release.clone();
+            let runner_executions = executions.clone();
+            let job = tokio::spawn(async move {
+                let wait_service = runner_service.clone();
+                let run = async move {
+                    let final_request = wait_service
+                        .wait(
+                            &runner_request.id,
+                            &runner_request.scope,
+                            &CancellationToken::new(),
+                        )
+                        .await
+                        .map_err(|error| AgentError::Other(error.to_string()))?;
+                    if final_request.state != crate::approval::State::Approved {
+                        return Err(AgentError::Other("Wrong rejection".into()));
+                    }
+                    runner_executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                };
+                let (_events, received) = tokio::sync::mpsc::unbounded_channel();
+                let mut first = true;
+                let mut decide = move |_: ApprovalRequest| {
+                    let is_first = std::mem::replace(&mut first, false);
+                    let service = runner_service.clone();
+                    let scope = scope.clone();
+                    let request = callback_request.clone();
+                    let shown = shown.clone();
+                    let release = runner_release.clone();
+                    async move {
+                        if is_first {
+                            service
+                                .set_mode(&scope, crate::approval::ApprovalMode::Yolo)
+                                .unwrap();
+                            let automatic = service
+                                .get(&request.id, &scope.workspace, Some(&scope.session_id))
+                                .unwrap();
+                            assert_eq!(automatic.state, crate::approval::State::Approved);
+                            service
+                                .set_mode(&scope, crate::approval::ApprovalMode::Manual)
+                                .unwrap();
+                            assert_eq!(
+                                service.revalidate_authorization(&automatic).unwrap().state,
+                                crate::approval::State::Pending
+                            );
+                            stale
+                        } else {
+                            shown.lock().unwrap().take().unwrap().send(()).unwrap();
+                            release.cancelled().await;
+                            ApprovalDecision::Allow
+                        }
+                    }
+                };
+                runner_controller
+                    .step_with_shared_approvals(
+                        run,
+                        received,
+                        &mut |_| {},
+                        &CancellationToken::new(),
+                        &mut decide,
+                    )
+                    .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), shown_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let current = service
+                .get(
+                    &request.id,
+                    &request.scope.workspace,
+                    Some(&request.scope.session_id),
+                )
+                .unwrap();
+            assert_eq!(current.state, crate::approval::State::Pending);
+            assert!(current.decision.is_none());
+            assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+            release.cancel();
+            assert!(job.await.unwrap().is_ok());
+            assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+            controller.close().unwrap();
+        }
+    }
     use crate::{
         app::PROMPT_ACTIVE,
         cli::testutil::initial_runtime,

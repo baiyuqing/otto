@@ -112,6 +112,7 @@ fn request(state: ApprovalState) -> Request {
         decision: None,
         application: ApplicationState::NotStarted,
         application_error: String::new(),
+        review: None,
     }
 }
 

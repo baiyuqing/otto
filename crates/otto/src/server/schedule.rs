@@ -106,6 +106,30 @@ pub struct FactoryRunner(pub Arc<dyn Factory>);
 
 #[async_trait::async_trait]
 impl PromptRunner for FactoryRunner {
+    async fn run_item(
+        &self,
+        item: &crate::schedule::Item,
+        text: &str,
+        cancel: &CancellationToken,
+    ) -> RunOutcome {
+        let canonical = match self.0.load_workspace(&item.workspace).await {
+            Ok((info, _)) => info.path,
+            Err(
+                WorkspaceLoadError::Invalid(error)
+                | WorkspaceLoadError::NotAdmitted(error)
+                | WorkspaceLoadError::Failed(error),
+            ) => return RunOutcome::FailedBeforeTools(error),
+        };
+        let controller = match self.0.create(Some(&canonical)).await {
+            Ok(controller) => controller,
+            Err(error) => return RunOutcome::FailedBeforeTools(error),
+        };
+        let _ = crate::app::scheduled::inherit_authority(&controller, item).await;
+        let outcome = crate::app::scheduled::run(&controller, text, cancel).await;
+        controller.close_mcp().await;
+        let _ = controller.close();
+        outcome
+    }
     async fn run(&self, workspace: &str, text: &str, cancel: &CancellationToken) -> RunOutcome {
         let canonical = match self.0.load_workspace(workspace).await {
             Ok((info, _)) => info.path,

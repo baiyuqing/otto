@@ -4,7 +4,7 @@
 //!
 //! [`install`] gives the inbox an input-id source and a persistence hook;
 //! [`load`] restores a sidecar before the inbox is shared with any producer.
-//! Writes use [`remind::replace_private`] (temporary file, `fsync`, rename,
+//! Writes use [`remind::replace_private_with`] (temporary file, `fsync`, rename,
 //! directory `fsync`) and report failures to the enqueueing caller instead of
 //! dropping them. The sidecar is the pending queue; the session file is the
 //! delivery record, which [`Session::append_input_if_absent`] consults so an

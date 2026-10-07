@@ -366,13 +366,15 @@ Configure shell permissions interactively with `otto sandbox setup`; see the
 [setup guide](docs/user-manual.md#interactive-sandbox-setup). In a running
 session, `/sandbox allow <path>` and `/sandbox network allow|deny` write the
 same `[sandbox]` settings and apply them to the current process. Models can
-also request a persistent read-path grant; in MANUAL mode this uses a TUI
-approval dialog or a Telegram/Feishu approval card; the prompt shows the path and that it will
-be saved. While an approval waits, you can ask Otto to explain or withdraw it;
-normal tasks remain queued. In the TUI, press `Esc` to return to chat without
-deciding; `/approve` reopens pending approvals. Feature screens share focus,
-navigation and submission controls, including arrows and Enter under an input
-method.
+also request a persistent read-path grant; in MANUAL mode this uses a centered
+TUI approval modal or a Telegram/Feishu approval card; the prompt shows the path
+and that it will be saved. The TUI shows one request at a time, has no feedback
+field, and selects **Approve** by default; a successful decision closes the
+modal immediately. `Esc` dismisses an undecided modal and `/approve` reopens
+pending requests. Chat cards and passive memory/reflection notices are sent
+only to the exact originating chat rather than every chat bound to the same
+session or workspace. While an approval waits, you can ask Otto to explain or
+withdraw it; normal tasks remain queued.
 Otto can also consult its installed-version user manual and current tool list;
 see [self-help and approval controls](docs/user-manual.md#ottos-own-help-and-approval-controls).
 `[sandbox].excluded_commands` lists simple commands, such as `lark-cli *`, that

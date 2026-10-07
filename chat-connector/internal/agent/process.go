@@ -287,7 +287,7 @@ func (c *client) SessionUpdate(_ context.Context, n acp.SessionNotification) err
 		return nil
 	}
 	if c.p.isLoading(string(n.SessionId)) {
-		_, notice := ReflectionNotice(n.Update)
+		_, _, notice := ReflectionNotice(n.Update)
 		_, wake := WakeReply(n.Update)
 		if !notice && !wake {
 			return nil
@@ -297,9 +297,31 @@ func (c *client) SessionUpdate(_ context.Context, n acp.SessionNotification) err
 	return nil
 }
 
-// ReflectionNotice returns the text of a valid Otto background notice.
-func ReflectionNotice(u acp.SessionUpdate) (string, bool) {
-	return ottoChunk(u, "reflectionNotice", "noticeId")
+// ReflectionNotice returns the text and trusted passive-delivery origin of a
+// valid Otto background notice. An empty origin is discoverable, not broadcast.
+func ReflectionNotice(u acp.SessionUpdate) (string, string, bool) {
+	text, otto, ok := ottoChunkMeta(u, "reflectionNotice", "noticeId")
+	if !ok {
+		return "", "", false
+	}
+	origin, _ := otto["presentationOrigin"].(string)
+	return text, origin, true
+}
+
+func ottoChunkMeta(u acp.SessionUpdate, flag, idKey string) (string, map[string]any, bool) {
+	chunk := u.AgentMessageChunk
+	if chunk == nil || chunk.Content.Text == nil {
+		return "", nil, false
+	}
+	otto, ok := chunk.Meta["otto"].(map[string]any)
+	if !ok || otto[flag] != true {
+		return "", nil, false
+	}
+	id, ok := otto[idKey].(float64)
+	if !ok || id < 1 || math.Trunc(id) != id {
+		return "", nil, false
+	}
+	return chunk.Content.Text.Text, otto, true
 }
 
 // WakeReply returns the Markdown text of a valid Otto wake-turn reply, which
@@ -311,19 +333,8 @@ func WakeReply(u acp.SessionUpdate) (string, bool) {
 // ottoChunk returns the text of an agent message chunk whose _meta.otto has
 // flag == true and an integer idKey >= 1.
 func ottoChunk(u acp.SessionUpdate, flag, idKey string) (string, bool) {
-	chunk := u.AgentMessageChunk
-	if chunk == nil || chunk.Content.Text == nil {
-		return "", false
-	}
-	otto, ok := chunk.Meta["otto"].(map[string]any)
-	if !ok || otto[flag] != true {
-		return "", false
-	}
-	id, ok := otto[idKey].(float64)
-	if !ok || id < 1 || math.Trunc(id) != id {
-		return "", false
-	}
-	return chunk.Content.Text.Text, true
+	text, _, ok := ottoChunkMeta(u, flag, idKey)
+	return text, ok
 }
 
 func (c *client) RequestPermission(ctx context.Context, r acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {

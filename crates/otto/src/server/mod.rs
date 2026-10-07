@@ -7051,13 +7051,19 @@ mod tests {
 
         let session = harness.server.lookup(&id).expect("session");
         session.ctrl.push_notice("reflection: first");
-        session.ctrl.push_notice("reflection: second");
+        session.ctrl.push_routed_notice(
+            "reflection: second",
+            crate::schedule::Origin::chat("telegram", "42").unwrap(),
+        );
 
         let reply = harness.send("GET", &path, None).await;
         assert_eq!(
             reply.json(),
             serde_json::json!({
-                "notices": [{"id": 1, "text": "reflection: first"}, {"id": 2, "text": "reflection: second"}],
+                "notices": [
+                    {"id": 1, "text": "reflection: first"},
+                    {"id": 2, "text": "reflection: second", "presentation_origin": "chat:telegram:42"}
+                ],
                 "last": 2,
             })
         );
@@ -7072,7 +7078,11 @@ mod tests {
         let reply = harness.send("GET", &format!("{path}?after=1"), None).await;
         assert_eq!(
             reply.json()["notices"],
-            serde_json::json!([{"id": 2, "text": "reflection: second"}])
+            serde_json::json!([{
+                "id": 2,
+                "text": "reflection: second",
+                "presentation_origin": "chat:telegram:42"
+            }])
         );
         let reply = harness.send("GET", &format!("{path}?after=2"), None).await;
         assert_eq!(reply.json(), serde_json::json!({"notices": [], "last": 2}));

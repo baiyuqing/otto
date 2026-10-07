@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, TurnStatus};
@@ -24,15 +24,49 @@ use crate::subagent::tasks::{Task, TaskStatus};
 /// Draws one frame.
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    if let Some(view) = app.active_view() {
-        let Some(surface) = app.surfaces.top() else {
-            return;
-        };
+    let active = app.active_view().zip(app.surfaces.top());
+    if let Some((view, surface)) = active.as_ref()
+        && !view.modal
+    {
         frame.render_widget(Clear, area);
-        let geometry = super::widgets::draw_surface(frame, area, &view, &surface.state);
+        let geometry = super::widgets::draw_surface(frame, area, view, &surface.state);
         *app.geometry.borrow_mut() = geometry;
         return;
     }
+    if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Terminal too small: resize to at least {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}."
+            ))
+            .alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
+    draw_shell(frame, app, area);
+    if let Some((view, surface)) = active {
+        let modal = approval_modal_area(area);
+        frame.render_widget(Clear, modal);
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .style(Style::default().bg(Color::Black)),
+            modal,
+        );
+        let inner = Rect {
+            x: modal.x.saturating_add(1),
+            y: modal.y.saturating_add(1),
+            width: modal.width.saturating_sub(2),
+            height: modal.height.saturating_sub(2),
+        };
+        let geometry = super::widgets::draw_surface(frame, inner, &view, &surface.state);
+        *app.geometry.borrow_mut() = geometry;
+    }
+}
+
+fn draw_shell(frame: &mut Frame, app: &App, area: Rect) {
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
         frame.render_widget(
             Paragraph::new(format!(
@@ -92,6 +126,18 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     draw_footer(frame, app, chunks[4]);
     if let Some(selection) = &app.selection {
         selection.highlight(frame.buffer_mut());
+    }
+}
+
+fn approval_modal_area(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).clamp(1, 88);
+    let wanted_height = (area.height * 7 / 10).max(8);
+    let height = area.height.saturating_sub(2).min(wanted_height).max(1);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
     }
 }
 
@@ -648,6 +694,67 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|frame| draw(frame, app)).expect("draw");
         format!("{}", terminal.backend())
+    }
+
+    fn approval() -> crate::approval::Request {
+        crate::approval::Request {
+            options: Vec::new(),
+            schema_version: 1,
+            id: "approval-1".into(),
+            revision: 1,
+            kind: crate::approval::Kind::Confirmation,
+            authority: crate::approval::Authority::Consent,
+            scope: crate::approval::Scope {
+                workspace: "/work".into(),
+                session_id: "session".into(),
+                task_id: String::new(),
+                run_id: String::new(),
+            },
+            presentation_origin: String::new(),
+            subject: crate::approval::Subject {
+                tool_call_id: String::new(),
+                source: "conversation".into(),
+                id: "plan".into(),
+                version: "1".into(),
+                details: "Review the implementation plan".into(),
+            },
+            title: "Approve implementation".into(),
+            reason: "Before editing".into(),
+            persistent: false,
+            blocking: true,
+            created_at: 1,
+            expires_at: None,
+            state: crate::approval::State::Pending,
+            decision: None,
+            application: crate::approval::ApplicationState::NotRequired,
+            application_error: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_draws_as_a_centered_modal_over_the_session_shell() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.entries.push(Entry {
+            kind: Some(EntryKind::User),
+            raw: "underlying conversation".into(),
+            ..Entry::default()
+        });
+        app.sync_shared_approval(&[approval()]);
+
+        let screen = rendered(&app, 100, 24);
+        assert!(screen.contains("underlying conversation"), "{screen}");
+        assert!(screen.contains("Approve implementation"), "{screen}");
+        assert!(screen.contains("[y] Approve"), "{screen}");
+        assert!(screen.contains("AUTO | tokens"), "{screen}");
+        let rows = screen_rows(&app, 100, 24);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains('╭') && row.contains('╮'))
+        );
+        assert!(
+            !rows[0].contains('╭'),
+            "modal reached the top edge: {rows:?}"
+        );
     }
 
     /// The drawn rows as plain text, without `TestBackend`'s `Display`

@@ -251,7 +251,7 @@ impl ApprovalStore for Store {
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
-        let mut statement = tx.prepare("SELECT DISTINCT a.body FROM approvals a JOIN approval_visibility v ON v.approval_id=a.id WHERE v.workspace=?1 AND (?2='' OR v.session_id=?2 OR v.session_id='') AND a.state='pending' ORDER BY a.id")
+        let mut statement = tx.prepare("SELECT DISTINCT a.body FROM approvals a JOIN approval_visibility v ON v.approval_id=a.id WHERE v.workspace=?1 AND (?2='' OR v.session_id=?2 OR v.session_id='') AND a.state='pending' ORDER BY a.rowid")
             .map_err(storage_error)?;
         let bodies = statement
             .query_map(params![workspace, session.unwrap_or("")], |row| {

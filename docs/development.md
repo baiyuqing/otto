@@ -159,13 +159,23 @@ earlier of their local policy and the parent's remaining budget. `otto-core`
 receives only the wasm-safe `operation::OperationControl` capability and must
 not read a native clock. Provider retries, compaction, task queueing, and
 workflow attempts consume the same logical budget rather than restarting it.
-The ChatGPT transport retries only connection/send/body failures before any
-streamed output, at most three times with 1/2/4-second backoff; the
+The ChatGPT transport retries connection/send/body failures, HTTP 429 and
+500/502/503/504 responses, a clean EOF before a terminal stream event, and
+stream-reported `server_is_overloaded` or `server_error` before any streamed
+output. Responses error classification uses the first non-empty value from
+`response.error.code|type`, event `error.code|type`, then the event's top-level
+`code`; an SSE `event:` name supplies a missing JSON `type`, but never replaces
+a non-empty one. It makes at most six retries with 1/2/4/8/16/30-second
+backoff; a numeric `Retry-After` is preferred and capped at 30 seconds. The
 OpenAI-compatible transport retries the classes described next. A retry
 repeats only the borrowed provider request, never tools or the agent turn.
-HTTP, auth, and stream-codec errors are terminal; retries preserve
+Other HTTP, auth, and stream-codec errors are terminal; retries preserve
 cancellation, the original deadline, actual send-attempt counts, and unknown
-effect certainty on failure.
+effect certainty on failure. A Responses SSE field line is capped at 64 KiB
+and one event's joined `data:` payload at 1 MiB; exceeding either bound is a
+terminal codec error. Native TUI and REPL surfaces show planned retry progress;
+ACP v1 has no stable retry-progress update and receives the normal terminal
+prompt error if retries are exhausted.
 The OpenAI-compatible transport uses the same policy (4 attempts, 1/2/4 s)
 for two failure classes, both of which prove that nothing was visible to the
 caller yet. A send whose connection could not be established
@@ -1021,10 +1031,34 @@ candidate store; the approval journal retains references and digests only.
 HTTP exposes `/v1/approvals`, per-request decisions/withdrawal and resumable
 changes/events. ACP uses standard permission requests for tool authorization,
 negotiated elicitation for confirmation, and `_otto/approvals/*` for durable
-queues. Connector cards and commands bind the exact request/version; feedback
-returns to the waiting model. MCP calls pass the same native authorization
-boundary; unsupported inbound elicitation modes are not advertised and cannot
-be interpreted as authorization.
+queues. `Request::presentation_origin` is trusted passive-delivery metadata,
+not authority: approval `Scope` still decides who may list or decide a request.
+Parent-turn producers snapshot the current exact `schedule::Origin`; originless
+background requests remain explicitly discoverable but are never inferred as a
+chat broadcast. HTTP notices, ACP metadata and connector cards preserve that
+origin through attach mode, and the connector presents only an exact admitted
+chat match. Connector cards and commands bind the exact request/version;
+feedback returns to waiting models and non-TUI clients, while the TUI deliberately
+has no feedback field. MCP calls pass the same native authorization boundary;
+unsupported inbound elicitation modes are not advertised and cannot be
+interpreted as authorization.
+
+The TUI renders approval presenters as centered modal overlays over the normal
+session shell. It selects Approve by default, closes immediately after either
+successful decision, and presents pending requests one at a time in creation
+order; an undecided `Esc` dismissal remains pending and can be reopened from
+`/approve`.
+
+Memory proposal routing lives in the candidate's internal
+`otto.presentation_origin` metadata until the corresponding approval is
+published. Accepting a candidate removes that internal key before the memory
+record is written. Existing candidates have no origin, remain explicitly
+reviewable, and are not passively broadcast.
+
+External chat notification routes are exact destinations, not session or
+workspace subscriptions. Originless session-open memory notices stay available
+to local and explicit API readers but do not fan out through the connector.
+Wake replies keep their separately documented session-subscriber behavior.
 
 Design: [unified approval](specs/2026-10-04-unified-approval.md).
 

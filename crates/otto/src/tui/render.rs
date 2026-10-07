@@ -44,11 +44,12 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     }
     let content_area = side_margin(area);
     let panel_tasks = visible_panel_tasks(&app.tasks);
+    let plan = plan_line(&app.info.plan);
     let (composer_height, panel_height) = composer_and_panel_height(
         app,
         content_area.width,
         content_area.height,
-        panel_row_count(panel_tasks.len()),
+        panel_row_count(panel_tasks.len()) + u16::from(plan.is_some()),
     );
     let suggestions = app.suggestions();
     let suggestion_height = (suggestions.len() as u16).min(
@@ -69,7 +70,24 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     draw_transcript(frame, app, chunks[0]);
     draw_suggestions(frame, app, &suggestions, chunks[1]);
     draw_composer(frame, app, chunks[2]);
-    draw_panel(frame, &panel_tasks, chunks[3]);
+    let mut panel_area = chunks[3];
+    if let Some(plan) = plan
+        && panel_area.height > 0
+    {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                plan,
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+            Rect {
+                height: 1,
+                ..panel_area
+            },
+        );
+        panel_area.y += 1;
+        panel_area.height -= 1;
+    }
+    draw_panel(frame, &panel_tasks, panel_area);
     draw_footer(frame, app, chunks[4]);
     if let Some(selection) = &app.selection {
         selection.highlight(frame.buffer_mut());
@@ -388,6 +406,28 @@ fn visible_panel_tasks(tasks: &[Task]) -> Vec<&Task> {
 /// The panel's row count for `visible_count` eligible tasks: 0 with none,
 /// otherwise up to 4 (the 4th row becomes a "+N more" summary once there are
 /// more than 4).
+/// The one-line plan summary above the sub-agent panel, `Plan 2/5 · <step in
+/// progress>`, or `None` with no plan.
+pub(crate) fn plan_line(steps: &[otto_core::session::PlanStep]) -> Option<String> {
+    use otto_core::session::PlanStatus;
+    if steps.is_empty() {
+        return None;
+    }
+    let completed = steps
+        .iter()
+        .filter(|step| step.status == PlanStatus::Completed)
+        .count();
+    let mut line = format!("Plan {completed}/{}", steps.len());
+    if let Some(step) = steps
+        .iter()
+        .find(|step| step.status == PlanStatus::InProgress)
+    {
+        line.push_str(" · ");
+        line.push_str(&step.text);
+    }
+    Some(line)
+}
+
 fn panel_row_count(visible_count: usize) -> u16 {
     visible_count.min(4) as u16
 }

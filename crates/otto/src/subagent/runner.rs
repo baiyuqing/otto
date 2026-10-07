@@ -72,9 +72,10 @@ use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result}
 
 /// Tools a child never receives: the agent-control tools, because delegation
 /// depth is fixed at one; the memory tools, because a child gets no memory
-/// binding; the timer tools, which read and wake the parent session; and the schedule
-/// tools, which deliver to the parent conversation's origin.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 14] = [
+/// binding; the timer tools, which read and wake the parent session; the schedule
+/// tools, which deliver to the parent conversation's origin; and `update_plan`,
+/// because a child's plan would be shown nowhere.
+pub const EXCLUDED_CHILD_TOOLS: [&str; 15] = [
     "agent",
     "agent_wait",
     "agent_status",
@@ -89,6 +90,7 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 14] = [
     "schedule",
     "schedule_list",
     "schedule_cancel",
+    "update_plan",
 ];
 
 /// Appended to a child's system prompt inside `<subagent_role>` when it has
@@ -312,6 +314,10 @@ impl Session for SharedTranscript {
 
     fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
         self.0.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+        self.0.plan()
     }
 
     async fn append_input_if_absent(
@@ -2757,6 +2763,10 @@ mod tests {
 
         fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
             self.inner.interrupted_turn()
+        }
+
+        fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+            self.inner.plan()
         }
 
         async fn append_input_if_absent(

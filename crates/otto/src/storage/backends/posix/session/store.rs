@@ -150,6 +150,9 @@ pub(crate) struct StoreState {
     /// The `otto.fork` record, read once on open: only a fork's creation
     /// writes one.
     pub(crate) forked_from: Option<otto_core::session::ForkRecord>,
+    /// The plan in force: folded on open, then replaced by each appended
+    /// valid `otto.plan` record.
+    pub(crate) plan: Vec<otto_core::session::PlanStep>,
     pub(crate) entries: Vec<PiEntry>,
     pub(crate) entry_ids: HashSet<String>,
     pub(crate) leaf_id: Option<String>,
@@ -276,6 +279,7 @@ impl Store {
                 thinking_level: String::new(),
                 session_name: None,
                 forked_from: None,
+                plan: Vec::new(),
                 entries: Vec::new(),
                 entry_ids: HashSet::new(),
                 leaf_id: None,
@@ -419,6 +423,7 @@ impl Store {
                 thinking_level: state.thinking_level,
                 session_name: state.session_name,
                 forked_from: otto_core::session::fork_origin(&decoded.entries),
+                plan: state.plan,
                 entries: decoded.entries.clone(),
                 entry_ids: state.entry_ids,
                 leaf_id: state.leaf_id,
@@ -705,9 +710,21 @@ impl Store {
                 }
             };
         }
+        let plan = if custom_type == otto_core::session::PLAN_CUSTOM_TYPE {
+            Some(
+                otto_core::session::decode_plan(data)
+                    .ok_or_else(|| PiError::invalid("malformed otto.plan data"))?,
+            )
+        } else {
+            None
+        };
         let mut state = self.lock()?;
         state.writable()?;
-        state.append_custom_entry_unchecked(custom_type, data)
+        state.append_custom_entry_unchecked(custom_type, data)?;
+        if let Some(plan) = plan {
+            state.plan = plan;
+        }
+        Ok(())
     }
 
     /// Records a new display name for the session.
@@ -1410,6 +1427,12 @@ impl Session for Store {
             .interrupted_turn
     }
 
+    fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+        self.lock()
+            .map(|state| state.plan.clone())
+            .unwrap_or_default()
+    }
+
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
         Store::append_custom_entry(self, custom_type, data)
             .map_err(|error| SessionError::Persist(error.to_string()))
@@ -1469,6 +1492,7 @@ pub(crate) struct ResolvedStoreState {
     pub(crate) leaf_id: Option<String>,
     pub(crate) operation_ledger: OperationLedger,
     pub(crate) interrupted_turn: Option<otto_core::session::InterruptedTurn>,
+    pub(crate) plan: Vec<otto_core::session::PlanStep>,
     pub(crate) warnings: Vec<Warning>,
 }
 
@@ -1509,6 +1533,7 @@ pub(crate) fn resolve_pi_store_state(decoded: &PiFile) -> Result<ResolvedStoreSt
         leaf_id,
         operation_ledger: resolved.operation_ledger,
         interrupted_turn: resolved.interrupted_turn,
+        plan: resolved.plan,
         warnings,
     })
 }

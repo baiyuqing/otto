@@ -181,6 +181,10 @@ impl Session for MemoryHandle {
         self.inner.interrupted_turn()
     }
 
+    fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+        self.inner.plan()
+    }
+
     async fn append_input_if_absent(
         &self,
         input_id: &str,
@@ -381,6 +385,10 @@ impl Session for SharedSession {
 
     fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
         self.0.interrupted_turn()
+    }
+
+    fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+        self.0.plan()
     }
 
     async fn append_input_if_absent(
@@ -1892,6 +1900,11 @@ impl Builder {
                 Arc::clone(&task_control),
                 &redaction_values,
             )));
+            // Parent-only: a child's plan would be shown nowhere.
+            tools.push(Box::new(crate::tool::plan::UpdatePlan::new(
+                Arc::new(session.clone()),
+                &redaction_values,
+            )));
             // Parent-only, like the timer tools: a child has no session file
             // of its own to reflect on.
             if self.reflector.enabled() && !self.no_session {
@@ -2768,6 +2781,7 @@ mod tests {
                 "schedule_list",
                 "schedule_cancel",
                 "task_queue",
+                "update_plan",
                 "otto_help"
             ]
         );
@@ -3082,7 +3096,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");
@@ -3352,6 +3366,10 @@ mod tests {
 
         fn interrupted_turn(&self) -> Option<otto_core::session::InterruptedTurn> {
             self.inner.interrupted_turn()
+        }
+
+        fn plan(&self) -> Vec<otto_core::session::PlanStep> {
+            self.inner.plan()
         }
 
         async fn append_input_if_absent(

@@ -42,6 +42,8 @@ const BASE_SAFETY: &[(&str, RetrySafety)] = &[
     ("schedule_list", RetrySafety::ReadOnly),
     ("schedule_cancel", RetrySafety::NonIdempotent),
     ("list_models", RetrySafety::ReadOnly),
+    // Each call replaces the whole plan, so a repeat has the same effect.
+    ("update_plan", RetrySafety::Idempotent),
     ("agent", RetrySafety::NonIdempotent),
     ("agent_wait", RetrySafety::NonIdempotent),
     ("agent_status", RetrySafety::ReadOnly),

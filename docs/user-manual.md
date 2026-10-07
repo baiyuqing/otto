@@ -1018,7 +1018,7 @@ Turns:
   serve, and `/agents` reads serve's task records.
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
-`/clear`, `/resume` (the sessions of the workspace), `/fork`, `/rename`, `/compact`,
+`/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
 `/image`, `/context`, `/agents`, `/auto [on|off]`, `/sandbox`, `/sandbox reload`,
 `/approve [<id>]`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
@@ -1052,6 +1052,7 @@ Shared commands:
 - `/help` shows command help.
 - `/init` asks the agent to inspect the repository and create a concise root
   `AGENTS.md` contributor guide. If the file already exists, it is left unchanged.
+- `/plan` shows the [session plan](#session-plan) as a checklist.
 - `/session` shows session details (ID, path, provider, model, thinking effort,
   and sandbox state, plus the session name once `/rename` has set one).
 - `/new` closes the current session and starts a fresh one in the same process.
@@ -2203,6 +2204,31 @@ hide the approval panel without deciding and type your message. Telegram and
 Feishu support this with Otto; other ACP agents keep the ordinary queue.
 Explicit Deny/No, `/deny` in chat and `/stop` continue to work.
 
+### Session plan
+
+For work of three or more steps, the main task model keeps a short plan with
+the `update_plan` tool: up to 20 steps, each one line of at most 200
+characters with the status `pending`, `in_progress`, or `completed`, and at
+most one step `in_progress`. Each call replaces the whole plan; an empty list
+clears it. The tool records progress only and runs nothing. Sub-agents do not
+get it.
+
+The plan is saved with the session as an `otto.plan` record, so it survives
+Otto stopping, `--resume`, `/resume`, and `/fork` (a fork keeps the plan in
+force at its cut). When a compaction summarizes the call that set the plan,
+the summary carries the current plan as a `<plan>` checklist, so the model
+keeps it.
+
+Where it appears:
+
+- **TUI:** one line above the status line, `Plan 2/5 · <step in progress>`,
+  dropped first when the terminal is short; `/plan` shows the whole checklist.
+  Both work with `--attach`.
+- **ACP:** a `plan` `session/update` after every change, with every entry at
+  priority `medium`; `session/load` sends the current plan after the history.
+- **HTTP:** a `plan_updated` SSE event (see [Events](#events)) and the session
+  object's `plan` field.
+
 ### Active-task guidance and model follow-ups
 
 In Telegram and Feishu, speak naturally while Otto is working: “investigate
@@ -2378,9 +2404,12 @@ only way to stop it.
     "summary": "..."
   },
   "turn": { "id": "...", "trigger": "user", "status": "..." },
-  "forked_from": { "session_id": "...", "entry_id": "..." }
+  "forked_from": { "session_id": "...", "entry_id": "..." },
+  "plan": [{ "text": "...", "status": "in_progress" }]
 }
 ```
+
+`plan` is the [session plan](#session-plan), omitted when there is none.
 
 `forked_from` is present only on a fork: the source session and the user
 message the fork stops before (`entry_id` is absent for a fork of the whole
@@ -2420,7 +2449,9 @@ payload. Event names are the `agent.Event` type names: `agent_started`,
 `text_delta`, `reasoning_delta`, `tool_call_started`, `tool_call_finished`, `provider_usage`,
 `provider_retry`, `compaction_planned`, `compaction_started`, `compaction_completed`,
 `compaction_warning`, `memory_warning`, `agent_finished`, and `agent_error`,
-plus `notification` when a sub-agent task finishes. `reasoning_delta` carries
+plus `notification` when a sub-agent task finishes, and `plan_updated` after a
+tool call changes the [session plan](#session-plan), carrying the whole plan as
+`steps: [{text, status}]` (empty when it was cleared). `reasoning_delta` carries
 `text` like `text_delta`. `provider_retry` carries
 `retry: {attempt, max_attempts, delay_ms, reason}`, where `attempt` is the
 1-based attempt about to start and `reason` is an HTTP status such as
@@ -2666,7 +2697,9 @@ through the chat connector.
 During a prompt Otto sends assistant text as `agent_message_chunk`,
 reasoning as `agent_thought_chunk`, and each tool call as a `tool_call`
 followed by a `tool_call_update` with status `completed` or `failed`.
-`bash` calls have kind `execute` and the command as title.
+`bash` calls have kind `execute` and the command as title. When a tool call
+changes the [session plan](#session-plan), Otto sends a `plan` update with the
+whole plan.
 
 ### Elevated `bash` uses `session/request_permission`
 

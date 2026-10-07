@@ -270,6 +270,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             &final_summary,
             &user_messages,
             &capability_updates,
+            &self.session.plan(),
             &details,
         )
         .map_err(AgentError::InvalidCompactionSummary)?;

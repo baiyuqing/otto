@@ -255,6 +255,15 @@ Interactive task commands:
 /task cancel <id|name> cancel a queued or running task
 ```
 
+The parent can also stop a task from the model side with the `agent_cancel`
+tool, which is the same operation as `/task cancel`. Cancellation is
+cooperative: a queued task never starts, and a running one stops at its next
+checkpoint. Tasks do not need to be stopped by hand to be bounded: a turn
+whose model keeps repeating the same call, or keeps getting tool errors, ends
+by itself with a `no progress: ...` error, and each sub-agent inherits the
+parent's limits (see
+[`[agent].no_progress_repeats`](docs/user-manual.md#stopping-a-turn-that-makes-no-progress)).
+
 Child agents cannot start nested agents. Their child-only `agent_report` tool
 sends one message to the parent without ending the task; children use it only
 to answer a parent question or to report a blocker that needs a parent
@@ -331,6 +340,10 @@ never retried automatically.
   with a call past the limit returning an error; parent-to-child `agent_send`
   delivery waits for the child's next safe checkpoint and does not interrupt
   an in-flight provider or tool call; child transcripts are not persisted.
+- No automatic parent-side supervisor that cancels stale sub-agent tasks: the
+  parent stops one itself with `agent_cancel`, and every turn has the
+  `no progress` guard. A turn stuck inside a single long tool call is bounded
+  only by the `[agent]` deadlines, which are unlimited unless you set them.
 - Durable workflows are acyclic: no loops, conditions, group chat, nested
   workflows, or automatic retry. Static `handoff` steps can pass control to a
   named next agent; `fork` creates a new run from a committed step boundary

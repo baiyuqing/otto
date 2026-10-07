@@ -17,6 +17,38 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- **A turn can now end by itself when it makes no progress.** A turn whose
+  model repeats the same tool call, with the same arguments, 8 times in a row,
+  or whose tool results fail 12 times in a row, ends with the error
+  `no progress: ...` instead of running until a deadline — and the deadlines
+  are unlimited unless configured. This applies to every turn, including each
+  sub-agent's, which inherits the parent's limits. A turn that ends this way is
+  not a persistence failure, so a frontend continues the session. The two
+  limits are `[agent].no_progress_repeats` and `[agent].no_progress_failures`;
+  `0` disables one condition and `0`/`0` disables the guard, which is the
+  setting for a deliberate poll loop that repeats one identical call. See the
+  [user manual](docs/user-manual.md#stopping-a-turn-that-makes-no-progress)
+  ([#404](https://github.com/baiyuqing/otto/pull/404)).
+
+### Features
+
+- Stop a sub-agent task from the model side with the new `agent_cancel` tool:
+  it takes a task id or name and cancels that task, the same registry call
+  `/task cancel`, `POST /v1/sessions/{id}/tasks/{task_id}/cancel` and ACP
+  already reached. Cancellation stays cooperative — a queued task is released
+  before it starts, a running one stops at its next checkpoint, and an
+  effectful call settles instead of being abandoned — so the parent can stop a
+  child that is stuck or no longer needed without waiting for it
+  ([#404](https://github.com/baiyuqing/otto/pull/404)).
+
+- Each turn now carries a progress guard that ends a turn which repeats one
+  identical tool call, or keeps failing, past the configured limits. Two calls
+  count as identical when the tool name and the arguments match; key order and
+  spacing in the arguments are ignored. Only consecutive conditions are
+  detected, so a cycle that alternates between different calls is not stopped
+  and remains the case `agent_status` plus `agent_cancel` exists for
+  ([#404](https://github.com/baiyuqing/otto/pull/404)).
+
 - Session **AUTO** approval now decides only a *bounded authorization*: an
   operation that stays inside the sandbox and the workspace and grants nothing
   durable. A plan review (`request_approval`), an unsandboxed command, a

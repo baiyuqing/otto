@@ -21,10 +21,11 @@ use crate::tool::{ToolExecutor, ToolResult};
 use super::context_report::SectionKind;
 use super::inbox::{Inbox, Notification, NotificationKind};
 use super::memory::{MemoryError, MemoryRecall, RecallRequest, RecallResult, Record, Scope};
+use super::progress::{ProgressPolicy, StallKind};
 use super::redactor::Redactor;
 use super::summary::SUMMARIZATION_SYSTEM_PROMPT;
 use super::summary_validate::REQUIRED_SUMMARY_HEADINGS;
-use super::{Agent, CompactionSettings, Event, Options};
+use super::{Agent, AgentError, CompactionSettings, Event, Options};
 
 // -- harness ---------------------------------------------------------------
 
@@ -71,6 +72,12 @@ impl Turn {
     }
 
     fn tool_call(call_id: &str, arguments: &str) -> Self {
+        Self::named_tool_call("echo", call_id, arguments)
+    }
+
+    /// A tool call to `name`, so a test can script a call the executor
+    /// reports as an unknown tool.
+    fn named_tool_call(name: &str, call_id: &str, arguments: &str) -> Self {
         Self {
             events: Vec::new(),
             outcome: Ok(Response {
@@ -80,7 +87,7 @@ impl Turn {
                     blocks: vec![Block {
                         block_type: BlockType::ToolCall,
                         tool_call_id: call_id.into(),
-                        tool_name: "echo".into(),
+                        tool_name: name.into(),
                         arguments: Some(raw(arguments)),
                         ..Block::default()
                     }],
@@ -4351,4 +4358,155 @@ async fn a_tool_call_that_changes_the_plan_emits_plan_updated_once() {
         .position(|name| *name == "tool_call_finished")
         .unwrap();
     assert_eq!(names[finished + 1], "plan_updated");
+}
+
+// -- progress guard --------------------------------------------------------
+
+/// Whether every assistant tool call in the transcript has its result, in
+/// order. A turn the guard stops must still leave a well-formed transcript.
+fn every_tool_call_has_its_result(messages: &[Message]) -> bool {
+    let mut pending: Option<&str> = None;
+    for message in messages {
+        for block in &message.blocks {
+            match block.block_type {
+                BlockType::ToolCall if pending.is_none() => {
+                    pending = Some(block.tool_call_id.as_str());
+                }
+                BlockType::ToolResult => {
+                    if pending != Some(block.tool_call_id.as_str()) {
+                        return false;
+                    }
+                    pending = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    pending.is_none()
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn identical_calls_stop_the_turn_with_no_progress() {
+    let turns: Vec<Turn> = (0..ProgressPolicy::default().repeated_calls)
+        .map(|index| Turn::tool_call(&format!("call-{index}"), r#"{"path":"a.txt"}"#))
+        .collect();
+    let expected = ProgressPolicy::default().repeated_calls;
+    let agent = Agent::new(
+        FakeProvider::new(turns),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    let error = agent
+        .run("go", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect_err("a repeated call stops the turn");
+
+    match error {
+        AgentError::NoProgress(stall) => {
+            assert_eq!(stall.kind, StallKind::RepeatedCall);
+            assert_eq!(stall.tool, "echo");
+            assert_eq!(stall.count, expected);
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    // One provider request per scripted call, and not one more: the turn
+    // stopped before asking the model again.
+    assert_eq!(agent.provider().normal_requests().len(), expected as usize);
+    assert!(
+        every_tool_call_has_its_result(&agent.session().messages()),
+        "the stopped turn left a tool call without its result"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_failing_streak_stops_the_turn_with_no_progress() {
+    let limit = 3;
+    // Distinct arguments, so only the failure streak can stop this turn.
+    let turns: Vec<Turn> = (0..limit)
+        .map(|index| {
+            Turn::named_tool_call(
+                "missing",
+                &format!("call-{index}"),
+                &format!(r#"{{"n":{index}}}"#),
+            )
+        })
+        .collect();
+    let agent = Agent::new(
+        FakeProvider::new(turns),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            progress: ProgressPolicy {
+                repeated_calls: 0,
+                consecutive_failures: limit,
+            },
+            ..options()
+        },
+    );
+    let error = agent
+        .run("go", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect_err("a failing streak stops the turn");
+
+    match error {
+        AgentError::NoProgress(stall) => {
+            assert_eq!(stall.kind, StallKind::RepeatedFailure);
+            assert_eq!(stall.tool, "missing");
+            assert_eq!(stall.count, limit);
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(agent.provider().normal_requests().len(), limit as usize);
+    assert!(every_tool_call_has_its_result(&agent.session().messages()));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn distinct_calls_never_stop_a_long_turn() {
+    // More calls than either limit, all different: a long but productive turn
+    // must run to its natural end.
+    let mut turns: Vec<Turn> = (0..20)
+        .map(|index| Turn::tool_call(&format!("call-{index}"), &format!(r#"{{"n":{index}}}"#)))
+        .collect();
+    let calls = turns.len();
+    turns.push(Turn::text("done"));
+    let agent = Agent::new(
+        FakeProvider::new(turns),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent
+        .run("go", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("distinct calls make progress");
+
+    assert_eq!(agent.provider().normal_requests().len(), calls + 1);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_disabled_policy_runs_a_repeating_turn_to_its_natural_end() {
+    let mut turns: Vec<Turn> = (0..20)
+        .map(|index| Turn::tool_call(&format!("call-{index}"), r#"{"path":"a.txt"}"#))
+        .collect();
+    turns.push(Turn::text("done"));
+    let agent = Agent::new(
+        FakeProvider::new(turns),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            progress: ProgressPolicy::disabled(),
+            ..options()
+        },
+    );
+    agent
+        .run("go", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("a disabled guard never stops a turn");
+
+    assert_eq!(agent.provider().normal_requests().len(), 21);
 }

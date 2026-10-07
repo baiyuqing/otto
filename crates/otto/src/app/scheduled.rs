@@ -58,10 +58,13 @@ pub(crate) async fn run(
     text: &str,
     cancel: &CancellationToken,
 ) -> RunOutcome {
+    if let Ok(runner) = controller.runner() {
+        runner.set_scheduled_authorization_run("unbound");
+    }
     let mut collector = ReplyCollector::default();
     let result = controller
         .run_with_channel(
-            Step::Text(text),
+            Step::Scheduled(text),
             None,
             None,
             &mut |event: Event| collector.observe(&event),
@@ -84,6 +87,65 @@ pub(crate) async fn run(
     } else {
         RunOutcome::FailedBeforeTools(failure)
     }
+}
+
+/// Installs creation-time original user evidence, bound to the immutable item.
+/// Generated scheduled prompt text itself supplies no authorization.
+pub(crate) async fn inherit_authority(
+    controller: &Controller,
+    item: &crate::schedule::Item,
+) -> Result<(), String> {
+    let builder = controller.builder();
+    let repository = builder.storage.sessions()?;
+    let root = builder.storage.session_root(&builder.session_root)?;
+    let data = repository
+        .custom_data_for(
+            &root,
+            &item.workspace,
+            &item.session_id,
+            &format!("otto.schedule.{}", item.label()),
+        )
+        .ok_or_else(|| "Scheduled creation authorization is unavailable.".to_string())?;
+    let mut authority: crate::schedule::tools::ScheduledAuthority = serde_json::from_str(&data)
+        .map_err(|_| "Scheduled creation authorization is invalid.".to_string())?;
+    if authority.body_digest != crate::approval::digest(&item.body)
+        || authority.source_session != item.session_id
+    {
+        return Err("Scheduled task changed since it was authorized.".into());
+    }
+    authority.context.instructions.push(format!("This unattended task is limited to the approved scheduled prompt: {}. Original user messages cannot authorize effects beyond this scheduled scope.", item.body));
+    let source_scope = crate::approval::Scope {
+        workspace: item.workspace.clone(),
+        session_id: item.session_id.clone(),
+        task_id: String::new(),
+        run_id: String::new(),
+    };
+    let settings = builder
+        .approvals
+        .settings(&source_scope)
+        .map_err(|error| error.to_string())?;
+    let target = controller.approval_scope();
+    let current = builder
+        .approvals
+        .settings(&target)
+        .map_err(|error| error.to_string())?;
+    builder
+        .approvals
+        .set_settings(
+            &target,
+            current.revision,
+            settings.policy,
+            settings.reviewer,
+        )
+        .map_err(|error| error.to_string())?;
+    controller
+        .runner()?
+        .install_authorization_context(authority.context)
+        .await?;
+    controller
+        .runner()?
+        .set_scheduled_authorization_run(&item.label());
+    Ok(())
 }
 
 /// Runs `text` in a new session created with `runtime`, then closes it.
@@ -111,6 +173,26 @@ pub struct ControllerRunner(pub Arc<Controller>);
 
 #[async_trait::async_trait]
 impl PromptRunner for ControllerRunner {
+    async fn run_item(
+        &self,
+        item: &crate::schedule::Item,
+        text: &str,
+        cancel: &CancellationToken,
+    ) -> RunOutcome {
+        let runtime = match self.0.current_runtime() {
+            Ok(runtime) => runtime,
+            Err(error) => return RunOutcome::FailedBeforeTools(error),
+        };
+        let controller = match Controller::create(Arc::clone(self.0.builder()), &runtime).await {
+            Ok(controller) => controller,
+            Err(error) => return RunOutcome::FailedBeforeTools(error),
+        };
+        let _ = inherit_authority(&controller, item).await;
+        let outcome = run(&controller, text, cancel).await;
+        controller.close_mcp().await;
+        let _ = controller.close();
+        outcome
+    }
     /// `workspace` is ignored: the local run role only claims items of this
     /// controller's workspace.
     async fn run(&self, _workspace: &str, text: &str, cancel: &CancellationToken) -> RunOutcome {
@@ -135,6 +217,84 @@ impl Sink for NoticeSink {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scheduled_lineage_uses_frozen_human_evidence_and_rejects_changed_task() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let source = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
+        let runner = source.runner().unwrap();
+        runner
+            .record_user_authorization("Check the approved build later; do not publish it.")
+            .await
+            .unwrap();
+        let store = Arc::new(crate::schedule::Store::open_in_memory().unwrap());
+        let origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+        origin.set(Some(Origin::terminal()));
+        let context = crate::schedule::tools::Context {
+            store: Some(store.clone()),
+            origin,
+            session_id: source.info().session_id,
+            workspace: source.info().workspace,
+        };
+        let tools =
+            crate::schedule::tools::tools_with_session(&context, runner.session().handle().clone());
+        let args = serde_json::value::RawValue::from_string(
+            r#"{"prompt":"Check build status without publishing","seconds":60}"#.into(),
+        )
+        .unwrap();
+        let result = tools[0].execute(&args, &CancellationToken::new()).await;
+        assert!(!result.is_error, "{}", result.content);
+        let item = store
+            .list(&Origin::terminal(), chrono::Utc::now())
+            .unwrap()
+            .remove(0);
+        // Changes after creation must not expand unattended authority.
+        runner
+            .record_user_authorization("A separate new task permits publication.")
+            .await
+            .unwrap();
+        source
+            .approval_service()
+            .set_mode(
+                &source.approval_scope(),
+                crate::approval::ApprovalMode::Manual,
+            )
+            .unwrap();
+        let runtime = source.current_runtime().unwrap();
+        let target = Controller::create(source.builder().clone(), &runtime)
+            .await
+            .unwrap();
+        inherit_authority(&target, &item).await.unwrap();
+        let saved = target
+            .runner()
+            .unwrap()
+            .session()
+            .handle()
+            .custom_data(crate::approval::reviewer::CONTEXT_CUSTOM_TYPE)
+            .unwrap();
+        let frozen: crate::approval::reviewer::ReviewContext =
+            serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            frozen.trusted_user_messages,
+            vec!["Check the approved build later; do not publish it."]
+        );
+        assert!(!saved.contains("separate new task permits"));
+        assert_eq!(
+            target
+                .approval_service()
+                .settings(&target.approval_scope())
+                .unwrap()
+                .reviewer,
+            crate::approval::ApprovalReviewer::User
+        );
+        let mut changed = item.clone();
+        changed.body = "Publish instead".into();
+        assert!(inherit_authority(&target, &changed).await.is_err());
+        target.close().unwrap();
+        source.close().unwrap();
+    }
     #[tokio::test]
     async fn a_scheduled_delivery_is_a_notice_and_rings_the_bell_once() {
         let workspace = tempfile::tempdir().unwrap();

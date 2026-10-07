@@ -30,6 +30,34 @@ pub fn order(domain: &str, record: &Record) -> Result<RecordOrder> {
         }
         use IdentityPart::{Integer, Text};
         let (kind, identity) = match value {
+            ApprovalRecord::ManagedPolicy { workspace, .. } => (7, vec![Text(workspace)]),
+            ApprovalRecord::Settings {
+                workspace,
+                session_id,
+                ..
+            } => (0, vec![Text(workspace), Text(session_id)]),
+            ApprovalRecord::ReviewContext {
+                workspace,
+                session_id,
+                ..
+            } => (5, vec![Text(workspace), Text(session_id)]),
+            ApprovalRecord::ReviewDenials {
+                workspace,
+                session_id,
+                task_id,
+                run_id,
+                evidence_digest,
+                ..
+            } => (
+                6,
+                vec![
+                    Text(workspace),
+                    Text(session_id),
+                    Text(task_id),
+                    Text(run_id),
+                    Text(evidence_digest),
+                ],
+            ),
             ApprovalRecord::Mode {
                 workspace,
                 session_id,

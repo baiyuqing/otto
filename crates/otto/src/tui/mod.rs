@@ -310,6 +310,7 @@ fn redraw<B: Backend>(
     controller: &Controller,
 ) -> Result<(), ReplError> {
     app.info.approval_mode = controller.info().approval_mode;
+    app.info.approval_settings = controller.info().approval_settings;
     app.refresh_tasks(&app::Backend::Local(controller));
     terminal
         .draw(|frame| render::draw(frame, app))

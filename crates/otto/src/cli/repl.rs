@@ -411,6 +411,11 @@ impl<'a> Repl<'a> {
                         let _ = writeln!(self.stdout,"{line}");
                         continue;
                     }
+                    if let Some(args) = trimmed.strip_prefix("/permissions").filter(|args|args.is_empty() || args.starts_with(char::is_whitespace)) {
+                        let line = self.controller.permissions_command(args).unwrap_or_else(|e|e);
+                        let _ = writeln!(self.stdout,"{line}");
+                        continue;
+                    }
                     if trimmed == "/exit" || trimmed == "/stop" {
                         turn.cancel();
                         if trimmed == "/exit" { queue.push_front(input); }
@@ -487,6 +492,10 @@ impl<'a> Repl<'a> {
                         break 'dispatch None;
                     }
                     let _ = write!(self.stdout, "{HELP}");
+                    let _ = writeln!(
+                        self.stdout,
+                        "/permissions [policy on_request|never | reviewer user|auto_review] inspect or set approval controls"
+                    );
                     Some(false)
                 }
                 "init" => {
@@ -597,6 +606,17 @@ impl<'a> Repl<'a> {
                             message,
                         }
                     })?;
+                    let _ = writeln!(self.stdout, "{line}");
+                    Some(false)
+                }
+                "permissions" => {
+                    let line = self
+                        .controller
+                        .permissions_command(args)
+                        .map_err(|message| Error::Command {
+                            command: "/permissions".into(),
+                            message,
+                        })?;
                     let _ = writeln!(self.stdout, "{line}");
                     Some(false)
                 }
@@ -1065,7 +1085,19 @@ fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -
                 "\n[approval] {} ({}) {:?}\n{}",
                 request.title, request.id, request.state, request.subject.details
             );
-            if request.state == crate::approval::State::Pending {
+            if let Some(review) = &request.review {
+                let _ = writeln!(
+                    stdout,
+                    "Review: {:?}{}",
+                    review.status,
+                    review
+                        .assessment
+                        .as_ref()
+                        .map(|assessment| format!(" · {}", assessment.reason))
+                        .unwrap_or_default()
+                );
+            }
+            if request.is_human_pending() {
                 let _ = writeln!(
                     stdout,
                     "Approve in Otto: /approve {}\nReject: /deny {} [feedback]\nWithdraw: /withdraw {}",

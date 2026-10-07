@@ -300,7 +300,11 @@ fn footer_text(app: &App) -> String {
     };
     let mut text = format!(
         "{profile_model} | {} | tokens {}/{}",
-        app.info.approval_mode.label(),
+        if app.info.approval_settings.policy == crate::approval::ApprovalPolicy::Never {
+            "NEVER"
+        } else {
+            app.info.approval_mode.label()
+        },
         format_token_count(app.usage.input_tokens),
         format_token_count(app.usage.output_tokens)
     );
@@ -728,6 +732,7 @@ mod tests {
             decision: None,
             application: crate::approval::ApplicationState::NotRequired,
             application_error: String::new(),
+            review: None,
         }
     }
 

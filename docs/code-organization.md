@@ -142,7 +142,7 @@ domains. Backend packages retain their physical mappings and I/O.
 
 | State | Domain owner | Current adapter |
 | --- | --- | --- |
-| Approval authority | `approval/{contracts,repository,service}.rs` | `storage/backends/turso/approval.rs` |
+| Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `storage/backends/turso/approval.rs` |
 | Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `storage/backends/turso/memory/` and `memory_advice.rs` |
 | Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `storage/backends/posix/session/` |
 | Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `storage/backends/turso/{schedule,workflow}.rs` |

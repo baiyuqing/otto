@@ -281,14 +281,16 @@ impl Relay {
         };
         let call = async {
             match command {
-                Command::Auto { args } => {
-                    let mode = crate::app::parse_auto_mode(args)
-                        .map_err(crate::client::Error::Unreachable)?;
-                    self.client
-                        .approval_mode(session_id, mode)
-                        .await
-                        .map(|mode| Some(format!("Approval mode: {}", mode.label())))
-                }
+                Command::Permissions { args } => self
+                    .client
+                    .permissions_command(session_id, args)
+                    .await
+                    .map(Some),
+                Command::Auto { args } => self
+                    .client
+                    .auto_mode_command(session_id, args)
+                    .await
+                    .map(Some),
                 Command::Context => self
                     .client
                     .context(session_id)
@@ -577,10 +579,11 @@ impl Relay {
                         "approval_requested" => {
                             let shared=self.client.shared_approval("_otto/approvals/get",session_id,&event.approval_id,0,"","",0).await.ok()
                                 .and_then(|value|serde_json::from_value::<crate::approval::Request>(value).ok());
+                            if shared.as_ref().is_some_and(|request| !request.is_human_pending()) { continue; }
                             let caps=connection.client_capabilities.lock().expect("ACP capabilities").clone();
                             if shared.is_some() && caps.pointer("/_meta/otto/approvals").is_some() {continue}
                             let confirmation=shared.as_ref().is_some_and(|r|r.kind==crate::approval::Kind::Confirmation);
-                            let (method,params)=if confirmation {
+                            let (method,mut params)=if confirmation {
                                 if caps.pointer("/clientCapabilities/elicitation/form").is_none_or(Value::is_null) {
                                     connection.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("Approval {} is pending. This client cannot display confirmation; use Otto's approval UI.",event.approval_id)}}}}));
                                     continue;
@@ -588,6 +591,9 @@ impl Relay {
                                 let request=shared.as_ref().expect("confirmation has request");
                                 ("elicitation/create",json!({"sessionId":session_id,"mode":"form","message":format!("{}\n{}\n{}",request.title,request.subject.details,request.reason),"requestedSchema":{"type":"object","properties":{"approved":{"type":"boolean"},"feedback":{"type":"string"}},"required":["approved"]}}))
                             } else {("session/request_permission",permission_params(session_id,&event.tool_call_id,&event.command,&event.read_path,&event.justification))};
+                            if let Some(request) = &shared {
+                                params["_meta"] = json!({"otto":{"approvalId":request.id,"revision":request.revision,"subjectVersion":request.subject.version}});
+                            }
                             let (request_id,reply)=connection.send_request(method,params);
                             if let Some(previous)=approval.take(){withdraw(connection,previous);}
                             approval=Some(OpenApproval {approval_id:event.approval_id,request_id,reply,confirmation,revision:shared.map(|r|r.revision)});

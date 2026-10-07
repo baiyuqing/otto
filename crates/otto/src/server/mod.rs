@@ -349,6 +349,7 @@ const MAX_REMEMBERED_INPUTS: usize = 256;
 /// because the turn waits.
 struct WaitingApproval {
     id: String,
+    shared_revision: Option<u64>,
     decide: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
 
@@ -816,6 +817,10 @@ impl Server {
                 "/v1/sessions/{id}/approval-mode",
                 get(approvals::mode).put(approvals::set_mode),
             )
+            .route(
+                "/v1/sessions/{id}/approval-policy",
+                get(approvals::policy).put(approvals::set_policy),
+            )
             .route("/v1/schedule/claim", post(schedule::claim))
             .route("/v1/schedule/{id}/delivered", post(schedule::delivered))
             .route("/v1/tasks", get(agents::list))
@@ -1215,6 +1220,7 @@ impl Server {
             sandbox: sandbox_wire(&info.sandbox),
             auto_mode: info.approval_mode.is_automatic(),
             approval_mode: info.approval_mode.as_str(),
+            approval_settings: info.approval_settings,
             turn,
             forked_from: info.forked_from,
             plan: info.plan,
@@ -1289,16 +1295,27 @@ impl Server {
                             .count()
                     })
                     .unwrap_or(0);
+                let scope = session.ctrl.approval_scope();
+                let counts = session
+                    .ctrl
+                    .approval_service()
+                    .activity_snapshot(&scope.workspace, Some(&scope.session_id))
+                    .map(|activity| activity.counts)
+                    .unwrap_or_default();
                 StatusSessionWire {
                     id: info.session_id,
                     workspace: info.workspace,
                     turn,
                     turn_id,
                     queued,
-                    approvals,
+                    approvals: approvals.max(counts.human_pending),
+                    human_pending: counts.human_pending,
+                    reviewing: counts.reviewing,
+                    application_failed: counts.application_failed,
                     tasks,
                     auto_mode: info.approval_mode.is_automatic(),
                     approval_mode: info.approval_mode.as_str(),
+                    approval_settings: info.approval_settings,
                 }
             })
             .collect();
@@ -1529,57 +1546,65 @@ impl Server {
     /// Runs `first` and its approval retries as `turn`, then finishes it. The
     /// error text is redacted before it reaches the turn frame, the summary
     /// or the log.
-    async fn run_turn(
-        self: &Arc<Self>,
-        session: &Arc<OpenSession>,
-        turn: &Arc<Turn>,
-        first: Step<'_>,
+    fn run_turn<'a>(
+        self: &'a Arc<Self>,
+        session: &'a Arc<OpenSession>,
+        turn: &'a Arc<Turn>,
+        first: Step<'a>,
         trigger: &'static str,
         channel: Option<Channel>,
         origin: Option<crate::schedule::Origin>,
-    ) {
-        let cancel = turn.cancel_token();
-        let result = {
-            let mut buffer = turn.emitter(&self.metrics);
-            // The agent_error frame carries the same provider error that
-            // turn_end carries redacted.
-            let mut emit = |event: Event| match event {
-                Event::AgentError { message } => buffer(Event::AgentError {
-                    message: session.ctrl.redact_error(&message),
-                }),
-                event => buffer(event),
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        // Keep the full agent/review future out of the idle wake loop and
+        // request-admission futures that only decide whether a turn can run.
+        Box::pin(async move {
+            let cancel = turn.cancel_token();
+            let result = {
+                let mut buffer = turn.emitter(&self.metrics);
+                // The agent_error frame carries the same provider error that
+                // turn_end carries redacted.
+                let mut emit = |event: Event| match event {
+                    Event::AgentError { message } => buffer(Event::AgentError {
+                        message: session.ctrl.redact_error(&message),
+                    }),
+                    event @ Event::ApprovalChanged { .. } => {
+                        buffer(event);
+                        self.bump_status();
+                    }
+                    event => buffer(event),
+                };
+                let (server, open, running, token) = (&**self, &**session, &**turn, &cancel);
+                session
+                    .ctrl
+                    .run_with_channel(first, channel, origin, &mut emit, &cancel, |request| {
+                        server.wait_for_approval(open, running, token, request)
+                    })
+                    .await
             };
-            let (server, open, running, token) = (&**self, &**session, &**turn, &cancel);
-            session
-                .ctrl
-                .run_with_channel(first, channel, origin, &mut emit, &cancel, |request| {
-                    server.wait_for_approval(open, running, token, request)
-                })
-                .await
-        };
-        let (error, canceled) = match result {
-            Ok(Stop::EndTurn) => (None, false),
-            Ok(Stop::Cancelled) => (Some(String::new()), true),
-            Err(error) if error.is_cancelled() => (Some(String::new()), true),
-            Err(error) => (Some(session.ctrl.redact_error(&error.to_string())), false),
-        };
-        turn.finish(error.clone(), canceled);
-        self.bump_status();
-        let summary = turn.summary();
-        self.metrics.turn_finished(&summary.status, turn.elapsed());
-        if let Some(message) = error.filter(|_| !canceled) {
+            let (error, canceled) = match result {
+                Ok(Stop::EndTurn) => (None, false),
+                Ok(Stop::Cancelled) => (Some(String::new()), true),
+                Err(error) if error.is_cancelled() => (Some(String::new()), true),
+                Err(error) => (Some(session.ctrl.redact_error(&error.to_string())), false),
+            };
+            turn.finish(error.clone(), canceled);
+            self.bump_status();
+            let summary = turn.summary();
+            self.metrics.turn_finished(&summary.status, turn.elapsed());
+            if let Some(message) = error.filter(|_| !canceled) {
+                let mut fields = turn.log_ids();
+                fields.extend([("trigger", trigger.to_string()), ("error", message)]);
+                self.log.error("turn_error", &fields);
+            }
             let mut fields = turn.log_ids();
-            fields.extend([("trigger", trigger.to_string()), ("error", message)]);
-            self.log.error("turn_error", &fields);
-        }
-        let mut fields = turn.log_ids();
-        fields.extend([
-            ("trigger", trigger.to_string()),
-            ("status", summary.status.clone()),
-            ("duration_ms", turn.elapsed().as_millis().to_string()),
-        ]);
-        fields.extend(turn.log_totals());
-        self.log.info("turn_finished", &fields);
+            fields.extend([
+                ("trigger", trigger.to_string()),
+                ("status", summary.status.clone()),
+                ("duration_ms", turn.elapsed().as_millis().to_string()),
+            ]);
+            fields.extend(turn.log_totals());
+            self.log.info("turn_finished", &fields);
+        })
     }
 
     /// Publishes the waiting approval, then waits for the decision route, the
@@ -1593,66 +1618,103 @@ impl Server {
         cancel: &CancellationToken,
         request: ApprovalRequest,
     ) -> ApprovalDecision {
-        let (decide, decided) = tokio::sync::oneshot::channel();
-        session.lock().waiting = Some(WaitingApproval {
-            id: request.approval_id.clone(),
-            decide,
-        });
-        let mut event = WireEvent::approval_requested(
-            &request.approval_id,
-            &request.tool_call_id,
-            &request.command,
-            &request.justification,
-        );
-        event.read_path = request.read_path.clone();
-        let scope = session.ctrl.approval_scope();
-        event.approval = session
-            .ctrl
-            .approval_service()
-            .get(
+        loop {
+            let scope = session.ctrl.approval_scope();
+            let mut actionable = None;
+            if let Ok(shared) = session.ctrl.approval_service().get(
                 &request.approval_id,
                 &scope.workspace,
                 Some(&scope.session_id),
-            )
-            .ok();
-        turn.push_event(event);
-        self.bump_status();
-
-        let (decision, label) = tokio::select! {
-            biased;
-            received = decided => match received {
-                Ok(ApprovalDecision::Allow) => (ApprovalDecision::Allow, "allow"),
-                _ => (ApprovalDecision::Deny, "deny"),
-            },
-            () = cancel.cancelled() => (ApprovalDecision::Cancelled, ""),
-            shared = async {
-                let scope = session.ctrl.approval_scope();
-                if let Ok(shared) = session.ctrl.approval_service().get(&request.approval_id,&scope.workspace,Some(&scope.session_id)) {
-                    session.ctrl.approval_service().wait(&shared.id,&shared.scope,cancel).await.ok()
-                } else { std::future::pending().await }
-            } => match shared {
-                Some(r) if r.state == crate::approval::State::Approved => (ApprovalDecision::Allow,"allow"),
-                _ => (ApprovalDecision::Deny,"deny"),
-            },
-            () = session.ctrl.approval_withdrawn(&request.approval_id) => (ApprovalDecision::Deny, "deny"),
-            () = tokio::time::sleep(APPROVAL_TIMEOUT) => (ApprovalDecision::Deny, "timeout"),
-        };
-        {
-            let mut state = session.lock();
-            if state
-                .waiting
-                .as_ref()
-                .is_some_and(|waiting| waiting.id == request.approval_id)
-            {
-                state.waiting = None;
+            ) {
+                let shared = match session
+                    .ctrl
+                    .approval_service()
+                    .wait_actionable(&shared.id, &shared.scope, cancel)
+                    .await
+                {
+                    Ok(shared) => shared,
+                    Err(_) => return ApprovalDecision::Deny,
+                };
+                if !shared.is_human_pending() {
+                    return match shared.state {
+                        crate::approval::State::Approved => ApprovalDecision::Allow,
+                        _ if cancel.is_cancelled() => ApprovalDecision::Cancelled,
+                        _ => ApprovalDecision::Deny,
+                    };
+                }
+                actionable = Some(shared);
             }
-            state.remember_decided(&request.approval_id);
+            let (decide, decided) = tokio::sync::oneshot::channel();
+            let mut event = WireEvent::approval_requested(
+                &request.approval_id,
+                &request.tool_call_id,
+                &request.command,
+                &request.justification,
+            );
+            event.read_path = request.read_path.clone();
+            event.approval = actionable.clone();
+            session.lock().waiting = Some(WaitingApproval {
+                id: request.approval_id.clone(),
+                shared_revision: event.approval.as_ref().map(|request| request.revision),
+                decide,
+            });
+            turn.push_event(event);
+            self.bump_status();
+
+            let (decision, label, refresh) = tokio::select! {
+                biased;
+                received = decided => match received {
+                    Ok(ApprovalDecision::Allow) => (ApprovalDecision::Allow, "allow", false),
+                    _ => (ApprovalDecision::Deny, "deny", false),
+                },
+                () = cancel.cancelled() => (ApprovalDecision::Cancelled, "", false),
+                shared = async {
+                    let scope = session.ctrl.approval_scope();
+                    if let Ok(shared) = session.ctrl.approval_service().get(&request.approval_id,&scope.workspace,Some(&scope.session_id)) {
+                        session.ctrl.approval_service().wait(&shared.id,&shared.scope,cancel).await.ok()
+                    } else { std::future::pending().await }
+                } => match shared {
+                    Some(r) if r.state == crate::approval::State::Approved => (ApprovalDecision::Allow,"allow", false),
+                    _ => (ApprovalDecision::Deny,"deny", false),
+                },
+                () = async {
+                    let Some(binding) = &actionable else { return std::future::pending().await; };
+                    let service = session.ctrl.approval_service();
+                    let mut changes = service.changes();
+                    let mut poll = tokio::time::interval(Duration::from_millis(200));
+                    loop {
+                        if let Ok(current) = service.get(&binding.id, &binding.scope.workspace, Some(&binding.scope.session_id))
+                            && current.state == crate::approval::State::Pending
+                            && (current.revision != binding.revision || current.subject != binding.subject) {
+                            return;
+                        }
+                        tokio::select! { _ = changes.changed() => {}, _ = poll.tick() => {} }
+                    }
+                } => (ApprovalDecision::Deny, "superseded", true),
+                () = session.ctrl.approval_withdrawn(&request.approval_id) => (ApprovalDecision::Deny, "deny", false),
+                () = tokio::time::sleep(APPROVAL_TIMEOUT) => (ApprovalDecision::Deny, "timeout", false),
+            };
+            {
+                let mut state = session.lock();
+                if state
+                    .waiting
+                    .as_ref()
+                    .is_some_and(|waiting| waiting.id == request.approval_id)
+                {
+                    state.waiting = None;
+                }
+                if !refresh {
+                    state.remember_decided(&request.approval_id);
+                }
+            }
+            if decision != ApprovalDecision::Cancelled {
+                turn.push_event(WireEvent::approval_decided(&request.approval_id, label));
+            }
+            self.bump_status();
+            if !refresh {
+                return decision;
+            }
         }
-        if decision != ApprovalDecision::Cancelled {
-            turn.push_event(WireEvent::approval_decided(&request.approval_id, label));
-        }
-        self.bump_status();
-        decision
     }
 
     /// Starts a user turn on `session`, or queues it when `queue` is set and
@@ -2120,6 +2182,7 @@ struct SessionWire {
     /// read `approval_mode` for the exact policy.
     auto_mode: bool,
     approval_mode: &'static str,
+    approval_settings: crate::approval::ApprovalSettings,
     turn: Option<SessionTurnWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     forked_from: Option<app::ForkedFrom>,
@@ -2170,6 +2233,7 @@ struct StatusSessionWire {
     /// read `approval_mode` for the exact policy.
     auto_mode: bool,
     approval_mode: &'static str,
+    approval_settings: crate::approval::ApprovalSettings,
     id: String,
     workspace: String,
     turn: Option<String>,
@@ -2178,6 +2242,9 @@ struct StatusSessionWire {
     /// Turns waiting behind the running one.
     queued: usize,
     approvals: usize,
+    human_pending: usize,
+    reviewing: usize,
+    application_failed: usize,
     tasks: usize,
 }
 
@@ -9646,6 +9713,238 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_review_asks_for_the_current_human_revision_without_an_early_prompt() {
+        struct AskReviewer {
+            started: CancellationToken,
+            release: CancellationToken,
+        }
+        #[async_trait::async_trait]
+        impl crate::approval::reviewer::ReviewProvider for AskReviewer {
+            async fn assess(
+                &self,
+                _: &crate::approval::Request,
+                _: &crate::approval::reviewer::ReviewContext,
+                cancel: &CancellationToken,
+            ) -> std::result::Result<crate::approval::ReviewAssessment, String> {
+                self.started.cancel();
+                tokio::select! {
+                    () = cancel.cancelled() => return Err("cancelled".into()),
+                    () = self.release.cancelled() => {},
+                }
+                Ok(crate::approval::ReviewAssessment {
+                    risk: crate::approval::RiskLevel::Medium,
+                    user_authorization: crate::approval::UserAuthorization::Unknown,
+                    outcome: crate::approval::ReviewOutcome::Ask,
+                    reason: "Confirm the exact target before running.".into(),
+                })
+            }
+        }
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let session = harness.server.lookup(&id).unwrap();
+        let scope = session.ctrl.approval_scope();
+        let started = CancellationToken::new();
+        let release = CancellationToken::new();
+        let service = session.ctrl.approval_service();
+        service
+            .register_reviewer(
+                &scope.workspace,
+                &scope.session_id,
+                Arc::new(AskReviewer {
+                    started: started.clone(),
+                    release: release.clone(),
+                }),
+            )
+            .unwrap();
+        service
+            .set_review_context(
+                &scope.workspace,
+                &scope.session_id,
+                crate::approval::reviewer::ReviewContext {
+                    trusted_user_messages: vec!["Run the exact operation.".into()],
+                    evidence_digest: "evidence".into(),
+                    policy_digest: "policy".into(),
+                    instructions: Vec::new(),
+                },
+            )
+            .unwrap();
+        let request = service
+            .create(crate::approval::Proposal {
+                kind: crate::approval::Kind::Authorization,
+                authority: crate::approval::Authority::Boundary,
+                scope: scope.clone(),
+                subject: crate::approval::Subject {
+                    tool_call_id: "held-call".into(),
+                    source: "tool".into(),
+                    id: "held-operation".into(),
+                    version: "exact-version".into(),
+                    details: "Run the exact operation".into(),
+                },
+                title: "Review operation".into(),
+                reason: "User requested operation".into(),
+                blocking: true,
+                persistent: false,
+                expires_at: None,
+            })
+            .unwrap();
+        let turn = Arc::new(Turn::new(
+            "held-turn".into(),
+            TRIGGER_USER,
+            CancellationToken::new(),
+        ));
+        let waiting = {
+            let server = harness.server.clone();
+            let session = session.clone();
+            let turn = turn.clone();
+            let request_id = request.id.clone();
+            tokio::spawn(async move {
+                server
+                    .wait_for_approval(
+                        &session,
+                        &turn,
+                        &CancellationToken::new(),
+                        ApprovalRequest {
+                            approval_id: request_id,
+                            tool_call_id: "held-call".into(),
+                            command: "exact-operation".into(),
+                            justification: "Run the exact operation".into(),
+                            read_path: String::new(),
+                        },
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), started.cancelled())
+            .await
+            .unwrap();
+        assert!(
+            turn.snapshot(0).0.is_empty(),
+            "reviewing must not emit a permission prompt"
+        );
+        assert!(session.lock().waiting.is_none());
+        release.cancel();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while session.lock().waiting.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let current = service
+            .get(&request.id, &scope.workspace, Some(&scope.session_id))
+            .unwrap();
+        assert!(current.is_human_pending());
+        assert_eq!(current.subject, request.subject);
+        assert_eq!(
+            session.lock().waiting.as_ref().unwrap().shared_revision,
+            Some(current.revision)
+        );
+        service
+            .set_mode(&scope, crate::approval::ApprovalMode::Manual)
+            .unwrap();
+        let fresh = service
+            .get(&request.id, &scope.workspace, Some(&scope.session_id))
+            .unwrap();
+        assert!(fresh.revision > current.revision);
+        assert_eq!(fresh.subject, current.subject);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while session
+                .lock()
+                .waiting
+                .as_ref()
+                .and_then(|waiting| waiting.shared_revision)
+                != Some(fresh.revision)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for option in ["approve", "reject"] {
+            let body =
+                serde_json::json!({"session_id":id,"revision":current.revision,"option_id":option})
+                    .to_string();
+            assert_eq!(
+                harness
+                    .raw(
+                        "POST",
+                        &format!("/v1/approvals/{}/decision", request.id),
+                        Some(&body),
+                        &[("content-type", b"application/json")],
+                    )
+                    .await
+                    .status(),
+                StatusCode::CONFLICT
+            );
+            assert!(
+                service
+                    .get(&request.id, &scope.workspace, Some(&scope.session_id))
+                    .unwrap()
+                    .is_human_pending()
+            );
+        }
+        assert_eq!(
+            decide(&harness, &id, &request.id, "allow").await.status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), waiting)
+                .await
+                .unwrap()
+                .unwrap(),
+            ApprovalDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_policy_requires_revision_and_preserves_reviewer_when_disabled() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let url = format!("/v1/sessions/{id}/approval-policy");
+        let initial = harness.send("GET", &url, None).await.json();
+        assert_eq!(initial["policy"], "on_request");
+        assert_eq!(initial["reviewer"], "auto_review");
+        assert_eq!(initial["revision"], 1);
+        let update = r#"{"expected_revision":1,"policy":"never","reviewer":"user"}"#;
+        let changed = harness.send("PUT", &url, Some(update)).await;
+        assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+        let body = changed.json();
+        assert_eq!(body["policy"], "never");
+        assert_eq!(body["reviewer"], "user");
+        assert_eq!(body["reviewer_active"], false);
+        assert_eq!(body["mode"], "auto");
+        assert_eq!(body["automatic"], true);
+        assert_eq!(body["revision"], 2);
+        assert_eq!(
+            harness.send("PUT", &url, Some(update)).await.status,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            harness
+                .send("PUT", &url, Some(r#"{"policy":"never","reviewer":"user"}"#))
+                .await
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+        let legacy = harness
+            .send("GET", &format!("/v1/sessions/{id}/approval-mode"), None)
+            .await
+            .json();
+        assert_eq!(legacy["policy"], "never");
+        assert_eq!(legacy["reviewer_active"], false);
+        let manual = harness
+            .send(
+                "PUT",
+                &format!("/v1/sessions/{id}/approval-mode"),
+                Some(r#"{"mode":"manual"}"#),
+            )
+            .await
+            .json();
+        assert_eq!(manual["policy"], "on_request");
+        assert_eq!(manual["reviewer"], "user");
+    }
+
+    #[tokio::test]
     async fn approval_mode_api_is_session_scoped_and_events_capture_auto_decisions() {
         let harness = Harness::new();
         let one = harness.create().await;
@@ -9763,7 +10062,10 @@ mod tests {
         let events = events.as_array().unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(events[0]["request"]["state"], "pending");
-        assert_eq!(events[1]["request"]["decision"]["transport"], "auto-mode");
+        assert_eq!(
+            events[1]["request"]["decision"]["transport"],
+            "bounded-authority"
+        );
         assert_eq!(events[2]["request"]["state"], "pending");
         assert!(events[2]["request"]["decision"].is_null());
         let other = harness

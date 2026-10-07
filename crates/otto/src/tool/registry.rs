@@ -4,7 +4,7 @@
 //! advertises, and serves them through [`otto_core::tool::ToolExecutor`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use otto_core::model::{
     EffectCertainty, OperationDisposition, OperationOutcome, OperationStopReason, ToolDefinition,
@@ -25,6 +25,7 @@ pub trait CallGuard: Send + Sync {
 
 /// A named, ordered set of tools.
 pub struct Registry {
+    authorization_run: Option<Arc<Mutex<String>>>,
     ordered: Vec<Box<dyn Tool + Send + Sync>>,
     by_name: HashMap<String, usize>,
     guard: Option<Arc<dyn CallGuard>>,
@@ -45,6 +46,7 @@ impl Registry {
             }
         }
         Ok(Self {
+            authorization_run: None,
             ordered: tools,
             by_name,
             guard: None,
@@ -72,6 +74,10 @@ impl Registry {
 
     pub fn with_guard(mut self, guard: Arc<dyn CallGuard>) -> Self {
         self.guard = Some(guard);
+        self
+    }
+    pub(crate) fn with_authorization_run(mut self, run: Arc<Mutex<String>>) -> Self {
+        self.authorization_run = Some(run);
         self
     }
 
@@ -118,7 +124,11 @@ impl Registry {
 
         let mut authorization = None;
         if let Some((service, scope, presentation_origin)) = &self.approval {
-            let scope = scope_override.unwrap_or(scope);
+            let mut effective_scope = scope_override.unwrap_or(scope).clone();
+            if let Some(run) = &self.authorization_run {
+                effective_scope.run_id = run.lock().expect("authorization run").clone();
+            }
+            let scope = &effective_scope;
             let spec = match tool
                 .approval_spec_async(call.arguments, control.cancellation_token())
                 .await
@@ -129,7 +139,7 @@ impl Registry {
             if let Some(spec) = spec {
                 let version = spec.version.clone();
                 let origin = presentation_origin.as_ref().and_then(|origin| origin.get());
-                let request = match service.create_with_origin(
+                let mut request = match service.create_with_origin(
                     crate::approval::Proposal {
                         kind: crate::approval::Kind::Authorization,
                         authority: spec.authority,
@@ -152,48 +162,85 @@ impl Registry {
                     Ok(r) => r,
                     Err(e) => return not_started(ToolResult::error(e.to_string())),
                 };
-                let decided = match service
-                    .wait(&request.id, &request.scope, control.cancellation_token())
+                loop {
+                    request = match wait_for_authorization(
+                        service,
+                        &request,
+                        control.cancellation_token(),
+                    )
                     .await
-                {
-                    Ok(r) => r,
-                    Err(e) => return not_started(ToolResult::error(e.to_string())),
-                };
-                if decided.state != crate::approval::State::Approved {
-                    return not_started(ToolResult::error(
-                        "Operation was not approved; replan before continuing.",
-                    ));
-                }
-                if let Some(reason) = control.admission_stop_reason() {
-                    return stopped_not_started(reason);
-                }
-                if let Some(guard) = &self.guard
-                    && let Err(error) = guard.before()
-                {
-                    return not_started(ToolResult::error(error));
-                }
-                match tool
-                    .approval_spec_async(call.arguments, control.cancellation_token())
-                    .await
-                {
-                    Ok(Some(current))
-                        if current.details == request.subject.details
-                            && current.persistent == request.persistent
-                            && current.version == request.subject.version => {}
-                    _ => {
-                        return not_started(ToolResult::error(
-                            "Approval subject changed before dispatch; request approval again.",
-                        ));
+                    {
+                        Ok(request) => request,
+                        Err(error) => return not_started(ToolResult::error(error)),
+                    };
+                    request = match service.revalidate_authorization(&request) {
+                        Ok(request) => request,
+                        Err(error) => return not_started(ToolResult::error(error.to_string())),
+                    };
+                    if request.state == crate::approval::State::Pending {
+                        continue;
                     }
-                }
-                if let Err(e) = service.application(
-                    &request.id,
-                    &request.scope,
-                    crate::approval::ApplicationState::NotStarted,
-                    crate::approval::ApplicationState::Applying,
-                    "",
-                ) {
-                    return not_started(ToolResult::error(e.to_string()));
+                    if request.state != crate::approval::State::Approved {
+                        let reason = request
+                            .review
+                            .as_ref()
+                            .and_then(|review| review.assessment.as_ref())
+                            .map(|assessment| assessment.reason.as_str())
+                            .or_else(|| {
+                                request
+                                    .decision
+                                    .as_ref()
+                                    .map(|decision| decision.feedback.as_str())
+                            })
+                            .filter(|reason| !reason.trim().is_empty())
+                            .unwrap_or("The requested authority was not granted.");
+                        return not_started(ToolResult::error(format!(
+                            "Operation was not approved: {reason} Choose a safer path or obtain a concrete user decision before continuing."
+                        )));
+                    }
+                    if let Some(reason) = control.admission_stop_reason() {
+                        return stopped_not_started(reason);
+                    }
+                    if let Some(guard) = &self.guard
+                        && let Err(error) = guard.before()
+                    {
+                        return not_started(ToolResult::error(error));
+                    }
+                    match tool
+                        .approval_spec_async(call.arguments, control.cancellation_token())
+                        .await
+                    {
+                        Ok(Some(current))
+                            if current.details == request.subject.details
+                                && current.persistent == request.persistent
+                                && current.authority == request.authority
+                                && current.source == request.subject.source
+                                && current.version == request.subject.version => {}
+                        _ => {
+                            let _ = service.supersede_unstarted(&request);
+                            return not_started(ToolResult::error(
+                                "Approval subject changed before dispatch; request approval again.",
+                            ));
+                        }
+                    }
+                    if let Err(e) = service.application(
+                        &request.id,
+                        &request.scope,
+                        crate::approval::ApplicationState::NotStarted,
+                        crate::approval::ApplicationState::Applying,
+                        "",
+                    ) {
+                        if matches!(e, crate::approval::Error::Conflict)
+                            && let Ok(current) = service.revalidate_authorization(&request)
+                            && current.application == crate::approval::ApplicationState::NotStarted
+                            && current.state != crate::approval::State::Approved
+                        {
+                            request = current;
+                            continue;
+                        }
+                        return not_started(ToolResult::error(e.to_string()));
+                    }
+                    break;
                 }
                 if let Err(error) = tool
                     .apply_approval(call.arguments, control.cancellation_token(), &request)
@@ -250,6 +297,30 @@ impl Registry {
             );
         }
         execution
+    }
+}
+
+async fn wait_for_authorization(
+    service: &crate::approval::Service,
+    request: &crate::approval::Request,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<crate::approval::Request, String> {
+    let wait = service.wait(&request.id, &request.scope, cancel);
+    tokio::pin!(wait);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            result = &mut wait => return result.map_err(|error| error.to_string()),
+            _ = tick.tick(), if request.scope.run_id.starts_with("schedule:") => {
+                let current = service.get(&request.id, &request.scope.workspace, Some(&request.scope.session_id))
+                    .map_err(|error| error.to_string())?;
+                if current.state == crate::approval::State::Pending
+                    && current.review.as_ref().is_none_or(|review| review.status == crate::approval::ReviewStatus::HumanRequired)
+                {
+                    return Err(format!("Human authority is required for approval {}; this unattended operation was not started. The exact request remains available for review.", current.id));
+                }
+            }
+        }
     }
 }
 

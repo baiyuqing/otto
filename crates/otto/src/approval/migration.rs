@@ -30,6 +30,30 @@ impl From<StoredMode> for crate::approval::ApprovalMode {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApprovalRecord {
+    ManagedPolicy {
+        workspace: String,
+        policy: Option<crate::approval::ApprovalPolicy>,
+        reviewer: Option<crate::approval::ApprovalReviewer>,
+    },
+    Settings {
+        workspace: String,
+        session_id: String,
+        settings: crate::approval::ApprovalSettings,
+    },
+    ReviewContext {
+        workspace: String,
+        session_id: String,
+        evidence_digest: String,
+        policy_digest: String,
+    },
+    ReviewDenials {
+        workspace: String,
+        session_id: String,
+        task_id: String,
+        run_id: String,
+        evidence_digest: String,
+        denials: u64,
+    },
     Mode {
         workspace: String,
         session_id: String,
@@ -69,6 +93,55 @@ impl ApprovalRecord {
     }
     pub fn metadata(&self) -> Result<(String, String)> {
         Ok(match self {
+            ApprovalRecord::ManagedPolicy { workspace, .. } => {
+                (format!("managed_policy:{workspace}"), "1".into())
+            }
+            ApprovalRecord::Settings {
+                workspace,
+                session_id,
+                settings,
+            } => {
+                settings.validate().map_err(|e| Error::Invalid(e.into()))?;
+                (
+                    format!(
+                        "settings:{}",
+                        serde_json::to_string(&(workspace, session_id)).map_err(json_error)?
+                    ),
+                    settings.revision.to_string(),
+                )
+            }
+            ApprovalRecord::ReviewContext {
+                workspace,
+                session_id,
+                ..
+            } => (
+                format!(
+                    "review_context:{}",
+                    serde_json::to_string(&(workspace, session_id)).map_err(json_error)?
+                ),
+                "1".into(),
+            ),
+            ApprovalRecord::ReviewDenials {
+                workspace,
+                session_id,
+                task_id,
+                run_id,
+                evidence_digest,
+                ..
+            } => (
+                format!(
+                    "review_denials:{}",
+                    serde_json::to_string(&(
+                        workspace,
+                        session_id,
+                        task_id,
+                        run_id,
+                        evidence_digest
+                    ))
+                    .map_err(json_error)?
+                ),
+                "1".into(),
+            ),
             ApprovalRecord::Mode {
                 workspace,
                 session_id,

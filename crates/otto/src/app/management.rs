@@ -418,7 +418,18 @@ impl Controller {
                         ..Default::default()
                     })
                     .map_err(|e| e.to_string())?;
-                Ok(Reply::MemoryCandidates(result.candidates))
+                let pending = self
+                    .approval_snapshot()
+                    .map_err(|error| error.to_string())?;
+                Ok(Reply::MemoryCandidates(
+                    result
+                        .candidates
+                        .into_iter()
+                        .filter(|candidate| {
+                            crate::approval::memory::is_human_pending(candidate, &pending.requests)
+                        })
+                        .collect(),
+                ))
             }
             MemoryReview { id, decision } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {

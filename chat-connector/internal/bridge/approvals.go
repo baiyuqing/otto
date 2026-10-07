@@ -19,6 +19,7 @@ func (c *chat) presents(r agent.SharedApproval) bool {
 }
 
 type sharedCard struct {
+	token    string
 	session  string
 	request  agent.SharedApproval
 	finish   func(context.Context, string) error
@@ -82,6 +83,17 @@ func (c *chat) startApprovalWatch(sid string) {
 		return
 	}
 	initialCursor := page.Cursor
+	// Hydrate passive states once; list contains only requests waiting for a human.
+	ctx, cancel = context.WithTimeout(c.b.workCtx, 10*time.Second)
+	if changes, err := c.b.opts.Agent.ApprovalChanges(ctx, sid, 0); err == nil {
+		for _, change := range changes {
+			c.recordApprovalStatus(sid, change.Request)
+		}
+	}
+	cancel()
+	for _, request := range page.Requests {
+		c.recordApprovalStatus(sid, request)
+	}
 	c.b.mu.Lock()
 	if c.b.closing {
 		c.b.mu.Unlock()
@@ -120,7 +132,11 @@ func (c *chat) startApprovalWatch(sid string) {
 				if changeErr == nil {
 					for _, change := range changes {
 						r := change.Request
-						if c.presents(r) && r.Decision != nil && (r.Decision.Transport == "auto-mode" || r.Decision.Transport == "yolo-mode") {
+						c.recordApprovalStatus(sid, r)
+						if c.presents(r) && r.Review != nil {
+							c.reviewNotice(ctx, r)
+						}
+						if c.presents(r) && r.Review == nil && r.Decision != nil && (r.Decision.Transport == "auto-mode" || r.Decision.Transport == "yolo-mode") {
 							// A YOLO decision approved a request the user would
 							// otherwise have seen, so it is always reported.
 							policy := "AUTO"
@@ -147,6 +163,47 @@ func (c *chat) startApprovalWatch(sid string) {
 	}()
 }
 
+func (c *chat) recordApprovalStatus(sid string, r agent.SharedApproval) {
+	if current := c.b.opts.Store.Session(c.key); current != "" && current != sid {
+		return
+	}
+	if !c.presents(r) {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.approvalStatusSID != sid {
+		c.approvalStatusSID = sid
+		c.approvalStatuses = map[string]agent.SharedApproval{}
+	}
+	if r.HumanPending() || (r.State == "pending" && r.Review != nil && (r.Review.Status == "queued" || r.Review.Status == "reviewing")) || r.Application == "failed" || r.Application == "unknown" {
+		c.approvalStatuses[r.ID] = r
+	} else {
+		delete(c.approvalStatuses, r.ID)
+	}
+}
+
+func (c *chat) approvalCounts(sid string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	human, reviewing, failed := 0, 0, 0
+	if c.approvalStatusSID != sid {
+		return ""
+	}
+	for _, r := range c.approvalStatuses {
+		if r.HumanPending() {
+			human++
+		}
+		if r.State == "pending" && r.Review != nil && (r.Review.Status == "queued" || r.Review.Status == "reviewing") {
+			reviewing++
+		}
+		if r.Application == "failed" || r.Application == "unknown" {
+			failed++
+		}
+	}
+	return fmt.Sprintf("\nHuman pending: %d · Reviewing: %d · Application failures: %d", human, reviewing, failed)
+}
+
 func (c *chat) showApprovals(ctx context.Context, sid string, requests []agent.SharedApproval) {
 	c.approvalViewMu.Lock()
 	defer c.approvalViewMu.Unlock()
@@ -156,7 +213,7 @@ func (c *chat) showApprovals(ctx context.Context, sid string, requests []agent.S
 	}
 	routed := requests[:0]
 	for _, r := range requests {
-		if c.presents(r) {
+		if c.presents(r) && r.HumanPending() {
 			routed = append(routed, r)
 		}
 	}
@@ -173,9 +230,18 @@ func (c *chat) showApprovals(ctx context.Context, sid string, requests []agent.S
 		pending[r.ID] = true
 		c.mu.Lock()
 		card := c.sharedCards[r.ID]
-		ready := card != nil && card.finish != nil
+		ready := card != nil && card.finish != nil && card.request.Revision == r.Revision
+		stale := card != nil && card.request.Revision != r.Revision && !card.deciding
+		deciding := card != nil && card.deciding
+		if stale {
+			delete(c.sharedCards, r.ID)
+		}
 		c.mu.Unlock()
-		if ready {
+		if stale {
+			c.finishSharedCard(ctx, card, "Closed; request changed.")
+			card = nil
+		}
+		if ready || deciding {
 			continue
 		}
 		text := fmt.Sprintf("%s\n\n%s\n\nReason: %s\nRequest: %s", r.Title, r.Subject.Details, r.Reason, r.ID)
@@ -186,13 +252,17 @@ func (c *chat) showApprovals(ctx context.Context, sid string, requests []agent.S
 			text += "\nProposal confirmation; this does not grant tool permissions."
 		}
 		if card == nil {
+			token := newRequestID()
+			if token == "unavailable" {
+				continue
+			}
 			text += fmt.Sprintf("\nDecide: /allow %s [feedback] or /deny %s [feedback]", r.ID, r.ID)
 			// Complete details precede a possibly truncated card. Register first
 			// so a fast button callback cannot race card publication.
 			if err := c.p.Send(ctx, c.id, "", text, false); err != nil {
 				continue
 			}
-			card = &sharedCard{session: sid, request: r}
+			card = &sharedCard{token: token, session: sid, request: r}
 			c.mu.Lock()
 			if c.sharedCards == nil {
 				c.sharedCards = map[string]*sharedCard{}
@@ -200,7 +270,7 @@ func (c *chat) showApprovals(ctx context.Context, sid string, requests []agent.S
 			c.sharedCards[r.ID] = card
 			c.mu.Unlock()
 		}
-		finish, err := platform.SendApproval(ctx, c.id, r.ID, text)
+		finish, err := platform.SendApproval(ctx, c.id, card.token, text)
 		if err != nil {
 			continue
 		}
@@ -224,13 +294,35 @@ func (c *chat) showApprovals(ctx context.Context, sid string, requests []agent.S
 
 func (c *chat) decideSharedCard(m Message) bool {
 	c.mu.Lock()
-	card := c.sharedCards[m.ApprovalID]
+	var card *sharedCard
+	for _, candidate := range c.sharedCards {
+		if candidate.token == m.ApprovalID {
+			card = candidate
+			break
+		}
+	}
 	c.mu.Unlock()
 	if card == nil {
 		return false
 	}
 	c.decideShared(card, m.Text == "/allow", "")
 	return true
+}
+
+// Review audit updates are passive; only the human pending queue offers buttons.
+func (c *chat) reviewNotice(ctx context.Context, r agent.SharedApproval) {
+	if r.Application == "failed" || r.Application == "unknown" {
+		c.send(ctx, "", fmt.Sprintf("Approval %s: application %s: %s", r.ID, r.Application, r.ApplicationError))
+		return
+	}
+	if r.State == "pending" && r.Review.Status == "reviewing" {
+		c.send(ctx, "", fmt.Sprintf("Reviewing approval: %s\nRequest: %s", r.Title, r.ID))
+		return
+	}
+	if r.Review.Status == "completed" && r.Review.Assessment != nil && (r.Application == "not_started" || r.Application == "not_required") {
+		assessment := r.Review.Assessment
+		c.send(ctx, "", fmt.Sprintf("Approval review: %s\nOutcome: %s · Risk: %s\nReason: %s\nRequest: %s", r.Title, assessment.Outcome, assessment.Risk, assessment.Reason, r.ID))
+	}
 }
 
 func (c *chat) cmdSharedDecision(m Message, allow bool, args string) bool {

@@ -9,8 +9,11 @@ use std::sync::{
 
 use async_trait::async_trait;
 use otto::approval::migration::ApprovalRecord;
-use otto::approval::repository::{ApprovalStore, Claim, ClaimChange};
-use otto::approval::{self, ApprovalMode, Change, Request, Scope, Snapshot, State};
+use otto::approval::repository::{ApprovalStore, Claim, ClaimChange, ReviewLease};
+use otto::approval::{
+    self, ApplicationState, ApprovalMode, ApprovalPolicy, ApprovalReviewer, ApprovalSettings,
+    Change, Request, Scope, Snapshot, State,
+};
 use otto::runtime::storage::backend::{MigrationContext, PreparedImport};
 use otto::runtime::storage::{
     Endpoint, NamespaceIdentity, RepositoryFactory, RepositoryRequirements, StorageEndpoint,
@@ -54,6 +57,8 @@ struct Data {
     receipts: BTreeMap<String, ChunkReceipt>,
     #[serde(default)]
     claims: BTreeMap<String, StoredClaim>,
+    #[serde(default)]
+    review_leases: BTreeMap<String, (String, i64, String, i64)>,
 }
 
 pub struct JsonStore {
@@ -176,22 +181,105 @@ impl JsonStore {
                 })
         })
     }
-    /// The persisted mode of one scope; AUTO is the default, as in the SQL
-    /// backend's missing row.
-    fn mode_in(data: &Data, scope: &Scope) -> ApprovalMode {
-        Self::values(data)
-            .into_iter()
-            .find_map(|value| match value {
+    fn settings_in(data: &Data, scope: &Scope) -> Option<ApprovalSettings> {
+        let mut fallback = None;
+        let mut legacy_session = None;
+        for value in Self::values(data) {
+            match value {
+                ApprovalRecord::Settings {
+                    workspace,
+                    session_id,
+                    settings,
+                } if workspace == scope.workspace => {
+                    if session_id == scope.session_id {
+                        return Some(settings);
+                    }
+                    if session_id.is_empty() {
+                        fallback = Some(settings);
+                    }
+                }
                 ApprovalRecord::Mode {
                     workspace,
                     session_id,
                     mode,
                 } if workspace == scope.workspace && session_id == scope.session_id => {
-                    Some(ApprovalMode::from(mode))
+                    legacy_session = Some(ApprovalSettings::from_mode(mode.into()));
+                }
+                _ => (),
+            }
+        }
+        legacy_session.or(fallback)
+    }
+    fn context_in(data: &Data, scope: &Scope) -> Option<(String, String)> {
+        Self::values(data)
+            .into_iter()
+            .find_map(|value| match value {
+                ApprovalRecord::ReviewContext {
+                    workspace,
+                    session_id,
+                    evidence_digest,
+                    policy_digest,
+                } if workspace == scope.workspace && session_id == scope.session_id => {
+                    Some((evidence_digest, policy_digest))
                 }
                 _ => None,
             })
-            .unwrap_or_default()
+    }
+    fn check_managed(
+        data: &Data,
+        scope: &Scope,
+        settings: ApprovalSettings,
+    ) -> approval::Result<()> {
+        for value in Self::values(data) {
+            if let ApprovalRecord::ManagedPolicy {
+                workspace,
+                policy,
+                reviewer,
+            } = value
+                && workspace == scope.workspace
+                && (policy.is_some_and(|p| p != settings.policy)
+                    || reviewer.is_some_and(|r| r != settings.reviewer))
+            {
+                return Err(approval::Error::Conflict);
+            }
+        }
+        Ok(())
+    }
+    fn automatic_current(data: &Data, request: &Request, review_owner: bool) -> bool {
+        if request.scope.session_id.is_empty() {
+            return false;
+        }
+        let settings = Self::settings_in(data, &request.scope).unwrap_or_default();
+        let metadata = request.review.as_ref();
+        if settings.policy == ApprovalPolicy::Never {
+            return request.state == State::Rejected
+                && metadata.is_some_and(|m| m.settings_revision == settings.revision);
+        }
+        if settings.reviewer == ApprovalReviewer::Bypass {
+            return metadata.is_none_or(|m| m.settings_revision == settings.revision);
+        }
+        if settings.reviewer != ApprovalReviewer::AutoReview {
+            return false;
+        }
+        let Some(metadata) = metadata else {
+            return false;
+        };
+        if metadata.settings_revision != settings.revision {
+            return false;
+        }
+        if request
+            .decision
+            .as_ref()
+            .is_some_and(|d| d.transport == "approval-rule")
+        {
+            let mut workspace_scope = request.scope.clone();
+            workspace_scope.session_id.clear();
+            return Self::context_in(data, &workspace_scope)
+                .is_some_and(|(_, p)| p == metadata.policy_digest);
+        }
+        review_owner
+            && Self::context_in(data, &request.scope)
+                .is_some_and(|(e, p)| metadata.matches(settings.revision, &e, &p))
     }
     fn ready(&self) -> bool {
         let data = self.data.lock().unwrap();
@@ -201,26 +289,266 @@ impl JsonStore {
 
 impl ApprovalStore for JsonStore {
     fn mode(&self, scope: &Scope) -> approval::Result<Option<ApprovalMode>> {
-        Ok(Self::values(&self.data.lock().unwrap())
-            .into_iter()
-            .find_map(|value| match value {
-                ApprovalRecord::Mode {
-                    workspace,
-                    session_id,
-                    mode,
-                } if workspace == scope.workspace && session_id == scope.session_id => {
-                    Some(mode.into())
-                }
-                _ => None,
-            }))
+        Ok(self.settings(scope)?.map(|s| s.mode()))
     }
     fn set_mode(&self, scope: &Scope, mode: ApprovalMode) -> approval::Result<()> {
         self.mutate(|data| {
+            let mut settings = ApprovalSettings::from_mode(mode);
+            Self::check_managed(data, scope, settings)?;
+            settings.revision = Self::settings_in(data, scope)
+                .unwrap_or_default()
+                .revision
+                .checked_add(1)
+                .ok_or(approval::Error::Conflict)?;
             Self::put(
                 data,
-                ApprovalRecord::mode(scope.workspace.clone(), scope.session_id.clone(), mode),
+                ApprovalRecord::Settings {
+                    workspace: scope.workspace.clone(),
+                    session_id: scope.session_id.clone(),
+                    settings,
+                },
             )
         })
+    }
+    fn settings(&self, scope: &Scope) -> approval::Result<Option<ApprovalSettings>> {
+        Ok(Self::settings_in(&self.data.lock().unwrap(), scope))
+    }
+    fn set_settings(
+        &self,
+        scope: &Scope,
+        revision: u64,
+        settings: ApprovalSettings,
+    ) -> approval::Result<ApprovalSettings> {
+        settings.validate().map_err(approval::Error::Invalid)?;
+        self.mutate(|data| {
+            Self::check_managed(data, scope, settings)?;
+            if Self::settings_in(data, scope).unwrap_or_default().revision != revision
+                || settings.revision != revision.checked_add(1).ok_or(approval::Error::Conflict)?
+            {
+                return Err(approval::Error::Conflict);
+            }
+            Self::put(
+                data,
+                ApprovalRecord::Settings {
+                    workspace: scope.workspace.clone(),
+                    session_id: scope.session_id.clone(),
+                    settings,
+                },
+            )?;
+            Ok(settings)
+        })
+    }
+    fn review_context(&self, scope: &Scope, evidence: &str, policy: &str) -> approval::Result<()> {
+        self.mutate(|data| {
+            Self::put(
+                data,
+                ApprovalRecord::ReviewContext {
+                    workspace: scope.workspace.clone(),
+                    session_id: scope.session_id.clone(),
+                    evidence_digest: evidence.into(),
+                    policy_digest: policy.into(),
+                },
+            )
+        })
+    }
+    fn policy_config(
+        &self,
+        workspace: &str,
+        mut settings: ApprovalSettings,
+        digest: &str,
+    ) -> approval::Result<()> {
+        self.mutate(|data| {
+            let scope = Scope {
+                workspace: workspace.into(),
+                session_id: String::new(),
+                task_id: String::new(),
+                run_id: String::new(),
+            };
+            let changed =
+                Self::context_in(data, &scope).is_none_or(|(_, previous)| previous != digest);
+            if changed {
+                for value in Self::values(data) {
+                    if let ApprovalRecord::ReviewContext {
+                        workspace: owner,
+                        session_id,
+                        evidence_digest,
+                        ..
+                    } = value
+                        && owner == workspace
+                        && !session_id.is_empty()
+                    {
+                        Self::put(
+                            data,
+                            ApprovalRecord::ReviewContext {
+                                workspace: owner,
+                                session_id,
+                                evidence_digest,
+                                policy_digest: format!("policy-changed:{digest}"),
+                            },
+                        )?;
+                    }
+                }
+            }
+            settings.revision = match Self::settings_in(data, &scope) {
+                Some(old) if Self::context_in(data, &scope).is_some_and(|(_, p)| p == digest) => {
+                    old.revision
+                }
+                Some(old) => old
+                    .revision
+                    .checked_add(1)
+                    .ok_or(approval::Error::Conflict)?,
+                None => 1,
+            };
+            Self::put(
+                data,
+                ApprovalRecord::Settings {
+                    workspace: workspace.into(),
+                    session_id: String::new(),
+                    settings,
+                },
+            )?;
+            Self::put(
+                data,
+                ApprovalRecord::ReviewContext {
+                    workspace: workspace.into(),
+                    session_id: String::new(),
+                    evidence_digest: "policy".into(),
+                    policy_digest: digest.into(),
+                },
+            )
+        })
+    }
+    fn authorization_current(&self, request: &Request) -> approval::Result<bool> {
+        let data = self.data.lock().unwrap();
+        if Self::requests(&data).iter().find(|r| r.id == request.id) != Some(request) {
+            return Err(approval::Error::Conflict);
+        }
+        Ok(Self::automatic_current(&data, request, true))
+    }
+    fn managed_policy(
+        &self,
+        workspace: &str,
+        forced: &otto_core::config::ApprovalConfig,
+    ) -> approval::Result<()> {
+        self.mutate(|data| {
+            let mut sessions = std::collections::BTreeSet::from([String::new()]);
+            for value in Self::values(data) {
+                if let ApprovalRecord::Settings {
+                    workspace: owner,
+                    session_id,
+                    ..
+                } = value
+                    && owner == workspace
+                {
+                    sessions.insert(session_id);
+                }
+            }
+            Self::put(
+                data,
+                ApprovalRecord::ManagedPolicy {
+                    workspace: workspace.into(),
+                    policy: forced.policy,
+                    reviewer: forced.reviewer,
+                },
+            )?;
+            for session_id in sessions {
+                let scope = Scope {
+                    workspace: workspace.into(),
+                    session_id: session_id.clone(),
+                    task_id: String::new(),
+                    run_id: String::new(),
+                };
+                let previous = Self::settings_in(data, &scope);
+                let mut settings = previous.unwrap_or_default();
+                settings.policy = forced.policy.unwrap_or(settings.policy);
+                settings.reviewer = forced.reviewer.unwrap_or(settings.reviewer);
+                if previous.is_some_and(|old| {
+                    old.policy != settings.policy || old.reviewer != settings.reviewer
+                }) {
+                    settings.revision = settings
+                        .revision
+                        .checked_add(1)
+                        .ok_or(approval::Error::Conflict)?;
+                }
+                Self::put(
+                    data,
+                    ApprovalRecord::Settings {
+                        workspace: workspace.into(),
+                        session_id,
+                        settings,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+    }
+    fn review_denials(&self, scope: &Scope, evidence: &str) -> approval::Result<u64> {
+        Ok(Self::values(&self.data.lock().unwrap())
+            .into_iter()
+            .find_map(|value| match value {
+                ApprovalRecord::ReviewDenials {
+                    workspace,
+                    session_id,
+                    task_id,
+                    run_id,
+                    evidence_digest,
+                    denials,
+                } if workspace == scope.workspace
+                    && session_id == scope.session_id
+                    && task_id == scope.task_id
+                    && run_id == scope.run_id
+                    && evidence_digest == evidence =>
+                {
+                    Some(denials)
+                }
+                _ => None,
+            })
+            .unwrap_or(0))
+    }
+    fn take_review_lease(&self, request: &Request, lease: &ReviewLease) -> approval::Result<bool> {
+        self.mutate(|data| {
+            let now = chrono::Utc::now().timestamp();
+            if Self::requests(data).iter().find(|r| r.id == request.id) != Some(request)
+                || request.state != State::Pending
+                || request.expires_at.is_some_and(|t| t <= now)
+                || data
+                    .review_leases
+                    .get(&request.id)
+                    .is_some_and(|(_, _, _, expiry)| *expiry > now)
+            {
+                return Ok(false);
+            }
+            data.review_leases.insert(
+                request.id.clone(),
+                (
+                    lease.owner.clone(),
+                    lease.pid,
+                    lease.started.clone(),
+                    lease.expires_at,
+                ),
+            );
+            Ok(true)
+        })
+    }
+    fn release_review_lease(&self, id: &str, owner: &str) -> approval::Result<()> {
+        self.mutate(|data| {
+            if data
+                .review_leases
+                .get(id)
+                .is_some_and(|(actual, _, _, _)| actual == owner)
+            {
+                data.review_leases.remove(id);
+            }
+            Ok(())
+        })
+    }
+    fn commit_review(
+        &self,
+        expected: &Request,
+        next: &Request,
+        owner: &str,
+    ) -> approval::Result<Request> {
+        self.commit_owned(expected, next, ClaimChange::None, true, Some(owner))
     }
     fn create(&self, key: &str, request: &Request) -> approval::Result<(Request, bool)> {
         self.mutate(|data| {
@@ -288,7 +616,8 @@ impl ApprovalStore for JsonStore {
             requests: Self::requests(&data)
                 .into_iter()
                 .filter(|r| {
-                    r.scope.workspace == workspace
+                    r.state == State::Pending
+                        && r.scope.workspace == workspace
                         && session.is_none_or(|session| r.scope.session_id == session)
                 })
                 .collect(),
@@ -330,9 +659,46 @@ impl ApprovalStore for JsonStore {
         claim: ClaimChange,
         automatic: bool,
     ) -> approval::Result<Request> {
+        self.commit_owned(expected, next, claim, automatic, None)
+    }
+}
+
+impl JsonStore {
+    fn commit_owned(
+        &self,
+        expected: &Request,
+        next: &Request,
+        claim: ClaimChange,
+        automatic: bool,
+        review_owner: Option<&str>,
+    ) -> approval::Result<Request> {
+        let advanced_once = expected.revision.checked_add(1) == Some(next.revision);
+        let basis_changed = match (&expected.review, &next.review) {
+            (Some(old), Some(new)) => {
+                old.settings_revision != new.settings_revision
+                    || old.evidence_digest != new.evidence_digest
+                    || old.policy_digest != new.policy_digest
+            }
+            _ => false,
+        };
+        let basis_refresh = expected.state == State::Pending
+            && next.state == State::Pending
+            && expected.application == next.application
+            && advanced_once
+            && basis_changed;
+        let unstarted_reauthorization = expected.state == State::Approved
+            && expected.application == ApplicationState::NotStarted
+            && next.application == ApplicationState::NotStarted
+            && next.state == State::Pending
+            && next.decision.is_none()
+            && advanced_once
+            && next
+                .review
+                .as_ref()
+                .is_some_and(|m| m.status == approval::ReviewStatus::HumanRequired);
         if next.id != expected.id
             || next.scope != expected.scope
-            || next.revision != expected.revision
+            || (next.revision != expected.revision && !basis_refresh && !unstarted_reauthorization)
             || next.schema_version != expected.schema_version
             || next.subject != expected.subject
         {
@@ -346,7 +712,65 @@ impl ApprovalStore for JsonStore {
             if current != *expected {
                 return Err(approval::Error::Conflict);
             }
-            if automatic && !Self::mode_in(data, &expected.scope).decides(expected) {
+            if !automatic
+                && expected.state == State::Pending
+                && matches!(next.state, State::Approved | State::Rejected)
+                && !expected.scope.session_id.is_empty()
+            {
+                let settings = Self::settings_in(data, &expected.scope).unwrap_or_default();
+                if settings.policy == ApprovalPolicy::Never && next.state == State::Approved {
+                    return Err(approval::Error::Conflict);
+                }
+                if let Some(metadata) = &expected.review {
+                    if metadata.settings_revision != settings.revision {
+                        return Err(approval::Error::Conflict);
+                    }
+                    let current_basis = if let Some((evidence, policy)) =
+                        Self::context_in(data, &expected.scope)
+                    {
+                        metadata.evidence_digest == evidence && metadata.policy_digest == policy
+                    } else {
+                        let mut workspace_scope = expected.scope.clone();
+                        workspace_scope.session_id.clear();
+                        let policy = Self::context_in(data, &workspace_scope)
+                            .map(|(_, p)| p)
+                            .unwrap_or_else(|| {
+                                approval::digest(
+                                    &serde_json::to_string(
+                                        &otto_core::config::ApprovalConfig::default(),
+                                    )
+                                    .unwrap(),
+                                )
+                            });
+                        metadata.evidence_digest == "missing" && metadata.policy_digest == policy
+                    };
+                    if !current_basis {
+                        return Err(approval::Error::Conflict);
+                    }
+                }
+            }
+            let starting_auto = expected.state == State::Approved
+                && expected.application == ApplicationState::NotStarted
+                && next.application == ApplicationState::Applying
+                && expected.decision.as_ref().is_some_and(|d| {
+                    matches!(
+                        d.transport.as_str(),
+                        "auto-review" | "approval-rule" | "yolo-mode"
+                    )
+                });
+            if (automatic || starting_auto)
+                && !Self::automatic_current(data, next, review_owner.is_some() || starting_auto)
+            {
+                return Err(approval::Error::Conflict);
+            }
+            if let Some(owner) = review_owner
+                && data
+                    .review_leases
+                    .get(&expected.id)
+                    .is_none_or(|(actual, _, _, expiry)| {
+                        actual != owner || *expiry <= chrono::Utc::now().timestamp()
+                    })
+            {
                 return Err(approval::Error::Conflict);
             }
             match claim {
@@ -400,6 +824,51 @@ impl ApprovalStore for JsonStore {
                     request: body,
                 },
             )?;
+            if let Some(metadata) = &next.review
+                && next
+                    .decision
+                    .as_ref()
+                    .is_some_and(|d| d.transport == "auto-review")
+                && expected.state == State::Pending
+                && matches!(next.state, State::Approved | State::Rejected)
+            {
+                let count = Self::values(data)
+                    .into_iter()
+                    .find_map(|value| match value {
+                        ApprovalRecord::ReviewDenials {
+                            workspace,
+                            session_id,
+                            task_id,
+                            run_id,
+                            evidence_digest,
+                            denials,
+                        } if workspace == next.scope.workspace
+                            && session_id == next.scope.session_id
+                            && task_id == next.scope.task_id
+                            && run_id == next.scope.run_id
+                            && evidence_digest == metadata.evidence_digest =>
+                        {
+                            Some(denials)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                Self::put(
+                    data,
+                    ApprovalRecord::ReviewDenials {
+                        workspace: next.scope.workspace.clone(),
+                        session_id: next.scope.session_id.clone(),
+                        task_id: next.scope.task_id.clone(),
+                        run_id: next.scope.run_id.clone(),
+                        evidence_digest: metadata.evidence_digest.clone(),
+                        denials: if next.state == State::Rejected {
+                            count + 1
+                        } else {
+                            0
+                        },
+                    },
+                )?;
+            }
             Ok(next.clone())
         })
     }

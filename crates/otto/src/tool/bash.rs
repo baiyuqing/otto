@@ -17,6 +17,7 @@
 //! out after <duration>`; a parent cancellation observed at the same time wins.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -522,6 +523,301 @@ impl BashTool {
         }
     }
 
+    /// Bounded read-only payload snapshots become part of the exact prepared
+    /// version, so a changed script/build recipe invalidates authorization.
+    fn review_facts(&self, command: &str) -> serde_json::Value {
+        let (cwd, words) = match self.review_command_target(command) {
+            Ok(target) => target,
+            Err(()) => return json!({"operation_unavailable":true,"complex_shell":true,"files":[]}),
+        };
+        let mut paths = Vec::<String>::new();
+        let workspace = Workspace::new(&self.workspace_root);
+        for (index, word) in words.iter().enumerate() {
+            if index > 0
+                && matches!(
+                    words[index - 1].as_str(),
+                    ">" | ">>" | ">|" | "2>" | "2>>" | "&>"
+                )
+            {
+                continue;
+            }
+            let name = Path::new(word)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let command_word = index == 0
+                || matches!(words[index - 1].as_str(), "&&" | "||" | "|" | ";")
+                || words[index - 1].ends_with(';');
+            match name {
+                "make" | "gmake" if command_word => {
+                    let recipe = ["GNUmakefile", "makefile", "Makefile"]
+                        .into_iter()
+                        .find(|path| {
+                            workspace.as_ref().is_ok_and(|workspace| {
+                                workspace.open(&cwd.join(path)).is_ok_and(|file| {
+                                    file.metadata().is_ok_and(|metadata| metadata.is_file())
+                                })
+                            })
+                        })
+                        .unwrap_or("Makefile");
+                    paths.push(recipe.into());
+                }
+                "cargo" if command_word => paths.extend(["Cargo.toml".into(), "build.rs".into()]),
+                "npm" | "pnpm" | "yarn" | "bun" if command_word => {
+                    paths.push("package.json".into())
+                }
+                "git" if command_word => paths.extend([".git/HEAD".into(), ".git/config".into()]),
+                _ => {}
+            }
+            if (command_word && word.starts_with("./"))
+                || ["sh", "py", "js", "mjs", "cjs", "rb", "pl"]
+                    .iter()
+                    .any(|extension| word.ends_with(&format!(".{extension}")))
+            {
+                paths.push(word.clone());
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        let required_facts_truncated = paths.len() > 12;
+        let mut total = 0usize;
+        let files: Vec<_> = paths
+            .into_iter()
+            .take(12)
+            .map(|path| {
+                let read = (|| -> std::io::Result<Vec<u8>> {
+                    let file = workspace
+                        .as_ref()
+                        .map_err(|_| std::io::Error::other("workspace unavailable"))?
+                        .open(&cwd.join(&path))?;
+                    if !file.metadata()?.is_file() {
+                        return Err(std::io::Error::other("not a regular file"));
+                    }
+                    let limit = (24 * 1024usize).saturating_sub(total).min(12 * 1024);
+                    let mut bytes = Vec::new();
+                    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+                    if bytes.len() > limit {
+                        return Err(std::io::Error::other("payload exceeds limit"));
+                    }
+                    total += bytes.len();
+                    Ok(bytes)
+                })();
+                match read {
+                    Ok(bytes) => {
+                        let body = String::from_utf8_lossy(&bytes);
+                        match self.redact_review_fact(&body) {
+                            Some(body) => json!({"path":path,"sha256":format!("{:x}",sha2::Sha256::digest(&bytes)),"body":body}),
+                            None => json!({"path":path,"unavailable":true}),
+                        }
+                    }
+                    Err(error) => json!({"path":path,"unavailable":true,"optional": path == "build.rs" && error.kind() == std::io::ErrorKind::NotFound}),
+                }
+            })
+            .collect();
+        let dynamic_redirect = words.windows(2).any(|pair| {
+            matches!(pair[0].as_str(), ">" | ">>" | ">|" | "2>" | "2>>" | "&>")
+                && pair[1].contains(['$', '`'])
+        });
+        let mut target_unavailable = dynamic_redirect;
+        let targets: Vec<_> = words.windows(2).filter(|pair| matches!(pair[0].as_str(), ">" | ">>" | ">|" | "2>" | "2>>" | "&>"))
+            .map(|pair| {
+                let path = cwd.join(&pair[1]);
+                let resolved = workspace.as_ref().ok().and_then(|workspace| workspace.resolve_for_write(&path).ok())
+                    .or_else(|| path.canonicalize().ok())
+                    .or_else(|| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?)));
+                match resolved {
+                    Some(resolved) if !pair[1].contains(['$', '`', '*', '?', '~']) => {
+                        let metadata = std::fs::metadata(&resolved).ok();
+                        json!({"path":pair[1],"resolved":resolved,"exists":metadata.is_some(),
+                            "regular_file":metadata.as_ref().is_some_and(|metadata| metadata.is_file()),
+                            "outside_workspace":!resolved.starts_with(&self.workspace_root)})
+                    },
+                    _ => { target_unavailable = true; json!({"path":pair[1],"unavailable":true}) },
+                }
+            }).collect();
+        json!({"cwd":cwd,"cwd_semantics":"initial literal cwd; the complete shell program remains untrusted operation data",
+            "files":files,"targets":targets,"required_facts_truncated":required_facts_truncated,"target_unavailable":target_unavailable,
+            "complex_shell":otto_core::approval::command_argv(command).is_none(),
+            "scope":"read-only workspace payload snapshots; unavailable or indirect effects require human review"})
+    }
+
+    fn redact_review_fact(&self, body: &str) -> Option<String> {
+        let mut secrets = self.redact_values.clone();
+        for token in body
+            .split_whitespace()
+            .filter(|token| token.contains("://"))
+        {
+            let (values, incomplete) = crate::urlprivacy::userinfo_forms(token.as_bytes());
+            if incomplete {
+                return None;
+            }
+            secrets.extend(values);
+        }
+        let marker = dynamic_redaction_marker(&secrets)?;
+        Some(redact_exact_text(body, &secrets, &marker))
+    }
+
+    fn review_command_target(&self, command: &str) -> Result<(PathBuf, Vec<String>), ()> {
+        let mut cwd = self.workspace_root.clone();
+        let operation = if command.trim_start().starts_with("cd ")
+            || command.trim_start().starts_with("cd\t")
+        {
+            match command.split_once("&&") {
+                Some((cd, operation)) => {
+                    let argv = otto_core::approval::command_argv(cd).ok_or(())?;
+                    if argv.len() != 2 || argv[0] != "cd" {
+                        return Err(());
+                    }
+                    cwd = cwd.join(&argv[1]);
+                    operation
+                }
+                _ => return Err(()),
+            }
+        } else {
+            command
+        };
+        if operation.contains('\0')
+            || regex::Regex::new(r"(?m)(?:^|[;&|()])\s*(?:cd|pushd|popd)\b")
+                .expect("fixed cwd pattern")
+                .is_match(operation)
+        {
+            return Err(());
+        }
+        let argv = shlex::split(operation).ok_or(())?;
+        if argv.is_empty() {
+            return Err(());
+        }
+        if Path::new(&argv[0])
+            .file_name()
+            .is_some_and(|name| name == "git" || name == "make" || name == "gmake")
+        {
+            let mut index = 1;
+            while index < argv.len() && !matches!(argv[index].as_str(), "&&" | "||" | ";" | "|") {
+                if argv[index] == "-C" {
+                    cwd = cwd.join(argv.get(index + 1).ok_or(())?);
+                    index += 2;
+                } else if let Some(path) = argv[index].strip_prefix("-C") {
+                    cwd = cwd.join(path);
+                    index += 1;
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        if cwd.to_string_lossy().contains(['$', '`']) {
+            return Err(());
+        }
+        let workspace = Workspace::new(&self.workspace_root).map_err(|_| ())?;
+        let cwd = workspace.resolve_existing(&cwd).map_err(|_| ())?;
+        if !cwd.is_dir() {
+            return Err(());
+        }
+        Ok((cwd, argv))
+    }
+
+    /// Resolve only literal git cwd syntax. Ambiguous shell/config overrides
+    /// never borrow branch or diff facts from the original workspace.
+    fn git_review_target(&self, command: &str) -> Result<Option<PathBuf>, ()> {
+        let (cwd, argv) = self.review_command_target(command)?;
+        if !Path::new(&argv[0])
+            .file_name()
+            .is_some_and(|name| name == "git")
+        {
+            return Ok(None);
+        }
+        if argv.iter().any(|arg| {
+            arg == "-c" || arg.starts_with("--git-dir") || arg.starts_with("--work-tree")
+        }) {
+            return Err(());
+        }
+        Ok(Some(cwd))
+    }
+
+    /// First push has no upstream. Use only an existing remote-tracking base
+    /// and a verified common ancestor; never fabricate an empty outgoing diff.
+    async fn first_push_diff(
+        &self,
+        target: &Path,
+        command: &str,
+        deadline: tokio::time::Instant,
+        cancel: &CancellationToken,
+    ) -> Option<(String, serde_json::Value)> {
+        let words = shlex::split(command)?;
+        let push = words.iter().position(|word| word == "push")?;
+        let remote = words[push + 1..]
+            .iter()
+            .find(|word| !word.starts_with('-'))?;
+        if !remote
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return None;
+        }
+        for name in ["HEAD", "main", "master"] {
+            let reference = format!("refs/remotes/{remote}/{name}");
+            let commit_ref = format!("{reference}^{{commit}}");
+            let Some(base) = crate::runtime::workspace_context::run_git(
+                &self.executor,
+                &target.to_string_lossy(),
+                &self.environment,
+                &["rev-parse", "--verify", &commit_ref],
+                deadline,
+                cancel,
+            )
+            .await
+            else {
+                continue;
+            };
+            let base = base.trim();
+            if !matches!(base.len(), 40 | 64) || !base.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                continue;
+            }
+            let Some(ancestor) = crate::runtime::workspace_context::run_git(
+                &self.executor,
+                &target.to_string_lossy(),
+                &self.environment,
+                &["merge-base", base, "HEAD"],
+                deadline,
+                cancel,
+            )
+            .await
+            else {
+                continue;
+            };
+            let ancestor = ancestor.trim();
+            if !matches!(ancestor.len(), 40 | 64)
+                || !ancestor.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                continue;
+            }
+            let Some(diff) = crate::runtime::workspace_context::run_git(
+                &self.executor,
+                &target.to_string_lossy(),
+                &self.environment,
+                &[
+                    "--no-pager",
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    ancestor,
+                    "HEAD",
+                ],
+                deadline,
+                cancel,
+            )
+            .await
+            else {
+                continue;
+            };
+            return Some((
+                self.redact_review_fact(&diff)?,
+                json!({"reference":reference,"commit":base,"merge_base":ancestor}),
+            ));
+        }
+        None
+    }
+
     /// Runs `request`, cancelling a private child token once the timeout
     /// elapses. Returns whether the timeout fired alongside the outcome.
     async fn run_with(
@@ -691,7 +987,7 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
     definition(
         "bash",
         &describe(
-            "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. The approval is the user's decision, made in the approval dialog/card, by /approve, or by the session approval mode (AUTO for a bounded authorization, YOLO for any request); the command does not run until approval.",
+            "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the authorized task; include a justification. AUTO reviews the exact command and bounded native script/build facts against original user evidence; missing or changed payloads require human review. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. Persistent security grants require a person in AUTO. The command runs only after authority is recorded; MANUAL asks, NEVER rejects additional authority, and YOLO bypasses review while retaining hard checks.",
             private_home,
         ),
         json!({
@@ -705,7 +1001,7 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
                 "sandbox_permissions": {
                     "type": "string",
                     "enum": ["use_default", "require_escalated"],
-                    "description": "Use require_escalated to request one-time unsandboxed execution; the user must approve it before the command runs"
+                    "description": "Use require_escalated for one exact unsandboxed command; the backend records authority through AUTO review, an explicit rule or the user's decision before dispatch"
                 },
                 "sandbox_read_path": {
                     "type": "string",
@@ -783,7 +1079,8 @@ impl Tool for BashTool {
         } else {
             String::new()
         };
-        let version=serde_json::json!({"arguments":crate::approval::digest(arguments.get()),"config":config_version,"path":read_path}).to_string();
+        let facts = self.review_facts(&args.command);
+        let version=serde_json::json!({"arguments":crate::approval::digest(arguments.get()),"config":config_version,"path":read_path,"facts":crate::approval::digest(&facts.to_string())}).to_string();
         // One escalation leaves the sandbox for a single command; a read path
         // is a persistent grant outside the workspace.
         let (authority, title) = if read_path.is_empty() {
@@ -793,14 +1090,126 @@ impl Tool for BashTool {
             )
         } else {
             (
-                crate::approval::Authority::Durable,
+                crate::approval::Authority::Consent,
                 "Save persistent sandbox read access?",
             )
         };
         Ok(Some(super::ApprovalSpec { version,source:"sandbox".into(),authority,title:title.into(),
             reason:args.justification, persistent:!read_path.is_empty(),
-            details:serde_json::json!({"command":args.command,"workspace":self.workspace_root,"read_path":read_path}).to_string(),
+            details:serde_json::json!({"command":args.command,"workspace":self.workspace_root,"read_path":read_path,"native_facts":facts}).to_string(),
         }))
+    }
+
+    async fn approval_spec_async(
+        &self,
+        arguments: &RawValue,
+        cancel: &CancellationToken,
+    ) -> Result<Option<super::ApprovalSpec>, ToolResult> {
+        let Some(mut spec) = self.approval_spec(arguments)? else {
+            return Ok(None);
+        };
+        let args: BashArgs = decode_strict_json(arguments.get(), &["command"])
+            .map_err(|error| self.argument_error(&error))?;
+        let words = shlex::split(&args.command).unwrap_or_default();
+        if words.iter().any(|word| {
+            Path::new(word)
+                .file_name()
+                .is_some_and(|name| name == "git")
+        }) {
+            let target = match self.git_review_target(&args.command) {
+                Ok(Some(target)) => target,
+                _ => {
+                    let mut details: serde_json::Value = serde_json::from_str(&spec.details)
+                        .map_err(|_| self.argument_error("invalid prepared Bash details"))?;
+                    details["native_facts"]["git"]["target"] = json!({"unavailable":true});
+                    spec.details = details.to_string();
+                    spec.version =
+                        crate::approval::digest(&format!("{}:{}", spec.version, spec.details));
+                    return Ok(Some(spec));
+                }
+            };
+            let child = cancel.child_token();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            let commands: [(&str, &[&str]); 4] = [
+                ("branch", &["rev-parse", "--abbrev-ref", "HEAD"]),
+                ("remotes", &["remote", "-v"]),
+                (
+                    "working_diff",
+                    &[
+                        "--no-pager",
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "HEAD",
+                    ],
+                ),
+                (
+                    "outgoing_diff",
+                    &[
+                        "--no-pager",
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "@{upstream}",
+                        "HEAD",
+                    ],
+                ),
+            ];
+            let mut git = serde_json::Map::new();
+            git.insert("cwd".into(), json!(target));
+            for (name, argv) in commands {
+                let body = crate::runtime::workspace_context::run_git(
+                    &self.executor,
+                    &target.to_string_lossy(),
+                    &self.environment,
+                    argv,
+                    deadline,
+                    &child,
+                )
+                .await;
+                let body = body
+                    .filter(|body| body.len() <= 12 * 1024)
+                    .and_then(|body| self.redact_review_fact(&body));
+                git.insert(
+                    name.into(),
+                    body.map_or(
+                        json!({"unavailable":true}),
+                        |body| json!({"body":body,"sha256":crate::approval::digest(&body)}),
+                    ),
+                );
+            }
+            if git["outgoing_diff"]["unavailable"] == true
+                && let Some((body, base)) = self
+                    .first_push_diff(&target, &args.command, deadline, &child)
+                    .await
+            {
+                git.insert(
+                    "outgoing_diff".into(),
+                    json!({"sha256":crate::approval::digest(&body),"body":body}),
+                );
+                git.insert("chosen_base".into(), base);
+            }
+            let mut details: serde_json::Value = serde_json::from_str(&spec.details)
+                .map_err(|_| self.argument_error("invalid prepared Bash details"))?;
+            // Worktree gitfiles make .git/HEAD and .git/config unavailable;
+            // the native sandboxed git queries supply those canonical facts.
+            if git["branch"]["unavailable"] != true
+                && git["remotes"]["unavailable"] != true
+                && let Some(files) = details
+                    .pointer_mut("/native_facts/files")
+                    .and_then(|files| files.as_array_mut())
+            {
+                files.retain(|file| {
+                    !file["path"]
+                        .as_str()
+                        .is_some_and(|path| path.starts_with(".git/"))
+                });
+            }
+            details["native_facts"]["git"] = serde_json::Value::Object(git);
+            spec.details = details.to_string();
+            spec.version = crate::approval::digest(&format!("{}:{}", spec.version, spec.details));
+        }
+        Ok(Some(spec))
     }
 
     async fn apply_approval(
@@ -1243,6 +1652,217 @@ The command did not run.";
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn escalated_local_script_facts_bind_content_and_change_the_prepared_version() {
+        let (_dir, workspace) = temp_workspace();
+        std::fs::write(workspace.root().join("script.sh"), "printf first\n").unwrap();
+        let executor = Arc::new(FakeExecutor::default());
+        let tool = bash(&workspace, executor.clone(), &[], 1024, &[])
+            .with_approvals("root", Arc::new(BashApprovals::new(executor, Vec::new())));
+        let args = raw(
+            r#"{"command":"./script.sh","sandbox_permissions":"require_escalated","justification":"Run the requested local script"}"#,
+        );
+        let first = tool.approval_spec(&args).unwrap().unwrap();
+        let facts: serde_json::Value = serde_json::from_str(&first.details).unwrap();
+        assert_eq!(facts["native_facts"]["files"][0]["body"], "printf first\n");
+        std::fs::write(workspace.root().join("script.sh"), "printf changed\n").unwrap();
+        let changed = tool.approval_spec(&args).unwrap().unwrap();
+        assert_ne!(first.version, changed.version);
+        assert_ne!(first.details, changed.details);
+        assert!(
+            tool.approval_spec(&raw(r#"{"command":"./script.sh"}"#))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn script_payload_facts_redact_secrets_and_refuse_workspace_escape() {
+        let (_dir, workspace) = temp_workspace();
+        std::fs::write(
+            workspace.root().join("script.sh"),
+            "printf private-payload-secret\n",
+        )
+        .unwrap();
+        let tool = bash(
+            &workspace,
+            Arc::new(FakeExecutor::default()),
+            &[],
+            1024,
+            &["private-payload-secret"],
+        );
+        let facts = tool.review_facts("./script.sh ../../outside.sh");
+        let serialized = facts.to_string();
+        assert!(!serialized.contains("private-payload-secret"));
+        assert!(
+            facts["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["unavailable"] == true)
+        );
+    }
+
+    #[test]
+    fn git_facts_resolve_literal_worktree_cwd_and_refuse_ambiguous_or_escaping_targets() {
+        let (_dir, workspace) = temp_workspace();
+        std::fs::create_dir_all(workspace.root().join(".worktree/feature")).unwrap();
+        let tool = bash(
+            &workspace,
+            Arc::new(FakeExecutor::default()),
+            &[],
+            1024,
+            &[],
+        );
+        let expected = workspace.root().join(".worktree/feature");
+        assert_eq!(
+            tool.git_review_target("git -C .worktree/feature push")
+                .unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            tool.git_review_target("cd .worktree/feature && git push")
+                .unwrap(),
+            Some(expected)
+        );
+        assert!(tool.git_review_target("cd ../outside && git push").is_err());
+        assert!(
+            tool.git_review_target("cd \"$TARGET\" && git push")
+                .is_err()
+        );
+        assert!(
+            tool.git_review_target("git -c remote.origin.pushurl=https://other.example push")
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_git_and_script_previews_bind_the_effective_branch_and_payload() {
+        let (_dir, workspace) = temp_workspace();
+        fn git(root: &Path, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "-c",
+                    "user.name=Otto Test",
+                    "-c",
+                    "user.email=otto@example.test",
+                ])
+                .args(args)
+                .current_dir(root)
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap())
+                .env("HOME", root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        }
+        git(workspace.root(), &["init", "-q", "--initial-branch=main"]);
+        std::fs::write(workspace.root().join("script.sh"), "printf primary\n").unwrap();
+        git(workspace.root(), &["add", "script.sh"]);
+        git(workspace.root(), &["commit", "-qm", "seed"]);
+        let base = git(workspace.root(), &["rev-parse", "main"]);
+        git(
+            workspace.root(),
+            &["remote", "add", "origin", "https://example.test/repo.git"],
+        );
+        git(
+            workspace.root(),
+            &["update-ref", "refs/remotes/origin/main", base.trim()],
+        );
+        git(
+            workspace.root(),
+            &["worktree", "add", "-qb", "feature", ".worktree/feature"],
+        );
+        let target = workspace.root().join(".worktree/feature");
+        std::fs::write(target.join("script.sh"), "printf feature-only\n").unwrap();
+        git(&target, &["add", "script.sh"]);
+        git(&target, &["commit", "-qm", "feature payload"]);
+        let executor = Arc::new(
+            crate::sandbox::Executor::new(
+                Arc::new(crate::sandbox::direct::DirectDriver::new()),
+                crate::sandbox::Policy {
+                    filesystem: crate::sandbox::FilesystemMode::Unconfined,
+                    network: crate::sandbox::NetworkMode::Allow,
+                },
+                workspace.root(),
+            )
+            .unwrap(),
+        );
+        let environment = strings(&[
+            &format!("PATH={}", std::env::var("PATH").unwrap()),
+            &format!("HOME={}", workspace.root().display()),
+            "GIT_CONFIG_NOSYSTEM=1",
+            "GIT_CONFIG_GLOBAL=/dev/null",
+        ]);
+        let tool = BashTool::new(
+            &workspace,
+            executor.clone(),
+            "/bin/sh",
+            environment,
+            Duration::from_secs(3),
+            1024,
+            &[],
+        )
+        .unwrap()
+        .with_approvals(
+            "root",
+            Arc::new(BashApprovals::new(executor.clone(), Vec::new())),
+        );
+        for command in [
+            "cd .worktree/feature && git push -u origin feature",
+            "git -C .worktree/feature push -u origin feature",
+        ] {
+            let args = raw(&serde_json::json!({"command":command,"sandbox_permissions":"require_escalated","justification":"Publish the authorized feature"}).to_string());
+            let preview = tool
+                .approval_spec_async(&args, &CancellationToken::new())
+                .await
+                .unwrap()
+                .unwrap();
+            let details: serde_json::Value = serde_json::from_str(&preview.details).unwrap();
+            assert_eq!(
+                details["native_facts"]["git"]["branch"]["body"],
+                "feature\n"
+            );
+            assert!(
+                details["native_facts"]["git"]["outgoing_diff"]["body"]
+                    .as_str()
+                    .unwrap()
+                    .contains("feature-only")
+            );
+            assert_eq!(
+                details["native_facts"]["git"]["chosen_base"]["reference"],
+                "refs/remotes/origin/main"
+            );
+            assert_eq!(
+                details["native_facts"]["git"]["chosen_base"]["merge_base"],
+                base.trim()
+            );
+        }
+        let args = raw(
+            r#"{"command":"cd .worktree/feature && ./script.sh","sandbox_permissions":"require_escalated","justification":"Run the feature script"}"#,
+        );
+        let before = tool.approval_spec(&args).unwrap().unwrap();
+        assert!(before.details.contains("feature-only"));
+        assert!(!before.details.contains("printf primary"));
+        std::fs::write(target.join("script.sh"), "printf changed-again\n").unwrap();
+        assert_ne!(
+            before.version,
+            tool.approval_spec(&args).unwrap().unwrap().version
+        );
+        executor.close().unwrap();
     }
 
     fn bash(

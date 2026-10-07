@@ -97,7 +97,8 @@ The frontends (`cli/`, `tui/`, `acp/`, `server/` and `client/`) build on every
 other module, and no other module may import a frontend:
 `crates/otto/tests/runtime_boundary.rs` fails when one does.
 `crates/otto/tests/storage_boundary.rs` checks storage ownership and dependency
-direction. See the [crate split design](specs/2026-10-05-otto-crate-split.md).
+direction. `crates/otto/tests/faults_boundary.rs` keeps `faults` out of
+production code. See the [crate split design](specs/2026-10-05-otto-crate-split.md).
 
 The other modules group native responsibilities:
 
@@ -116,6 +117,9 @@ The other modules group native responsibilities:
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
 - **Runtime assembly:** `runtime/`, and `metrics.rs` (the HTTP and turn
   metrics `server/` exposes and the schedule worker records).
+- **Test-only fault injection:** `faults/` (compiled under `cfg(test)` or the
+  `fault-injection` feature; `faults/http.rs` is the scripted loopback HTTP
+  server; see [Fault injection](development.md#fault-injection)).
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`,
   `urlprivacy.rs`, and `log.rs` (the process logger: one instance built at the
   composition root and passed to its consumers; event names and fields are in

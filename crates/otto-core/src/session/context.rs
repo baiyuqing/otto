@@ -85,6 +85,9 @@ pub struct ResolvedContext {
     /// The newest `otto.turn` start on the active path without a matching
     /// end; see [`crate::session::turn`].
     pub interrupted_turn: Option<InterruptedTurn>,
+    /// The steps of the latest valid `otto.plan` record on the active path;
+    /// see [`crate::session::plan`].
+    pub plan: Vec<crate::session::plan::PlanStep>,
     /// Every input id delivered on the active path, including messages a
     /// compaction checkpoint has since summarized away, so an input is
     /// recognised as delivered for as long as its entry is on the path.
@@ -104,6 +107,7 @@ impl Default for ResolvedContext {
             operation_ledger: OperationLedger::default(),
             observed_capabilities: None,
             interrupted_turn: None,
+            plan: Vec::new(),
             input_ids: HashSet::new(),
         }
     }
@@ -267,6 +271,16 @@ pub fn build_context(
                         Some(record) => apply_turn_record(&mut resolved.interrupted_turn, &record),
                         None => collector.add(format!(
                             "ignored malformed {TURN_CUSTOM_TYPE} entry {}",
+                            entry.id
+                        )),
+                    }
+                } else if custom.custom_type == crate::session::plan::PLAN_CUSTOM_TYPE {
+                    let raw = custom.data.as_deref().map(RawValue::get);
+                    match crate::session::plan::decode_plan(raw.unwrap_or_default()) {
+                        Some(steps) => resolved.plan = steps,
+                        None => collector.add(format!(
+                            "ignored malformed {} entry {}",
+                            crate::session::plan::PLAN_CUSTOM_TYPE,
                             entry.id
                         )),
                     }

@@ -131,6 +131,10 @@ pub struct WireEvent {
     pub plan: Option<WirePlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<WireRetry>,
+    /// `plan_updated`: the whole session plan, empty when it was cleared.
+    /// Named `steps` because `plan` is the compaction plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Vec<crate::session::PlanStep>>,
     #[serde(default, skip_serializing_if = "is_empty")]
     pub error: String,
     /// `user_message`: an image was attached. The image data is not repeated.
@@ -303,6 +307,7 @@ pub fn to_wire(event: &Event) -> WireEvent {
             wire.compaction = Some(to_wire_compaction(compaction));
         }
         Event::CompactionPlanned { plan } => wire.plan = Some(to_wire_plan(plan)),
+        Event::PlanUpdated { steps } => wire.steps = Some(steps.clone()),
         Event::ProviderRetry {
             operation_id,
             attempt,

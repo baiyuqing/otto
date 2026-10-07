@@ -93,7 +93,7 @@ fn texts(store: &Store) -> Vec<String> {
 }
 
 fn journal_rule(op: FileOp, nth: u32, fault: Fault) -> Rule<FileOp> {
-    Rule::new(op, Trigger::Nth(nth), fault).filter(Filter::NameSuffix(".jsonl"))
+    Rule::new(op, Trigger::Nth(nth), fault).filter(Filter::NameContains(".jsonl"))
 }
 
 /// A store whose first message is durable and whose second append meets

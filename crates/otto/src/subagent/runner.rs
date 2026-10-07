@@ -3582,7 +3582,7 @@ mod tests {
                 Trigger::FromNth(3),
                 Fault::Before(FaultError::Os(libc::EIO)),
             )
-            .filter(Filter::NameSuffix(".jsonl")),
+            .filter(Filter::NameContains(".jsonl")),
         ]);
         let child_plan = Arc::clone(&plan);
         config.child_session = Some(Arc::new(move |task_id: &str| {

@@ -176,9 +176,14 @@ impl Controller {
             Some(self.begin_operation().map_err(AgentError::Other)?)
         };
         let runner = self.runner().map_err(AgentError::Other)?;
-        if matches!(first, Step::Text(_) | Step::Image(..)) {
-            self.begin_user_turn(&runner, origin).await;
-        }
+        let _presentation = if matches!(first, Step::Text(_) | Step::Image(..)) {
+            Some(self.begin_user_turn(&runner, origin).await)
+        } else {
+            if matches!(first, Step::Wake(_)) {
+                runner.presentation_origin.set(None);
+            }
+            None
+        };
         let session_id = runner.session().header().id.clone();
         let original_task = match &first {
             Step::Text(text) | Step::Followup(text) => runner.redact_text(text),

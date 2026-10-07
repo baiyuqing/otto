@@ -116,6 +116,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Approval review in the TUI now opens as a centered modal over the active
+  conversation instead of replacing the whole screen. It has no feedback
+  field, selects **Approve** by default, closes immediately after either
+  successful decision, and presents concurrent requests one at a time in
+  creation order instead of stacking them. Telegram and Feishu approval cards
+  plus passive memory/reflection notices now follow the exact originating chat;
+  workspace-visible or originless reviews remain explicitly discoverable but
+  are no longer broadcast to every chat bound to the session or workspace. See
+  [unified approvals](docs/user-manual.md#unified-approvals)
+  ([#421](https://github.com/baiyuqing/otto/pull/421)).
+
 - Compaction works again for sessions with `thinking` set on a model that
   returns reasoning, such as ChatGPT. The summary request inherits `thinking`,
   and the summary path cancelled the stream at the first reasoning delta and

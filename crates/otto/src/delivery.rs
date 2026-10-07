@@ -1667,6 +1667,7 @@ mod tests {
                 task_id: String::new(),
                 run_id: String::new(),
             },
+            presentation_origin: String::new(),
             subject: crate::approval::Subject {
                 tool_call_id: "call".into(),
                 source: "delivery".into(),

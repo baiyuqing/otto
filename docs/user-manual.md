@@ -931,11 +931,15 @@ OTTO_UI=repl otto
   Queries run independently of terminal input and live turn output. Returning
   from a detail screen restores the previous selection and draft.
 - `Esc` returns or dismisses a feature screen without making a decision.
-  Dismissing an approval leaves it pending; `/approve` with no arguments opens
-  pending approvals again. Permission decisions start on **Deny**;
-  memory/reflection reviews start on **Accept**. Neither default submits itself.
-  A submitted action displays its pending state and prevents duplicate clicks;
-  failures preserve input, and safe read failures offer a Retry action.
+  Approvals open as centered modals over the conversation rather than replacing
+  the whole screen. The modal has no feedback field, starts on **Approve** (or
+  **Accept** for a review), and Enter submits that choice. Approve and Deny both
+  close the modal as soon as the decision succeeds; no extra `Esc` is needed.
+  Multiple pending approvals are shown one at a time in creation order. If you
+  dismiss an undecided approval with `Esc`, it remains pending; `/approve` with
+  no arguments opens pending approvals again. A submitted action prevents
+  duplicate clicks; failures keep the modal open, and safe read failures offer
+  a Retry action.
 - Uses the terminal alternate screen buffer.
 - Every transcript entry is one block under a marker in the left gutter, so a
   turn reads as prompt, tool calls, reply. The marker opens the block and an
@@ -1782,9 +1786,15 @@ and optional feedback. Later tool calls in that same batch do not run; the model
 must consider your answer first. A plan confirmation gives no additional
 sandbox or external-tool permission. Mandatory domain checks still apply.
 
-- TUI: review the displayed request, use arrows and Enter or y/n; for a general
-  approval press **f** to edit feedback, then Enter to return to the choices.
-  Complete details are also shown in the transcript.
+- TUI: one centered approval modal is shown at a time over the conversation.
+  **Approve** is selected by default; use Enter, arrows, or y/n. The TUI has no
+  feedback field. A successful Approve or Deny closes the modal immediately
+  and advances to the next pending request.
+- Passive chat delivery is separate from approval visibility. An approval made
+  during a Telegram or Feishu turn is presented only to that exact originating
+  chat. Workspace-visible memory reviews remain discoverable from authorized
+  approval or `/memory` lists, but an originless or unrelated request is not
+  broadcast to every chat bound to the session or workspace.
 - Web: the approval queue shows the full proposal, feedback input, approve,
   reject and withdraw controls. It refreshes pending state across clients.
 - Telegram/Feishu: use the request's card buttons, or
@@ -2525,9 +2535,10 @@ executed command, remove permanent grants, or affect another session.
 
 While approval waits, you can ask why it is needed or ask Otto to withdraw it.
 This conversation has only help, approval query/withdrawal and queue tools;
-normal tasks keep waiting in the frontend's queue. In the TUI, press `c` to
-hide the approval panel without deciding and type your message. Telegram and
-Feishu support this with Otto; other ACP agents keep the ordinary queue.
+normal tasks keep waiting in the frontend's queue. In the TUI, press `Esc` to
+dismiss the modal without deciding; `/approve` opens pending requests again.
+Telegram and Feishu support this with Otto; other ACP agents keep the ordinary
+queue.
 Explicit Deny/No, `/deny` in chat and `/stop` continue to work.
 
 ### Session plan

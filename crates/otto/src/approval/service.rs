@@ -358,6 +358,16 @@ impl Service {
     }
 
     pub fn create(&self, proposal: Proposal) -> Result<Request> {
+        self.create_with_origin(proposal, "")
+    }
+
+    /// Creates an approval with a trusted passive-presentation origin.
+    /// The origin changes delivery only; scope remains the authority boundary.
+    pub fn create_with_origin(&self, proposal: Proposal, origin: &str) -> Result<Request> {
+        if !origin.is_empty() {
+            crate::schedule::Origin::parse(origin)
+                .map_err(|_| Error::Invalid("invalid approval presentation origin"))?;
+        }
         let now = Utc::now().timestamp();
         let mut bytes = [0; 16];
         std::fs::File::open("/dev/urandom")
@@ -394,6 +404,7 @@ impl Service {
             kind: proposal.kind,
             authority: proposal.authority,
             scope: proposal.scope,
+            presentation_origin: origin.to_owned(),
             subject: proposal.subject,
             title: proposal.title,
             reason: proposal.reason,

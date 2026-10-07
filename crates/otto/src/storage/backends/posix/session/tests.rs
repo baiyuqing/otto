@@ -4221,3 +4221,39 @@ fn listing_shows_a_fork_and_ignores_a_leftover_temporary_file() {
     assert_eq!(listed.skipped, 0);
     store.close().expect("close");
 }
+
+#[test]
+fn a_plan_set_before_a_compaction_survives_it_and_a_reopen() {
+    use otto_core::session::{PLAN_CUSTOM_TYPE, PlanStatus, PlanStep, Session, encode_plan};
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    let plan = vec![PlanStep {
+        text: "ship".into(),
+        status: PlanStatus::InProgress,
+    }];
+    store.append_message(&user("one")).expect("append");
+    store
+        .append_custom_entry(PLAN_CUSTOM_TYPE, &encode_plan(&plan))
+        .expect("plan");
+    store.append_message(&assistant("two")).expect("append");
+    store.append_message(&user("three")).expect("append");
+    let anchor = message_entry_id(&store.path(), 3);
+    store
+        .append_compaction(&checkpoint(&anchor))
+        .expect("compact");
+    assert_eq!(store.plan(), plan);
+    // A malformed record is refused and leaves the plan in force.
+    assert!(
+        store
+            .append_custom_entry(PLAN_CUSTOM_TYPE, r#"{"schemaVersion":1}"#)
+            .is_err()
+    );
+    assert_eq!(store.plan(), plan);
+    let path = store.path();
+    store.close().expect("close");
+
+    let (reopened, warnings) = Store::open(&path).expect("open");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(reopened.plan(), plan);
+    reopened.close().expect("close");
+}

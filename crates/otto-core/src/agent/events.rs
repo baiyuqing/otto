@@ -209,6 +209,11 @@ pub enum Event {
         /// The `Display` text of the [`AgentError`] `run` is about to return.
         message: String,
     },
+    /// A tool call changed the session plan; `steps` is the whole new plan,
+    /// empty when it was cleared.
+    PlanUpdated {
+        steps: Vec<crate::session::PlanStep>,
+    },
 }
 
 impl Event {
@@ -233,6 +238,7 @@ impl Event {
             Self::MemoryWarning { .. } => "memory_warning",
             Self::Notification { .. } => "notification",
             Self::AgentError { .. } => "agent_error",
+            Self::PlanUpdated { .. } => "plan_updated",
         }
     }
 }

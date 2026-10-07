@@ -980,6 +980,8 @@ struct SessionWire {
     auto_mode: bool,
     #[serde(default)]
     forked_from: Option<crate::app::ForkedFrom>,
+    #[serde(default)]
+    plan: Vec<otto_core::session::PlanStep>,
 }
 
 #[derive(Default, Deserialize)]
@@ -1009,6 +1011,7 @@ impl SessionWire {
         crate::app::Info {
             auto_mode: self.auto_mode,
             forked_from: self.forked_from,
+            plan: self.plan,
             session_id: self.id,
             session_name: self.name,
             workspace: self.workspace,

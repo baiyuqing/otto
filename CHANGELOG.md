@@ -108,7 +108,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   plus passive memory/reflection notices now follow the exact originating chat;
   workspace-visible or originless reviews remain explicitly discoverable but
   are no longer broadcast to every chat bound to the session or workspace. See
-  [unified approvals](docs/user-manual.md#unified-approvals).
+  [unified approvals](docs/user-manual.md#unified-approvals)
+  ([#421](https://github.com/baiyuqing/otto/pull/421)).
 
 - A process killed while it wrote the first records of a new session no longer
   leaves an empty or torn `<session-id>.jsonl`. Such a file failed to open

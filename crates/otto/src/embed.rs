@@ -94,6 +94,7 @@ use crate::app::{CLOSED, Controller, PROMPT_ACTIVE, SandboxControl};
 use crate::runtime::builder::Builder;
 use crate::runtime::sandbox_switch::SandboxReloader;
 use crate::runtime::startup::{self, Disabled, StartOptions, WorkspaceSandbox};
+pub use crate::runtime::wiring::MemoryExtension;
 use crate::runtime::workspace_admission::{self as admission, Admission};
 use crate::session::{self as sessionfs, MAX_LIST_SESSIONS};
 
@@ -284,6 +285,7 @@ impl Write for Diagnostics {
 
 /// Configures and builds an [`Otto`].
 pub struct OttoBuilder {
+    memory_extension: Option<crate::runtime::wiring::MemoryExtension>,
     workspace: Option<PathBuf>,
     config: ConfigSource,
     environment: Option<Vec<Vec<u8>>>,
@@ -293,6 +295,11 @@ pub struct OttoBuilder {
 }
 
 impl OttoBuilder {
+    /// Selects a host-provided memory service. Configuration and component switches still apply.
+    pub fn memory_service(mut self, extension: crate::runtime::wiring::MemoryExtension) -> Self {
+        self.memory_extension = Some(extension);
+        self
+    }
     /// The startup workspace, as `--cwd`. Required.
     pub fn workspace(mut self, path: impl AsRef<Path>) -> Self {
         self.workspace = Some(path.as_ref().to_path_buf());
@@ -366,6 +373,7 @@ impl OttoBuilder {
         let cancel = CancellationToken::new();
         let started = startup::start(
             StartOptions {
+                memory_extension: self.memory_extension,
                 host_entries,
                 config_path,
                 explicit_config,
@@ -479,6 +487,7 @@ impl Otto {
     /// Starts configuring an [`Otto`].
     pub fn builder() -> OttoBuilder {
         OttoBuilder {
+            memory_extension: None,
             workspace: None,
             config: ConfigSource::Default,
             environment: None,
@@ -734,6 +743,11 @@ impl Otto {
         {
             failure.get_or_insert("sandbox runtime close failed".to_string());
         }
+        if let Some(client) = &inner.builder.memory.client
+            && let Err(error) = client.close(&CancellationToken::new()).await
+        {
+            failure.get_or_insert_with(|| format!("close memory: {error}"));
+        }
         let _ = inner.builder.memory.service.close();
         drop(inner.guard.lock().unwrap_or_else(|p| p.into_inner()).take());
         match failure {
@@ -778,6 +792,16 @@ fn text_error(message: String) -> Error {
 }
 
 impl Session {
+    pub fn memory_service(&self) -> Option<Arc<crate::memory::client::Client>> {
+        self.controller.memory_service()
+    }
+
+    pub fn memory_context(
+        &self,
+        origin: otto_core::memory::Origin,
+    ) -> otto_core::memory::MemoryContext {
+        self.controller.memory_context(origin)
+    }
     /// The session id [`Otto::resume_session`] takes.
     pub fn id(&self) -> &str {
         &self.id

@@ -169,6 +169,15 @@ impl Service {
         self.ready()?.get(reference)
     }
 
+    /// The stable identity of this service's repository.
+    pub fn identity(&self) -> Result<super::StoreIdentity> {
+        self.ready()?.identity()
+    }
+
+    pub fn encryption_at_rest(&self) -> Result<bool> {
+        Ok(self.ready()?.encryption_at_rest())
+    }
+
     pub fn get_by_key(&self, key: &RecordKey) -> Result<Record> {
         self.ready()?.get_by_key(key)
     }

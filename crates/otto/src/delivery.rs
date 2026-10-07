@@ -1536,13 +1536,16 @@ mod tests {
         (temp, plan)
     }
 
+    /// One scripted command result: exit status, execution outcome and stdout.
+    type ScriptedOutput = (ExitStatus, Result<(), SandboxError>, String);
+
     struct InspectorExecutor {
         requests: Mutex<Vec<SandboxRequest>>,
-        outputs: Mutex<Vec<(ExitStatus, Result<(), SandboxError>, String)>>,
+        outputs: Mutex<Vec<ScriptedOutput>>,
     }
 
     impl InspectorExecutor {
-        fn new(outputs: Vec<(ExitStatus, Result<(), SandboxError>, String)>) -> Arc<Self> {
+        fn new(outputs: Vec<ScriptedOutput>) -> Arc<Self> {
             Arc::new(Self {
                 requests: Mutex::new(Vec::new()),
                 outputs: Mutex::new(outputs),

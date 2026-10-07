@@ -1216,8 +1216,26 @@ pub trait ParentToolFactory: Send + Sync {
 pub struct ParentToolSlot(Arc<std::sync::RwLock<Option<Arc<dyn ParentToolFactory>>>>);
 
 impl ParentToolSlot {
-    pub fn install(&self, factory: Arc<dyn ParentToolFactory>) {
-        *self.0.write().unwrap_or_else(|poison| poison.into_inner()) = Some(factory);
+    /// Installs the frontend's parent tools. The first installation wins: one
+    /// process has one frontend, and a second would silently replace the tools
+    /// every later parent runner composes. Returns whether this call installed.
+    pub fn install(&self, factory: Arc<dyn ParentToolFactory>) -> bool {
+        let mut slot = self.0.write().unwrap_or_else(|poison| poison.into_inner());
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(factory);
+        true
+    }
+
+    /// Whether a factory is installed. Test-only: production installs once and
+    /// relies on the first-install-wins rule above.
+    #[cfg(test)]
+    pub(crate) fn installed(&self) -> bool {
+        self.0
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_some()
     }
 
     fn get(&self) -> Option<Arc<dyn ParentToolFactory>> {
@@ -1976,9 +1994,7 @@ impl Builder {
                     Arc::clone(&reflection),
                 )));
             }
-            if include_parent_tools
-                && let Some(factory) = self.shared.parent_tool_factory.get()
-            {
+            if include_parent_tools && let Some(factory) = self.shared.parent_tool_factory.get() {
                 tools.extend(factory.tools(&ParentToolContext {
                     workspace: self.workspace_path.clone(),
                     session_id: session.header().id.clone(),

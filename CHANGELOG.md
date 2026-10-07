@@ -17,6 +17,19 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Deliver work into a repository other than the session's own from an
+  `otto serve` session: the parent-only `start_delivery_task` tool takes one
+  authorization that binds the target checkout, its Git directory, base, new
+  branch, worktree path and a frozen handoff of selected context, then runs the
+  task in `TARGET/.otto/delivery-worktrees/<id>` as its own session and reports
+  the result back, readable through
+  `GET /v1/sessions/{source_session}/deliveries/{approval_id}`. The source
+  workspace stays read-only, an interrupted delivery is reported as `unknown`
+  instead of being replayed, ordinary sub-agents never receive the tool, and
+  the Git/GitHub permission boundaries are unchanged
+  ([design](docs/specs/2026-10-06-cross-workspace-delivery-design.md),
+  [user manual](docs/user-manual.md#cross-workspace-deliveries)).
+
 - Report Otto's lifecycle to [Herdr](https://herdr.dev) when Herdr starts it in
   a pane: the pane appears as the agent `otto`, `working` while a turn runs,
   `blocked` while a tool call waits for your decision, and `idle` when it waits

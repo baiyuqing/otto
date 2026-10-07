@@ -1660,6 +1660,28 @@ overflow. For private deployments, set `context_window` and optionally
 
 ## Unified approvals
 
+Otto's default system prompt asks the model to understand a new action request
+before executing it: identify the goal, target, scope, constraints and expected
+result; check colloquial wording, missing details, unclear references, ambiguity,
+contradictions and unverified premises; then briefly restate the request in your
+language. Missing information stays unknown. When different interpretations
+would change the result, Otto should explain them and ask focused questions.
+
+Before changing files or causing external side effects, Otto should ask you to
+confirm that understanding and wait for your reply. Only necessary read-only
+checks should happen before confirmation. A correction updates the restatement;
+silence or elapsed time does not confirm it. Simple questions get direct answers.
+After confirmation, Otto should complete the agreed scope without asking again
+unless the goal, scope or key constraints materially change. This also covers
+continuations, delegated tasks and scheduled runs within that confirmed scope.
+An existing mandatory review that presents the same requirements serves as the
+confirmation, so Otto should not add a separate confirmation to that review.
+
+These are model instructions, not a runtime enforcement gate. Confirming the
+requirements grants no additional tool or sandbox permissions. They apply across
+native frontends; install the updated binary and restart the running Otto
+process to use the updated prompt.
+
 Sessions start in **AUTO** mode: a session-owned **bounded authorization** is
 recorded and automatically approved. A bounded authorization stays inside the
 sandbox and the workspace and grants nothing durable. Otto shows the request

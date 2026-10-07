@@ -108,7 +108,7 @@ fn sigkill_during_a_tool_call_leaves_a_session_that_reopens_with_the_call_marked
         replies: vec![tool_call_reply(
             "call-1",
             "bash",
-            r#"{"command":"sleep 30"}"#,
+            r#"{"command":"echo ran >> ran.txt; sleep 30"}"#,
         )],
         served: Arc::new(AtomicUsize::new(0)),
     });
@@ -126,7 +126,12 @@ fn sigkill_during_a_tool_call_leaves_a_session_that_reopens_with_the_call_marked
         Duration::from_secs(10),
         "the bash toolCall to be recorded",
     );
-    std::thread::sleep(Duration::from_millis(300));
+    let evidence = workspace.path().join("ran.txt");
+    wait_for(
+        || evidence.exists().then_some(()),
+        Duration::from_secs(10),
+        "the bash command to start",
+    );
 
     // SAFETY: `child.id()` is this test's own spawned `otto` subprocess.
     let killed = unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
@@ -178,5 +183,10 @@ fn sigkill_during_a_tool_call_leaves_a_session_that_reopens_with_the_call_marked
     assert!(
         first.contains("call-1"),
         "the resumed request carries the repaired tool result: {first}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&evidence).expect("read evidence"),
+        "ran\n",
+        "the resume does not run the interrupted command again"
     );
 }

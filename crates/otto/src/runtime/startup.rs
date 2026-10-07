@@ -51,12 +51,12 @@ const ENVIRONMENT_SNAPSHOT_TOO_LARGE: &str = "process environment snapshot is to
 /// The process environment, parsed into names and values.
 pub(crate) type EnvironmentLookup = HashMap<String, String>;
 
-/// Builds the automatic skill contract checker (experimental) when its three
-/// enabling conditions all hold: `[skills].enabled` is not false,
-/// `[experimental].typesafe_skill_check` is true, and `TYPESAFE_API_KEY` is
-/// non-empty. A database open failure prints one warning here, before any UI
-/// starts, and leaves the checker off for the process; `TYPESAFE_API_KEY`
-/// never appears in that warning.
+/// Builds the automatic skill contract checker when skills and the check are
+/// enabled and `TYPESAFE_API_KEY` is non-empty. The check defaults to enabled;
+/// the legacy `[experimental]` setting remains a fallback for compatibility.
+/// A database open failure prints one warning here, before any UI starts, and
+/// leaves the checker off for the process; `TYPESAFE_API_KEY` never appears in
+/// that warning.
 pub(crate) fn skill_checker(
     storage: &crate::runtime::storage::Storage,
     config: &File,
@@ -67,7 +67,12 @@ pub(crate) fn skill_checker(
     if config.skills.enabled == Some(false) {
         return None;
     }
-    if config.experimental.typesafe_skill_check != Some(true) {
+    if !config
+        .skills
+        .typesafe_skill_check
+        .or(config.experimental.typesafe_skill_check)
+        .unwrap_or(true)
+    {
         return None;
     }
     let api_key = environment

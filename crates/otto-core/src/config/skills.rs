@@ -15,6 +15,7 @@ const DEFAULT_SKILLS_PATHS: [&str; 2] = ["~/.otto/skills", ".otto/skills"];
 #[serde(deny_unknown_fields)]
 pub struct Skills {
     pub enabled: Option<bool>,
+    pub typesafe_skill_check: Option<bool>,
     pub paths: Option<Vec<String>>,
     /// Exact skill names excluded from the active prompt, tool registry, and
     /// skill-derived sub-agent definitions. They remain discoverable to local

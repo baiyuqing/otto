@@ -856,8 +856,7 @@ impl Runner {
         (self.config.template.now)()
     }
 
-    /// The automatic skill contract checker, when the experimental feature is
-    /// enabled.
+    /// The automatic skill contract checker, when enabled.
     pub fn checker(&self) -> Option<&Arc<crate::skill::check::Checker>> {
         self.config.checker.as_ref()
     }

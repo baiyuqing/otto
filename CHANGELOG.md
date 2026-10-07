@@ -17,6 +17,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Automatic skill contract checks are now a regular `[skills]` feature and
+  default to enabled when `TYPESAFE_API_KEY` is set. Disable them with
+  `[skills].typesafe_skill_check = false`; the old `[experimental]` setting is
+  still accepted as a fallback. See the
+  [user manual](docs/user-manual.md#automatic-contract-check)
+  ([#417](https://github.com/baiyuqing/otto/pull/417)).
+
 - **A session can now decide every request: the YOLO approval mode.**
   `/auto manual|auto|yolo` (and `/auto on|off`, unchanged) selects the
   session's policy, `otto --yolo` starts one session in YOLO, and the HTTP and

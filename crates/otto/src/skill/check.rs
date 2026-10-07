@@ -1,4 +1,4 @@
-//! Automatic skill contract check (experimental).
+//! Automatic skill contract check.
 //!
 //! The first time a skill is delegated to as a sub-agent, [`Checker::trigger`]
 //! runs in the background: deterministic rules run first

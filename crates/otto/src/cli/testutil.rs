@@ -84,6 +84,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         memory: Default::default(),
         reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
         logger: Arc::new(crate::log::Logger::discard()),
+        parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
     });
     let mut builder = Builder::for_workspace(
         shared,
@@ -140,6 +141,7 @@ pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {
         memory: Default::default(),
         reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
         logger: Arc::new(crate::log::Logger::discard()),
+        parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
     })
 }
 
@@ -176,6 +178,7 @@ pub fn shared_with_sandbox_driver_override(root: &Path, driver: &str) -> Arc<Sha
         memory: Default::default(),
         reflector: Arc::new(crate::reflection::Reflector::new(Default::default(), None)),
         logger: Arc::new(crate::log::Logger::discard()),
+        parent_tool_factory: crate::runtime::builder::ParentToolSlot::default(),
     })
 }
 

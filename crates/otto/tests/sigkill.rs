@@ -184,6 +184,12 @@ fn sigkill_during_a_tool_call_leaves_a_session_that_reopens_with_the_call_marked
         first.contains("call-1"),
         "the resumed request carries the repaired tool result: {first}"
     );
+    assert!(
+        first.contains(
+            "The previous Otto process for this session stopped before its turn finished"
+        ) && first.contains("Continue the interrupted turn from the transcript"),
+        "the resumed request reports the interrupted turn: {first}"
+    );
     assert_eq!(
         std::fs::read_to_string(&evidence).expect("read evidence"),
         "ran\n",

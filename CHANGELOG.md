@@ -22,15 +22,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
   arrives on one SSE line, and `response.completed` repeats the request
   instructions and tool definitions plus all output, so a response with about
   20 KB of output exceeded the line cap. An SSE line may now hold one whole
-  event up to the existing 1 MiB event cap.
+  event up to the existing 1 MiB event cap ([#426](https://github.com/baiyuqing/otto/pull/426)).
 
 - `request_approval` treats an empty `proposal` or `subject_ref` as omitted,
   so a call that sends a proposal with `subject_ref: ""` creates the approval
-  instead of failing with "supply exactly one of proposal or subject_ref".
+  instead of failing with "supply exactly one of proposal or subject_ref" ([#426](https://github.com/baiyuqing/otto/pull/426)).
 
 - The `otto.turn` end entry of a failed turn now records the error that ended
   it (secrets redacted, at most 4 KiB), so a session file shows why a turn
-  failed instead of only `"outcome":"failed"`.
+  failed instead of only `"outcome":"failed"` ([#426](https://github.com/baiyuqing/otto/pull/426)).
 
 - Bash now admits canonical Git-linked worktrees registered to the selected
   repository's exact common Git directory, without persistent `read_paths`

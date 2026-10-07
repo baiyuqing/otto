@@ -67,6 +67,20 @@ pub(super) struct Relay {
     lost: CancellationToken,
 }
 
+impl Drop for Relay {
+    /// Releases the sessions this connection pinned, so the server's idle
+    /// sweeper can close them once nothing else holds them.
+    fn drop(&mut self) {
+        let Some(server) = &self.server else {
+            return;
+        };
+        let sessions = self.sessions.lock().expect("session map");
+        for id in sessions.keys() {
+            server.unpin_session(id);
+        }
+    }
+}
+
 impl Relay {
     /// A relay whose server is `router`, for tests of what the relay sends.
     #[cfg(test)]
@@ -99,11 +113,17 @@ impl Relay {
     }
 
     pub(super) fn register(&self, id: &str) {
-        self.sessions
-            .lock()
-            .expect("session map")
-            .entry(id.to_string())
-            .or_default();
+        let newly = {
+            let mut sessions = self.sessions.lock().expect("session map");
+            let newly = !sessions.contains_key(id);
+            sessions.entry(id.to_string()).or_default();
+            newly
+        };
+        // A connection that holds a session keeps it open: the server's idle
+        // sweeper must not close a session this frontend is still using.
+        if newly && let Some(server) = &self.server {
+            server.pin_session(id);
+        }
     }
 
     /// The JSON-RPC error for a failed call. A connection failure also marks

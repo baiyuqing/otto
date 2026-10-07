@@ -17,6 +17,21 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Keep a long-lived `otto serve` bounded: a session with no request, turn start
+  or turn end for 30 minutes is closed, and once more than 64 sessions are open
+  in the process the least recently used ones are closed too. Both defaults are
+  on and configurable with `[server].session_idle_timeout` and
+  `[server].max_open_sessions` (`"0"`/`0` turns one rule off). Closing a session
+  this way is invisible to a client — it keeps its file, its history and its
+  saved queued turns, and the next request that names it re-opens it from disk.
+  Busy sessions are never closed, whatever their age or the count: a running or
+  queued turn, a compaction, a reflection, a waiting approval, an unfinished
+  sub-agent task, an undelivered notification, or a session a live ACP
+  connection pinned. `DELETE /v1/sessions/{id}` still closes a session for
+  good, `otto_sessions_evicted_total` counts automatic closes, and each one
+  logs `session_evicted` ([#394](https://github.com/baiyuqing/otto/pull/394),
+  [user manual](docs/user-manual.md#session-lifetime)).
+
 - Run the direct ACP TCP deployment as one supervised pair: `scripts/otto-tcp.sh
   start` runs `otto serve --acp-listen` and an `otto-connect` configured with
   `[agent] address`, so connect starts no `otto acp` process. It reads the same

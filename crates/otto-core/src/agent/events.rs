@@ -275,6 +275,10 @@ pub enum AgentError {
     /// manual compaction.
     #[error("nothing to compact")]
     NothingToCompact,
+    /// The turn was making no progress: the model kept issuing the same tool
+    /// call, or kept failing. See [`super::progress`].
+    #[error("no progress: {0}")]
+    NoProgress(super::progress::Stall),
     /// The messages that must stay verbatim already exceed the retained budget.
     #[error("current turn exceeds the retained input budget")]
     CurrentTurnTooLarge,

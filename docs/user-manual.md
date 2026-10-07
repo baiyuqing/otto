@@ -642,14 +642,24 @@ Key points:
   progress, for every turn including each sub-agent's. `0` disables one
   condition and must be between `0` and `1000`. See
   [Stopping a turn that makes no progress](#stopping-a-turn-that-makes-no-progress).
-- ChatGPT transport failures, and stream errors with code
-  `server_is_overloaded` or `server_error`, are retried up to three times
-  when no output has been streamed yet, waiting 1, 2, then 4 seconds within
-  the same turn deadline. Only the current model request is repeated;
-  previously executed tools are not rerun. HTTP errors (including 429/5xx),
-  other stream error codes (such as `rate_limit_exceeded`), authorization
-  errors, protocol errors, and failures after streamed output are not
-  retried.
+- ChatGPT connection/send/body failures, HTTP 429/500/502/503/504 responses,
+  a clean stream close before its terminal event, and stream errors classified
+  as `server_is_overloaded` or `server_error` are retried up to six times when
+  no output has been streamed yet, waiting 1, 2, 4, 8, 16, then 30 seconds
+  within the same turn deadline. A numeric `Retry-After` header takes
+  precedence and is capped at 30 seconds. Only the current model request is
+  repeated; previously executed tools are not rerun. The TUI shows the retry
+  countdown and the REPL prints each planned retry. Other HTTP statuses, other
+  stream error codes (such as `rate_limit_exceeded`), authorization errors,
+  malformed or oversized stream events, and failures after streamed output
+  are not retried. After the retry limit, the turn ends with an error rather
+  than remaining active.
+
+  A Responses stream accepts error classification in `response.error`, a
+  nested event `error`, or top-level fields, and falls back to the SSE `event:`
+  name when the JSON payload omits `type`. Individual SSE lines are limited to
+  64 KiB and one event payload to 1 MiB.
+
   OpenAI-compatible requests are not automatically retried after dispatch.
   When the connection to an OpenAI-compatible endpoint cannot be
   established (refused, unreachable, or a failed TLS or connect timeout), the

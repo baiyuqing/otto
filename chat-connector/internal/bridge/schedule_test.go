@@ -85,6 +85,7 @@ func TestAgentDeliversThroughConnection(t *testing.T) {
 	h.say(`ext:_otto/schedule/deliver {"chat":"telegram:c1","text":"due"}`)
 	h.waitCall("ext_result:{}")
 	h.waitFor(func() bool { return len(h.plat.texts()) > 0 && h.plat.texts()[0] == "due" }, "delivered text")
+	h.waitCall("end:ext:_otto/schedule/deliver")
 	h.say(`ext:_otto/schedule/deliver {"chat":"telegram:zz","text":"no"}`)
 	if c := h.waitCall("ext_result:error:"); !strings.Contains(c, "allowed") {
 		t.Fatalf("call = %q", c)

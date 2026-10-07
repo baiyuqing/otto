@@ -777,7 +777,7 @@ changelog maintenance itself need no entry.
 
 The version is `[workspace.package] version` in `Cargo.toml`, shared by `otto` and `otto-core`. The `otto` and `otto-core` entries of `Cargo.lock` must carry the same value; a test fails `make check` when they differ.
 
-Versioning follows SemVer in the 0.x range: a new feature or an incompatible change raises the minor version (0.1.0 to 0.2.0); only fixes raise the patch version (0.1.0 to 0.1.1). Moving to 1.0.0 is a maintainer decision. Version numbers change only in a release PR.
+Versioning is patch-only in the 0.x range: a release increments the last number (0.4.0 to 0.4.1), and neither a new feature nor an incompatible change raises the minor version. Moving to 1.0.0 is a maintainer decision. Version numbers change only in a release PR.
 
 1. On a branch, run `make bump VERSION=X.Y.Z`. `scripts/release.mjs` requires X.Y.Z to be a plain version greater than the current one, rewrites `Cargo.toml` and `Cargo.lock` by exact text replacement (no other line changes, no network), and exits with an error if a location is missing or matches more than once.
 2. Archive the `Unreleased` changelog entries as described above. Commit, open a PR titled `Release vX.Y.Z`, and merge it.

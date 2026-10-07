@@ -695,6 +695,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Documentation
 
+- Make the release contract patch-only: a release increments the patch number
+  and a new feature no longer raises the minor version, so contributors bump
+  `X.Y.Z-1` to `X.Y.Z` in a release PR instead of planning a minor.
+  ([#400](https://github.com/baiyuqing/otto/pull/400),
+  [development guide](docs/development.md#releases))
+
 - Add a mandatory contributor rule: a PR that adds, changes, removes or
   renames a model-callable capability updates its tool description, schema
   field descriptions, prompt policy section, sub-agent exclusion and user

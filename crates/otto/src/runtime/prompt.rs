@@ -43,7 +43,7 @@ pub fn agent_guidance(
         "Use a model ID the user named or the session model. Otto cannot list this provider's models; do not write a model ID from memory."
     };
     format!(
-        "<delegation_policy>\nUse the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result. Use agent_status to see what a running task is doing; when it is stuck, repeating itself, or no longer needed, stop it with agent_cancel.\n<subagent_runtime {identity}>\n{model_policy}\n</subagent_runtime>\n</delegation_policy>"
+        "<delegation_policy>\nUse the agent tool to delegate self-contained tasks (exploration, review, independent edits). It returns immediately: keep working on independent work, or finish the current response and let the runtime-owned wake turn deliver each completed child's [task-notification]. Do not poll agent_status to wait; use it only to inspect progress. Use agent_send when the user adds constraints, priorities, facts, or direction changes, and agent_cancel when a task is stuck, repeating itself, or no longer needed.\n<subagent_runtime {identity}>\n{model_policy}\n</subagent_runtime>\n</delegation_policy>"
     )
 }
 
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn delegation_policy_appears_only_with_an_agent_tool() {
         let prompt = system_prompt_for(
-            &definitions(&["read", "agent", "agent_wait"]),
+            &definitions(&["read", "agent"]),
             off(),
             "openai-compatible",
             "gw.example.com",

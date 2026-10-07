@@ -271,6 +271,77 @@ async fn openai_deadline_budget_smaller_than_the_backoff_stops_without_waiting()
     assert!(started.elapsed() < Duration::from_millis(500));
 }
 
+/// A reqwest client whose read timeout is 200 ms, so a silent peer fails the
+/// attempt without waiting for the 60 s production timeout.
+fn short_timeout_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .read_timeout(Duration::from_millis(200))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build the test HTTP client")
+}
+
+fn openai_short(server: &Server) -> openaicompat::Client {
+    openaicompat::Client::with_http_client(&server.url, "key", short_timeout_http())
+}
+
+fn assert_one_retry_then_success(
+    settlement: &ProviderSettlement,
+    events: &[StreamEvent],
+    server: &Server,
+) {
+    assert!(
+        settlement.result.is_ok(),
+        "{:?}",
+        settlement.result.as_ref().err()
+    );
+    assert_eq!(settlement.attempts, 2);
+    assert_eq!(server.count(), 2);
+    assert_eq!(
+        retries(events),
+        [(2, Duration::from_secs(1), "connection interrupted")]
+    );
+}
+
+#[tokio::test]
+async fn openai_stall_before_the_head_is_retried_and_the_second_request_succeeds() {
+    let server =
+        http::spawn_scripted(vec![Script::stall_before_head(), Script::sse_done(&[STOP])]).await;
+    let (settlement, events) = complete_plain(&openai_short(&server)).await;
+    assert_one_retry_then_success(&settlement, &events, &server);
+}
+
+#[tokio::test]
+async fn openai_stall_after_the_head_before_any_event_is_retried() {
+    let server =
+        http::spawn_scripted(vec![Script::stall_after_head(), Script::sse_done(&[STOP])]).await;
+    let (settlement, events) = complete_plain(&openai_short(&server)).await;
+    assert_one_retry_then_success(&settlement, &events, &server);
+}
+
+#[tokio::test]
+async fn openai_stall_after_one_content_delta_is_terminal_with_unknown_effect() {
+    let server = http::spawn_repeating(Script::stall_after_events(&[DELTA])).await;
+    let (settlement, events) = complete_plain(&openai_short(&server)).await;
+    assert!(
+        settlement.result.is_err(),
+        "a stalled stream is not a complete response"
+    );
+    assert_eq!(settlement.attempts, 1);
+    assert_eq!(server.count(), 1);
+    assert_eq!(
+        settlement.outcome.effect_certainty,
+        EffectCertainty::Unknown
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { .. })),
+        "the delta reached the caller: {events:?}"
+    );
+    assert!(retries(&events).is_empty());
+}
+
 mod agent {
     use super::*;
     use otto_core::agent::{Agent, Event, Options};
@@ -451,6 +522,60 @@ async fn chatgpt_reset_after_output_is_not_retried_and_effect_is_unknown() {
             .iter()
             .any(|event| matches!(event, StreamEvent::TextDelta { .. })),
         "the delta reached the caller: {events:?}"
+    );
+    assert!(retries(&events).is_empty());
+}
+
+fn chatgpt_short(server: &Server) -> chatgpt::Client {
+    chatgpt::Client::with_http_client(
+        &server.url,
+        tokens("token"),
+        "acct-1",
+        reqwest::Client::builder()
+            .read_timeout(Duration::from_millis(200))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build the test HTTP client"),
+    )
+}
+
+#[tokio::test]
+async fn chatgpt_stall_before_the_head_is_retried_and_the_second_request_succeeds() {
+    let server = http::spawn_scripted(vec![
+        Script::stall_before_head(),
+        Script::sse_without_done(&[TEXT, COMPLETED]),
+    ])
+    .await;
+    let (settlement, events) = complete_plain(&chatgpt_short(&server)).await;
+    assert_one_retry_then_success(&settlement, &events, &server);
+    let requests = server.requests();
+    assert_eq!(requests[0].body, requests[1].body);
+}
+
+#[tokio::test]
+async fn chatgpt_stall_after_the_head_before_any_event_is_retried() {
+    let server = http::spawn_scripted(vec![
+        Script::stall_after_head(),
+        Script::sse_without_done(&[TEXT, COMPLETED]),
+    ])
+    .await;
+    let (settlement, events) = complete_plain(&chatgpt_short(&server)).await;
+    assert_one_retry_then_success(&settlement, &events, &server);
+}
+
+#[tokio::test]
+async fn chatgpt_stall_after_one_content_delta_is_terminal_with_unknown_effect() {
+    let server = http::spawn_repeating(Script::stall_after_events(&[TEXT])).await;
+    let (settlement, events) = complete_plain(&chatgpt_short(&server)).await;
+    assert!(
+        settlement.result.is_err(),
+        "a stalled stream is not a complete response"
+    );
+    assert_eq!(settlement.attempts, 1);
+    assert_eq!(server.count(), 1);
+    assert_eq!(
+        settlement.outcome.effect_certainty,
+        EffectCertainty::Unknown
     );
     assert!(retries(&events).is_empty());
 }

@@ -376,6 +376,10 @@ impl ApprovalStore for JsonStore {
             )
         })
     }
+    fn review_snapshot(&self, scope: &Scope) -> approval::Result<Option<(String, String)>> {
+        let data = self.data.lock().map_err(|_| approval::Error::Unavailable)?;
+        Ok(Self::context_in(&data, scope))
+    }
     fn policy_config(
         &self,
         workspace: &str,

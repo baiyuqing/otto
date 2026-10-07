@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,6 +25,14 @@ type sharedCard struct {
 	request  agent.SharedApproval
 	finish   func(context.Context, string) error
 	deciding bool
+}
+
+// Stable across connector restarts, but invalidated by a different request
+// revision, owning session or presentation origin. Fits platform callback limits.
+func (c *chat) sharedApprovalToken(sid string, request agent.SharedApproval) string {
+	key := fmt.Sprintf("%q:%q:%q:%d:%q", sid, c.presentationOrigin(), request.ID, request.Revision, request.Subject.Version)
+	digest := sha256.Sum256([]byte(key))
+	return fmt.Sprintf("%x", digest[:16])
 }
 
 // Restore only explicitly admitted chat bindings; no conversation is needed to
@@ -228,10 +237,11 @@ func (c *chat) showApprovals(ctx context.Context, sid string, requests []agent.S
 	pending := map[string]bool{}
 	for _, r := range requests {
 		pending[r.ID] = true
+		token := c.sharedApprovalToken(sid, r)
 		c.mu.Lock()
 		card := c.sharedCards[r.ID]
-		ready := card != nil && card.finish != nil && card.request.Revision == r.Revision
-		stale := card != nil && card.request.Revision != r.Revision && !card.deciding
+		ready := card != nil && card.finish != nil && card.token == token
+		stale := card != nil && card.token != token && !card.deciding
 		deciding := card != nil && card.deciding
 		if stale {
 			delete(c.sharedCards, r.ID)
@@ -252,10 +262,6 @@ func (c *chat) showApprovals(ctx context.Context, sid string, requests []agent.S
 			text += "\nProposal confirmation; this does not grant tool permissions."
 		}
 		if card == nil {
-			token := newRequestID()
-			if token == "unavailable" {
-				continue
-			}
 			text += fmt.Sprintf("\nDecide: /allow %s [feedback] or /deny %s [feedback]", r.ID, r.ID)
 			// Complete details precede a possibly truncated card. Register first
 			// so a fast button callback cannot race card publication.
@@ -309,19 +315,11 @@ func (c *chat) decideSharedCard(m Message) bool {
 	return true
 }
 
-// Review audit updates are passive; only the human pending queue offers buttons.
+// Automatic review stays in audit/status views. Only actual application failure
+// needs a chat notification; the human pending queue separately offers buttons.
 func (c *chat) reviewNotice(ctx context.Context, r agent.SharedApproval) {
 	if r.Application == "failed" || r.Application == "unknown" {
 		c.send(ctx, "", fmt.Sprintf("Approval %s: application %s: %s", r.ID, r.Application, r.ApplicationError))
-		return
-	}
-	if r.State == "pending" && r.Review.Status == "reviewing" {
-		c.send(ctx, "", fmt.Sprintf("Reviewing approval: %s\nRequest: %s", r.Title, r.ID))
-		return
-	}
-	if r.Review.Status == "completed" && r.Review.Assessment != nil && (r.Application == "not_started" || r.Application == "not_required") {
-		assessment := r.Review.Assessment
-		c.send(ctx, "", fmt.Sprintf("Approval review: %s\nOutcome: %s · Risk: %s\nReason: %s\nRequest: %s", r.Title, assessment.Outcome, assessment.Risk, assessment.Reason, r.ID))
 	}
 }
 
@@ -336,6 +334,14 @@ func (c *chat) cmdSharedDecision(m Message, allow bool, args string) bool {
 	feedback := ""
 	if len(fields) > 0 {
 		card = c.sharedCards[fields[0]]
+		if card == nil {
+			for _, candidate := range c.sharedCards {
+				if candidate.token == fields[0] {
+					card = candidate
+					break
+				}
+			}
+		}
 		feedback = strings.TrimSpace(strings.TrimPrefix(args, fields[0]))
 	} else {
 		for _, pending := range c.sharedCards {

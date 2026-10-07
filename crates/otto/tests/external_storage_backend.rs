@@ -332,7 +332,44 @@ mod tests {
         service
             .set_mode(&scope, approval::ApprovalMode::Manual)
             .unwrap();
+        let mut context = approval::reviewer::ReviewContext {
+            trusted_user_messages: vec!["Review the exact operation.".into()],
+            policy_digest: "fixed-instructions".into(),
+            ..Default::default()
+        };
+        context.refresh_digest();
+        service
+            .set_review_context(&scope.workspace, &scope.session_id, context)
+            .unwrap();
         let request = service.create(proposal()).unwrap();
+        let bytes = std::fs::read(temp.path().join("human.json")).unwrap();
+        let persisted = backend.store.review_snapshot(&scope).unwrap().unwrap();
+        assert_eq!(
+            persisted.0,
+            request.review.as_ref().unwrap().evidence_digest
+        );
+        assert_eq!(persisted.1, request.review.as_ref().unwrap().policy_digest);
+        assert_eq!(
+            std::fs::read(temp.path().join("human.json")).unwrap(),
+            bytes,
+            "snapshot getter is read-only"
+        );
+        drop(service);
+        drop(backend);
+        let backend = JsonBackend::new(temp.path().join("human.json"), "probe:human");
+        let service = approval::Service::from_store(backend.store.clone()).unwrap();
+        let resumed = service.create(proposal()).unwrap();
+        assert_eq!(resumed.id, request.id);
+        assert_eq!(
+            resumed.revision, request.revision,
+            "unrestored live context must not fabricate a new missing basis"
+        );
+        assert_eq!(resumed.review, request.review);
+        assert_eq!(
+            resumed.state,
+            approval::State::Pending,
+            "a persisted digest alone cannot approve anything"
+        );
         let previous = backend.store.settings(&scope).unwrap().unwrap();
         let mut next = previous;
         next.revision += 1;

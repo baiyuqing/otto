@@ -35,6 +35,10 @@ pub trait ApprovalStore: Send + Sync {
     fn review_context(&self, _: &Scope, _: &str, _: &str) -> Result<()> {
         Err(Error::Unavailable)
     }
+    /// Persisted authority basis is distinct from live review availability.
+    fn review_snapshot(&self, _: &Scope) -> Result<Option<(String, String)>> {
+        Ok(None)
+    }
     fn policy_config(&self, _: &str, _: ApprovalSettings, _: &str) -> Result<()> {
         Err(Error::Unavailable)
     }

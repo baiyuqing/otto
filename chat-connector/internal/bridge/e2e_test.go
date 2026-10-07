@@ -368,6 +368,16 @@ func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 		t.Fatal(got)
 	}
 	token := h.plat.approvalID()
+	firstChat := h.b.chat(h.plat, "c1")
+	firstChat.mu.Lock()
+	var initial agent.SharedApproval
+	for _, card := range firstChat.sharedCards {
+		if card.token == token {
+			initial = card.request
+			break
+		}
+	}
+	firstChat.mu.Unlock()
 	// Restart with the persisted chat binding. The pending card must return
 	// without sending a new message or creating another approval identity.
 	store := h.store
@@ -377,7 +387,15 @@ func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 	h = newHarness(t, setup{platform: "telegram", agent: options, store: store})
 	waitCards(h, 1)
 	if h.plat.approvalID() != token {
-		t.Fatal("restart replaced the durable approval identity")
+		restoredChat := h.b.chat(h.plat, "c1")
+		restoredChat.mu.Lock()
+		var restored agent.SharedApproval
+		for _, card := range restoredChat.sharedCards {
+			restored = card.request
+			break
+		}
+		restoredChat.mu.Unlock()
+		t.Fatalf("restart replaced the durable approval identity: initial=%+v restored=%+v initial_review=%+v restored_review=%+v", initial, restored, initial.Review, restored.Review)
 	}
 	h.agent.Kill() // a card must still work after ACP transport/process reconnect
 	memoryClick(h, "c1", "u1", token, "/allow")

@@ -1,6 +1,6 @@
 //! The slash commands `otto acp` runs itself: `/compact [focus]`,
-//! `/context`, `/reflect [focus]`, `/steer <guidance>`, `/queue <prompt>`,
-//! and the reflection skill commands.
+//! `/context`, `/model [profile]`, `/reflect [focus]`, `/steer <guidance>`,
+//! `/queue <prompt>`, and the reflection skill commands.
 //!
 //! They are advertised with `available_commands_update` and arrive as the
 //! text of an ordinary `session/prompt`. [`parse`] decides whether a prompt is
@@ -21,6 +21,7 @@ pub(super) enum Command<'a> {
     Context,
     Auto { args: &'a str },
     Compact { focus: &'a str },
+    Model { profile: &'a str },
     Reflect { focus: &'a str },
     Skill { args: &'a str },
     Steer { guidance: &'a str },
@@ -42,6 +43,13 @@ pub(super) fn parse(text: &str) -> Option<Command<'_>> {
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     {
         return Some(Command::Skill { args: rest.trim() });
+    }
+    if let Some(rest) = text.strip_prefix("/model")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        return Some(Command::Model {
+            profile: rest.trim(),
+        });
     }
     if let Some(rest) = text.strip_prefix("/reflect")
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
@@ -85,6 +93,13 @@ pub(super) fn available_commands() -> SessionUpdate {
             "Show what the next request sends, with token counts per part",
         ),
         AvailableCommand::new(
+            "model",
+            "Show the session's profile and model, or switch the session to another configured profile",
+        )
+        .input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("optional profile"),
+        )),
+        AvailableCommand::new(
             "reflect",
             "Write a retrospective of this session and propose memories and reusable skills; list or show <id> for past runs",
         )
@@ -116,6 +131,50 @@ pub(super) fn available_commands() -> SessionUpdate {
 }
 
 pub(super) const CONTEXT_UNAVAILABLE: &str = "The context report is not available in this session.";
+
+/// The `/model` report: the session's effective selection plus every profile a
+/// switch may name. The profile list is what makes the command usable from a
+/// chat client, which cannot read the configuration file.
+pub(super) fn model_text(
+    profile: &str,
+    provider: &str,
+    model: &str,
+    thinking: &str,
+    available: &[String],
+) -> String {
+    let mut lines = vec![
+        format!("Profile: {profile}"),
+        format!("Provider: {provider}"),
+        format!("Model: {model}"),
+    ];
+    if !thinking.is_empty() {
+        lines.push(format!("Thinking: {thinking}"));
+    }
+    if available.is_empty() {
+        lines.push("No profiles are configured; add one on the host to switch.".to_string());
+    } else {
+        lines.push(format!("Configured profiles: {}", available.join(", ")));
+        lines.push("Switch with /model <profile>.".to_string());
+    }
+    lines.join("\n")
+}
+
+/// The `/model <profile>` confirmation. It never claims the profile was saved:
+/// a session switch leaves the configuration file and every other session
+/// unchanged.
+pub(super) fn model_switched_text(
+    profile: &str,
+    provider: &str,
+    model: &str,
+    thinking: &str,
+) -> String {
+    let thinking = if thinking.is_empty() {
+        String::new()
+    } else {
+        format!(", thinking {thinking}")
+    };
+    format!("Switched to profile {profile} (provider {provider}, model {model}{thinking}).")
+}
 
 fn section_name(kind: SectionKind, items: usize) -> String {
     match kind {
@@ -220,6 +279,15 @@ mod tests {
             Some(Command::Skill { args: "generated" })
         );
         assert_eq!(parse("/skill"), Some(Command::Skill { args: "" }));
+        assert_eq!(parse("/model"), Some(Command::Model { profile: "" }));
+        assert_eq!(
+            parse("/model  terra "),
+            Some(Command::Model { profile: "terra" })
+        );
+        assert_eq!(
+            parse("/model\tterra"),
+            Some(Command::Model { profile: "terra" })
+        );
         assert_eq!(
             parse("/skill revert lint-gate"),
             Some(Command::Skill {
@@ -236,6 +304,9 @@ mod tests {
             "/steerx",
             "/queuex",
             "/skillx",
+            "/models",
+            "/models work",
+            "/modelx",
             "compact",
             "",
         ] {
@@ -252,10 +323,41 @@ mod tests {
         assert_eq!(commands[0]["input"]["hint"], "optional focus");
         assert_eq!(commands[1]["name"], "context");
         assert!(commands[1].get("input").is_none());
-        assert_eq!(commands[2]["name"], "reflect");
-        assert_eq!(commands[3]["name"], "skill");
-        assert_eq!(commands[4]["name"], "steer");
-        assert_eq!(commands[5]["name"], "queue");
+        assert_eq!(commands[2]["name"], "model");
+        assert_eq!(commands[2]["input"]["hint"], "optional profile");
+        assert_eq!(commands[3]["name"], "reflect");
+        assert_eq!(commands[4]["name"], "skill");
+        assert_eq!(commands[5]["name"], "steer");
+        assert_eq!(commands[6]["name"], "queue");
+    }
+
+    #[test]
+    fn model_text_reports_the_selection_and_every_profile() {
+        let text = model_text(
+            "terra",
+            "chatgpt",
+            "gpt-5.6-terra",
+            "medium",
+            &["chatgpt".to_string(), "terra".to_string()],
+        );
+        assert_eq!(
+            text,
+            "Profile: terra\nProvider: chatgpt\nModel: gpt-5.6-terra\nThinking: medium\n\
+             Configured profiles: chatgpt, terra\nSwitch with /model <profile>."
+        );
+        let bare = model_text("terra", "chatgpt", "gpt-5.6-terra", "", &[]);
+        assert!(bare.starts_with("Profile: terra\nProvider: chatgpt\nModel: gpt-5.6-terra\n"));
+        assert!(bare.ends_with("add one on the host to switch."));
+        assert!(!bare.contains("Thinking:"));
+
+        assert_eq!(
+            model_switched_text("terra", "chatgpt", "gpt-5.6-terra", "medium"),
+            "Switched to profile terra (provider chatgpt, model gpt-5.6-terra, thinking medium)."
+        );
+        assert_eq!(
+            model_switched_text("terra", "chatgpt", "gpt-5.6-terra", ""),
+            "Switched to profile terra (provider chatgpt, model gpt-5.6-terra)."
+        );
     }
 
     #[test]

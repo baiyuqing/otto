@@ -102,7 +102,10 @@ impl Registry {
         let mut authorization = None;
         if let Some((service, scope)) = &self.approval {
             let scope = scope_override.unwrap_or(scope);
-            let spec = match tool.approval_spec(call.arguments) {
+            let spec = match tool
+                .approval_spec_async(call.arguments, control.cancellation_token())
+                .await
+            {
                 Ok(spec) => spec,
                 Err(result) => return not_started(result),
             };
@@ -147,7 +150,10 @@ impl Registry {
                 {
                     return not_started(ToolResult::error(error));
                 }
-                match tool.approval_spec(call.arguments) {
+                match tool
+                    .approval_spec_async(call.arguments, control.cancellation_token())
+                    .await
+                {
                     Ok(Some(current))
                         if current.details == request.subject.details
                             && current.persistent == request.persistent
@@ -348,6 +354,72 @@ mod tests {
         }
     }
 
+    struct AsyncApprovalTool {
+        calls: Arc<AtomicUsize>,
+        change_on_second_call: bool,
+        applied: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for AsyncApprovalTool {
+        fn definition(&self) -> ToolDefinition {
+            definition("async_approval", "", serde_json::json!({"type":"object"}))
+        }
+
+        async fn approval_spec_async(
+            &self,
+            _arguments: &serde_json::value::RawValue,
+            _cancel: &CancellationToken,
+        ) -> Result<Option<super::super::ApprovalSpec>, ToolResult> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(super::super::ApprovalSpec {
+                version: if self.change_on_second_call && call > 0 {
+                    "v2"
+                } else {
+                    "v1"
+                }
+                .into(),
+                source: "test".into(),
+                title: "Approve?".into(),
+                reason: "test".into(),
+                details: if self.change_on_second_call && call > 0 {
+                    "two"
+                } else {
+                    "one"
+                }
+                .into(),
+                persistent: false,
+            }))
+        }
+
+        async fn apply_approval(
+            &self,
+            _arguments: &serde_json::value::RawValue,
+            _cancel: &CancellationToken,
+            _request: &crate::approval::Request,
+        ) -> Result<(), String> {
+            self.applied.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn execute(
+            &self,
+            _arguments: &serde_json::value::RawValue,
+            _cancel: &CancellationToken,
+        ) -> ToolResult {
+            text_result("ran")
+        }
+    }
+
+    fn approval_scope() -> crate::approval::Scope {
+        crate::approval::Scope {
+            workspace: "/workspace".into(),
+            session_id: "session".into(),
+            task_id: String::new(),
+            run_id: String::new(),
+        }
+    }
+
     struct CountingTool(Arc<AtomicUsize>);
 
     #[async_trait::async_trait]
@@ -450,6 +522,47 @@ mod tests {
             "second"
         );
         assert!(registry.lookup("missing").is_none());
+    }
+
+    #[tokio::test]
+    async fn async_approval_subject_is_prepared_and_revalidated() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let applied = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(crate::approval::Service::in_memory().unwrap());
+        let registry = Registry::new(vec![Box::new(AsyncApprovalTool {
+            calls: Arc::clone(&calls),
+            change_on_second_call: false,
+            applied: Arc::clone(&applied),
+        })])
+        .unwrap()
+        .with_approval(service, approval_scope());
+        let execution = execute(&registry, "async_approval", &CancellationToken::new()).await;
+        assert!(!execution.result.is_error, "{}", execution.result.content);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(applied.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn changed_async_approval_subject_never_reaches_effect_boundary() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let applied = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(crate::approval::Service::in_memory().unwrap());
+        let registry = Registry::new(vec![Box::new(AsyncApprovalTool {
+            calls: Arc::clone(&calls),
+            change_on_second_call: true,
+            applied: Arc::clone(&applied),
+        })])
+        .unwrap()
+        .with_approval(service, approval_scope());
+        let execution = execute(&registry, "async_approval", &CancellationToken::new()).await;
+        assert!(execution.result.is_error);
+        assert!(execution.result.content.contains("subject changed"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(applied.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            execution.outcome.effect_certainty,
+            EffectCertainty::NotStarted
+        );
     }
 
     #[tokio::test]

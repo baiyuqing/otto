@@ -14,6 +14,7 @@ pub mod approvals;
 pub mod auth;
 pub mod compact;
 pub mod config;
+pub mod delivery;
 pub mod diff;
 pub mod fs;
 pub mod listen;
@@ -151,6 +152,15 @@ pub trait Factory: Send + Sync {
         _parent_session: &str,
         _task_id: &str,
     ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
+        Ok(None)
+    }
+    /// A delivery status scoped to its source session. The status is a narrow
+    /// read-only projection and deliberately does not reuse ordinary tasks.
+    fn delivery_status(
+        &self,
+        _source_session: &str,
+        _approval_id: &str,
+    ) -> Result<Option<delivery::Status>, String> {
         Ok(None)
     }
     /// Every loaded workspace, startup first then by path, for `GET
@@ -650,6 +660,7 @@ impl Server {
                     .delete(delete_session),
             )
             .route("/v1/sessions/{id}/fork", post(fork_session))
+            .route("/v1/sessions/{id}/profile", post(set_session_profile))
             .route("/v1/sessions/{id}/fork-points", get(fork_points))
             .route("/v1/sessions/{id}/history", get(history))
             .route("/v1/sessions/{id}/context", get(context))
@@ -709,6 +720,10 @@ impl Server {
                 post(reflection::revert_skill),
             )
             .route("/v1/sessions/{id}/tasks", get(tasks::list))
+            .route(
+                "/v1/sessions/{id}/deliveries/{approval_id}",
+                get(delivery::get),
+            )
             .route("/v1/sessions/{id}/tasks/{task_id}", get(tasks::get))
             .route(
                 "/v1/sessions/{id}/tasks/{task_id}/cancel",
@@ -1945,6 +1960,56 @@ async fn get_session(State(server): State<Arc<Server>>, Path(id): Path<String>) 
     match server.lookup(&id) {
         Some(session) => json_response(StatusCode::OK, &server.session_wire(&session)),
         None => not_found("session not found"),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProfileBody {
+    /// The configured profile this session should run on.
+    #[serde(default)]
+    profile: String,
+}
+
+/// `POST /v1/sessions/{id}/profile`. Rebuilds this session's runner on another
+/// configured profile and answers with the session wire. It never writes the
+/// configuration file, so other sessions and the next `otto serve` start keep
+/// the profile they had.
+async fn set_session_profile(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let parsed: ProfileBody = match serde_json::from_slice(&body) {
+        Ok(parsed) => parsed,
+        Err(_) => return bad_request("invalid JSON body"),
+    };
+    if parsed.profile.is_empty() {
+        return bad_request("profile must not be empty");
+    }
+    match session.ctrl.switch_profile_result(&parsed.profile).await {
+        Ok(_) => {
+            server.logger().info(
+                "profile_switched",
+                &[("session_id", id), ("profile", parsed.profile)],
+            );
+            json_response(StatusCode::OK, &server.session_wire(&session))
+        }
+        Err(message) if message == app::PROMPT_ACTIVE => {
+            turn_active("a turn is already active for this session")
+        }
+        // A session without dynamic content, or under a policy that forbids a
+        // dynamic profile, cannot switch; retrying the same request cannot help.
+        Err(message)
+            if message == app::PROFILE_SWITCH_UNAVAILABLE
+                || message == app::SESSION_OPERATION_UNAVAILABLE =>
+        {
+            error_response(StatusCode::CONFLICT, "profile_switch_unavailable", &message)
+        }
+        // Unknown profile or invalid profile content; the builder redacts it.
+        Err(message) => bad_request(&message),
     }
 }
 
@@ -5620,6 +5685,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn switching_a_session_profile_rebuilds_it_and_writes_no_file() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/profile"),
+                Some(r#"{"profile":"beta"}"#),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert_eq!(reply.json()["profile"], "beta");
+        assert_eq!(reply.json()["model"], "gpt-beta");
+
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/profile"),
+                Some(r#"{"profile":"nope"}"#),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "bad_request");
+        assert!(reply.body.contains("nope"), "{}", reply.body);
+
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/profile"), Some("{}"))
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+
+        let reply = harness
+            .send(
+                "POST",
+                "/v1/sessions/missing/profile",
+                Some(r#"{"profile":"beta"}"#),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+
+        // A session switch never writes the configuration file: the running
+        // serve keeps its startup profile catalog, and so does the next start.
+        assert!(
+            !harness.factory.builder.shared.config_path.exists(),
+            "the profile switch wrote a configuration file"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn switching_a_profile_while_a_turn_runs_is_409_turn_active() {
+        let (gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+        let (_stream, _turn_id) = start_stream(&harness, &id).await;
+        harness.provider.wait_started(1).await;
+
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/profile"),
+                Some(r#"{"profile":"beta"}"#),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "turn_active");
+        gate.cancel();
+    }
+
+    #[tokio::test]
     async fn config_profiles_are_readable_without_environment_values() {
         let harness = Harness::with(HarnessOptions {
             config_text: Some(
@@ -5694,6 +5827,7 @@ mod tests {
         "/v1/sessions/{id}",
         "/v1/sessions/{id}/history",
         "/v1/sessions/{id}/context",
+        "/v1/sessions/{id}/profile",
         "/v1/sessions/{id}/approvals/{approval_id}",
         "/v1/sessions/{id}/inputs",
         "/v1/sessions/{id}/tasks/steer",

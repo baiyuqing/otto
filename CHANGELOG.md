@@ -27,6 +27,41 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([design](docs/specs/2026-10-07-otto-embedding-api.md),
   [#392](https://github.com/baiyuqing/otto/pull/392)).
 
+- Switch the conversation's profile from a chat with one tap: bare `/model`
+  replies with the profiles from the local `~/.config/otto/config.toml` — name,
+  provider and model each — and one inline button per profile in Telegram or one
+  card button per profile in Feishu; choosing one switches that session exactly
+  as typing `/model <profile>` does. A platform without buttons gets the same
+  list as text. The connector reads that file read-only, so the picker shows the
+  user layer only and marks the configured default rather than the session's
+  current profile; switching itself stays Otto's
+  ([#391](https://github.com/baiyuqing/otto/pull/391),
+  [user manual](docs/user-manual.md#commands)).
+
+- Switch the model of one session from ACP itself with `/model [profile]`: Otto
+  rebuilds the session's runner on another configured profile, makes no model
+  request, and leaves the configuration file and every other session unchanged.
+  A chat client connected directly to `otto acp` can therefore move off a
+  profile whose quota is exhausted, which the attach-only `/config` commands
+  cannot do. Bare `/model` reports the session's profile, provider, model,
+  effort and the configured profile names; `otto acp --attach` runs the switch
+  on `otto serve` through the new `POST /v1/sessions/{id}/profile` route
+  ([#390](https://github.com/baiyuqing/otto/pull/390),
+  [user manual](docs/user-manual.md#compact-and-context-are-slash-commands)).
+
+- Deliver work into a repository other than the session's own from an
+  `otto serve` session: the parent-only `start_delivery_task` tool takes one
+  authorization that binds the target checkout, its Git directory, base, new
+  branch, worktree path and a frozen handoff of selected context, then runs the
+  task in `TARGET/.otto/delivery-worktrees/<id>` as its own session and reports
+  the result back, readable through
+  `GET /v1/sessions/{source_session}/deliveries/{approval_id}`. The source
+  workspace stays read-only, an interrupted delivery is reported as `unknown`
+  instead of being replayed, ordinary sub-agents never receive the tool, and
+  the Git/GitHub permission boundaries are unchanged
+  ([design](docs/specs/2026-10-06-cross-workspace-delivery-design.md),
+  [user manual](docs/user-manual.md#cross-workspace-deliveries)).
+
 - Report Otto's lifecycle to [Herdr](https://herdr.dev) when Herdr starts it in
   a pane: the pane becomes the agent `otto` as soon as Otto starts, `working`
   while a turn runs, `blocked` while a tool call waits for your decision, and
@@ -38,6 +73,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `--attach` and `--prompt` runs do not
   ([design](docs/specs/2026-10-07-herdr-agent-state.md),
   [#384](https://github.com/baiyuqing/otto/pull/384)).
+
+- Start Otto from a source checkout with `scripts/otto.sh` or `make run`: the
+  script reads `otto.env`, a gitignored shell file copied from the committed
+  `otto.env.example`, and turns its settings — provider, model, profile, base
+  URL, workspace, frontend, sandbox, thinking effort, timeouts and the API key
+  variable — into the matching command-line options before executing the
+  binary. Options written after the script name come last and win over the file,
+  a missing `otto.env` still starts with Otto's own configuration, and
+  `OTTO_ENV_FILE` and `OTTO_BIN` select another settings file or binary
+  ([user manual](docs/user-manual.md#launcher-script),
+  [#389](https://github.com/baiyuqing/otto/pull/389)).
 
 ### User experience
 
@@ -57,6 +103,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
   confirms; permission grants remain default Deny.
 - Prevent a generic conversational confirmation from being requested before the
   exact memory review for the same model-originated `remember` proposal.
+- Name why `otto acp --attach` and `otto --attach` cannot reach `otto serve`:
+  the stderr line now carries the failure's causes, so a host without a
+  running server reports `... (http://otto/healthz): client error (Connect): No
+  such file or directory (os error 2)` instead of only `reqwest`'s request
+  error. The line keeps its shape and the exit status stays `1`
+  ([#388](https://github.com/baiyuqing/otto/pull/388)).
 
 ### Architecture and reliability
 

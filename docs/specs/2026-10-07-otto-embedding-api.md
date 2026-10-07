@@ -161,7 +161,7 @@ otto.close().await;
 | `OttoBuilder::disable(Component)` | [component table](#components) |
 | `OttoBuilder::diagnostics(writer)` | where warnings and log lines go. Default: the process stderr, which is where `otto acp` writes them |
 | `OttoBuilder::build()` | `runtime::startup::start`, then `Builder::for_workspace` |
-| `Otto::open_workspace(path)` | `admit_workspace` (`cli/serve.rs:243`), then `load_workspace`, the same as `POST /v1/workspaces` |
+| `Otto::open_workspace(path)` | `admit_workspace` (`cli/serve.rs:243`, now `runtime/workspace_admission.rs`), then `load_workspace`, the same as `POST /v1/workspaces` |
 | `Otto::new_session(workspace)` | `Controller::create` (`app/mod.rs:2382`), as ACP `session/new` does (`acp/mod.rs:1494`) |
 | `Otto::resume_session(id, workspace)` | `Controller::open` (`app/mod.rs:2390`), as ACP `session/load` does (`acp/mod.rs:1520`); repair warnings are written as `warning: {redacted}` to the diagnostics writer, as ACP does |
 | `Otto::list_sessions(workspace, limit)` | `Controller::list_sessions` / `listed_for` |
@@ -326,9 +326,10 @@ one. `otto serve` does the same thing through one `Shared`.
   - `Disabled` carries the disabled components. The CLI passes
     `Disabled::default()`. `startup::start` applies the config keys after
     `configure`, so the redaction set does not depend on the switches.
-  - `startup.rs` also holds `load_workspace` (from `cli/run.rs`) and
+  - `startup.rs` also holds `load_workspace` (from `cli/run.rs`).
     `admit_workspace`, `canonicalize_workspace_roots` and `trusted_projects`
-    (from `cli/serve.rs`).
+    moved from `cli/serve.rs` to `runtime/workspace_admission.rs` in #387
+    (cross-workspace delivery); `embed` uses that module.
 - **Moved `pub` items keep their old paths.** `cli/sandbox_switch.rs` moves
   to `runtime/sandbox_switch.rs`, and `cli::sandbox_switch` re-exports it.
   `CapturedAuth` and `capture_auth_credentials` move to `auth`, and
@@ -339,7 +340,7 @@ one. `otto serve` does the same thing through one `Shared`.
 - **`cli/run.rs::run_with_backends`** calls the phases and keeps the
   CLI-only steps and frontend dispatch: workflow, acp, serve, REPL/TUI,
   herdr and the schedule worker. `cli/serve.rs` calls
-  `startup::load_workspace` and `startup::admit_workspace`.
+  `startup::load_workspace` and `workspace_admission::admit_workspace`.
 - **New `crates/otto/src/embed.rs`.** It holds the public types above and
   depends on `runtime` and `app`. `crates/otto/tests/runtime_boundary.rs`
   already rejects imports of `cli`, `tui`, `acp`, `server` and `client` from

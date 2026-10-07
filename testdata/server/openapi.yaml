@@ -1962,6 +1962,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: input_not_persisted (a queued turn could not be saved with the session and was not queued)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: The turn could not be started
           content:

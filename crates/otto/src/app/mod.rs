@@ -26,6 +26,7 @@ pub mod channel;
 pub(crate) mod management;
 mod requested_reflection;
 pub(crate) mod task_control;
+pub(crate) mod turn_queue;
 
 /// Fixed, content-free frontend notice for a successful memory proposal.
 pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory review.";
@@ -343,7 +344,13 @@ impl Controller {
     /// Starts reporting this session's lifecycle to the Herdr pane that
     /// started the process. `cli::run` calls this for the frontends that are
     /// the pane's agent; without it nothing is reported.
+    ///
+    /// The pane is announced here, not at the first turn: a Herdr pane is
+    /// nobody until the agent inside it reports, so Otto would be missing from
+    /// the agent list — and unreachable through `herdr agent ...` — until the
+    /// user sent a prompt.
     pub fn install_herdr(&self, reporter: Arc<crate::herdr::Reporter>) {
+        reporter.ready(&self.herdr_session());
         *self
             .herdr
             .write()
@@ -654,6 +661,48 @@ impl Controller {
         state.current.as_ref().is_some_and(|current| {
             otto_core::session::Session::has_input(&current.session, input_id)
         })
+    }
+
+    /// The session's durable turn queue; `None` under `--no-session`.
+    pub(crate) fn turn_queue(&self) -> Option<Arc<turn_queue::TurnQueue>> {
+        self.current_runner()?.task_control().turn_queue()
+    }
+
+    /// The prompts saved in the turn queue that have not started, oldest
+    /// first. A saved prompt whose user message is already in the transcript
+    /// started before Otto stopped: its entry is removed, and the
+    /// interrupted turn's recovery covers it.
+    pub(crate) fn restorable_prompts(&self) -> Vec<turn_queue::QueuedPrompt> {
+        let Some(queue) = self.turn_queue() else {
+            return Vec::new();
+        };
+        queue
+            .pending()
+            .into_iter()
+            .filter(|prompt| {
+                let started = self.has_input(&prompt.input_id);
+                if started {
+                    queue.forget(&prompt.input_id);
+                }
+                !started
+            })
+            .collect()
+    }
+
+    /// Queues the context notice that `prompts` were restored, for the
+    /// first of them to deliver before its user message. Its id is stable,
+    /// so a second restore of the same prompts does not repeat it.
+    pub(crate) fn announce_restored_prompts(&self, prompts: &[turn_queue::QueuedPrompt]) {
+        let (Some(first), Some(tasks)) = (prompts.first(), self.subagent_tasks()) else {
+            return;
+        };
+        let _ = tasks
+            .notifications()
+            .enqueue(otto_core::agent::inbox::Notification {
+                id: format!("restored:{}", first.input_id),
+                text: turn_queue::restored_notice(prompts),
+                ..otto_core::agent::inbox::Notification::default()
+            });
     }
 
     /// Records the client's input id for the next turn's user message; see
@@ -2671,6 +2720,49 @@ mod tests {
             source_bytes
         );
         assert_eq!(source.forked_from, None);
+    }
+
+    #[tokio::test]
+    async fn a_saved_prompt_that_already_started_is_not_restored() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        // The journal follows the session file, which exists after a write.
+        controller
+            .current_session()
+            .append(user("hello"))
+            .await
+            .unwrap();
+        let queue = controller.turn_queue().expect("journal");
+        for (input_id, text) in [("in-1", "started"), ("in-2", "waiting")] {
+            queue
+                .save(&turn_queue::QueuedPrompt {
+                    input_id: input_id.into(),
+                    turn_id: format!("turn-{input_id}"),
+                    text: text.into(),
+                    channel: None,
+                    origin: None,
+                    image_dropped: false,
+                })
+                .expect("save");
+        }
+        let mut started = user("started");
+        started.input_id = "in-1".into();
+        controller.current_session().append(started).await.unwrap();
+
+        let restorable = controller.restorable_prompts();
+        assert_eq!(
+            restorable
+                .iter()
+                .map(|prompt| prompt.text.as_str())
+                .collect::<Vec<_>>(),
+            ["waiting"]
+        );
+        assert_eq!(
+            queue.pending().len(),
+            1,
+            "the started prompt's entry is removed"
+        );
     }
 
     #[tokio::test]

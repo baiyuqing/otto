@@ -307,3 +307,64 @@ fn ordinary_input_during_a_wake_turn_steers_the_wake_turn() {
     assert_eq!(served.load(Ordering::SeqCst), 4);
     assert_eq!(client.close(), Some(0));
 }
+
+#[test]
+fn a_queued_prompt_survives_the_process_and_runs_once_after_session_load() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (base_url, served, release) = serve_gated(vec![
+        text_reply("lost answer"),
+        text_reply("recovered"),
+        text_reply("queued answer"),
+    ]);
+    configure(home.path(), &base_url);
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    let _first = client.start("session/prompt", prompt(&session_id, "first task"));
+    wait_for_count(&served, 1);
+    let (frames, response) = client.call(
+        "session/prompt",
+        prompt(&session_id, "/queue survive the restart"),
+    );
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert!(message_text(&frames).contains("Follow-up accepted"));
+    // The process dies before the queued prompt runs.
+    drop(client);
+    release.send(()).unwrap();
+
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let (_, response) = client.call(
+        "session/load",
+        json!({"cwd": workspace.path(), "sessionId": session_id, "mcpServers": []}),
+    );
+    assert!(response["result"].is_object(), "{response}");
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        assert!(Instant::now() < deadline, "the queued prompt did not run");
+        let frame = client.recv();
+        if frame["method"] == "session/update"
+            && frame["params"]["update"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("queued answer"))
+        {
+            break;
+        }
+    }
+    // The recovery turn and the queued prompt: nothing ran twice.
+    assert_eq!(served.load(Ordering::SeqCst), 3);
+    assert_eq!(client.close(), Some(0));
+
+    // Its saved copy is gone: a second load runs nothing.
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let (_, response) = client.call(
+        "session/load",
+        json!({"cwd": workspace.path(), "sessionId": session_id, "mcpServers": []}),
+    );
+    assert!(response["result"].is_object(), "{response}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(served.load(Ordering::SeqCst), 3);
+    assert_eq!(client.close(), Some(0));
+}

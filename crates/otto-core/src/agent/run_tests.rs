@@ -1646,9 +1646,60 @@ async fn a_soft_compaction_failure_warns_and_sends_the_original_request() {
         .await
         .expect("the turn continues");
     assert!(collect(&events).contains(&Event::CompactionWarning {
-        message: super::overflow::AUTOMATIC_COMPACTION_WARNING_MESSAGE.into()
+        message: format!(
+            "{}: compaction summary provider request failed: summary call failed",
+            super::overflow::AUTOMATIC_COMPACTION_WARNING_MESSAGE
+        )
     }));
     assert_eq!(agent.provider().normal_requests().len(), 1);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_summary_response_with_reasoning_writes_a_checkpoint() {
+    let mut summary = Turn::summary(&structured_summary());
+    summary.events = vec![
+        StreamEvent::ReasoningDelta {
+            text: "**Summarizing**".into(),
+        },
+        StreamEvent::TextDelta {
+            text: structured_summary(),
+        },
+    ];
+    if let Ok(response) = summary.outcome.as_mut() {
+        response
+            .message
+            .blocks
+            .insert(0, Block::reasoning("**Summarizing**"));
+    }
+    let provider = FakeProvider::new(vec![summary, Turn::text("ok")]);
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        seeded_session().await,
+        Options {
+            compaction: tight_compaction(),
+            ..options()
+        },
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    agent
+        .run(
+            "hello",
+            &mut |event| sink.lock().expect("e").push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+    assert!(
+        !collect(&events)
+            .iter()
+            .any(|event| matches!(event, Event::CompactionWarning { .. }))
+    );
+    let compaction = agent.session().latest_compaction().expect("checkpoint");
+    assert!(compaction.summary.starts_with(structured_summary().trim()));
+    assert!(!compaction.summary.contains("**Summarizing**"));
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

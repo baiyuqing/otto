@@ -199,3 +199,93 @@ fn a_crash_before_the_session_directory_sync_leaves_no_session_or_a_valid_one() 
         }
     });
 }
+
+fn workflow_definition() -> otto::workflow::Definition {
+    otto::workflow::Definition {
+        name: "crash".into(),
+        description: String::new(),
+        steps: vec![otto::workflow::Step {
+            id: "one".into(),
+            kind: otto::workflow::StepKind::Agent,
+            agent: "worker".into(),
+            prompt: "crash".into(),
+            needs: Vec::new(),
+        }],
+        agents: Vec::new(),
+        hash: "hash".into(),
+    }
+}
+
+fn workflow_store(
+    address: &str,
+    driver: Arc<dyn otto::storage::SqlDriver>,
+) -> Arc<dyn otto::workflow::WorkflowStore> {
+    use otto::runtime::storage::{Endpoint, RepositoryFactory, SqlRepositories};
+    SqlRepositories::new(driver)
+        .workflow(Endpoint {
+            address,
+            policy: otto::storage::OpenPolicy::CreateIfMissing,
+        })
+        .expect("open workflow store")
+}
+
+#[test]
+fn a_crash_after_the_step_claim_commit_is_recovered_as_a_paused_run_with_an_interrupted_step() {
+    use otto::faults::sql::{FaultySqlDriver, SqlOp};
+    use otto::storage::drivers::turso::TursoDriver;
+    use otto::workflow::{RunStatus, StepStatus};
+
+    crash::run(crash::name_of(&|| {}), |role| {
+        let address = |dir: &Path| dir.join("workflow.db").to_string_lossy().into_owned();
+        match role {
+            Role::Child(dir) => {
+                let address = address(dir);
+                let created = workflow_store(&address, Arc::new(TursoDriver));
+                created
+                    .create_run(
+                        "run-1",
+                        &workflow_definition(),
+                        "/crash",
+                        "p",
+                        "openai-compatible",
+                        "m",
+                        "",
+                    )
+                    .expect("create run");
+                drop(created);
+                let plan = FaultPlan::new(vec![Rule::new(
+                    SqlOp::Commit,
+                    Trigger::Nth(1),
+                    Fault::ExitAfter,
+                )]);
+                let faulty = workflow_store(
+                    &address,
+                    Arc::new(FaultySqlDriver::new(Arc::new(TursoDriver), plan)),
+                );
+                let _ = faulty.claim_ready("run-1", "one", "transcript.jsonl");
+            }
+            Role::Parent(dir, status) => {
+                assert_eq!(
+                    status.code(),
+                    Some(CRASH_EXIT),
+                    "child did not crash at the fault"
+                );
+                let store = workflow_store(&address(dir), Arc::new(TursoDriver));
+                let before = store.get_run("run-1").expect("get").expect("run exists");
+                assert_eq!(
+                    before.steps[0].status,
+                    StepStatus::Running,
+                    "the committed claim is visible before recovery"
+                );
+                assert_eq!(store.recover("/crash").expect("recover"), 1);
+                let after = store.get_run("run-1").expect("get").expect("run exists");
+                assert_eq!(after.status, RunStatus::Paused, "run after recovery");
+                assert_eq!(
+                    after.steps[0].status,
+                    StepStatus::Interrupted,
+                    "step after recovery"
+                );
+            }
+        }
+    });
+}

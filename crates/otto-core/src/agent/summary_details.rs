@@ -50,13 +50,18 @@ pub const CAPABILITY_UPDATE_TRUNCATION_MARKER: &str =
     "[capability update truncated for compaction]";
 
 /// Replaces the trailing blocks of `summary` with a `user-messages` block for
-/// `user_messages`, a `capability-updates` block for `capability_updates`, and
-/// the file blocks `details` describes, and checks the result is nonempty and
-/// within bounds.
+/// `user_messages`, a `capability-updates` block for `capability_updates`, a
+/// `plan` block for the session plan in force, and the file blocks `details`
+/// describes, and checks the result is nonempty and within bounds.
+///
+/// The `plan` block is a checklist ([`crate::session::plan_checklist`]) built
+/// from the current plan each time, never carried from a previous summary:
+/// the session's `otto.plan` records stay the source of truth.
 pub fn append_compaction_blocks(
     summary: &str,
     user_messages: &[String],
     capability_updates: &[String],
+    plan: &[crate::session::PlanStep],
     details: &CompactionDetails,
 ) -> Result<String, String> {
     let mut complete = strip_compaction_blocks(summary).to_owned();
@@ -76,6 +81,11 @@ pub fn append_compaction_blocks(
             complete.push('\n');
         }
         complete.push_str(&format!("</{tag}>"));
+    }
+    if !plan.is_empty() {
+        complete.push_str("\n\n<plan>\n");
+        complete.push_str(&crate::session::plan_checklist(plan));
+        complete.push_str("\n</plan>");
     }
     let suffix = compaction_file_blocks(details);
     if !suffix.is_empty() {
@@ -248,6 +258,7 @@ fn trailing_compaction_block_start(summary: &str) -> Option<usize> {
     for tag in [
         "user-messages",
         "capability-updates",
+        "plan",
         "read-files",
         "modified-files",
     ] {
@@ -669,15 +680,17 @@ mod tests {
             modified_files: vec!["b.txt".into()],
             ..CompactionDetails::default()
         };
-        let complete = append_compaction_blocks("summary body", &[], &[], &details).expect("valid");
+        let complete =
+            append_compaction_blocks("summary body", &[], &[], &[], &details).expect("valid");
         assert_eq!(
             complete,
             "summary body\n\n<read-files>\na.txt\n</read-files>\n\n<modified-files>\nb.txt\n</modified-files>"
         );
         assert_eq!(strip_compaction_blocks(&complete), "summary body");
 
-        let replaced = append_compaction_blocks(&complete, &[], &[], &CompactionDetails::default())
-            .expect("valid");
+        let replaced =
+            append_compaction_blocks(&complete, &[], &[], &[], &CompactionDetails::default())
+                .expect("valid");
         assert_eq!(replaced, "summary body");
     }
 
@@ -697,7 +710,7 @@ mod tests {
             ..CompactionDetails::default()
         };
         let complete =
-            append_compaction_blocks("summary body", &messages, &[], &details).expect("valid");
+            append_compaction_blocks("summary body", &messages, &[], &[], &details).expect("valid");
         assert_eq!(
             complete,
             "summary body\n\n<user-messages>\n\"plain\"\n\
@@ -744,12 +757,52 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_block_carries_the_current_plan_and_is_replaced_not_repeated() {
+        use crate::session::{PlanStatus, PlanStep};
+        let plan = vec![
+            PlanStep {
+                text: "read".into(),
+                status: PlanStatus::Completed,
+            },
+            PlanStep {
+                text: "write".into(),
+                status: PlanStatus::InProgress,
+            },
+        ];
+        let complete = append_compaction_blocks(
+            "summary body",
+            &["hi".to_owned()],
+            &[],
+            &plan,
+            &CompactionDetails::default(),
+        )
+        .expect("valid");
+        assert_eq!(
+            complete,
+            "summary body\n\n<user-messages>\n\"hi\"\n</user-messages>\n\n<plan>\n[x] read\n[>] write\n</plan>"
+        );
+        assert_eq!(strip_compaction_blocks(&complete), "summary body");
+        assert_eq!(compaction_user_messages(&complete), ["hi"]);
+
+        let newer = &plan[..1];
+        let replaced =
+            append_compaction_blocks(&complete, &[], &[], newer, &CompactionDetails::default())
+                .expect("valid");
+        assert_eq!(replaced, "summary body\n\n<plan>\n[x] read\n</plan>");
+        let cleared =
+            append_compaction_blocks(&replaced, &[], &[], &[], &CompactionDetails::default())
+                .expect("valid");
+        assert_eq!(cleared, "summary body");
+    }
+
+    #[test]
     fn capability_updates_round_trip_and_follow_the_user_messages_block() {
         let updates = vec!["<n>\nAdded: a\n</n>".to_owned()];
         let complete = append_compaction_blocks(
             "summary body",
             &["hi".to_owned()],
             &updates,
+            &[],
             &CompactionDetails {
                 read_files: vec!["a.txt".into()],
                 ..CompactionDetails::default()
@@ -802,12 +855,13 @@ mod tests {
     #[test]
     fn an_empty_summary_is_rejected() {
         assert_eq!(
-            append_compaction_blocks("  \n ", &[], &[], &CompactionDetails::default()).unwrap_err(),
+            append_compaction_blocks("  \n ", &[], &[], &[], &CompactionDetails::default())
+                .unwrap_err(),
             "complete compaction summary must be nonempty UTF-8"
         );
         let only_blocks = "\n\n<read-files>\na.txt\n</read-files>";
         assert_eq!(
-            append_compaction_blocks(only_blocks, &[], &[], &CompactionDetails::default())
+            append_compaction_blocks(only_blocks, &[], &[], &[], &CompactionDetails::default())
                 .unwrap_err(),
             "complete compaction summary must be nonempty UTF-8"
         );
@@ -835,7 +889,7 @@ mod tests {
             ..CompactionDetails::default()
         };
         assert_eq!(
-            append_compaction_blocks(&body, &[], &[], &details).unwrap_err(),
+            append_compaction_blocks(&body, &[], &[], &[], &details).unwrap_err(),
             format!("complete compaction summary exceeds {SUMMARY_MAXIMUM_BYTES} bytes")
         );
     }

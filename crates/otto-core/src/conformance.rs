@@ -28,8 +28,9 @@ use crate::model::{
 use crate::session::operation::OperationFact;
 use crate::session::{
     AppendOutcome, CAPABILITIES_CUSTOM_TYPE, COMPACTION_CONTEXT_TYPE, Capabilities,
-    CompactionCheckpoint, InterruptedTurn, Session, TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord,
-    TurnTrigger, encode_capabilities, encode_turn_record,
+    CompactionCheckpoint, InterruptedTurn, PLAN_CUSTOM_TYPE, PlanStatus, PlanStep, Session,
+    TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, encode_capabilities, encode_plan,
+    encode_turn_record,
 };
 
 /// One broken guarantee: the stable check name and what was observed.
@@ -71,6 +72,7 @@ pub async fn session<S: Session>(
     session_input_id(&fresh()).await?;
     session_turns(&fresh()).await?;
     session_capabilities(&fresh()).await?;
+    session_plan(&fresh()).await?;
     session_operations(&fresh()).await?;
     session_compaction(&fresh()).await?;
     if let Some(reopen) = reopen {
@@ -342,6 +344,49 @@ async fn session_capabilities(session: &impl Session) -> Result<(), Failure> {
     )
 }
 
+fn plan_step(text: &str, status: PlanStatus) -> PlanStep {
+    PlanStep {
+        text: text.into(),
+        status,
+    }
+}
+
+/// The latest `otto.plan` record is the plan; an empty one clears it.
+async fn session_plan(session: &impl Session) -> Result<(), Failure> {
+    const CHECK: &str = "session.plan";
+    ensure(
+        CHECK,
+        session.plan().is_empty(),
+        "a fresh session has a plan",
+    )?;
+    let first = vec![plan_step("read", PlanStatus::InProgress)];
+    let second = vec![
+        plan_step("read", PlanStatus::Completed),
+        plan_step("write", PlanStatus::InProgress),
+    ];
+    for steps in [&first, &second] {
+        session
+            .append_custom(PLAN_CUSTOM_TYPE, &encode_plan(steps))
+            .await
+            .map_err(fail(CHECK, "append otto.plan"))?;
+    }
+    let observed = session.plan();
+    ensure(
+        CHECK,
+        observed == second,
+        format!("the latest record does not win: {observed:?}"),
+    )?;
+    session
+        .append_custom(PLAN_CUSTOM_TYPE, &encode_plan(&[]))
+        .await
+        .map_err(fail(CHECK, "append an empty otto.plan"))?;
+    ensure(
+        CHECK,
+        session.plan().is_empty(),
+        "an empty record does not clear the plan",
+    )
+}
+
 fn operation(id: &str) -> OperationId {
     OperationId::new(id).expect("valid operation id")
 }
@@ -491,6 +536,11 @@ async fn session_reopen<S: Session>(
         )
         .await
         .map_err(fail(CHECK, "append otto.capabilities"))?;
+    let plan = vec![plan_step("ship", PlanStatus::Pending)];
+    session
+        .append_custom(PLAN_CUSTOM_TYPE, &encode_plan(&plan))
+        .await
+        .map_err(fail(CHECK, "append otto.plan"))?;
     turn(
         &session,
         TurnRecord::started("t1", TurnTrigger::User, 1, None),
@@ -518,6 +568,7 @@ async fn session_reopen<S: Session>(
         session.observed_capabilities().map(|record| record.tools) == Some(vec!["read".into()]),
         "the capabilities record was lost",
     )?;
+    ensure(CHECK, session.plan() == plan, "the plan was lost")?;
     let again = session
         .append_input_if_absent("in_1", user("question"))
         .await
@@ -703,11 +754,17 @@ mod tests {
 
     /// A wrapper that forgets one forward: the check that guards it must
     /// name the broken guarantee.
-    struct ForgetsInputs(MemorySession);
+    struct Forgets(MemorySession, Forgotten);
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Forgotten {
+        Inputs,
+        Plan,
+    }
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Session for ForgetsInputs {
+    impl Session for Forgets {
         fn messages(&self) -> Vec<Message> {
             self.0.messages()
         }
@@ -745,11 +802,21 @@ mod tests {
         fn interrupted_turn(&self) -> Option<InterruptedTurn> {
             self.0.interrupted_turn()
         }
+
+        fn plan(&self) -> Vec<crate::session::PlanStep> {
+            if self.1 == Forgotten::Plan {
+                return Vec::new();
+            }
+            self.0.plan()
+        }
         async fn append_input_if_absent(
             &self,
-            _input_id: &str,
+            input_id: &str,
             message: Message,
         ) -> Result<AppendOutcome, crate::session::SessionError> {
+            if self.1 != Forgotten::Inputs {
+                return self.0.append_input_if_absent(input_id, message).await;
+            }
             self.0
                 .append(message)
                 .await
@@ -763,10 +830,15 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn a_wrapper_that_drops_a_guarantee_fails_the_named_check() {
-        let failure = session(&|| ForgetsInputs(MemorySession::new()), None)
-            .await
-            .expect_err("the broken wrapper must fail");
-        assert_eq!(failure.check, "session.input_id", "{failure}");
+        for (forgotten, check) in [
+            (Forgotten::Inputs, "session.input_id"),
+            (Forgotten::Plan, "session.plan"),
+        ] {
+            let failure = session(&|| Forgets(MemorySession::new(), forgotten), None)
+                .await
+                .expect_err("the broken wrapper must fail");
+            assert_eq!(failure.check, check, "{failure}");
+        }
     }
 
     /// A mailbox that ignores acknowledgements fails `mailbox.fifo`.

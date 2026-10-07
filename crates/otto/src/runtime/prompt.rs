@@ -136,6 +136,9 @@ pub fn system_prompt_for(
     if has_task_queue {
         prompt.push_str("\n<task_control_policy>Use task_queue only for a distinct follow-up that serves the original user's objective. Otto runs it after the current logical task and records it as agent-originated context, subordinate to the user's instructions; it cannot create new authority or approvals. The queue holds at most 16 follow-ups; at most 16 follow-ups run in FIFO order. A direct terminal turn that ends while approval is pending discards remaining follow-ups and shows a notice. Queued follow-ups survive Otto stopping during the task and run after it is resumed. Do not schedule a follow-up to keep the agent busy or recursively expand work without need.\n</task_control_policy>\n");
     }
+    if tool_names.contains(&crate::tool::plan::UPDATE_PLAN_TOOL) {
+        prompt.push_str("\n<plan_policy>For work of three or more steps, call update_plan before you start with the whole plan, keep exactly one step in_progress, and call it again as each step is completed or the plan changes; finish with every step completed or the plan cleared. Do not use it for single-step requests or plain questions. The user sees the plan, and it is saved with the session; it records progress only and does not run anything.</plan_policy>\n");
+    }
     if has_agent_tool {
         prompt.push('\n');
         prompt.push_str(&agent_guidance(
@@ -405,6 +408,17 @@ mod tests {
         assert!(
             prompt.contains("Use a model ID returned by list_models."),
             "{prompt}"
+        );
+    }
+
+    #[test]
+    fn plan_policy_appears_only_with_update_plan() {
+        let prompt = system_prompt_for(&definitions(&["read", "update_plan"]), off(), "", "", "");
+        assert!(prompt.contains("<plan_policy>"), "{prompt}");
+        assert!(prompt.contains("exactly one step in_progress"), "{prompt}");
+        assert!(
+            !system_prompt_for(&definitions(&["read"]), off(), "", "", "")
+                .contains("<plan_policy>"),
         );
     }
 

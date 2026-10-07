@@ -122,6 +122,13 @@ const ENTRIES: &[Entry] = &[
         false,
         approve
     ),
+    entry!("/steer", "guide the active task", false, steer),
+    entry!(
+        "/inputs",
+        "list or withdraw guidance for the active task",
+        false,
+        inputs
+    ),
     entry!(
         "/memory",
         "search, inspect, forget or review memories",
@@ -320,6 +327,81 @@ fn approve(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
         _ => Err("usage: /approve [<id> [always]]".into()),
     }
 }
+
+/// `/steer <guidance>` is the explicit form of the text an active turn accepts.
+/// Unlike ordinary text it never becomes a prompt: when nothing runs there is no
+/// turn to guide, and silently starting one would hide the mistake.
+fn steer(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
+    if args.is_empty() {
+        return Err("usage: /steer <guidance>".into());
+    }
+    command("Guidance", Command::Steer(args.into()))
+}
+
+/// `/inputs` lists the active run's guidance, each line `#<id> <status> <text>`,
+/// and `/inputs withdraw <id>` takes one back before it is delivered.
+fn inputs(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
+    match args.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] => query("Guidance", Request::Command(Command::SteeringState)),
+        ["withdraw", id] => command(
+            "Withdraw guidance",
+            Command::WithdrawSteer(
+                id.parse()
+                    .map_err(|_| "usage: /inputs withdraw <id>".to_string())?,
+            ),
+        ),
+        _ => Err("usage: /inputs [withdraw <id>]".into()),
+    }
+}
+
+/// How long one guidance line of `/inputs` may be, in characters.
+const GUIDANCE_PREVIEW: usize = 60;
+
+/// One guidance item per line: what the user can still withdraw, what was
+/// already delivered, and what the run end dropped.
+fn steering_lines(messages: &[otto_core::agent::steering::Message]) -> String {
+    let mut text = if messages.is_empty() {
+        "No guidance for the active task.".to_string()
+    } else {
+        messages
+            .iter()
+            .map(|message| {
+                format!(
+                    "#{} {} {}",
+                    message.id,
+                    steering_status(message.status),
+                    guidance_preview(&message.text)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    text.push_str("\n\n/inputs withdraw <id> withdraws guidance that is still queued.");
+    text
+}
+
+fn guidance_preview(text: &str) -> String {
+    let single = crate::subagent::format::one_line(text);
+    if single.chars().count() <= GUIDANCE_PREVIEW {
+        return single;
+    }
+    format!(
+        "{}…",
+        single.chars().take(GUIDANCE_PREVIEW).collect::<String>()
+    )
+}
+
+/// The status word one `/inputs` line uses. A queued item is the only one the
+/// user can still withdraw; the others are what became of earlier guidance.
+fn steering_status(status: otto_core::agent::steering::Status) -> &'static str {
+    use otto_core::agent::steering::Status;
+    match status {
+        Status::Queued => "queued",
+        Status::Delivered => "delivered",
+        Status::Withdrawn => "withdrawn",
+        Status::Discarded => "discarded",
+    }
+}
 fn context(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;
     push(Context::new())
@@ -456,6 +538,7 @@ impl Presenter for RequestPresenter {
         self.text = match reply {
             Reply::Image { path, .. } => format!("Attached image: {path}"),
             Reply::Operation { message, .. } => message,
+            Reply::Steering(messages) => steering_lines(&messages),
             Reply::Management(reply) => crate::cli::repl_commands::format_management_reply(&reply),
             Reply::AgentDetail {
                 row,

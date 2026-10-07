@@ -137,7 +137,7 @@ let otto = Otto::builder()
     .await?;
 
 let session = otto.new_session(None).await?; // None: the startup workspace
-session.set_auto_mode(false)?;                // MANUAL: approvals reach `decide`
+session.set_approval_mode(ApprovalMode::Manual)?; // approvals reach `decide`
 let stop = session
     .prompt(
         Input::Text("fix the failing test"),
@@ -171,7 +171,8 @@ otto.close().await;
 | `Session::compact(..)` | `Controller::compact` |
 | `Session::history()` | `Controller::history` |
 | `Session::info()` | `Controller::info` |
-| `Session::set_auto_mode(bool)` | `approval::Service::set_auto_mode` for the session scope, as ACP `_otto/approval_mode/set` does (`acp/shared_approval.rs:181`) and `/auto on\|off` does |
+| `Session::set_approval_mode(ApprovalMode)` | `approval::Service::set_mode` for the session scope, as ACP `_otto/approval_mode/set` and `/auto` do |
+| `Session::set_auto_mode(bool)` | `Session::set_approval_mode` with the boolean it replaced: `true` is AUTO, `false` is MANUAL |
 | `Session::close()` | `Controller::close_mcp`, then `Controller::close` |
 
 Types:
@@ -184,9 +185,13 @@ Types:
   `Future<Output = ApprovalDecision>`. The module re-exports both from
   `app::approval`. A headless host passes a closure that returns `Deny`.
 - A new session starts in AUTO approval mode, as in every CLI frontend
-  (`approval::Service::auto_mode` defaults to `true`). AUTO approves
-  requests without calling `decide`. `set_auto_mode(false)` selects MANUAL,
-  in which `decide` is called.
+  (`approval::Service::mode` defaults to AUTO). AUTO approves a bounded
+  authorization without calling `decide` and still asks for a plan review, a
+  sandbox escalation or a durable grant. `set_approval_mode(ApprovalMode::Yolo)`
+  selects YOLO, in which every request of the session is approved without
+  calling `decide`, while a workspace-wide request still reaches it.
+  `set_auto_mode(false)` selects MANUAL, in which `decide` is called.
+  See the [YOLO mode contract](2026-10-07-yolo-approval-mode.md).
 - `prompt` returns `Stop::EndTurn` or `Stop::Cancelled`.
 - A second `prompt` on a session whose turn is still running returns the
   existing `PROMPT_ACTIVE` error. Sessions run turns concurrently with each
@@ -263,7 +268,7 @@ these:
 | Behavior | `otto acp` | Embedded |
 | --- | --- | --- |
 | sandbox elevation | `elevate = true` (`cli/run.rs:848`) | the same; in MANUAL approval mode, commands outside the sandbox grants reach `decide` |
-| approval mode | AUTO for a new session; `_otto/approval_mode/set` switches it | AUTO for a new session; `Session::set_auto_mode` switches it |
+| approval mode | AUTO for a new session; `_otto/approval_mode/set` switches it (MANUAL, AUTO or YOLO) | AUTO for a new session; `Session::set_approval_mode` switches it |
 | logger | `Logger::stderr()` (`cli/run.rs:758`) | `Logger::stderr()`, or `Logger::new(writer)` when `diagnostics` is set |
 | startup warnings | written to stderr | written to stderr, or to the `diagnostics` writer |
 | session create and load | `Controller::create` and `Controller::open` | the same calls |
@@ -463,7 +468,7 @@ no Seatbelt.
 7. **One instance.** A second `build()` returns `AlreadyRunning`. A `build()`
    after `close()` succeeds.
 8. **Prompt round trip.** The session is switched to MANUAL with
-   `set_auto_mode(false)`. A scripted provider calls the `request_approval`
+   `set_approval_mode(ApprovalMode::Manual)`. A scripted provider calls the `request_approval`
    tool; with driver `off` bash has no approval path, and the
    approval-capable bash definition exists only under Seatbelt.
    - `decide` is called once with that request

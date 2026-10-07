@@ -409,6 +409,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--acp-listen HOST:PORT` | `serve` only. Additional authenticated ACP v1 TCP listener on loopback. Requires `OTTO_ACP_TOKEN` in the environment; see [Direct ACP TCP connection](#direct-acp-tcp-connection). |
 | `--socket PATH` | `serve`, `acp --attach`, or `--attach`. Unix domain socket path of `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. For `serve` with `--listen`, both listeners are opened. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. With `--socket`, both listeners are opened. |
+| `--yolo` | Start this process's session in the YOLO approval mode, exactly as `/auto yolo` does. Requires a frontend that opens one session, so it cannot be combined with `serve`, `acp`, or `--attach`. |
 
 ## Environment variables
 
@@ -1103,7 +1104,7 @@ Turns:
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
-`/image`, `/context`, `/agents`, `/auto [on|off]`, `/sandbox`, `/sandbox reload`,
+`/image`, `/context`, `/agents`, `/auto [manual|auto|yolo]`, `/sandbox`, `/sandbox reload`,
 `/approve [<id>]`, `/steer`, `/inputs`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/reflect`, `/memory`, `/remember`, `/skill`,
@@ -1686,13 +1687,22 @@ requirements grants no additional tool or sandbox permissions. They apply across
 native frontends; install the updated binary and restart the running Otto
 process to use the updated prompt.
 
-Sessions start in **AUTO** mode: a session-owned **bounded authorization** is
-recorded and automatically approved. A bounded authorization stays inside the
-sandbox and the workspace and grants nothing durable. Otto shows the request
-and its automatic decision; execution/application failure remains a separate
-outcome. Every other request waits for your decision in either mode, because
-AUTO does not decide what is not its to decide:
+A session has one of three approval modes. All three keep the same request
+record, journal and application steps; they differ only in which requests are
+decided without you.
 
+| Mode | Decides without you |
+| --- | --- |
+| **MANUAL** | nothing |
+| **AUTO** (default) | a session-owned **bounded authorization**: inside the sandbox and the workspace, granting nothing durable |
+| **YOLO** | every request of the session, whatever its class |
+
+Sessions start in **AUTO**. In AUTO a bounded authorization is recorded and
+approved automatically: it stays inside the sandbox and the workspace and
+grants nothing durable. Otto shows the request and its automatic decision;
+execution/application failure remains a separate outcome. Every other request
+waits for your decision, because AUTO does not decide what is not its to
+decide:
 - a plan or approach review (`request_approval`), which only you can answer;
 - an authorization that leaves the sandbox or the workspace: an unsandboxed
   command, a cross-workspace delivery task, a tool call on an external MCP
@@ -1703,24 +1713,46 @@ AUTO does not decide what is not its to decide:
 A request AUTO cannot decide is presented exactly as it is in MANUAL, and the
 footer still shows the session mode.
 
-Workspace-wide approvals and independent child tasks remain manual.
+**YOLO** is the deliberate answer to "stop asking me": the session decides
+every request that carries its id, including the plan reviews, the sandbox
+escalations and the durable grants AUTO refuses, and including requests made
+by its own child tasks. Choose it with `/auto yolo` or `--yolo`. It is a
+blanket consent: a request you would have refused is approved anyway, so the
+recorded decision names `YOLO`, the frontends always show the mode, and one
+command (`/auto off`, `/auto manual` or a mode button) takes it back — including
+for requests that are already waiting.
 
-Use `/auto` to inspect the mode, `/auto off` to require manual approval, and
-`/auto on` to approve automatically, including pending requests in this session
-that AUTO may decide.
-The preference survives session loading and process restarts in `approvals.db`;
-new sessions start in AUTO. TUI and Web footers show AUTO or MANUAL. The same
-commands work in ACP, Telegram and Feishu. Telegram's command menu includes
-`/auto`; its AUTO/MANUAL buttons apply only to the session shown on the message.
-After a successful selection, the message shows the resulting mode and removes
-the buttons. Send `/auto` again to open fresh controls.
-Clicking a mode button updates that message instead of sending another card.
+What no mode changes:
+
+- workspace-wide requests (no session id) and another session's requests are
+  never decided by this session's mode;
+- only you can set the mode. No tool argument, model request or chat
+  participant can select YOLO; the model cannot read or write the mode;
+- argument and version validation, the recorded journal, the application
+  outcome, the sandbox boundary and recovery rules are unchanged. Approval is
+  still not execution: a failed or unknown application is reported as such.
+
+Use `/auto` to inspect the mode, `/auto manual` (or `/auto off`) to require
+manual approval, `/auto auto` (or `/auto on`) for the default, and `/auto yolo`
+to decide everything. The preference survives session loading and process
+restarts in `approvals.db`; new sessions start in AUTO. TUI and Web footers show
+MANUAL, AUTO or YOLO. The same commands work in ACP, Telegram and Feishu.
+Telegram's command menu includes `/auto`, and its AUTO/MANUAL buttons apply to
+the session shown on the message; a YOLO session reports YOLO in the message
+and `/auto off` leaves it. After a successful selection, the message shows the
+resulting mode and removes the buttons. Send `/auto` again to open fresh
+controls. Clicking a mode button updates that message instead of sending
+another card.
 
 The session API exposes `GET /v1/sessions/{id}/approval-mode` and `PUT` with
-`{"automatic":true|false}`, returning `{"automatic":boolean}`. ACP clients use
-`_otto/approval_mode/get|set` with `sessionId` and, for set, `automatic`.
+`{"automatic":true|false}` or `{"mode":"manual"|"auto"|"yolo"}`, returning
+`{"automatic":boolean,"mode":"..."}`. `automatic` keeps its meaning: `true` is
+AUTO and `false` is MANUAL. A body that contradicts itself is refused. ACP
+clients use `_otto/approval_mode/get|set` with `sessionId` and, for set,
+`automatic` or `mode`, and read the same two fields.
 `GET /v1/sessions/{id}/approval-events?after=<cursor>` returns ordered recorded
-requests and decisions. See the [session mode contract](specs/2026-10-05-session-auto-mode.md).
+requests and decisions. See the [session mode contract](specs/2026-10-05-session-auto-mode.md)
+and the [YOLO mode contract](specs/2026-10-07-yolo-approval-mode.md).
 
 
 Otto uses one approval service for tool permissions, memory review, workflow
@@ -1752,7 +1784,9 @@ See the [authority boundary contract](specs/2026-10-07-auto-mode-authority-bound
 for which request classes each mode decides.
 
 Generated skills still pass the rule scan and configured model review, then
-wait for human approval. Saving a profile change still requires a restart.
+wait for human approval: YOLO decides the review, and the rule scan, the
+configured model review and the artifact checks still run. Saving a profile
+change still requires a restart.
 Read-path requests explicitly disclose persistence; commands remain sandboxed.
 
 ## Tools and safety

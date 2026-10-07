@@ -853,15 +853,12 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
                     format!("Session name: {name}")
                 }
                 Command::AutoMode(args) => {
-                    let automatic = crate::app::parse_auto_mode(&args)?;
-                    let automatic = client
-                        .approval_mode(session, automatic)
+                    let mode = crate::app::parse_auto_mode(&args)?;
+                    let mode = client
+                        .approval_mode(session, mode)
                         .await
                         .map_err(mutation_error)?;
-                    format!(
-                        "Approval mode: {}",
-                        if automatic { "AUTO" } else { "MANUAL" }
-                    )
+                    format!("Approval mode: {}", mode.label())
                 }
                 Command::SandboxReload => format!(
                     "Sandbox: {}",
@@ -1018,6 +1015,7 @@ async fn remote_management(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::ApprovalMode;
     #[tokio::test]
     async fn repeated_reads_are_coalesced_and_keep_the_original_ticket() {
         let remote = Arc::new(Remote::offline(Vec::new()));
@@ -1176,7 +1174,7 @@ mod tests {
         let scope = controller.approval_scope();
         controller
             .approval_service()
-            .set_auto_mode(&scope, false)
+            .set_mode(&scope, ApprovalMode::Manual)
             .unwrap();
         let request = controller
             .approval_service()

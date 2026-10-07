@@ -361,7 +361,7 @@ func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 		_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
 		options = tcpAgentOptions(t, diagnostics, workspace)
 	}
-	h := newHarness(t, setup{agent: options})
+	h := newHarness(t, setup{platform: "telegram", agent: options})
 	h.say("Remember my preference for tabs.")
 	waitCards(h, 1)
 	if got := h.waitSent(2); !strings.Contains(got[1], "prefers tabs") {
@@ -374,7 +374,7 @@ func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 	if err := h.shutdown(); err != nil {
 		t.Fatal(err)
 	}
-	h = newHarness(t, setup{agent: options, store: store})
+	h = newHarness(t, setup{platform: "telegram", agent: options, store: store})
 	waitCards(h, 1)
 	if h.plat.approvalID() != token {
 		t.Fatal("restart replaced the durable approval identity")
@@ -382,7 +382,7 @@ func testEndToEndMemoryApprovalCard(t *testing.T, tcp bool) {
 	h.agent.Kill() // a card must still work after ACP transport/process reconnect
 	memoryClick(h, "c1", "u1", token, "/allow")
 	h.waitFor(func() bool { h.plat.mu.Lock(); defer h.plat.mu.Unlock(); return len(h.plat.statuses) == 1 }, "real memory review")
-	sid := h.store.Session("fake:c1")
+	sid := h.store.Session("telegram:c1")
 	page, err := h.agent.MemoryPending(context.Background(), sid, "")
 	if err != nil {
 		t.Fatal(err)
@@ -450,7 +450,7 @@ func testEndToEndApprovalDialogueRevokesPermission(t *testing.T, tcp bool) {
 		_, diagnostics := startOttoServer(t, bin, home, workspace, "--sandbox", "seatbelt", "--acp-listen", "127.0.0.1:0")
 		options = tcpAgentOptions(t, diagnostics, workspace)
 	}
-	h := newHarness(t, setup{mod: func(o *Options) { o.PermissionTimeout = 2 * time.Minute }, agent: options})
+	h := newHarness(t, setup{platform: "telegram", mod: func(o *Options) { o.PermissionTimeout = 2 * time.Minute }, agent: options})
 	h.say("/auto off")
 	h.waitSent(1)
 	h.say("Run the command after I approve it.")
@@ -707,7 +707,7 @@ func TestEndToEndModelInitiatedApproval(t *testing.T) {
 				_, diagnostics := startOttoServer(t, bin, home, workspace, "--acp-listen", "127.0.0.1:0")
 				options = tcpAgentOptions(t, diagnostics, workspace)
 			}
-			h := newHarness(t, setup{agent: options})
+			h := newHarness(t, setup{platform: "telegram", agent: options})
 			h.say("/auto off")
 			h.waitSent(1)
 			h.say("Ask me to approve the plan before continuing.")

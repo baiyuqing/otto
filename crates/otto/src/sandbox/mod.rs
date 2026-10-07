@@ -33,6 +33,7 @@ pub mod process;
 /// targets is what lets the rest of the crate build for them.
 #[cfg(target_os = "macos")]
 pub mod seatbelt;
+pub mod worktrees;
 
 #[cfg(test)]
 pub(crate) mod conformance;

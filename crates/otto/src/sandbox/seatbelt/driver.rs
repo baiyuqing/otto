@@ -70,6 +70,7 @@ pub struct Options {
     /// The host environment, read only for its single `PATH` entry.
     pub host_entries: Vec<String>,
     pub read_paths: Vec<String>,
+    pub workspaces: Vec<String>,
     /// `None` is rejected; the mode must be explicit.
     pub network: Option<NetworkMode>,
 }
@@ -213,6 +214,7 @@ impl SeatbeltDriver {
         }
         let profile_options = profile::Options {
             workspace: workspace.clone(),
+            workspaces: options.workspaces.clone(),
             directories: private.directories.clone(),
             shell,
             home,
@@ -277,6 +279,16 @@ impl SeatbeltDriver {
             .clone()
     }
 
+    /// The canonical Git worktree roots in the profile now in effect.
+    pub fn workspaces(&self) -> Vec<String> {
+        self.profile
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .options
+            .workspaces
+            .clone()
+    }
+
     /// The network mode in the profile now in effect.
     pub fn network(&self) -> Option<NetworkMode> {
         self.profile
@@ -305,6 +317,7 @@ impl SeatbeltDriver {
     pub async fn reconfigure(
         &self,
         read_paths: Vec<String>,
+        workspaces: Vec<String>,
         network: NetworkMode,
         cancel: &CancellationToken,
     ) -> Result<(), Error> {
@@ -328,6 +341,7 @@ impl SeatbeltDriver {
         };
         let next_options = profile::Options {
             read_paths,
+            workspaces,
             network: Some(network),
             ..previous_options
         };
@@ -1137,6 +1151,7 @@ mod contract {
         async fn new_driver(&self, fixture: &Fixture) -> Arc<dyn Driver> {
             let options = Options {
                 workspace: fixture.workspace.to_str().expect("workspace").to_string(),
+                workspaces: vec![fixture.workspace.to_str().expect("workspace").to_string()],
                 shell: "/bin/sh".to_string(),
                 home: private_directory(fixture, "host-home"),
                 cache_base: private_directory(fixture, "user-cache"),
@@ -1314,6 +1329,7 @@ mod tests {
         let driver = SeatbeltDriver::open(
             Options {
                 workspace: workspace.to_str().expect("workspace").to_string(),
+                workspaces: vec![workspace.to_str().expect("workspace").to_string()],
                 shell: "/bin/sh".to_string(),
                 home: directory("host-home").to_str().expect("home").to_string(),
                 cache_base: directory("user-cache").to_str().expect("cache").to_string(),
@@ -1386,6 +1402,7 @@ mod tests {
             .driver
             .reconfigure(
                 vec![fixture.outside.to_str().expect("outside").to_string()],
+                vec![fixture.workspace.to_str().expect("workspace").to_string()],
                 NetworkMode::Allow,
                 &CancellationToken::new(),
             )
@@ -1417,14 +1434,24 @@ mod tests {
         let read_paths = vec![fixture.outside.to_str().expect("outside").to_string()];
         fixture
             .driver
-            .reconfigure(read_paths.clone(), NetworkMode::Allow, &cancel)
+            .reconfigure(
+                read_paths.clone(),
+                vec![fixture.workspace.to_str().expect("workspace").to_string()],
+                NetworkMode::Allow,
+                &cancel,
+            )
             .await
             .expect("first");
         let written = std::fs::read(&fixture.driver.profile_path).expect("profile");
 
         fixture
             .driver
-            .reconfigure(read_paths, NetworkMode::Allow, &cancel)
+            .reconfigure(
+                read_paths,
+                vec![fixture.workspace.to_str().expect("workspace").to_string()],
+                NetworkMode::Allow,
+                &cancel,
+            )
             .await
             .expect("second");
 
@@ -1436,7 +1463,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn a_rejected_reconfigure_keeps_the_previous_profile_and_the_driver_running() {
+    async fn a_missing_read_path_reconfigure_keeps_the_driver_running() {
         use crate::sandbox::Driver as _;
 
         let Some(fixture) = reconfigure_fixture().await else {
@@ -1444,22 +1471,22 @@ mod tests {
         };
         let before = std::fs::read(&fixture.driver.profile_path).expect("profile");
 
-        let error = fixture
+        fixture
             .driver
             .reconfigure(
                 vec!["/otto-reconfigure-missing-directory".to_string()],
+                vec![fixture.workspace.to_str().expect("workspace").to_string()],
                 NetworkMode::Allow,
                 &CancellationToken::new(),
             )
             .await
-            .expect_err("a missing read path is rejected");
+            .expect("a missing read path is ignored");
 
-        assert_eq!(error, Error::unavailable(UnavailableReason::SelfTestFailed));
-        assert_eq!(
+        assert_ne!(
             std::fs::read(&fixture.driver.profile_path).expect("profile"),
             before
         );
-        assert!(fixture.driver.capabilities().network_deny);
+        assert!(fixture.driver.capabilities().network_allow);
         let (ok, output) = run_script(&fixture, "printf ok").await;
         assert!(ok);
         assert_eq!(output, "ok");
@@ -1476,7 +1503,12 @@ mod tests {
         fixture.driver.close().expect("close");
         let error = fixture
             .driver
-            .reconfigure(Vec::new(), NetworkMode::Deny, &CancellationToken::new())
+            .reconfigure(
+                Vec::new(),
+                vec![fixture.workspace.to_str().expect("workspace").to_string()],
+                NetworkMode::Deny,
+                &CancellationToken::new(),
+            )
             .await
             .expect_err("closed");
         assert_eq!(error, Error::Closed);

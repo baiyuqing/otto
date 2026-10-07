@@ -100,6 +100,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- A process killed while it wrote the first records of a new session no longer
+  leaves an empty or torn `<session-id>.jsonl`. Such a file failed to open
+  ("session file is empty" or "session header must be one JSON object"),
+  session lists skipped it, and `--continue` resumed an older session. The first records are now written to a `.tmp` file and given the
+  session file's name after they are synced. A file torn by an earlier version
+  still fails to open. See the
+  [user manual](docs/user-manual.md#sessions)
+  ([#416](https://github.com/baiyuqing/otto/pull/416)).
+
 - Quitting Otto no longer fails with `otto: close sandbox: sandbox runtime
   close failed` and exit code 1 after a session whose sandboxed commands left
   read-only directories behind. A child creates them routinely: the Go module
@@ -175,6 +184,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `SIGTERM` is killed with its group after the grace on every driver, and that
   a hung MCP request times out, stopping a stdio server and leaving an HTTP
   client usable ([#413](https://github.com/baiyuqing/otto/pull/413)).
+  `faults::crash` re-runs a test in a child process that exits at an injected
+  fault, and the parent checks what the child left: a torn journal line, a
+  takeover between its two renames, a fork, a configuration write, a skill
+  revert, a turn-queue save and a workflow step commit. `tests/sigkill.rs`
+  kills the `otto` binary during a bash call and checks that the resumed
+  session reports the interrupted turn and does not run the command again
+  ([#416](https://github.com/baiyuqing/otto/pull/416)).
 
 - Main's `connect-check` no longer fails on the connector's end-to-end
   reflection test. That test scripted ten identical `read {"path":"notes.txt"}`

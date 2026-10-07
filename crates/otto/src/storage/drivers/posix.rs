@@ -317,6 +317,17 @@ pub fn unlink_at(dir: &Dir, name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Gives the file `from` the second name `to` inside a pinned directory;
+/// fails with `EEXIST` when `to` exists.
+fn link_at(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
+    let (from, to) = (c_name(from)?, c_name(to)?);
+    // SAFETY: dir is open and both names outlive the syscall.
+    if unsafe { libc::linkat(dir.fd(), from.as_ptr(), dir.fd(), to.as_ptr(), 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// An atomic move that fails with `EEXIST` rather than replacing an existing
 /// destination, closing the check-then-rename race.
 ///
@@ -499,6 +510,15 @@ impl crate::storage::files::FileRoot for Dir {
     }
     fn remove_journal(&self, name: &str) -> io::Result<()> {
         unlink_at(self, name)
+    }
+    fn publish_journal(&self, temp: &str, name: &str) -> io::Result<()> {
+        // `link` instead of an exclusive rename: the Linux NFS and CephFS
+        // clients return `EINVAL` for `renameat2` flags, and session failover
+        // supports both. A failed unlink leaves `temp` as a second name of
+        // the published file; no session scan reads it.
+        link_at(self, temp, name)?;
+        let _ = unlink_at(self, temp);
+        Ok(())
     }
     fn sync_all(&self) -> io::Result<()> {
         sync_dir(self)

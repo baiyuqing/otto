@@ -53,6 +53,10 @@ pub struct OpenOptions {
     /// The environment variable names that hold provider API keys. Their
     /// values are redacted whether or not they reach the child.
     pub provider_names: Vec<String>,
+    /// Canonical roots of Git-linked worktrees sharing the selected workspace.
+    /// They are discovered by the host before opening Seatbelt, never sourced
+    /// from model-controlled command input or persistent read grants.
+    pub managed_worktrees: Vec<String>,
 }
 
 /// What closing the runtime has to do.
@@ -162,10 +166,16 @@ impl SandboxRuntime {
 
         let previous = (
             driver.read_paths(),
+            driver.workspaces(),
             driver.network().unwrap_or(NetworkMode::Deny),
         );
         if let Err(error) = driver
-            .reconfigure(options.settings.read_paths.clone(), network, cancel)
+            .reconfigure(
+                options.settings.read_paths.clone(),
+                options.managed_worktrees.clone(),
+                network,
+                cancel,
+            )
             .await
         {
             return Err(Failed(reconfigure_reason(&error, cancel)));
@@ -187,7 +197,12 @@ impl SandboxRuntime {
                     // The driver already runs the new profile; restore the old one
                     // so it matches the executor that stays in service.
                     let _ = driver
-                        .reconfigure(previous.0, previous.1, &CancellationToken::new())
+                        .reconfigure(
+                            previous.0,
+                            previous.1,
+                            previous.2,
+                            &CancellationToken::new(),
+                        )
                         .await;
                     return Err(Failed(reason));
                 }
@@ -352,6 +367,7 @@ async fn open_seatbelt(
             // rather than lossily rewritten into a path the child would use.
             host_entries: utf8_entries(&options.host_entries),
             read_paths: options.settings.read_paths.clone(),
+            workspaces: options.managed_worktrees.clone(),
             network: Some(network),
         },
         cancel,
@@ -797,6 +813,7 @@ mod tests {
             home: workspace.to_string_lossy().into_owned(),
             host_entries: vec![b"PATH=/usr/bin:/bin".to_vec()],
             provider_names: vec!["OTTO_API_KEY".to_string()],
+            managed_worktrees: vec![workspace.to_string_lossy().into_owned()],
         }
     }
 

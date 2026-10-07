@@ -215,6 +215,9 @@ impl SandboxControl for SandboxReloader {
                 &file,
                 &self.api_key_env,
             ),
+            managed_worktrees: crate::sandbox::worktrees::managed(Path::new(
+                &self.reopen.workspace,
+            )),
             ..self.reopen.clone()
         };
         let info = match self.control.reconfigure(&options, &self.cancel).await {
@@ -266,12 +269,13 @@ mod tests {
             },
             workspace: path.clone(),
             shell: "/bin/sh".to_string(),
-            home: path,
+            home: path.clone(),
             host_entries: vec![
                 b"PATH=/usr/bin:/bin".to_vec(),
                 b"GH_TOKEN=token-value".to_vec(),
             ],
             provider_names: vec!["OTTO_API_KEY".to_string()],
+            managed_worktrees: vec![path.clone()],
         }
     }
 
@@ -571,6 +575,7 @@ mod tests {
                 b"GH_TOKEN=token-value".to_vec(),
             ],
             provider_names: vec!["OTTO_API_KEY".to_string()],
+            managed_worktrees: vec![canonical(&workspace)],
         };
         Some(Seatbelt {
             workspace,

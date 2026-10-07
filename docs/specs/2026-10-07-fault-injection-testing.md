@@ -439,10 +439,11 @@ minimum set.
 
 | Fault | Expected |
 | --- | --- |
-| transport failure ×3, then success | success; 4 requests with identical bodies |
+| transport failure before output | retry the same request, up to 7 attempts; no tool is re-executed |
 | `response.failed` overload before output | retried |
 | overload after output started | not retried |
-| HTTP error status, HTTP 401, stream codec error | terminal; 1 request |
+| HTTP 429, 500, 502, 503 or 504 before output | retry the same request; no tool is re-executed |
+| Other HTTP status, HTTP 401, stream codec error | terminal; 1 request |
 | token source failure | terminal; 0 requests; certainty `NotStarted` |
 | body cut short before output | retried |
 | body cut short after output | error; 1 request; certainty `Unknown` |

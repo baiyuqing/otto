@@ -90,6 +90,11 @@ candidates and `/memory review <id> accept|reject` decides one through
 `Service::review` (human authority, like `/memory forget`). The TUI dispatches `/memory` and `/remember` to the same
 functions the REPL uses (`crates/otto/src/cli/repl_commands.rs`).
 
+The [open Memory service design](specs/2026-10-07-open-memory-contract.md)
+defines the proposed service boundary and capability guarantees; its linked
+research records preserve source evidence. This is design documentation, not
+an implemented adapter API or a change to the behavior above.
+
 Keep `crates/otto`'s `skill` module free of imports from other Otto modules
 besides `otto-core`. The skill tool's file reads stay confined to the skill
 directory. `/skills` and `/skill` are wired in both frontends and documented

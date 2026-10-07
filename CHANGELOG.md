@@ -210,6 +210,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
   the call count and the reflection assertion are unchanged
   ([#411](https://github.com/baiyuqing/otto/pull/411)).
 
+### Documentation
+
+- Document the open Memory service design and its source research, including
+  capability declarations, reviewed/delegated learning, asynchronous outcomes
+  and forgetting coverage. This documents the intended boundary; runtime
+  adapters and memory behavior are unchanged. See the
+  [design](docs/specs/2026-10-07-open-memory-contract.md).
+
 ## 0.4.1 - 2026-10-07
 
 ### Features

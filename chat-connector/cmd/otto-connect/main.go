@@ -20,6 +20,7 @@ import (
 	"github.com/baiyuqing/otto/chat-connector/internal/feishu"
 	"github.com/baiyuqing/otto/chat-connector/internal/manage"
 	"github.com/baiyuqing/otto/chat-connector/internal/metrics"
+	"github.com/baiyuqing/otto/chat-connector/internal/ottoconfig"
 	"github.com/baiyuqing/otto/chat-connector/internal/state"
 	"github.com/baiyuqing/otto/chat-connector/internal/telegram"
 )
@@ -74,6 +75,7 @@ func run() error {
 		Platforms: platforms,
 		Access:    access,
 		Store:     store,
+		Profiles:  profileSource{path: ottoconfig.Path(home)},
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -135,6 +137,30 @@ func withoutVars(env []string, names ...string) []string {
 		}
 	}
 	return out
+}
+
+// profileSource adapts the local Otto configuration to the bridge's profile
+// picker. Every "/model" re-reads it, so an edit on the host shows up without
+// restarting the connector.
+type profileSource struct{ path string }
+
+func (s profileSource) Profiles() (bridge.ProfileSnapshot, error) {
+	snapshot, err := ottoconfig.Read(s.path)
+	if err != nil {
+		return bridge.ProfileSnapshot{}, err
+	}
+	out := bridge.ProfileSnapshot{
+		Default:  snapshot.Default,
+		Profiles: make([]bridge.ProfileOption, 0, len(snapshot.Profiles)),
+	}
+	for _, profile := range snapshot.Profiles {
+		out.Profiles = append(out.Profiles, bridge.ProfileOption{
+			Name:     profile.Name,
+			Provider: profile.Provider,
+			Model:    profile.Model,
+		})
+	}
+	return out, nil
 }
 
 // serveMetrics starts the metrics endpoint. A bind failure is logged and the

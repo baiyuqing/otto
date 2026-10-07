@@ -13,15 +13,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use otto_core::safetext::{self, SecretCollector};
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::service::Service;
-use crate::auth::{self, AuthError, Credentials};
+use crate::auth::{self, AuthError};
 
 use super::controller::Controller;
 use super::repl::Error as ReplError;
-use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
 
 /// The browser launcher. macOS is given as an absolute path because `PATH` is
 /// attacker-influenced input at this point; every other target resolves the
@@ -39,66 +37,7 @@ const NOT_SIGNED_IN: &str = "Not signed in to ChatGPT.";
 const REPL_SIGNED_IN: &str = "Signed in to ChatGPT. Restart Otto to use the new credentials.";
 const LOGIN_USAGE: &str = "usage: /login [status]";
 
-/// What `captureAuthCredentials` returns: the path it read, the credentials
-/// when they loaded, and the values the redaction boundary must mask.
-#[derive(Debug, Default)]
-pub struct CapturedAuth {
-    pub path: String,
-    pub credentials: Credentials,
-    pub loaded: bool,
-    pub complete: bool,
-    pub redaction_values: Vec<String>,
-}
-
-pub fn capture_auth_credentials(path: &Path) -> CapturedAuth {
-    let mut capture = CapturedAuth {
-        path: path.to_string_lossy().into_owned(),
-        complete: true,
-        ..CapturedAuth::default()
-    };
-    if capture.path.is_empty() {
-        capture.complete = false;
-        return capture;
-    }
-    let credentials = match auth::load(path) {
-        Ok(credentials) => credentials,
-        // A missing file is the normal state before `otto login`: nothing is
-        // secret, so the boundary stays open.
-        Err(AuthError::NoCredentials) => return capture,
-        Err(_) => {
-            capture.complete = false;
-            return capture;
-        }
-    };
-    let mut redactions = SecretCollector::new();
-    let mut exact = SecretCollector::new();
-    for value in [
-        &credentials.access_token,
-        &credentials.refresh_token,
-        &credentials.id_token,
-        &credentials.account_id,
-    ] {
-        if value.is_empty() {
-            continue;
-        }
-        if !redactions.add(value)
-            || !exact.add_form(value)
-            || value.len() > MAX_EXACT_GUARD_VALUE_BYTES
-        {
-            capture.complete = false;
-            return capture;
-        }
-    }
-    let values = redactions.values();
-    if safetext::dynamic_redaction_marker(&values).is_none() {
-        capture.complete = false;
-        return capture;
-    }
-    capture.credentials = credentials;
-    capture.loaded = true;
-    capture.redaction_values = values;
-    capture
-}
+pub use crate::auth::{CapturedAuth, capture_auth_credentials};
 
 /// Records what the browser launcher was asked to open. A compile-time seam is
 /// used so no test can reach `/usr/bin/open`.
@@ -344,8 +283,10 @@ pub fn repl_logout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::Credentials;
     use crate::auth::login::{LoginError, Opener};
     use crate::cli::testutil;
+    use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
     use std::sync::{Arc, Mutex as StdMutex};
 
     /// Builds a service whose sign-in flow returns `credentials` after calling

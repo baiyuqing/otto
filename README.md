@@ -205,7 +205,9 @@ The selected model and OpenAI-compatible endpoint must support image input.
   Telegram and Feishu chats, one session per chat, with Approve / Deny buttons and `/allow` / `/deny` for
   elevated `bash` commands and `/sessions` and `/use` to pick a session.
   With `otto acp --attach`, chats share sessions with the `otto serve` web UI
-  and `otto --attach` terminals.
+  and `otto --attach` terminals; `scripts/otto-tcp.sh` supervises the direct
+  ACP TCP pair instead, where `otto serve --acp-listen` is the agent and
+  connect starts no process of its own.
 - [Usage history](docs/user-manual.md#observability): a Web UI analysis page
   for local provider token trends and cache hit rate, without prompt or tool
   content.

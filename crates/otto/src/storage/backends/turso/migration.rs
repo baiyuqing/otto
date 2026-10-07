@@ -644,6 +644,23 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> Error {
     Error::Unavailable("migration lock poisoned".into())
 }
 
+/// Whether `approval_modes` still carries the pre-mode `automatic` column, so a
+/// source database written before the mode form is exported with its meaning.
+fn legacy_mode_column(connection: &Connection) -> Result<bool> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(approval_modes)")
+        .map_err(sql_error)?;
+    let fields = statement
+        .query_map((), |row| row.get::<String>(1))
+        .map_err(sql_error)?;
+    for name in fields {
+        if name.map_err(sql_error)? == "automatic" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub struct ApprovalCodec;
 use crate::approval::migration::ApprovalRecord;
 impl SqlDomainCodec for ApprovalCodec {
@@ -690,12 +707,18 @@ impl SqlDomainCodec for ApprovalCodec {
                     .map_err(|_| Error::Invalid("invalid offset".into()))?,
             )
         };
+        // A source written before the mode form stores `automatic` instead.
+        let legacy = legacy_mode_column(connection)?;
         // ponytail: OFFSET scans are quadratic for large snapshots; switch these
         // five known record kinds to keyset cursors when migration volume needs it.
         while section < 5 {
             let (fields, lengths, table, order) = match section {
                 0 => (
-                    "workspace,session_id,automatic",
+                    if legacy {
+                        "workspace,session_id,automatic"
+                    } else {
+                        "workspace,session_id,mode"
+                    },
                     "length(CAST(workspace AS BLOB))+length(CAST(session_id AS BLOB))+8",
                     "approval_modes",
                     "workspace,session_id",
@@ -760,7 +783,22 @@ impl SqlDomainCodec for ApprovalCodec {
                             0 => ApprovalRecord::Mode {
                                 workspace: r.get(0)?,
                                 session_id: r.get(1)?,
-                                automatic: r.get(2)?,
+                                mode: crate::approval::migration::StoredMode::Mode {
+                                    mode: if legacy {
+                                        // `automatic` was an integer boolean.
+                                        match r.get::<i64>(2)? {
+                                            0 => crate::approval::ApprovalMode::Manual,
+                                            _ => crate::approval::ApprovalMode::Auto,
+                                        }
+                                    } else {
+                                        crate::approval::ApprovalMode::parse(&r.get::<String>(2)?)
+                                            .ok_or_else(|| {
+                                            crate::storage::Error::ConversionFailure(
+                                                "unknown approval mode".into(),
+                                            )
+                                        })?
+                                    },
+                                },
                             },
                             1 => ApprovalRecord::Request {
                                 subject_key: r.get(0)?,
@@ -813,12 +851,13 @@ impl SqlDomainCodec for ApprovalCodec {
             ApprovalRecord::Mode {
                 workspace,
                 session_id,
-                automatic,
+                mode,
             } => {
+                let mode: crate::approval::ApprovalMode = mode.into();
                 connection
                     .execute(
                         "INSERT INTO approval_modes VALUES (?1,?2,?3)",
-                        params![workspace, session_id, automatic],
+                        params![workspace, session_id, mode.as_str()],
                     )
                     .map_err(sql_error)?;
             }
@@ -899,7 +938,7 @@ impl SqlDomainCodec for ApprovalCodec {
         let version: i64 = connection
             .query_row("PRAGMA user_version", (), |r| r.get(0))
             .map_err(sql_error)?;
-        if version != 2 {
+        if !(2..=3).contains(&version) {
             return Err(Error::Invalid(
                 "unsupported approval database schema".into(),
             ));
@@ -1005,6 +1044,7 @@ fn approval_request(value: &str) -> Result<otto_core::approval::Request> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::ApprovalMode;
     use crate::approval::{
         Actor, ApplicationState, Authority, Kind, Proposal, Scope, Service, Subject,
     };
@@ -1047,7 +1087,7 @@ mod tests {
             task_id: String::new(),
             run_id: String::new(),
         };
-        service.set_auto_mode(&scope, false).unwrap();
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
         let request = service
             .create(Proposal {
                 kind: Kind::Authorization,
@@ -1210,7 +1250,7 @@ mod tests {
         drop(statement);
         connection.close().unwrap();
         let service = Service::open(&stage_path).unwrap();
-        assert!(!service.auto_mode(&scope).unwrap());
+        assert_eq!(service.mode(&scope).unwrap(), ApprovalMode::Manual);
         assert_eq!(service.events("/w", Some("s"), 0).unwrap().len(), 2);
         service.apply_available("/w").unwrap();
         assert_eq!(
@@ -1316,7 +1356,7 @@ mod tests {
             task_id: String::new(),
             run_id: String::new(),
         };
-        service.set_auto_mode(&scope, false).unwrap();
+        service.set_mode(&scope, ApprovalMode::Manual).unwrap();
         drop(service);
         let codec = Arc::new(ApprovalCodec);
         let source = Source::open(
@@ -1575,14 +1615,14 @@ mod commit_ack_tests {
             let target = dir.path().join("target.db");
             let service = crate::approval::Service::open(&source_path).unwrap();
             service
-                .set_auto_mode(
+                .set_mode(
                     &otto_core::approval::Scope {
                         workspace: "/w".into(),
                         session_id: "s".into(),
                         task_id: String::new(),
                         run_id: String::new(),
                     },
-                    false,
+                    otto_core::approval::ApprovalMode::Manual,
                 )
                 .unwrap();
             drop(service);

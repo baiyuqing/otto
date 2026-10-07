@@ -15,6 +15,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+## 0.4.4 - 2026-10-07
+
 ### Usage and compatibility
 
 - AUTO now reviews requests for additional authority against the original user

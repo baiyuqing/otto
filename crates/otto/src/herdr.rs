@@ -111,6 +111,11 @@ impl State {
 }
 
 enum Command {
+    /// First contact: the pane becomes `otto` and learns the session.
+    Ready {
+        session: SessionRef,
+        seq: u64,
+    },
     State {
         state: State,
         message: Option<String>,
@@ -159,13 +164,38 @@ impl Reporter {
         reporter
     }
 
+    /// Announces this process as the pane's agent, so the pane is `otto` from
+    /// the moment the frontend starts and not only from its first turn.
+    ///
+    /// Called once, when the session is open. The state goes before the
+    /// session reference: Herdr accepts `resume_argv` only from a reporter that
+    /// already holds the pane, and the first `idle` is reported without the
+    /// debounce that a finished turn gets.
+    pub fn ready(&self, session: &SessionRef) {
+        let seq = self.next_seq();
+        {
+            let mut last = lock(&self.last_state);
+            *last = Some((State::Idle, None));
+        }
+        if !session.is_empty() {
+            let mut last = lock(&self.last_session);
+            *last = Some(session.clone());
+        }
+        let _ = self.tx.send(Command::Ready {
+            session: session.clone(),
+            seq,
+        });
+    }
+
     /// Turns one agent event into a report. Called for every event of a run,
     /// so it only inspects the three that carry lifecycle meaning.
     pub fn observe(&self, event: &Event, session: &SessionRef) {
         match event {
             Event::AgentStarted => {
-                self.report_session(session);
+                // The state first: a session reference is only accepted once
+                // the reporter holds the pane.
                 self.report_state(State::Working, None);
+                self.report_session(session);
             }
             Event::AgentFinished => self.report_state(State::Idle, None),
             Event::ApprovalChanged { request } => match request.state {
@@ -295,6 +325,15 @@ async fn report_loop(config: Config, mut rx: mpsc::UnboundedReceiver<Command>, d
         tokio::select! {
             command = rx.recv() => match command {
                 None => break,
+                Some(Command::Ready { session, seq }) => {
+                    idle = None;
+                    let params = report_agent_params(&config.pane_id, State::Idle.as_str(), None, seq);
+                    send(&config.socket_path, "pane.report_agent", params).await;
+                    if !session.is_empty() {
+                        let params = report_agent_session_params(&config.pane_id, &session, seq);
+                        send(&config.socket_path, "pane.report_agent_session", params).await;
+                    }
+                }
                 Some(Command::State { state: State::Idle, seq, .. }) => {
                     // A later `working` cancels this before it is sent.
                     idle = Some((seq, tokio::time::Instant::now() + debounce));

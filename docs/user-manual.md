@@ -1052,14 +1052,20 @@ Herdr injects through the environment, so the pane appears as an agent named
 
 | Otto | Herdr state | What it means |
 | --- | --- | --- |
+| Otto starts | `idle` | the pane becomes the agent `otto` right away, before the first prompt |
 | A turn is running | `working` | the model is working |
-| A tool call waits for your decision | `blocked` | the sidebar marks the pane, and `herdr agent wait otto --until blocked` returns |
+| A tool call waits for your decision | `blocked` | the sidebar marks the pane, and `herdr agent wait <pane> --until blocked` returns |
 | The turn ended | `idle` | Otto waits for input |
 
 - Start Otto in a pane the usual way: `herdr pane run <pane> otto`, or type
   `otto` in a split. Herdr does not detect Otto by itself, so
   `herdr agent start --kind otto` is not available; the pane command is the way
-  in, and `herdr agent prompt otto ...` works once Otto is running.
+  in.
+- Otto reports state and session only, so it does not name itself: address it
+  by the pane it runs in, as in `herdr agent prompt <pane> ...` and
+  `herdr agent wait <pane> --until blocked`. For a name, rename it in Herdr
+  once (`herdr agent rename <pane> otto`); `herdr agent list` and the agent
+  panel show the label `otto` either way.
 - Otto reports the session file and the command that resumes it
   (`otto --resume <session file>`), which is what Herdr needs to restore the
   session after its server restarts. Otto itself never depends on that.

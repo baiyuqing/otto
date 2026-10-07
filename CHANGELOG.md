@@ -64,7 +64,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   the stderr line now carries the failure's causes, so a host without a
   running server reports `... (http://otto/healthz): client error (Connect): No
   such file or directory (os error 2)` instead of only `reqwest`'s request
-  error. The line keeps its shape and the exit status stays `1`.
+  error. The line keeps its shape and the exit status stays `1`
+  ([#388](https://github.com/baiyuqing/otto/pull/388)).
 
 ### Architecture and reliability
 

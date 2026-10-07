@@ -115,9 +115,6 @@ fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
             let request = service
                 .create(Proposal {
                     kind: Kind::Confirmation,
-                    // A plan-free confirmation the user answers: `#401` kept
-                    // this class session-decidable, which is what a single
-                    // write row here exercises.
                     authority: Authority::Consent,
                     scope: scope.clone(),
                     subject: Subject {

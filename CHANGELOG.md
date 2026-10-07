@@ -490,6 +490,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   the model, the approval mode, the token totals, the context percentage,
   the sandbox state, the reasoning effort, the workspace and the session ID
   in that order, so only the tail is dropped.
+  [#396](https://github.com/baiyuqing/otto/pull/396)
 
 - Clarify the mutually exclusive `edit` argument forms with JSON examples and
   tell models how to correct mixed batch/single arguments before any file write.

@@ -301,3 +301,32 @@ fn a_crash_after_the_step_claim_commit_is_recovered_as_a_paused_run_with_an_inte
         }
     });
 }
+
+#[test]
+fn a_crash_while_writing_the_session_header_leaves_no_session_file() {
+    crash::run(crash::name_of(&|| {}), |role| match role {
+        Role::Child(dir) => {
+            // Write 1 is the header, which is cut after 7 bytes.
+            let (store, _plan) = store(
+                dir,
+                vec![
+                    Rule::new(FileOp::Write, Trigger::Nth(1), Fault::ShortExit { keep: 7 })
+                        .filter(Filter::NameContains(".jsonl")),
+                ],
+            );
+            let _ = store.append_message(&user("first"));
+        }
+        Role::Parent(dir, status) => {
+            assert_eq!(
+                status.code(),
+                Some(CRASH_EXIT),
+                "child did not crash at the fault"
+            );
+            assert!(journals(dir).is_empty(), "{:?}", journals(dir));
+            let workspace = dir.join("workspace").to_string_lossy().into_owned();
+            let listed = otto::session::list(&dir.join("root"), &workspace, "", 10).expect("list");
+            assert_eq!(listed.sessions.len(), 0);
+            assert_eq!(listed.skipped, 0, "no unreadable session candidate");
+        }
+    });
+}

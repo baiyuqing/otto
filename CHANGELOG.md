@@ -150,7 +150,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   that a failed launch is reported as not started, that a child ignoring
   `SIGTERM` is killed with its group after the grace on every driver, and that
   a hung MCP request times out, stopping a stdio server and leaving an HTTP
-  client usable.
+  client usable ([#413](https://github.com/baiyuqing/otto/pull/413)).
 
 ## 0.4.1 - 2026-10-07
 

@@ -94,7 +94,7 @@ func TestReviewStatesNeverShowActionableCardsBeforeHumanRequired(t *testing.T) {
 	}
 }
 
-func TestReviewNoticesArePassiveAndShowDenialRationale(t *testing.T) {
+func TestAutomaticReviewAuditDoesNotPostChatMessages(t *testing.T) {
 	h := newHarness(t, setup{})
 	c := h.b.chat(h.plat, "c1")
 	request := agent.SharedApproval{ID: "r", Title: "Action", State: "pending", Review: &agent.ReviewMetadata{Status: "reviewing"}}
@@ -103,9 +103,16 @@ func TestReviewNoticesArePassiveAndShowDenialRationale(t *testing.T) {
 	request.Review.Status = "completed"
 	request.Review.Assessment = &agent.ReviewAssessment{Risk: "critical", Outcome: "deny", Reason: "Outside authorized scope"}
 	c.reviewNotice(context.Background(), request)
+	request.State, request.Review.Assessment.Outcome = "approved", "allow"
+	c.reviewNotice(context.Background(), request)
+	if len(h.plat.texts()) != 0 {
+		t.Fatal("automatic review flooded chat")
+	}
+	request.Application, request.ApplicationError = "unknown", "Transport lost during application"
+	c.reviewNotice(context.Background(), request)
 	texts := h.plat.texts()
-	if len(texts) != 2 || !strings.Contains(texts[0], "Reviewing") || !strings.Contains(texts[1], "Outcome: deny") || !strings.Contains(texts[1], "Outside authorized scope") {
-		t.Fatalf("notices=%v", texts)
+	if len(texts) != 1 || !strings.Contains(texts[0], "application unknown") || !strings.Contains(texts[0], "Transport lost") {
+		t.Fatalf("missing application failure reminder: %v", texts)
 	}
 	if c.decideSharedCard(Message{ApprovalID: "r", Text: "/allow"}) {
 		t.Fatal("passive notice was actionable")
@@ -170,4 +177,50 @@ func TestOngoingPromptGetsHumanCardWhenReviewStatusChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.waitCall("end:wait")
+}
+
+func TestSharedCallbackIdentitySurvivesRecreationAndBindsRevision(t *testing.T) {
+	h := newHarness(t, setup{})
+	c := h.b.chat(h.plat, "c1")
+	r := agent.SharedApproval{ID: "durable-request", Revision: 3, State: "pending", PresentationOrigin: c.presentationOrigin()}
+	r.Subject.Version = "version1"
+	c.showApprovals(context.Background(), "sid", []agent.SharedApproval{r})
+	c.mu.Lock()
+	old := c.sharedCards[r.ID].token
+	delete(c.sharedCards, r.ID)
+	c.mu.Unlock()
+	c.showApprovals(context.Background(), "sid", []agent.SharedApproval{r})
+	c.mu.Lock()
+	card := c.sharedCards[r.ID]
+	card.deciding = true
+	c.mu.Unlock()
+	if card.token != old {
+		t.Fatal("unchanged durable request got a different callback identity")
+	}
+	if c.sharedApprovalToken("other-session", r) == old || h.b.chat(h.plat, "other").sharedApprovalToken("sid", r) == old {
+		t.Fatal("callback identity did not bind origin/session")
+	}
+	r.Revision++
+	if c.sharedApprovalToken("sid", r) == old {
+		t.Fatal("callback identity did not bind revision")
+	}
+	r.Revision--
+	r.Subject.Version = "version2"
+	if c.sharedApprovalToken("sid", r) == old {
+		t.Fatal("callback identity did not bind subject version")
+	}
+	before := len(h.plat.texts())
+	if !c.cmdSharedDecision(Message{Text: "/allow"}, true, old+" feedback") {
+		t.Fatal("exact callback token was not accepted by text command")
+	}
+	if len(h.plat.texts()) != before {
+		t.Fatal("exact callback token was not resolved to its existing approval")
+	}
+	c.mu.Lock()
+	card.deciding = false
+	c.mu.Unlock()
+	c.showApprovals(context.Background(), "sid", []agent.SharedApproval{r})
+	if c.decideSharedCard(Message{ApprovalID: old, Text: "/allow"}) {
+		t.Fatal("old subject-version callback remained actionable")
+	}
 }

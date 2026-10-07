@@ -204,6 +204,17 @@ The authoritative implementation belongs in `crates/otto`, next to existing
 configuration resolution and its backed-up writer. Connect never reads or
 writes `config.toml` directly.
 
+Amended on 2026-10-07: bare `/model` in a chat is a picker, so the connector
+reads `~/.config/otto/config.toml` read-only to learn the profile names,
+providers and models it offers as buttons. The user chose this over a new ACP
+method, and it is narrower than a management client: connect still never writes
+the file, never sends it anywhere, and never reads an environment value. The
+cost is that the picker sees the user layer only — not a workspace's
+`.otto/config.toml`, `.otto/config.local.toml` or managed policy — and that an
+attached connector shows the local host's profiles rather than the ones
+`otto serve` runs with. Switching itself stays Otto's: the button only delivers
+`/model <profile>`, and `/config` keeps its attached-only management client.
+
 All routes are private Unix-socket `/v1/` routes and use the existing bearer
 protection when enabled. Request and response schemas are added to
 `testdata/server/openapi.yaml` alongside handlers.

@@ -3227,8 +3227,10 @@ a log line.
 
 A message whose whole text is one of these commands (for `/use`, the
 command and its argument) is handled by `otto-connect` and not sent to Otto,
-except `/compact`, `/context`, `/reflect`, `/skill`, and `/model`, which are
-sent to Otto as typed for agent-side command handling.
+except `/compact`, `/context`, `/reflect`, and `/skill`, which are sent to
+Otto as typed for agent-side command handling, and `/model <profile>`, which the
+connector forwards to Otto as a prompt. Bare `/model` is answered by the
+connector itself.
 Any other text, including other words starting with `/`, is a prompt.
 
 | Command | Effect |
@@ -3239,7 +3241,7 @@ Any other text, including other words starting with `/`, is a prompt.
 | `/queue <prompt>` | Queues an independent prompt without model routing. Starts immediately when idle, otherwise waits behind the task and any approval; acknowledges actual admission. |
 | `/compact [focus]` | Sent to Otto as a prompt; `otto acp` runs it as `/compact` (see [`/compact` and `/context` are slash commands](#compact-and-context-are-slash-commands)) and replies with the token counts before and after. Like any prompt it waits in the chat's queue behind a running turn. |
 | `/context` | Sent to Otto as a prompt; `otto acp` replies with the token counts of the next request, part by part. It waits in the chat's queue like any prompt. |
-| `/model` | Sent to Otto as a prompt; `otto acp` replies with the session's profile, provider, model, and effort plus the names of every configured profile. It makes no model request. |
+| `/model` | Answered by `otto-connect`: it posts the profiles from the local `~/.config/otto/config.toml`, one line each with provider and model, plus one button per profile. Choosing a button switches the conversation exactly as `/model <profile>` does. On a platform without buttons the same list is posted as text. It makes no model request. The list covers the user configuration only (a workspace's `.otto/config.toml` is not read), and it marks the configured default profile, not the session's current one. |
 | `/model <profile>` | Sent to Otto as a prompt; `otto acp` rebuilds this session on the named profile, replies "Switched to profile …", and leaves the configuration file and every other session unchanged. It works whether the connector runs `otto acp` or `otto acp --attach`, uses no model request, and is therefore the way to move off a profile whose quota is exhausted. An unknown profile answers with an error. |
 | `/reflect [focus]` | Runs the existing reflection over the uncovered part of this session and reports the result and the retrospective. Memory proposals require `/memory` review; generated skills pass the existing evidence and safety checks. `/reflect list` and `/reflect show <id>` show past runs. |
 | `/skill generated` | Lists skills written by reflection. Generated skills become active in new sessions. |

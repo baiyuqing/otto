@@ -131,16 +131,26 @@ receives only the wasm-safe `operation::OperationControl` capability and must
 not read a native clock. Provider retries, compaction, task queueing, and
 workflow attempts consume the same logical budget rather than restarting it.
 The ChatGPT transport retries only connection/send/body failures before any
-streamed output, at most three times with 1/2/4-second backoff. It repeats only
-the borrowed provider request, never tools or the agent turn. HTTP, auth, and
-stream-codec errors are terminal; retries preserve cancellation, the original
-deadline, actual send-attempt counts, and unknown effect certainty on failure.
-The OpenAI-compatible transport retries only a send whose connection could not
-be established (`reqwest::Error::is_connect`), with the same policy (4
-attempts, 1/2/4 s, `Retry` reason `connection failed`): such a request was
-never dispatched, which the resilience design permits, and the settlement is
-`NotStarted`. Any failure after connecting, every HTTP status, and stream
-errors stay single-attempt.
+streamed output, at most three times with 1/2/4-second backoff; the
+OpenAI-compatible transport retries the classes described next. A retry
+repeats only the borrowed provider request, never tools or the agent turn.
+HTTP, auth, and stream-codec errors are terminal; retries preserve
+cancellation, the original deadline, actual send-attempt counts, and unknown
+effect certainty on failure.
+The OpenAI-compatible transport uses the same policy (4 attempts, 1/2/4 s)
+for two failure classes, both of which prove that nothing was visible to the
+caller yet. A send whose connection could not be established
+(`reqwest::Error::is_connect`, `Retry` reason `connection failed`) was never
+dispatched, which the resilience design permits, and the settlement is
+`NotStarted`. A dispatched request whose transport failed before any stream
+event reached the caller (`Retry` reason `connection interrupted`) is retried
+as well: a connection reset, a connection closed before the message
+completed, a broken pipe, a stalled read, or a send that produced no response.
+Its settlement is `transport_lost` with `Unknown` certainty, because the
+endpoint may have started the completion even though no output was visible.
+Every HTTP status, every stream-codec error, a local builder or redirect-policy
+rejection, and any failure after a reasoning, text or tool-call delta stays
+single-attempt.
 Retry progress uses the existing provider event; core owns countdown formatting
 and native/browser frontends supply elapsed time.
 The fixed race rule is completion-first only after the owner has obtained and

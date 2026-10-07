@@ -16,6 +16,7 @@ storage-conformance = []
 fault-injection = []
 
 [dependencies]
+shlex = "=2.0.1"
 otto-core.workspace = true
 async-trait.workspace = true
 base64.workspace = true

@@ -92,6 +92,7 @@ impl Controller {
         }
         let runner = self.runner()?;
         let runtime = self.current_runtime()?;
+        // Questions do not amend the active task; queued text is admitted later as its own user turn.
         let queued = Arc::new(AtomicBool::new(false));
         let mut tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>> = [false, true]
             .into_iter()
@@ -209,6 +210,7 @@ impl Controller {
         let runner = self.runner()?;
         let runtime = self.current_runtime()?;
         let queued = Arc::new(AtomicBool::new(false));
+        // Decisions/revocation use exact approval bindings; this dialogue supplies no new task authority.
         let mut tools: Vec<Box<dyn crate::tool::Tool + Send + Sync>> = [false, true]
             .into_iter()
             .map(|revoke| {

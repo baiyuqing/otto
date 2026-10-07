@@ -47,10 +47,34 @@ func (c *chat) cmdAuto(m Message, arg string) {
 			return
 		}
 		c.startApprovalWatch(sid)
-		mode, err := c.b.opts.Agent.ApprovalMode(ctx, sid, automatic)
+		if automatic != nil {
+			if c.b.opts.Store.Session(c.key) != sid {
+				c.send(ctx, m.MessageID, "This mode shortcut belongs to another session. Send /auto for current controls.")
+				return
+			}
+			_, err = c.b.opts.Agent.ApprovalMode(ctx, sid, automatic)
+			if err != nil {
+				c.send(ctx, m.MessageID, "Could not configure approval mode: "+err.Error())
+				return
+			}
+		}
+		policy, err := c.b.opts.Agent.ApprovalPolicy(ctx, sid)
 		if err != nil {
 			c.send(ctx, m.MessageID, "Could not configure approval mode: "+err.Error())
 			return
+		}
+		mode := policy.Mode
+		if policy.Policy == "never" {
+			mode = "never"
+		}
+		messageID := ""
+		if m.ModeSession != "" {
+			messageID = m.MessageID
+		}
+		if platform, ok := c.p.(PolicyPlatform); ok && !policy.Legacy {
+			if err := platform.SendApprovalPolicy(ctx, c.id, messageID, sid, *policy); err == nil {
+				return
+			}
 		}
 		if platform, ok := c.p.(ModePlatform); ok {
 			messageID := ""
@@ -62,6 +86,10 @@ func (c *chat) cmdAuto(m Message, arg string) {
 			}
 		}
 		name := agent.ApprovalModeLabel(mode)
+		if !policy.Legacy {
+			c.send(ctx, m.MessageID, policySummary(sid, policy)+"\n/auto on · /auto off")
+			return
+		}
 		note := "/auto on · /auto off"
 		if mode == "yolo" {
 			note = "This session approves every request without asking. /auto off requires manual approval again."

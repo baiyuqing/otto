@@ -12,6 +12,21 @@ pub struct Artifact {
     pub diff: String,
 }
 impl Artifact {
+    pub fn authority(&self) -> super::Authority {
+        use crate::config::{ProfileChange, ProfileField};
+        if matches!(
+            &self.change,
+            ProfileChange::Create { .. }
+                | ProfileChange::SetField {
+                    field: ProfileField::BaseUrl | ProfileField::ApiKeyEnv,
+                    ..
+                }
+        ) {
+            super::Authority::Consent
+        } else {
+            super::Authority::Durable
+        }
+    }
     pub fn prepare(change: ProfileChange, preview: &ProfileChangePreview) -> Self {
         Self {
             change,

@@ -97,7 +97,17 @@ pub(super) fn pending(controller: &Controller, params: &PendingParams) -> Reply 
             cursor: params.cursor.clone(),
         })
         .map_err(|failure| memory_error(&failure))?;
-    let candidates: Vec<Value> = page.candidates.iter().map(candidate_json).collect();
+    let snapshot = controller
+        .approval_snapshot()
+        .map_err(|failure| error(super::INTERNAL_ERROR, failure.to_string()))?;
+    let candidates: Vec<Value> = page
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            crate::approval::memory::is_human_pending(candidate, &snapshot.requests)
+        })
+        .map(candidate_json)
+        .collect();
     Ok(json!({ "candidates": candidates, "nextCursor": page.next_cursor }))
 }
 

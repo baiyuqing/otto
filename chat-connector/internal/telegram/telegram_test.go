@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 	"github.com/baiyuqing/otto/chat-connector/internal/bridge"
 	"github.com/baiyuqing/otto/chat-connector/internal/state"
 )
@@ -844,6 +845,20 @@ func TestApprovalModeMessageShowsModeAndOffersBothShortcuts(t *testing.T) {
 		if got := buttons[i].(map[string]any)["callback_data"]; got != "auto:"+mode+":"+session {
 			t.Fatalf("shortcut = %v", got)
 		}
+	}
+}
+
+func TestApprovalPolicyMessageShowsNeverAndInactiveReviewer(t *testing.T) {
+	api := newAPI(t, func(method string, body map[string]any) resp { return okR(map[string]any{"message_id": 42}) })
+	bot := New(testToken, nil)
+	bot.APIBase = api.srv.URL
+	policy := agent.ApprovalPolicy{Policy: "never", Reviewer: "auto_review", Mode: "auto", Automatic: true}
+	if err := bot.SendApprovalPolicy(context.Background(), "123", "", strings.Repeat("b", 32), policy); err != nil {
+		t.Fatal(err)
+	}
+	text := api.byMethod("sendMessage")[0].body["text"].(string)
+	if !strings.Contains(text, "Approval policy: NEVER") || !strings.Contains(text, "auto_review (inactive)") {
+		t.Fatalf("policy text = %q", text)
 	}
 }
 

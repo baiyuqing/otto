@@ -108,6 +108,7 @@ struct MemoryState {
     header: Header,
     name: String,
     thinking_level: String,
+    custom_data: HashMap<String, String>,
 }
 
 impl MemoryHandle {
@@ -119,6 +120,7 @@ impl MemoryHandle {
                 header,
                 name: String::new(),
                 thinking_level: String::new(),
+                custom_data: HashMap::new(),
             }),
             writer_ownership: None,
         }
@@ -200,11 +202,18 @@ impl Session for MemoryHandle {
     }
 
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
-        self.inner.append_custom(custom_type, data).await
+        self.inner.append_custom(custom_type, data).await?;
+        self.state()
+            .custom_data
+            .insert(custom_type.into(), data.into());
+        Ok(())
     }
 }
 
 impl SessionHandle for MemoryHandle {
+    fn custom_data(&self, custom_type: &str) -> Option<String> {
+        self.state().custom_data.get(custom_type).cloned()
+    }
     fn header(&self) -> Header {
         self.state().header.clone()
     }
@@ -634,7 +643,10 @@ impl RequestSizer for ScriptedSizer {
 }
 
 pub struct Runner {
+    authorization_run: Arc<Mutex<String>>,
     approvals: Option<(Arc<crate::approval::Service>, crate::approval::Scope)>,
+    review_context: tokio::sync::Mutex<crate::approval::reviewer::ReviewContext>,
+    pending_authorization: Mutex<Vec<String>>,
     agent: Agent<ProviderClient, Registry, SharedSession>,
     turn_timeout: Option<Duration>,
     system_prompt: String,
@@ -674,6 +686,150 @@ pub struct Runner {
 pub type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
 
 impl Runner {
+    pub(crate) fn set_scheduled_authorization_run(&self, label: &str) {
+        let mut run = self.authorization_run.lock().expect("authorization run");
+        if !run.starts_with("schedule:") {
+            *run = format!("schedule:{label}");
+        }
+    }
+    pub(crate) async fn install_authorization_context(
+        &self,
+        mut context: crate::approval::reviewer::ReviewContext,
+    ) -> Result<(), String> {
+        let Some((service, scope)) = &self.approvals else {
+            return Ok(());
+        };
+        if scope.session_id.is_empty() {
+            return Ok(());
+        }
+        let mut current = self.review_context.lock().await;
+        context.policy_digest = current.policy_digest.clone();
+        context.refresh_digest();
+        self.session()
+            .append_custom(
+                crate::approval::reviewer::CONTEXT_CUSTOM_TYPE,
+                &serde_json::to_string(&context).map_err(|error| error.to_string())?,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        service
+            .set_review_context(&scope.workspace, &scope.session_id, context.clone())
+            .map_err(|error| error.to_string())?;
+        *current = context;
+        Ok(())
+    }
+    /// Captures only text admitted through a human input boundary, before any
+    /// model/tool execution. Generated child, wake and scheduled prompts never call this.
+    pub(crate) async fn record_user_authorization(&self, text: &str) -> Result<(), AgentError> {
+        self.record_user_authorizations(&[text.to_owned()]).await
+    }
+
+    async fn record_user_authorizations(&self, texts: &[String]) -> Result<(), AgentError> {
+        let Some((service, scope)) = &self.approvals else {
+            return Ok(());
+        };
+        if scope.session_id.is_empty() {
+            return Ok(());
+        }
+        let mut current = self.review_context.lock().await;
+        let mut context = current.clone();
+        if context
+            .instructions
+            .iter()
+            .any(|instruction| instruction == crate::approval::reviewer::INCOMPLETE_EVIDENCE)
+        {
+            context.trusted_user_messages.clear();
+            context.instructions.retain(|instruction| {
+                instruction != crate::approval::reviewer::INCOMPLETE_EVIDENCE
+            });
+            context
+                .instructions
+                .push(crate::approval::reviewer::FRESH_EVIDENCE_ONLY.into());
+        }
+        context
+            .trusted_user_messages
+            .extend(texts.iter().map(|text| self.redact_text(text)));
+        // Never select an arbitrary excerpt which could drop a prohibition.
+        if serde_json::to_string(&context)
+            .map_err(|error| AgentError::Other(error.to_string()))?
+            .len()
+            > crate::approval::reviewer::MAX_INPUT_BYTES
+        {
+            context.trusted_user_messages.clear();
+            context.instructions.clear();
+            context
+                .instructions
+                .push(crate::approval::reviewer::INCOMPLETE_EVIDENCE.into());
+        }
+        context.refresh_digest();
+        let unavailable = crate::approval::reviewer::ReviewContext {
+            evidence_digest: context.evidence_digest.clone(),
+            policy_digest: "authorization-persistence-pending".into(),
+            ..Default::default()
+        };
+        service
+            .set_review_context(&scope.workspace, &scope.session_id, unavailable)
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        self.session()
+            .append_custom(
+                crate::approval::reviewer::CONTEXT_CUSTOM_TYPE,
+                &serde_json::to_string(&context)
+                    .map_err(|error| AgentError::Other(error.to_string()))?,
+            )
+            .await
+            .map_err(|error| AgentError::Other(error.to_string()))?;
+        {
+            let pending = self
+                .pending_authorization
+                .lock()
+                .expect("pending authorization");
+            if pending.is_empty() {
+                service
+                    .set_review_context(&scope.workspace, &scope.session_id, context.clone())
+                    .map_err(|error| AgentError::Other(error.to_string()))?;
+            }
+        }
+        *current = context;
+        Ok(())
+    }
+
+    /// Sync admission invalidates a review immediately. The monitor persists
+    /// the original input before installing an assessable replacement context.
+    pub(crate) fn queue_user_authorization(&self, text: &str) -> Result<(), String> {
+        let Some((service, scope)) = &self.approvals else {
+            return Ok(());
+        };
+        if scope.session_id.is_empty() {
+            return Ok(());
+        }
+        let mut pending = self
+            .pending_authorization
+            .lock()
+            .expect("pending authorization");
+        pending.push(self.redact_text(text));
+        let unavailable = crate::approval::reviewer::ReviewContext {
+            evidence_digest: crate::approval::digest(&pending.join("\n")),
+            policy_digest: "authorization-input-pending".into(),
+            ..Default::default()
+        };
+        service
+            .set_review_context(&scope.workspace, &scope.session_id, unavailable)
+            .map_err(|error| error.to_string())
+    }
+
+    async fn flush_user_authorization(&self) -> Result<(), AgentError> {
+        let pending = std::mem::take(
+            &mut *self
+                .pending_authorization
+                .lock()
+                .expect("pending authorization"),
+        );
+        if pending.is_empty() {
+            Ok(())
+        } else {
+            self.record_user_authorizations(&pending).await
+        }
+    }
     pub async fn end_session_hooks(self: &Arc<Self>) {
         if self.agent.claim_end_hooks() {
             let runner = self.clone();
@@ -861,6 +1017,15 @@ impl Runner {
         mut events: tokio::sync::mpsc::UnboundedReceiver<otto_core::agent::Event>,
         emit: EventSink<'_>,
     ) -> T {
+        {
+            let mut run = self.authorization_run.lock().expect("authorization run");
+            if !run.starts_with("schedule:") {
+                *run = self
+                    .task_control()
+                    .authorization_scope()
+                    .unwrap_or_else(crate::runtime::sidecar_mailbox::new_input_id);
+            }
+        }
         tokio::pin!(future);
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let mut cursor = self
@@ -875,6 +1040,7 @@ impl Runner {
         loop {
             tokio::select! {
                 result=&mut future=>{
+                    let _ = self.flush_user_authorization().await;
                     while let Ok(event)=events.try_recv(){emit(event);}
                     if let Some((service,scope))=&self.approvals {
                         while let Ok(changes)=service.events(&scope.workspace,Some(&scope.session_id),cursor) {
@@ -886,6 +1052,7 @@ impl Runner {
                 },
                 Some(event)=events.recv()=>emit(event),
                 _=tick.tick(),if self.approvals.is_some()=>{
+                    let _ = self.flush_user_authorization().await;
                     while let Ok(event)=events.try_recv(){emit(event);}
                     if let Some((service,scope))=&self.approvals && let Ok(changes)=service.events(&scope.workspace,Some(&scope.session_id),cursor) {
                         for change in changes {cursor=change.sequence;emit(otto_core::agent::Event::ApprovalChanged{request:Box::new(change.request)});}
@@ -1176,6 +1343,9 @@ impl Runner {
                 },
             ),
             approvals: None,
+            authorization_run: Arc::default(),
+            review_context: tokio::sync::Mutex::new(Default::default()),
+            pending_authorization: Mutex::new(Vec::new()),
             turn_timeout: None,
             system_prompt: String::new(),
             definitions,
@@ -1603,6 +1773,36 @@ impl Builder {
                 system_prompt: Some(&prompt),
             },
         )
+    }
+
+    fn review_instruction_snapshot(
+        &self,
+        workspace_instructions: &str,
+        redactor: &Redactor,
+    ) -> Vec<String> {
+        let mut instructions = vec![redactor.redact_string(workspace_instructions)];
+        if self.memory.extension.is_none() && self.config.memory.enabled != Some(false) {
+            match self
+                .memory
+                .service
+                .standing_records(&self.memory.user_scope)
+            {
+                Ok(records) => {
+                    instructions.extend(records.into_iter().map(|record| {
+                        serde_json::json!({
+                            "constraint_only": true, "source": "accepted_standing_user_memory",
+                            "id": record.id, "revision": record.revision, "kind": record.kind,
+                            "key": record.key, "text": redactor.redact_string(&record.text),
+                        })
+                        .to_string()
+                    }));
+                }
+                Err(error) if error.kind == crate::memory::ErrorKind::Disabled => {}
+                Err(_) => instructions
+                    .push(crate::approval::reviewer::STANDING_CONSTRAINTS_UNAVAILABLE.into()),
+            }
+        }
+        instructions
     }
 
     pub fn boundary_allows_dynamic(&self, runtime: Option<&Runtime>) -> bool {
@@ -2120,13 +2320,14 @@ impl Builder {
                     legacy: self.bash_approvals.clone(),
                 }));
             }
-            tools.extend(crate::schedule::tools::tools(
+            tools.extend(crate::schedule::tools::tools_with_session(
                 &crate::schedule::tools::Context {
                     store: self.schedule.clone(),
                     origin: Arc::clone(&schedule_origin),
                     session_id: session.header().id.clone(),
                     workspace: self.workspace_path.clone(),
                 },
+                session.handle().clone(),
             ));
             tools.push(Box::new(crate::tool::task_control::TaskQueue::new(
                 Arc::clone(&task_control),
@@ -2168,6 +2369,7 @@ impl Builder {
         ) {
             tools = guard.tools(tools);
         }
+        let authorization_run = Arc::new(Mutex::new(String::new()));
         let registry =
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
         let registry = registry.with_approval_origin(
@@ -2180,7 +2382,8 @@ impl Builder {
             },
             Some(Arc::clone(&presentation_origin)),
         );
-        let registry = with_lease_guard(registry, session, &self.workspace_path);
+        let registry = with_lease_guard(registry, session, &self.workspace_path)
+            .with_authorization_run(authorization_run.clone());
         let definitions = registry.definitions();
         let base_prompt = system_prompt_for(
             &definitions,
@@ -2192,6 +2395,89 @@ impl Builder {
         let system_prompt =
             base_prompt.clone() + &prompt_tail + &parent_agent_section + "</otto_system_prompt>";
         let (environment, instructions) = split_workspace_instructions(&environment);
+        self.approvals
+            .set_policy_config(&self.workspace_path, self.config.approval.clone())
+            .map_err(|error| error.to_string())?;
+        let forced = self
+            .config
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.force.get("approval"))
+            .cloned()
+            .map(toml::Value::try_into::<otto_core::config::ApprovalConfig>)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        self.approvals
+            .set_managed_policy(&self.workspace_path, forced)
+            .map_err(|error| error.to_string())?;
+        if !session.header().id.is_empty() {
+            let review_runtime = match self.config.approval.reviewer_profile.as_deref() {
+                Some(profile) => {
+                    if !self.config.profiles.contains_key(profile) {
+                        return Err("approval reviewer profile does not exist".into());
+                    }
+                    self.resolve_profile(profile)?
+                }
+                None => runtime.clone(),
+            };
+            let review_agent = Agent::with_redactor(
+                match self.config.approval.reviewer_profile {
+                    Some(_) => self.provider_client(&review_runtime)?,
+                    None => client.clone(),
+                },
+                Registry::new(Vec::new())?,
+                SharedSession::memory(session.header()),
+                Options {
+                    model: review_runtime.model.clone(),
+                    provider_name: review_runtime.provider.clone(),
+                    thinking: review_runtime.thinking.clone(),
+                    now: Box::new(Utc::now),
+                    new_operation_id: Box::new(new_operation_id),
+                    ..Options::default()
+                },
+                self.boundary_redactor(Some(&review_runtime)),
+            );
+            self.approvals
+                .register_reviewer(
+                    &self.workspace_path,
+                    &session.header().id,
+                    Arc::new(
+                        crate::approval::reviewer::SessionReviewer::new(review_agent)
+                            .with_usage(self.usage_collector(session, &review_runtime)),
+                    ),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let mut review_context = session
+            .handle()
+            .custom_data(crate::approval::reviewer::CONTEXT_CUSTOM_TYPE)
+            .and_then(|data| {
+                serde_json::from_str::<crate::approval::reviewer::ReviewContext>(&data).ok()
+            })
+            .unwrap_or_else(|| {
+                let mut constraints = self.review_instruction_snapshot(instructions, &redactor);
+                if !session.messages().is_empty() {
+                    constraints.push(crate::approval::reviewer::INCOMPLETE_EVIDENCE.into());
+                }
+                crate::approval::reviewer::ReviewContext {
+                    instructions: constraints,
+                    ..Default::default()
+                }
+            });
+        review_context.policy_digest = crate::approval::digest(
+            &serde_json::to_string(&self.config.approval).map_err(|error| error.to_string())?,
+        );
+        review_context.refresh_digest();
+        if !session.header().id.is_empty() {
+            self.approvals
+                .set_review_context(
+                    &self.workspace_path,
+                    &session.header().id,
+                    review_context.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+        }
         let system_prompt_parts: Vec<(String, String)> = [
             ("Base", base_prompt),
             ("Environment", redactor.redact_string(environment)),
@@ -2281,6 +2567,9 @@ impl Builder {
         }
         let trace_entries = trace.map(|trace| trace.entries).unwrap_or_default();
         let runner = Runner {
+            authorization_run,
+            review_context: tokio::sync::Mutex::new(review_context),
+            pending_authorization: Mutex::new(Vec::new()),
             approvals: Some((
                 self.approvals.clone(),
                 crate::approval::Scope {
@@ -2869,6 +3158,199 @@ mod tests {
 
     fn builder(root: &Path) -> Builder {
         builder_for(shared(root), root)
+    }
+
+    #[tokio::test]
+    async fn authorization_admission_preserves_each_original_and_legacy_new_task_can_review() {
+        let directory = tempfile::tempdir().unwrap();
+        let builder =
+            crate::cli::testutil::builder(directory.path(), &directory.path().join("sessions"));
+        let runtime = crate::cli::testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).unwrap();
+        // An old transcript's user role alone cannot establish provenance.
+        session
+            .append(Message {
+                role: otto_core::model::Role::User,
+                blocks: vec![Block::text("old prompt with unknown origin")],
+                created_at: Utc::now(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let runner = builder.build_runner(&session, &runtime).await.unwrap();
+        assert!(
+            runner
+                .review_context
+                .lock()
+                .await
+                .trusted_user_messages
+                .is_empty()
+        );
+        runner
+            .record_user_authorization("New task: inspect the requested repo")
+            .await
+            .unwrap();
+        let pending = runner.queue_user_authorization("Do not publish anything.");
+        assert!(pending.is_ok());
+        runner.flush_user_authorization().await.unwrap();
+        let data = session
+            .handle()
+            .custom_data(crate::approval::reviewer::CONTEXT_CUSTOM_TYPE)
+            .unwrap();
+        let context: crate::approval::reviewer::ReviewContext =
+            serde_json::from_str(&data).unwrap();
+        assert_eq!(
+            context.trusted_user_messages,
+            vec![
+                "New task: inspect the requested repo",
+                "Do not publish anything."
+            ]
+        );
+        assert!(!data.contains("old prompt with unknown origin"));
+        let replacement = builder.build_runner(&session, &runtime).await.unwrap();
+        assert_eq!(
+            replacement.review_context.lock().await.evidence_digest,
+            context.evidence_digest
+        );
+        session
+            .append(Message {
+                role: otto_core::model::Role::User,
+                blocks: vec![Block::text(
+                    "Model-visible tail with no extra authorization",
+                )],
+                created_at: Utc::now(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let first_kept_entry_id = session.messages().last().unwrap().id.clone();
+        session
+            .append_compaction(CompactionCheckpoint {
+                summary: "A deliberately incomplete model summary".into(),
+                first_kept_entry_id,
+                created_at: Utc::now(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let path = session.path();
+        runner.close();
+        replacement.close();
+        session.close().unwrap();
+        let (reopened, _) = builder
+            .storage
+            .sessions()
+            .unwrap()
+            .prepare(&path, None)
+            .unwrap()
+            .activate()
+            .unwrap();
+        let restored = SharedSession::new(reopened);
+        let replacement = builder.build_runner(&restored, &runtime).await.unwrap();
+        assert_eq!(
+            replacement
+                .review_context
+                .lock()
+                .await
+                .trusted_user_messages,
+            vec![
+                "New task: inspect the requested repo",
+                "Do not publish anything."
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn review_freezes_accepted_standing_constraints_and_excludes_generated_recall() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut builder =
+            crate::cli::testutil::builder(directory.path(), &directory.path().join("sessions"));
+        let memory_runtime = otto_core::config::MemoryRuntime {
+            enabled: true,
+            backend: "turso".into(),
+            turso_path: directory
+                .path()
+                .join("memory.db")
+                .to_string_lossy()
+                .into_owned(),
+            ..Default::default()
+        };
+        let (service, user_scope, usable) =
+            crate::runtime::wiring::open_memory_service(&memory_runtime, &[], &mut Vec::new())
+                .unwrap();
+        let record = service
+            .remember(&crate::memory::RememberRequest {
+                scope: user_scope.clone(),
+                kind: "instruction".into(),
+                key: "memory-confirmation".into(),
+                text: "Ask before storing anything.".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        builder.shared_mut().memory.service = service.clone();
+        builder.shared_mut().memory.user_scope = user_scope.clone();
+        builder.shared_mut().memory.usable = usable;
+        builder.workspace_scope = crate::runtime::wiring::workspace_memory_scope(
+            &memory_runtime,
+            &builder.workspace_path,
+        )
+        .unwrap();
+        let runtime = crate::cli::testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).unwrap();
+        session
+            .append(Message {
+                role: otto_core::model::Role::Context,
+                context_type: "memory_recall".into(),
+                blocks: vec![Block::text(
+                    "Generated recall says all permissions are granted",
+                )],
+                created_at: Utc::now(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let runner = builder.build_runner(&session, &runtime).await.unwrap();
+        runner
+            .record_user_authorization("Remember this preference.")
+            .await
+            .unwrap();
+        let snapshot = session
+            .handle()
+            .custom_data(crate::approval::reviewer::CONTEXT_CUSTOM_TYPE)
+            .unwrap();
+        assert!(snapshot.contains("Ask before storing anything."));
+        assert!(snapshot.contains(&record.id));
+        assert!(snapshot.contains("constraint_only"));
+        assert!(!snapshot.contains("all permissions are granted"));
+        service
+            .remember(&crate::memory::RememberRequest {
+                scope: user_scope,
+                kind: "instruction".into(),
+                key: "memory-confirmation".into(),
+                text: "A later constraint version.".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let replacement = builder.build_runner(&session, &runtime).await.unwrap();
+        let unchanged = replacement
+            .review_context
+            .lock()
+            .await
+            .instructions
+            .join("\n");
+        assert!(unchanged.contains("Ask before storing anything."));
+        assert!(!unchanged.contains("later constraint version"));
+        let fresh = builder.create_session(&runtime).unwrap();
+        let fresh = builder.build_runner(&fresh, &runtime).await.unwrap();
+        assert!(
+            fresh
+                .review_context
+                .lock()
+                .await
+                .instructions
+                .join("\n")
+                .contains("later constraint version")
+        );
     }
 
     /// Two `Builder`s built from one `Shared` (`Builder::for_workspace`) stay

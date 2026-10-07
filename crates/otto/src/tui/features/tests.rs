@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::approval::Approval;
+use super::approval::{Approval, Approvals};
 use super::choice::{Choice, ChoiceKind};
 use super::collection::Agents;
 use super::commands::Entry;
@@ -48,6 +48,7 @@ fn approval_request() -> crate::approval::Request {
         decision: None,
         application: crate::approval::ApplicationState::NotRequired,
         application_error: String::new(),
+        review: None,
     }
 }
 
@@ -72,6 +73,68 @@ fn candidate(id: &str) -> Candidate {
         result_record_id: String::new(),
         result_revision: 0,
     }
+}
+
+#[test]
+fn approval_activity_inspection_separates_counts_and_review_has_no_modal() {
+    let mut request = approval_request();
+    request.review = Some(crate::approval::ReviewMetadata {
+        status: crate::approval::ReviewStatus::Reviewing,
+        assessment: None,
+        settings_revision: 1,
+        evidence_digest: "evidence".into(),
+        policy_digest: "policy".into(),
+    });
+    let id = request.id.clone();
+    let mut approvals = Approvals::default();
+    approvals.receive(Reply::ApprovalActivity(crate::approval::ApprovalActivity {
+        requests: Vec::new(),
+        cursor: 1,
+        reviewing: vec![request],
+        recent_decisions: Vec::new(),
+        counts: crate::approval::ApprovalCounts {
+            human_pending: 0,
+            reviewing: 1,
+            application_failed: 2,
+        },
+    }));
+    assert_eq!(
+        approvals.view().description,
+        "0 human pending · 1 reviewing · 2 application failed"
+    );
+    let Transition::Push(detail) = approvals.activate(Activation::Open(id)) else {
+        panic!("open review details");
+    };
+    assert!(!detail.view().modal);
+    assert!(detail.view().actions.is_empty());
+}
+
+#[test]
+fn automatic_review_and_denial_have_no_human_actions() {
+    let mut request = approval_request();
+    request.review = Some(crate::approval::ReviewMetadata {
+        status: crate::approval::ReviewStatus::Reviewing,
+        assessment: None,
+        settings_revision: 1,
+        evidence_digest: "evidence".into(),
+        policy_digest: "policy".into(),
+    });
+    let view = Approval::shared(&request).view();
+    assert!(view.actions.is_empty());
+    assert!(view.default_action.is_none());
+    assert_eq!(view.description.split(" · ").next(), Some("Reviewing"));
+    request.state = crate::approval::State::Rejected;
+    let review = request.review.as_mut().unwrap();
+    review.status = crate::approval::ReviewStatus::Completed;
+    review.assessment = Some(crate::approval::ReviewAssessment {
+        risk: crate::approval::RiskLevel::Critical,
+        user_authorization: crate::approval::UserAuthorization::Unknown,
+        outcome: crate::approval::ReviewOutcome::Deny,
+        reason: "The target is outside the authorized scope.".into(),
+    });
+    let view = Approval::shared(&request).view();
+    assert!(view.actions.is_empty());
+    assert!(view.document.contains("outside the authorized scope"));
 }
 
 #[test]

@@ -1,5 +1,107 @@
 use super::*;
 
+#[test]
+fn auto_startup_reviews_and_persists_requested_memory_without_a_human_card() {
+    use otto::faults::http;
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let database = home.path().join("review-memory.db");
+    let reviews = Arc::new(AtomicUsize::new(0));
+    let reviewer_calls = reviews.clone();
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    let (url_sender, url_receiver) = channel();
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+            let server = http::spawn(move |request| {
+                let body: Value = serde_json::from_str(&request.body).unwrap();
+                let system = body["messages"][0]["content"].as_str().unwrap();
+                let reply = if system.starts_with("You assess an exact prepared operation") {
+                    reviewer_calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(body["tools"].as_array().is_none_or(Vec::is_empty));
+                    assert!(request.body.contains("Use tabs in fixture files."));
+                    text_reply(&json!({"risk":"medium", "user_authorization":"high",
+                        "outcome":"allow", "reason":"User requested this exact workspace preference."}).to_string())
+                } else if system.starts_with("You give advisory hints") {
+                    text_reply("no advice")
+                } else if main_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tool_call_reply("remember-fixture", "remember",
+                        r#"{"kind":"preference","key":"fixture","text":"Use tabs in fixture files."}"#)
+                } else {
+                    text_reply("queued")
+                };
+                http::sse_response(&reply)
+            }).await;
+            url_sender.send(server.url.clone()).unwrap();
+            std::future::pending::<()>().await;
+        });
+    });
+    configure(home.path(), &url_receiver.recv().unwrap());
+    let config = home.path().join(".config/otto/config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            "{text}\n[memory.turso]\npath = {:?}\n",
+            database.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut client = Client::spawn(home.path(), workspace.path(), "off");
+    client.initialize();
+    let session_id = client.new_session(workspace.path());
+    let (frames, response) = client.call(
+        "session/prompt",
+        prompt(
+            &session_id,
+            "Remember this workspace preference: Use tabs in fixture files.",
+        ),
+    );
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["method"] != "session/request_permission")
+    );
+    let started = Instant::now();
+    loop {
+        let (_, activity) = client.call("_otto/approvals/list", json!({"sessionId": session_id}));
+        assert_eq!(
+            activity["result"]["counts"]["human_pending"], 0,
+            "{activity}"
+        );
+        if activity["result"]["recent_decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["subject"]["source"] == "memory" && r["application"] == "applied")
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < TIMEOUT,
+            "memory approval did not apply: {activity}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(reviews.load(Ordering::SeqCst), 1);
+    assert_eq!(client.close(), Some(0));
+    let memory = otto::memory::Service::new(
+        otto::memory::turso::Store::open(&database, Default::default()).unwrap(),
+        otto::memory::decide_default_policy,
+    );
+    let scope =
+        otto::memory::scope::new_workspace_scope(workspace.path().to_str().unwrap(), "").unwrap();
+    let record = memory
+        .get_by_key(&otto::memory::RecordKey {
+            scope,
+            kind: "preference".into(),
+            key: "fixture".into(),
+        })
+        .unwrap();
+    assert_eq!(record.text, "Use tabs in fixture files.");
+    assert_eq!(record.revision, 1);
+}
+
 /// Spawns a client whose model proposes one memory, and returns the id of the
 /// pending candidate.
 fn client_with_pending_candidate(
@@ -26,6 +128,11 @@ fn client_with_pending_candidate(
         true
     );
     let session_id = client.new_session(workspace);
+    let (_, response) = client.call(
+        "_otto/approval_mode/set",
+        json!({"sessionId": session_id, "automatic": false}),
+    );
+    assert_eq!(response["result"]["automatic"], false, "{response}");
     let (_, response) = client.call("session/prompt", prompt(&session_id, "remember tabs"));
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     let (_, pending) = client.call("_otto/memory/pending", json!({"sessionId": session_id}));
@@ -137,6 +244,11 @@ fn memory_pending_pages_with_a_cursor_and_rejects_bad_paging() {
     let mut client = Client::spawn(home.path(), workspace.path(), "off");
     client.initialize();
     let session_id = client.new_session(workspace.path());
+    let (_, mode) = client.call(
+        "_otto/approval_mode/set",
+        json!({"sessionId": session_id, "mode": "manual"}),
+    );
+    assert_eq!(mode["result"]["mode"], "manual", "{mode}");
     let (_, done) = client.call("session/prompt", prompt(&session_id, "remember two"));
     assert_eq!(done["result"]["stopReason"], "end_turn", "{done}");
 

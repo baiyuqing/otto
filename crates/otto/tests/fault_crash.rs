@@ -129,7 +129,7 @@ fn a_crash_during_a_journal_append_leaves_a_torn_line_that_reopen_truncates_and_
                         Trigger::Nth(5),
                         Fault::ShortExit { keep: 1500 },
                     )
-                    .filter(Filter::NameSuffix(".jsonl")),
+                    .filter(Filter::NameContains(".jsonl")),
                 ],
             );
             store.append_message(&user("first")).expect("first");

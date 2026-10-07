@@ -490,7 +490,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
-    use crate::auth::testserver;
+    use crate::faults::http as testserver;
 
     struct FakeBearer {
         bearer_result: Mutex<Result<String, CallError>>,

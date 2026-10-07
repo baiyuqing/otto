@@ -189,7 +189,8 @@ pub enum Event {
         compaction: CompactionResult,
     },
     /// An automatic compaction failed below the hard input limit. The turn
-    /// continues with the uncompacted request.
+    /// continues with the uncompacted request. The message ends with the
+    /// redacted failure cause.
     CompactionWarning {
         message: String,
     },
@@ -287,8 +288,9 @@ pub enum AgentError {
     #[error("invalid compaction summary{}", detail(.0))]
     InvalidCompactionSummary(String),
     /// A compaction step failed at a boundary the agent does not own: the
-    /// selection, the provider call, or the durable append.
-    #[error("{message}")]
+    /// selection, the provider call, or the durable append. The cause is
+    /// appended to the message.
+    #[error("{message}{}", detail(.cause))]
     CompactionBoundary { message: String, cause: String },
     /// An automatic compaction path gave up. `message` is one of the
     /// [`super::overflow`] constants and is shown to the user as is.

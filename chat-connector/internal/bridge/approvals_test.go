@@ -8,10 +8,28 @@ import (
 	"github.com/baiyuqing/otto/chat-connector/internal/agent"
 )
 
+func TestSharedCardsArePresentedOnlyToTheirExactOrigin(t *testing.T) {
+	h := newHarness(t, setup{})
+	c := h.b.chat(h.plat, "c1")
+	request := agent.SharedApproval{
+		ID: "request-a", Revision: 1, Title: "Review plan", State: "pending",
+		PresentationOrigin: "chat:telegram:another-chat",
+	}
+	c.showApprovals(context.Background(), "session-a", []agent.SharedApproval{request})
+	if got := h.plat.texts(); len(got) != 0 {
+		t.Fatalf("unrelated approval was presented: %q", got)
+	}
+	request.PresentationOrigin = c.presentationOrigin()
+	c.showApprovals(context.Background(), "session-a", []agent.SharedApproval{request})
+	if got := h.plat.texts(); len(got) != 2 {
+		t.Fatalf("matching approval was not presented once: %q", got)
+	}
+}
+
 func TestSharedCardRetryKeepsDetailsAndDoesNotCloseAnInFlightDecision(t *testing.T) {
 	h := newHarness(t, setup{})
 	c := h.b.chat(h.plat, "c1")
-	r := agent.SharedApproval{ID: "request-a", Revision: 1, Title: "Review plan", State: "pending", Blocking: true}
+	r := agent.SharedApproval{ID: "request-a", Revision: 1, Title: "Review plan", State: "pending", Blocking: true, PresentationOrigin: c.presentationOrigin()}
 	r.Subject.Details = "Complete proposal"
 	h.plat.mu.Lock()
 	h.plat.cardErr = errors.New("temporary delivery failure")

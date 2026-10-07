@@ -100,6 +100,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Approval review in the TUI now opens as a centered modal over the active
+  conversation instead of replacing the whole screen. It has no feedback
+  field, selects **Approve** by default, closes immediately after either
+  successful decision, and presents concurrent requests one at a time in
+  creation order instead of stacking them. Telegram and Feishu approval cards
+  plus passive memory/reflection notices now follow the exact originating chat;
+  workspace-visible or originless reviews remain explicitly discoverable but
+  are no longer broadcast to every chat bound to the session or workspace. See
+  [unified approvals](docs/user-manual.md#unified-approvals).
+
 - A process killed while it wrote the first records of a new session no longer
   leaves an empty or torn `<session-id>.jsonl`. Such a file failed to open
   ("session file is empty" or "session header must be one JSON object"),

@@ -442,8 +442,14 @@ impl App {
         match transition {
             Transition::Stay => {}
             Transition::Close => {
-                self.surfaces.remove(surface);
+                let approval = self
+                    .surfaces
+                    .remove(surface)
+                    .is_some_and(|surface| surface.model.key().starts_with("approval:"));
                 self.pending.retain(|(id, _)| *id != surface);
+                if approval {
+                    self.request_approvals();
+                }
             }
             Transition::Push(mut presenter) => {
                 if let Some(id) = presenter.key().strip_prefix("approval:") {
@@ -720,17 +726,34 @@ impl App {
                 surface.state.reconcile(&surface.model.view());
             }
         }
-        if let Some(request) = requests.iter().find(|r| {
-            r.state == crate::approval::State::Pending
-                && !existing.contains(&r.id)
-                && !covered.contains(&r.id)
-                && !self.hidden_approvals.contains(&r.id)
-        }) {
+        let approval_open = self
+            .surfaces
+            .iter()
+            .any(|surface| surface.model.key().starts_with("approval:"));
+        if !approval_open
+            && let Some(request) = requests.iter().find(|r| {
+                r.state == crate::approval::State::Pending
+                    && !existing.contains(&r.id)
+                    && !covered.contains(&r.id)
+                    && !self.hidden_approvals.contains(&r.id)
+            })
+        {
             self.transition(
                 0,
                 Transition::Push(Box::new(features::Approval::shared(request))),
             );
         }
+    }
+
+    fn show_approval(&mut self, presenter: features::Approval) {
+        if self
+            .surfaces
+            .iter()
+            .any(|surface| surface.model.key().starts_with("approval:"))
+        {
+            return;
+        }
+        self.transition(0, Transition::Push(Box::new(presenter)));
     }
 
     pub fn dispatch_line(
@@ -1180,13 +1203,12 @@ impl App {
                     e.stop_reason = result.stop_reason;
                 }
                 if let Some(request) = approval {
-                    let presenter = features::Approval::legacy(
+                    self.show_approval(features::Approval::legacy(
                         request.id,
                         request.command,
                         request.justification,
                         request.read_path,
-                    );
-                    self.transition(0, Transition::Push(Box::new(presenter)));
+                    ));
                 }
             }
             "compaction_completed" => {
@@ -1254,21 +1276,15 @@ impl App {
             APPROVAL_REQUESTED => {
                 if let Some(req) = &event.approval {
                     if req.state == crate::approval::State::Pending {
-                        self.transition(
-                            0,
-                            Transition::Push(Box::new(features::Approval::shared(req))),
-                        )
+                        self.show_approval(features::Approval::shared(req));
                     }
                 } else {
-                    self.transition(
-                        0,
-                        Transition::Push(Box::new(features::Approval::legacy(
-                            event.approval_id.clone(),
-                            event.command.clone(),
-                            event.justification.clone(),
-                            event.read_path.clone(),
-                        ))),
-                    );
+                    self.show_approval(features::Approval::legacy(
+                        event.approval_id.clone(),
+                        event.command.clone(),
+                        event.justification.clone(),
+                        event.read_path.clone(),
+                    ));
                 }
             }
             APPROVAL_DECIDED => {
@@ -1325,10 +1341,7 @@ impl App {
                             .iter()
                             .any(|s| s.model.key() == format!("approval:{}", request.id))
                     {
-                        self.transition(
-                            0,
-                            Transition::Push(Box::new(features::Approval::shared(request))),
-                        );
+                        self.show_approval(features::Approval::shared(request));
                     } else if request.state != crate::approval::State::Pending {
                         let key = format!("approval:{}", request.id);
                         let ids: Vec<_> = self
@@ -1472,6 +1485,7 @@ mod tests {
                 task_id: String::new(),
                 run_id: String::new(),
             },
+            presentation_origin: String::new(),
             subject: crate::approval::Subject {
                 tool_call_id: String::new(),
                 source: "test".into(),
@@ -1558,6 +1572,31 @@ mod tests {
         );
         assert!(app.has_surface());
         assert!(!app.hidden_approvals.contains("a1"));
+    }
+
+    #[test]
+    fn pending_approvals_are_presented_one_at_a_time() {
+        let (mut app, _) = app();
+        let first = approval("a1");
+        let second = approval("a2");
+
+        app.sync_shared_approval(&[first.clone(), second.clone()]);
+        let visible: Vec<_> = app
+            .surfaces
+            .iter()
+            .filter(|surface| surface.model.key().starts_with("approval:"))
+            .map(|surface| surface.model.key())
+            .collect();
+        assert_eq!(visible, ["approval:a1"]);
+
+        app.sync_shared_approval(&[second]);
+        let visible: Vec<_> = app
+            .surfaces
+            .iter()
+            .filter(|surface| surface.model.key().starts_with("approval:"))
+            .map(|surface| surface.model.key())
+            .collect();
+        assert_eq!(visible, ["approval:a2"]);
     }
 
     #[test]

@@ -260,12 +260,13 @@ cp otto.env.example otto.env
 make run                 # same as scripts/otto.sh
 ```
 
-`otto.env` is read as a shell file and ignored by Git, so quoting, `#` comments
-and `export` work. It is trusted local configuration, like a shell profile; put
-the real key there only in your own copy, never in the committed example. A
-checkout without `otto.env` still starts: the script says so on stderr and Otto
-falls back to its own configuration and the environment. An empty setting says
-nothing and behaves the same way.
+`otto.env` is read as a shell file and ignored by Git, as are variants such as
+`otto.env.local`, so quoting, `#` comments and `export` work. It is trusted
+local configuration, like a shell profile; put the real key there only in your
+own copy, never in the committed example. A checkout without `otto.env` still
+starts: the script says so on stderr and Otto falls back to its own
+configuration and the environment. An empty setting says nothing and behaves
+the same way.
 
 | Setting | Otto option |
 | --- | --- |

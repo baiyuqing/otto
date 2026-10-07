@@ -154,3 +154,15 @@ test('make run starts the launcher', () => {
   const output = execFileSync('make', ['-n', 'run'], { cwd: ROOT, encoding: 'utf8' });
   assert.match(output, /\.\/scripts\/otto\.sh/);
 });
+
+test('otto.env and its variants stay out of Git while the example is committed', () => {
+  const ignored = (path) => spawnSync('git', ['check-ignore', '-q', path], { cwd: ROOT }).status;
+  // A real key lives in otto.env, so an unignored name would be committed by
+  // `git add -A` without anyone noticing.
+  for (const path of ['otto.env', 'otto.env.local', 'otto.env.bak']) {
+    assert.equal(ignored(path), 0, `${path} must be ignored`);
+  }
+  assert.equal(ignored('otto.env.example'), 1, 'otto.env.example must stay committable');
+  const tracked = execFileSync('git', ['ls-files', 'otto.env.example'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  assert.equal(tracked, 'otto.env.example');
+});

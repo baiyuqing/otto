@@ -26,8 +26,11 @@ target/
 !.env.sample
 !.env.template
 
-# Launcher configuration read by scripts/otto.sh; otto.env.example is tracked.
+# Launcher configuration read by scripts/otto.sh: kept out of Git, including
+# variants such as otto.env.local. otto.env.example is the committed template.
 otto.env
+otto.env.*
+!otto.env.example
 
 # Local config that may embed secrets
 config.toml

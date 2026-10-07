@@ -1186,6 +1186,42 @@ impl Connection {
                         self.say(session_id, &text);
                         end_turn()
                     }
+                    command::Command::Model { profile } => {
+                        if profile.is_empty() {
+                            let info = session.controller.info();
+                            let available = session.controller.profiles();
+                            self.say(
+                                session_id,
+                                &command::model_text(
+                                    &info.profile,
+                                    &info.provider,
+                                    &info.model,
+                                    &info.thinking,
+                                    &available,
+                                ),
+                            );
+                            return end_turn();
+                        }
+                        match session.controller.switch_profile_result(profile).await {
+                            Ok(switched) => {
+                                let info = session.controller.info();
+                                self.say(
+                                    session_id,
+                                    &command::model_switched_text(
+                                        &info.profile,
+                                        &info.provider,
+                                        &info.model,
+                                        &info.thinking,
+                                    ),
+                                );
+                                for warning in switched.warnings {
+                                    self.say(session_id, &local.redact(&warning));
+                                }
+                                end_turn()
+                            }
+                            Err(message) => Err(invalid_params(local.redact(&message))),
+                        }
+                    }
                     command::Command::Context => {
                         let report = session.controller.context_report();
                         self.say(

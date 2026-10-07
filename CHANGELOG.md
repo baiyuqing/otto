@@ -25,7 +25,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
   cannot do. Bare `/model` reports the session's profile, provider, model,
   effort and the configured profile names; `otto acp --attach` runs the switch
   on `otto serve` through the new `POST /v1/sessions/{id}/profile` route
-  ([user manual](docs/user-manual.md#compact-and-context-are-slash-commands)).
+  ([#390](https://github.com/baiyuqing/otto/pull/390),
+  [user manual](docs/user-manual.md#compact-and-context-are-slash-commands)).
 
 - Deliver work into a repository other than the session's own from an
   `otto serve` session: the parent-only `start_delivery_task` tool takes one

@@ -114,12 +114,38 @@ impl Client {
     /// A client for `base_url`. One trailing `/` is trimmed so the path is
     /// never doubled.
     pub fn with_base_url(base_url: &str, tokens: TokenSource, account_id: &str) -> Self {
+        Self::with_client_result(
+            base_url,
+            tokens,
+            account_id,
+            default_http_client().map_err(|error| error.to_string()),
+        )
+    }
+
+    /// A client for `base_url` on a caller-supplied [`reqwest::Client`]. The
+    /// caller owns the timeouts and the redirect policy of `http`; nothing in
+    /// [`default_http_client`] is reapplied.
+    pub fn with_http_client(
+        base_url: &str,
+        tokens: TokenSource,
+        account_id: &str,
+        http: reqwest::Client,
+    ) -> Self {
+        Self::with_client_result(base_url, tokens, account_id, Ok(http))
+    }
+
+    fn with_client_result(
+        base_url: &str,
+        tokens: TokenSource,
+        account_id: &str,
+        http: Result<reqwest::Client, String>,
+    ) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             tokens,
             account_id: account_id.to_owned(),
             hosted_web_search: false,
-            http: default_http_client().map_err(|error| error.to_string()),
+            http,
         }
     }
 }

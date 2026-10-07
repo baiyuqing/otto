@@ -154,7 +154,7 @@ impl<'a> EditTool<'a> {
             Err(message) => return error_result(message),
         };
 
-        let (replaced, diff) = match apply_text_edits(&text, rel_path, edits) {
+        let (replaced, diff, notes) = match apply_text_edits(&text, rel_path, edits) {
             Ok(applied) => applied,
             Err(message) => return error_result(message),
         };
@@ -168,7 +168,14 @@ impl<'a> EditTool<'a> {
         {
             return error.into_tool_result();
         }
-        text_result(format!("edited {rel_path}\n{diff}"))
+        let mut output = format!("edited {rel_path}\n{diff}");
+        for note in notes {
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&note);
+        }
+        text_result(output)
     }
 }
 
@@ -192,7 +199,8 @@ pub fn edit_definition() -> ToolDefinition {
             "top-level old_text/new_text; never split replacements between the two forms. ",
             "An empty new_text deletes the matched text. Batch edits apply together against the original file. When old_text has ",
             "no exact match, a match that ignores trailing whitespace and treats curly quotes, dashes, and ",
-            "non-breaking spaces as ASCII is used, and only the part of old_text that new_text changes is rewritten.",
+            "non-breaking spaces as ASCII is used, and only the part of old_text that new_text changes is rewritten. ",
+            "The result shows a diff and notes when new_text drops the line break that ends old_text, joining the next line.",
         ),
         json!({
             "type": "object",
@@ -253,14 +261,15 @@ impl Tool for EditTool<'_> {
     }
 }
 
-/// Applies every replacement to `text` and renders the diff. Every `old_text`
-/// is matched against the original content, a leading byte-order mark and the
-/// file's newline style are preserved, and overlapping edits are refused.
+/// Applies every replacement to `text` and renders the diff and any notes
+/// about likely mistakes. Every `old_text` is matched against the original
+/// content, a leading byte-order mark and the file's newline style are
+/// preserved, and overlapping edits are refused.
 fn apply_text_edits(
     text: &str,
     path: &str,
     edits: &[EditReplacement],
-) -> Result<(String, String), String> {
+) -> Result<(String, String, Vec<String>), String> {
     let body = text.strip_prefix('\u{feff}').unwrap_or(text);
     let has_bom = body.len() != text.len();
     let (content, content_to_body) = normalize_line_endings_with_map(body);
@@ -268,6 +277,7 @@ fn apply_text_edits(
 
     let mut matcher = EditMatcher::new(&content);
     let mut resolved = Vec::with_capacity(edits.len());
+    let mut notes = Vec::new();
     for (index, edit) in edits.iter().enumerate() {
         let mut old_text = normalize_line_endings(&edit.old_text);
         let mut new_text = normalize_line_endings(&edit.new_text);
@@ -279,7 +289,11 @@ fn apply_text_edits(
                 .unwrap_or(&new_text)
                 .to_owned();
         }
-        resolved.push(matcher.resolve(&old_text, &new_text, path, index, edits.len())?);
+        let edit = matcher.resolve(&old_text, &new_text, path, index, edits.len())?;
+        if joins_next_line(&content, &edit, &old_text, &new_text) {
+            notes.push(joined_line_note(index, edits.len()));
+        }
+        resolved.push(edit);
     }
 
     resolved.sort_by_key(|edit| edit.start);
@@ -300,7 +314,32 @@ fn apply_text_edits(
             replaced
         },
         diff,
+        notes,
     ))
+}
+
+/// Whether the edit drops the line break ending `old_text` while keeping text
+/// in its place, so the line after the match continues the replacement. Models
+/// often copy a whole line with its break into `old_text` but leave it off
+/// `new_text`; deleting the match outright or editing the file's last line
+/// joins nothing.
+fn joins_next_line(content: &str, edit: &ResolvedEdit, old_text: &str, new_text: &str) -> bool {
+    old_text.ends_with('\n')
+        && !new_text.is_empty()
+        && !new_text.ends_with('\n')
+        && edit.end < content.len()
+}
+
+fn joined_line_note(index: usize, total: usize) -> String {
+    let message = concat!(
+        "old_text ends with a line break but new_text does not, so the next line now ",
+        "continues the replaced text; if unintended, edit again to restore the line break"
+    );
+    if total == 1 {
+        format!("note: {message}\n")
+    } else {
+        format!("note: edit {}: {message}\n", index + 1)
+    }
 }
 
 /// Locates `old_text` in LF-normalized content. The fuzzy view of the content
@@ -1070,6 +1109,66 @@ mod tests {
         assert!(result.content.contains("sample.txt"), "{result:?}");
         assert!(result.content.contains("-hello world"), "{result:?}");
         assert!(result.content.contains("+hello there"), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_line_break_ending_old_text_adds_a_note() {
+        let (root, path) = sample("a\nb\nc\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","old_text":"a\nb\n","new_text":"x\ny"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\nyc\n");
+        assert!(
+            result
+                .content
+                .contains("note: old_text ends with a line break but new_text does not"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_joining_fuzzy_match_in_a_batch_gets_a_numbered_note() {
+        let (root, path) = sample("one \ntwo\nthree\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","edits":[{"old_text":"three","new_text":"3"},{"old_text":"one\n","new_text":"1"}]}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "1two\n3\n");
+        assert!(
+            result.content.contains("note: edit 2: old_text ends"),
+            "{result:?}"
+        );
+        assert!(!result.content.contains("edit 1:"), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn kept_or_deleted_line_breaks_add_no_note() {
+        for (old_text, new_text, expected) in [
+            (r"a\nb\n", r"x\ny\n", "x\ny\nc\n"),
+            (r"a\nb", r"x\ny", "x\ny\nc\n"),
+            (r"a\n", "", "b\nc\n"),
+            (r"c\n", "z", "a\nb\nz"),
+        ] {
+            let (root, path) = sample("a\nb\nc\n");
+            let workspace = workspace(root.path());
+            let result = run(
+                &EditTool::new(&workspace),
+                &format!(
+                    r#"{{"path":"sample.txt","old_text":"{old_text}","new_text":"{new_text}"}}"#
+                ),
+            )
+            .await;
+            assert!(!result.is_error, "{result:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+            assert!(!result.content.contains("note:"), "{result:?}");
+        }
     }
 
     #[tokio::test]

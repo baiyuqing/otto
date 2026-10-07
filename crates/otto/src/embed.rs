@@ -166,7 +166,9 @@ pub enum Component {
     /// No reflect tool and no automatic reflection (`[reflection].enabled =
     /// false`).
     Reflection,
-    /// `schedule.db` is not opened and there is no schedule tool.
+    /// `schedule.db` is not opened. The schedule tools stay registered and
+    /// report that scheduled delivery is unavailable, as they do when the
+    /// store fails to open.
     Schedule,
     /// No session file is written; [`Otto::resume_session`] and
     /// [`Otto::list_sessions`] return [`Error::PersistenceDisabled`]
@@ -826,5 +828,603 @@ impl Session {
         close_controller(Arc::clone(&self.controller))
             .await
             .map_err(Error::Close)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::builder::TEST_PROVIDER;
+    use otto_core::{
+        agent::Event,
+        model::{BlockType, FinishReason, Role},
+        operation::OperationControl,
+        provider::{Provider, ProviderSettlement, Request, Response, StreamSink},
+    };
+    use serde_json::value::RawValue;
+    use std::collections::VecDeque;
+
+    /// `build()` is exclusive per process, so every test that builds an
+    /// `Otto` holds this for its whole body.
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        root: PathBuf,
+        home: PathBuf,
+        workspace: PathBuf,
+    }
+
+    const PROFILE: &str = r#"
+default_profile = "alpha"
+
+[profiles.alpha]
+provider = "openai-compatible"
+base_url = "https://example.com/v1"
+model = "gpt-test"
+api_key_env = "ALPHA_KEY"
+"#;
+
+    /// A temp home with a user config of `PROFILE`, `extra` and
+    /// `[sandbox] driver = "off"`, and an empty workspace.
+    fn fixture(extra: &str) -> Fixture {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical root");
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(home.join(".config/otto")).expect("config dir");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let extra = extra.replace("{ROOT}", &root.to_string_lossy());
+        std::fs::write(
+            home.join(".config/otto/config.toml"),
+            format!("{PROFILE}\n{extra}\n[sandbox]\ndriver = \"off\"\n"),
+        )
+        .expect("write config");
+        Fixture {
+            _directory: directory,
+            root,
+            home,
+            workspace,
+        }
+    }
+
+    fn environment(fixture: &Fixture) -> Vec<(String, String)> {
+        vec![
+            ("HOME".to_string(), fixture.home.to_string_lossy().into_owned()),
+            ("ALPHA_KEY".to_string(), "sk-alpha".to_string()),
+        ]
+    }
+
+    fn builder(fixture: &Fixture) -> OttoBuilder {
+        Otto::builder()
+            .workspace(&fixture.workspace)
+            .environment(environment(fixture))
+    }
+
+    /// A diagnostics writer the test can read back.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Capture {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    /// Replays `replies` in order and records every request.
+    #[derive(Default)]
+    struct Script {
+        replies: Mutex<VecDeque<Message>>,
+        requests: Mutex<Vec<Request>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Script {
+        async fn complete(
+            &self,
+            request: &Request,
+            _: StreamSink<'_>,
+            _: &dyn OperationControl,
+        ) -> ProviderSettlement {
+            self.requests.lock().unwrap().push(request.clone());
+            let message = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| reply("done"));
+            ProviderSettlement::succeeded(Response { message }, 1)
+        }
+    }
+
+    fn reply(text: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            blocks: vec![Block::text(text)],
+            finish_reason: Some(FinishReason::Stop),
+            ..Message::default()
+        }
+    }
+
+    fn tool_call(name: &str, arguments: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            blocks: vec![Block {
+                block_type: BlockType::ToolCall,
+                tool_call_id: "call-1".into(),
+                tool_name: name.into(),
+                arguments: Some(RawValue::from_string(arguments.into()).unwrap()),
+                ..Block::default()
+            }],
+            finish_reason: Some(FinishReason::ToolCalls),
+            ..Message::default()
+        }
+    }
+
+    /// Makes every runner the composition builds use `script` until dropped.
+    struct Installed;
+
+    impl Installed {
+        fn new(replies: Vec<Message>) -> (Self, Arc<Script>) {
+            let script = Arc::new(Script {
+                replies: Mutex::new(replies.into()),
+                ..Script::default()
+            });
+            *TEST_PROVIDER.lock().unwrap() = Some(script.clone());
+            (Self, script)
+        }
+    }
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            *TEST_PROVIDER.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+    }
+
+    async fn deny(_: ApprovalRequest) -> ApprovalDecision {
+        ApprovalDecision::Deny
+    }
+
+    async fn say(session: &Session, text: &str) -> Stop {
+        session
+            .prompt(Input::Text(text), &mut |_| {}, &CancellationToken::new(), deny)
+            .await
+            .expect("prompt")
+    }
+
+    /// The tool names of a new session, with `disabled` switched off, and the
+    /// entry names under the test's `~/.otto` after the runtime closed.
+    async fn observe(fixture: &Fixture, disabled: &[Component]) -> (Vec<String>, Vec<String>) {
+        let mut options = builder(fixture);
+        for component in disabled {
+            options = options.disable(*component);
+        }
+        let otto = options.build().await.expect("build");
+        let session = otto.new_session(None).await.expect("session");
+        let tools = session.controller.tool_names();
+        drop(session);
+        otto.close().await.expect("close");
+        let mut entries: Vec<String> = std::fs::read_dir(fixture.home.join(".otto"))
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        entries.sort();
+        (tools, entries)
+    }
+
+    fn has(names: &[String], wanted: &[&str]) -> bool {
+        wanted.iter().all(|name| names.iter().any(|n| n == name))
+    }
+
+    fn lacks(names: &[String], unwanted: &[&str]) -> bool {
+        unwanted.iter().all(|name| !names.iter().any(|n| n == name))
+    }
+
+    /// Runs the switch for `component` against a control without it:
+    /// `tools` appear in the control and not with the switch; `files` are
+    /// created by the control and not with the switch.
+    async fn switch(component: Component, extra: &str, tools: &[&str], files: &[&str]) {
+        let _serial = LOCK.lock().await;
+        let (control_tools, control_files) = observe(&fixture(extra), &[]).await;
+        assert!(has(&control_tools, tools), "control tools {control_tools:?}");
+        for file in files {
+            assert!(
+                control_files.iter().any(|f| f == file),
+                "control files {control_files:?} lack {file}"
+            );
+        }
+        let (tools_off, files_off) = observe(&fixture(extra), &[component]).await;
+        assert!(lacks(&tools_off, tools), "{component:?} tools {tools_off:?}");
+        for file in files {
+            assert!(
+                !files_off.iter().any(|f| f == file),
+                "{component:?} files {files_off:?} hold {file}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bash_off_removes_the_tool_and_reports_bash_unavailable() {
+        switch(Component::Bash, "", &["bash"], &[]).await;
+        let _serial = LOCK.lock().await;
+        let fixture = fixture("");
+        let otto = builder(&fixture).disable(Component::Bash).build().await.unwrap();
+        let session = otto.new_session(None).await.unwrap();
+        assert!(!session.info().sandbox.bash_available);
+        otto.close().await.unwrap();
+        let control = builder(&fixture).build().await;
+        assert!(control.is_ok(), "bash stays available without the switch");
+        let control = control.unwrap();
+        assert!(control.new_session(None).await.unwrap().info().sandbox.bash_available);
+        control.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn memory_off_removes_the_memory_tools() {
+        switch(Component::Memory, "", &["memory_search", "remember", "forget"], &[]).await;
+    }
+
+    #[tokio::test]
+    async fn subagents_off_removes_the_subagent_tools() {
+        switch(
+            Component::Subagents,
+            "",
+            &["agent", "agent_wait", "agent_status", "agent_send"],
+            &[],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reflection_off_removes_the_tool_and_the_store() {
+        switch(Component::Reflection, "", &["reflect"], &["reflection.db"]).await;
+    }
+
+    #[tokio::test]
+    async fn schedule_off_does_not_create_the_store_and_keeps_the_tools() {
+        switch(Component::Schedule, "", &[], &["schedule.db"]).await;
+        let _serial = LOCK.lock().await;
+        let (tools, _) = observe(&fixture(""), &[Component::Schedule]).await;
+        assert!(has(&tools, &["schedule", "schedule_list", "schedule_cancel"]));
+    }
+
+    #[tokio::test]
+    async fn usage_off_does_not_create_the_store() {
+        switch(Component::Usage, "", &[], &["usage.db"]).await;
+    }
+
+    #[tokio::test]
+    async fn task_history_off_does_not_create_the_store() {
+        switch(Component::TaskHistory, "", &[], &["tasks.db"]).await;
+    }
+
+    /// An MCP server that records that it was spawned, then exits.
+    const MARKER_SERVER: &str = r#"
+[mcp]
+enabled = true
+
+[mcp.servers.marker]
+transport = "stdio"
+command = "/bin/sh"
+args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
+"#;
+
+    async fn spawned(fixture: &Fixture) -> bool {
+        let marker = fixture.root.join("spawned");
+        for _ in 0..40 {
+            if marker.exists() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn mcp_off_does_not_spawn_a_configured_server() {
+        let _serial = LOCK.lock().await;
+        let control = fixture(MARKER_SERVER);
+        let otto = builder(&control).build().await.unwrap();
+        let session = otto.new_session(None).await.unwrap();
+        assert!(spawned(&control).await, "the control spawns its server");
+        drop(session);
+        otto.close().await.unwrap();
+
+        let off = fixture(MARKER_SERVER);
+        let otto = builder(&off).disable(Component::Mcp).build().await.unwrap();
+        let session = otto.new_session(None).await.unwrap();
+        assert!(!spawned(&off).await, "the switch leaves the server unspawned");
+        drop(session);
+        otto.close().await.unwrap();
+    }
+
+    /// `[mcp].enabled = true` in config does not beat the switch, in the
+    /// startup workspace or in one opened later.
+    #[tokio::test]
+    async fn disable_wins_over_config_in_every_workspace() {
+        let _serial = LOCK.lock().await;
+        let extra = format!("{MARKER_SERVER}\n[server]\nworkspace_roots = [\"{{ROOT}}/projects\"]\n");
+        let second = |fixture: &Fixture| {
+            let path = fixture.root.join("projects/two");
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        };
+
+        let control = fixture(&extra);
+        let two = second(&control);
+        let otto = builder(&control).build().await.unwrap();
+        let session = otto.new_session(Some(&two)).await.unwrap();
+        assert!(spawned(&control).await, "the second workspace spawns without the switch");
+        drop(session);
+        otto.close().await.unwrap();
+
+        let off = fixture(&extra);
+        let two = second(&off);
+        let otto = builder(&off).disable(Component::Mcp).build().await.unwrap();
+        otto.new_session(None).await.unwrap();
+        let session = otto.new_session(Some(&two)).await.unwrap();
+        assert!(!spawned(&off).await);
+        let canonical = two.canonicalize().unwrap();
+        let loaded = otto.inner.loaded.lock().await;
+        let (builder, _) = loaded.get(&canonical).expect("workspace was loaded");
+        assert!(!builder.mcp.enabled, "the second workspace config has MCP off");
+        drop(loaded);
+        drop(session);
+        otto.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn skills_off_removes_the_skill_catalog() {
+        let _serial = LOCK.lock().await;
+        let skill = |fixture: &Fixture| {
+            let directory = fixture.home.join(".otto/skills/demo");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join("SKILL.md"),
+                "---\nname: demo\ndescription: demo skill\n---\nbody\n",
+            )
+            .unwrap();
+        };
+        let (_provider, script) = Installed::new(vec![reply("one"), reply("two")]);
+        for (off, expected) in [(false, true), (true, false)] {
+            let fixture = fixture("");
+            skill(&fixture);
+            let mut options = builder(&fixture);
+            if off {
+                options = options.disable(Component::Skills);
+            }
+            let otto = options.build().await.unwrap();
+            let session = otto.new_session(None).await.unwrap();
+            say(&session, "hello").await;
+            let request = script.requests.lock().unwrap().pop().unwrap();
+            let listed = request.system_prompt.contains("demo skill")
+                || request.tools.iter().any(|tool| tool.name == "skill");
+            assert_eq!(listed, expected, "skills off = {off}");
+            drop(session);
+            otto.close().await.unwrap();
+        }
+    }
+
+    /// The plugin catalog needs an installed package, which no offline
+    /// fixture creates; this pins that the switch reaches the resolved
+    /// config, which is where the plugin wiring reads it.
+    #[tokio::test]
+    async fn plugins_off_sets_the_resolved_config_key() {
+        let _serial = LOCK.lock().await;
+        for (off, expected) in [(false, true), (true, false)] {
+            let fixture = fixture("");
+            let mut options = builder(&fixture);
+            if off {
+                options = options.disable(Component::Plugins);
+            }
+            let otto = options.build().await.unwrap();
+            assert_eq!(
+                otto.inner.builder.config.plugins.enabled.unwrap_or(true),
+                expected
+            );
+            otto.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn session_persistence_off_writes_no_session_file_and_refuses_resume_and_list() {
+        let _serial = LOCK.lock().await;
+        let (_provider, _script) = Installed::new(Vec::new());
+        let count = |otto: &Otto| -> usize {
+            let root = &otto.inner.builder.session_root;
+            walk(root).into_iter().filter(|p| p.extension().is_some_and(|e| e == "jsonl")).count()
+        };
+        let fixture_on = fixture("");
+        let otto = builder(&fixture_on).build().await.unwrap();
+        let session = otto.new_session(None).await.unwrap();
+        say(&session, "hello").await;
+        assert_eq!(count(&otto), 1, "the control writes one session file");
+        drop(session);
+        otto.close().await.unwrap();
+
+        let fixture_off = fixture("");
+        let otto = builder(&fixture_off)
+            .disable(Component::SessionPersistence)
+            .build()
+            .await
+            .unwrap();
+        let session = otto.new_session(None).await.unwrap();
+        say(&session, "hello").await;
+        assert_eq!(session.history().len(), 2, "the conversation is kept in memory");
+        assert_eq!(count(&otto), 0);
+        assert!(matches!(
+            otto.list_sessions(None, 10).await,
+            Err(Error::PersistenceDisabled)
+        ));
+        assert!(matches!(
+            otto.resume_session(&"0".repeat(32), None).await,
+            Err(Error::PersistenceDisabled)
+        ));
+        drop(session);
+        otto.close().await.unwrap();
+    }
+
+    fn walk(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    #[tokio::test]
+    async fn only_one_otto_runs_per_process() {
+        let _serial = LOCK.lock().await;
+        let fixture = fixture("");
+        let first = builder(&fixture).build().await.unwrap();
+        assert!(matches!(
+            builder(&fixture).build().await,
+            Err(Error::AlreadyRunning)
+        ));
+        let clone = first.clone();
+        first.close().await.unwrap();
+        assert!(
+            matches!(first.new_session(None).await, Err(Error::Closed)),
+            "a closed runtime refuses new sessions"
+        );
+        first.close().await.expect("a second close is a no-op");
+        drop(first);
+        drop(clone);
+        builder(&fixture)
+            .build()
+            .await
+            .expect("a build after close succeeds")
+            .close()
+            .await
+            .unwrap();
+
+        let dropped = builder(&fixture).build().await.unwrap();
+        drop(dropped);
+        builder(&fixture)
+            .build()
+            .await
+            .expect("a build after the last clone dropped succeeds")
+            .close()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_needs_approval_calls_decide_and_a_denial_ends_the_turn() {
+        let _serial = LOCK.lock().await;
+        let (_provider, script) = Installed::new(vec![
+            tool_call(
+                "request_approval",
+                r#"{"title":"Publish","reason":"push branch","proposal":"git push"}"#,
+            ),
+            reply("understood"),
+        ]);
+        let fixture = fixture("");
+        let otto = builder(&fixture).build().await.unwrap();
+        let session = otto.new_session(None).await.unwrap();
+        // A new session approves automatically; `decide` is consulted in MANUAL.
+        session.controller.auto_mode_command("off").unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let asked = Arc::clone(&seen);
+        let stop = session
+            .prompt(
+                Input::Text("push it"),
+                &mut move |event| sink.lock().unwrap().push(event),
+                &CancellationToken::new(),
+                move |request| {
+                    asked.lock().unwrap().push(request);
+                    async { ApprovalDecision::Deny }
+                },
+            )
+            .await
+            .expect("prompt");
+        assert!(matches!(stop, Stop::EndTurn));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "decide runs once");
+        assert!(seen[0].command.contains("git push"), "{:?}", seen[0].command);
+
+        let requests = script.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the denial result reaches the model");
+        let result = requests[1]
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .find(|block| block.block_type == BlockType::ToolResult)
+            .expect("a tool result block");
+        assert!(
+            result.text.contains("\"approved\":false") || result.text.contains("\"approved\": false"),
+            "{}",
+            result.text
+        );
+
+        let events = events.lock().unwrap();
+        let position = |wanted: fn(&Event) -> bool| events.iter().position(wanted);
+        let started = position(|e| matches!(e, Event::AgentStarted)).expect("AgentStarted");
+        let call = position(|e| matches!(e, Event::ToolCallStarted { .. })).expect("call started");
+        let finished = position(|e| matches!(e, Event::ToolCallFinished { .. })).expect("call finished");
+        let done = position(|e| matches!(e, Event::AgentFinished)).expect("AgentFinished");
+        assert!(started < call && call < finished && finished < done);
+        drop(session);
+        otto.close().await.unwrap();
+    }
+
+    /// The startup warnings the CLI test pins in
+    /// `startup_warnings_keep_their_order_and_text`, written to the
+    /// diagnostics writer.
+    #[tokio::test]
+    async fn diagnostics_receive_the_startup_warnings_the_cli_writes_to_stderr() {
+        let _serial = LOCK.lock().await;
+        let fixture = fixture("[memory]\nenabled = false\n[mcp]\nenabled = false\n");
+        for store in ["usage.db", "tasks.db", "schedule.db"] {
+            std::fs::create_dir_all(fixture.home.join(".otto").join(store)).unwrap();
+        }
+        std::fs::create_dir_all(fixture.workspace.join(".otto")).unwrap();
+        std::fs::write(
+            fixture.workspace.join(".otto/config.toml"),
+            "[sandbox]\ndriver = \"seatbelt\"\n",
+        )
+        .unwrap();
+        let capture = Capture::default();
+        let otto = builder(&fixture)
+            .diagnostics(Box::new(capture.clone()))
+            .build()
+            .await
+            .unwrap();
+        otto.close().await.unwrap();
+        let text = capture
+            .text()
+            .replace(&*fixture.workspace.to_string_lossy(), "<workspace>");
+        assert_eq!(
+            text,
+            "warning: sandbox in <workspace>/.otto/config.toml: field is restricted to user or managed configuration\n\
+             warning: usage store unavailable, continuing without usage history\n\
+             warning: task history store unavailable, continuing without task recording\n\
+             warning: schedule store unavailable, continuing without scheduled deliveries\n\
+             warning: sandbox is off; bash runs unsandboxed as your user\n"
+        );
     }
 }

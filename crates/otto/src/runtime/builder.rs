@@ -572,6 +572,12 @@ where
 #[cfg(test)]
 struct ScriptedSizer;
 
+/// The provider every runner built by [`Builder`] uses while a test has set
+/// one, so a test can drive the full composition without a network.
+#[cfg(test)]
+pub(crate) static TEST_PROVIDER: std::sync::Mutex<Option<Arc<dyn Provider + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
 #[cfg(test)]
 impl RequestSizer for ScriptedSizer {
     fn serialized_request_size(&self, request: &Request) -> Result<usize, ProviderError> {
@@ -1633,6 +1639,10 @@ impl Builder {
     /// The provider client for `runtime`; `Unavailable` when the redaction
     /// boundary is closed.
     fn provider_client(&self, runtime: &Runtime) -> Result<ProviderClient, BuildError> {
+        #[cfg(test)]
+        if let Some(provider) = TEST_PROVIDER.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            return Ok(ProviderClient::Scripted(provider));
+        }
         Ok(if !self.boundary_allows_dynamic(Some(runtime)) {
             ProviderClient::Unavailable
         } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {

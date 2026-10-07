@@ -250,7 +250,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   the file existed and then read it, so a removal between the two calls threw
   instead of returning no pid to the polling loop. The helper now reads the
   file directly and treats `ENOENT` as no pid. Main's Linux checks failed this
-  way after #427.
+  way after #427 ([#430](https://github.com/baiyuqing/otto/pull/430)).
 
 - The chat connector end-to-end tests for memory cards, plan approval and
   approval cancellation run their chat as `telegram` again. Since #421 a

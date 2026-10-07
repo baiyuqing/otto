@@ -122,7 +122,10 @@ session fork/resume, and pagination are deferred.
   execution. The command acknowledgement is separate from the eventual answer.
 - Reuse existing server and connector queue limits and lifecycle behavior.
   Local ACP uses the server's existing limit of 16 waiting prompts. Full queues
-  reject input explicitly. Queue storage remains in memory; disconnect/shutdown
+  reject input explicitly. Queue storage is the session's `turns.json`
+  journal (amended 2026-10-07 by
+  [durable turn queue](2026-10-07-durable-turn-queue.md)): a restored prompt
+  runs only in its own session, after a client opens it; disconnect/shutdown
   must not silently restart requests in a different session. A connector `/stop`
   cancels its active work and clears its pending prompts, as today. Individual
   server turn cancellation retains its existing semantics.

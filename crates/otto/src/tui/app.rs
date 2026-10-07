@@ -1166,6 +1166,22 @@ impl App {
                 EntryKind::Assistant,
                 &event.text,
             ),
+            "provider_usage" if event.usage_present == Some(true) => {
+                if let Some(usage) = event.usage {
+                    self.usage.input_tokens = self
+                        .usage
+                        .input_tokens
+                        .saturating_add(usage.input_tokens.max(0));
+                    self.usage.output_tokens = self
+                        .usage
+                        .output_tokens
+                        .saturating_add(usage.output_tokens.max(0));
+                    self.usage.cached_input_tokens = self
+                        .usage
+                        .cached_input_tokens
+                        .saturating_add(usage.cached_input_tokens.max(0));
+                }
+            }
             "tool_call_started" => self.entries.push(Entry {
                 id: format!("streaming-tool-{}", self.entries.len()),
                 kind: Some(EntryKind::Tool),
@@ -1738,6 +1754,42 @@ mod tests {
         });
         app.composer.edit(Edit::PreviousHistory);
         assert_eq!(app.composer.input.iter().collect::<String>(), line);
+    }
+
+    #[test]
+    fn provider_usage_updates_the_footer_during_a_turn() {
+        let (mut app, _) = app();
+        app.usage = Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            cached_input_tokens: 4,
+        };
+
+        app.apply_event(&WireEvent {
+            event_type: "provider_usage".into(),
+            usage: Some(Usage {
+                input_tokens: 7,
+                output_tokens: 3,
+                cached_input_tokens: 5,
+            }),
+            usage_present: Some(true),
+            ..Default::default()
+        });
+        app.apply_event(&WireEvent {
+            event_type: "provider_usage".into(),
+            usage: Some(Usage::default()),
+            usage_present: Some(false),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            app.usage,
+            Usage {
+                input_tokens: 17,
+                output_tokens: 5,
+                cached_input_tokens: 9,
+            }
+        );
     }
 
     #[test]

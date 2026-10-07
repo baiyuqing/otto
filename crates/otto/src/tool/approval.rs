@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 pub struct RequestApproval {
     pub service: Arc<Service>,
     pub scope: Scope,
+    pub turn_origin: Option<Arc<crate::schedule::tools::TurnOrigin>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,23 +60,30 @@ impl Tool for RequestApproval {
             return error_result(super::CONTEXT_CANCELED).cancelled_not_started();
         }
         let request = match (args.proposal, args.subject_ref) {
-            (Some(proposal), None) => self.service.create(Proposal {
-                kind: Kind::Confirmation,
-                authority: Authority::Consent,
-                scope: self.scope.clone(),
-                subject: Subject {
-                    tool_call_id: call.tool_call_id.into(),
-                    source: "conversation".into(),
-                    id: call.operation_id.to_string(),
-                    version: crate::approval::digest(&proposal),
-                    details: proposal,
+            (Some(proposal), None) => self.service.create_with_origin(
+                Proposal {
+                    kind: Kind::Confirmation,
+                    authority: Authority::Consent,
+                    scope: self.scope.clone(),
+                    subject: Subject {
+                        tool_call_id: call.tool_call_id.into(),
+                        source: "conversation".into(),
+                        id: call.operation_id.to_string(),
+                        version: crate::approval::digest(&proposal),
+                        details: proposal,
+                    },
+                    title: args.title,
+                    reason: args.reason,
+                    persistent: false,
+                    blocking: true,
+                    expires_at: None,
                 },
-                title: args.title,
-                reason: args.reason,
-                persistent: false,
-                blocking: true,
-                expires_at: None,
-            }),
+                self.turn_origin
+                    .as_ref()
+                    .and_then(|origin| origin.get())
+                    .as_ref()
+                    .map_or("", crate::schedule::Origin::as_str),
+            ),
             (None, Some(id)) => {
                 self.service
                     .get(&id, &self.scope.workspace, Some(&self.scope.session_id))
@@ -272,6 +280,7 @@ mod tests {
             let tool = RequestApproval {
                 service: service.clone(),
                 scope: scope.clone(),
+                turn_origin: None,
             };
             let run = tokio::spawn(async move {
                 let operation = OperationId::new("confirm-operation").unwrap();

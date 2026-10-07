@@ -52,10 +52,46 @@ pub(super) struct Notices {
 /// The queued lines, each with the id it was given when queued. Ids start at 1
 /// and only grow, so a reader that remembers the last id it saw can ask for
 /// what came after without draining the queue for other readers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub id: u64,
+    pub text: String,
+    pub presentation_origin: String,
+}
+
 #[derive(Default)]
 struct Queue {
-    lines: VecDeque<(u64, String)>,
+    lines: VecDeque<Notice>,
     last_id: u64,
+}
+
+impl Notice {
+    fn local_text(self) -> String {
+        self.text
+    }
+}
+
+impl Notices {
+    pub(super) fn push_for(&self, line: String, origin: Option<&crate::schedule::Origin>) {
+        self.push_with_origin(line, origin.map_or("", crate::schedule::Origin::as_str));
+    }
+
+    fn push_with_origin(&self, line: String, presentation_origin: &str) {
+        {
+            let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+            if queue.lines.len() >= MAXIMUM_NOTICES {
+                queue.lines.pop_front();
+            }
+            queue.last_id += 1;
+            let id = queue.last_id;
+            queue.lines.push_back(Notice {
+                id,
+                text: line,
+                presentation_origin: presentation_origin.to_owned(),
+            });
+        }
+        self.signal.send_modify(|count| *count += 1);
+    }
 }
 
 impl Notices {
@@ -67,16 +103,7 @@ impl Notices {
     }
 
     pub(super) fn push(&self, line: String) {
-        {
-            let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
-            if queue.lines.len() >= MAXIMUM_NOTICES {
-                queue.lines.pop_front();
-            }
-            queue.last_id += 1;
-            let id = queue.last_id;
-            queue.lines.push_back((id, line));
-        }
-        self.signal.send_modify(|count| *count += 1);
+        self.push_with_origin(line, "");
     }
 
     /// Removes and returns every queued line. For a frontend that is the only
@@ -87,19 +114,19 @@ impl Notices {
             .unwrap_or_else(|p| p.into_inner())
             .lines
             .drain(..)
-            .map(|(_, line)| line)
+            .map(Notice::local_text)
             .collect()
     }
 
     /// The queued lines with an id above `after`, oldest first, and the id of
     /// the newest line ever queued. Leaves the queue as it is, so several
     /// readers each see every line.
-    fn since(&self, after: u64) -> (Vec<(u64, String)>, u64) {
+    fn since(&self, after: u64) -> (Vec<Notice>, u64) {
         let queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
         let lines = queue
             .lines
             .iter()
-            .filter(|(id, _)| *id > after)
+            .filter(|notice| notice.id > after)
             .cloned()
             .collect();
         (lines, queue.last_id)
@@ -226,6 +253,17 @@ impl Controller {
     /// a controller, such as the HTTP server's clients. The REPL and the TUI
     /// use [`Controller::take_notices`] instead, which drains.
     pub fn notices_since(&self, after: u64) -> (Vec<(u64, String)>, u64) {
+        let (notices, last) = self.notices.since(after);
+        (
+            notices
+                .into_iter()
+                .map(|notice| (notice.id, notice.text))
+                .collect(),
+            last,
+        )
+    }
+
+    pub(crate) fn routed_notices_since(&self, after: u64) -> (Vec<Notice>, u64) {
         self.notices.since(after)
     }
 
@@ -233,6 +271,11 @@ impl Controller {
     #[cfg(test)]
     pub(crate) fn push_notice(&self, line: &str) {
         self.notices.push(line.to_owned());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_routed_notice(&self, line: &str, origin: crate::schedule::Origin) {
+        self.notices.push_for(line.to_owned(), Some(&origin));
     }
 
     /// Queues a wake reply as a finished wake turn would, for server tests.
@@ -251,7 +294,14 @@ impl Controller {
     /// so far. Only ACP and the HTTP server read this queue; the TUI and the
     /// REPL show a wake turn's events directly.
     pub fn wake_replies_since(&self, after: u64) -> (Vec<(u64, String)>, u64) {
-        self.wake_replies.since(after)
+        let (replies, last) = self.wake_replies.since(after);
+        (
+            replies
+                .into_iter()
+                .map(|reply| (reply.id, reply.text))
+                .collect(),
+            last,
+        )
     }
 
     /// A signal that changes whenever a wake reply is queued.
@@ -298,13 +348,18 @@ impl Controller {
         let notices = Arc::clone(&self.notices);
         let cancel = self.auto_cancel.child_token();
         let approvals = self.builder.approvals.clone();
-        notices.push(format!("reflection: running ({})", trigger.as_str()));
+        let presentation_origin = runner.presentation_origin.get();
+        notices.push_for(
+            format!("reflection: running ({})", trigger.as_str()),
+            presentation_origin.as_ref(),
+        );
         tokio::spawn(async move {
             let _running = running;
             let context = reflection::Context {
                 approvals: Some(&approvals),
                 runner: &runner,
                 session_id: &session_id,
+                presentation_origin: presentation_origin.as_ref(),
                 session_path: &session_path,
                 service: &service,
                 user_scope: &user_scope,
@@ -313,7 +368,7 @@ impl Controller {
             };
             let result = reflector.run(&context, trigger, "", &cancel).await;
             if let Some(line) = notice_for(result, reflector.log_dir()) {
-                notices.push(line);
+                notices.push_for(line, presentation_origin.as_ref());
             }
         });
     }
@@ -357,10 +412,12 @@ impl Controller {
         let session_id = session.header().id;
         let session_path = session.path();
         let skill_roots = self.reflection_skill_roots();
+        let presentation_origin = runner.presentation_origin.get();
         let context = reflection::Context {
             approvals: Some(&self.builder.approvals),
             runner: &runner,
             session_id: &session_id,
+            presentation_origin: presentation_origin.as_ref(),
             session_path: &session_path,
             service: &service,
             user_scope: &user_scope,
@@ -427,17 +484,31 @@ mod tests {
         notices.push("first".into());
         notices.push("second".into());
         let (all, last) = notices.since(0);
-        assert_eq!(all, [(1, "first".to_owned()), (2, "second".to_owned())]);
+        assert_eq!(
+            all,
+            [
+                Notice {
+                    id: 1,
+                    text: "first".to_owned(),
+                    presentation_origin: String::new(),
+                },
+                Notice {
+                    id: 2,
+                    text: "second".to_owned(),
+                    presentation_origin: String::new(),
+                },
+            ]
+        );
         assert_eq!(last, 2);
         // A second reader sees the same lines; a reader that is caught up sees none.
         assert_eq!(notices.since(0).0.len(), 2);
         assert_eq!(notices.since(2), (Vec::new(), 2));
-        assert_eq!(notices.since(1).0, [(2, "second".to_owned())]);
+        assert_eq!(notices.since(1).0[0].text, "second");
         // Draining is for the single-reader frontends and does not reuse ids.
         assert_eq!(notices.take(), ["first", "second"]);
         assert_eq!(notices.since(0), (Vec::new(), 2));
         notices.push("third".into());
-        assert_eq!(notices.since(2).0, [(3, "third".to_owned())]);
+        assert_eq!(notices.since(2).0[0].text, "third");
     }
 
     #[test]
@@ -702,6 +773,8 @@ mod tests {
         let mut builder = builder(workspace.path(), sessions.path());
         builder.shared_mut().home = home.path().to_string_lossy().into_owned();
         builder.shared_mut().memory = MemoryWiring {
+            client: None,
+            extension: None,
             service: Arc::clone(&service),
             usable,
             user_scope: user_scope.clone(),

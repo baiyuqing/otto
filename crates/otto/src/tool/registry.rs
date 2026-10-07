@@ -28,7 +28,11 @@ pub struct Registry {
     ordered: Vec<Box<dyn Tool + Send + Sync>>,
     by_name: HashMap<String, usize>,
     guard: Option<Arc<dyn CallGuard>>,
-    approval: Option<(Arc<crate::approval::Service>, crate::approval::Scope)>,
+    approval: Option<(
+        Arc<crate::approval::Service>,
+        crate::approval::Scope,
+        Option<Arc<crate::schedule::tools::TurnOrigin>>,
+    )>,
 }
 
 impl Registry {
@@ -49,11 +53,20 @@ impl Registry {
     }
 
     pub fn with_approval(
-        mut self,
+        self,
         service: Arc<crate::approval::Service>,
         scope: crate::approval::Scope,
     ) -> Self {
-        self.approval = Some((service, scope));
+        self.with_approval_origin(service, scope, None)
+    }
+
+    pub fn with_approval_origin(
+        mut self,
+        service: Arc<crate::approval::Service>,
+        scope: crate::approval::Scope,
+        origin: Option<Arc<crate::schedule::tools::TurnOrigin>>,
+    ) -> Self {
+        self.approval = Some((service, scope, origin));
         self
     }
 
@@ -76,7 +89,11 @@ impl Registry {
 impl Registry {
     pub(crate) fn approval_binding(
         &self,
-    ) -> Option<(Arc<crate::approval::Service>, crate::approval::Scope)> {
+    ) -> Option<(
+        Arc<crate::approval::Service>,
+        crate::approval::Scope,
+        Option<Arc<crate::schedule::tools::TurnOrigin>>,
+    )> {
         self.approval.clone()
     }
     pub(crate) async fn execute_with_scope(
@@ -100,7 +117,7 @@ impl Registry {
         }
 
         let mut authorization = None;
-        if let Some((service, scope)) = &self.approval {
+        if let Some((service, scope, presentation_origin)) = &self.approval {
             let scope = scope_override.unwrap_or(scope);
             let spec = match tool
                 .approval_spec_async(call.arguments, control.cancellation_token())
@@ -111,23 +128,27 @@ impl Registry {
             };
             if let Some(spec) = spec {
                 let version = spec.version.clone();
-                let request = match service.create(crate::approval::Proposal {
-                    kind: crate::approval::Kind::Authorization,
-                    authority: spec.authority,
-                    scope: scope.clone(),
-                    subject: crate::approval::Subject {
-                        tool_call_id: call.tool_call_id.into(),
-                        source: spec.source,
-                        id: call.operation_id.to_string(),
-                        version,
-                        details: spec.details,
+                let origin = presentation_origin.as_ref().and_then(|origin| origin.get());
+                let request = match service.create_with_origin(
+                    crate::approval::Proposal {
+                        kind: crate::approval::Kind::Authorization,
+                        authority: spec.authority,
+                        scope: scope.clone(),
+                        subject: crate::approval::Subject {
+                            tool_call_id: call.tool_call_id.into(),
+                            source: spec.source,
+                            id: call.operation_id.to_string(),
+                            version,
+                            details: spec.details,
+                        },
+                        title: spec.title,
+                        reason: spec.reason,
+                        persistent: spec.persistent,
+                        blocking: true,
+                        expires_at: Some(chrono::Utc::now().timestamp() + 600),
                     },
-                    title: spec.title,
-                    reason: spec.reason,
-                    persistent: spec.persistent,
-                    blocking: true,
-                    expires_at: Some(chrono::Utc::now().timestamp() + 600),
-                }) {
+                    origin.as_ref().map_or("", crate::schedule::Origin::as_str),
+                ) {
                     Ok(r) => r,
                     Err(e) => return not_started(ToolResult::error(e.to_string())),
                 };
@@ -207,7 +228,7 @@ impl Registry {
         }
 
         if let Some(request) = authorization
-            && let Some((service, _)) = &self.approval
+            && let Some((service, _, _)) = &self.approval
         {
             let state = if execution.outcome.effect_certainty == EffectCertainty::Unknown {
                 crate::approval::ApplicationState::Unknown
@@ -531,17 +552,29 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let applied = Arc::new(AtomicUsize::new(0));
         let service = Arc::new(crate::approval::Service::in_memory().unwrap());
+        let origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
+        origin.set(Some(
+            crate::schedule::Origin::chat("telegram", "42").unwrap(),
+        ));
         let registry = Registry::new(vec![Box::new(AsyncApprovalTool {
             calls: Arc::clone(&calls),
             change_on_second_call: false,
             applied: Arc::clone(&applied),
         })])
         .unwrap()
-        .with_approval(service, approval_scope());
+        .with_approval_origin(service.clone(), approval_scope(), Some(origin));
         let execution = execute(&registry, "async_approval", &CancellationToken::new()).await;
         assert!(!execution.result.is_error, "{}", execution.result.content);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(applied.load(Ordering::SeqCst), 1);
+        let request = service
+            .events("/workspace", Some("session"), 0)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .request;
+        assert_eq!(request.presentation_origin, "chat:telegram:42");
     }
 
     #[tokio::test]

@@ -120,7 +120,9 @@ pub fn publish(
     workspace: &str,
     session_id: &str,
     session_path: &str,
+    presentation_origin: Option<&crate::schedule::Origin>,
     run_id: &str,
+
     vetted: &guard::Vetted,
     reviewed: bool,
 ) -> Result<Request> {
@@ -160,26 +162,29 @@ pub fn publish(
         base_hash,
     };
     let details = serde_json::to_string(&artifact).map_err(|_| Error::Unavailable)?;
-    service.create(Proposal {
-        kind: Kind::Authorization,
-        authority: Authority::Durable,
-        scope: super::Scope {
-            workspace: workspace.into(),
-            session_id: String::new(),
-            task_id: String::new(),
-            run_id: run_id.into(),
+    service.create_with_origin(
+        Proposal {
+            kind: Kind::Authorization,
+            authority: Authority::Durable,
+            scope: super::Scope {
+                workspace: workspace.into(),
+                session_id: String::new(),
+                task_id: String::new(),
+                run_id: run_id.into(),
+            },
+            subject: Subject {
+                tool_call_id: String::new(),
+                source: "reflection_skill".into(),
+                id: format!("{run_id}:{}", vetted.name()),
+                version: super::digest(&details),
+                details,
+            },
+            title: format!("Review skill {}", vetted.name()),
+            reason: vetted.reason().into(),
+            persistent: false,
+            blocking: false,
+            expires_at: None,
         },
-        subject: Subject {
-            tool_call_id: String::new(),
-            source: "reflection_skill".into(),
-            id: format!("{run_id}:{}", vetted.name()),
-            version: super::digest(&details),
-            details,
-        },
-        title: format!("Review skill {}", vetted.name()),
-        reason: vetted.reason().into(),
-        persistent: false,
-        blocking: false,
-        expires_at: None,
-    })
+        presentation_origin.map_or("", crate::schedule::Origin::as_str),
+    )
 }

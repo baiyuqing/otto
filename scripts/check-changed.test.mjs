@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { readdirSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { plan } from './check-changed.mjs';
@@ -9,6 +12,42 @@ const CLIPPY = 'cargo clippy --workspace --all-targets -- -D warnings';
 const FULL = 'cargo test --workspace';
 const WASM = 'make rust-wasm-check';
 const LICENSE = 'make license-check';
+
+test('check-fast runs the selector directly without a worktree lock utility', () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'otto-check-fast-'));
+  const bin = join(fixture, 'bin');
+  const scripts = join(fixture, 'scripts');
+  const calls = join(fixture, 'selector-calls');
+  mkdirSync(bin);
+  mkdirSync(scripts);
+  writeFileSync(join(scripts, 'check-changed.mjs'), `
+    import { appendFileSync } from 'node:fs';
+    appendFileSync(process.env.SELECTOR_CALLS, 'called\\n');
+    console.log('selector fixture ran');
+  `);
+  for (const utility of ['lockf', 'flock']) {
+    const stub = join(bin, utility);
+    writeFileSync(stub, '#!/bin/sh\nexit 87\n');
+    chmodSync(stub, 0o755);
+  }
+
+  try {
+    const makefile = fileURLToPath(new URL('../Makefile', import.meta.url));
+    const output = execFileSync('make', ['-f', makefile, 'check-fast'], {
+      cwd: fixture,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}${delimiter}${process.env.PATH}`,
+        SELECTOR_CALLS: calls,
+      },
+    });
+    assert.match(output, /selector fixture ran/);
+    assert.equal(readFileSync(calls, 'utf8'), 'called\n');
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
 
 test('two modules share one --lib step, no full test', () => {
   const { steps, unchecked } = plan(['crates/otto/src/memory/store.rs', 'crates/otto/src/tui.rs', 'crates/otto/src/memory/x.rs']);

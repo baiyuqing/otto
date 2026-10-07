@@ -25,12 +25,27 @@ pub const SIDE_MARGIN: u16 = 1;
 /// decimal place, rounded to the nearest tenth of a percent. The fraction of
 /// the context window in use, as the footer shows it.
 pub fn format_context_percentage(input_tokens: i64, context_window: i64) -> String {
-    let input_tokens = input_tokens.max(0);
-    if context_window <= 0 {
+    format_percentage(input_tokens, context_window)
+}
+
+/// The share of the prompt tokens the provider served from its cache, as a
+/// percentage with one decimal place. `None` when the prompt total is not
+/// positive, because no rate exists then. The rate is the same weighted ratio
+/// `GET /v1/usage` reports as `cache_hit_rate`.
+pub fn format_cache_hit_rate(cached_input_tokens: i64, input_tokens: i64) -> Option<String> {
+    (input_tokens > 0).then(|| format_percentage(cached_input_tokens, input_tokens))
+}
+
+/// Formats `part` of `whole` as a percentage with one decimal place, rounded to
+/// the nearest tenth. A negative `part` or a non-positive `whole` is `0.0%`,
+/// which is what a frontend shows before the first report.
+fn format_percentage(part: i64, whole: i64) -> String {
+    let part = part.max(0);
+    if whole <= 0 {
         return "0.0%".to_string();
     }
-    let numerator = input_tokens.saturating_mul(1000) + context_window / 2;
-    let tenths = (numerator / context_window).max(0);
+    let numerator = part.saturating_mul(1000) + whole / 2;
+    let tenths = (numerator / whole).max(0);
     let digits = tenths.to_string();
     if digits.len() == 1 {
         format!("0.{digits}%")
@@ -155,6 +170,22 @@ mod tests {
     fn context_percentage_treats_a_missing_window_as_zero() {
         assert_eq!(format_context_percentage(500, 0), "0.0%");
         assert_eq!(format_context_percentage(-5, 1000), "0.0%");
+    }
+
+    #[test]
+    fn the_cache_hit_rate_is_the_cached_share_of_the_prompt() {
+        assert_eq!(
+            format_cache_hit_rate(7_091_584, 93_498 + 7_091_584).as_deref(),
+            Some("98.7%")
+        );
+        assert_eq!(format_cache_hit_rate(0, 1000).as_deref(), Some("0.0%"));
+        assert_eq!(format_cache_hit_rate(1000, 1000).as_deref(), Some("100.0%"));
+    }
+
+    #[test]
+    fn a_cache_hit_rate_needs_a_prompt_total() {
+        assert_eq!(format_cache_hit_rate(0, 0), None);
+        assert_eq!(format_cache_hit_rate(5, -1), None);
     }
 
     #[test]

@@ -487,6 +487,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Keep the TUI footer's token totals and cached-prompt share visible on a
+  narrow terminal, and show the cache hit rate beside the cached count
+  (`tokens 7.2M/37.5k (cached 7.1M, 98.7%)`). The footer ordered the model,
+  the reasoning effort, the approval mode, the sandbox state and the
+  workspace before the token totals, so ratatui clipped the totals off the
+  right edge whenever those fields were long; a `deepseek-v4-flash` session
+  lost them where a shorter ChatGPT model id did not. The footer now lists
+  the model, the approval mode, the token totals, the context percentage,
+  the sandbox state, the reasoning effort, the workspace and the session ID
+  in that order, so only the tail is dropped.
+  [#396](https://github.com/baiyuqing/otto/pull/396)
+
 - Clarify the mutually exclusive `edit` argument forms with JSON examples and
   tell models how to correct mixed batch/single arguments before any file write.
   [#362](https://github.com/baiyuqing/otto/pull/362)

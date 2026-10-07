@@ -174,6 +174,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- `make check-fast` runs its existing change selector directly, without a
+  cross-worktree `lockf`/`flock` wrapper. Independent worktrees can start checks
+  concurrently; the selected checks are unchanged. See
+  [local verification](docs/development.md#local-verification)
+  ([#419](https://github.com/baiyuqing/otto/pull/419)).
+
 - Add test-only fault injection. The `fault-injection` Cargo feature exposes
   `otto::faults` to integration tests and no shipped build enables it;
   `tests/faults_boundary.rs` fails if production code names it. `faults::http`

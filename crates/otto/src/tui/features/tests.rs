@@ -23,6 +23,7 @@ fn approval_request() -> crate::approval::Request {
         id: "approval-7".into(),
         revision: 7,
         kind: crate::approval::Kind::Authorization,
+        authority: crate::approval::Authority::Boundary,
         scope: crate::approval::Scope {
             workspace: "/work".into(),
             session_id: "session".into(),

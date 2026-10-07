@@ -1,5 +1,5 @@
 //! Workflow owns the transactional request/step/result receipt and DAG resume.
-use super::{Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
+use super::{Authority, Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
 use std::sync::{Arc, Weak};
 pub struct Adapter {
     pub controller: Weak<crate::workflow::Controller>,
@@ -37,6 +37,7 @@ pub fn publish(
 ) -> Result<Request> {
     service.create(Proposal {
         kind: Kind::Authorization,
+        authority: Authority::Consent,
         scope: super::Scope {
             workspace: workspace.into(),
             session_id: String::new(),

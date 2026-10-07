@@ -294,8 +294,9 @@ impl Service {
         self.changes.send_modify(|v| *v = v.wrapping_add(1));
     }
 
-    /// A missing preference means AUTO for a session; workspace-only requests
-    /// and independent tasks still require manual approval.
+    /// A missing preference means AUTO for a session; workspace-only requests,
+    /// independent tasks and every request that is not a bounded authorization
+    /// still require manual approval.
     pub fn auto_mode(&self, scope: &Scope) -> Result<bool> {
         if scope.session_id.is_empty() || !scope.task_id.is_empty() {
             return Ok(false);
@@ -329,7 +330,10 @@ impl Service {
 
     fn auto_approve(&self, id: &str, scope: &Scope) -> Result<Request> {
         self.mutate_checked(id, scope, true, |request| {
-            if request.state != State::Pending || !self.auto_mode(scope)? {
+            if request.state != State::Pending
+                || !request.auto_decidable()
+                || !self.auto_mode(scope)?
+            {
                 return Ok(false);
             }
             Self::record_decision(
@@ -378,6 +382,7 @@ impl Service {
             id: bytes.iter().map(|b| format!("{b:02x}")).collect(),
             revision: 1,
             kind: proposal.kind,
+            authority: proposal.authority,
             scope: proposal.scope,
             subject: proposal.subject,
             title: proposal.title,
@@ -407,6 +412,7 @@ impl Service {
                     &request.scope,
                     &request.subject,
                     request.kind,
+                    request.authority,
                     &request.title,
                     &request.reason,
                     request.persistent,
@@ -657,6 +663,7 @@ impl Service {
                     Ok(request) => request,
                     Err(Error::Conflict)
                         if self.store.load(id)? != expected
+                            || (automatic && !expected.auto_decidable())
                             || (automatic && !self.auto_mode(scope)?) =>
                     {
                         continue;
@@ -793,6 +800,7 @@ mod tests {
         let request = service
             .create(Proposal {
                 kind: Kind::Confirmation,
+                authority: Authority::Consent,
                 scope: Scope {
                     workspace: "/w".into(),
                     session_id: "s".into(),

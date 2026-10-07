@@ -1,6 +1,8 @@
 use crate::approval::repository::*;
 use crate::approval::{Error, Result};
+use crate::storage::drivers::turso::TursoDriver;
 use crate::storage::{Connection, OptionalExtension, Transaction, params};
+use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
 use otto_core::approval::*;
 use std::{path::Path, sync::Mutex, time::Duration};
 
@@ -35,6 +37,10 @@ CREATE INDEX IF NOT EXISTS approvals_scope ON approvals(workspace, session_id, s
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_driver(&TursoDriver, path)
+    }
+
+    pub fn open_with_driver(driver: &dyn SqlDriver, path: &Path) -> Result<Self> {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|_| Error::Unavailable)?;
@@ -50,7 +56,15 @@ impl Store {
             .map_err(|_| Error::Unavailable)?;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error::Unavailable)?;
-        Self::from_connection(Connection::open(path).map_err(storage_error)?)
+        Self::from_connection(
+            Connection::open_with_driver(
+                driver,
+                path,
+                OpenOptions::default(),
+                SqlRequirements::DURABLE,
+            )
+            .map_err(storage_error)?,
+        )
     }
     pub fn in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory().map_err(storage_error)?)
@@ -302,7 +316,7 @@ impl ApprovalStore for Store {
                 .map_err(storage_error)?
                 .unwrap_or(1)
                 != 0;
-            if !enabled {
+            if !automatic_decision_allowed(enabled, next) {
                 return Err(Error::Conflict);
             }
         }
@@ -392,12 +406,13 @@ mod tests {
         service.set_auto_mode(&scope, false).unwrap();
         let pending = service
             .create(Proposal {
-                kind: Kind::Confirmation,
+                kind: Kind::Authorization,
+                authority: Authority::Bounded,
                 scope: scope.clone(),
                 subject: Subject {
                     tool_call_id: String::new(),
-                    source: "conversation".into(),
-                    id: "plan".into(),
+                    source: "plugin".into(),
+                    id: "plugin".into(),
                     version: "1".into(),
                     details: "review".into(),
                 },
@@ -425,5 +440,48 @@ mod tests {
         ));
         assert_eq!(store.load(&pending.id).unwrap().state, State::Rejected);
         assert_eq!(store.events("/w", Some("s"), 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn auto_mode_never_publishes_a_decision_for_a_request_it_cannot_decide() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let service = Service::from_store(store.clone()).unwrap();
+        let scope = Scope {
+            workspace: "/w".into(),
+            session_id: "s".into(),
+            task_id: String::new(),
+            run_id: String::new(),
+        };
+        // AUTO is the default for a new session, so this fence is the only
+        // thing standing between a plan review and an automatic decision.
+        assert!(service.auto_mode(&scope).unwrap());
+        let pending = service
+            .create(Proposal {
+                kind: Kind::Confirmation,
+                authority: Authority::Consent,
+                scope: scope.clone(),
+                subject: Subject {
+                    tool_call_id: String::new(),
+                    source: "conversation".into(),
+                    id: "plan".into(),
+                    version: "1".into(),
+                    details: "review".into(),
+                },
+                title: "Review".into(),
+                reason: "scope".into(),
+                persistent: false,
+                blocking: true,
+                expires_at: None,
+            })
+            .unwrap();
+        assert_eq!(pending.state, State::Pending);
+        let mut next = pending.clone();
+        next.state = State::Approved;
+        assert!(matches!(
+            store.commit(&pending, &next, ClaimChange::None, true),
+            Err(Error::Conflict)
+        ));
+        assert_eq!(store.load(&pending.id).unwrap(), pending);
+        assert_eq!(store.events("/w", Some("s"), 0).unwrap().len(), 1);
     }
 }

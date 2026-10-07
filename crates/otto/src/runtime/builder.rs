@@ -1640,7 +1640,11 @@ impl Builder {
     /// boundary is closed.
     fn provider_client(&self, runtime: &Runtime) -> Result<ProviderClient, BuildError> {
         #[cfg(test)]
-        if let Some(provider) = TEST_PROVIDER.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+        if let Some(provider) = TEST_PROVIDER
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
             return Ok(ProviderClient::Scripted(provider));
         }
         Ok(if !self.boundary_allows_dynamic(Some(runtime)) {

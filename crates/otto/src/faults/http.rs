@@ -361,6 +361,14 @@ impl Script {
         Self(vec![Step::Stall(None)])
     }
 
+    /// The head and `events`, then silence without closing the connection.
+    pub fn stall_after_events(events: &[&str]) -> Self {
+        let mut steps = vec![Self::sse_head()];
+        steps.extend(events.iter().map(|e| Step::Sse((*e).into())));
+        steps.push(Step::Stall(None));
+        Self(steps)
+    }
+
     /// Sends the head of an event stream, then nothing.
     pub fn stall_after_head() -> Self {
         Self(vec![Self::sse_head(), Step::Stall(None)])

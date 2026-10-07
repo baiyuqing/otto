@@ -302,7 +302,7 @@ impl ApprovalStore for Store {
                 .map_err(storage_error)?
                 .unwrap_or(1)
                 != 0;
-            if !enabled {
+            if !automatic_decision_allowed(enabled, next) {
                 return Err(Error::Conflict);
             }
         }
@@ -392,12 +392,13 @@ mod tests {
         service.set_auto_mode(&scope, false).unwrap();
         let pending = service
             .create(Proposal {
-                kind: Kind::Confirmation,
+                kind: Kind::Authorization,
+                authority: Authority::Bounded,
                 scope: scope.clone(),
                 subject: Subject {
                     tool_call_id: String::new(),
-                    source: "conversation".into(),
-                    id: "plan".into(),
+                    source: "plugin".into(),
+                    id: "plugin".into(),
                     version: "1".into(),
                     details: "review".into(),
                 },
@@ -425,5 +426,48 @@ mod tests {
         ));
         assert_eq!(store.load(&pending.id).unwrap().state, State::Rejected);
         assert_eq!(store.events("/w", Some("s"), 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn auto_mode_never_publishes_a_decision_for_a_request_it_cannot_decide() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let service = Service::from_store(store.clone()).unwrap();
+        let scope = Scope {
+            workspace: "/w".into(),
+            session_id: "s".into(),
+            task_id: String::new(),
+            run_id: String::new(),
+        };
+        // AUTO is the default for a new session, so this fence is the only
+        // thing standing between a plan review and an automatic decision.
+        assert!(service.auto_mode(&scope).unwrap());
+        let pending = service
+            .create(Proposal {
+                kind: Kind::Confirmation,
+                authority: Authority::Consent,
+                scope: scope.clone(),
+                subject: Subject {
+                    tool_call_id: String::new(),
+                    source: "conversation".into(),
+                    id: "plan".into(),
+                    version: "1".into(),
+                    details: "review".into(),
+                },
+                title: "Review".into(),
+                reason: "scope".into(),
+                persistent: false,
+                blocking: true,
+                expires_at: None,
+            })
+            .unwrap();
+        assert_eq!(pending.state, State::Pending);
+        let mut next = pending.clone();
+        next.state = State::Approved;
+        assert!(matches!(
+            store.commit(&pending, &next, ClaimChange::None, true),
+            Err(Error::Conflict)
+        ));
+        assert_eq!(store.load(&pending.id).unwrap(), pending);
+        assert_eq!(store.events("/w", Some("s"), 0).unwrap().len(), 1);
     }
 }

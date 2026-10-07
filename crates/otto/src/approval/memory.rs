@@ -1,5 +1,5 @@
 //! Memory retains review data and the atomic candidate/result receipt.
-use super::{Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
+use super::{Authority, Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
 use crate::memory::{
     CandidateListRequest, CandidateRef, CandidateState, ReviewDecision, ReviewRequest, Scope,
 };
@@ -123,6 +123,7 @@ pub fn publish(
     };
     service.create(Proposal {
         kind: Kind::Authorization,
+        authority: Authority::Durable,
         scope: super::Scope {
             workspace: workspace.into(),
             session_id: String::new(),

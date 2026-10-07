@@ -818,8 +818,14 @@ HTTP, ACP and terminal surfaces. Models discover `request_approval` in actual
 runner definitions and system guidance, and choose when conversational consent
 is needed. Models can query/withdraw but cannot decide an approval. Session-owned requests
 default to automatic decisions under the persisted AUTO policy; user-only
-`/auto off` selects manual review. Creation and decision remain distinct
-journal events. See [session automatic approval](specs/2026-10-05-session-auto-mode.md).
+`/auto off` selects manual review. Each native producer declares the authority
+class of its request, and AUTO decides only a bounded authorization that stays
+inside the sandbox and the workspace: a plan review, a boundary crossing and a
+durable grant always wait for the user, whatever the mode. The service enforces
+this and every backend rechecks it inside the committing transaction. Creation
+and decision remain distinct journal events. See
+[session automatic approval](specs/2026-10-05-session-auto-mode.md) and
+[authority boundaries](specs/2026-10-07-auto-mode-authority-boundaries.md).
 
 Authorization is prepared before tool dispatch, bound to the logical operation,
 exact arguments and relevant domain version. Decisions/events commit together.
@@ -858,6 +864,8 @@ withdrawal cannot affect a newer request. Protocol and frontend contracts:
 
 Bash's optional `sandbox_read_path` requests persistent read access to one
 absolute existing path, with a justification and `use_default` permissions.
+The grant is durable authority, so it is always a user decision, whatever the
+session approval mode.
 `BashApprovals` binds its canonical path and exact command to the session's
 latest approval ID, separately from unsandboxed command grants. The controller
 applies the existing backed-up config amendment and sandbox reload before

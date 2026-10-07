@@ -7,6 +7,7 @@ const REQUEST_FIELDS: &[&str] = &[
     "id",
     "revision",
     "kind",
+    "authority",
     "scope",
     "subject",
     "title",

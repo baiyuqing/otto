@@ -1,10 +1,8 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-
 use super::*;
+use crate::faults::http;
 use crate::memory::turso::testsupport::open_temp;
 use crate::memory::{Origin, Provenance, RememberRequest, decide_default_policy};
 use crate::storage::backends::turso::memory_advice::Store as TursoAuditStore;
@@ -504,82 +502,13 @@ fn audit_store_records_user_version_one_and_rejects_another() {
 // The Jev backend against a loopback server.
 // ---------------------------------------------------------------------------
 
-struct Server {
-    base_url: String,
-    requests: Arc<Mutex<Vec<(String, String)>>>,
-    accept: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.accept.abort();
-    }
-}
-
 /// Answers every request with `reply`, or never when `reply` is `None`.
-async fn serve(reply: Option<String>) -> Server {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let base_url = format!("http://{}", listener.local_addr().expect("address"));
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let seen = Arc::clone(&requests);
-    let accept = tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            let reply = reply.clone();
-            let seen = Arc::clone(&seen);
-            tokio::spawn(async move {
-                let Some((head, body)) = read_request(&mut stream).await else {
-                    return;
-                };
-                seen.lock().expect("lock").push((head, body));
-                let Some(reply) = reply else {
-                    std::future::pending::<()>().await;
-                    return;
-                };
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                    reply.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            });
-        }
-    });
-    Server {
-        base_url,
-        requests,
-        accept,
-    }
-}
-
-async fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
-    let mut raw = Vec::new();
-    let mut buffer = [0u8; 4096];
-    let head_end = loop {
-        if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-            break index + 4;
-        }
-        let read = stream.read(&mut buffer).await.ok()?;
-        if read == 0 {
-            return None;
-        }
-        raw.extend_from_slice(&buffer[..read]);
+async fn serve(reply: Option<String>) -> http::Server {
+    let script = match reply {
+        Some(reply) => http::Script::status(200, &reply),
+        None => http::Script::stall_before_head(),
     };
-    let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
-    let length = head
-        .to_ascii_lowercase()
-        .lines()
-        .find_map(|line| line.strip_prefix("content-length:").map(str::to_owned))
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut body = raw[head_end..].to_vec();
-    while body.len() < length {
-        let read = stream.read(&mut buffer).await.ok()?;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&buffer[..read]);
-    }
-    Some((head, String::from_utf8_lossy(&body).into_owned()))
+    http::spawn_repeating(script).await
 }
 
 const API_KEY: &str = "tsk-secret-key-123";
@@ -601,7 +530,7 @@ async fn jev_advice_carries_percentages_and_the_audit_row_never_holds_the_key() 
     let server = serve(Some(jev_reply())).await;
     let (_directory, service) = service();
     standing(&service, "plan-first", "Plan before editing.");
-    let (advisor, audit) = audited(Box::new(jev::Jev::new(&server.base_url, API_KEY)));
+    let (advisor, audit) = audited(Box::new(jev::Jev::new(&server.url, API_KEY)));
     assert!(advisor.is_auxiliary());
 
     let candidates = propose_one(
@@ -616,8 +545,8 @@ async fn jev_advice_carries_percentages_and_the_audit_row_never_holds_the_key() 
         advice_line(&candidates[0].proposed).as_deref(),
         Some("Advice (auxiliary model jev-latest): all workspaces 91% · new 84% · durable 77%")
     );
-    let requests = server.requests.lock().expect("lock");
-    let (head, body) = &requests[0];
+    let requests = server.requests();
+    let (head, body) = (&requests[0].head, &requests[0].body);
     assert!(head.contains(&format!("Bearer {API_KEY}")), "{head}");
     assert!(!body.contains(API_KEY));
     assert!(body.contains("plan-first"), "standing key in the body");
@@ -649,7 +578,7 @@ async fn a_low_noul_answers_no_with_the_complement_probability() {
     .to_string();
     let server = serve(Some(reply)).await;
     let (_directory, service) = service();
-    let (advisor, _) = audited(Box::new(jev::Jev::new(&server.base_url, API_KEY)));
+    let (advisor, _) = audited(Box::new(jev::Jev::new(&server.url, API_KEY)));
 
     let candidates = propose_one(
         &advisor,
@@ -669,7 +598,7 @@ async fn a_low_noul_answers_no_with_the_complement_probability() {
 async fn a_jev_server_that_does_not_answer_in_time_times_out_without_advice() {
     let server = serve(None).await;
     let (_directory, service) = service();
-    let (advisor, audit) = audited(Box::new(jev::Jev::new(&server.base_url, API_KEY)));
+    let (advisor, audit) = audited(Box::new(jev::Jev::new(&server.url, API_KEY)));
     let advisor = advisor.with_limit(Duration::from_millis(150));
 
     let candidates = propose_one(
@@ -699,7 +628,7 @@ async fn a_jev_answer_of_the_wrong_type_is_invalid() {
     .to_string();
     let server = serve(Some(reply)).await;
     let (_directory, service) = service();
-    let (advisor, audit) = audited(Box::new(jev::Jev::new(&server.base_url, API_KEY)));
+    let (advisor, audit) = audited(Box::new(jev::Jev::new(&server.url, API_KEY)));
 
     let candidates = propose_one(
         &advisor,

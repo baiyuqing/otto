@@ -15,6 +15,20 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Usage and compatibility
+
+- Session **AUTO** approval now decides only a *bounded authorization*: an
+  operation that stays inside the sandbox and the workspace and grants nothing
+  durable. A plan review (`request_approval`), an unsandboxed command, a
+  cross-workspace delivery task, an external MCP tool call, a persistent
+  sandbox read grant and a scheduled `prompt` item now always wait for the
+  user in either mode instead of being approved automatically in AUTO. A
+  request AUTO cannot decide is presented exactly as in MANUAL, and its
+  recorded `pending` event is unchanged. See the
+  [authority boundary contract](docs/specs/2026-10-07-auto-mode-authority-boundaries.md)
+  and the [user manual](docs/user-manual.md#unified-approvals)
+  ([#401](https://github.com/baiyuqing/otto/pull/401)).
+
 ### Features
 
 - Steer the active turn from the TUI and take the guidance back. `/steer
@@ -43,6 +57,41 @@ limitations are documented in the [user manual](docs/user-manual.md).
   composer when it was empty. The unreachable queued-input withdrawal wiring
   this replaces (`queue_user_message`/`withdraw_user_message` from the TUI) is
   gone ([#404](https://github.com/baiyuqing/otto/pull/404)).
+- The session AUTO policy no longer approves a request raised by the model on
+  its own behalf: a plan or approach review is a human judgement, and letting
+  the asking session answer it made the requesting model the approving party
+  ([#401](https://github.com/baiyuqing/otto/pull/401)).
+
+- A memory write whose commit fails with an error other than busy now
+  reports "memory commit outcome is unknown" and closes the memory database
+  connection, as the
+  [state storage contract](docs/specs/2026-10-06-state-storage-contracts.md)
+  requires. Before, the write issued `COMMIT` as a raw statement, so the
+  failure was reported as an ordinary error and later writes kept using the
+  connection ([#403](https://github.com/baiyuqing/otto/pull/403)).
+
+### Security
+
+- A request outside the sandbox boundary, a durable grant and a plan review
+  cannot be approved by the session policy. The rule is enforced in the
+  approval service and rechecked inside the committing transaction, and a
+  request persisted without a declared authority class is treated as a user
+  decision ([#401](https://github.com/baiyuqing/otto/pull/401)).
+
+### Build and CI
+
+- Add test-only fault injection. The `fault-injection` Cargo feature exposes
+  `otto::faults` to integration tests and no shipped build enables it;
+  `tests/faults_boundary.rs` fails if production code names it. `faults::http`
+  is one loopback HTTP server with scripted connection faults (refused, reset,
+  stall, truncated or malformed stream) and replaces the servers copied into
+  six test modules. `tests/fault_provider.rs` checks the attempt count, request
+  count and effect certainty of both providers under those faults
+  ([#402](https://github.com/baiyuqing/otto/pull/402),
+  [development guide](docs/development.md#fault-injection)). `faults::sql`
+  wraps the SQL driver that every Turso repository now opens through, and
+  `tests/fault_storage.rs` runs commit, rollback, open and read faults against
+  each repository ([#403](https://github.com/baiyuqing/otto/pull/403)).
 
 ## 0.4.1 - 2026-10-07
 

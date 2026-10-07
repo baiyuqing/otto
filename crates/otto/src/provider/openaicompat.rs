@@ -792,10 +792,9 @@ mod tests {
 
     use otto_core::model::{Block, Message, OperationDisposition, Role};
     use otto_core::provider::StreamEvent;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
+    use crate::faults::http;
 
     /// A complete, minimal SSE body that finishes without emitting anything.
     const DONE_STREAM: &str =
@@ -852,88 +851,16 @@ mod tests {
         }
     }
 
-    /// A loopback HTTP/1.1 origin server.
-    ///
-    /// The accept loop is aborted when the guard is dropped, so a test never
-    /// leaks a listener. Handlers return the exact bytes to write, which lets
-    /// the same helper serve well-formed responses and the truncated or absent
-    /// ones the transport-retry tests need.
-    struct TestServer {
-        base_url: String,
-        accept: tokio::task::JoinHandle<()>,
-    }
-
-    impl Drop for TestServer {
-        fn drop(&mut self) {
-            self.accept.abort();
-        }
-    }
-
-    /// Starts a server on an ephemeral loopback port.
+    /// Starts a loopback origin server on `faults::http`.
     ///
     /// `handler` receives the request head as text and the request body, and
     /// returns the raw response bytes. An empty return closes the connection
     /// without a response, which is how the tests produce a transport error.
-    async fn spawn_server<H>(handler: H) -> TestServer
+    async fn spawn_server<H>(handler: H) -> http::Server
     where
         H: Fn(&str, &[u8]) -> Vec<u8> + Send + Sync + 'static,
     {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind a loopback port");
-        let base_url = format!(
-            "http://{}",
-            listener.local_addr().expect("listener has an address")
-        );
-        let handler = Arc::new(handler);
-        let accept = tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let handler = Arc::clone(&handler);
-                tokio::spawn(async move {
-                    let Some((head, body)) = read_request(&mut stream).await else {
-                        return;
-                    };
-                    let response = handler(&head, &body);
-                    if !response.is_empty() {
-                        let _ = stream.write_all(&response).await;
-                    }
-                    let _ = stream.shutdown().await;
-                });
-            }
-        });
-        TestServer { base_url, accept }
-    }
-
-    /// Reads one request. Returns `None` if the peer closed early.
-    async fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
-        let mut raw: Vec<u8> = Vec::new();
-        let mut buffer = [0u8; 4096];
-        let head_end = loop {
-            if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-                break index + 4;
-            }
-            let read = stream.read(&mut buffer).await.ok()?;
-            if read == 0 {
-                return None;
-            }
-            raw.extend_from_slice(&buffer[..read]);
-        };
-        let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
-        let length = head
-            .to_ascii_lowercase()
-            .lines()
-            .find_map(|line| line.strip_prefix("content-length:").map(str::to_string))
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-        let mut body = raw[head_end..].to_vec();
-        while body.len() < length {
-            let read = stream.read(&mut buffer).await.ok()?;
-            if read == 0 {
-                break;
-            }
-            body.extend_from_slice(&buffer[..read]);
-        }
-        Some((head, body))
+        http::spawn(move |request| handler(&request.head, request.body.as_bytes())).await
     }
 
     /// Serializes a complete response with a `Content-Length` body.
@@ -984,7 +911,7 @@ mod tests {
             http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
         })
         .await;
-        let client = Client::new(&server.base_url, "key");
+        let client = Client::new(&server.url, "key");
         let mut emit = |_: StreamEvent| panic!("no event is emitted after deadline");
         let settlement = client
             .complete(&model_request(), &mut emit, &StoppedControl::deadline())
@@ -1014,7 +941,7 @@ mod tests {
             })
             .await;
 
-            let client = Client::new(&server.base_url, "key");
+            let client = Client::new(&server.url, "key");
             let mut events = Vec::new();
             let mut emit = |event| events.push(event);
             let settlement = client
@@ -1074,22 +1001,14 @@ mod tests {
     /// sends the same request and succeeds.
     #[tokio::test]
     async fn a_connection_retry_recovers_once_the_endpoint_listens() {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
-        let address = probe.local_addr().expect("address");
-        drop(probe);
-        let client = Client::new(&format!("http://{address}"), "key");
-        let server = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let listener = TcpListener::bind(address).await.expect("rebind");
-            let (mut stream, _) = listener.accept().await.expect("accept");
-            let _ = read_request(&mut stream).await;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{DONE_STREAM}",
-                DONE_STREAM.len()
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.shutdown().await;
-        });
+        let server = http::late_listener(
+            http::refused_port(),
+            Duration::from_millis(300),
+            vec![http::Script::sse_done(&[
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            ])],
+        );
+        let client = Client::new(&server.url, "key");
         let mut retries = 0;
         let settlement = client
             .complete(
@@ -1102,7 +1021,6 @@ mod tests {
                 &CancellationToken::new(),
             )
             .await;
-        server.await.expect("server");
         assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
         assert_eq!(settlement.attempts, 2);
         assert_eq!(retries, 1);
@@ -1125,7 +1043,7 @@ mod tests {
 
         let mut events = Vec::new();
         let mut emit = |event| events.push(event);
-        let settlement = Client::new(&server.base_url, "key")
+        let settlement = Client::new(&server.url, "key")
             .complete(&model_request(), &mut emit, &CancellationToken::new())
             .await;
         assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
@@ -1150,7 +1068,7 @@ mod tests {
 
         let mut events = Vec::new();
         let mut emit = |event| events.push(event);
-        let settlement = Client::new(&server.base_url, "key")
+        let settlement = Client::new(&server.url, "key")
             .complete(&model_request(), &mut emit, &CancellationToken::new())
             .await;
         assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
@@ -1175,7 +1093,7 @@ mod tests {
 
         let mut events = Vec::new();
         let mut emit = |event| events.push(event);
-        let settlement = Client::new(&server.base_url, "key")
+        let settlement = Client::new(&server.url, "key")
             .complete(&model_request(), &mut emit, &CancellationToken::new())
             .await;
         assert_eq!(settlement.attempts, 4);
@@ -1218,7 +1136,7 @@ mod tests {
         };
         let mut events = Vec::new();
         let mut emit = |event| events.push(event);
-        let settlement = Client::new(&server.base_url, "key")
+        let settlement = Client::new(&server.url, "key")
             .complete(&model_request(), &mut emit, &control)
             .await;
         assert_eq!(settlement.attempts, 1);
@@ -1248,7 +1166,7 @@ mod tests {
 
         let mut events = Vec::new();
         let mut emit = |event| events.push(event);
-        Client::new(&server.base_url, "key")
+        Client::new(&server.url, "key")
             .complete(&model_request(), &mut emit, &CancellationToken::new())
             .await
             .result
@@ -1287,14 +1205,14 @@ mod tests {
 
         let source_calls = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&source_calls);
-        let location = format!("{}/chat/completions", target.base_url);
+        let location = format!("{}/chat/completions", target.url);
         let source = spawn_server(move |_head, _body| {
             counted.fetch_add(1, Ordering::SeqCst);
             http_response(302, &[("Location", &location)], "")
         })
         .await;
 
-        let client = Client::new(&source.base_url, "secret");
+        let client = Client::new(&source.url, "secret");
         let error = complete(&client, &model_request())
             .await
             .expect_err("a cross-origin redirect is rejected");
@@ -1320,7 +1238,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&format!("{}/redirect", server.base_url), "secret");
+        let client = Client::new(&format!("{}/redirect", server.url), "secret");
         complete(&client, &model_request())
             .await
             .expect("the redirect is followed");
@@ -1348,7 +1266,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, KEY);
+        let client = Client::new(&server.url, KEY);
         let message = complete(&client, &model_request())
             .await
             .expect_err("401 is an error")
@@ -1380,7 +1298,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, KEY);
+        let client = Client::new(&server.url, KEY);
         let error = complete(&client, &model_request())
             .await
             .expect_err("400 is an error");
@@ -1408,7 +1326,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, "secret");
+        let client = Client::new(&server.url, "secret");
         let error = complete(&client, &model_request())
             .await
             .expect_err("400 is an error");
@@ -1438,7 +1356,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, KEY);
+        let client = Client::new(&server.url, KEY);
         let error = complete(&client, &model_request())
             .await
             .expect_err("413 is an error");
@@ -1471,7 +1389,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, "key");
+        let client = Client::new(&server.url, "key");
         let error = complete(&client, &model_request())
             .await
             .expect_err("400 is an error");
@@ -1566,7 +1484,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&format!("{}/gateway/v1/", server.base_url), "secret");
+        let client = Client::new(&format!("{}/gateway/v1/", server.url), "secret");
         complete(&client, &model_request())
             .await
             .expect("the request succeeds");
@@ -1602,7 +1520,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&format!("{}/gateway/v1/", server.base_url), "secret");
+        let client = Client::new(&format!("{}/gateway/v1/", server.url), "secret");
         let ids = client
             .list_models(&CancellationToken::new())
             .await
@@ -1631,7 +1549,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, "sk-secret-value-123");
+        let client = Client::new(&server.url, "sk-secret-value-123");
         let error = client
             .list_models(&CancellationToken::new())
             .await
@@ -1648,7 +1566,7 @@ mod tests {
     async fn list_models_rejects_a_body_without_a_data_list() {
         let server = spawn_server(|_head, _body| http_response(200, &[], r#"{"models":[]}"#)).await;
 
-        let client = Client::new(&server.base_url, "key");
+        let client = Client::new(&server.url, "key");
         let error = client
             .list_models(&CancellationToken::new())
             .await

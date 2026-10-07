@@ -1421,6 +1421,7 @@ mod tests {
         let request = service
             .create(crate::approval::Proposal {
                 kind: crate::approval::Kind::Confirmation,
+                authority: crate::approval::Authority::Consent,
                 scope: controller.approval_scope(),
                 subject: crate::approval::Subject {
                     tool_call_id: "plan-call".into(),

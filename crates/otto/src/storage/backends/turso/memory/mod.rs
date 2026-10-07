@@ -18,6 +18,8 @@ use std::time::Duration;
 use crate::memory::guard::ContentGuard;
 use crate::memory::{Error, ErrorKind, MAX_DUPLICATE_ID_RETRIES, Result, Scope, StoreIdentity};
 use crate::storage::Connection;
+use crate::storage::drivers::turso::TursoDriver;
+use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
 
 /// Driver diagnostics can contain row data; only domain error kinds escape.
 pub fn map_storage_error(error: crate::storage::Error) -> Error {
@@ -33,6 +35,7 @@ pub fn map_storage_error(error: crate::storage::Error) -> Error {
                 ErrorKind::Corrupt
             }
         }
+        DriverError::CommitUnknown => ErrorKind::CommitUnknown,
         DriverError::Corrupt(_) | DriverError::NotAdb(_) => ErrorKind::Corrupt,
         DriverError::Misuse(_) | DriverError::Closed => ErrorKind::Closed,
         _ => ErrorKind::Unavailable,
@@ -66,12 +69,26 @@ pub struct Store {
 impl Store {
     /// Opens `filename`, creating and initializing it when it does not exist.
     pub fn open(filename: &std::path::Path, options: Options) -> Result<Self> {
+        Self::open_with_driver(&TursoDriver, filename, options)
+    }
+
+    pub fn open_with_driver(
+        driver: &dyn SqlDriver,
+        filename: &std::path::Path,
+        options: Options,
+    ) -> Result<Self> {
         if let Some(parent) = filename.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent).map_err(|_| Error::new(ErrorKind::Unavailable))?;
         }
-        let connection = Connection::open(filename).map_err(map_storage_error)?;
+        let connection = Connection::open_with_driver(
+            driver,
+            filename,
+            OpenOptions::default(),
+            SqlRequirements::DURABLE,
+        )
+        .map_err(map_storage_error)?;
         Self::from_connection(connection, options)
     }
 
@@ -202,21 +219,17 @@ impl Store {
     ) -> Result<T> {
         let mut inner = self.locked()?;
         let connection = inner.connection.as_ref().expect("checked by locked");
-        connection
-            .execute_batch("BEGIN IMMEDIATE")
+        let transaction = connection
+            .unchecked_transaction()
             .map_err(map_storage_error)?;
         match body(connection) {
             Ok((value, generation)) => {
-                connection
-                    .execute_batch("COMMIT")
-                    .map_err(map_storage_error)?;
+                transaction.commit().map_err(map_storage_error)?;
                 inner.generation = generation;
                 Ok(value)
             }
-            Err(error) => {
-                let _ = connection.execute_batch("ROLLBACK");
-                Err(error)
-            }
+            // Dropping the transaction rolls it back.
+            Err(error) => Err(error),
         }
     }
 }

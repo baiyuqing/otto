@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use crate::reflection::repository::ReflectionStore;
 use crate::reflection::store::{Error, GeneratedSkill, Result, RunRow, SkillWrite, Status};
+use crate::storage::drivers::turso::TursoDriver;
 use crate::storage::{Connection, OptionalExtension, params};
+use crate::storage::{OpenOptions, SqlDriver, SqlRequirements};
 
 /// The schema version this build writes and expects. A database with another
 /// version is left untouched and reported as [`Error::UnknownVersion`].
@@ -97,6 +99,10 @@ pub struct Store {
 
 impl Store {
     pub fn open(filename: &Path) -> Result<Self> {
+        Self::open_with_driver(&TursoDriver, filename)
+    }
+
+    pub fn open_with_driver(driver: &dyn SqlDriver, filename: &Path) -> Result<Self> {
         if let Some(parent) = filename.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -104,7 +110,13 @@ impl Store {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| Error::Io)?;
         }
-        let connection = Connection::open(filename).map_err(|_| Error::Io)?;
+        let connection = Connection::open_with_driver(
+            driver,
+            filename,
+            OpenOptions::default(),
+            SqlRequirements::DURABLE,
+        )
+        .map_err(|_| Error::Io)?;
         std::fs::set_permissions(filename, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error::Io)?;
         Self::from_connection(connection)

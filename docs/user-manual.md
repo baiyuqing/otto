@@ -2152,6 +2152,14 @@ Otto keeps generated profile files in a separate private `profiles` directory
 that the sandboxed child cannot read. Otto does not treat the workspace as protected: source,
 `.git`, tests, and generated files remain writable.
 
+When the selected workspace is a Git worktree, Otto also admits the other
+canonical worktrees Git registers under that exact repository's common Git
+directory. Bash can read and write those worktrees without a separate
+`read_paths` approval; their `.git` metadata and Otto workspace identity stay
+read-only. This does not admit a similarly named directory, a different
+repository, or change the file tools' selected-workspace boundary. Otto
+rediscovers this set at startup and `/sandbox reload`.
+
 Host home content is not automatically readable. Git config, shell dotfiles,
 and host caches are not implicitly mounted into the command view. Add only the
 narrow absolute or `~/...` `read_paths` you need. Broad `read_paths` are high
@@ -2159,6 +2167,8 @@ risk because command code can read them and, with `network = "allow"`, exfiltrat
 them. Otto rejects `read_paths` that would include Otto's private sandbox state.
 If you need tool-specific config, prefer narrow `read_paths` plus exact config
 environment variables over exposing a large home or cache subtree.
+An unavailable configured `read_paths` entry is skipped until it exists again;
+remove obsolete entries from the configuration to keep the policy clear.
 
 `network = "allow"` is the default and permits ordinary IP networking and local
 IP binds. `network = "deny"` blocks IP networking and local binds. Phase 1 has

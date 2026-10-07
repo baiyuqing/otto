@@ -121,6 +121,8 @@ pub(crate) struct AutomaticPath {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Options {
     pub(crate) workspace: String,
+    /// Canonical Git-linked worktree roots, including `workspace`.
+    pub(crate) workspaces: Vec<String>,
     pub(crate) directories: PrivateDirectories,
     pub(crate) shell: String,
     pub(crate) home: String,
@@ -141,6 +143,7 @@ pub(crate) struct Dependencies<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedOptions {
     workspace: String,
+    workspaces: Vec<String>,
     directories: PrivateDirectories,
     shell: String,
     home: String,
@@ -180,18 +183,17 @@ pub(crate) fn generate_with(
 ) -> Result<String, Rejected> {
     let resolved = resolve_required_options(options, dependencies.resolve)?;
     let roots = discover_read_roots(options, &resolved, dependencies)?;
-    let writable = vec![
-        resolved.workspace.clone(),
+    let mut writable = resolved.workspaces.clone();
+    writable.extend([
         directory_text(&resolved.directories.home)?,
         directory_text(&resolved.directories.temp)?,
         directory_text(&resolved.directories.cache)?,
-    ];
+    ]);
     let roots = collapse_read_roots(roots, &writable);
     if !roots_within_limits(&roots) {
         return Err(Rejected);
     }
 
-    let mut writable = writable;
     sort_paths(&mut writable);
     let metadata = metadata_ancestors(&writable, &roots, &resolved.shell);
 
@@ -203,7 +205,7 @@ pub(crate) fn generate_with(
         .and_then(|name| name.to_str())
         .ok_or(Rejected)?;
     let deny_message = format!("(with message {})", string_literal(tag)?);
-    let write_rules = render_write_rules(&writable, &resolved.workspace, &deny_message)?;
+    let write_rules = render_write_rules(&writable, &resolved.workspaces, &deny_message)?;
     let network_rules = render_network_rules(resolved.network);
     let shell_rule = render_shell_rule(&resolved.shell)?;
 
@@ -266,6 +268,13 @@ fn resolve_required_options(
     resolve: &dyn Fn(&str) -> Result<ResolvedPath, ResolveError>,
 ) -> Result<ResolvedOptions, Rejected> {
     let workspace = resolve_required_directory(&options.workspace, resolve)?;
+    let mut workspaces = Vec::with_capacity(options.workspaces.len() + 1);
+    for path in options.workspaces.iter().chain(std::iter::once(&workspace)) {
+        let resolved = resolve_required_directory(path, resolve)?;
+        if !workspaces.contains(&resolved) {
+            workspaces.push(resolved);
+        }
+    }
     let root = resolve_required_directory(&directory_text(&options.directories.root)?, resolve)?;
     let home_directory =
         resolve_required_directory(&directory_text(&options.directories.home)?, resolve)?;
@@ -284,6 +293,9 @@ fn resolve_required_options(
         || temp_directory != join(&root, "tmp")
         || cache_directory != join(&root, "cache")
         || paths_overlap(&workspace, &root)
+        || workspaces
+            .iter()
+            .any(|workspace| paths_overlap(workspace, &root))
         || paths_overlap(&shell.path, &root)
     {
         return Err(Rejected);
@@ -294,6 +306,7 @@ fn resolve_required_options(
 
     Ok(ResolvedOptions {
         workspace,
+        workspaces,
         directories: PrivateDirectories {
             root: root.into(),
             home: home_directory.into(),
@@ -382,7 +395,14 @@ fn discover_read_roots(
 
     for configured in &options.read_paths {
         let expanded = expand_read_path(configured, &resolved.home)?;
-        let candidate = (dependencies.resolve)(&expanded).map_err(Rejected::from)?;
+        let candidate = match (dependencies.resolve)(&expanded) {
+            Ok(candidate) => candidate,
+            // Configured paths can disappear when a linked worktree is
+            // removed. They grant no access while absent, rather than making
+            // the whole sandbox unavailable.
+            Err(ResolveError::NotFound) => continue,
+            Err(ResolveError::Rejected) => return Err(Rejected),
+        };
         if !valid_resolved(&candidate)
             || !matches!(candidate.kind, PathKind::Directory | PathKind::Regular)
             || paths_overlap(&candidate.path, &private_root)
@@ -659,7 +679,7 @@ fn render_read_rules(
 
 fn render_write_rules(
     writable: &[String],
-    workspace: &str,
+    workspaces: &[String],
     deny_message: &str,
 ) -> Result<String, Rejected> {
     let mut builder = String::new();
@@ -678,16 +698,20 @@ fn render_write_rules(
     // probe on macOS 27.2 showed the same denies placed before it had no
     // effect). The rules are emitted whether or not the paths exist, and no
     // setting turns them off.
-    let protected: Vec<Filter> = crate::sandbox::GIT_READ_ONLY
+    let protected: Vec<Filter> = workspaces
         .iter()
-        .chain(crate::workspace::READ_ONLY_PATHS.iter())
-        .map(|(name, subpath)| Filter {
-            kind: if *subpath {
-                FilterKind::Subpath
-            } else {
-                FilterKind::Literal
-            },
-            path: join(workspace, name),
+        .flat_map(|workspace| {
+            crate::sandbox::GIT_READ_ONLY
+                .iter()
+                .chain(crate::workspace::READ_ONLY_PATHS.iter())
+                .map(move |(name, subpath)| Filter {
+                    kind: if *subpath {
+                        FilterKind::Subpath
+                    } else {
+                        FilterKind::Literal
+                    },
+                    path: join(workspace, name),
+                })
         })
         .collect();
     write_rule(
@@ -1143,7 +1167,8 @@ mod tests {
         let home = make_directory(&join(&base, "resolved-home"));
         let shell = make_file(&join(&join(&base, "shells"), "shell"), 0o700);
         let options = Options {
-            workspace,
+            workspace: workspace.clone(),
+            workspaces: vec![workspace],
             directories: private_state.directories.clone(),
             shell,
             home,
@@ -1307,6 +1332,19 @@ mod tests {
             last_allow < deny_at,
             "git deny precedes an allow file-write* rule"
         );
+    }
+
+    #[test]
+    fn managed_worktrees_are_writable_but_keep_their_git_metadata_read_only() {
+        let mut fixture = new_fixture();
+        let linked = make_directory(&join(&fixture.base, "linked-worktree"));
+        fixture.options.workspaces.push(linked.clone());
+
+        let profile = fixture.render();
+        let write = section(&profile, "WRITE");
+        assert!(write.contains(&filter("subpath", &linked)));
+        assert!(write.contains(&quote(&join(&linked, ".git"))));
+        assert!(write.contains(&quote(&join(&linked, crate::workspace::MARKER))));
     }
 
     fn tag_message(fixture: &Fixture) -> String {
@@ -1844,7 +1882,11 @@ mod tests {
                 }
                 None
             });
-            fixture.assert_rejected(&format!("shell syntax {syntax}"));
+            let profile = fixture.render();
+            assert!(
+                !section(&profile, "READ").contains(&literal),
+                "an unavailable legacy path was granted"
+            );
             assert_eq!(
                 *seen.lock().expect("seen"),
                 literal,
@@ -1854,7 +1896,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalizes_read_paths_and_rejects_special_or_missing_entries() {
+    fn canonicalizes_read_paths_and_rejects_special_entries() {
         let mut fixture = new_fixture();
         let directory = make_directory(&join(&join(&fixture.base, "canonical"), "directory"));
         let file = make_file(&join(&join(&fixture.base, "canonical"), "file"), 0o600);
@@ -1873,18 +1915,12 @@ mod tests {
             "read path aliases were not canonicalized to typed grants"
         );
 
-        let base = fixture.base.clone();
         drop(fixture);
         let cases: Vec<(&str, String, Result<ResolvedPath, ResolveError>)> = vec![
             (
                 "relative",
                 "relative/path".to_string(),
                 Err(ResolveError::Rejected),
-            ),
-            (
-                "missing",
-                join(&base, "missing"),
-                Err(ResolveError::NotFound),
             ),
             (
                 "special",
@@ -1905,6 +1941,15 @@ mod tests {
                 .override_resolve(move |candidate| (candidate == target).then(|| resolved.clone()));
             fixture.assert_rejected(&format!("invalid read path {name}"));
         }
+
+        let mut fixture = new_fixture();
+        let missing = join(&fixture.base, "missing");
+        fixture.options.read_paths = vec![missing.clone()];
+        let profile = fixture.render();
+        assert!(
+            !section(&profile, "READ").contains(&missing),
+            "a missing legacy grant must not reach the profile"
+        );
     }
 
     #[test]

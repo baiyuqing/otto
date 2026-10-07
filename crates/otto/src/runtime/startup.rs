@@ -505,6 +505,7 @@ pub(crate) async fn compose_workspace_sandbox(
         home: builder.home.clone(),
         host_entries: builder.host_entries.clone(),
         provider_names: sandbox_provider_environment_names(&builder.config, api_key_env),
+        managed_worktrees: crate::sandbox::worktrees::managed(Path::new(&builder.workspace_path)),
     };
     let sandbox = normalize_sandbox_runtime(open_sandbox_runtime(&open_options, cancel).await);
     // The bash tool captures its executor when a runner is built, so the

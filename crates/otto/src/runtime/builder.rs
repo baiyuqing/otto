@@ -16,13 +16,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use otto_core::agent::inbox::NotificationKind;
 use otto_core::agent::redactor::Redactor;
 use otto_core::agent::{
-    Agent, AgentError, CompactionResult, CompactionSettings, EventSink, Options,
+    Agent, AgentError, CompactionResult, CompactionSettings, Event, EventSink, Options,
 };
 use otto_core::config::resolve::{Overrides, Runtime, SessionDefaults};
 use otto_core::config::{ConfigError, File, McpRuntime};
-use otto_core::model::{Block, Message, OperationStopReason, ToolDefinition};
+use otto_core::model::{Block, Message, OperationStopReason, ToolDefinition, Usage};
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
     Provider, ProviderError, ProviderSettlement, Request, RequestSizer, StreamSink,
@@ -566,6 +567,45 @@ where
     }
 }
 
+/// The notice a frontend shows after an interrupted turn dropped guidance it
+/// had accepted but never delivered.
+///
+/// The exact words matter: the user typed them and, with the turn gone, the
+/// notice is the only place they can read them back. Each message is quoted,
+/// bounded so a pathological queue cannot flood the transcript, and the
+/// remainder is counted rather than hidden.
+fn lost_steering_notice(lost: &[otto_core::agent::steering::Message]) -> String {
+    const MAX_QUOTED: usize = 8;
+    const MAX_QUOTED_CHARS: usize = 1_000;
+
+    let mut notice = if lost.len() == 1 {
+        "1 queued guidance message for the turn that just ended was not delivered: \
+         the turn ended before the next safe boundary, so it was dropped. \
+         Send it again if it is still needed."
+            .to_string()
+    } else {
+        format!(
+            "{} queued guidance messages for the turn that just ended were not \
+             delivered: the turn ended before the next safe boundary, so they were \
+             dropped. Send them again if they are still needed.",
+            lost.len()
+        )
+    };
+    for message in lost.iter().take(MAX_QUOTED) {
+        notice.push_str("\n\n> ");
+        let mut chars = message.text.chars();
+        let quoted: String = chars.by_ref().take(MAX_QUOTED_CHARS).collect();
+        notice.push_str(&quoted.split('\n').collect::<Vec<_>>().join("\n> "));
+        if chars.next().is_some() {
+            notice.push_str(" […]");
+        }
+    }
+    if let Some(rest) = lost.len().checked_sub(MAX_QUOTED).filter(|rest| *rest > 0) {
+        notice.push_str(&format!("\n\n({rest} more not shown)"));
+    }
+    notice
+}
+
 /// One composed agent, plus the two fixed strings a frontend may show.
 /// The request sizer a [`Runner::scripted`] runner uses: the bytes of text, so
 /// compaction can size its summary request without a real provider client.
@@ -676,8 +716,15 @@ impl Runner {
             &mut collecting,
             &control,
         );
-        self.monitor_approvals(drive_with_control(run, cancel, &control), received, emit)
-            .await
+        let result = self
+            .monitor_approvals(
+                drive_with_control(run, cancel, &control),
+                received,
+                &mut *emit,
+            )
+            .await;
+        self.report_lost_steering(&mut *emit).await;
+        result
     }
 
     /// Runs one model-originated follow-up as display-only context.
@@ -706,8 +753,15 @@ impl Runner {
             &mut collecting,
             &control,
         );
-        self.monitor_approvals(drive_with_control(run, cancel, &control), received, emit)
-            .await
+        let result = self
+            .monitor_approvals(
+                drive_with_control(run, cancel, &control),
+                received,
+                &mut *emit,
+            )
+            .await;
+        self.report_lost_steering(&mut *emit).await;
+        result
     }
 
     pub async fn run_with_image(
@@ -748,8 +802,53 @@ impl Runner {
             &mut collecting,
             &control,
         );
-        self.monitor_approvals(drive_with_control(run, cancel, &control), received, emit)
+        let result = self
+            .monitor_approvals(
+                drive_with_control(run, cancel, &control),
+                received,
+                &mut *emit,
+            )
+            .await;
+        self.report_lost_steering(&mut *emit).await;
+        result
+    }
+
+    /// Reports the guidance a finished run accepted but never delivered.
+    ///
+    /// An interrupted turn — the user pressed Esc, the provider failed, the
+    /// deadline expired — drops guidance it never reached a safe boundary
+    /// for. The user typed those words and must learn what became of them, so
+    /// each loss is persisted as a visible `agent_steering` context message
+    /// and announced on the turn's own event stream. A failed append still
+    /// announces the text, with the failure appended: losing the user's input
+    /// silently is exactly what this prevents.
+    async fn report_lost_steering(&self, emit: EventSink<'_>) {
+        let lost = self.steering().take_discarded();
+        if lost.is_empty() {
+            return;
+        }
+        let mut text = lost_steering_notice(&lost);
+        if let Err(error) = self
+            .session()
+            .append(Message {
+                role: otto_core::model::Role::Context,
+                blocks: vec![Block::text(&text)],
+                created_at: Utc::now(),
+                context_type: "agent_steering".into(),
+                display: true,
+                ..Message::default()
+            })
             .await
+        {
+            text.push_str(&format!("\n\n(It could not be saved: {error})"));
+        }
+        emit(Event::Notification {
+            kind: Some(NotificationKind::TaskReport),
+            task_id: "agent_steering".into(),
+            text,
+            usage: Usage::default(),
+            present: false,
+        });
     }
 
     async fn monitor_approvals<T>(
@@ -3965,5 +4064,111 @@ mod tests {
             .unwrap();
         assert!(session.1.start.get().unwrap().is_err());
         assert!(!root.join("should-not-finish").exists());
+    }
+
+    /// Answers only once the turn is cancelled, so the test decides exactly
+    /// when guidance is still waiting for a safe boundary.
+    struct CancelledProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for CancelledProvider {
+        async fn complete(
+            &self,
+            _request: &Request,
+            _emit: StreamSink<'_>,
+            control: &dyn OperationControl,
+        ) -> ProviderSettlement {
+            control.cancellation_token().cancelled().await;
+            ProviderSettlement::failed(
+                otto_core::provider::ProviderError::Cancelled,
+                1,
+                EffectCertainty::Unknown,
+            )
+        }
+    }
+
+    /// Guidance a cancelled turn accepted and never delivered must come back
+    /// with its own words: the user typed it, the turn that would have carried
+    /// it is gone, and before this the guidance simply vanished.
+    #[tokio::test]
+    async fn a_cancelled_turn_reports_the_guidance_it_never_delivered() {
+        use crate::subagent::tasks::Tasks;
+
+        let runner = Runner::scripted(
+            SharedSession::memory(Header::default()),
+            Arc::new(CancelledProvider),
+            Arc::new(Tasks::new()),
+        );
+        let steering = runner.steering();
+        let cancel = CancellationToken::new();
+        let mut events = Vec::new();
+        let run = async {
+            // Esc only means something once the run accepts guidance.
+            while steering.ticket().is_none() {
+                tokio::task::yield_now().await;
+            }
+            steering.submit("keep my exact words").expect("active run");
+            cancel.cancel();
+        };
+        let mut sink = |event| events.push(event);
+        let (result, ()) = tokio::join!(runner.run("hello", &mut sink, &cancel), run);
+
+        assert!(result.is_err(), "a cancelled turn reports its error");
+        let notice = runner
+            .session()
+            .messages()
+            .into_iter()
+            .find(|message| message.context_type == "agent_steering")
+            .expect("persisted steering-loss notice");
+        assert_eq!(notice.role, otto_core::model::Role::Context);
+        assert!(notice.display, "the loss must be visible, not hidden");
+        assert!(
+            notice.text().contains("keep my exact words"),
+            "the notice must quote the guidance: {}",
+            notice.text()
+        );
+        assert!(
+            matches!(events.as_slice(), [.., Event::Notification { task_id, text, .. }] if task_id == "agent_steering" && text == &notice.text()),
+            "the live event must say what the session recorded: {events:?}"
+        );
+    }
+
+    /// A turn that delivers its guidance loses nothing, so it adds no notice.
+    #[tokio::test]
+    async fn a_turn_that_delivers_its_guidance_reports_no_loss() {
+        use crate::subagent::tasks::Tasks;
+        use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any};
+        use otto_core::model::Usage;
+
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let runner = Runner::scripted(
+            SharedSession::memory(Header::default()),
+            provider,
+            Arc::new(Tasks::new()),
+        );
+        let cancel = CancellationToken::new();
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+        runner
+            .run("hello", &mut sink, &cancel)
+            .await
+            .expect("an answered turn succeeds");
+
+        assert!(
+            runner
+                .session()
+                .messages()
+                .iter()
+                .all(|message| message.context_type != "agent_steering"),
+            "an ordinary turn must not claim it lost guidance"
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                Event::Notification { task_id, .. } if task_id == "agent_steering"
+            )),
+            "{events:?}"
+        );
     }
 }

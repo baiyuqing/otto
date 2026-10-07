@@ -127,11 +127,8 @@ pub struct File {
     pub projects: HashMap<String, projects::Project>,
 }
 
-/// The `[experimental]` table: features that may change shape or be removed
-/// without a compatibility path. Unlike every other table it does not reject
-/// unknown keys, so dropping a feature later never turns a config that
-/// enabled it into a parse error; [`File::experimental_warnings`] reports
-/// each surviving unknown key once, for the caller to print at load time.
+/// Legacy `[experimental]` configuration, accepted for compatibility.
+/// New configuration uses `[skills].typesafe_skill_check`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Experimental {
     pub typesafe_skill_check: Option<bool>,
@@ -536,10 +533,18 @@ model = "gpt-5-codex"
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn experimental_absent_resolves_to_disabled() {
+    fn experimental_absent_is_empty() {
         let file = parse("").expect("parse");
         assert_eq!(file.experimental.typesafe_skill_check, None);
+        assert_eq!(file.skills.typesafe_skill_check, None);
         assert!(experimental_warnings(&file).is_empty());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn typesafe_skill_check_is_a_skills_setting() {
+        let file = parse("[skills]\ntypesafe_skill_check = false\n").expect("parse");
+        assert_eq!(file.skills.typesafe_skill_check, Some(false));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

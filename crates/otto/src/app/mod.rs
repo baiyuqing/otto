@@ -781,8 +781,8 @@ impl Controller {
             .unwrap_or_default()
     }
 
-    /// The automatic skill contract checker (experimental), when the
-    /// feature is enabled and the current runner has sub-agents built.
+    /// The automatic skill contract checker, when the feature is enabled and
+    /// the current runner has sub-agents built.
     pub fn skill_checker(&self) -> Option<Arc<crate::skill::check::Checker>> {
         self.lock()
             .current

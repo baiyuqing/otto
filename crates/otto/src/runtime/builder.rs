@@ -1269,8 +1269,8 @@ pub struct Shared {
     /// The scheduled-delivery store (`~/.otto/schedule.db`). `None` when it
     /// could not be opened; the schedule tools then report it as unavailable.
     pub schedule: Option<Arc<dyn crate::schedule::ScheduleStore>>,
-    /// The automatic skill contract check (experimental). `None` when the
-    /// feature is disabled or its database could not be opened; either way
+    /// The automatic skill contract check. `None` when the feature is disabled
+    /// or its database could not be opened; either way
     /// `build_subagents` wires no checker in and delegation is unaffected.
     pub skill_checker: Option<Arc<crate::skill::check::Checker>>,
     /// The process-wide memory service, its user scope, and the recall

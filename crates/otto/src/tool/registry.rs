@@ -409,6 +409,13 @@ impl ToolExecutor for Registry {
             .map_or_default(|tool| tool.batch_control())
     }
 
+    fn yields_turn(&self, name: &str, execution: &ToolExecution) -> bool {
+        !execution.result.is_error
+            && execution.outcome.disposition == OperationDisposition::Succeeded
+            && execution.outcome.effect_certainty == EffectCertainty::Completed
+            && self.lookup(name).is_some_and(|tool| tool.yields_turn())
+    }
+
     async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution {
         self.execute_with_scope(call, control, None).await
     }

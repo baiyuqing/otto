@@ -1206,7 +1206,13 @@ api_key_env = "ALPHA_KEY"
         switch(
             Component::Subagents,
             "",
-            &["agent", "agent_status", "agent_send", "agent_cancel"],
+            &[
+                "agent",
+                "agent_status",
+                "agent_yield",
+                "agent_send",
+                "agent_cancel",
+            ],
             &[],
         )
         .await;

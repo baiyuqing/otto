@@ -143,6 +143,8 @@ mod tests {
                         }),
                         ..Message::default()
                     },
+                    cached_input_tokens_present: true,
+                    remote_compaction: None,
                 },
                 1,
             )

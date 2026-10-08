@@ -1595,6 +1595,41 @@ async fn seeded_session() -> MemorySession {
     session
 }
 
+async fn record_echo_capabilities(session: &MemorySession) {
+    let definitions = EchoExecutor::default().definitions();
+    let capabilities = crate::session::Capabilities {
+        tools: definitions
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect(),
+        definitions: Some(
+            definitions
+                .iter()
+                .map(|definition| {
+                    (
+                        definition.name.clone(),
+                        super::capabilities::definition_digest(definition),
+                    )
+                })
+                .collect(),
+        ),
+        version: None,
+    };
+    session
+        .append_custom(
+            crate::session::CAPABILITIES_CUSTOM_TYPE,
+            &crate::session::encode_capabilities(&capabilities),
+        )
+        .await
+        .expect("record capabilities");
+}
+
+async fn seeded_session_with_echo_capabilities() -> MemorySession {
+    let session = seeded_session().await;
+    record_echo_capabilities(&session).await;
+    session
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn a_request_under_the_soft_trigger_is_not_compacted() {
@@ -1824,8 +1859,8 @@ async fn unknown_limits_never_compact_proactively() {
 /// before the test clock and reported `input_tokens` of prompt usage. The usage
 /// anchors the request estimate near `input_tokens` plus a few tens of tokens.
 async fn idle_session(age_minutes: i64, input_tokens: i64) -> MemorySession {
-    let session = seeded_session().await;
-    let mut messages = session.messages();
+    let mut messages = seeded_session().await.messages();
+
     let last = messages.last_mut().expect("seeded assistant message");
     last.created_at = clock() - chrono::TimeDelta::minutes(age_minutes);
     last.usage = Some(Usage {
@@ -1836,6 +1871,7 @@ async fn idle_session(age_minutes: i64, input_tokens: i64) -> MemorySession {
     for message in messages {
         rebuilt.append(message).await.expect("append");
     }
+    record_echo_capabilities(&rebuilt).await;
     rebuilt
 }
 
@@ -2168,7 +2204,7 @@ async fn remote_compaction_persists_opaque_state_and_reuses_only_the_new_tail() 
     let agent = Agent::new(
         provider,
         EchoExecutor::default(),
-        seeded_session().await,
+        seeded_session_with_echo_capabilities().await,
         options(),
     );
     let mut events = Vec::new();

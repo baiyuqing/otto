@@ -447,7 +447,7 @@ impl Client {
                 return ProviderSettlement::succeeded(
                     Response {
                         message: redact_message(&redactor, response.message),
-                        ..Response::default()
+                        ..response
                     },
                     1,
                 );
@@ -480,7 +480,7 @@ impl Client {
         ProviderSettlement::succeeded(
             Response {
                 message: redact_message(&redactor, response.message),
-                ..Response::default()
+                ..response
             },
             1,
         )
@@ -892,6 +892,33 @@ mod tests {
         );
         assert!(response.cached_input_tokens_present);
         assert!(!events.is_empty());
+    }
+
+    /// A requested remote compaction item reaches the response, tagged with
+    /// this provider.
+    #[tokio::test]
+    async fn returns_the_requested_remote_compaction() {
+        const STREAM: &str = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        );
+        let server = testserver::spawn(|_| sse_response(STREAM)).await;
+        let client = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1");
+        let request = Request {
+            request_remote_compaction: true,
+            ..model_request()
+        };
+
+        let (settlement, _) = complete(&client, &request).await;
+
+        assert_eq!(
+            settlement.result.unwrap().remote_compaction,
+            Some(otto_core::session::RemoteCompaction {
+                provider: "chatgpt".into(),
+                id: "cmp_1".into(),
+                encrypted_content: "opaque".into(),
+            })
+        );
     }
 
     #[tokio::test]

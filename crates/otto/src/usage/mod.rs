@@ -298,7 +298,7 @@ impl Collector {
     }
 }
 
-fn disposition_name(value: otto_core::model::OperationDisposition) -> &'static str {
+pub(crate) fn disposition_name(value: otto_core::model::OperationDisposition) -> &'static str {
     use otto_core::model::OperationDisposition::*;
     match value {
         Succeeded => "succeeded",
@@ -309,7 +309,7 @@ fn disposition_name(value: otto_core::model::OperationDisposition) -> &'static s
     }
 }
 
-fn effect_certainty_name(value: otto_core::model::EffectCertainty) -> &'static str {
+pub(crate) fn effect_certainty_name(value: otto_core::model::EffectCertainty) -> &'static str {
     use otto_core::model::EffectCertainty::*;
     match value {
         NotStarted => "not_started",
@@ -319,7 +319,7 @@ fn effect_certainty_name(value: otto_core::model::EffectCertainty) -> &'static s
     }
 }
 
-fn stop_reason_name(value: otto_core::model::OperationStopReason) -> &'static str {
+pub(crate) fn stop_reason_name(value: otto_core::model::OperationStopReason) -> &'static str {
     use otto_core::model::OperationStopReason::*;
     match value {
         UserCancellation => "user_cancellation",

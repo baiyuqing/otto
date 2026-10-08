@@ -127,6 +127,7 @@ pub fn build_summary_request(
         system_prompt.push_str(&normalized_focus);
     }
     let request = Request {
+        cache_key: String::new(),
         model: options.model.clone(),
         system_prompt,
         thinking: options.thinking.clone(),

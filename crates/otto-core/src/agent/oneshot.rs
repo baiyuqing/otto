@@ -93,6 +93,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
         stopped(control)?;
         let provider_request = Request {
+            cache_key: String::new(),
             model: self.options.model.clone(),
             system_prompt: request.system_prompt.to_owned(),
             thinking: self.options.thinking.clone(),

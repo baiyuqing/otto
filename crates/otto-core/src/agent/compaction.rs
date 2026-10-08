@@ -328,6 +328,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             thinking: self.options.thinking.clone(),
             messages,
             tools,
+            cache_key: self.options.cache_key.clone(),
         }
     }
 
@@ -627,6 +628,7 @@ pub fn estimate_compacted_context(
         thinking: options.thinking.clone(),
         messages,
         tools: tools.to_vec(),
+        cache_key: options.cache_key.clone(),
     };
     estimate_request(&request, Some(&CompactionMetadata::default()))
 }

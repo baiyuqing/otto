@@ -68,6 +68,8 @@ pub struct RunDispatchState {
     /// The limits that stop a turn making no progress. The turn loop replaces
     /// the default with the one this run's [`super::Options`] configured.
     pub progress: ProgressGuard,
+    pub yield_after_batch: bool,
+    pub batch_has_errors: bool,
 }
 
 /// Builds the error an automatic dispatch path gives up with, dropping causes

@@ -48,15 +48,17 @@ pub struct WireCompaction {
     pub checkpoint_id: String,
     #[serde(default)]
     pub reason: String,
-    #[serde(default)]
-    pub tokens_before: i64,
-    #[serde(default)]
-    pub estimated_tokens_after: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens_after: Option<i64>,
     #[serde(default)]
     pub automatic: bool,
-    /// Present only when the summary call reported usage.
+    /// Present only when the compaction call reported usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens_present: Option<bool>,
     #[serde(default)]
     pub noop: bool,
 }
@@ -68,10 +70,10 @@ pub struct WirePlan {
     pub reason: String,
     #[serde(default)]
     pub automatic: bool,
-    #[serde(default)]
-    pub tokens_before: i64,
-    #[serde(default)]
-    pub estimated_tokens_after: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens_after: Option<i64>,
     #[serde(default)]
     pub summarized_messages: usize,
     #[serde(default)]
@@ -127,6 +129,8 @@ pub struct WireEvent {
     pub usage: Option<Usage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_present: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens_present: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<WireCompaction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,6 +231,7 @@ impl PartialEq for WireEvent {
             && self.result == other.result
             && self.usage == other.usage
             && self.usage_present == other.usage_present
+            && self.cached_input_tokens_present == other.cached_input_tokens_present
             && self.compaction == other.compaction
             && self.plan == other.plan
             && self.retry == other.retry
@@ -289,9 +294,14 @@ pub fn to_wire(event: &Event) -> WireEvent {
                 stop_reason: outcome.stop_reason,
             });
         }
-        Event::ProviderUsage { usage, present } => {
+        Event::ProviderUsage {
+            usage,
+            present,
+            cached_input_tokens_present,
+        } => {
             wire.usage = Some(*usage);
             wire.usage_present = Some(*present);
+            wire.cached_input_tokens_present = (*present).then_some(*cached_input_tokens_present);
         }
         Event::Notification {
             kind: _,
@@ -357,6 +367,9 @@ pub fn to_wire_compaction(result: &CompactionResult) -> WireCompaction {
         estimated_tokens_after: result.estimated_tokens_after,
         automatic: result.automatic,
         usage: result.usage_present.then_some(result.usage),
+        cached_input_tokens_present: result
+            .usage_present
+            .then_some(result.cached_input_tokens_present),
         noop: result.noop,
     }
 }
@@ -463,6 +476,7 @@ mod tests {
             json(&Event::ProviderUsage {
                 usage: Usage::default(),
                 present: false,
+                cached_input_tokens_present: false,
             }),
             r#"{"type":"provider_usage","usage":{"input_tokens":0,"output_tokens":0},"usage_present":false}"#
         );
@@ -491,11 +505,12 @@ mod tests {
         let compaction = CompactionResult {
             checkpoint_id: "m9".into(),
             reason: CompactionReason::Threshold,
-            tokens_before: 900,
-            estimated_tokens_after: 300,
+            tokens_before: Some(900),
+            estimated_tokens_after: Some(300),
             automatic: true,
             usage: Usage::default(),
             usage_present: false,
+            cached_input_tokens_present: false,
             noop: false,
         };
         assert_eq!(
@@ -511,8 +526,8 @@ mod tests {
                 plan: CompactionPlan {
                     reason: CompactionReason::Overflow,
                     automatic: false,
-                    tokens_before: 10,
-                    estimated_tokens_after: 4,
+                    tokens_before: Some(10),
+                    estimated_tokens_after: Some(4),
                     summarized_messages: 3,
                     retained_messages: 2,
                     mode: CompactionMode::SplitTurn,
@@ -573,6 +588,7 @@ mod tests {
         assert_eq!(
             json(&Event::ProviderApiCall {
                 operation_id: operation_id(),
+                kind: crate::agent::ProviderOperationKind::Ordinary,
                 provider: "openai-compatible".into(),
                 model: "gpt".into(),
                 duration: std::time::Duration::from_millis(5),

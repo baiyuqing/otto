@@ -155,6 +155,21 @@ impl Session for MemoryHandle {
         self.inner.latest_compaction()
     }
 
+    fn remote_compaction(&self) -> Option<otto_core::session::RemoteCompaction> {
+        self.inner.remote_compaction()
+    }
+
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        self.inner.post_remote_compaction_messages()
+    }
+
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: otto_core::session::RemoteCompaction,
+    ) -> Result<(), SessionError> {
+        self.inner.append_remote_compaction(checkpoint).await
+    }
+
     async fn append_compaction(
         &self,
         checkpoint: CompactionCheckpoint,
@@ -368,6 +383,21 @@ impl Session for SharedSession {
         self.0.latest_compaction()
     }
 
+    fn remote_compaction(&self) -> Option<otto_core::session::RemoteCompaction> {
+        self.0.remote_compaction()
+    }
+
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        self.0.post_remote_compaction_messages()
+    }
+
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: otto_core::session::RemoteCompaction,
+    ) -> Result<(), SessionError> {
+        self.0.append_remote_compaction(checkpoint).await
+    }
+
     async fn append_compaction(
         &self,
         checkpoint: CompactionCheckpoint,
@@ -446,6 +476,16 @@ pub enum ProviderClient {
 
 #[async_trait::async_trait]
 impl Provider for ProviderClient {
+    fn capabilities(&self) -> otto_core::provider::ProviderCapabilities {
+        match self {
+            Self::Compat { client, .. } => client.capabilities(),
+            Self::ChatGpt { client, .. } => client.capabilities(),
+            Self::Unavailable => otto_core::provider::ProviderCapabilities::default(),
+            #[cfg(test)]
+            Self::Scripted(provider) => provider.capabilities(),
+        }
+    }
+
     async fn complete(
         &self,
         request: &Request,
@@ -525,6 +565,9 @@ struct ObservedProvider<'a, P: ?Sized> {
 }
 #[async_trait::async_trait]
 impl<P: Provider + Sync + ?Sized> Provider for ObservedProvider<'_, P> {
+    fn capabilities(&self) -> otto_core::provider::ProviderCapabilities {
+        self.inner.capabilities()
+    }
     async fn complete(
         &self,
         request: &Request,
@@ -694,6 +737,7 @@ pub struct Runner {
     system_prompt: String,
     definitions: Vec<ToolDefinition>,
     usage: Option<crate::usage::Collector>,
+    logger: Arc<crate::log::Logger>,
     /// The sub-agent task registry, absent when sub-agents are off. `/tasks`
     /// and `/task` read the active runner's task registry.
     pub(crate) tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
@@ -726,6 +770,84 @@ pub struct Runner {
 
 /// The tool-less agent behind the session-model advice backend.
 pub type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
+
+fn log_runtime_event(logger: &crate::log::Logger, session: &SharedSession, event: &Event) {
+    match event {
+        Event::ProviderApiCall {
+            operation_id,
+            kind,
+            provider,
+            model,
+            duration,
+            attempts,
+            status,
+            outcome,
+        } => logger.info(
+            "provider_operation_finished",
+            &[
+                ("operation_id", operation_id.to_string()),
+                ("kind", kind.name().into()),
+                ("provider", provider.clone()),
+                ("model", model.clone()),
+                ("attempts", attempts.to_string()),
+                ("status", status.name().into()),
+                (
+                    "disposition",
+                    crate::usage::disposition_name(outcome.disposition).into(),
+                ),
+                (
+                    "effect_certainty",
+                    crate::usage::effect_certainty_name(outcome.effect_certainty).into(),
+                ),
+                (
+                    "stop_reason",
+                    outcome
+                        .stop_reason
+                        .map(crate::usage::stop_reason_name)
+                        .unwrap_or_default()
+                        .into(),
+                ),
+                ("duration_ms", duration.as_millis().to_string()),
+            ],
+        ),
+        // A no-op result has an empty checkpoint id, which can equal the id of
+        // a remote checkpoint the provider returned without one.
+        Event::CompactionCompleted { compaction } if !compaction.noop => {
+            let Some(checkpoint) = session
+                .remote_compaction()
+                .filter(|checkpoint| checkpoint.id == compaction.checkpoint_id)
+            else {
+                return;
+            };
+            logger.info(
+                "remote_compaction_finished",
+                &[
+                    ("checkpoint_id", checkpoint.id),
+                    ("provider", checkpoint.provider),
+                    ("reason", compaction.reason.name().into()),
+                    ("automatic", compaction.automatic.to_string()),
+                    (
+                        "tail_messages",
+                        session.post_remote_compaction_messages().len().to_string(),
+                    ),
+                    (
+                        "tokens_before",
+                        compaction
+                            .tokens_before
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                    ),
+                    ("usage_present", compaction.usage_present.to_string()),
+                    (
+                        "cached_input_tokens_present",
+                        compaction.cached_input_tokens_present.to_string(),
+                    ),
+                ],
+            );
+        }
+        _ => {}
+    }
+}
 
 impl Runner {
     /// Keep temporary output across all provider steps of one logical turn,
@@ -1149,13 +1271,20 @@ impl Runner {
             control.stop(OperationStopReason::UserCancellation);
         }
         let collector = self.usage.as_ref().map(|usage| usage.for_task(task_id));
-        let mut emit = |_event: otto_core::agent::Event| {};
+        // The one-shot call emits its provider operation record, including
+        // for a failed call, so operation and attempt counts include it.
+        let mut emit = |event: otto_core::agent::Event| {
+            if let Some(collector) = &collector {
+                let _ = collector.record(&event);
+            }
+        };
         let call = self.agent.complete_text(request, &mut emit, &control);
         let response = drive_with_control(call, cancel, &control).await?;
-        if let Some(collector) = collector {
+        if let Some(collector) = &collector {
             let _ = collector.record(&otto_core::agent::Event::ProviderUsage {
                 usage: response.usage,
                 present: response.usage_present,
+                cached_input_tokens_present: response.cached_input_tokens_present,
             });
         }
         Ok(response)
@@ -1223,6 +1352,7 @@ impl Runner {
         emit: EventSink<'a>,
     ) -> impl FnMut(otto_core::agent::Event) + Send + use<'a> {
         move |event| {
+            log_runtime_event(&self.logger, self.session(), &event);
             if let Some(usage) = &self.usage {
                 let _ = usage.record(&event);
             }
@@ -1403,6 +1533,7 @@ impl Runner {
             system_prompt: String::new(),
             definitions,
             usage: None,
+            logger: Arc::new(crate::log::Logger::discard()),
             reminders: Some(Arc::new(crate::tool::remind::Reminders::new(inbox))),
             tasks: Some(tasks),
             subagents: None,
@@ -2670,6 +2801,7 @@ impl Builder {
             system_prompt,
             definitions,
             usage: self.usage_collector(session, runtime),
+            logger: self.logger.clone(),
             tasks: subagents.tasks,
             subagents: subagents.runner,
             reminders: subagents.reminders,
@@ -3040,6 +3172,19 @@ mod tests {
         dropped: Arc<AtomicBool>,
     }
 
+    struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log bytes").extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     struct DropFlag(Arc<AtomicBool>);
 
     impl Drop for DropFlag {
@@ -3061,6 +3206,103 @@ mod tests {
             control.cancellation_token().cancelled().await;
             std::future::pending().await
         }
+    }
+
+    #[tokio::test]
+    async fn remote_compaction_logs_safe_diagnostic_metadata_without_opaque_content() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let logger = crate::log::Logger::new(Box::new(LogSink(Arc::clone(&bytes))));
+        let session = SharedSession::memory(Header::default());
+        session
+            .append_remote_compaction(otto_core::session::RemoteCompaction {
+                provider: "chatgpt".into(),
+                id: "compact-1".into(),
+                encrypted_content: "opaque-secret-must-not-appear".into(),
+            })
+            .await
+            .expect("append checkpoint");
+
+        log_runtime_event(
+            &logger,
+            &session,
+            &Event::ProviderApiCall {
+                operation_id: otto_core::model::OperationId::new("operation-1").unwrap(),
+                kind: otto_core::agent::ProviderOperationKind::RemoteCompaction,
+                provider: "chatgpt".into(),
+                model: "test-model".into(),
+                duration: Duration::from_millis(42),
+                attempts: 2,
+                status: otto_core::agent::ApiStatus::Ok,
+                outcome: otto_core::model::OperationOutcome {
+                    disposition: OperationDisposition::Succeeded,
+                    effect_certainty: EffectCertainty::Completed,
+                    stop_reason: None,
+                },
+            },
+        );
+        log_runtime_event(
+            &logger,
+            &session,
+            &Event::CompactionCompleted {
+                compaction: CompactionResult {
+                    checkpoint_id: "compact-1".into(),
+                    tokens_before: Some(120),
+                    usage_present: true,
+                    cached_input_tokens_present: true,
+                    ..CompactionResult::default()
+                },
+            },
+        );
+
+        let text = String::from_utf8(bytes.lock().expect("log bytes").clone()).unwrap();
+        for expected in [
+            "msg=provider_operation_finished",
+            "operation_id=operation-1",
+            "kind=remote_compaction",
+            "attempts=2",
+            "status=ok",
+            "effect_certainty=completed",
+            "duration_ms=42",
+            "msg=remote_compaction_finished",
+            "checkpoint_id=compact-1",
+            "provider=chatgpt",
+            "tail_messages=0",
+            "tokens_before=120",
+            "usage_present=true",
+            "cached_input_tokens_present=true",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text:?}");
+        }
+        assert!(!text.contains("opaque-secret-must-not-appear"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_noop_compaction_does_not_log_an_unnamed_remote_checkpoint() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let logger = crate::log::Logger::new(Box::new(LogSink(Arc::clone(&bytes))));
+        let session = SharedSession::memory(Header::default());
+        session
+            .append_remote_compaction(otto_core::session::RemoteCompaction {
+                provider: "chatgpt".into(),
+                id: String::new(),
+                encrypted_content: "opaque".into(),
+            })
+            .await
+            .expect("append checkpoint");
+
+        log_runtime_event(
+            &logger,
+            &session,
+            &Event::CompactionCompleted {
+                compaction: CompactionResult {
+                    noop: true,
+                    ..CompactionResult::default()
+                },
+            },
+        );
+
+        let text = String::from_utf8(bytes.lock().expect("log bytes").clone()).unwrap();
+        assert!(!text.contains("remote_compaction_finished"), "{text}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -3655,6 +3897,7 @@ mod tests {
                 "list_models",
                 "agent",
                 "agent_status",
+                "agent_yield",
                 "agent_send",
                 "agent_cancel",
                 "remind",
@@ -4058,7 +4301,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("<otto_system_prompt version=\"1\">"));
         assert!(prompt.contains(
-            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_status, agent_send, agent_cancel, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, otto_help</available_tools>"
+            "<available_tools>read, grep, find, ls, write, edit, web_fetch, web_search, list_models, agent, agent_status, agent_yield, agent_send, agent_cancel, remind, remind_status, remind_cancel, request_approval, approval_pending, approval_revoke, schedule, schedule_list, schedule_cancel, task_queue, update_plan, otto_help</available_tools>"
         ));
         assert!(prompt.contains("<task_control_policy>"));
         assert!(prompt.contains("<workspace_instructions"), "{prompt}");
@@ -4225,12 +4468,13 @@ mod tests {
                     cached_input_tokens: 4,
                 },
                 present: true,
+                cached_input_tokens_present: true,
             })
             .expect("record");
 
         let summary = store.summary(Some("session-1")).expect("summary");
         assert_eq!(summary.input_tokens, 10);
-        assert_eq!(summary.cached_input_tokens, 4);
+        assert_eq!(summary.cached_input_tokens, Some(4));
     }
 
     /// A provider `Runner::scripted` needs a value for but this test never

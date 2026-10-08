@@ -1028,6 +1028,9 @@ impl Connection {
         if let Some(command) = command::parse(&text) {
             return self.run_command(session_id, command, cancel).await;
         }
+        // Keep the local agent turn and attach transport state machines on the
+        // heap. Combining both large futures inline can overflow the default
+        // ACP task stack as either backend evolves.
         match &self.backend {
             Backend::Local(local) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
@@ -1039,23 +1042,28 @@ impl Connection {
                         .controller
                         .set_next_input_id(Some(input_id.to_string()));
                 }
-                let reply = self
-                    .local_prompt(local, &session, session_id, text, (channel, origin), cancel)
-                    .await;
+                let reply = Box::pin(self.local_prompt(
+                    local,
+                    &session,
+                    session_id,
+                    text,
+                    (channel, origin),
+                    cancel,
+                ))
+                .await;
                 session.controller.set_next_input_id(None);
                 reply
             }
             Backend::Attach(relay) => {
-                relay
-                    .prompt(
-                        self,
-                        session_id,
-                        &text,
-                        (channel, origin.as_ref()),
-                        (request_id, input_id),
-                        cancel,
-                    )
-                    .await
+                Box::pin(relay.prompt(
+                    self,
+                    session_id,
+                    &text,
+                    (channel, origin.as_ref()),
+                    (request_id, input_id),
+                    cancel,
+                ))
+                .await
             }
         }
     }
@@ -1071,23 +1079,31 @@ impl Connection {
         request_id: Option<&str>,
         cancel: &CancellationToken,
     ) -> Reply {
+        // Match `prompt`: queued turns use the same backend boundary and must
+        // not inline either large state machine into this dispatcher.
         match &self.backend {
             Backend::Local(local) => {
                 let session = local.session(session_id).ok_or_else(unknown_session)?;
-                self.local_prompt(local, &session, session_id, text, (channel, origin), cancel)
-                    .await
+                Box::pin(self.local_prompt(
+                    local,
+                    &session,
+                    session_id,
+                    text,
+                    (channel, origin),
+                    cancel,
+                ))
+                .await
             }
             Backend::Attach(relay) => {
-                relay
-                    .prompt(
-                        self,
-                        session_id,
-                        &text,
-                        (channel, origin.as_ref()),
-                        (request_id, None),
-                        cancel,
-                    )
-                    .await
+                Box::pin(relay.prompt(
+                    self,
+                    session_id,
+                    &text,
+                    (channel, origin.as_ref()),
+                    (request_id, None),
+                    cancel,
+                ))
+                .await
             }
         }
     }

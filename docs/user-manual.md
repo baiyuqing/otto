@@ -346,8 +346,9 @@ otto --provider chatgpt --model gpt-5-codex
 - Subscription traffic goes to OpenAI's Responses backend
   (`https://chatgpt.com/backend-api/codex/responses`), authorized by the OAuth
   access token plus the `chatgpt-account-id` header. This is a different wire
-  format from the OpenAI-compatible Chat Completions provider, but the CLI,
-  tools, sessions, and compaction behave identically.
+  format from the OpenAI-compatible Chat Completions provider. ChatGPT uses the
+  backend's Responses compaction protocol; other providers use Otto's local
+  structured summaries.
 - The access token is refreshed automatically from the stored refresh token
   when it nears expiry; rotated tokens are written back to the credential file.
 - Tokens are never written to TOML, session files, or logs, and are stripped
@@ -1047,7 +1048,8 @@ OTTO_UI=repl otto
   sub-agent panel. Its fields, most important first: the model, the approval
   mode (`AUTO` or `MANUAL`), the session's token totals with the cached share
   of the prompt (`tokens 12.4k/802 (cached 9.8k, 79.0%)`, or `tokens 0/0`
-  before the first report), the context percentage, the sandbox state
+  before the first report; the cached suffix is omitted when any accumulated
+  report lacks that breakdown), the context percentage, the sandbox state
   (`sb · write · net`, `sb · write · no-net`, or the full `seatbelt ·
   workspace-write · network allowed`, `sandbox off · WARNING: bash is
   unsandboxed`, and `bash disabled · sandbox unavailable`), the reasoning
@@ -1056,8 +1058,10 @@ OTTO_UI=repl otto
   head: the token totals and the cached share stay readable down to about 60
   columns, while the sandbox state, the reasoning effort, the workspace and
   the session ID can be cut off. The cached share is `cached input tokens /
-  input tokens`, the same weighted ratio `GET /v1/usage` reports as
-  `cache_hit_rate`.
+  input tokens`. `GET /v1/usage` reports provider operations and actual HTTP
+  attempts separately. Its `cache_hit_rate` and cached-token total are `null`
+  when any included, reported usage lacks a cached-token breakdown; a missing
+  breakdown is unknown, not a reported zero.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
 
 ### TUI keys
@@ -1516,7 +1520,7 @@ Notes:
   recovers it:
   - Tool calls in the last assistant message without results are run again
     when every one of them names `read`, `ls`, `grep`, `find`,
-    `memory_search`, `agent_status`, `remind_status`, or `list_models`, the
+    `memory_search`, `agent_status`, `agent_yield`, `remind_status`, or `list_models`, the
     tool had the same read-only declaration when the call started, and the
     call was not already run again once. Otherwise the first such call is
     recorded as an error result saying the call may have run, and the calls
@@ -1539,9 +1543,12 @@ Notes:
     written before `otto.turn` entries existed are recovered only when they
     end with calls without results. Nothing is resumed until a frontend opens
     the session; `otto serve` does not reopen sessions on start.
-- Manual and automatic compaction append Pi v3 `type: "compaction"`
+- Local manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
-  bounded file metadata.
+  bounded file metadata. Responses remote compaction instead appends an
+  invisible `otto.remote_compaction` custom checkpoint. It is append-only and
+  contains provider-owned encrypted context, so a resumed session can return
+  it unchanged without exposing it as transcript text.
 - Session files contain sensitive prompt text, responses, summaries, tool
   calls, tool arguments, results, and file metadata. Protect them like source
   data. They do not contain provider API keys, OAuth tokens, authorization
@@ -1663,8 +1670,16 @@ Rules and defaults:
   `hard_input_window - reserve_tokens`, Otto emits a `compaction_warning` that
   names the cause and sends the original request. At or above that limit the
   turn fails.
-- Reasoning the model returns with a summary is discarded; only the summary
-  text is stored in the checkpoint.
+- A provider that explicitly advertises Responses remote compaction receives
+  the current context plus a `compaction_trigger`. Otto stores the returned
+  encrypted compaction item unchanged and sends it only to the same provider;
+  it is never displayed, logged, or treated as readable summary text. A
+  provider without that capability uses Otto's local structured summary. Once
+  a provider advertises support, authentication, transport, cancellation and
+  malformed-response failures are surfaced rather than hidden by a second
+  local request.
+- For local compaction, reasoning the model returns with a summary is
+  discarded; only the summary text is stored in the checkpoint.
 - `reserve_tokens = 16384` and `keep_recent_tokens = 20000` are the defaults.
 - `context_window` and `compaction_window` must be at least `4096` when set.
 - `compaction_window` requires `context_window` and must not exceed it.
@@ -1923,7 +1938,11 @@ canonical workspace, even when `--sandbox off` is selected:
   `new_text` for a single replacement (omit `edits`), or `path` and `edits`
   for a batch (omit top-level `old_text` and `new_text`). The agent is instructed
   to combine all currently known changes to the same file into one `edits` batch
-  rather than making one call per replacement. Put every batch
+  rather than making one call per replacement. After three successful single
+  replacements to the same file in one turn, Otto adds a one-time batching
+  advisory to the successful result. It does not reject or repeat the edit.
+  A successful multi-replacement batch resets the single-edit streak; failed
+  edits do not count. Advisory tracking is bounded to 128 files per turn. Put every batch
   replacement inside `edits`; each entry has its own `old_text` and `new_text`
   and matches against the original file. An empty `new_text` deletes the match.
   When `old_text` has no exact match, `edit` retries with a
@@ -2161,6 +2180,15 @@ the session's model. Child agents do not get this tool.
 
 The `agent` tool starts or resumes a child task and always returns immediately
 with its task id, so a running child cannot hold the parent's agent loop open.
+Before parallel implementation, settle shared types, field meanings and interfaces.
+Assign each writable file to one owner and keep tightly coupled cross-file changes
+in one implementation task, including required call-site adaptations. While a
+child owns its task, the parent does independent work; after delivery it reviews
+change summaries, interface changes and necessary diffs for integration. Shared
+contract revisions must be coordinated before dependent edits continue. These
+are coordination instructions, not new filesystem permissions or file locks;
+existing named-agent `write_policy` and `write_paths` still apply.
+
 Assign bounded file scopes and request findings with file/line evidence. After
 delegation, the parent relies on the child report and reads its saved report
 sections rather than repeating source inspection. Follow-up questions can be
@@ -2219,9 +2247,27 @@ temporary paths. This scratch directory is separate from the durable transcript.
 Filesystem failures or abrupt process termination can prevent cleanup. Without
 `bash`, no scratch directory is allocated; existing web/file tools still work.
 
+When only child dependencies remain, call `agent_yield` with `{}`. It returns
+immediately and requests ending the current model turn at a safe boundary; it
+does not wait inside the tool, cancel a child, or poll. All tool results in the
+batch are persisted before yielding. Tool errors and approval replanning take
+precedence, and queued notifications or user guidance are processed instead of
+being stranded at the yield boundary. Later child notifications or user input
+resume the parent through the existing runtime wake path. Calling it with no
+queued/running child, unsupported arguments or cancellation does not yield.
+Only the parent receives this tool; it is not the old blocking `agent_wait`.
+
+`agent_status` detail includes live activity: `tool`, `provider_or_runtime`,
+`waiting_for_approval`, or `approval_review` (and `unknown` if approval state
+cannot be read). Provider/runtime covers model calls, retries and orchestration;
+it does not claim an in-flight request is stalled. The last-tool field remains
+historical. Do not cancel children merely because that field or counters have
+not changed; use actual failure/timeout evidence or a changed task requirement.
+
 Use `agent_status` to inspect progress or retrieve a report path, `agent_send`
 to send guidance, and
-`agent_cancel` to stop a task; do not poll status to simulate waiting. Children
+`agent_cancel` to stop a task, and `agent_yield` when only dependencies remain.
+Do not poll status to simulate waiting. Children
 never receive these tools, so a child cannot start or stop another child.
 
 `agent_cancel` takes a task id or name and cancels that task. Cancellation is
@@ -3948,8 +3994,11 @@ server's internal state or a tool subprocess's liveness.
 
 `finish` preserves the typed outcome, attempt count, safe error class and any
 provider-reported token usage. Missing usage is unknown, not zero; an explicit
-all-zero usage remains present. Input tokens include cached input tokens. Sum
-only final provider/compaction/one-shot usage records, not heartbeats or turns.
+all-zero usage remains present. Input tokens include cached input tokens.
+`finish.cached_input_tokens_present` distinguishes a reported cache count from
+an unknown cache breakdown; false must not be treated as a zero cache hit. Sum
+only final provider/local-compaction/remote-compaction/one-shot usage records,
+not heartbeats or turns.
 Compaction and one-shot records describe their provider calls, not subsequent
 checkpoint/content validation. Cancelled attempts may not return usage. Tool
 exit codes and detailed failures remain in session tool results; this file does
@@ -3991,9 +4040,17 @@ time=2026-10-04T10:15:02.114+08:00 level=INFO msg=turn_finished session_id=... t
 
 `msg` is a stable event name; values that contain spaces or quotes are
 quoted. Levels are `INFO`, `WARN`, and `ERROR`; there is no level setting.
-Message text, model output, prompts, tool arguments and results, tokens, and
-secrets are never logged. Chat ids and sender ids are logged; protect the log
-files accordingly.
+Message text, model output, prompts, tool arguments and results, OAuth/API
+token values, secrets, and remote-compaction `encrypted_content` are never
+logged. Token counts and cache-breakdown presence may be logged. Chat ids and
+sender ids are logged; protect the log files accordingly.
+
+Provider runtime events shared by non-interactive frontends:
+
+| Event | Fields |
+| --- | --- |
+| `provider_operation_finished` | `operation_id`, `kind`, `provider`, `model`, `attempts`, `status`, `disposition`, `effect_certainty`, `stop_reason`, `duration_ms` |
+| `remote_compaction_finished` | `checkpoint_id`, `provider`, `reason`, `automatic`, `tail_messages`, `tokens_before`, `usage_present`, `cached_input_tokens_present` |
 
 `otto serve` events:
 

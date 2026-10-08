@@ -46,6 +46,7 @@ const BASE_SAFETY: &[(&str, RetrySafety)] = &[
     ("update_plan", RetrySafety::Idempotent),
     ("agent", RetrySafety::NonIdempotent),
     ("agent_status", RetrySafety::ReadOnly),
+    ("agent_yield", RetrySafety::ReadOnly),
     ("agent_send", RetrySafety::NonIdempotent),
     ("agent_cancel", RetrySafety::NonIdempotent),
     ("agent_report", RetrySafety::NonIdempotent),

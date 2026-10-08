@@ -1019,7 +1019,13 @@ api_key_env = "ALPHA_KEY"
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| reply("done"));
-            ProviderSettlement::succeeded(Response { message }, 1)
+            ProviderSettlement::succeeded(
+                Response {
+                    message,
+                    ..Response::default()
+                },
+                1,
+            )
         }
     }
 
@@ -1200,7 +1206,13 @@ api_key_env = "ALPHA_KEY"
         switch(
             Component::Subagents,
             "",
-            &["agent", "agent_status", "agent_send", "agent_cancel"],
+            &[
+                "agent",
+                "agent_status",
+                "agent_yield",
+                "agent_send",
+                "agent_cancel",
+            ],
             &[],
         )
         .await;
@@ -1865,9 +1877,22 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
             normalize(&from_otto.system_prompt, &embedded, &otto_session),
             "system prompt"
         );
+        // The in-process `otto acp` writes its process log through
+        // `Logger::stderr()` to the real stderr, not to `cli_stderr`, so only
+        // the embedded capture holds `time=` log lines.
+        let diagnostics = capture.text();
+        assert!(
+            diagnostics.contains("msg=provider_operation_finished"),
+            "{diagnostics}"
+        );
+        let warnings: String = diagnostics
+            .lines()
+            .filter(|line| !line.starts_with("time="))
+            .map(|line| format!("{line}\n"))
+            .collect();
         assert_eq!(
             normalize(&cli_stderr, &cli, &cli_session),
-            normalize(&capture.text(), &embedded, &otto_session),
+            normalize(&warnings, &embedded, &otto_session),
             "diagnostics"
         );
         assert_eq!(

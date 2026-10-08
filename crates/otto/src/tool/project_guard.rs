@@ -112,6 +112,9 @@ impl Tool for Guarded {
     fn definition(&self) -> ToolDefinition {
         self.inner.definition()
     }
+    fn yields_turn(&self) -> bool {
+        self.inner.yields_turn()
+    }
     fn batch_control(&self) -> otto_core::approval::BatchControl {
         self.inner.batch_control()
     }

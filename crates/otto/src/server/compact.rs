@@ -71,7 +71,12 @@ pub async fn handle(
                 &[
                     ("session_id", id),
                     ("noop", compaction.noop.to_string()),
-                    ("tokens_before", compaction.tokens_before.to_string()),
+                    (
+                        "tokens_before",
+                        compaction
+                            .tokens_before
+                            .map_or_else(|| "unknown".into(), |tokens| tokens.to_string()),
+                    ),
                 ],
             );
             json_response(StatusCode::OK, &to_wire_compaction(&compaction))

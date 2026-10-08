@@ -51,7 +51,7 @@ mod run_tests;
 
 pub use events::{
     AgentError, ApiStatus, CompactionMode, CompactionPlan, CompactionReason, CompactionResult,
-    CompactionSettings, Event, EventSink,
+    CompactionSettings, Event, EventSink, ProviderOperationKind,
 };
 
 use crate::model::{
@@ -61,7 +61,8 @@ use crate::model::{
 };
 use crate::operation::OperationControl;
 use crate::provider::{
-    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, Response, StreamEvent,
+    Provider, ProviderError, ProviderSettlement, RemoteCompactionSupport, Request, RequestSizer,
+    Response, StreamEvent,
 };
 use crate::session::Session;
 use crate::session::context::pending_tool_calls;
@@ -252,6 +253,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     pub fn context_report(&self) -> context_report::ContextReport {
         let (request, estimated_total) =
             self.build_normal_provider_request(&RunDispatchState::default(), "");
+        let estimate_complete = context_estimate::estimate_complete(&request);
         let memory = self
             .last_memory_context
             .lock()
@@ -273,6 +275,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             context_window: settings.hard_input_window.max(0),
             compaction_threshold,
             estimated_total,
+            estimate_complete,
             reported_input_tokens: snapshot
                 .context_input_tokens_present
                 .then_some(snapshot.context_input_tokens),
@@ -565,6 +568,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             outcome: None,
             attempts: None,
             usage: None,
+            cached_input_tokens_present: None,
             error_class: result
                 .as_ref()
                 .err()
@@ -677,7 +681,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 EffectCertainty::NotStarted,
                 reason,
             );
-            self.emit_provider_api_call(emit, operation_id, std::time::Duration::ZERO, &settlement);
+            self.emit_provider_api_call(
+                emit,
+                operation_id,
+                ProviderOperationKind::Ordinary,
+                std::time::Duration::ZERO,
+                &settlement,
+            );
             return Err(self.fail(emit, AgentError::Provider(error)));
         }
 
@@ -770,6 +780,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
 
         loop {
+            state.yield_after_batch = false;
+            state.batch_has_errors = false;
             let response = match self
                 .dispatch_normal_provider_step(emit, &mut state, &system_context, control)
                 .await
@@ -778,6 +790,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 Err(error) => return Err(self.fail(emit, error)),
             };
 
+            let cached_input_tokens_present = response.cached_input_tokens_present;
             let mut assistant = self.redact_message(&response.message);
             if assistant.id.is_empty() {
                 assistant.id = (self.options.new_id)();
@@ -811,6 +824,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             emit(Event::ProviderUsage {
                 usage: usage.unwrap_or_default(),
                 present: usage.is_some(),
+                cached_input_tokens_present,
             });
 
             let had_tool_call = !tool_calls.is_empty();
@@ -829,12 +843,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 return Err(self.fail(emit, AgentError::NoProgress(stall)));
             }
 
-            if !had_tool_call {
+            if !had_tool_call || (state.yield_after_batch && !state.batch_has_errors && !replan) {
                 if let Some(error) = stopped_provider_error(control) {
                     return Err(self.fail(emit, AgentError::Provider(error)));
                 }
                 if self.options.mailbox.queued().iter().any(|entry| {
-                    entry.notification.kind == Some(inbox::NotificationKind::UserMessage)
+                    state.yield_after_batch
+                        || entry.notification.kind == Some(inbox::NotificationKind::UserMessage)
                 }) {
                     if let Err(error) = self.deliver_notifications(emit).await {
                         return Err(self.fail(emit, error));
@@ -996,6 +1011,20 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 },
             }
         }
+        if let Some(advice) = state.progress.edit_advice(
+            &block.tool_name,
+            arguments.get(),
+            execution.result.is_error
+                || execution.outcome.disposition != OperationDisposition::Succeeded,
+        ) {
+            execution.result.content.push_str(advice);
+            if let Some(persisted) = &mut execution.result.persisted_content {
+                persisted.push_str(advice);
+            }
+        }
+        state.yield_after_batch |= self.tools.yields_turn(&block.tool_name, &execution);
+        state.batch_has_errors |= execution.result.is_error
+            || execution.outcome.disposition != OperationDisposition::Succeeded;
         execution.result.content = self.redactor.redact_string(&execution.result.content);
         execution.result.persisted_content = execution
             .result
@@ -1023,6 +1052,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             outcome: Some(execution.outcome.clone()),
             attempts: Some(attempt),
             usage: None,
+            cached_input_tokens_present: None,
             error_class: execution
                 .result
                 .is_error
@@ -1341,14 +1371,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     .stop_reason()
                     .unwrap_or(OperationStopReason::UserCancellation),
             );
-            self.emit_provider_api_call(emit, operation_id, std::time::Duration::ZERO, &settlement);
+            self.emit_provider_api_call(
+                emit,
+                operation_id,
+                ProviderOperationKind::Ordinary,
+                std::time::Duration::ZERO,
+                &settlement,
+            );
             return Err(AgentError::Provider(error));
         }
         let (mut request, mut estimate) = self.build_normal_provider_request(state, system_context);
+        let mut estimate_complete = context_estimate::estimate_complete(&request);
         let triggers = automatic_compaction_triggers(&self.options.compaction);
 
         let proactive_reason = triggers.and_then(|(soft_trigger, _)| {
-            if !self.options.compaction.auto {
+            if !self.options.compaction.auto || !estimate_complete {
                 None
             } else if estimate > soft_trigger {
                 Some(CompactionReason::Threshold)
@@ -1364,7 +1401,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         {
             if !state.proactive_attempted {
                 state.proactive_attempted = true;
-                match self.compact_locked(reason, "", emit, control).await {
+                // Compaction futures live on the heap so the local and remote
+                // compaction state machines do not enlarge every turn future.
+                match Box::pin(self.compact_locked(reason, "", emit, control)).await {
                     Err(error) if error.is_nothing_to_compact() => {
                         emit(Event::CompactionCompleted {
                             compaction: CompactionResult {
@@ -1402,7 +1441,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         }
                         (request, estimate) =
                             self.build_normal_provider_request(state, system_context);
-                        if estimate > hard_trigger {
+                        estimate_complete = context_estimate::estimate_complete(&request);
+                        if estimate_complete && estimate > hard_trigger {
                             return Err(automatic_dispatch_error(
                                 AUTOMATIC_COMPACTION_STILL_TOO_LARGE_MESSAGE,
                                 Vec::new(),
@@ -1431,9 +1471,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(original_overflow);
         }
 
-        if let Err(compaction_error) = self
-            .compact_locked(CompactionReason::Overflow, "", emit, control)
-            .await
+        if let Err(compaction_error) =
+            Box::pin(self.compact_locked(CompactionReason::Overflow, "", emit, control)).await
         {
             if compaction_error.is_nothing_to_compact() {
                 emit(Event::CompactionCompleted {
@@ -1525,7 +1564,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         state: &RunDispatchState,
         system_context: &str,
     ) -> (Request, i64) {
-        let mut messages = self.session.model_messages();
+        let remote_compaction = matches!(
+            self.provider.capabilities().remote_compaction,
+            RemoteCompactionSupport::ResponsesV2
+        )
+        .then(|| self.session.remote_compaction())
+        .flatten()
+        .filter(|checkpoint| checkpoint.provider == self.options.provider_name);
+        let mut messages = if remote_compaction.is_some() {
+            self.session.post_remote_compaction_messages()
+        } else {
+            self.session.model_messages()
+        };
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
         if !state.memory_context.is_empty() {
             let current_user = messages
@@ -1548,8 +1598,17 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             messages,
             tools: self.tools.definitions(),
             cache_key: self.options.cache_key.clone(),
+            remote_compaction,
+            request_remote_compaction: false,
         };
-        let latest = self.session.latest_compaction();
+        // A remote checkpoint supersedes any older local one, and the request
+        // carries only its tail, so the local checkpoint's first message id
+        // cannot anchor the estimate there.
+        let latest = request
+            .remote_compaction
+            .is_none()
+            .then(|| self.session.latest_compaction())
+            .flatten();
         let estimate = context_estimate::estimate_request(&request, latest.as_ref());
         (request, estimate)
     }
@@ -1648,7 +1707,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
-        self.emit_provider_api_call(emit, operation_id.clone(), duration, &outcome);
+        self.emit_provider_api_call(
+            emit,
+            operation_id.clone(),
+            ProviderOperationKind::Ordinary,
+            duration,
+            &outcome,
+        );
         // Persist only content-free recovery facts. Failed stream fragments
         // never become model context or executable tool calls.
         if !retries.is_empty() || outcome.result.is_err() {
@@ -1702,6 +1767,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         &self,
         emit: EventSink<'_>,
         operation_id: OperationId,
+        kind: ProviderOperationKind,
         duration: std::time::Duration,
         settlement: &ProviderSettlement,
     ) {
@@ -1714,6 +1780,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         };
         emit(Event::ProviderApiCall {
             operation_id,
+            kind,
             provider: self.options.provider_name.clone(),
             model: self.options.model.clone(),
             duration,
@@ -2049,6 +2116,7 @@ mod tests {
                 }],
                 ..Message::default()
             },
+            ..Response::default()
         }
     }
 
@@ -2060,6 +2128,7 @@ mod tests {
                 blocks: vec![Block::text("done")],
                 ..Message::default()
             },
+            ..Response::default()
         }
     }
 
@@ -2224,6 +2293,7 @@ mod tests {
 
         let api_call = Event::ProviderApiCall {
             operation_id: OperationId::new("op_2").expect("operation id"),
+            kind: ProviderOperationKind::Ordinary,
             provider: "fake".into(),
             model: "test-model".into(),
             duration: std::time::Duration::ZERO,
@@ -2237,6 +2307,7 @@ mod tests {
         };
         let second_api_call = Event::ProviderApiCall {
             operation_id: OperationId::new("op_4").expect("operation id"),
+            kind: ProviderOperationKind::Ordinary,
             provider: "fake".into(),
             model: "test-model".into(),
             duration: std::time::Duration::ZERO,
@@ -2260,6 +2331,7 @@ mod tests {
                         cached_input_tokens: 0
                     },
                     present: true,
+                    cached_input_tokens_present: false,
                 },
                 Event::ToolCallStarted {
                     operation_id: OperationId::new("op_3").expect("operation id"),
@@ -2291,7 +2363,8 @@ mod tests {
                 second_api_call,
                 Event::ProviderUsage {
                     usage: Usage::default(),
-                    present: false
+                    present: false,
+                    cached_input_tokens_present: false
                 },
                 Event::AgentFinished,
             ]
@@ -2470,6 +2543,7 @@ mod tests {
                 Event::AgentStarted,
                 Event::ProviderApiCall {
                     operation_id: OperationId::new("op_2").expect("operation id"),
+                    kind: ProviderOperationKind::Ordinary,
                     provider: "fake".into(),
                     model: "test-model".into(),
                     duration: std::time::Duration::ZERO,
@@ -2499,6 +2573,7 @@ mod tests {
                     blocks: vec![Block::text("wrong")],
                     ..Message::default()
                 },
+                ..Response::default()
             },
         )]);
         let agent = Agent::new(provider, EchoExecutor, MemorySession::new(), test_options());

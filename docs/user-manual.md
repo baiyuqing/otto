@@ -352,6 +352,9 @@ otto --provider chatgpt --model gpt-5-codex
   when it nears expiry; rotated tokens are written back to the credential file.
 - Tokens are never written to TOML, session files, or logs, and are stripped
   from provider error messages.
+- Each request carries `prompt_cache_key` set to the session id (a sub-agent
+  uses its own transcript id) so the backend can route a session's requests to
+  the same prompt cache; the OpenAI-compatible provider does not send it.
 - Exchanging the login for an API key (which would bill as API credits rather
   than subscription quota) is intentionally not supported.
 

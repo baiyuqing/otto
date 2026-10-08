@@ -433,9 +433,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
         let operation_id = (self.options.new_operation_id)()
             .map_err(|message| AgentError::OperationIdentity { message })?;
+        let mut diagnostic = crate::diagnostics::Observation::start(
+            self.options.diagnostics.as_ref(),
+            crate::diagnostics::Kind::Compaction,
+            operation_id.as_str(),
+            None,
+            &self.options.provider_name,
+            &self.options.model,
+        );
         let started = (self.options.now)();
         let outcome = {
             let mut on_stream = |event: crate::provider::StreamEvent| {
+                diagnostic.stream(&event);
                 if invalid_stream.load(Ordering::SeqCst) {
                     return;
                 }
@@ -474,9 +483,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
             };
             self.provider
-                .complete(request, &mut on_stream, &summary_control)
+                .complete_observed(
+                    request,
+                    &mut on_stream,
+                    &summary_control,
+                    diagnostic.observer(),
+                )
                 .await
         };
+        diagnostic.provider_finished(&outcome);
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();

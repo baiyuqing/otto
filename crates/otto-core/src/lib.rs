@@ -11,6 +11,7 @@ pub mod approval;
 pub mod config;
 #[cfg(feature = "conformance")]
 pub mod conformance;
+pub mod diagnostics;
 pub mod mailbox;
 pub mod memory;
 pub mod model;

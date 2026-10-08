@@ -1118,6 +1118,14 @@ Protocol and examples: [Hooks and custom tools](user-manual.md#hooks-and-custom-
 
 ## Agent implementation contracts
 
+Execution diagnostics are out-of-band: core emits typed metadata through an
+optional injected observer and native startup supplies private rotating files.
+Never pass request/response/tool bodies or raw errors to the observer, copy
+ordinary stderr lines into the diagnostic sink, or inject diagnostic records
+into model history. `Provider::complete_observed` defaults to the original
+provider method; transport adapters and timeout wrappers preserve observation
+without changing stream events, request serialization or cancellation behavior.
+
 Apply these requirements to every feature, fix, and refactor:
 
 - Keep agent instruction files short navigation maps and rulebooks. Put detailed contracts next to their owning code or in this development guide, and link to one canonical source instead of copying it across agent instructions.

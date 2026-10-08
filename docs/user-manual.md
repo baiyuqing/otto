@@ -3915,16 +3915,69 @@ at `<path>`: `<error>`". Both reach the chat as an agent exit. Restart
 
 ## Logs, metrics, and request correlation
 
-`otto serve` and `otto-connect` write structured log lines to stderr and
-serve Prometheus metrics on `/metrics`. Neither process writes log files;
-redirect stderr or let the process supervisor collect it, for example:
+Native agent runtimes automatically write content-free execution diagnostics to
+`~/.otto/logs/diagnostic-<pid>-<random-id>.jsonl`. TUI, REPL, headless, ACP,
+serve and the embedding startup path share this facility. Attach-mode execution
+is recorded on the server host. `--no-session` disables conversation persistence,
+not these content-free diagnostics. Each runtime owns an independent file family;
+multiple processes and PID reuse cannot share an active log or rotate each
+other's files.
+
+Files rotate at 5 MiB with three backups (`.jsonl.1` through `.jsonl.3`). New
+files are mode `0600` and the logs directory is mode `0700`. On startup, Otto
+removes inactive families whose latest file activity is over seven days old;
+a held ownership lock protects active runtimes. Retention cleanup is best effort.
+
+JSONL records contain `time`, `pid`, `instance`, build `version`, `session_id`,
+`task_id`, `operation_id`, `span_id`, provider/model identity and operation kind.
+Turn records use the persisted turn id as their operation id. Provider/tool
+operation ids correlate with session records; child scopes retain the parent
+session id and their own task id. No prompts, stream text, reasoning, tool
+arguments/results, URLs, headers or raw error messages are written. Metadata
+identifiers are bounded and passed through the existing secret redactor.
+
+Operations record start, finish, retries and abandonment when a future is dropped
+without settlement. While active, a background thread records a heartbeat every
+15 seconds. Provider phases distinguish request preparation, sending, received
+HTTP headers/status, received body bytes, decoded model output and retry waits.
+`first_network_ms`, `first_model_ms`, `last_network_ms`, `last_model_ms` and
+`last_activity_ms` are offsets from `started_at`; `elapsed_ms` and provider
+`idle_ms` use a monotonic clock. Tool/turn heartbeats report elapsed time, not
+inferred network idleness. These are observed stages, not proof of a remote
+server's internal state or a tool subprocess's liveness.
+
+`finish` preserves the typed outcome, attempt count, safe error class and any
+provider-reported token usage. Missing usage is unknown, not zero; an explicit
+all-zero usage remains present. Input tokens include cached input tokens. Sum
+only final provider/compaction/one-shot usage records, not heartbeats or turns.
+Compaction and one-shot records describe their provider calls, not subsequent
+checkpoint/content validation. Cancelled attempts may not return usage. Tool
+exit codes and detailed failures remain in session tool results; this file does
+not copy their contents. Diagnostic records never enter model context.
+
+If file logging cannot initialize, startup emits a warning and continues.
+Later write failures do not fail agent operations; `dropped_records` on the next
+successful write reports lost records. Forced process termination can leave an
+unfinished operation or a partial final line. These logs supplement, rather than
+replace, append-only session/operation history.
+
+To locate one session across processes, for example:
+
+```sh
+rg 'SESSION_ID' ~/.otto/logs/diagnostic-*.jsonl*
+```
+
+Existing frontend logs remain separate: `otto serve` and `otto-connect` write
+structured lines to stderr and expose Prometheus metrics on `/metrics`.
+To retain those stderr lines as well, redirect them or use a supervisor:
 
 ```sh
 otto serve --socket ~/.otto/otto.sock --listen 127.0.0.1:9464 2>>~/.otto/serve.log
 otto-connect 2>>~/.otto/connect.log
 ```
 
-The terminal UI writes no log lines, because they would overwrite its screen.
+The terminal UI suppresses stderr log lines to protect its screen; its execution
+diagnostics still go to the private JSONL files.
 Plain `otto acp` writes to stderr; when `otto-connect` starts it, the
 connector logs each of those lines as `agent stderr: <line>`.
 

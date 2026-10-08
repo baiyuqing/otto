@@ -252,9 +252,11 @@ impl Client {
         payload: &[u8],
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
+        observer: &dyn otto_core::diagnostics::Observer,
     ) -> Result<Response, AttemptError> {
         check_running(control).map_err(AttemptError::Sent)?;
-        self.attempt_sent(ready, payload, emit, control).await
+        self.attempt_sent(ready, payload, emit, control, observer)
+            .await
     }
 
     /// [`Self::attempt`] after the stop check: a connection that could not
@@ -267,7 +269,9 @@ impl Client {
         payload: &[u8],
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
+        observer: &dyn otto_core::diagnostics::Observer,
     ) -> Result<Response, AttemptError> {
+        observer.activity(otto_core::diagnostics::Phase::Sending, 0, None);
         let send = ready
             .http
             .post(format!("{}/chat/completions", ready.base_url))
@@ -312,6 +316,11 @@ impl Client {
         control: &dyn OperationControl,
     ) -> Result<Response, AttemptError> {
         let status = response.status();
+        observer.activity(
+            otto_core::diagnostics::Phase::Headers,
+            0,
+            Some(status.as_u16()),
+        );
         if !status.is_success() {
             return Err(AttemptError::Sent(
                 self.error_response(status.as_u16(), response, control)
@@ -343,6 +352,7 @@ impl Client {
                     });
                 }
             };
+            observer.activity(otto_core::diagnostics::Phase::Receiving, chunk.len(), None);
             {
                 if let Err(error) = assembler.push(&chunk, &mut forward) {
                     check_running(control).map_err(AttemptError::Sent)?;
@@ -465,101 +475,116 @@ impl Provider for Client {
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
     ) -> ProviderSettlement {
-        if let Err(error) = check_running(control) {
-            return provider_failure(error, 0, EffectCertainty::NotStarted, control);
-        }
-        let ready = match &self.state {
-            Ok(ready) => ready,
-            Err(error) => {
-                return ProviderSettlement::failed(
-                    ProviderError::Other(error.clone()),
-                    0,
-                    EffectCertainty::NotStarted,
-                );
+        self.complete_observed(request, emit, control, &otto_core::diagnostics::Noop)
+            .await
+    }
+
+    fn complete_observed<'a>(
+        &'a self,
+        request: &'a Request,
+        emit: StreamSink<'a>,
+        control: &'a dyn OperationControl,
+        observer: &'a dyn otto_core::diagnostics::Observer,
+    ) -> otto_core::provider::DiagnosticFuture<'a> {
+        Box::pin(async move {
+            if let Err(error) = check_running(control) {
+                return provider_failure(error, 0, EffectCertainty::NotStarted, control);
             }
-        };
-        let payload = match serde_json::to_vec(&build_request(request)) {
-            Ok(payload) => payload,
-            Err(error) => {
-                return ProviderSettlement::failed(
-                    self.safe_error(ProviderError::Other(format!(
-                        "encode chat completion request: {error}"
-                    ))),
-                    0,
-                    EffectCertainty::NotStarted,
-                );
+            let ready = match &self.state {
+                Ok(ready) => ready,
+                Err(error) => {
+                    return ProviderSettlement::failed(
+                        ProviderError::Other(error.clone()),
+                        0,
+                        EffectCertainty::NotStarted,
+                    );
+                }
+            };
+            let payload = match serde_json::to_vec(&build_request(request)) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return ProviderSettlement::failed(
+                        self.safe_error(ProviderError::Other(format!(
+                            "encode chat completion request: {error}"
+                        ))),
+                        0,
+                        EffectCertainty::NotStarted,
+                    );
+                }
+            };
+            if let Err(error) = check_running(control) {
+                return provider_failure(error, 0, EffectCertainty::NotStarted, control);
             }
-        };
-        if let Err(error) = check_running(control) {
-            return provider_failure(error, 0, EffectCertainty::NotStarted, control);
-        }
-        let mut attempts = 0;
-        let result = loop {
-            attempts += 1;
-            // `dispatched` records whether a retry could repeat provider work,
-            // which the settlement must keep as unknown effect certainty.
-            let (error, reason, dispatched) =
-                match self.attempt(ready, &payload, &mut *emit, control).await {
+            let mut attempts = 0;
+            let result = loop {
+                attempts += 1;
+                // `dispatched` records whether a retry could repeat provider work,
+                // which the settlement must keep as unknown effect certainty.
+                let (error, reason, dispatched) = match self
+                    .attempt(ready, &payload, &mut *emit, control, observer)
+                    .await
+                {
                     Ok(response) => break Ok(response),
                     Err(AttemptError::Sent(error)) => break Err(error),
                     Err(AttemptError::NotSent(error)) => (error, CONNECT_RETRY_REASON, false),
                     Err(AttemptError::Interrupted(error)) => (error, TRANSPORT_RETRY_REASON, true),
                 };
-            let Some(delay) = crate::retry::next_delay(
-                RETRY_POLICY,
-                attempts,
-                None,
-                control.remaining().unwrap_or(Duration::MAX),
-                Duration::from_secs(1),
-                &mut Backoff,
-            ) else {
-                let error = self.safe_error(error);
-                return if dispatched {
-                    provider_failure(error, attempts, EffectCertainty::Unknown, control)
-                } else {
-                    ProviderSettlement::failed(error, attempts, EffectCertainty::NotStarted)
+                let Some(delay) = crate::retry::next_delay(
+                    RETRY_POLICY,
+                    attempts,
+                    None,
+                    control.remaining().unwrap_or(Duration::MAX),
+                    Duration::from_secs(1),
+                    &mut Backoff,
+                ) else {
+                    let error = self.safe_error(error);
+                    return if dispatched {
+                        provider_failure(error, attempts, EffectCertainty::Unknown, control)
+                    } else {
+                        ProviderSettlement::failed(error, attempts, EffectCertainty::NotStarted)
+                    };
                 };
+                emit(StreamEvent::Retry {
+                    attempt: attempts + 1,
+                    max_attempts: RETRY_POLICY.max_attempts,
+                    delay,
+                    reason: reason.to_owned(),
+                    interrupted_output: false,
+                });
+                if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
+                    return if dispatched {
+                        provider_failure(error, attempts, EffectCertainty::Unknown, control)
+                    } else {
+                        not_started_stop(error, attempts, control)
+                    };
+                }
             };
-            emit(StreamEvent::Retry {
-                attempt: attempts + 1,
-                max_attempts: RETRY_POLICY.max_attempts,
-                delay,
-                reason: reason.to_owned(),
-                interrupted_output: false,
-            });
-            if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
-                return if dispatched {
-                    provider_failure(error, attempts, EffectCertainty::Unknown, control)
-                } else {
-                    not_started_stop(error, attempts, control)
-                };
-            }
-        };
-        match result {
-            Ok(response) => ProviderSettlement::succeeded(response, attempts),
-            Err(error) => {
-                let certainty = match &error {
-                    ProviderError::DeadlineExceeded | ProviderError::Cancelled => {
-                        EffectCertainty::Unknown
+            match result {
+                Ok(response) => ProviderSettlement::succeeded(response, attempts),
+                Err(error) => {
+                    let certainty = match &error {
+                        ProviderError::DeadlineExceeded | ProviderError::Cancelled => {
+                            EffectCertainty::Unknown
+                        }
+                        ProviderError::Other(message)
+                            if message.starts_with("send chat completion request:")
+                                || message.starts_with("read chat completion stream:") =>
+                        {
+                            EffectCertainty::Unknown
+                        }
+                        ProviderError::Overflow(_) | ProviderError::Other(_) => {
+                            EffectCertainty::Completed
+                        }
+                    };
+                    let error = self.safe_error(error);
+                    if certainty == EffectCertainty::Completed {
+                        ProviderSettlement::failed(error, attempts, certainty)
+                    } else {
+                        provider_failure(error, attempts, certainty, control)
                     }
-                    ProviderError::Other(message)
-                        if message.starts_with("send chat completion request:")
-                            || message.starts_with("read chat completion stream:") =>
-                    {
-                        EffectCertainty::Unknown
-                    }
-                    ProviderError::Overflow(_) | ProviderError::Other(_) => {
-                        EffectCertainty::Completed
-                    }
-                };
-                let error = self.safe_error(error);
-                if certainty == EffectCertainty::Completed {
-                    ProviderSettlement::failed(error, attempts, certainty)
-                } else {
-                    provider_failure(error, attempts, certainty, control)
                 }
             }
-        }
+        })
     }
 }
 
@@ -933,6 +958,15 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limits_and_server_errors_are_not_retried() {
+        #[derive(Default)]
+        struct Statuses(std::sync::Mutex<Vec<u16>>);
+        impl otto_core::diagnostics::Observer for Statuses {
+            fn activity(&self, _: otto_core::diagnostics::Phase, _: usize, status: Option<u16>) {
+                if let Some(status) = status {
+                    self.0.lock().unwrap().push(status);
+                }
+            }
+        }
         for status in [429u16, 503] {
             let attempts = Arc::new(AtomicUsize::new(0));
             let counter = Arc::clone(&attempts);
@@ -945,9 +979,16 @@ mod tests {
             let client = Client::new(&server.url, "key");
             let mut events = Vec::new();
             let mut emit = |event| events.push(event);
+            let statuses = Statuses::default();
             let settlement = client
-                .complete(&model_request(), &mut emit, &CancellationToken::new())
+                .complete_observed(
+                    &model_request(),
+                    &mut emit,
+                    &CancellationToken::new(),
+                    &statuses,
+                )
                 .await;
+            assert_eq!(*statuses.0.lock().unwrap(), vec![status]);
             assert_eq!(settlement.attempts, 1);
             assert_eq!(
                 settlement.outcome.effect_certainty,

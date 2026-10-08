@@ -212,49 +212,65 @@ impl Provider for SharedProvider {
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
     ) -> ProviderSettlement {
-        if let Some(reason) = control.admission_stop_reason() {
-            return ProviderSettlement::stopped(
-                if reason == OperationStopReason::Deadline {
-                    ProviderError::DeadlineExceeded
-                } else {
-                    ProviderError::Cancelled
-                },
-                0,
-                otto_core::model::EffectCertainty::NotStarted,
-                reason,
+        self.complete_observed(request, emit, control, &otto_core::diagnostics::Noop)
+            .await
+    }
+
+    fn complete_observed<'a>(
+        &'a self,
+        request: &'a Request,
+        emit: StreamSink<'a>,
+        control: &'a dyn OperationControl,
+        observer: &'a dyn otto_core::diagnostics::Observer,
+    ) -> otto_core::provider::DiagnosticFuture<'a> {
+        Box::pin(async move {
+            if let Some(reason) = control.admission_stop_reason() {
+                return ProviderSettlement::stopped(
+                    if reason == OperationStopReason::Deadline {
+                        ProviderError::DeadlineExceeded
+                    } else {
+                        ProviderError::Cancelled
+                    },
+                    0,
+                    otto_core::model::EffectCertainty::NotStarted,
+                    reason,
+                );
+            }
+            let child = Control::new(Deadline::child(control.remaining(), self.timeout));
+            let mut complete = std::pin::pin!(
+                self.provider
+                    .complete_observed(request, emit, &child, observer)
             );
-        }
-        let child = Control::new(Deadline::child(control.remaining(), self.timeout));
-        let mut complete = std::pin::pin!(self.provider.complete(request, emit, &child));
-        let deadline = child.deadline();
-        let reason = tokio::select! {
-            biased;
-            result = &mut complete => return result,
-            () = control.cancellation_token().cancelled() => {
-                let reason = control
-                    .stop_reason()
-                    .unwrap_or(OperationStopReason::UserCancellation);
-                child.stop(reason);
-                reason
+            let deadline = child.deadline();
+            let reason = tokio::select! {
+                biased;
+                result = &mut complete => return result,
+                () = control.cancellation_token().cancelled() => {
+                    let reason = control
+                        .stop_reason()
+                        .unwrap_or(OperationStopReason::UserCancellation);
+                    child.stop(reason);
+                    reason
+                }
+                () = deadline.expired() => {
+                    child.stop(OperationStopReason::Deadline);
+                    OperationStopReason::Deadline
+                }
+            };
+            match tokio::time::timeout(self.cancellation_grace, &mut complete).await {
+                Ok(settlement) => settlement,
+                Err(_) => ProviderSettlement::stopped(
+                    if reason == OperationStopReason::Deadline {
+                        ProviderError::DeadlineExceeded
+                    } else {
+                        ProviderError::Cancelled
+                    },
+                    1,
+                    otto_core::model::EffectCertainty::Unknown,
+                    reason,
+                ),
             }
-            () = deadline.expired() => {
-                child.stop(OperationStopReason::Deadline);
-                OperationStopReason::Deadline
-            }
-        };
-        match tokio::time::timeout(self.cancellation_grace, &mut complete).await {
-            Ok(settlement) => settlement,
-            Err(_) => ProviderSettlement::stopped(
-                if reason == OperationStopReason::Deadline {
-                    ProviderError::DeadlineExceeded
-                } else {
-                    ProviderError::Cancelled
-                },
-                1,
-                otto_core::model::EffectCertainty::Unknown,
-                reason,
-            ),
-        }
+        })
     }
 }
 
@@ -600,6 +616,7 @@ impl ToolExecutor for ChildTools {
 /// The turn settings every child copies from the parent, and the two injected
 /// capabilities [`Options`] needs.
 pub struct OptionsTemplate {
+    pub diagnostics: Option<Arc<dyn otto_core::diagnostics::Diagnostics>>,
     pub plugins: Option<Arc<crate::plugin::hooks::Runtime>>,
     pub hook_guard: Option<Arc<crate::plugin::hooks::SessionGuard>>,
     pub model: String,
@@ -623,6 +640,7 @@ pub struct OptionsTemplate {
 impl Default for OptionsTemplate {
     fn default() -> Self {
         Self {
+            diagnostics: None,
             plugins: None,
             hook_guard: None,
             model: String::new(),
@@ -1393,6 +1411,10 @@ impl Runner {
             })
             .unwrap_or_default();
         let options = Options {
+            diagnostics: template
+                .diagnostics
+                .as_ref()
+                .and_then(|sink| sink.for_task(&task.id)),
             hooks: template
                 .plugins
                 .as_ref()

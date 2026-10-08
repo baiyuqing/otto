@@ -15,6 +15,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Features
+
+- Native agent runtimes automatically retain private rotating diagnostic logs
+  with session/task/operation IDs, HTTP and stream stages, active-operation
+  heartbeats, outcomes and reported usage. Each runtime has an independently
+  locked file family; content and credentials stay out of diagnostics and
+  model context.
+
 ### Fixes
 
 - Long sub-agent research can be handed off as persistent report files with a

@@ -125,7 +125,9 @@ The other modules group native responsibilities:
   server; see [Fault injection](development.md#fault-injection)).
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`,
   `urlprivacy.rs`, and `log.rs` (the process logger: one instance built at the
-  composition root and passed to its consumers; event names and fields are in
+  composition root and passed to its consumers). `log/diagnostics.rs` owns the
+  private rotating execution files; `otto-core/src/diagnostics.rs` supplies the
+  content-free observation boundary used by provider and agent operations. Event names and fields are in
   [observability](specs/2026-10-04-observability.md)).
 
 ### Persistent state and storage ownership

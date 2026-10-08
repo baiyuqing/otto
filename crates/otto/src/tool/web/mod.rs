@@ -309,8 +309,7 @@ impl Tool for WebFetch {
             .shared
             .max_output
             .saturating_sub(HEADER_BUDGET)
-            .max(1)
-            .min(super::result::RETRIEVAL_BYTES);
+            .clamp(1, super::result::RETRIEVAL_BYTES);
         let max_chars = args
             .limit
             .filter(|limit| *limit > 0)

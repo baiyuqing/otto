@@ -418,7 +418,7 @@ impl ChildTools {
     /// [`ChildTools::report`].
     fn agent_report_definition() -> ToolDefinition {
         let description = format!(
-            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, raw logs, source dumps or interim findings. Keep the answer or blocker within 4 KiB; the parent transport truncates longer reports. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent. A report that cannot be saved to the parent's pending-notification file also returns an error and does not reach the parent."
+            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, raw logs, source dumps or interim findings. Keep the answer or blocker within 4 KiB; the parent transport truncates longer reports. For longer answers, write a persistent report when permitted and send its summary, path and section index; this call does not automatically save overflow. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent. A report that cannot be saved to the parent's pending-notification file also returns an error and does not reach the parent."
         );
         definition(
             "agent_report",
@@ -740,6 +740,7 @@ pub struct StartRequest {
 
 /// Builds and runs sub-agent tasks for one session.
 pub struct Runner {
+    reports: super::reports::Reports,
     scratch_root: std::sync::OnceLock<crate::tool::root::Root>,
     output_logs: std::sync::OnceLock<Arc<crate::tool::bash_output::Logs>>,
     config: Config,
@@ -847,6 +848,7 @@ impl Runner {
         let semaphore = Arc::new(Semaphore::new(config.max_parallel));
         Ok((
             Self {
+                reports: super::reports::Reports::default(),
                 output_logs: std::sync::OnceLock::new(),
                 scratch_root: std::sync::OnceLock::new(),
                 config,
@@ -862,6 +864,20 @@ impl Runner {
             self.scratch_root.set(root).is_ok(),
             "scratch root already bound"
         );
+    }
+
+    /// Bound the parent preview while keeping a durable report pointer visible.
+    pub(crate) fn parent_text(&self, task: &Task, text: &str) -> String {
+        let cap = self.config.max_output_bytes.min(PARENT_REPORT_BYTES);
+        let mut preview = capped_text_result(text, cap).content;
+        if task.is_final() {
+            preview.push_str(&self.reports.handoff(
+                &task.id,
+                &self.redactor().redact_string(&task.result),
+                text.len() > cap,
+            ));
+        }
+        preview
     }
 
     pub(crate) fn bind_output_logs(&self, logs: Arc<crate::tool::bash_output::Logs>) {
@@ -1352,6 +1368,9 @@ impl Runner {
             .map(super::scratch::Scratch::new)
             .transpose()
             .map_err(|_| StartError::ScratchUnavailable)?;
+        let report_path = self.reports.prepare(self.scratch_root.get(), &task.id);
+        let report_policy = report_path.map_or_else(String::new, |path| format!(
+            "\n<research_report>For research too detailed for the handoff, use write, when available and permitted, to save the complete report in {path}/report.md with Markdown section headings. Return a concise summary, uncertainties, the report path and a section index with line numbers within 4 KiB. This directory persists after task exit; final.md and index.md are reserved for runtime overflow capture. Do not place reports in the temporary research directory. Existing write permissions and assigned file scope still apply. If you cannot write a report, return your findings as final text; the runtime saves an oversized final answer automatically.</research_report>"));
         let scratch_policy = scratch.as_ref().map_or_else(String::new, |scratch| format!(
             "\n<research_workspace>Use {} for temporary source downloads and analysis scripts. Download each pinned source once, then search/analyze locally and return only conclusions with original URL or file/line evidence. Keep durable deliverables outside this directory. Otto deletes this directory when your task exits, including failure or cancellation. Do not return its temporary paths as evidence.</research_workspace>", scratch.path()));
 
@@ -1362,7 +1381,7 @@ impl Runner {
             .unwrap_or(GENERIC_SUBAGENT_INSTRUCTION);
         let redactor = self.redactor();
         let system_prompt = redactor.redact_string(&format!(
-            "{}\n<subagent_role>\n{}\n</subagent_role>{scratch_policy}\n<child_report_policy>Keep research process, source text and logs in your own context. Return only the verified conclusion, essential evidence references, uncertainty and decisions needed from the parent. Final answers and agent_report messages must fit within 4 KiB; no raw logs, code dumps or chronological research report. The parent-facing transport caps reports. The full transcript remains local.</child_report_policy>\n</otto_system_prompt>",
+            "{}\n<subagent_role>\n{}\n</subagent_role>{scratch_policy}{report_policy}\n<child_report_policy>Keep research process, source text and logs in your own context. Return only the verified conclusion, essential evidence references, uncertainty and decisions needed from the parent. Keep handoff summaries and agent_report messages within 4 KiB; put detailed findings in a report file when permitted. Do not include raw logs or code dumps in handoffs. The parent-facing transport caps previews; oversized final answers are saved to a persistent report when workspace storage is available. The full transcript remains local.</child_report_policy>\n</otto_system_prompt>",
             (self.config.prompt_for)(&tools.definitions()),
             crate::skill::prompt::escape_html(role_body),
         ));
@@ -1682,11 +1701,7 @@ impl Runner {
             self.config.tasks.notifications().push(Notification {
                 task_id: task_id.to_string(),
                 kind: Some(NotificationKind::TaskFinished),
-                text: capped_text_result(
-                    &completion_text(&final_task, usize::MAX),
-                    self.config.max_output_bytes.min(PARENT_REPORT_BYTES),
-                )
-                .content,
+                text: self.parent_text(&final_task, &completion_text(&final_task, usize::MAX)),
                 usage: final_task.usage_present.then_some(final_task.usage),
                 ..Default::default()
             });
@@ -1729,7 +1744,9 @@ pub enum StartError {
     ResumeNoSession,
     #[error("no sub-agent task {0} in this session")]
     ResumeNotFound(String),
-    #[error("task {0} is not interrupted")]
+    #[error(
+        "task {0} is not interrupted; resume only accepts interrupted tasks. Use agent_status to inspect its status and report path, then read the report for completed tasks"
+    )]
     ResumeNotInterrupted(String),
     #[error("resume: {0}")]
     ResumeFailed(String),
@@ -2412,6 +2429,10 @@ mod tests {
             "system prompt does not start with the parent prompt:\n{prompt}"
         );
         assert!(prompt.contains("<subagent_role>"), "{prompt}");
+        assert!(
+            !prompt.contains("<research_report>"),
+            "no artifact path without storage"
+        );
         assert!(prompt.ends_with("</otto_system_prompt>"), "{prompt}");
         assert!(prompt.contains(GENERIC_SUBAGENT_INSTRUCTION), "{prompt}");
     }
@@ -4468,6 +4489,8 @@ mod tests {
             "{}",
             result.content
         );
+        assert!(result.content.contains("Use agent_status"));
+        assert!(result.content.contains("read the report"));
     }
 
     #[tokio::test]

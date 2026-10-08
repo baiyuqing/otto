@@ -629,7 +629,10 @@ mod tests {
                 ..otto_core::model::Message::default()
             };
             otto_core::provider::ProviderSettlement::succeeded(
-                otto_core::provider::Response { message },
+                otto_core::provider::Response {
+                    message,
+                    ..otto_core::provider::Response::default()
+                },
                 1,
             )
         }

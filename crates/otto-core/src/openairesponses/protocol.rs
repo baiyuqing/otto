@@ -77,7 +77,10 @@ pub struct WireTool {
 }
 
 /// One input item. The struct covers every item shape the request side uses:
-/// `message`, `function_call`, and `function_call_output`.
+/// `message`, `function_call`, `function_call_output`, and `compaction`.
+///
+/// A persisted compaction carries `id` and `encrypted_content`; a compaction
+/// trigger carries only its type. Both opaque fields are omitted when empty.
 ///
 /// `output` is an [`Option`] rather than a plain `String` so a
 /// `function_call_output` item emits `"output"` even when the tool produced no
@@ -87,6 +90,10 @@ pub struct WireTool {
 pub struct WireItem {
     #[serde(rename = "type")]
     pub item_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub encrypted_content: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub role: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -157,6 +164,8 @@ pub struct WireOutputItem {
     pub name: String,
     #[serde(default, deserialize_with = "null_as_default")]
     pub arguments: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub encrypted_content: String,
 }
 
 /// The response object carried by the terminal event.
@@ -209,6 +218,10 @@ impl WireUsage {
             .as_ref()
             .map_or(0, |details| details.cached_tokens)
     }
+
+    pub fn cached_tokens_present(&self) -> bool {
+        self.input_tokens_details.is_some()
+    }
 }
 
 /// The breakdown of the input token count.
@@ -235,6 +248,14 @@ pub fn build_request(request: &Request) -> WireRequest {
 /// `web_search` tool when `hosted_web_search` is set.
 pub fn build_request_with(request: &Request, hosted_web_search: bool) -> WireRequest {
     let mut input: Vec<WireItem> = Vec::new();
+    if let Some(compaction) = &request.remote_compaction {
+        input.push(WireItem {
+            item_type: "compaction".into(),
+            id: compaction.id.clone(),
+            encrypted_content: compaction.encrypted_content.clone(),
+            ..WireItem::default()
+        });
+    }
     for message in &request.messages {
         match message.role {
             Role::User => input.push(user_message_item(message)),
@@ -276,6 +297,12 @@ pub fn build_request_with(request: &Request, hosted_web_search: bool) -> WireReq
             }
             Role::Other(_) => {}
         }
+    }
+    if request.request_remote_compaction {
+        input.push(WireItem {
+            item_type: "compaction".into(),
+            ..WireItem::default()
+        });
     }
     WireRequest {
         model: request.model.clone(),
@@ -466,6 +493,48 @@ mod tests {
         serde_json::to_string(&build_request(request)).expect("request serializes")
     }
 
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn compaction_items_wrap_messages_in_the_required_order() {
+        let request = Request {
+            model: "m".into(),
+            remote_compaction: Some(crate::session::RemoteCompaction {
+                provider: "openai-compatible".into(),
+                id: "cmp_1".into(),
+                encrypted_content: "opaque-persisted".into(),
+            }),
+            messages: vec![Message {
+                role: Role::User,
+                blocks: vec![Block::text("hello")],
+                ..Message::default()
+            }],
+            request_remote_compaction: true,
+            ..Request::default()
+        };
+        assert_eq!(
+            encode(&request),
+            concat!(
+                r#"{"model":"m","input":["#,
+                r#"{"type":"compaction","id":"cmp_1","encrypted_content":"opaque-persisted"},"#,
+                r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},"#,
+                r#"{"type":"compaction"}],"stream":true,"store":false}"#,
+            )
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn empty_compaction_fields_are_omitted_exactly() {
+        let item = WireItem {
+            item_type: "compaction".into(),
+            ..WireItem::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&item).unwrap(),
+            r#"{"type":"compaction"}"#
+        );
+    }
+
     /// The Responses API requires every `function_call_output` item to carry an
     /// `output` field, even when the tool produced no text; dropping it yields
     /// HTTP 400 "Missing required parameter: 'input[N].output'".
@@ -552,6 +621,7 @@ mod tests {
                 description: "read a file".into(),
                 parameters: Some(raw(r#"{"alpha":{"a":3,"b":2},"zeta":1}"#)),
             }],
+            ..Request::default()
         };
         assert_eq!(
             encode(&request),
@@ -718,11 +788,18 @@ mod tests {
         let usage: WireUsage =
             serde_json::from_str(r#"{"input_tokens":5,"output_tokens":7}"#).expect("usage decodes");
         assert_eq!(usage.cached_tokens(), 0);
+        assert!(!usage.cached_tokens_present());
         let detailed: WireUsage = serde_json::from_str(
             r#"{"input_tokens":5,"output_tokens":7,"input_tokens_details":{"cached_tokens":4}}"#,
         )
         .expect("usage decodes");
         assert_eq!(detailed.cached_tokens(), 4);
+        assert!(detailed.cached_tokens_present());
+        let explicit_zero: WireUsage = serde_json::from_str(
+            r#"{"input_tokens":5,"output_tokens":7,"input_tokens_details":{"cached_tokens":0}}"#,
+        )
+        .expect("usage decodes");
+        assert!(explicit_zero.cached_tokens_present());
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

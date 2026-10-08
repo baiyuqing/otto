@@ -533,10 +533,17 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
             }
             let mut next = items.to_vec();
             next.push(Item::Notice {
-                text: format!(
-                    "Context compacted: {} → ~{} tokens ({})",
-                    compaction.tokens_before, compaction.estimated_tokens_after, compaction.reason
-                ),
+                text: match (compaction.tokens_before, compaction.estimated_tokens_after) {
+                    (Some(before), Some(after)) => format!(
+                        "Context compacted: {before} → ~{after} tokens ({})",
+                        compaction.reason
+                    ),
+                    (Some(before), None) => format!(
+                        "Context compacted: {before} tokens before ({})",
+                        compaction.reason
+                    ),
+                    (None, _) => format!("Context compacted ({})", compaction.reason),
+                },
             });
             next
         }

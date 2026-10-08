@@ -15,6 +15,24 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Usage and compatibility
+
+- `GET /v1/usage` now distinguishes token-usage rows, logical provider
+  operations and actual HTTP attempts. Cache totals and `cache_hit_rate` are
+  `null` when any reported usage lacks a cached-token breakdown; missing data
+  is no longer presented as a zero cache hit. The former `requests` and
+  `reported_requests` fields are named `usage_events` and
+  `reported_usage_events` to match what they count.
+  ([#447](https://github.com/baiyuqing/otto/pull/447))
+
+### Features
+
+- The ChatGPT Responses provider uses capability-gated remote compaction and
+  persists the returned encrypted checkpoint as invisible append-only session
+  state. Other providers, and manual compaction with a retention focus, keep
+  using Otto's validated structured summaries.
+  ([#447](https://github.com/baiyuqing/otto/pull/447))
+
 ### Fixes
 
 - Long sub-agent research can be handed off as persistent report files with a
@@ -24,6 +42,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
   child exits. Failed `resume` calls now explain how to inspect completed tasks.
   ([#445](https://github.com/baiyuqing/otto/pull/445))
 
+### Performance
+
+- Context reporting and automatic compaction treat an opaque provider prefix
+  as unknown until a post-checkpoint usage report anchors its size, rather than
+  making cache and threshold decisions from a partial estimate.
+  ([#447](https://github.com/baiyuqing/otto/pull/447))
+
 ### Build and CI
 
 - Fix the web retrieval byte limit expression to satisfy Clippy’s
@@ -31,6 +56,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([#446](https://github.com/baiyuqing/otto/pull/446))
 
 ### Documentation
+
+- The manual documents remote compaction, provider-locked opaque checkpoints,
+  exact operation/attempt counts, cache-breakdown presence and secret-safe
+  runtime diagnostics.
+  ([#447](https://github.com/baiyuqing/otto/pull/447))
 
 - Contributor and agent instructions leave builds, tests and `make` gates to
   CI: local work runs only `cargo fmt --all`; a test's failure mode is shown

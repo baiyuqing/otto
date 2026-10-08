@@ -19,12 +19,17 @@ const TOOL_CALL_FRAMING_TOKENS: i64 = 12;
 const TOOL_RESULT_FRAMING_TOKENS: i64 = 8;
 const TOOL_DEFINITION_FRAMING_TOKENS: i64 = 16;
 
-/// Estimates the input tokens `request` will cost.
-///
-/// When the most recent assistant message inside the active checkpoint
-/// reported its own input-token count, that count anchors the estimate and
-/// only the messages after it are counted. Otherwise everything is counted
-/// from the system prompt down.
+/// Whether the estimate covers the whole request. An opaque remote prefix is
+/// known only after a post-checkpoint assistant response reports input usage.
+pub fn estimate_complete(request: &Request) -> bool {
+    request.remote_compaction.is_none()
+        || request.messages.iter().rev().any(|message| {
+            message.role == crate::model::Role::Assistant
+                && message.usage.is_some_and(|usage| usage.input_tokens > 0)
+        })
+}
+
+/// Estimates input tokens; provider-reported usage anchors a known prefix.
 pub fn estimate_request(request: &Request, latest: Option<&CompactionMetadata>) -> i64 {
     if let Some((anchor, prompt_tokens)) = request_usage_anchor(&request.messages, latest) {
         let mut total = prompt_tokens;

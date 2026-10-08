@@ -38,15 +38,21 @@ impl Presenter for Context {
                 ..View::default()
             };
         };
-        let mut title = format!(
-            "Context  {} · ~{}",
-            report.model,
-            format_token_count(report.estimated_total)
-        );
+        let mut title = if report.estimate_complete {
+            format!(
+                "Context  {} · ~{}",
+                report.model,
+                format_token_count(report.estimated_total)
+            )
+        } else {
+            format!("Context  {} · estimate unknown", report.model)
+        };
         if report.context_window > 0 {
             title.push_str(&format!(" / {}", format_token_count(report.context_window)));
         }
-        title.push_str(" tokens (estimate)");
+        if report.estimate_complete {
+            title.push_str(" tokens (estimate)");
+        }
         if let Some(tokens) = report.reported_input_tokens {
             title.push_str(&format!(" · last reported {}", format_token_count(tokens)));
         }

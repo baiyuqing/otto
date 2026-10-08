@@ -553,7 +553,7 @@ changes a dependency version.
 The canonical Make targets are:
 
 ```bash
-make check-fast     # the local gate: only the checks for paths changed since origin/main, one worktree at a time
+make check-fast     # manual use only: the checks for paths changed since origin/main
 make check          # full macOS gate: rust-fmt, rust-lint, all tests (PTY tests included), core wasm tests (no release build)
 make check-tests    # `check` without rust-fmt and rust-lint (CI's macOS acceptance job)
 make build          # the release build: cargo build --release, then copy ./otto
@@ -647,60 +647,21 @@ binaries are distributed, the MIT, BSD and Apache-2.0 terms require one.
 
 ### Local verification
 
-Locally, run the focused tests for the change and then `make check-fast`. Do
-not run `make check` or `make check-linux`; CI runs both on every PR. A full
-gate compiles the workspace in test mode and again in check mode for clippy,
-checks core WASM compatibility and runs the Go race tests.
+CI runs `make check` and `make check-linux` on every PR; do not build or test
+locally. Before committing a Rust change, run only `cargo fmt --all`. Opening
+the PR ends the task; do not poll CI. When asked to fix a failed run, read
+only the failed jobs' log with `gh run view <run-id> --log-failed`, fix the
+cause, and push; do not rerun the gate locally to reproduce it.
 
-`make check-fast` directly runs `scripts/check-changed.mjs`. Independent
-worktrees can run it at the same time. Worktrees have separate `target/`
-caches; if commands share a target directory, Cargo may serialize builds.
-`check-fast` adds no cross-worktree coordination or performance guarantee.
-The selector lists paths changed since `git merge-base HEAD origin/main`,
-including uncommitted and untracked files, and runs only the commands those
-paths need:
-
-| Changed path | Commands |
-|---|---|
-| any `*.rs` file | `cargo fmt --all -- --check` |
-| anything under `crates/` or `testdata/`; root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | `cargo clippy --workspace --all-targets -- -D warnings` |
-| `crates/otto/src/<module>/…` or `crates/otto/src/<module>.rs` | `cargo test --workspace --lib -- <module>::`, one run for all changed modules |
-| `crates/otto/tests/<name>.rs` | `cargo test --workspace --test <name>` |
-| `crates/otto-core/`, `testdata/`, root manifests, `crates/otto/` `Cargo.toml`, `build.rs`, `src/lib.rs`, `src/main.rs`, `tests/common/`, `tests/fixtures/`, `tests/testdata/`, and any other path under `crates/`  | `cargo test --workspace`, in place of the two rows above |
-| `crates/otto-core/`, root manifests | `make rust-wasm-check` |
-| `chat-connector/` | `make connect-check` |
-| `scripts/` | `make scripts-test` |
-| root `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml`, `scripts/license-check.mjs` | `make license-check` |
-| `docs/`, `LICENSE`, Markdown outside `crates/` and `testdata/` | nothing |
-| anything else, such as `.github/`, `Makefile` | nothing; printed as not checked |
-
-It ends with `git diff --check` against the same base.
-
-The selection follows Cargo's units. A crate compiles as a whole, so any change
-in `crates/otto` recompiles all of it; the selection only limits which test
-binaries are linked and which tests run. The module filter is a libtest name
-substring, so `memory::` also runs tests whose path contains `memory::` under
-another module. A change in one module runs that module's unit tests only;
-other modules' tests and the integration tests run in CI. Clippy with
-`--all-targets` still compiles every target, so a compile error anywhere is
-reported locally. When a change touches what an integration test covers, run
-it by name, for example `cargo test --workspace --test tui_pty --test
-tui_attach_pty` for `tui`. Use `--workspace` in focused Cargo commands too:
-`-p <crate>` resolves features differently and recompiles dependencies.
-
-`make check` takes no lock. To cap `check-fast`'s CPU use further, set
-`CARGO_BUILD_JOBS` in the environment; the script passes the environment to
-every command.
+`make check-fast` remains for manual use. It runs `scripts/check-changed.mjs`,
+whose `plan` function maps the paths changed since
+`git merge-base HEAD origin/main` to the commands that check them.
 
 ### ACP integration-test navigation
 
 `crates/otto/tests/acp_stdio.rs` and `acp_attach.rs` retain the two ACP test
 binaries and their process/JSON-RPC harnesses. Their scenario modules keep the
-suite navigable without changing the focused command:
-
-```bash
-cargo test --workspace --test acp_stdio --test acp_attach
-```
+suite navigable:
 
 - `acp_stdio/{protocol,memory,approval,commands,tasks}.rs` covers the local
   stdio server's wire contract, memory review, permission dialogue, commands,
@@ -709,10 +670,8 @@ cargo test --workspace --test acp_stdio --test acp_attach
   `otto serve`: session parity/queueing/failure, relay permissions, and
   commands, reflection cancellation, and wake turns.
 
-When changing one scenario, use its fully qualified libtest name to narrow the
-existing target, for example `cargo test --workspace --test acp_stdio
-memory::` or `cargo test --workspace --test acp_attach relay::`. Run both
-targets after shared ACP protocol, session, approval, or serve changes.
+Shared ACP protocol, session, approval, or serve changes affect both
+targets; add coverage to the scenario module that owns the behavior.
 
 ## Web UI workflow
 
@@ -731,9 +690,9 @@ adds or fixes:
 1. Each test covers behavior the change defines: an input, a state, or an
    error path, not the structure of the implementation.
 2. A test must fail when the behavior it covers breaks. When that is not
-   evident from the test, check it once by breaking the behavior locally.
-3. Run the smallest relevant `cargo test ...` command, then the broader
-   relevant crate or repository gates.
+   evident from the test, name in the PR the assertion that fails without
+   the change; do not revert the change locally to demonstrate it.
+3. CI runs the tests; see [Local verification](#local-verification).
 
 Tests may be written before, during, or after the code. Docs-only and other
 non-code changes need no tests.
@@ -966,7 +925,8 @@ changelog maintenance itself need no entry.
   `Build and CI`, and `Documentation`. Omit empty categories.
 - Describe the resulting behavior and its practical impact in concise English,
   with a PR link (or commit link when there is no PR). Group related changes;
-  do not copy the commit log. Add the link once the PR number is known. The
+  do not copy the commit log. After `gh pr create` prints the PR number,
+  add the link, commit and push in one shell command. The
   complete historical index is a fixed initial backfill, not a per-PR ledger.
 - Put breaking changes, changed defaults, migration steps, and required user
   action in `Usage and compatibility`. Link the manual for detailed setup.

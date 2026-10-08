@@ -219,5 +219,5 @@ guards these dependency directions.
 ## Verification
 
 For documentation-only changes, check links and review the rendered Markdown.
-For code organization changes, use the relevant focused tests and then the
-canonical repository gates described in the [development guide](development.md).
+For code organization changes, CI runs the canonical repository gates
+described in the [development guide](development.md#local-verification).

@@ -22,6 +22,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   completion notifications and `agent_status` keep the full report's read path
   visible after truncation, so parents can retrieve omitted sections after the
   child exits. Failed `resume` calls now explain how to inspect completed tasks.
+  ([#445](https://github.com/baiyuqing/otto/pull/445))
 
 ### Documentation
 

@@ -22,7 +22,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   by naming the assertion instead of reverting the change; opening the PR
   ends the task without polling CI; feature and fix PRs never edit version
   files; and the changelog PR link is added, committed and pushed in one
-  command.
+  command. ([#444](https://github.com/baiyuqing/otto/pull/444))
 
 ## 0.4.8 - 2026-10-08
 

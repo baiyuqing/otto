@@ -674,7 +674,13 @@ mod tests {
                     ..Message::default()
                 }
             };
-            ProviderSettlement::succeeded(Response { message }, 1)
+            ProviderSettlement::succeeded(
+                Response {
+                    message,
+                    ..Response::default()
+                },
+                1,
+            )
         }
     }
 

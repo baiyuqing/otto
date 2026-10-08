@@ -23,6 +23,7 @@ use serde_json::value::RawValue;
 
 use crate::model::{Block, BlockType, Message, Role, Usage};
 use crate::provider::{Response, StreamEvent};
+use crate::session::RemoteCompaction;
 
 use super::protocol::{WireError, WireEvent, finish_reason, valid_arguments};
 
@@ -58,6 +59,10 @@ pub enum StreamError {
     /// The accumulated arguments of a tool call are not a complete JSON value.
     #[error("tool call {0:?} has malformed arguments")]
     MalformedArguments(String),
+    /// The backend violated the remote-compaction response contract. Opaque
+    /// encrypted content is deliberately excluded from this diagnostic.
+    #[error("responses remote compaction protocol error: {0}")]
+    RemoteCompactionProtocol(&'static str),
 }
 
 /// A tool call being assembled from the events that share its output item id.
@@ -87,8 +92,12 @@ pub struct StreamAssembler {
     calls: Vec<AssembledToolCall>,
     by_item: HashMap<String, usize>,
     usage: Option<Usage>,
+    cached_input_tokens_present: bool,
     status: String,
     incomplete_reason: String,
+    request_remote_compaction: bool,
+    remote_compaction_provider: String,
+    remote_compaction: Option<RemoteCompaction>,
     emitted: bool,
     completed: bool,
 }
@@ -97,6 +106,20 @@ impl StreamAssembler {
     /// A new assembler with no buffered input.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an assembler with the request's remote-compaction expectation.
+    /// A requested compaction must be returned exactly once; an unsolicited
+    /// compaction is rejected when the response finishes.
+    pub fn with_remote_compaction(
+        request_remote_compaction: bool,
+        remote_compaction_provider: impl Into<String>,
+    ) -> Self {
+        Self {
+            request_remote_compaction,
+            remote_compaction_provider: remote_compaction_provider.into(),
+            ..Self::default()
+        }
     }
 
     /// Consumes the next slice of response body.
@@ -147,6 +170,22 @@ impl StreamAssembler {
         if !self.completed {
             return Err(StreamError::MissingCompletion);
         }
+        match (
+            self.request_remote_compaction,
+            self.remote_compaction.is_some(),
+        ) {
+            (true, false) => {
+                return Err(StreamError::RemoteCompactionProtocol(
+                    "requested compaction was not returned",
+                ));
+            }
+            (false, true) => {
+                return Err(StreamError::RemoteCompactionProtocol(
+                    "compaction was returned without being requested",
+                ));
+            }
+            _ => {}
+        }
 
         let has_tool_calls = !self.calls.is_empty();
         let mut blocks = Vec::with_capacity(2 + self.calls.len());
@@ -183,6 +222,8 @@ impl StreamAssembler {
                 usage: self.usage,
                 ..Message::default()
             },
+            cached_input_tokens_present: self.cached_input_tokens_present,
+            remote_compaction: self.remote_compaction,
         })
     }
 
@@ -317,12 +358,31 @@ impl StreamAssembler {
                 }
             }
             "response.output_item.done" => {
-                if let Some(item) = event.item.filter(|item| item.item_type == "function_call")
-                    && let Some(&position) = self.by_item.get(&item.id)
-                {
-                    let call = &mut self.calls[position];
-                    if call.arguments.is_empty() && !item.arguments.is_empty() {
-                        call.arguments = item.arguments;
+                if let Some(item) = event.item {
+                    if item.item_type == "function_call" {
+                        if let Some(&position) = self.by_item.get(&item.id) {
+                            let call = &mut self.calls[position];
+                            if call.arguments.is_empty() && !item.arguments.is_empty() {
+                                call.arguments = item.arguments;
+                            }
+                        }
+                    } else if matches!(item.item_type.as_str(), "compaction" | "compaction_summary")
+                    {
+                        if item.encrypted_content.is_empty() {
+                            return Err(StreamError::RemoteCompactionProtocol(
+                                "compaction encrypted_content is empty",
+                            ));
+                        }
+                        if self.remote_compaction.is_some() {
+                            return Err(StreamError::RemoteCompactionProtocol(
+                                "multiple compactions were returned",
+                            ));
+                        }
+                        self.remote_compaction = Some(RemoteCompaction {
+                            provider: self.remote_compaction_provider.clone(),
+                            id: item.id,
+                            encrypted_content: item.encrypted_content,
+                        });
                     }
                 }
             }
@@ -331,6 +391,7 @@ impl StreamAssembler {
                 if let Some(result) = event.response {
                     self.status = result.status;
                     if let Some(usage) = result.usage {
+                        self.cached_input_tokens_present = usage.cached_tokens_present();
                         self.usage = Some(Usage {
                             input_tokens: usage.input_tokens,
                             output_tokens: usage.output_tokens,
@@ -430,9 +491,18 @@ mod tests {
     /// Feeds `body` in slices of `chunk` bytes (`0` meaning one push) and
     /// returns the assembled result together with every emitted event.
     fn assemble(body: &[u8], chunk: usize) -> (Result<Response, StreamError>, Vec<StreamEvent>) {
+        assemble_with_compaction(body, chunk, false)
+    }
+
+    fn assemble_with_compaction(
+        body: &[u8],
+        chunk: usize,
+        request_remote_compaction: bool,
+    ) -> (Result<Response, StreamError>, Vec<StreamEvent>) {
         let mut events = Vec::new();
         let mut sink = |event: StreamEvent| events.push(event);
-        let mut assembler = StreamAssembler::new();
+        let mut assembler =
+            StreamAssembler::with_remote_compaction(request_remote_compaction, "test-provider");
         let step = if chunk == 0 { body.len().max(1) } else { chunk };
         let mut result = Ok(());
         for slice in body.chunks(step) {
@@ -444,6 +514,78 @@ mod tests {
         match result {
             Err(error) => (Err(error), events),
             Ok(()) => (assembler.finish(&mut sink), events),
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn captures_requested_compaction_without_exposing_opaque_content() {
+        for item_type in ["compaction", "compaction_summary"] {
+            let body = format!(concat!(
+                "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}}\n\n",
+                "data: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"{item_type}\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-secret\"}}}}\n\n",
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\"}}}}\n\n",
+            ));
+            let (response, events) = assemble_with_compaction(body.as_bytes(), 0, true);
+            let response = response.expect("requested compaction assembles");
+            assert_eq!(response.message.blocks, [Block::text("hi")]);
+            assert_eq!(events, [StreamEvent::TextDelta { text: "hi".into() }]);
+            assert_eq!(
+                response.remote_compaction,
+                Some(RemoteCompaction {
+                    provider: "test-provider".into(),
+                    id: "cmp_1".into(),
+                    encrypted_content: "opaque-secret".into(),
+                })
+            );
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn validates_compaction_cardinality_and_content() {
+        let cases = [
+            (
+                "empty encrypted content",
+                true,
+                concat!(
+                    "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+                ),
+                "responses remote compaction protocol error: compaction encrypted_content is empty",
+            ),
+            (
+                "duplicate aliases",
+                true,
+                concat!(
+                    "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"id\":\"c1\",\"encrypted_content\":\"one\"}}\n\n",
+                    "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction_summary\",\"id\":\"c2\",\"encrypted_content\":\"two\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+                ),
+                "responses remote compaction protocol error: multiple compactions were returned",
+            ),
+            (
+                "requested but missing",
+                true,
+                "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+                "responses remote compaction protocol error: requested compaction was not returned",
+            ),
+            (
+                "unsolicited",
+                false,
+                concat!(
+                    "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque-secret\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+                ),
+                "responses remote compaction protocol error: compaction was returned without being requested",
+            ),
+        ];
+        for (name, requested, body, expected) in cases {
+            let (result, events) = assemble_with_compaction(body.as_bytes(), 0, requested);
+            let error = result.expect_err(name);
+            assert_eq!(error.to_string(), expected, "{name}");
+            assert!(!error.to_string().contains("opaque-secret"), "{name}");
+            assert!(events.is_empty(), "{name}");
         }
     }
 

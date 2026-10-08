@@ -81,6 +81,7 @@ impl Backend for SessionBackend {
                             .record(&otto_core::agent::Event::ProviderUsage {
                                 usage: response.usage,
                                 present: response.usage_present,
+                                cached_input_tokens_present: response.cached_input_tokens_present,
                             });
                 }
                 let result: Result<HashMap<String, Answer>, Failure> =

@@ -6059,12 +6059,23 @@ mod tests {
         assert_eq!(
             reply.json(),
             serde_json::json!({
-                "requests": 0,
-                "reported_requests": 0,
+                "usage_events": 0,
+                "reported_usage_events": 0,
+                "logical_operations": 0,
+                "actual_attempts": 0,
+                "succeeded_operations": 0,
+                "failed_operations": 0,
+                "canceled_operations": 0,
+                "deadline_exceeded_operations": 0,
+                "interrupted_operations": 0,
+                "not_started_operations": 0,
+                "known_no_effect_operations": 0,
+                "completed_effect_operations": 0,
+                "unknown_effect_operations": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
-                "cached_input_tokens": 0,
-                "cache_hit_rate": 0.0
+                "cached_input_tokens": null,
+                "cache_hit_rate": null
             })
         );
     }
@@ -6078,7 +6089,8 @@ mod tests {
 
         let reply = harness.send("GET", "/v1/usage/daily?days=7", None).await;
         assert_eq!(reply.status, StatusCode::OK);
-        assert_eq!(reply.json()["summary"]["requests"], 0);
+        assert_eq!(reply.json()["summary"]["usage_events"], 0);
+        assert_eq!(reply.json()["summary"]["logical_operations"], 0);
         assert_eq!(reply.json()["daily"].as_array().expect("daily").len(), 7);
     }
 

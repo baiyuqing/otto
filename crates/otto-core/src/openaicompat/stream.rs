@@ -57,6 +57,7 @@ pub struct StreamAssembler {
     calls: Vec<AssembledToolCall>,
     by_index: HashMap<i64, usize>,
     usage: Option<Usage>,
+    cached_input_tokens_present: bool,
     finish: FinishReason,
     emitted: bool,
     done: bool,
@@ -72,6 +73,7 @@ impl Default for StreamAssembler {
             calls: Vec::new(),
             by_index: HashMap::new(),
             usage: None,
+            cached_input_tokens_present: false,
             finish: FinishReason::Unknown,
             emitted: false,
             done: false,
@@ -158,6 +160,8 @@ impl StreamAssembler {
                 usage: self.usage,
                 ..Message::default()
             },
+            cached_input_tokens_present: self.cached_input_tokens_present,
+            remote_compaction: None,
         })
     }
 
@@ -210,6 +214,7 @@ impl StreamAssembler {
         let chunk: WireChunk = serde_json::from_slice(&data)
             .map_err(|error| StreamError::Decode(error.to_string()))?;
         if let Some(usage) = &chunk.usage {
+            self.cached_input_tokens_present = usage.cached_tokens_present();
             self.usage = Some(Usage {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,

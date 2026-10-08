@@ -25,6 +25,7 @@ pub mod fork;
 pub mod operation;
 pub mod pi;
 pub mod plan;
+pub mod remote_compaction;
 pub mod turn;
 pub mod types;
 
@@ -53,6 +54,12 @@ pub use pi::{
 pub use plan::{
     MAX_PLAN_STEP_CHARS, MAX_PLAN_STEPS, PLAN_CUSTOM_TYPE, PLAN_SCHEMA_VERSION, PlanStatus,
     PlanStep, decode_plan, encode_plan, plan_checklist, plan_summary, validate_plan,
+};
+pub use remote_compaction::{
+    MAX_REMOTE_COMPACTION_CONTENT_BYTES, MAX_REMOTE_COMPACTION_ID_BYTES,
+    MAX_REMOTE_COMPACTION_PROVIDER_BYTES, REMOTE_COMPACTION_CUSTOM_TYPE,
+    REMOTE_COMPACTION_SCHEMA_VERSION, RemoteCompaction, decode_remote_compaction,
+    encode_remote_compaction, validate_remote_compaction,
 };
 pub use turn::{
     InterruptedTurn, TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, decode_turn_record,
@@ -243,6 +250,30 @@ pub trait Session {
     /// [`pi_entry_to_context_messages`]: crate::session::context::pi_entry_to_context_messages
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError>;
 
+    /// The provider-managed compaction checkpoint currently in force.
+    fn remote_compaction(&self) -> Option<RemoteCompaction> {
+        None
+    }
+
+    /// Model messages appended after [`Self::remote_compaction`]. When no
+    /// remote checkpoint is active this is the ordinary model projection.
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        self.model_messages()
+    }
+
+    /// Atomically appends and activates a provider-managed checkpoint.
+    /// Implementations that persist Pi sessions should override this to append
+    /// an `otto.remote_compaction` custom entry before publishing live state.
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: RemoteCompaction,
+    ) -> Result<(), SessionError> {
+        let data = encode_remote_compaction(&checkpoint)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        self.append_custom(REMOTE_COMPACTION_CUSTOM_TYPE, &data)
+            .await
+    }
+
     /// The latest `otto.capabilities` record on the active path, or `None`
     /// when there is none. Like `append_custom`, it has no
     /// default body: every implementation forwards or states its behavior.
@@ -293,6 +324,8 @@ struct State {
     /// Every message id seen in this session, to reject reuse.
     seen_ids: HashSet<String>,
     latest_compaction: Option<CompactionMetadata>,
+    remote_compaction: Option<RemoteCompaction>,
+    post_remote_compaction_messages: Vec<Message>,
     /// Numbers the synthetic checkpoint ids and the ids generated for messages
     /// appended without one. An in-memory session has no file to share ids
     /// with, so a counter is enough and keeps tests deterministic.
@@ -341,6 +374,9 @@ impl State {
         state.seen_ids.insert(message.id.clone());
         if !message.input_id.is_empty() {
             state.seen_inputs.insert(message.input_id.clone());
+        }
+        if state.remote_compaction.is_some() {
+            state.post_remote_compaction_messages.push(message.clone());
         }
         state.record(message);
         Ok(())
@@ -498,6 +534,35 @@ impl Session for MemorySession {
             .clone()
     }
 
+    fn remote_compaction(&self) -> Option<RemoteCompaction> {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .remote_compaction
+            .clone()
+    }
+
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        let state = self.state.lock().expect("session mutex");
+        if state.remote_compaction.is_some() {
+            state.post_remote_compaction_messages.clone()
+        } else {
+            state.messages.clone()
+        }
+    }
+
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: RemoteCompaction,
+    ) -> Result<(), SessionError> {
+        validate_remote_compaction(&checkpoint)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        let mut state = self.state.lock().expect("session mutex");
+        state.remote_compaction = Some(checkpoint);
+        state.post_remote_compaction_messages.clear();
+        Ok(())
+    }
+
     async fn append_compaction(
         &self,
         checkpoint: CompactionCheckpoint,
@@ -618,6 +683,14 @@ impl Session for MemorySession {
             let steps = decode_plan(data)
                 .ok_or_else(|| SessionError::Persist("malformed otto.plan data".into()))?;
             self.state.lock().expect("session mutex").plan = steps;
+            return Ok(());
+        }
+        if custom_type == REMOTE_COMPACTION_CUSTOM_TYPE {
+            let checkpoint = decode_remote_compaction(data)
+                .map_err(|error| SessionError::Persist(error.to_string()))?;
+            let mut state = self.state.lock().expect("session mutex");
+            state.remote_compaction = Some(checkpoint);
+            state.post_remote_compaction_messages.clear();
             return Ok(());
         }
         if custom_type != OPERATION_CUSTOM_TYPE {

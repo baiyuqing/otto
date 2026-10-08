@@ -76,7 +76,7 @@ fn candidate(id: &str) -> Candidate {
 }
 
 #[test]
-fn approval_activity_inspection_separates_counts_and_review_has_no_modal() {
+fn approval_activity_inspection_separates_counts_and_review_has_no_actions() {
     let mut request = approval_request();
     request.review = Some(crate::approval::ReviewMetadata {
         status: crate::approval::ReviewStatus::Reviewing,
@@ -105,7 +105,6 @@ fn approval_activity_inspection_separates_counts_and_review_has_no_modal() {
     let Transition::Push(detail) = approvals.activate(Activation::Open(id)) else {
         panic!("open review details");
     };
-    assert!(!detail.view().modal);
     assert!(detail.view().actions.is_empty());
 }
 
@@ -138,13 +137,12 @@ fn automatic_review_and_denial_have_no_human_actions() {
 }
 
 #[test]
-fn approval_is_a_modal_that_defaults_to_approve_without_feedback() {
+fn approval_defaults_to_approve_without_feedback() {
     let request = approval_request();
     let mut approval = Approval::shared(&request);
     let view = approval.view();
     let mut state = State::new(&view);
 
-    assert!(view.modal);
     assert!(view.fields.is_empty());
     assert_eq!(view.default_action.as_deref(), Some("allow"));
     assert_eq!(state.selected_action.as_deref(), Some("allow"));
@@ -194,6 +192,21 @@ fn approval_refresh_keeps_the_exact_revision_and_approve_default() {
             ..
         })) if feedback.is_empty()
     ));
+}
+
+#[test]
+fn empty_memory_review_has_an_explicit_empty_state() {
+    let mut reviews = Reviews::default();
+    assert!(matches!(
+        reviews.receive(Reply::Reviews(Vec::new())),
+        Transition::Stay
+    ));
+
+    let view = reviews.view();
+    assert_eq!(view.document, "No pending memory candidates.");
+    assert!(!view.loading);
+    assert!(view.rows.is_empty());
+    assert!(view.actions.iter().all(|action| !action.enabled));
 }
 
 #[test]

@@ -862,7 +862,7 @@ mod tests {
             .append_compaction(CompactionCheckpoint {
                 summary: "local summary".into(),
                 first_kept_entry_id: first_kept,
-                created_at: chrono::Utc::now(),
+                created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
                 ..CompactionCheckpoint::default()
             })
             .await

@@ -50,9 +50,12 @@ advertise other providers or planned roadmap features.
   in the same PR. Descriptions are short and unambiguous and state the
   capability, inputs and outputs. This rule is mandatory.
 - Version numbers change only in release PRs via `make bump VERSION=X.Y.Z`.
+  Feature and fix PRs never edit version files, whatever a remembered
+  preference about version increments says.
 - Use small, focused commits with imperative subjects such as
   `feat: add ...` or `docs: document ...`.
-- After implementation and required checks, open a PR without asking again.
+- After implementation and `cargo fmt --all`, open a PR without asking again.
+  Opening the PR ends the task; do not poll CI.
 
 ## Safety
 
@@ -72,11 +75,14 @@ advertise other providers or planned roadmap features.
 
 ## Verification
 
-Run focused behavioral tests, then `make check-fast`. Feature/fix tests must
-fail when the added/fixed behavior breaks. Documentation-only changes need
-no new tests. Never run `make check` or `make check-linux` locally; CI runs
-both full gates. Use [local verification](docs/development.md#local-verification)
-for selection and platform-specific contracts.
+CI runs every build, lint and test gate on each PR. Locally, run only
+`cargo fmt --all` before committing a Rust change; do not run other Cargo
+commands or `make` gates. Feature/fix tests must fail when the added/fixed
+behavior breaks; when that is not evident from the test, name in the PR the
+assertion that fails without the change instead of reverting it locally.
+Documentation-only changes need no new tests. See
+[local verification](docs/development.md#local-verification) for reading CI
+failures.
 
 Full sandbox validation requires macOS 26+ and standalone Command Line Tools;
 Linux checks cannot establish Seatbelt behavior. CI commands/toolchain pins

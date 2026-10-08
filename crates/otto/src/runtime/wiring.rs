@@ -968,7 +968,10 @@ impl Builder {
                 diagnostics: self.logger.diagnostic_scope(
                     &session.header().id,
                     "",
-                    self.boundary_redactor(Some(runtime)),
+                    Redactor::with_completeness(
+                        redaction_values,
+                        redactor.allows_dynamic_content(),
+                    ),
                 ),
                 plugins: extensions,
                 hook_guard,

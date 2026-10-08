@@ -442,7 +442,7 @@ fn composer_lines(input: &[char], cursor: usize, width: u16) -> (Vec<String>, u1
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     let (title, style) = if app.busy() && app.queued_steer.is_some() {
         (
-            "Queued for current turn · Ctrl+U withdraw · Esc cancels turn",
+            "Queued for current turn · Ctrl+U recall to edit · Esc cancels turn",
             Style::default().fg(Color::Cyan),
         )
     } else if app.busy() && app.queued_input.is_some() {
@@ -1060,7 +1060,7 @@ mod tests {
             "{screen}"
         );
         assert!(
-            screen.contains("Queued for current turn · Ctrl+U withdraw · Esc cancels turn"),
+            screen.contains("Queued for current turn · Ctrl+U recall to edit · Esc cancels turn"),
             "{screen}"
         );
         assert!(

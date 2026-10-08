@@ -977,8 +977,11 @@ OTTO_UI=repl otto
   turn · Esc cancels turn`. Once input is queued, a yellow `◆ QUEUED …` banner
   on a shaded background stays pinned immediately above the composer, even
   while the transcript scrolls. Ordinary guidance uses `◆ QUEUED FOR CURRENT
-  TURN` and changes the title to `Queued for current turn · Ctrl+U withdraw ·
-  Esc cancels turn`. A queued slash command uses `◆ QUEUED NEXT INPUT` and the
+  TURN` and changes the title to `Queued for current turn · Ctrl+U recall to
+  edit · Esc cancels turn`. `Ctrl+U` waits for the runtime to confirm that the
+  guidance was not delivered, then returns its exact text to an empty composer
+  for editing; a draft typed while recall is pending is never overwritten. A
+  queued slash command uses `◆ QUEUED NEXT INPUT` and the
   title `Queued next input · Ctrl+U withdraw`, because it remains local until
   the active turn succeeds. Ordinary input is
   delivered within the same turn after the current provider response or tool
@@ -1112,8 +1115,11 @@ Turns:
 - Ordinary text submitted while a turn runs steers that active task. Otto
   accepts it for the next safe provider boundary without interrupting a tool or
   silently creating a later turn. The pinned banner above the composer then
-  shows `◆ QUEUED FOR CURRENT TURN …`, and `Ctrl+U` withdraws it (as does
-  `/inputs withdraw <id>`); an interrupted turn that never delivered it is
+  shows `◆ QUEUED FOR CURRENT TURN …`. `Ctrl+U` recalls undelivered guidance
+  into an empty composer for editing after the runtime confirms withdrawal;
+  `/inputs withdraw <id>` only withdraws it. Guidance that wins the race and is
+  delivered is not restored, and a new draft is never overwritten. An
+  interrupted turn that never delivered it is
   reported with the text. If the turn has just ended, the text becomes
   a new turn; when an approval is pending, resolve that approval first. Use an
   explicit `/queue` command when the text is a separate follow-up task. Slash

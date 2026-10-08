@@ -1776,6 +1776,86 @@ async fn unknown_limits_never_compact_proactively() {
     assert!(agent.provider().summary_requests().is_empty());
 }
 
+/// A seeded session whose last assistant message finished `age_minutes`
+/// before the test clock and reported `input_tokens` of prompt usage. The usage
+/// anchors the request estimate near `input_tokens` plus a few tens of tokens.
+async fn idle_session(age_minutes: i64, input_tokens: i64) -> MemorySession {
+    let session = seeded_session().await;
+    let mut messages = session.messages();
+    let last = messages.last_mut().expect("seeded assistant message");
+    last.created_at = clock() - chrono::TimeDelta::minutes(age_minutes);
+    last.usage = Some(Usage {
+        input_tokens,
+        ..Usage::default()
+    });
+    let rebuilt = MemorySession::new();
+    for message in messages {
+        rebuilt.append(message).await.expect("append");
+    }
+    rebuilt
+}
+
+/// Runs one turn on an idle session and returns the reasons of the completed
+/// compactions plus the summary request count. The soft trigger is 200 tokens.
+async fn run_idle_turn(age_minutes: i64, input_tokens: i64) -> (Vec<String>, usize) {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::summary(&structured_summary()), Turn::text("ok")]),
+        EchoExecutor::default(),
+        idle_session(age_minutes, input_tokens).await,
+        Options {
+            compaction: CompactionSettings {
+                working_window: 200,
+                ..tight_compaction()
+            },
+            ..options()
+        },
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    agent
+        .run(
+            "hello",
+            &mut |event| sink.lock().expect("e").push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+    let reasons = collect(&events)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::CompactionCompleted { compaction } => Some(compaction.reason.name().to_owned()),
+            _ => None,
+        })
+        .collect();
+    (reasons, agent.provider().summary_requests().len())
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn an_idle_cache_with_a_half_full_context_compacts_before_the_request() {
+    // Estimate is about 135 tokens: above 100 (half the soft trigger), below 200.
+    let (reasons, summaries) = run_idle_turn(61, 100).await;
+    assert_eq!(reasons, ["idle"]);
+    assert_eq!(summaries, 1);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_recent_response_does_not_trigger_idle_compaction() {
+    let (reasons, summaries) = run_idle_turn(59, 100).await;
+    assert!(reasons.is_empty());
+    assert_eq!(summaries, 0);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn an_idle_cache_with_a_small_context_is_not_compacted() {
+    // Estimate is about 45 tokens, below 100 (half the soft trigger).
+    let (reasons, summaries) = run_idle_turn(61, 10).await;
+    assert!(reasons.is_empty());
+    assert_eq!(summaries, 0);
+}
+
 // -- overflow recovery -----------------------------------------------------
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

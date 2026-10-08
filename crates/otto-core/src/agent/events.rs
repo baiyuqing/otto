@@ -41,6 +41,7 @@ pub enum CompactionReason {
     #[default]
     Manual,
     Threshold,
+    Idle,
     Overflow,
 }
 
@@ -49,6 +50,7 @@ impl CompactionReason {
         match self {
             Self::Manual => "manual",
             Self::Threshold => "threshold",
+            Self::Idle => "idle",
             Self::Overflow => "overflow",
         }
     }
@@ -510,6 +512,7 @@ mod tests {
     fn compaction_names_match_the_wire_constants() {
         assert_eq!(CompactionReason::Manual.name(), "manual");
         assert_eq!(CompactionReason::Threshold.name(), "threshold");
+        assert_eq!(CompactionReason::Idle.name(), "idle");
         assert_eq!(CompactionReason::Overflow.name(), "overflow");
         assert_eq!(CompactionMode::Structured.name(), "structured");
         assert_eq!(CompactionMode::TurnPrefix.name(), "turn-prefix");

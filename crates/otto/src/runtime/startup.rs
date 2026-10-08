@@ -944,6 +944,10 @@ pub(crate) fn compose(
     let environment = &configured.environment;
     let home = &loaded.home;
     let disabled = options.disabled;
+    if options.logger.enable_diagnostics(Path::new(home)).is_err() {
+        let _ = writeln!(stderr, "warning: diagnostic file logging unavailable");
+    }
+
     let mut shell = lookup.get("SHELL").cloned().unwrap_or_default();
     if shell.is_empty() {
         shell = "/bin/sh".to_string();

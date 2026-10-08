@@ -452,47 +452,88 @@ impl Provider for ProviderClient {
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
     ) -> ProviderSettlement {
-        match self {
-            Self::Compat {
-                client,
-                timeout,
-                cancellation_grace,
-            } => {
-                complete_with_timeout(
-                    client.as_ref(),
-                    request,
-                    emit,
-                    control,
-                    *timeout,
-                    *cancellation_grace,
-                )
-                .await
-            }
-            Self::ChatGpt {
-                client,
-                timeout,
-                cancellation_grace,
-            } => {
-                complete_with_timeout(
-                    client.as_ref(),
-                    request,
-                    emit,
-                    control,
-                    *timeout,
-                    *cancellation_grace,
-                )
-                .await
-            }
-            Self::Unavailable => ProviderSettlement::failed(
-                ProviderError::Other(
-                    "provider is unavailable: redaction is incomplete".to_string(),
+        self.complete_observed(request, emit, control, &otto_core::diagnostics::Noop)
+            .await
+    }
+
+    fn complete_observed<'a>(
+        &'a self,
+        request: &'a Request,
+        emit: StreamSink<'a>,
+        control: &'a dyn OperationControl,
+        observer: &'a dyn otto_core::diagnostics::Observer,
+    ) -> otto_core::provider::DiagnosticFuture<'a> {
+        Box::pin(async move {
+            match self {
+                Self::Compat {
+                    client,
+                    timeout,
+                    cancellation_grace,
+                } => {
+                    complete_with_timeout(
+                        &ObservedProvider {
+                            inner: client.as_ref(),
+                            observer,
+                        },
+                        request,
+                        emit,
+                        control,
+                        *timeout,
+                        *cancellation_grace,
+                    )
+                    .await
+                }
+                Self::ChatGpt {
+                    client,
+                    timeout,
+                    cancellation_grace,
+                } => {
+                    complete_with_timeout(
+                        &ObservedProvider {
+                            inner: client.as_ref(),
+                            observer,
+                        },
+                        request,
+                        emit,
+                        control,
+                        *timeout,
+                        *cancellation_grace,
+                    )
+                    .await
+                }
+                Self::Unavailable => ProviderSettlement::failed(
+                    ProviderError::Other(
+                        "provider is unavailable: redaction is incomplete".to_string(),
+                    ),
+                    0,
+                    otto_core::model::EffectCertainty::NotStarted,
                 ),
-                0,
-                otto_core::model::EffectCertainty::NotStarted,
-            ),
-            #[cfg(test)]
-            Self::Scripted(provider) => provider.complete(request, emit, control).await,
-        }
+                #[cfg(test)]
+                Self::Scripted(provider) => {
+                    provider
+                        .complete_observed(request, emit, control, observer)
+                        .await
+                }
+            }
+        })
+    }
+}
+
+struct ObservedProvider<'a, P: ?Sized> {
+    inner: &'a P,
+    observer: &'a dyn otto_core::diagnostics::Observer,
+}
+#[async_trait::async_trait]
+impl<P: Provider + Sync + ?Sized> Provider for ObservedProvider<'_, P> {
+    async fn complete(
+        &self,
+        request: &Request,
+        emit: StreamSink<'_>,
+        control: &dyn OperationControl,
+    ) -> ProviderSettlement {
+        self.inner
+            .complete_observed(request, emit, control, self.observer)
+            .await
     }
 }
 
@@ -1133,6 +1174,7 @@ impl Runner {
     ) -> Result<String, AgentError> {
         let registry = Registry::new(tools).map_err(AgentError::Other)?;
         let options = Options {
+            diagnostics: self.agent.diagnostics().cloned(),
             model: runtime.model.clone(),
             provider_name: runtime.provider.clone(),
             thinking: runtime.thinking.clone(),
@@ -2156,6 +2198,11 @@ impl Builder {
                 Registry::new(Vec::new()).map_err(|error| format!("advice registry: {error}"))?,
                 SharedSession::memory(session.header()),
                 Options {
+                    diagnostics: self.logger.diagnostic_scope(
+                        &session.header().id,
+                        "",
+                        self.boundary_redactor(Some(runtime)),
+                    ),
                     model: runtime.model.clone(),
                     provider_name: runtime.provider.clone(),
                     thinking: runtime.thinking.clone(),
@@ -2456,6 +2503,11 @@ impl Builder {
                 Registry::new(Vec::new())?,
                 SharedSession::memory(session.header()),
                 Options {
+                    diagnostics: self.logger.diagnostic_scope(
+                        &session.header().id,
+                        "",
+                        self.boundary_redactor(Some(&review_runtime)),
+                    ),
                     model: review_runtime.model.clone(),
                     provider_name: review_runtime.provider.clone(),
                     thinking: review_runtime.thinking.clone(),
@@ -2533,6 +2585,11 @@ impl Builder {
             ProviderClient::Scripted(_) => None,
         };
         let options = Options {
+            diagnostics: self.logger.diagnostic_scope(
+                &session.header().id,
+                "",
+                self.boundary_redactor(Some(runtime)),
+            ),
             hooks: (extensions.has_hooks() && redactor.allows_dynamic_content()).then(|| {
                 extensions.bind(
                     session.header().id,

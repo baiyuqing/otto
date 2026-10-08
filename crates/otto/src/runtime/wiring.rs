@@ -965,6 +965,11 @@ impl Builder {
             redaction_values: redaction_values.to_vec(),
             redaction_complete: redactor.allows_dynamic_content(),
             template: OptionsTemplate {
+                diagnostics: self.logger.diagnostic_scope(
+                    &session.header().id,
+                    "",
+                    self.boundary_redactor(Some(runtime)),
+                ),
                 plugins: extensions,
                 hook_guard,
                 model: runtime.model.clone(),

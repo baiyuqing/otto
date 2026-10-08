@@ -18,7 +18,7 @@
 
 ## 代码架构
 
-[![Otto 代码架构：接入端、前端适配、应用运行时、原生功能服务与可移植核心](docs/architecture/otto-architecture.png)](docs/architecture/otto-architecture.svg)
+[![Otto 代码架构：接入端、前端适配、应用运行时、原生功能服务与可移植核心](docs/architecture/otto-architecture.png?v=a37f68b)](docs/architecture/otto-architecture.svg)
 
 [代码组织（英文）](docs/code-organization.md) · [SVG 矢量图](docs/architecture/otto-architecture.svg) · [可编辑 HTML](docs/architecture/otto-architecture.html)
 

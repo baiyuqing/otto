@@ -35,9 +35,9 @@ use crate::sandbox::{
 };
 use otto_core::safetext::{dynamic_redaction_marker, secret_forms};
 
-use super::result::{
-    CappedByteCollector, RedactingCollector, decode_strict_json, redact_exact_text,
-};
+use super::bash_output::{Output, PREVIEW_BYTES};
+use super::result::{RedactingCollector, decode_strict_json, redact_exact_text};
+use super::root::Root;
 use super::workspace::Workspace;
 use super::{Tool, definition};
 
@@ -362,6 +362,7 @@ pub struct InvalidConfiguration;
 pub struct BashTool {
     grant_control: Option<(PathBuf, Arc<dyn crate::app::SandboxControl>)>,
     workspace_root: PathBuf,
+    output_root: Arc<Root>,
     executor: Arc<dyn CommandExecutor>,
     shell: String,
     environment: Vec<String>,
@@ -463,6 +464,19 @@ impl BashTool {
         Ok(Self {
             grant_control: None,
             workspace_root: workspace.root().to_path_buf(),
+            output_root: Arc::new(
+                Root::from_directory(
+                    workspace
+                        .root_fs()
+                        .open_file(
+                            Path::new("."),
+                            nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY,
+                            nix::sys::stat::Mode::empty(),
+                        )
+                        .map_err(|_| InvalidConfiguration)?,
+                )
+                .map_err(|_| InvalidConfiguration)?,
+            ),
             executor,
             shell: shell.to_owned(),
             environment,
@@ -902,13 +916,7 @@ impl BashTool {
         .not_started()
     }
 
-    fn result(
-        &self,
-        stdout: &CappedByteCollector,
-        stderr: &CappedByteCollector,
-        status: &ExitStatus,
-        summary: &str,
-    ) -> ToolResult {
+    fn result(&self, stdout: &str, stderr: &str, status: &ExitStatus, summary: &str) -> ToolResult {
         let mut summary = summary.to_owned();
         if status.signaled && !status.signal.is_empty() {
             summary.push_str("; signal: ");
@@ -924,11 +932,7 @@ impl BashTool {
                 denied.push_str(&format!("[{} more omitted]\n", status.denials_omitted));
             }
         }
-        let formatted = format!(
-            "{}\n{}\n{denied}{summary}",
-            format_stream("stdout", stdout),
-            format_stream("stderr", stderr)
-        );
+        let formatted = format!("{}\n{}\n{denied}{summary}", stdout, stderr);
         ToolResult {
             content: redact_exact_text(&formatted, &self.redact_values, &self.redaction_marker),
             ..ToolResult::default()
@@ -953,15 +957,20 @@ fn infrastructure_result(error: &Error) -> ToolResult {
     }
 }
 
-/// Appended to the description when the child's `HOME` is a private sandbox directory.
+/// The output contract shared by sandboxed and elevated calls.
+const OUTPUT_NOTE: &str = "Return exit status and stdout/stderr previews of at most 4 KiB each (or the smaller configured cap); longer redacted output is saved under .otto/tool-output. Analyze logs with scripts and print only verified summaries or relevant failures; use read with offset/limit for excerpts instead of printing complete logs.";
+
+/// Appended when the child's `HOME` is a private sandbox directory.
 const PRIVATE_HOME_NOTE: &str = "HOME and ~ are a private sandbox directory, not the user's home directory; use absolute paths for the user's files.";
 
 fn describe(base: &str, private_home: bool) -> String {
-    match (private_home, base.ends_with('.')) {
-        (false, _) => base.to_owned(),
-        (true, true) => format!("{base} {PRIVATE_HOME_NOTE}"),
-        (true, false) => format!("{base}. {PRIVATE_HOME_NOTE}"),
+    let base = base.trim_end_matches('.');
+    let mut description = format!("{base}. {OUTPUT_NOTE}");
+    if private_home {
+        description.push(' ');
+        description.push_str(PRIVATE_HOME_NOTE);
     }
+    description
 }
 
 /// The schema advertised for `bash`.
@@ -975,7 +984,7 @@ pub fn bash_definition(private_home: bool) -> ToolDefinition {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute"
+                    "description": "Shell command to execute; for verbose jobs prefer quiet flags or a script that captures logs, preserves the command exit status, and prints a concise checked summary"
                 }
             },
             "required": ["command"]
@@ -996,7 +1005,7 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute"
+                    "description": "Shell command to execute; for verbose jobs prefer quiet flags or a script that captures logs, preserves the command exit status, and prints a concise checked summary"
                 },
                 "sandbox_permissions": {
                     "type": "string",
@@ -1359,21 +1368,27 @@ this exact elevated Bash command after approval."
         if cancel.is_cancelled() {
             return self
                 .result(
-                    &CappedByteCollector::new(self.max_output_bytes),
-                    &CappedByteCollector::new(self.max_output_bytes),
+                    "stdout:\n",
+                    "stderr:\n",
                     &ExitStatus::default(),
                     "status: cancelled",
                 )
                 .cancelled_not_started();
         }
 
-        let mut stdout = RedactingCollector::new(
-            self.max_output_bytes,
+        let mut stdout = RedactingCollector::with_collector(
+            Output::new(
+                Arc::clone(&self.output_root),
+                self.max_output_bytes.min(PREVIEW_BYTES),
+            ),
             &self.redact_values,
             &self.redaction_marker,
         );
-        let mut stderr = RedactingCollector::new(
-            self.max_output_bytes,
+        let mut stderr = RedactingCollector::with_collector(
+            Output::new(
+                Arc::clone(&self.output_root),
+                self.max_output_bytes.min(PREVIEW_BYTES),
+            ),
             &self.redact_values,
             &self.redaction_marker,
         );
@@ -1394,6 +1409,8 @@ this exact elevated Bash command after approval."
         }
         stdout.flush();
         stderr.flush();
+        stdout.collector_mut().finish();
+        stderr.collector_mut().finish();
 
         let summary = if cancel.is_cancelled() {
             "status: cancelled".to_owned()
@@ -1404,7 +1421,12 @@ this exact elevated Bash command after approval."
         } else {
             format!("exit_code: {}", status.code)
         };
-        let result = self.result(stdout.collector(), stderr.collector(), &status, &summary);
+        let result = self.result(
+            &stdout.collector().render("stdout"),
+            &stderr.collector().render("stderr"),
+            &status,
+            &summary,
+        );
         if cancel.is_cancelled() {
             result.cancelled_unknown()
         } else if timed_out {
@@ -1415,24 +1437,6 @@ this exact elevated Bash command after approval."
             result
         }
     }
-}
-
-/// Renders one stream the way `formatBashStream` does: the name, the captured
-/// bytes, and a truthful omission count when the cap discarded anything.
-fn format_stream(name: &str, collector: &CappedByteCollector) -> String {
-    let data = collector.bytes();
-    let mut rendered = format!("{name}:\n");
-    rendered.push_str(&String::from_utf8_lossy(data));
-    if collector.discarded() > 0 {
-        if data.last().is_some_and(|byte| *byte != b'\n') {
-            rendered.push('\n');
-        }
-        rendered.push_str(&format!(
-            "[truncated: {} bytes omitted]",
-            collector.discarded()
-        ));
-    }
-    rendered
 }
 
 /// Revalidates the workspace root at construction time.
@@ -2243,9 +2247,104 @@ The command did not run. Only the user or their session approval mode can approv
         let tool = bash(&workspace, executor, &[], 12, &[]);
         let result = run(&tool, "ignored").await;
         assert!(!result.is_error);
+        assert!(
+            result
+                .content
+                .starts_with("stdout:\n123456\n[truncated: 4 bytes omitted]\nabcdef")
+        );
+        assert!(
+            result
+                .content
+                .contains("stderr:\nabcdef\n[truncated: 4 bytes omitted]\nklmnop")
+        );
+        assert!(result.content.ends_with("exit_code: 7"));
+        let paths: Vec<_> = result
+            .content
+            .lines()
+            .filter_map(|line| line.strip_prefix("full_output: "))
+            .collect();
+        assert_eq!(paths.len(), 2);
         assert_eq!(
-            result.content,
-            "stdout:\n1234567890ab\n[truncated: 4 bytes omitted]\nstderr:\nabcdefghijkl\n[truncated: 4 bytes omitted]\nexit_code: 7"
+            std::fs::read_to_string(workspace.root().join(paths[0])).unwrap(),
+            "1234567890abcdef"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.root().join(paths[1])).unwrap(),
+            "abcdefghijklmnop"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_preview_caps_large_output_and_read_can_retrieve_an_omitted_range() {
+        let (_dir, workspace) = temp_workspace();
+        let text = format!(
+            "{}failure detail in the middle\n{}final summary\n",
+            "ok\n".repeat(2000),
+            "ok\n".repeat(2000)
+        );
+        let executor = Arc::new(FakeExecutor::chunks(&[&text], &[]).with_status(ExitStatus {
+            code: 1,
+            ..Default::default()
+        }));
+        let tool = bash(&workspace, executor, &[], 51200, &[]);
+        let result = run(&tool, "test").await;
+        assert!(result.content.len() < 4600);
+        assert!(!result.content.contains("failure detail in the middle"));
+        assert!(result.content.contains("final summary"));
+        assert!(result.content.ends_with("exit_code: 1"));
+        let path = result
+            .content
+            .lines()
+            .find_map(|line| line.strip_prefix("full_output: "))
+            .unwrap();
+        let read = crate::tool::read::ReadTool::new(&workspace, 51200);
+        let args =
+            serde_json::value::to_raw_value(&json!({"path":path,"offset":2001,"limit":1})).unwrap();
+        let excerpt = read.execute(&args, &CancellationToken::new()).await;
+        assert!(!excerpt.is_error);
+        assert_eq!(excerpt.content, "failure detail in the middle\n");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_keeps_partial_overflow_log_and_execution_status() {
+        let (_dir, workspace) = temp_workspace();
+        let executor = Arc::new(FakeExecutor::behaving(Box::new(|_, streams, cancel| {
+            Box::pin(async move {
+                streams
+                    .stdout
+                    .write_all(b"begin lots of partial output end")
+                    .unwrap();
+                cancel.cancelled().await;
+                (
+                    ExitStatus {
+                        code: -1,
+                        signaled: true,
+                        signal: "killed".into(),
+                        ..Default::default()
+                    },
+                    Err(Error::Cancelled),
+                )
+            })
+        })));
+        let tool = bash(&workspace, executor, &[], 8, &[]);
+        let result = run(&tool, "test").await;
+        assert!(
+            result
+                .content
+                .contains("status: timed out after 3s; signal: killed")
+        );
+        assert_eq!(
+            outcome(&result).disposition,
+            otto_core::model::OperationDisposition::DeadlineExceeded
+        );
+        let path = result
+            .content
+            .lines()
+            .find_map(|line| line.strip_prefix("full_output: "))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.root().join(path)).unwrap(),
+            "begin lots of partial output end"
         );
     }
 
@@ -2474,9 +2573,9 @@ The command did not run. Only the user or their session approval mode can approv
         for secret in &values {
             assert!(!result.content.contains(secret.as_str()), "{result:?}");
         }
-        assert_eq!(stdout_body(&result.content), "prefix");
+        assert_eq!(stdout_body(&result.content), "pref");
         assert!(
-            result.content.contains("[truncated: 3 bytes omitted]"),
+            result.content.contains("[truncated: 2 bytes omitted]"),
             "{result:?}"
         );
     }
@@ -2500,7 +2599,7 @@ The command did not run. Only the user or their session approval mode can approv
             assert!(!result.content.contains(secret.as_str()), "{result:?}");
         }
         assert!(
-            result.content.contains("[truncated: 9 bytes omitted]"),
+            result.content.contains("[truncated: 8 bytes omitted]"),
             "{result:?}"
         );
     }

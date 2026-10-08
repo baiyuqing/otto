@@ -1205,14 +1205,20 @@ fn compaction_line(result: &CompactionResult) -> String {
     if result.noop {
         return "\n[context] no-op\n".to_string();
     }
-    let before = format_token_count(result.tokens_before);
-    if result.estimated_tokens_after > 0 {
-        return format!(
-            "\n[context] compacted {before} \u{2192} {} tokens\n",
-            format_token_count(result.estimated_tokens_after)
-        );
+    match (result.tokens_before, result.estimated_tokens_after) {
+        (Some(before), Some(after)) => format!(
+            "\n[context] compacted {} \u{2192} {} tokens\n",
+            format_token_count(before),
+            format_token_count(after)
+        ),
+        (Some(before), None) => {
+            format!(
+                "\n[context] compacted {} tokens\n",
+                format_token_count(before)
+            )
+        }
+        (None, _) => "\n[context] compacted\n".into(),
     }
-    format!("\n[context] compacted {before} tokens\n")
 }
 
 fn format_token_count(tokens: i64) -> String {
@@ -2361,15 +2367,15 @@ Justification: \"push branch\"\n"
         );
         assert_eq!(
             compaction_line(&CompactionResult {
-                tokens_before: 12_000,
-                estimated_tokens_after: 800,
+                tokens_before: Some(12_000),
+                estimated_tokens_after: Some(800),
                 ..CompactionResult::default()
             }),
             "\n[context] compacted 12k → 800 tokens\n"
         );
         assert_eq!(
             compaction_line(&CompactionResult {
-                tokens_before: 999,
+                tokens_before: Some(999),
                 ..CompactionResult::default()
             }),
             "\n[context] compacted 999 tokens\n"
@@ -2469,6 +2475,8 @@ Justification: \"push branch\"\n"
                         }],
                         ..Message::default()
                     },
+                    cached_input_tokens_present: false,
+                    remote_compaction: None,
                 },
                 0,
             )

@@ -2351,7 +2351,31 @@ protection against same-user or same-kernel attacks, pre-existing hard links,
 intentional damage inside the writable workspace. Docker and Apple Container are
 not detected or supported.
 
-Default limits remain a 120-second shell timeout and a 50 KiB tool-output cap.
+The default shell timeout is 120 seconds. Other tools retain the default
+50 KiB output cap. Bash previews each stdout/stderr stream at at most 4 KiB,
+or the smaller `agent.max_output_bytes` setting. Short output is unchanged;
+long output retains the head and tail, reports the normalized/redacted byte
+count and omitted bytes, and gives a workspace-relative `full_output` path.
+Exit code, signal, timeout/cancellation and sandbox denials remain visible.
+
+Overflow logs are streamed after UTF-8 normalization and secret redaction into
+exclusive `0600` files under `.otto/tool-output/`, with a local `.gitignore`.
+They persist across sessions until removed; remove that directory when its logs
+are no longer needed. There is no automatic retention or disk quota. If storage
+fails, execution continues and the result explicitly says that the full log is
+unavailable; partial files must not be treated as complete results. Commands
+that produce only short output create no log.
+
+For verbose jobs, the agent is instructed to prefer quiet flags or write a small
+script that captures and analyzes logs locally, then returns only a checked
+summary and relevant failure excerpts. The script must preserve the original
+command's exit status, account for pipeline failures, and verify expected tests
+or stages completed. No matches for `error` does not establish success; missing
+summaries, timeouts and parsing uncertainty must be reported. Saved logs are
+untrusted data. Analyze them through sandboxed `bash`, or use `read` with
+`offset` and `limit` for a relevant excerpt instead of returning the whole log.
+The usual `read` file limits still apply; use a streaming script for logs larger
+than 64 MiB or containing binary data.
 Override them with `--shell-timeout` and `--max-output-bytes` or `[agent]`.
 
 ## Headless mode

@@ -22,6 +22,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   Parent-facing child reports are bounded, and `agent_status` omits recent steps
   unless requested. Children analyze downloaded sources in private temporary
   directories removed when their tasks exit; full transcripts remain local.
+  ([#442](https://github.com/baiyuqing/otto/pull/442))
 
 - Bash overflow logs are now temporary: guidance asks the model to remove them
   after analysis, and runtime cleanup removes owned logs once the turn and its child

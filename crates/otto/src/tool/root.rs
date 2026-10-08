@@ -320,6 +320,25 @@ impl Root {
         }
     }
 
+    /// Creates and pins one child directory without following a symlink.
+    /// Only one normal component is accepted, so callers can build private
+    /// artifact directories without resolving aliases into protected paths.
+    pub(crate) fn create_child_directory(&self, name: &str, mode: Mode) -> io::Result<Self> {
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "invalid child directory",
+            ));
+        }
+        match nix::sys::stat::mkdirat(self.fd.as_fd(), name, mode) {
+            Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+            Err(error) => return Err(nix_error(error)),
+        }
+        Ok(Self {
+            fd: open_dir_at(self.fd.as_fd(), OsStr::new(name))?,
+        })
+    }
+
     /// Creates `name` and every missing parent directory.
     //
     // ponytail: each prefix is resolved from the root again, so this is

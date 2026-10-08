@@ -153,25 +153,24 @@ pub(crate) fn valid_utf8_prefix(data: &[u8]) -> &[u8] {
     }
 }
 
-/// A capped collector fronted by UTF-8 normalization and secret redaction.
+/// A sink fronted by UTF-8 normalization and secret redaction.
 ///
-/// The three stages (UTF-8 normalization, exact redaction, capped collection)
-/// are combined into one type because both call sites use the whole chain and a
-/// chain of owned writers cannot be handed to the sandbox driver as a single
-/// sink.
+/// The default sink caps text; bash supplies a bounded preview and log sink.
+/// Both receive the same normalized/redacted stream so persistence cannot
+/// bypass secret handling.
 ///
 /// [`RedactingCollector::flush`] must be called once the stream ends; until
 /// then a trailing partial rune and a trailing partial secret match are held
 /// back deliberately.
 #[derive(Debug)]
-pub(crate) struct RedactingCollector {
+pub(crate) struct RedactingCollector<C = CappedByteCollector> {
     values: Vec<String>,
     marker: String,
     /// Bytes not yet known to form a complete rune.
     rune_pending: Vec<u8>,
     /// Normalized bytes not yet known to be outside a secret.
     match_pending: Vec<u8>,
-    collector: CappedByteCollector,
+    collector: C,
 }
 
 impl RedactingCollector {
@@ -179,6 +178,27 @@ impl RedactingCollector {
     /// duplicate values are dropped; an empty `marker` deletes matches instead
     /// of replacing them.
     pub(crate) fn new(limit: usize, values: &[String], marker: &str) -> Self {
+        Self::with_collector(CappedByteCollector::new(limit), values, marker)
+    }
+}
+
+/// Destination for normalized, redacted bytes. Atomic writes never split a marker.
+pub(crate) trait RedactedSink {
+    fn write(&mut self, data: &[u8]);
+    fn write_atomic(&mut self, data: &[u8]);
+}
+
+impl RedactedSink for CappedByteCollector {
+    fn write(&mut self, data: &[u8]) {
+        Self::write(self, data);
+    }
+    fn write_atomic(&mut self, data: &[u8]) {
+        Self::write_atomic(self, data);
+    }
+}
+
+impl<C: RedactedSink> RedactingCollector<C> {
+    pub(crate) fn with_collector(collector: C, values: &[String], marker: &str) -> Self {
         let mut unique: Vec<String> = Vec::with_capacity(values.len());
         for value in values {
             if value.is_empty() || unique.iter().any(|seen| seen == value) {
@@ -191,7 +211,7 @@ impl RedactingCollector {
             marker: marker.to_owned(),
             rune_pending: Vec::new(),
             match_pending: Vec::new(),
-            collector: CappedByteCollector::new(limit),
+            collector,
         }
     }
 
@@ -208,8 +228,12 @@ impl RedactingCollector {
         self.redact(true);
     }
 
-    pub(crate) fn collector(&self) -> &CappedByteCollector {
+    pub(crate) fn collector(&self) -> &C {
         &self.collector
+    }
+
+    pub(crate) fn collector_mut(&mut self) -> &mut C {
+        &mut self.collector
     }
 
     fn normalize(&mut self, final_chunk: bool) {
@@ -285,7 +309,7 @@ impl RedactingCollector {
 /// Lets the collector stand in as a sandbox stream sink. Writes never fail:
 /// the cap discards rather than erroring, so the child never observes a
 /// short write and a capture failure cannot be a distinct outcome.
-impl std::io::Write for RedactingCollector {
+impl<C: RedactedSink> std::io::Write for RedactingCollector<C> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         RedactingCollector::write(self, data);
         Ok(data.len())

@@ -25,6 +25,11 @@ impl Presenter for Reviews {
             collection: true,
             title: "Memory review".into(),
             description: "No change until you submit a decision".into(),
+            document: if self.loaded && self.rows.is_empty() {
+                "No pending memory candidates.".to_string()
+            } else {
+                String::new()
+            },
             loading: !self.loaded,
             rows: self
                 .rows

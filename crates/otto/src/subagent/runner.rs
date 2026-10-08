@@ -81,9 +81,10 @@ pub(crate) const PARENT_REPORT_BYTES: usize = 4096;
 /// because a child's plan would be shown nowhere; and delivery, which only a
 /// parent may start and which would otherwise let a child reach another
 /// workspace.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 15] = [
+pub const EXCLUDED_CHILD_TOOLS: [&str; 16] = [
     "agent",
     "agent_status",
+    "agent_yield",
     "agent_send",
     "agent_cancel",
     "remember",
@@ -101,7 +102,7 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 15] = [
 
 /// Appended to a child's system prompt inside `<subagent_role>` when it has
 /// no definition, or its definition's body is empty.
-const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result. Do not send progress updates, plans, or interim findings with agent_report; put them in the final report instead. Call agent_report only to answer a question that arrives in a [parent-message], or to report a blocker that needs a parent decision while you can keep working on other parts of the task. If you cannot continue, end with a final report that states the blocker.";
+const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete the entire delegated change within its assigned file scope. Reuse the agreed shared interfaces; report a needed contract change before expanding scope. Batch known same-file edits and use checked scripts for repetitive call-site changes. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result. Do not send progress updates, plans, or interim findings with agent_report; put them in the final report instead. Call agent_report only to answer a question that arrives in a [parent-message], or to report a blocker that needs a parent decision while you can keep working on other parts of the task. If you cannot continue, end with a final report that states the blocker.";
 
 const DEFAULT_MAX_PARALLEL: usize = 4;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 16384;
@@ -306,6 +307,21 @@ impl Session for SharedTranscript {
 
     fn latest_compaction(&self) -> Option<otto_core::session::CompactionMetadata> {
         self.0.latest_compaction()
+    }
+
+    fn remote_compaction(&self) -> Option<otto_core::session::RemoteCompaction> {
+        self.0.remote_compaction()
+    }
+
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        self.0.post_remote_compaction_messages()
+    }
+
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: otto_core::session::RemoteCompaction,
+    ) -> Result<(), otto_core::session::SessionError> {
+        self.0.append_remote_compaction(checkpoint).await
     }
 
     async fn append_compaction(
@@ -909,6 +925,32 @@ impl Runner {
     /// The report-text cap in force.
     pub fn max_output_bytes(&self) -> usize {
         self.config.max_output_bytes
+    }
+
+    pub(crate) fn activity(&self, task: &Task) -> &'static str {
+        if task.status == TaskStatus::Running
+            && let Some((service, scope)) = &self.config.approval
+        {
+            let Ok(activity) = service.activity_snapshot(&scope.workspace, Some(&scope.session_id))
+            else {
+                return "unknown";
+            };
+            if activity
+                .requests
+                .iter()
+                .any(|request| request.scope.task_id == task.id)
+            {
+                return "waiting_for_approval";
+            }
+            if activity
+                .reviewing
+                .iter()
+                .any(|request| request.scope.task_id == task.id)
+            {
+                return "approval_review";
+            }
+        }
+        self.config.tasks.activity(&task.id).unwrap_or("unknown")
     }
 
     /// The runner's clock, which the status tool uses for elapsed columns.
@@ -1783,12 +1825,13 @@ impl ChildProgress {
                 interrupted_output: true,
                 ..
             } => self.text.clear(),
-            Event::ProviderUsage { usage, present } => {
+            Event::ProviderUsage { usage, present, .. } => {
                 let text = cap_last_bytes(&self.text, 500).to_string();
                 self.text.clear();
                 self.tasks
                     .record_provider_step(&self.task_id, usage, &text, present);
             }
+            Event::ToolCallFinished { .. } => self.tasks.record_tool_finished(&self.task_id),
             Event::ToolCallStarted {
                 tool_name,
                 arguments,
@@ -2097,9 +2140,9 @@ mod tests {
         wait_final(&tasks, "t1").await;
 
         let summary = store.summary(Some("parent")).expect("summary");
-        assert_eq!(summary.requests, 1);
+        assert_eq!(summary.usage_events, 1);
         assert_eq!(summary.input_tokens, 20);
-        assert_eq!(summary.cached_input_tokens, 10);
+        assert_eq!(summary.cached_input_tokens, Some(10));
     }
 
     #[tokio::test]
@@ -2107,14 +2150,16 @@ mod tests {
         let provider = FakeProvider::new();
         provider.add_route(
             match_any,
-            vec![RouteStep::Reply(Response {
+            vec![RouteStep::Reply(Box::new(Response {
                 message: Message {
                     role: Role::Assistant,
                     finish_reason: Some(FinishReason::Stop),
                     blocks: vec![Block::text("done")],
                     ..Message::default()
                 },
-            })],
+                cached_input_tokens_present: false,
+                remote_compaction: None,
+            }))],
         );
 
         let tasks = Arc::new(Tasks::new());

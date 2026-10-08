@@ -16,6 +16,10 @@ use super::context_estimate::{estimate_message, estimate_string, estimate_tool_d
 /// The prefix the native crate gives every MCP tool name.
 const MCP_TOOL_PREFIX: &str = "mcp__";
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextReport {
     pub model: String,
@@ -27,6 +31,9 @@ pub struct ContextReport {
     /// on the last provider-reported usage, so it can differ from the sum of
     /// the sections.
     pub estimated_total: i64,
+    /// False when an opaque provider prefix has no post-checkpoint usage anchor.
+    #[serde(default = "default_true")]
+    pub estimate_complete: bool,
     /// The input tokens the provider reported for the last response.
     pub reported_input_tokens: Option<i64>,
     pub sections: Vec<ContextSection>,

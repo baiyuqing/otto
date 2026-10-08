@@ -38,7 +38,9 @@ pub struct Context {
     pub model: String,
 }
 
-/// The collection-to-storage contract.
+/// One token-usage report. This is deliberately not an API-operation record:
+/// a provider operation may report no usage, and compaction must not duplicate
+/// the provider usage event that supplied its tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
     pub occurred_at: String,
@@ -46,35 +48,81 @@ pub struct UsageRecord {
     pub kind: &'static str,
     pub usage: Usage,
     pub usage_present: bool,
+    pub cached_input_tokens_present: bool,
+}
+
+/// One completed logical provider API operation. It contains classifications
+/// and counts only, never request or response content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiOperationRecord {
+    pub occurred_at: String,
+    pub context: Context,
+    pub operation_id: String,
+    pub kind: &'static str,
+    pub mode: Option<&'static str>,
+    pub attempts: u32,
+    pub status: &'static str,
+    pub disposition: &'static str,
+    pub effect_certainty: &'static str,
+    pub stop_reason: Option<&'static str>,
 }
 
 /// Collection writes through this boundary and has no storage dependency.
 pub trait Sink: Send + Sync {
     fn append(&self, record: &UsageRecord) -> Result<()>;
+
+    /// Kept defaulted so third-party sinks compiled against the token-only
+    /// contract remain source-compatible; durable stores override it.
+    fn append_api_operation(&self, _record: &ApiOperationRecord) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub use crate::storage::backends::turso::usage::Store;
 
-/// Persisted token totals. Cache hit rate is weighted by input tokens rather
-/// than averaged across requests.
+/// Persisted token and provider-operation totals. Usage-event counts are not
+/// provider attempts. Cache totals/rate are absent until a provider explicitly
+/// reports whether the cached-token breakdown was present.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Summary {
-    pub requests: i64,
-    pub reported_requests: i64,
+    pub usage_events: i64,
+    pub reported_usage_events: i64,
+    pub logical_operations: i64,
+    pub actual_attempts: i64,
+    pub succeeded_operations: i64,
+    pub failed_operations: i64,
+    pub canceled_operations: i64,
+    pub deadline_exceeded_operations: i64,
+    pub interrupted_operations: i64,
+    pub not_started_operations: i64,
+    pub known_no_effect_operations: i64,
+    pub completed_effect_operations: i64,
+    pub unknown_effect_operations: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub cached_input_tokens: i64,
-    pub cache_hit_rate: f64,
+    pub cached_input_tokens: Option<i64>,
+    pub cache_hit_rate: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct DailyPoint {
     pub date: String,
-    pub requests: i64,
-    pub reported_requests: i64,
+    pub usage_events: i64,
+    pub reported_usage_events: i64,
+    pub logical_operations: i64,
+    pub actual_attempts: i64,
+    pub succeeded_operations: i64,
+    pub failed_operations: i64,
+    pub canceled_operations: i64,
+    pub deadline_exceeded_operations: i64,
+    pub interrupted_operations: i64,
+    pub not_started_operations: i64,
+    pub known_no_effect_operations: i64,
+    pub completed_effect_operations: i64,
+    pub unknown_effect_operations: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub cached_input_tokens: i64,
+    pub cached_input_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -110,20 +158,58 @@ impl Analysis {
 
     pub(crate) fn total(&mut self) {
         let mut summary = Summary::default();
+        let mut cache_known = true;
+        let mut cached_total = 0_i64;
         for point in &self.daily {
-            summary.requests = summary.requests.saturating_add(point.requests);
-            summary.reported_requests = summary
-                .reported_requests
-                .saturating_add(point.reported_requests);
+            summary.usage_events = summary.usage_events.saturating_add(point.usage_events);
+            summary.reported_usage_events = summary
+                .reported_usage_events
+                .saturating_add(point.reported_usage_events);
+            summary.logical_operations = summary
+                .logical_operations
+                .saturating_add(point.logical_operations);
+            summary.actual_attempts = summary
+                .actual_attempts
+                .saturating_add(point.actual_attempts);
+            summary.succeeded_operations = summary
+                .succeeded_operations
+                .saturating_add(point.succeeded_operations);
+            summary.failed_operations = summary
+                .failed_operations
+                .saturating_add(point.failed_operations);
+            summary.canceled_operations = summary
+                .canceled_operations
+                .saturating_add(point.canceled_operations);
+            summary.deadline_exceeded_operations = summary
+                .deadline_exceeded_operations
+                .saturating_add(point.deadline_exceeded_operations);
+            summary.interrupted_operations = summary
+                .interrupted_operations
+                .saturating_add(point.interrupted_operations);
+            summary.not_started_operations = summary
+                .not_started_operations
+                .saturating_add(point.not_started_operations);
+            summary.known_no_effect_operations = summary
+                .known_no_effect_operations
+                .saturating_add(point.known_no_effect_operations);
+            summary.completed_effect_operations = summary
+                .completed_effect_operations
+                .saturating_add(point.completed_effect_operations);
+            summary.unknown_effect_operations = summary
+                .unknown_effect_operations
+                .saturating_add(point.unknown_effect_operations);
             summary.input_tokens = summary.input_tokens.saturating_add(point.input_tokens);
             summary.output_tokens = summary.output_tokens.saturating_add(point.output_tokens);
-            summary.cached_input_tokens = summary
-                .cached_input_tokens
-                .saturating_add(point.cached_input_tokens);
+            match point.cached_input_tokens {
+                Some(value) => cached_total = cached_total.saturating_add(value),
+                None if point.reported_usage_events > 0 => cache_known = false,
+                None => {}
+            }
         }
-        if summary.input_tokens > 0 {
-            summary.cache_hit_rate =
-                summary.cached_input_tokens as f64 / summary.input_tokens as f64;
+        if cache_known && summary.reported_usage_events > 0 {
+            summary.cached_input_tokens = Some(cached_total);
+            summary.cache_hit_rate = (summary.input_tokens > 0)
+                .then_some(cached_total as f64 / summary.input_tokens as f64);
         }
         self.summary = summary;
     }
@@ -163,20 +249,85 @@ impl Collector {
     }
 
     pub fn record(&self, event: &Event) -> Result<()> {
-        let (kind, usage, present) = match event {
-            Event::ProviderUsage { usage, present } => ("provider", *usage, *present),
+        let occurred_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+        match event {
+            Event::ProviderUsage {
+                usage,
+                present,
+                cached_input_tokens_present,
+            } => self.sink.append(&UsageRecord {
+                occurred_at,
+                context: self.context.clone(),
+                kind: "provider",
+                usage: *usage,
+                usage_present: *present,
+                cached_input_tokens_present: *present && *cached_input_tokens_present,
+            }),
             Event::CompactionCompleted { compaction } if !compaction.noop => {
-                ("compaction", compaction.usage, compaction.usage_present)
+                self.sink.append(&UsageRecord {
+                    occurred_at,
+                    context: self.context.clone(),
+                    kind: "compaction",
+                    usage: compaction.usage,
+                    usage_present: compaction.usage_present,
+                    cached_input_tokens_present: compaction.usage_present
+                        && compaction.cached_input_tokens_present,
+                })
             }
-            _ => return Ok(()),
-        };
-        self.sink.append(&UsageRecord {
-            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
-            context: self.context.clone(),
-            kind,
-            usage,
-            usage_present: present,
-        })
+            Event::ProviderApiCall {
+                operation_id,
+                kind,
+                attempts,
+                status,
+                outcome,
+                ..
+            } => self.sink.append_api_operation(&ApiOperationRecord {
+                occurred_at,
+                context: self.context.clone(),
+                operation_id: operation_id.to_string(),
+                kind: kind.name(),
+                mode: None,
+                attempts: *attempts,
+                status: status.name(),
+                disposition: disposition_name(outcome.disposition),
+                effect_certainty: effect_certainty_name(outcome.effect_certainty),
+                stop_reason: outcome.stop_reason.map(stop_reason_name),
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+pub(crate) fn disposition_name(value: otto_core::model::OperationDisposition) -> &'static str {
+    use otto_core::model::OperationDisposition::*;
+    match value {
+        Succeeded => "succeeded",
+        Error => "error",
+        Cancelled => "cancelled",
+        DeadlineExceeded => "deadline_exceeded",
+        Interrupted => "interrupted",
+    }
+}
+
+pub(crate) fn effect_certainty_name(value: otto_core::model::EffectCertainty) -> &'static str {
+    use otto_core::model::EffectCertainty::*;
+    match value {
+        NotStarted => "not_started",
+        KnownNoEffect => "known_no_effect",
+        Completed => "completed",
+        Unknown => "unknown",
+    }
+}
+
+pub(crate) fn stop_reason_name(value: otto_core::model::OperationStopReason) -> &'static str {
+    use otto_core::model::OperationStopReason::*;
+    match value {
+        UserCancellation => "user_cancellation",
+        Deadline => "deadline",
+        Shutdown => "shutdown",
+        Migration => "migration",
+        TransportLost => "transport_lost",
+        ProcessLost => "process_lost",
     }
 }
 
@@ -186,6 +337,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::{Days, SecondsFormat, Utc};
+
     use otto_core::agent::{CompactionResult, Event};
     use otto_core::model::Usage;
 
@@ -216,6 +368,7 @@ mod tests {
             .record(&Event::ProviderUsage {
                 usage: usage(12, 3, 4),
                 present: true,
+                cached_input_tokens_present: true,
             })
             .expect("record");
         let records = sink.0.lock().expect("records");
@@ -251,6 +404,7 @@ mod tests {
             .record(&Event::ProviderUsage {
                 usage: usage(100, 20, 40),
                 present: true,
+                cached_input_tokens_present: true,
             })
             .expect("provider usage");
         collector
@@ -258,6 +412,7 @@ mod tests {
                 compaction: CompactionResult {
                     usage: usage(50, 10, 35),
                     usage_present: true,
+                    cached_input_tokens_present: true,
                     ..CompactionResult::default()
                 },
             })
@@ -267,16 +422,19 @@ mod tests {
             .record(&Event::ProviderUsage {
                 usage: usage(50, 5, 25),
                 present: true,
+                cached_input_tokens_present: true,
             })
             .expect("sub-agent usage");
 
         let summary = store.summary(Some("s1")).expect("summary");
-        assert_eq!(summary.requests, 3);
-        assert_eq!(summary.reported_requests, 3);
+        assert_eq!(summary.usage_events, 3);
+        assert_eq!(summary.reported_usage_events, 3);
+        assert_eq!(summary.logical_operations, 0);
+        assert_eq!(summary.actual_attempts, 0);
         assert_eq!(summary.input_tokens, 200);
         assert_eq!(summary.output_tokens, 35);
-        assert_eq!(summary.cached_input_tokens, 100);
-        assert_eq!(summary.cache_hit_rate, 0.5);
+        assert_eq!(summary.cached_input_tokens, Some(100));
+        assert_eq!(summary.cache_hit_rate, Some(0.5));
     }
 
     #[test]
@@ -294,6 +452,7 @@ mod tests {
             .record(&Event::ProviderUsage {
                 usage: Usage::default(),
                 present: false,
+                cached_input_tokens_present: false,
             })
             .expect("missing usage");
         collector
@@ -306,10 +465,10 @@ mod tests {
             .expect("noop");
 
         let summary = store.summary(None).expect("summary");
-        assert_eq!(summary.requests, 1);
-        assert_eq!(summary.reported_requests, 0);
+        assert_eq!(summary.usage_events, 1);
+        assert_eq!(summary.reported_usage_events, 0);
         assert_eq!(summary.input_tokens, 0);
-        assert_eq!(summary.cache_hit_rate, 0.0);
+        assert_eq!(summary.cache_hit_rate, None);
     }
 
     #[test]
@@ -328,6 +487,7 @@ mod tests {
             .record(&Event::ProviderUsage {
                 usage: usage(8, 3, 2),
                 present: true,
+                cached_input_tokens_present: true,
             })
             .expect("record");
         }
@@ -338,7 +498,7 @@ mod tests {
             .expect("summary");
         assert_eq!(summary.input_tokens, 8);
         assert_eq!(summary.output_tokens, 3);
-        assert_eq!(summary.cached_input_tokens, 2);
+        assert_eq!(summary.cached_input_tokens, Some(2));
 
         let directory_mode = std::fs::metadata(path.parent().expect("parent"))
             .expect("directory metadata")
@@ -374,6 +534,7 @@ mod tests {
                     kind: "provider",
                     usage: tokens,
                     usage_present: true,
+                    cached_input_tokens_present: true,
                 })
                 .expect("append");
         }
@@ -383,10 +544,10 @@ mod tests {
         assert_eq!(analysis.daily[0].input_tokens, 0);
         assert_eq!(analysis.daily[1].date, yesterday.to_string());
         assert_eq!(analysis.daily[2].date, today.to_string());
-        assert_eq!(analysis.summary.requests, 2);
+        assert_eq!(analysis.summary.usage_events, 2);
         assert_eq!(analysis.summary.input_tokens, 30);
         assert_eq!(analysis.summary.output_tokens, 5);
-        assert_eq!(analysis.summary.cached_input_tokens, 10);
-        assert_eq!(analysis.summary.cache_hit_rate, 1.0 / 3.0);
+        assert_eq!(analysis.summary.cached_input_tokens, Some(10));
+        assert_eq!(analysis.summary.cache_hit_rate, Some(1.0 / 3.0));
     }
 }

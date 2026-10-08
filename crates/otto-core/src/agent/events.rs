@@ -16,6 +16,24 @@ use crate::tool::ToolResult;
 
 use super::inbox::NotificationKind;
 
+/// The logical work one provider operation performed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderOperationKind {
+    Ordinary,
+    LocalCompaction,
+    RemoteCompaction,
+}
+
+impl ProviderOperationKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ordinary => "ordinary",
+            Self::LocalCompaction => "local_compaction",
+            Self::RemoteCompaction => "remote_compaction",
+        }
+    }
+}
+
 /// The outcome the agent records for one provider HTTP call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiStatus {
@@ -63,6 +81,7 @@ pub enum CompactionMode {
     Structured,
     TurnPrefix,
     SplitTurn,
+    Remote,
 }
 
 impl CompactionMode {
@@ -71,6 +90,7 @@ impl CompactionMode {
             Self::Structured => "structured",
             Self::TurnPrefix => "turn-prefix",
             Self::SplitTurn => "split-turn",
+            Self::Remote => "remote",
         }
     }
 }
@@ -81,12 +101,16 @@ impl CompactionMode {
 pub struct CompactionResult {
     pub checkpoint_id: String,
     pub reason: CompactionReason,
-    pub tokens_before: i64,
-    pub estimated_tokens_after: i64,
+    /// Estimated locally, or provider-reported for a completed remote compaction.
+    pub tokens_before: Option<i64>,
+    /// `None` when the provider owns an opaque compacted prefix Otto cannot estimate.
+    pub estimated_tokens_after: Option<i64>,
     pub automatic: bool,
     pub usage: Usage,
     /// False when no summary call reported usage; `usage` is then zero.
     pub usage_present: bool,
+    /// True only when the provider reported the cached-input-token breakdown.
+    pub cached_input_tokens_present: bool,
     /// True when there was no safe historic prefix, so nothing was written.
     pub noop: bool,
 }
@@ -100,8 +124,10 @@ pub struct CompactionResult {
 pub struct CompactionPlan {
     pub reason: CompactionReason,
     pub automatic: bool,
-    pub tokens_before: i64,
-    pub estimated_tokens_after: i64,
+    /// Estimated locally; `None` when an opaque prefix prevents estimation.
+    pub tokens_before: Option<i64>,
+    /// `None` when the provider owns an opaque compacted prefix Otto cannot estimate.
+    pub estimated_tokens_after: Option<i64>,
     pub summarized_messages: usize,
     pub retained_messages: usize,
     pub mode: CompactionMode,
@@ -162,6 +188,8 @@ pub enum Event {
         usage: Usage,
         /// False when the provider reported no usage; `usage` is then zero.
         present: bool,
+        /// True only when the provider reported the cached-input-token breakdown.
+        cached_input_tokens_present: bool,
     },
     /// The provider will retry a failed attempt after `delay`; see
     /// [`crate::provider::StreamEvent::Retry`].
@@ -175,6 +203,7 @@ pub enum Event {
     },
     ProviderApiCall {
         operation_id: OperationId,
+        kind: ProviderOperationKind,
         provider: String,
         model: String,
         duration: std::time::Duration,
@@ -406,10 +435,12 @@ mod tests {
             Event::ProviderUsage {
                 usage: Usage::default(),
                 present: false,
+                cached_input_tokens_present: false,
             }
             .name(),
             Event::ProviderApiCall {
                 operation_id: OperationId::new("provider_op").expect("operation id"),
+                kind: ProviderOperationKind::Ordinary,
                 provider: String::new(),
                 model: String::new(),
                 duration: std::time::Duration::ZERO,
@@ -430,8 +461,8 @@ mod tests {
                 plan: CompactionPlan {
                     reason: CompactionReason::Manual,
                     automatic: false,
-                    tokens_before: 0,
-                    estimated_tokens_after: 0,
+                    tokens_before: None,
+                    estimated_tokens_after: None,
                     summarized_messages: 0,
                     retained_messages: 0,
                     mode: CompactionMode::Structured,
@@ -517,6 +548,7 @@ mod tests {
         assert_eq!(CompactionMode::Structured.name(), "structured");
         assert_eq!(CompactionMode::TurnPrefix.name(), "turn-prefix");
         assert_eq!(CompactionMode::SplitTurn.name(), "split-turn");
+        assert_eq!(CompactionMode::Remote.name(), "remote");
         assert_eq!(ApiStatus::Canceled.name(), "canceled");
     }
 }

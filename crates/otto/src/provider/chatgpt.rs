@@ -41,9 +41,17 @@ use otto_core::openairesponses::protocol::{build_request_with, serialized_reques
 use otto_core::openairesponses::stream::{StreamAssembler, StreamError};
 use otto_core::operation::OperationControl;
 use otto_core::provider::{
-    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, Response, StreamEvent,
-    StreamSink,
+    Provider, ProviderCapabilities, ProviderError, ProviderSettlement, RemoteCompactionSupport,
+    Request, RequestSizer, Response, StreamEvent, StreamSink,
 };
+
+impl Client {
+    fn provider_capabilities() -> ProviderCapabilities {
+        ProviderCapabilities {
+            remote_compaction: RemoteCompactionSupport::ResponsesV2,
+        }
+    }
+}
 
 /// The ChatGPT backend that serves subscription traffic.
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -177,6 +185,10 @@ impl Client {
 
 #[async_trait::async_trait]
 impl Provider for Client {
+    fn capabilities(&self) -> ProviderCapabilities {
+        Self::provider_capabilities()
+    }
+
     async fn complete(
         &self,
         request: &Request,
@@ -386,7 +398,8 @@ impl Client {
         }
 
         let mut events = EventRedactor::new(&redactor);
-        let mut assembler = StreamAssembler::new();
+        let mut assembler =
+            StreamAssembler::with_remote_compaction(request.request_remote_compaction, "chatgpt");
         let mut body = Box::pin(response.bytes_stream());
         loop {
             let chunk = match await_control(control, body.try_next()).await {
@@ -452,6 +465,7 @@ impl Client {
                 return ProviderSettlement::succeeded(
                     Response {
                         message: redact_message(&redactor, response.message),
+                        ..response
                     },
                     1,
                 );
@@ -484,6 +498,7 @@ impl Client {
         ProviderSettlement::succeeded(
             Response {
                 message: redact_message(&redactor, response.message),
+                ..response
             },
             1,
         )
@@ -893,7 +908,35 @@ mod tests {
                 cached_input_tokens: 2,
             })
         );
+        assert!(response.cached_input_tokens_present);
         assert!(!events.is_empty());
+    }
+
+    /// A requested remote compaction item reaches the response, tagged with
+    /// this provider.
+    #[tokio::test]
+    async fn returns_the_requested_remote_compaction() {
+        const STREAM: &str = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        );
+        let server = testserver::spawn(|_| sse_response(STREAM)).await;
+        let client = Client::with_base_url(&server.url, static_tokens("test-token"), "acct-1");
+        let request = Request {
+            request_remote_compaction: true,
+            ..model_request()
+        };
+
+        let (settlement, _) = complete(&client, &request).await;
+
+        assert_eq!(
+            settlement.result.unwrap().remote_compaction,
+            Some(otto_core::session::RemoteCompaction {
+                provider: "chatgpt".into(),
+                id: "cmp_1".into(),
+                encrypted_content: "opaque".into(),
+            })
+        );
     }
 
     #[tokio::test]

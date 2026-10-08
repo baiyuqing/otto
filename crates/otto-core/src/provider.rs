@@ -23,6 +23,21 @@ use crate::model::{
     ToolDefinition,
 };
 use crate::operation::OperationControl;
+use crate::session::RemoteCompaction;
+
+/// The remote compaction protocol a provider can execute.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RemoteCompactionSupport {
+    #[default]
+    Unsupported,
+    ResponsesV2,
+}
+
+/// Optional provider behavior the agent may select without inspecting a provider name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    pub remote_compaction: RemoteCompactionSupport,
+}
 
 /// One completion request. Built fresh from session state for each provider
 /// call; implementations translate it to their wire format.
@@ -36,6 +51,10 @@ pub struct Request {
     /// Identifies the conversation so a provider can route requests that share
     /// a prompt prefix to the same cache. Empty means none.
     pub cache_key: String,
+    /// Provider-owned compacted prefix to return unchanged on a Responses request.
+    pub remote_compaction: Option<RemoteCompaction>,
+    /// Requests a remote compaction item instead of an ordinary assistant turn.
+    pub request_remote_compaction: bool,
 }
 
 /// One completion response.
@@ -43,6 +62,17 @@ pub struct Request {
 pub struct Response {
     /// The single source of response finish and usage metadata.
     pub message: Message,
+    /// True only when the provider included a cached-input-token breakdown.
+    pub cached_input_tokens_present: bool,
+    /// Opaque provider-owned state returned only by a remote compaction request.
+    pub remote_compaction: Option<RemoteCompaction>,
+}
+
+impl Response {
+    /// Token usage reported for this operation, including compact-only responses.
+    pub fn usage(&self) -> Option<crate::model::Usage> {
+        self.message.usage
+    }
 }
 
 /// The result and content-free metadata for one logical provider operation.
@@ -255,6 +285,11 @@ pub type DiagnosticFuture<'a> =
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Provider {
+    /// Optional protocols implemented by this concrete provider transport.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+
     async fn complete(
         &self,
         request: &Request,

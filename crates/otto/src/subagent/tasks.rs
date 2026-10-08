@@ -144,6 +144,7 @@ pub const REPORT_BUDGET: usize = 10;
 /// What the registry stores beside the record.
 struct Entry {
     task: Task,
+    in_tool: bool,
     cancel: Option<CancellationToken>,
     #[allow(clippy::type_complexity)]
     history: Option<Arc<dyn Fn() -> Vec<Message> + Send + Sync>>,
@@ -376,6 +377,7 @@ impl Tasks {
                 id.clone(),
                 Entry {
                     task,
+                    in_tool: false,
                     cancel,
                     history,
                     inbox: Arc::new(Inbox::new(None)) as Arc<dyn Mailbox>,
@@ -458,6 +460,7 @@ impl Tasks {
             let mut state = self.lock();
             match state.entries.get_mut(id) {
                 Some(entry) if entry.task.status == TaskStatus::Running => {
+                    entry.in_tool = true;
                     entry.task.tool_calls += 1;
                     entry.task.last_tool = last_tool.to_string();
                     true
@@ -469,6 +472,37 @@ impl Tasks {
             self.signal();
             self.record(id);
         }
+    }
+
+    /// Finishes the current tool phase without changing historical tool data.
+    pub(crate) fn record_tool_finished(&self, id: &str) {
+        let changed = {
+            let mut state = self.lock();
+            if let Some(entry) = state.entries.get_mut(id)
+                && entry.task.status == TaskStatus::Running
+                && entry.in_tool
+            {
+                entry.in_tool = false;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.signal();
+        }
+    }
+
+    /// Live process-local phase. Provider/runtime includes model requests,
+    /// retries and orchestration; it is not a claim that a provider is stalled.
+    pub(crate) fn activity(&self, reference: &str) -> Option<&'static str> {
+        let state = self.lock();
+        let entry = Self::entry(&state, reference)?;
+        Some(match entry.task.status {
+            TaskStatus::Running if entry.in_tool => "tool",
+            TaskStatus::Running => "provider_or_runtime",
+            _ => entry.task.status.as_str(),
+        })
     }
 
     /// Moves a queued or running task to a terminal status, records its final

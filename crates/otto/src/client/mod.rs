@@ -1850,7 +1850,7 @@ mod tests {
         let done = client.compact("full", "api").await.unwrap().expect("some");
         assert_eq!(
             (done.tokens_before, done.estimated_tokens_after),
-            (900, 100)
+            (Some(900), Some(100))
         );
         assert_eq!(
             request(&seen, 0),
@@ -1996,6 +1996,7 @@ mod tests {
             context_window: 1000,
             compaction_threshold: 800,
             estimated_total: 120,
+            estimate_complete: true,
             reported_input_tokens: Some(110),
             sections: vec![otto_core::agent::context_report::ContextSection {
                 kind: otto_core::agent::context_report::SectionKind::Messages,

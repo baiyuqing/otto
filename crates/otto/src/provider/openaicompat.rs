@@ -1459,6 +1459,7 @@ mod tests {
             model: "model\\\"界".to_string(),
             system_prompt: "system\n\t\\\"界".to_string(),
             thinking: "high".to_string(),
+            cache_key: String::new(),
             messages: vec![Message {
                 role: Role::User,
                 blocks: vec![Block::text("escape-heavy: \\ \" \n \t 界 <>&")],

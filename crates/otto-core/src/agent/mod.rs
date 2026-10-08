@@ -97,6 +97,8 @@ pub struct Options {
     /// are ignored unless they concatenate to `system_prompt` exactly.
     pub system_prompt_parts: Vec<(String, String)>,
     pub thinking: String,
+    /// Conversation identifier sent as `Request::cache_key`; empty means none.
+    pub cache_key: String,
     /// Returns the current time. Called once per persisted message and twice
     /// per provider call, to measure its duration.
     pub now: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
@@ -146,6 +148,7 @@ impl Default for Options {
             system_prompt: String::new(),
             system_prompt_parts: Vec::new(),
             thinking: String::new(),
+            cache_key: String::new(),
             now: Box::new(zero_time),
             new_id: Box::new(String::new),
             new_operation_id: Box::new(move || {
@@ -1479,6 +1482,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             thinking: self.options.thinking.clone(),
             messages,
             tools: self.tools.definitions(),
+            cache_key: self.options.cache_key.clone(),
         };
         let latest = self.session.latest_compaction();
         let estimate = context_estimate::estimate_request(&request, latest.as_ref());

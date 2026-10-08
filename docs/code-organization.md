@@ -128,7 +128,7 @@ The other modules group native responsibilities:
   composition root and passed to its consumers). `log/diagnostics.rs` owns the
   private rotating execution files; `otto-core/src/diagnostics.rs` supplies the
   content-free observation boundary used by provider and agent operations. Event names and fields are in
-  [observability](specs/2026-10-04-observability.md)).
+  [observability](specs/2026-10-04-observability.md).
 
 ### Persistent state and storage ownership
 

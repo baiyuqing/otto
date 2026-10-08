@@ -2092,7 +2092,7 @@ mod tests {
         let summary = store.summary(Some("parent")).expect("summary");
         assert_eq!(summary.usage_events, 1);
         assert_eq!(summary.input_tokens, 20);
-        assert_eq!(summary.cached_input_tokens, None);
+        assert_eq!(summary.cached_input_tokens, Some(10));
     }
 
     #[tokio::test]
@@ -2100,14 +2100,16 @@ mod tests {
         let provider = FakeProvider::new();
         provider.add_route(
             match_any,
-            vec![RouteStep::Reply(Response {
+            vec![RouteStep::Reply(Box::new(Response {
                 message: Message {
                     role: Role::Assistant,
                     finish_reason: Some(FinishReason::Stop),
                     blocks: vec![Block::text("done")],
                     ..Message::default()
                 },
-            })],
+                cached_input_tokens_present: false,
+                remote_compaction: None,
+            }))],
         );
 
         let tasks = Arc::new(Tasks::new());

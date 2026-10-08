@@ -337,13 +337,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::{Days, SecondsFormat, Utc};
-    use std::time::Duration;
 
-    use otto_core::agent::{ApiStatus, CompactionResult, Event, ProviderOperationKind};
-    use otto_core::model::{
-        EffectCertainty, OperationDisposition, OperationId, OperationOutcome, OperationStopReason,
-        Usage,
-    };
+    use otto_core::agent::{CompactionResult, Event};
+    use otto_core::model::Usage;
 
     use super::{Collector, Context, Sink, Store, UsageRecord};
 
@@ -502,7 +498,7 @@ mod tests {
             .expect("summary");
         assert_eq!(summary.input_tokens, 8);
         assert_eq!(summary.output_tokens, 3);
-        assert_eq!(summary.cached_input_tokens, None);
+        assert_eq!(summary.cached_input_tokens, Some(2));
 
         let directory_mode = std::fs::metadata(path.parent().expect("parent"))
             .expect("directory metadata")
@@ -551,7 +547,7 @@ mod tests {
         assert_eq!(analysis.summary.usage_events, 2);
         assert_eq!(analysis.summary.input_tokens, 30);
         assert_eq!(analysis.summary.output_tokens, 5);
-        assert_eq!(analysis.summary.cached_input_tokens, None);
-        assert_eq!(analysis.summary.cache_hit_rate, None);
+        assert_eq!(analysis.summary.cached_input_tokens, Some(10));
+        assert_eq!(analysis.summary.cache_hit_rate, Some(1.0 / 3.0));
     }
 }

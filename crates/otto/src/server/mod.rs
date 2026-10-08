@@ -3316,6 +3316,7 @@ mod tests {
                     Some(otto_core::model::FinishReason::Stop),
                 ),
             };
+            let cached_input_tokens_present = self.script.usage.is_some();
             otto_core::provider::ProviderSettlement::succeeded(
                 ProviderResponse {
                     message: Message {
@@ -3325,6 +3326,8 @@ mod tests {
                         finish_reason,
                         ..Message::default()
                     },
+                    cached_input_tokens_present,
+                    remote_compaction: None,
                 },
                 0,
             )

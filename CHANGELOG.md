@@ -58,7 +58,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
 ### Documentation
 
 - The manual documents remote compaction, provider-locked opaque checkpoints,
-  exact operation/attempt counts and cache-breakdown presence.
+  exact operation/attempt counts, cache-breakdown presence and secret-safe
+  runtime diagnostics.
   ([#447](https://github.com/baiyuqing/otto/pull/447))
 
 - Contributor and agent instructions leave builds, tests and `make` gates to

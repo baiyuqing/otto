@@ -28,7 +28,7 @@ use crate::tool::{Tool, definition};
 /// One scripted response for a matched route.
 #[derive(Clone)]
 pub(crate) enum RouteStep {
-    Reply(Response),
+    Reply(Box<Response>),
     Fail(String),
 }
 
@@ -167,7 +167,7 @@ impl Provider for FakeProvider {
                         });
                     }
                 }
-                ProviderSettlement::succeeded(response, 0)
+                ProviderSettlement::succeeded(*response, 0)
             }
         }
     }
@@ -198,7 +198,7 @@ pub(crate) fn match_any(_request: &Request) -> bool {
 
 /// A response carrying one assistant text block, no tool calls, and `usage`.
 pub(crate) fn assistant_text(text: &str, usage: Usage) -> RouteStep {
-    RouteStep::Reply(Response {
+    RouteStep::Reply(Box::new(Response {
         message: Message {
             role: Role::Assistant,
             finish_reason: Some(FinishReason::Stop),
@@ -206,7 +206,9 @@ pub(crate) fn assistant_text(text: &str, usage: Usage) -> RouteStep {
             blocks: vec![Block::text(text)],
             ..Message::default()
         },
-    })
+        cached_input_tokens_present: true,
+        remote_compaction: None,
+    }))
 }
 
 /// A response carrying one tool-call block and no text, so the agent loop
@@ -217,7 +219,7 @@ pub(crate) fn assistant_tool_call(
     arguments: &str,
     usage: Usage,
 ) -> RouteStep {
-    RouteStep::Reply(Response {
+    RouteStep::Reply(Box::new(Response {
         message: Message {
             role: Role::Assistant,
             finish_reason: Some(FinishReason::ToolCalls),
@@ -231,7 +233,9 @@ pub(crate) fn assistant_tool_call(
             }],
             ..Message::default()
         },
-    })
+        cached_input_tokens_present: true,
+        remote_compaction: None,
+    }))
 }
 
 pub(crate) fn raw(json: &str) -> Box<RawValue> {

@@ -3953,9 +3953,17 @@ time=2026-10-04T10:15:02.114+08:00 level=INFO msg=turn_finished session_id=... t
 
 `msg` is a stable event name; values that contain spaces or quotes are
 quoted. Levels are `INFO`, `WARN`, and `ERROR`; there is no level setting.
-Message text, model output, prompts, tool arguments and results, tokens, and
-secrets are never logged. Chat ids and sender ids are logged; protect the log
-files accordingly.
+Message text, model output, prompts, tool arguments and results, OAuth/API
+token values, secrets, and remote-compaction `encrypted_content` are never
+logged. Token counts and cache-breakdown presence may be logged. Chat ids and
+sender ids are logged; protect the log files accordingly.
+
+Provider runtime events shared by non-interactive frontends:
+
+| Event | Fields |
+| --- | --- |
+| `provider_operation_finished` | `operation_id`, `kind`, `provider`, `model`, `attempts`, `status`, `disposition`, `effect_certainty`, `stop_reason`, `duration_ms` |
+| `remote_compaction_finished` | `checkpoint_id`, `provider`, `reason`, `automatic`, `tail_messages`, `tokens_before`, `usage_present`, `cached_input_tokens_present` |
 
 `otto serve` events:
 

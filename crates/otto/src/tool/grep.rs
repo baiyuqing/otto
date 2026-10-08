@@ -517,7 +517,11 @@ mod tests {
         let result = run(&GrepTool::new(&workspace, 8), r#"{"pattern":"matching"}"#).await;
         assert!(!result.is_error, "{result:?}");
         assert!(result.content.contains("truncated"), "{result:?}");
-        assert!(result.content.len() <= 80, "{result:?}");
+        // A truncated result ends with fixed narrowing guidance; only the
+        // capped body before it is bounded by the 8-byte limit and marker.
+        let (body, guidance) = result.content.split_once("\nNarrow path").unwrap();
+        assert!(body.len() <= 80, "{result:?}");
+        assert!(guidance.ends_with("do not repeat the same broad search."));
     }
 
     /// Cancels the token during its first read, so the scan must stop before

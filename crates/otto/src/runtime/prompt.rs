@@ -234,7 +234,7 @@ mod tests {
         assert!(full.contains("source downloads, searches and analysis stay in the child"));
         assert!(full.contains("download each pinned source once"));
         assert!(
-            full.contains("conclusion, essential evidence references and uncertainty within 4 KiB")
+            full.contains("conclusion, essential evidence references, uncertainty and a report path with section index within 4 KiB")
         );
         let read_only = system_prompt_for(&definitions(&["read"]), off(), "", "", "");
         assert!(read_only.contains("<retrieval_policy>"));

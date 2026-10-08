@@ -5078,3 +5078,287 @@ async fn compaction_recovery_resets_the_per_response_byte_bound() {
             .starts_with(&summary)
     );
 }
+
+struct YieldExecutor {
+    calls: Arc<AtomicUsize>,
+    inbox: Option<Arc<Inbox>>,
+    fail: bool,
+    replan: bool,
+}
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl ToolExecutor for YieldExecutor {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        EchoExecutor::default().definitions()
+    }
+    fn yields_turn(&self, _: &str, _: &crate::tool::ToolExecution) -> bool {
+        true
+    }
+    fn batch_control(
+        &self,
+        _: &str,
+        _: &crate::tool::ToolExecution,
+    ) -> crate::approval::BatchControl {
+        if self.replan {
+            crate::approval::BatchControl::Replan
+        } else {
+            crate::approval::BatchControl::Continue
+        }
+    }
+    async fn execute(
+        &self,
+        call: crate::tool::ToolCall<'_>,
+        control: &dyn OperationControl,
+    ) -> crate::tool::ToolExecution {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(inbox) = &self.inbox {
+            inbox.push(Notification {
+                kind: Some(NotificationKind::TaskFinished),
+                text: "child completed during yield".into(),
+                ..Default::default()
+            });
+        }
+        if self.fail {
+            crate::tool::ToolExecution::completed(ToolResult::error("repair this failure"))
+        } else {
+            EchoExecutor::default().execute(call, control).await
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn yielding_settles_the_entire_batch_without_another_provider_request() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        FakeProvider::new(vec![two_tool_calls()]),
+        YieldExecutor {
+            calls: calls.clone(),
+            inbox: None,
+            fail: false,
+            replan: false,
+        },
+        MemorySession::new(),
+        options(),
+    );
+    agent
+        .run("delegate and yield", &mut |_| {}, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(agent.provider().requests().len(), 1);
+    assert_eq!(
+        agent
+            .session()
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .count(),
+        2
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn completion_racing_with_yield_is_processed_without_an_extra_user_prompt() {
+    let inbox = Arc::new(Inbox::new(None));
+    let agent = Agent::new(
+        FakeProvider::new(vec![
+            Turn::tool_call("y", "{}"),
+            Turn::text("collected child result"),
+        ]),
+        YieldExecutor {
+            calls: Arc::default(),
+            inbox: Some(inbox.clone()),
+            fail: false,
+            replan: false,
+        },
+        MemorySession::new(),
+        Options {
+            mailbox: inbox,
+            ..options()
+        },
+    );
+    agent
+        .run("delegate", &mut |_| {}, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(agent.provider().requests().len(), 2);
+    assert!(
+        agent.provider().requests()[1]
+            .messages
+            .iter()
+            .any(|m| m.text().contains("child completed during yield"))
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn failures_and_approval_replanning_take_precedence_over_yield() {
+    for (fail, replan) in [(true, false), (false, true)] {
+        let agent = Agent::new(
+            FakeProvider::new(vec![
+                Turn::tool_call("y", "{}"),
+                Turn::text("handled feedback"),
+            ]),
+            YieldExecutor {
+                calls: Arc::default(),
+                inbox: None,
+                fail,
+                replan,
+            },
+            MemorySession::new(),
+            options(),
+        );
+        agent
+            .run("work", &mut |_| {}, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(agent.provider().requests().len(), 2);
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_yielded_turn_can_resume_from_a_later_child_notification() {
+    let inbox = Arc::new(Inbox::new(None));
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::tool_call("y", "{}"), Turn::text("resumed")]),
+        YieldExecutor {
+            calls: Arc::default(),
+            inbox: None,
+            fail: false,
+            replan: false,
+        },
+        MemorySession::new(),
+        Options {
+            mailbox: inbox.clone(),
+            ..options()
+        },
+    );
+    agent
+        .run("work", &mut |_| {}, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(agent.provider().requests().len(), 1);
+    inbox.push(Notification {
+        kind: Some(NotificationKind::TaskFinished),
+        text: "later result".into(),
+        ..Default::default()
+    });
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(agent.provider().requests().len(), 2);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn steering_racing_with_yield_is_preserved() {
+    let steering = Arc::new(super::steering::Steering::default());
+    let agent = Agent::new(
+        FakeProvider::new(vec![
+            Turn::tool_call("y", "{}"),
+            Turn::text("handled guidance"),
+        ]),
+        YieldExecutor {
+            calls: Arc::default(),
+            inbox: None,
+            fail: false,
+            replan: false,
+        },
+        MemorySession::new(),
+        Options {
+            steering: steering.clone(),
+            ..options()
+        },
+    );
+    let mut submitted = false;
+    agent
+        .run(
+            "work",
+            &mut |event| {
+                if matches!(event, Event::ToolCallFinished { .. }) && !submitted {
+                    steering.submit("new direction").unwrap();
+                    submitted = true;
+                }
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(agent.provider().requests().len(), 2);
+    assert!(
+        agent.provider().requests()[1]
+            .messages
+            .iter()
+            .any(|m| m.text().contains("new direction"))
+    );
+}
+
+struct EditAdviceExecutor;
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl ToolExecutor for EditAdviceExecutor {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "edit".into(),
+            ..Default::default()
+        }]
+    }
+    async fn execute(
+        &self,
+        _: crate::tool::ToolCall<'_>,
+        _: &dyn OperationControl,
+    ) -> crate::tool::ToolExecution {
+        crate::tool::ToolExecution::completed(ToolResult {
+            content: "edited file.rs".into(),
+            ..Default::default()
+        })
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn batching_advice_is_persisted_with_the_third_successful_edit() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![
+            Turn::named_tool_call(
+                "edit",
+                "e1",
+                r#"{"path":"file.rs","old_text":"a","new_text":"A"}"#,
+            ),
+            Turn::named_tool_call(
+                "edit",
+                "e2",
+                r#"{"path":"file.rs","old_text":"b","new_text":"B"}"#,
+            ),
+            Turn::named_tool_call(
+                "edit",
+                "e3",
+                r#"{"path":"file.rs","old_text":"c","new_text":"C"}"#,
+            ),
+            Turn::text("done"),
+        ]),
+        EditAdviceExecutor,
+        MemorySession::new(),
+        options(),
+    );
+    agent
+        .run("edit", &mut |_| {}, &CancellationToken::new())
+        .await
+        .unwrap();
+    let results: Vec<_> = agent
+        .session()
+        .messages()
+        .into_iter()
+        .filter(|message| message.role == Role::Tool)
+        .collect();
+    assert_eq!(results.len(), 3);
+    assert!(!results[0].text().contains("Batching advice"));
+    assert!(!results[1].text().contains("Batching advice"));
+    assert!(results[2].text().contains("Batching advice"));
+    assert!(results[2].text().contains("This edit succeeded"));
+    assert!(results.iter().all(|message| !message.blocks[0].is_error));
+}

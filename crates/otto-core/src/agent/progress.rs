@@ -3,7 +3,8 @@
 //! A turn whose model keeps issuing the same tool call, or keeps receiving tool
 //! errors, is making no progress and would otherwise run until a deadline that
 //! may be disabled. The guard watches the previous call only, so its memory is
-//! constant and cannot grow with the turn.
+//! constant for stall detection. A separate bounded advisory tracks single
+//! edits to at most 128 files per turn.
 //!
 //! Ownership: a [`ProgressGuard`] lives in
 //! [`super::overflow::RunDispatchState`], which one `Agent::run` call owns and
@@ -14,9 +15,10 @@
 //! Limitations: the guard detects *consecutive* conditions only. An alternating
 //! cycle such as `read`, `grep`, `read`, `grep`, ... never repeats a
 //! fingerprint twice in a row and is not detected; the parent observes that
-//! case through `agent_status` and stops it with `agent_cancel`.
+//! case through status snapshots; dependent-only waiting uses an explicit yield.
+//! Unchanged counters alone do not establish that a task is stalled.
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, hash_map::DefaultHasher};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -125,6 +127,13 @@ pub struct ProgressGuard {
     /// The first stall this turn hit. A stall is not undone by a later call,
     /// because the turn ends as soon as the caller reads it.
     pending: Option<Stall>,
+    edits: BTreeMap<String, EditCount>,
+}
+
+#[derive(Debug, Default)]
+struct EditCount {
+    singles: u8,
+    advised: bool,
 }
 
 impl ProgressGuard {
@@ -179,6 +188,55 @@ impl ProgressGuard {
             self.pending = crossed.clone();
         }
         crossed
+    }
+
+    /// A one-time advisory per file after three successful single replacements.
+    /// Reading another file does not reset it. Batches reset only the count;
+    /// failures do not count, and all edits remain valid operations.
+    pub fn edit_advice(
+        &mut self,
+        tool: &str,
+        arguments: &str,
+        is_error: bool,
+    ) -> Option<&'static str> {
+        if tool != "edit" || is_error {
+            return None;
+        }
+        let args: Value = serde_json::from_str(arguments).ok()?;
+        let path = args.get("path")?.as_str()?;
+        let count = match args
+            .get("edits")
+            .and_then(Value::as_array)
+            .filter(|items| !items.is_empty())
+        {
+            Some(items) => items.len(),
+            None if args
+                .get("old_text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.is_empty()) =>
+            {
+                1
+            }
+            _ => return None,
+        };
+        // Bound advisory state without changing execution for larger tasks.
+        if self.edits.len() >= 128 && !self.edits.contains_key(path) {
+            return None;
+        }
+        let entry = self.edits.entry(path.into()).or_default();
+        if count > 1 {
+            entry.singles = 0;
+            return None;
+        }
+        entry.singles = entry.singles.saturating_add(1);
+        if entry.singles >= 3 && !entry.advised {
+            entry.advised = true;
+            Some(
+                "\nBatching advice: several single replacements were applied to this file. Collect the remaining known changes and apply one non-overlapping edits batch; use a checked script for repetitive cross-file changes. This edit succeeded.",
+            )
+        } else {
+            None
+        }
     }
 
     /// Takes the stall this turn hit, if it hit one.
@@ -256,6 +314,39 @@ fn push_json_string(text: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_single_edits_warn_once_without_rejecting_or_counting_failures() {
+        let mut guard = ProgressGuard::default();
+        let single = r#"{"path":"a.rs","old_text":"x","new_text":"y"}"#;
+        assert!(guard.edit_advice("edit", single, false).is_none());
+        assert!(guard.edit_advice("read", single, false).is_none());
+        assert!(guard.edit_advice("edit", single, true).is_none());
+        assert!(guard.edit_advice("edit", single, false).is_none());
+        assert!(
+            guard
+                .edit_advice("edit", single, false)
+                .unwrap()
+                .contains("This edit succeeded")
+        );
+        assert!(guard.edit_advice("edit", single, false).is_none());
+        assert!(guard.take_stall().is_none());
+    }
+
+    #[test]
+    fn batched_edits_reset_the_single_edit_streak() {
+        let mut guard = ProgressGuard::default();
+        let single = r#"{"path":"a.rs","edits":[{"old_text":"x","new_text":"y"}]}"#;
+        for _ in 0..2 {
+            assert!(guard.edit_advice("edit", single, false).is_none());
+        }
+        let batch = r#"{"path":"a.rs","edits":[{"old_text":"x","new_text":"y"},{"old_text":"z","new_text":"w"}]}"#;
+        assert!(guard.edit_advice("edit", batch, false).is_none());
+        for _ in 0..2 {
+            assert!(guard.edit_advice("edit", single, false).is_none());
+        }
+        assert!(guard.edit_advice("edit", single, false).is_some());
+    }
 
     #[test]
     fn identical_calls_trip_the_repeated_call_limit() {

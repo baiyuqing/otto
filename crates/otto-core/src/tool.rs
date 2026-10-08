@@ -184,6 +184,13 @@ pub trait ToolExecutor {
         crate::approval::BatchControl::Continue
     }
 
+    /// Requests a safe-boundary end of this provider turn after the complete
+    /// tool batch is persisted. Hosts resume via their existing mailbox wakeup.
+    /// Errors, replanning, queued notifications and steering take precedence.
+    fn yields_turn(&self, _name: &str, _execution: &ToolExecution) -> bool {
+        false
+    }
+
     /// Runs one attempt. A name this executor does not serve must settle as
     /// `Error + NotStarted` with [`ToolResult::unknown_tool`].
     async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution;

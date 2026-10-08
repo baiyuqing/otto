@@ -521,11 +521,14 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn captures_requested_compaction_without_exposing_opaque_content() {
         for item_type in ["compaction", "compaction_summary"] {
-            let body = format!(concat!(
-                "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}}\n\n",
-                "data: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"{item_type}\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-secret\"}}}}\n\n",
-                "data: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\"}}}}\n\n",
-            ));
+            let body = format!(
+                concat!(
+                    "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}}\n\n",
+                    "data: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"{}\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-secret\"}}}}\n\n",
+                    "data: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\"}}}}\n\n",
+                ),
+                item_type
+            );
             let (response, events) = assemble_with_compaction(body.as_bytes(), 0, true);
             let response = response.expect("requested compaction assembles");
             assert_eq!(response.message.blocks, [Block::text("hi")]);

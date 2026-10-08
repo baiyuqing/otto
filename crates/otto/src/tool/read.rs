@@ -15,7 +15,7 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
-use super::result::{CappedByteCollector, decode_strict_json, valid_utf8_prefix};
+use super::result::{CappedByteCollector, RETRIEVAL_BYTES, decode_strict_json, valid_utf8_prefix};
 use super::workspace::Workspace;
 use super::{Tool, definition, error_result, text_result};
 
@@ -32,6 +32,8 @@ struct ReadArgs {
     offset: i64,
     #[serde(default)]
     limit: i64,
+    #[serde(default)]
+    character_offset: i64,
 }
 
 /// Reads a workspace file.
@@ -44,7 +46,7 @@ impl<'a> ReadTool<'a> {
     pub fn new(workspace: &'a Workspace, max_output_bytes: usize) -> Self {
         Self {
             workspace,
-            max_output_bytes,
+            max_output_bytes: max_output_bytes.min(RETRIEVAL_BYTES),
         }
     }
 }
@@ -53,7 +55,7 @@ impl<'a> ReadTool<'a> {
 pub fn read_definition() -> ToolDefinition {
     definition(
         "read",
-        "Read a UTF-8 workspace file, including temporary bash output (removed after its turn and child tasks finish); use offset and limit for relevant excerpts. Returns selected lines within the output cap or an error for unreadable, binary or oversized files.",
+        "Read a UTF-8 workspace file, including temporary bash output (removed after its turn and child tasks finish); use offset and limit for relevant excerpts. Returns at most 4 KiB of selected text (or the smaller configured cap); truncation gives character_offset to resume within the same line range. Returns an error for unreadable, binary or oversized files.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -66,9 +68,14 @@ pub fn read_definition() -> ToolDefinition {
                     "type": "integer",
                     "description": "One-based starting line number"
                 },
+                "character_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Zero-based Unicode character offset within the selected offset/limit line range; default 0. Use the returned value with the same path, offset and limit to continue a truncated range, including a long single line"
+                },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to return; 0 means all remaining lines"
+                    "description": "Maximum selected lines; 0 means all remaining lines. The 4 KiB body cap still applies"
                 }
             },
             "required": ["path"]
@@ -97,6 +104,10 @@ impl Tool for ReadTool<'_> {
             return error_result("limit must be >= 0");
         }
 
+        if args.character_offset < 0 {
+            return error_result("character_offset must be >= 0");
+        }
+
         let file = match self.workspace.open(Path::new(&args.path)) {
             Ok(file) => file,
             Err(error) => return error_result(error),
@@ -107,7 +118,10 @@ impl Tool for ReadTool<'_> {
         };
 
         let start_line = if args.offset == 0 { 1 } else { args.offset };
-        let content = select_lines(&text, start_line, args.limit);
+        let content: String = select_lines(&text, start_line, args.limit)
+            .chars()
+            .skip(args.character_offset as usize)
+            .collect();
         let mut collector = CappedByteCollector::new(self.max_output_bytes);
         collector.write(content.as_bytes());
         if collector.discarded() == 0 {
@@ -117,11 +131,15 @@ impl Tool for ReadTool<'_> {
         let safe = valid_utf8_prefix(raw);
         let omitted = collector.discarded() + raw.len() - safe.len();
         if safe.is_empty() {
-            return text_result(format!("[truncated: {omitted} bytes omitted]"));
+            return text_result(format!(
+                "[truncated: {omitted} bytes omitted; configured output cap is too small for the next UTF-8 character]"
+            ));
         }
         text_result(format!(
-            "{}\n[truncated: {omitted} bytes omitted]",
-            String::from_utf8_lossy(safe)
+            "{}\n[truncated: {omitted} bytes omitted; continue with offset {start_line}, limit {}, character_offset {}]",
+            String::from_utf8_lossy(safe),
+            args.limit,
+            args.character_offset as usize + String::from_utf8_lossy(safe).chars().count()
         ))
     }
 }
@@ -207,6 +225,26 @@ mod tests {
 mod execute_tests {
     use super::*;
     use crate::tool::testutil::{MAX_OUTPUT_BYTES, run, workspace};
+
+    #[tokio::test]
+    async fn retrieval_cap_and_character_cursor_preserve_long_unicode_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "你".repeat(2000);
+        std::fs::write(dir.path().join("long.txt"), &text).unwrap();
+        let workspace = workspace(dir.path());
+        let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let first = run(&tool, r#"{"path":"long.txt"}"#).await;
+        assert!(first.content.contains("character_offset 1365"));
+        let head = first.content.split("\n[truncated:").next().unwrap();
+        assert_eq!(head.len(), 4095);
+        let second = run(&tool, r#"{"path":"long.txt","character_offset":1365}"#).await;
+        assert_eq!(format!("{head}{}", second.content), text);
+        assert!(
+            run(&tool, r#"{"path":"long.txt","character_offset":-1}"#)
+                .await
+                .is_error
+        );
+    }
 
     #[tokio::test]
     async fn unknown_fields_and_a_missing_path_are_rejected() {

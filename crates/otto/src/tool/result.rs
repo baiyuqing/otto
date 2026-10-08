@@ -23,6 +23,9 @@ use serde::de::DeserializeOwned;
 
 use otto_core::tool::ToolResult;
 
+/// Maximum body bytes returned by read, grep and web_fetch per call.
+pub(crate) const RETRIEVAL_BYTES: usize = 4096;
+
 /// The marker used when no dynamic marker was negotiated.
 #[cfg(test)]
 const LEGACY_REDACTION_MARKER: &str = "[REDACTED]";

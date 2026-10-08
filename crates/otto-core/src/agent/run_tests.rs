@@ -12,10 +12,10 @@ use tokio_util::sync::CancellationToken;
 use crate::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
 use crate::operation::OperationControl;
 use crate::provider::{
-    ContextOverflowError, Provider, ProviderError, ProviderSettlement, Request, RequestSizer,
-    Response, StreamEvent, StreamSink,
+    ContextOverflowError, Provider, ProviderCapabilities, ProviderError, ProviderSettlement,
+    RemoteCompactionSupport, Request, RequestSizer, Response, StreamEvent, StreamSink,
 };
-use crate::session::{MemorySession, Session};
+use crate::session::{MemorySession, RemoteCompaction, Session};
 use crate::tool::{ToolExecutor, ToolResult};
 
 use super::context_report::SectionKind;
@@ -67,6 +67,7 @@ impl Turn {
                     blocks: vec![Block::text(text)],
                     ..Message::default()
                 },
+                ..Response::default()
             }),
         }
     }
@@ -93,6 +94,7 @@ impl Turn {
                     }],
                     ..Message::default()
                 },
+                ..Response::default()
             }),
         }
     }
@@ -112,6 +114,30 @@ impl Turn {
                     }),
                     ..Message::default()
                 },
+                ..Response::default()
+            }),
+        }
+    }
+
+    fn remote_compaction(id: &str, encrypted_content: &str) -> Self {
+        Self {
+            events: Vec::new(),
+            outcome: Ok(Response {
+                message: Message {
+                    role: Role::Assistant,
+                    usage: Some(Usage {
+                        input_tokens: 50,
+                        output_tokens: 2,
+                        cached_input_tokens: 20,
+                    }),
+                    ..Message::default()
+                },
+                cached_input_tokens_present: true,
+                remote_compaction: Some(RemoteCompaction {
+                    provider: "fake".into(),
+                    id: id.into(),
+                    encrypted_content: encrypted_content.into(),
+                }),
             }),
         }
     }
@@ -140,6 +166,7 @@ impl Turn {
 struct FakeProvider {
     turns: Mutex<VecDeque<Turn>>,
     requests: Mutex<Vec<Request>>,
+    remote_compaction: bool,
 }
 
 impl FakeProvider {
@@ -147,7 +174,13 @@ impl FakeProvider {
         Self {
             turns: Mutex::new(turns.into()),
             requests: Mutex::new(Vec::new()),
+            remote_compaction: false,
         }
+    }
+
+    fn with_remote_compaction(mut self) -> Self {
+        self.remote_compaction = true;
+        self
     }
 
     fn requests(&self) -> Vec<Request> {
@@ -182,6 +215,16 @@ impl FakeProvider {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider for FakeProvider {
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            remote_compaction: if self.remote_compaction {
+                RemoteCompactionSupport::ResponsesV2
+            } else {
+                RemoteCompactionSupport::Unsupported
+            },
+        }
+    }
+
     async fn complete(
         &self,
         request: &Request,
@@ -1386,6 +1429,7 @@ async fn reasoning_is_streamed_redacted_and_persisted() {
                     blocks: vec![Block::reasoning(reasoning), Block::text("ok")],
                     ..Message::default()
                 },
+                ..Response::default()
             }),
         },
         Turn::text("second"),
@@ -2115,6 +2159,61 @@ async fn a_manual_compaction_persists_the_summary_and_emits_the_plan_first() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn remote_compaction_persists_opaque_state_and_reuses_only_the_new_tail() {
+    let provider = FakeProvider::new(vec![
+        Turn::remote_compaction("compact-1", "opaque-secret"),
+        Turn::text("continued"),
+    ])
+    .with_remote_compaction();
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        seeded_session().await,
+        options(),
+    );
+    let mut events = Vec::new();
+    let result = agent
+        .compact(
+            "",
+            &mut |event| events.push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("remote compact");
+
+    assert_eq!(result.checkpoint_id, "compact-1");
+    assert_eq!(result.tokens_before, Some(50));
+    assert_eq!(result.estimated_tokens_after, None);
+    assert!(result.usage_present);
+    assert!(result.cached_input_tokens_present);
+    let checkpoint = agent.session().remote_compaction().expect("checkpoint");
+    assert_eq!(checkpoint.provider, "fake");
+    assert_eq!(checkpoint.encrypted_content, "opaque-secret");
+    assert!(agent.session().post_remote_compaction_messages().is_empty());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::ProviderApiCall {
+            kind: super::ProviderOperationKind::RemoteCompaction,
+            attempts: 1,
+            ..
+        }
+    )));
+
+    agent
+        .run("next", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("continued turn");
+    let requests = agent.provider().requests();
+    assert!(requests[0].request_remote_compaction);
+    assert!(requests[0].remote_compaction.is_none());
+    assert_eq!(requests[1].remote_compaction, Some(checkpoint));
+    assert!(!requests[1].request_remote_compaction);
+    assert_eq!(requests[1].messages.len(), 1);
+    assert_eq!(requests[1].messages[0].text(), "next");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn a_manual_compaction_with_nothing_to_compact_is_a_bounded_no_op() {
     let provider = FakeProvider::new(Vec::new());
     let agent = Agent::new(
@@ -2450,6 +2549,7 @@ async fn text_deltas_and_usage_reach_the_event_sink() {
             cached_input_tokens: 2,
         },
         present: true,
+        cached_input_tokens_present: false,
     }));
     let Event::ProviderApiCall {
         provider,
@@ -2491,6 +2591,7 @@ async fn a_response_without_usage_still_emits_the_event_marked_absent() {
     assert!(collect(&events).contains(&Event::ProviderUsage {
         usage: Usage::default(),
         present: false,
+        cached_input_tokens_present: false,
     }));
 }
 
@@ -2598,6 +2699,7 @@ fn two_tool_calls() -> Turn {
                 blocks: vec![call("c1", 1), call("c2", 2)],
                 ..Message::default()
             },
+            ..Response::default()
         }),
     }
 }
@@ -2662,6 +2764,7 @@ async fn an_unknown_tool_is_persisted_as_an_error_result() {
                 }],
                 ..Message::default()
             },
+            ..Response::default()
         }),
     };
     let agent = Agent::new(

@@ -15,7 +15,32 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Usage and compatibility
+
+- `GET /v1/usage` now distinguishes token-usage rows, logical provider
+  operations and actual HTTP attempts. Cache totals and `cache_hit_rate` are
+  `null` when any reported usage lacks a cached-token breakdown; missing data
+  is no longer presented as a zero cache hit. The former `requests` and
+  `reported_requests` fields are named `usage_events` and
+  `reported_usage_events` to match what they count. (PR pending)
+
+### Features
+
+- The ChatGPT Responses provider uses capability-gated remote compaction and
+  persists the returned encrypted checkpoint as invisible append-only session
+  state. Other providers, and manual compaction with a retention focus, keep
+  using Otto's validated structured summaries. (PR pending)
+
+### Performance
+
+- Context reporting and automatic compaction treat an opaque provider prefix
+  as unknown until a post-checkpoint usage report anchors its size, rather than
+  making cache and threshold decisions from a partial estimate. (PR pending)
+
 ### Documentation
+
+- The manual documents remote compaction, provider-locked opaque checkpoints,
+  exact operation/attempt counts and cache-breakdown presence. (PR pending)
 
 - Contributor and agent instructions leave builds, tests and `make` gates to
   CI: local work runs only `cargo fmt --all`; a test's failure mode is shown

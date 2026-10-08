@@ -155,6 +155,21 @@ impl Session for MemoryHandle {
         self.inner.latest_compaction()
     }
 
+    fn remote_compaction(&self) -> Option<otto_core::session::RemoteCompaction> {
+        self.inner.remote_compaction()
+    }
+
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        self.inner.post_remote_compaction_messages()
+    }
+
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: otto_core::session::RemoteCompaction,
+    ) -> Result<(), SessionError> {
+        self.inner.append_remote_compaction(checkpoint).await
+    }
+
     async fn append_compaction(
         &self,
         checkpoint: CompactionCheckpoint,
@@ -368,6 +383,21 @@ impl Session for SharedSession {
         self.0.latest_compaction()
     }
 
+    fn remote_compaction(&self) -> Option<otto_core::session::RemoteCompaction> {
+        self.0.remote_compaction()
+    }
+
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        self.0.post_remote_compaction_messages()
+    }
+
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: otto_core::session::RemoteCompaction,
+    ) -> Result<(), SessionError> {
+        self.0.append_remote_compaction(checkpoint).await
+    }
+
     async fn append_compaction(
         &self,
         checkpoint: CompactionCheckpoint,
@@ -446,6 +476,16 @@ pub enum ProviderClient {
 
 #[async_trait::async_trait]
 impl Provider for ProviderClient {
+    fn capabilities(&self) -> otto_core::provider::ProviderCapabilities {
+        match self {
+            Self::Compat { client, .. } => client.capabilities(),
+            Self::ChatGpt { client, .. } => client.capabilities(),
+            Self::Unavailable => otto_core::provider::ProviderCapabilities::default(),
+            #[cfg(test)]
+            Self::Scripted(provider) => provider.capabilities(),
+        }
+    }
+
     async fn complete(
         &self,
         request: &Request,
@@ -1115,6 +1155,7 @@ impl Runner {
             let _ = collector.record(&otto_core::agent::Event::ProviderUsage {
                 usage: response.usage,
                 present: response.usage_present,
+                cached_input_tokens_present: response.cached_input_tokens_present,
             });
         }
         Ok(response)
@@ -4168,12 +4209,13 @@ mod tests {
                     cached_input_tokens: 4,
                 },
                 present: true,
+                cached_input_tokens_present: true,
             })
             .expect("record");
 
         let summary = store.summary(Some("session-1")).expect("summary");
         assert_eq!(summary.input_tokens, 10);
-        assert_eq!(summary.cached_input_tokens, 4);
+        assert_eq!(summary.cached_input_tokens, Some(4));
     }
 
     /// A provider `Runner::scripted` needs a value for but this test never

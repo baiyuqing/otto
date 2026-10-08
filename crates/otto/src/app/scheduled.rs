@@ -237,6 +237,7 @@ mod tests {
         collector.observe(&Event::ProviderUsage {
             usage: Default::default(),
             present: false,
+            cached_input_tokens_present: false,
         });
         collector.after_tool = true;
         for text in ["partial 一", "partial 二"] {

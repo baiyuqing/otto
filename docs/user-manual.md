@@ -346,8 +346,9 @@ otto --provider chatgpt --model gpt-5-codex
 - Subscription traffic goes to OpenAI's Responses backend
   (`https://chatgpt.com/backend-api/codex/responses`), authorized by the OAuth
   access token plus the `chatgpt-account-id` header. This is a different wire
-  format from the OpenAI-compatible Chat Completions provider, but the CLI,
-  tools, sessions, and compaction behave identically.
+  format from the OpenAI-compatible Chat Completions provider. ChatGPT uses the
+  backend's Responses compaction protocol; other providers use Otto's local
+  structured summaries.
 - The access token is refreshed automatically from the stored refresh token
   when it nears expiry; rotated tokens are written back to the credential file.
 - Tokens are never written to TOML, session files, or logs, and are stripped
@@ -1047,7 +1048,8 @@ OTTO_UI=repl otto
   sub-agent panel. Its fields, most important first: the model, the approval
   mode (`AUTO` or `MANUAL`), the session's token totals with the cached share
   of the prompt (`tokens 12.4k/802 (cached 9.8k, 79.0%)`, or `tokens 0/0`
-  before the first report), the context percentage, the sandbox state
+  before the first report; the cached suffix is omitted when any accumulated
+  report lacks that breakdown), the context percentage, the sandbox state
   (`sb · write · net`, `sb · write · no-net`, or the full `seatbelt ·
   workspace-write · network allowed`, `sandbox off · WARNING: bash is
   unsandboxed`, and `bash disabled · sandbox unavailable`), the reasoning
@@ -1056,8 +1058,10 @@ OTTO_UI=repl otto
   head: the token totals and the cached share stay readable down to about 60
   columns, while the sandbox state, the reasoning effort, the workspace and
   the session ID can be cut off. The cached share is `cached input tokens /
-  input tokens`, the same weighted ratio `GET /v1/usage` reports as
-  `cache_hit_rate`.
+  input tokens`. `GET /v1/usage` reports provider operations and actual HTTP
+  attempts separately. Its `cache_hit_rate` and cached-token total are `null`
+  when any included, reported usage lacks a cached-token breakdown; a missing
+  breakdown is unknown, not a reported zero.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
 
 ### TUI keys
@@ -1539,9 +1543,12 @@ Notes:
     written before `otto.turn` entries existed are recovered only when they
     end with calls without results. Nothing is resumed until a frontend opens
     the session; `otto serve` does not reopen sessions on start.
-- Manual and automatic compaction append Pi v3 `type: "compaction"`
+- Local manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
-  bounded file metadata.
+  bounded file metadata. Responses remote compaction instead appends an
+  invisible `otto.remote_compaction` custom checkpoint. It is append-only and
+  contains provider-owned encrypted context, so a resumed session can return
+  it unchanged without exposing it as transcript text.
 - Session files contain sensitive prompt text, responses, summaries, tool
   calls, tool arguments, results, and file metadata. Protect them like source
   data. They do not contain provider API keys, OAuth tokens, authorization
@@ -1663,8 +1670,16 @@ Rules and defaults:
   `hard_input_window - reserve_tokens`, Otto emits a `compaction_warning` that
   names the cause and sends the original request. At or above that limit the
   turn fails.
-- Reasoning the model returns with a summary is discarded; only the summary
-  text is stored in the checkpoint.
+- A provider that explicitly advertises Responses remote compaction receives
+  the current context plus a `compaction_trigger`. Otto stores the returned
+  encrypted compaction item unchanged and sends it only to the same provider;
+  it is never displayed, logged, or treated as readable summary text. A
+  provider without that capability uses Otto's local structured summary. Once
+  a provider advertises support, authentication, transport, cancellation and
+  malformed-response failures are surfaced rather than hidden by a second
+  local request.
+- For local compaction, reasoning the model returns with a summary is
+  discarded; only the summary text is stored in the checkpoint.
 - `reserve_tokens = 16384` and `keep_recent_tokens = 20000` are the defaults.
 - `context_window` and `compaction_window` must be at least `4096` when set.
 - `compaction_window` requires `context_window` and must not exceed it.

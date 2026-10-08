@@ -184,18 +184,22 @@ pub struct WireUsage {
     pub completion_tokens: i64,
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub prompt_cache_hit_tokens: i64,
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<i64>,
 }
 
 impl WireUsage {
-    /// The cached prompt tokens: the OpenAI detail field when it is positive,
+    /// The cached prompt tokens: the OpenAI detail field when present,
     /// otherwise the DeepSeek top-level field.
     pub fn cached_tokens(&self) -> i64 {
         match &self.prompt_tokens_details {
-            Some(details) if details.cached_tokens > 0 => details.cached_tokens,
-            _ => self.prompt_cache_hit_tokens,
+            Some(details) => details.cached_tokens,
+            None => self.prompt_cache_hit_tokens.unwrap_or_default(),
         }
+    }
+
+    pub fn cached_tokens_present(&self) -> bool {
+        self.prompt_tokens_details.is_some() || self.prompt_cache_hit_tokens.is_some()
     }
 }
 

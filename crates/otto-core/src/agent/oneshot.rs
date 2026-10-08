@@ -45,6 +45,8 @@ pub struct TextResponse {
     pub usage: Usage,
     /// Whether the provider reported usage at all.
     pub usage_present: bool,
+    /// Whether the provider reported the cached-input-token breakdown.
+    pub cached_input_tokens_present: bool,
 }
 
 struct ChildControl<'a> {
@@ -103,6 +105,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 ..Message::default()
             }],
             tools: Vec::new(),
+            ..Request::default()
         };
 
         let child = control.cancellation_token().child_token();
@@ -162,7 +165,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
-        self.emit_provider_api_call(emit, operation_id, duration, &outcome);
+        self.emit_provider_api_call(
+            emit,
+            operation_id,
+            super::ProviderOperationKind::Ordinary,
+            duration,
+            &outcome,
+        );
 
         stopped(control)?;
         if invalid_stream.load(Ordering::SeqCst) {
@@ -177,6 +186,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             other => AgentError::Other(self.redactor.redact_string(&other.to_string())),
         })?;
 
+        let cached_input_tokens_present = response.cached_input_tokens_present;
         let message = response.message;
         if message.role != Role::Assistant {
             return Err(AgentError::InvalidResponse(
@@ -208,6 +218,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             text: self.redactor.redact_string(&text),
             usage: message.usage.unwrap_or_default(),
             usage_present,
+            cached_input_tokens_present: usage_present && cached_input_tokens_present,
         })
     }
 }

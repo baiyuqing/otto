@@ -1019,7 +1019,13 @@ api_key_env = "ALPHA_KEY"
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| reply("done"));
-            ProviderSettlement::succeeded(Response { message }, 1)
+            ProviderSettlement::succeeded(
+                Response {
+                    message,
+                    ..Response::default()
+                },
+                1,
+            )
         }
     }
 

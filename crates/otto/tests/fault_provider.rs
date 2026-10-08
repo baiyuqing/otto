@@ -533,23 +533,23 @@ async fn chatgpt_token_source_failure_sends_no_request_and_is_not_started() {
 }
 
 #[tokio::test]
-async fn chatgpt_reset_after_output_is_not_retried_and_effect_is_unknown() {
-    let server = http::spawn_repeating(Script::sse_cut_after(&[TEXT, COMPLETED], 1)).await;
+async fn chatgpt_reset_after_output_recovers_and_marks_partial_output() {
+    let server = http::spawn_scripted(vec![
+        Script::sse_cut_after(&[TEXT, COMPLETED], 1),
+        Script::sse_without_done(&[TEXT, COMPLETED]),
+    ])
+    .await;
     let (settlement, events) = complete_plain(&chatgpt(&server, "token")).await;
-    assert!(settlement.result.is_err());
-    assert_eq!(settlement.attempts, 1);
-    assert_eq!(server.count(), 1);
-    assert_eq!(
-        settlement.outcome.effect_certainty,
-        EffectCertainty::Unknown
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::TextDelta { .. })),
-        "the delta reached the caller: {events:?}"
-    );
-    assert!(retries(&events).is_empty());
+    assert_one_retry_then_success(&settlement, &events, &server);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Retry {
+            interrupted_output: true,
+            ..
+        }
+    )));
+    let requests = server.requests();
+    assert_eq!(requests[0].body, requests[1].body);
 }
 
 fn chatgpt_short(server: &Server) -> chatgpt::Client {
@@ -573,7 +573,13 @@ async fn chatgpt_stall_before_the_head_is_retried_and_the_second_request_succeed
     ])
     .await;
     let (settlement, events) = complete_plain(&chatgpt_short(&server)).await;
-    assert_one_retry_then_success(&settlement, &events, &server);
+    assert!(settlement.result.is_ok());
+    assert_eq!(settlement.attempts, 2);
+    assert_eq!(server.count(), 2);
+    assert_eq!(
+        retries(&events),
+        [(2, Duration::from_secs(1), "request timeout")]
+    );
     let requests = server.requests();
     assert_eq!(requests[0].body, requests[1].body);
 }
@@ -586,22 +592,35 @@ async fn chatgpt_stall_after_the_head_before_any_event_is_retried() {
     ])
     .await;
     let (settlement, events) = complete_plain(&chatgpt_short(&server)).await;
-    assert_one_retry_then_success(&settlement, &events, &server);
+    assert!(settlement.result.is_ok());
+    assert_eq!(settlement.attempts, 2);
+    assert_eq!(server.count(), 2);
+    assert_eq!(
+        retries(&events),
+        [(2, Duration::from_secs(1), "stream read timeout")]
+    );
 }
 
 #[tokio::test]
-async fn chatgpt_stall_after_one_content_delta_is_terminal_with_unknown_effect() {
-    let server = http::spawn_repeating(Script::stall_after_events(&[TEXT])).await;
+async fn chatgpt_stall_after_one_content_delta_recovers() {
+    let server = http::spawn_scripted(vec![
+        Script::stall_after_events(&[TEXT]),
+        Script::sse_without_done(&[TEXT, COMPLETED]),
+    ])
+    .await;
     let (settlement, events) = complete_plain(&chatgpt_short(&server)).await;
-    assert!(
-        settlement.result.is_err(),
-        "a stalled stream is not a complete response"
-    );
-    assert_eq!(settlement.attempts, 1);
-    assert_eq!(server.count(), 1);
+    assert!(settlement.result.is_ok());
+    assert_eq!(settlement.attempts, 2);
+    assert_eq!(server.count(), 2);
     assert_eq!(
-        settlement.outcome.effect_certainty,
-        EffectCertainty::Unknown
+        retries(&events),
+        [(2, Duration::from_secs(1), "stream read timeout")]
     );
-    assert!(retries(&events).is_empty());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Retry {
+            interrupted_output: true,
+            ..
+        }
+    )));
 }

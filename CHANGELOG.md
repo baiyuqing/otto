@@ -45,6 +45,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- ChatGPT automatically retries transient failures after partial streamed output,
+  preserving completed tools and marking the interrupted response before its
+  replacement. Parent and sub-agent requests share bounded, cancellable recovery;
+  session diagnostics record retry reasons and attempt counts
+  ([#434](https://github.com/baiyuqing/otto/pull/434)).
+
 - `agent` with `resume` accepts `context: "fresh"` (the default) as omitted,
   so a call that fills every field no longer fails with `resume does not
   accept context`.

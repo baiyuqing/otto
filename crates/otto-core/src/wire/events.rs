@@ -91,6 +91,8 @@ pub struct WireRetry {
     pub delay_ms: u64,
     #[serde(default)]
     pub reason: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted_output: bool,
 }
 
 /// One event as it crosses the HTTP boundary.
@@ -314,6 +316,7 @@ pub fn to_wire(event: &Event) -> WireEvent {
             max_attempts,
             delay,
             reason,
+            interrupted_output,
         } => {
             wire.operation_id = operation_id.to_string();
             wire.attempt = Some(*attempt);
@@ -322,6 +325,7 @@ pub fn to_wire(event: &Event) -> WireEvent {
                 max_attempts: *max_attempts,
                 delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                 reason: reason.clone(),
+                interrupted_output: *interrupted_output,
             });
         }
         Event::CompactionWarning { message }

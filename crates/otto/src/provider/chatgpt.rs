@@ -16,15 +16,15 @@
 //! distinct, while a fully received and validated response wins a simultaneous
 //! stop.
 //!
-//! Errors: every failure outside the stream decoder is one of three fixed
-//! strings, so no endpoint text and no credential can reach the caller. A
+//! Errors: transport failures use fixed messages with safe retry counts and
+//! failure classes, so no endpoint text or credential reaches the caller. A
 //! decoder failure carries the decoder's own message with the access token and
 //! the account id redacted.
 //!
 //! Two deliberate decisions:
 //!   - transport failures, HTTP 429/500/502/503/504, and stream-reported
-//!     `server_is_overloaded` or `server_error` before any streamed output get
-//!     up to six retries; other statuses, reported codes and protocol failures
+//!     `server_is_overloaded` or `server_error` get up to six retries, including
+//!     after partial output; other statuses, reported codes and protocol failures
 //!     are returned on the first attempt.
 //!   - reqwest exposes no cap on the size of a response header block, so no
 //!     bound is enforced on it. The same gap exists in
@@ -69,7 +69,7 @@ const REQUEST_FAILED: &str = "chatgpt request failed";
 const TRANSPORT_RETRY_REASON: &str = "connection interrupted";
 
 /// Classifies a Responses stream failure for the bounded transport retry.
-/// The caller still suppresses the retry after any output reached its sink.
+/// Partial output is provisional; the retry event marks its replacement.
 fn stream_retry(error: &StreamError) -> Option<Retry> {
     let reason = match error {
         StreamError::Reported { code, .. } => match code.as_str() {
@@ -203,14 +203,12 @@ impl Provider for Client {
             }
             attempts += settlement.attempts;
             settlement.attempts = attempts;
-            // Retry this completion only. Previously executed tools stay in
-            // the unchanged request; streamed output cannot be replayed.
+            // Retry only this completion. A partial stream never authorizes
+            // tools; previously completed tools remain in the borrowed request.
+            // The retry event separates provisional output from its replacement.
             let Some(retry) = retry_reason else {
                 return settlement;
             };
-            if output_started {
-                return settlement;
-            }
             if let Err(error) = check_running(control) {
                 return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
             }
@@ -222,6 +220,12 @@ impl Provider for Client {
                 Duration::from_secs(1),
                 &mut Backoff,
             ) else {
+                if let Err(ProviderError::Other(message)) = &mut settlement.result {
+                    *message = format!(
+                        "{message} ({}; {attempts} attempts; retry budget exhausted)",
+                        retry.reason
+                    );
+                }
                 return settlement;
             };
             emit(StreamEvent::Retry {
@@ -229,6 +233,7 @@ impl Provider for Client {
                 max_attempts: RETRY_POLICY.max_attempts,
                 delay,
                 reason: retry.reason.to_owned(),
+                interrupted_output: output_started,
             });
             if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
                 return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
@@ -326,7 +331,11 @@ impl Client {
             Ok(Err(error)) => {
                 if !error.is_builder() && !error.is_redirect() {
                     *retry_reason = Some(Retry {
-                        reason: TRANSPORT_RETRY_REASON,
+                        reason: if error.is_timeout() {
+                            "request timeout"
+                        } else {
+                            TRANSPORT_RETRY_REASON
+                        },
                         retry_after: None,
                     });
                 }
@@ -369,7 +378,11 @@ impl Client {
                 Ok(Err(error)) => {
                     if !error.is_builder() && !error.is_redirect() {
                         *retry_reason = Some(Retry {
-                            reason: TRANSPORT_RETRY_REASON,
+                            reason: if error.is_timeout() {
+                                "stream read timeout"
+                            } else {
+                                TRANSPORT_RETRY_REASON
+                            },
                             retry_after: None,
                         });
                     }
@@ -1159,8 +1172,8 @@ mod tests {
     }
 
     /// A connection that is refused carries no provider text into the error.
-    /// Paused time skips the 1 + 2 + 4 + 8 + 16 + 30 s backoff.
-    #[tokio::test(start_paused = true)]
+    /// Real time keeps socket failures distinct from artificial read timeouts.
+    #[tokio::test]
     async fn a_transport_failure_stops_after_six_retries() {
         let client = Client::with_base_url("http://127.0.0.1:1", static_tokens("token"), "acct-1");
         let (settlement, events) = complete(&client, &Request::default()).await;
@@ -1169,7 +1182,10 @@ mod tests {
             settlement.outcome.effect_certainty,
             EffectCertainty::Unknown
         );
-        assert_eq!(settlement.result.unwrap_err().to_string(), REQUEST_FAILED);
+        assert_eq!(
+            settlement.result.unwrap_err().to_string(),
+            "chatgpt request failed (connection interrupted; 7 attempts; retry budget exhausted)"
+        );
         assert_eq!(
             events,
             vec![
@@ -1177,37 +1193,43 @@ mod tests {
                     attempt: 2,
                     max_attempts: 7,
                     delay: Duration::from_secs(1),
-                    reason: "connection interrupted".into()
+                    reason: "connection interrupted".into(),
+                    interrupted_output: false,
                 },
                 StreamEvent::Retry {
                     attempt: 3,
                     max_attempts: 7,
                     delay: Duration::from_secs(2),
-                    reason: "connection interrupted".into()
+                    reason: "connection interrupted".into(),
+                    interrupted_output: false,
                 },
                 StreamEvent::Retry {
                     attempt: 4,
                     max_attempts: 7,
                     delay: Duration::from_secs(4),
-                    reason: "connection interrupted".into()
+                    reason: "connection interrupted".into(),
+                    interrupted_output: false,
                 },
                 StreamEvent::Retry {
                     attempt: 5,
                     max_attempts: 7,
                     delay: Duration::from_secs(8),
-                    reason: "connection interrupted".into()
+                    reason: "connection interrupted".into(),
+                    interrupted_output: false,
                 },
                 StreamEvent::Retry {
                     attempt: 6,
                     max_attempts: 7,
                     delay: Duration::from_secs(16),
-                    reason: "connection interrupted".into()
+                    reason: "connection interrupted".into(),
+                    interrupted_output: false,
                 },
                 StreamEvent::Retry {
                     attempt: 7,
                     max_attempts: 7,
                     delay: Duration::from_secs(30),
-                    reason: "connection interrupted".into()
+                    reason: "connection interrupted".into(),
+                    interrupted_output: false,
                 },
             ]
         );
@@ -1287,19 +1309,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_clean_eof_after_output_is_terminal_without_retry() {
-        const PARTIAL: &str = concat!(
-            "event: response.output_text.delta\n",
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n",
-            "\n",
-        );
-        let server = testserver::spawn(|_| sse_response(PARTIAL)).await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
-        let (settlement, events) = complete(&client, &model_request()).await;
-        assert!(settlement.result.is_err());
-        assert_eq!(settlement.attempts, 1);
-        assert_eq!(server.count(), 1);
-        assert!(retry_reasons(&events).is_empty());
+    async fn interrupted_text_reasoning_and_tool_streams_are_retried() {
+        for prefix in [
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial answer long enough to be visible\"}\n\n",
+            "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"partial reasoning long enough to be visible\"}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"item1\",\"call_id\":\"unfinished\",\"name\":\"get_time\",\"arguments\":\"\"}}\n\n",
+        ] {
+            let count = std::sync::atomic::AtomicUsize::new(0);
+            let server = testserver::spawn(move |_| {
+                if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    sse_response(prefix)
+                } else {
+                    sse_response(CANNED_STREAM)
+                }
+            })
+            .await;
+            let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+            let (settlement, events) = complete(&client, &model_request()).await;
+            assert!(settlement.result.is_ok(), "{events:?}");
+            assert_eq!(settlement.attempts, 2);
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    StreamEvent::Retry {
+                        interrupted_output: true,
+                        ..
+                    }
+                )),
+                "{events:?}"
+            );
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].body, requests[1].body);
+        }
     }
 
     fn retry_reasons(events: &[StreamEvent]) -> Vec<&str> {
@@ -1391,7 +1433,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reported_overload_after_streamed_output_is_not_retried() {
+    async fn a_reported_overload_after_streamed_output_recovers() {
         let body = format!(
             "{}{OVERLOADED_STREAM}",
             concat!(
@@ -1400,12 +1442,27 @@ mod tests {
                 "\n",
             )
         );
-        let server = testserver::spawn(move |_| sse_response(&body)).await;
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let server = testserver::spawn(move |_| {
+            if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                sse_response(&body)
+            } else {
+                sse_response(CANNED_STREAM)
+            }
+        })
+        .await;
         let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
         let (settlement, events) = complete(&client, &model_request()).await;
-        assert!(settlement.result.is_err());
-        assert_eq!(server.count(), 1);
-        assert!(retry_reasons(&events).is_empty());
+        assert!(settlement.result.is_ok());
+        assert_eq!(server.count(), 2);
+        assert_eq!(retry_reasons(&events), ["server_is_overloaded"]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Retry {
+                interrupted_output: true,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
@@ -1433,7 +1490,11 @@ mod tests {
         let attempts = AtomicUsize::new(0);
         let server = testserver::spawn(move |_| match attempts.fetch_add(1, Ordering::SeqCst) {
             0 => sse_response(CANNED_STREAM),
-            1 => testserver::truncated_sse_response("", 4096),
+            1 => {
+                let prefix =
+                    &CANNED_STREAM[..CANNED_STREAM.find("event: response.completed").unwrap()];
+                testserver::truncated_sse_response(prefix, prefix.len() + 4096)
+            }
             2 => sse_response(&format!(
                 "{}{}",
                 &CANNED_STREAM[..CANNED_STREAM
@@ -1485,7 +1546,12 @@ mod tests {
             OperationStopReason::UserCancellation,
             OperationStopReason::Deadline,
         ] {
-            let server = testserver::spawn(|_| testserver::truncated_sse_response("", 4096)).await;
+            let server = testserver::spawn(|_| {
+                let prefix =
+                    &CANNED_STREAM[..CANNED_STREAM.find("event: response.completed").unwrap()];
+                testserver::truncated_sse_response(prefix, prefix.len() + 4096)
+            })
+            .await;
             let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
             let control = crate::deadline::Control::new(crate::deadline::Deadline::unlimited());
             let mut retries = 0;
@@ -1493,9 +1559,14 @@ mod tests {
                 .complete(
                     &model_request(),
                     &mut |event| {
-                        assert!(matches!(event, StreamEvent::Retry { .. }));
-                        retries += 1;
-                        control.stop(reason);
+                        if let StreamEvent::Retry {
+                            interrupted_output, ..
+                        } = event
+                        {
+                            assert!(interrupted_output);
+                            retries += 1;
+                            control.stop(reason);
+                        }
                     },
                     &control,
                 )
@@ -1537,7 +1608,13 @@ mod tests {
             .await;
         assert_eq!(settlement.attempts, 1);
         assert_eq!(server.count(), 1);
-        assert_eq!(settlement.result.unwrap_err().to_string(), REQUEST_FAILED);
+        assert!(
+            settlement
+                .result
+                .unwrap_err()
+                .to_string()
+                .contains("1 attempts; retry budget exhausted")
+        );
     }
 
     #[tokio::test]
@@ -1564,36 +1641,43 @@ mod tests {
             "stream-account-secret",
         );
         let (settlement, events) = complete(&client, &Request::default()).await;
-        assert_eq!(settlement.attempts, 1);
-        assert_eq!(server.count(), 1);
+        assert_eq!(settlement.attempts, 7);
+        assert_eq!(server.count(), 7);
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event, StreamEvent::TextDelta { .. }))
         );
+        assert_eq!(retry_reasons(&events).len(), 6);
         assert!(
-            !events
+            events
                 .iter()
-                .any(|event| matches!(event, StreamEvent::Retry { .. }))
+                .filter_map(|event| match event {
+                    StreamEvent::Retry {
+                        interrupted_output, ..
+                    } => Some(*interrupted_output),
+                    _ => None,
+                })
+                .all(|interrupted| interrupted)
         );
         let error = settlement.result.unwrap_err().to_string();
-        assert_eq!(error, "chatgpt request failed");
+        assert_eq!(
+            error,
+            "chatgpt request failed (connection interrupted; 7 attempts; retry budget exhausted)"
+        );
+        assert!(!format!("{events:?} {error}").contains("stream-token-secret"));
+        assert!(!format!("{events:?} {error}").contains("stream-account-secret"));
     }
 
-    /// A stream that ends without `response.completed` is a protocol failure,
-    /// and its message is redacted before it leaves the client.
+    /// A malformed stream remains terminal.
     #[tokio::test]
-    async fn a_protocol_failure_is_reported_with_a_redacted_message() {
-        let server = testserver::spawn(|_| {
-            sse_response("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
-        })
-        .await;
-        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
-        let (settlement, _) = complete(&client, &Request::default()).await;
-        assert_eq!(
-            settlement.result.unwrap_err().to_string(),
-            "responses stream ended without response.completed"
-        );
+    async fn a_protocol_failure_is_not_retried() {
+        let server = testserver::spawn(|_| sse_response("data: {invalid}\n\n")).await;
+        let client = Client::with_base_url(&server.url, static_tokens("secret"), "acct-1");
+        let (settlement, events) = complete(&client, &Request::default()).await;
+        assert!(settlement.result.is_err());
+        assert_eq!(server.count(), 1);
+        assert!(retry_reasons(&events).is_empty());
     }
 
     #[tokio::test]

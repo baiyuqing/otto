@@ -644,16 +644,21 @@ Key points:
   [Stopping a turn that makes no progress](#stopping-a-turn-that-makes-no-progress).
 - ChatGPT connection/send/body failures, HTTP 429/500/502/503/504 responses,
   a clean stream close before its terminal event, and stream errors classified
-  as `server_is_overloaded` or `server_error` are retried up to six times when
-  no output has been streamed yet, waiting 1, 2, 4, 8, 16, then 30 seconds
-  within the same turn deadline. A numeric `Retry-After` header takes
+  as `server_is_overloaded` or `server_error` are retried up to six times,
+  including interruptions after partial output, waiting 1, 2, 4, 8, 16, then
+  30 seconds within the same turn deadline. A numeric `Retry-After` header takes
   precedence and is capped at 30 seconds. Only the current model request is
   repeated; previously executed tools are not rerun. The TUI shows the retry
-  countdown and the REPL prints each planned retry. Other HTTP statuses, other
-  stream error codes (such as `rate_limit_exceeded`), authorization errors,
-  malformed or oversized stream events, and failures after streamed output
-  are not retried. After the retry limit, the turn ends with an error rather
-  than remaining active.
+  countdown and the REPL prints each planned retry. Interrupted partial output
+  is marked before the replacement reply in the TUI, REPL and ACP clients;
+  only the completed reply is saved as assistant history. Parent and sub-agent
+  requests use the same recovery policy. Other HTTP statuses, other stream
+  error codes (such as `rate_limit_exceeded`), authorization errors, and
+  malformed or oversized stream events are not retried. Cancellation stops
+  recovery immediately. After the retry limit or deadline, the turn ends with
+  an error and the interactive session remains available. Normal model steps
+  record attempt counts and safe retry reasons in `otto.provider_recovery`
+  session entries when the request settles.
 
   A Responses stream accepts error classification in `response.error`, a
   nested event `error`, or top-level fields, and falls back to the SSE `event:`
@@ -2883,10 +2888,13 @@ plus `notification` when a sub-agent task finishes, and `plan_updated` after a
 tool call changes the [session plan](#session-plan), carrying the whole plan as
 `steps: [{text, status}]` (empty when it was cleared). `reasoning_delta` carries
 `text` like `text_delta`. `provider_retry` carries
-`retry: {attempt, max_attempts, delay_ms, reason}`, where `attempt` is the
+`retry: {attempt, max_attempts, delay_ms, reason, interrupted_output}`.
+`interrupted_output` defaults to false for older events; true marks the preceding
+partial response as interrupted, so consumers must separate it from the next
+attempt and discard unfinished buffers. `attempt` is the
 1-based attempt about to start and `reason` is an HTTP status such as
-`HTTP 503`, `connection error`, or `stream interrupted`; it never contains the
-response body.
+`HTTP 503`, `connection interrupted`, `request timeout`, or `stream read timeout`;
+it never contains the response body.
 
 ### Errors
 

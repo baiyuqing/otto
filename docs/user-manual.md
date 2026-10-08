@@ -1640,11 +1640,16 @@ per-profile context metadata.
 
 Rules and defaults:
 
-- `auto = true` is the default. With `auto = true`, Otto does two bounded
+- `auto = true` is the default. With `auto = true`, Otto does three bounded
   automatic checks:
   - **Proactive compaction:** when the model window is known and the next
     request estimate is above `working_window - reserve_tokens`, Otto attempts
     one checkpoint before sending the provider request.
+  - **Idle compaction:** when the last model response is at least 60 minutes
+    old (the provider prompt cache has likely expired) and the next request
+    estimate is above half of `working_window - reserve_tokens`, Otto attempts
+    one checkpoint before sending the request. It shares the one-shot attempt
+    with proactive compaction.
   - **Reactive overflow recovery:** when the provider returns a typed
     context-overflow error, Otto does one automatic compaction and retries once.
 - The automatic paths are one-shot only; they never loop.

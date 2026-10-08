@@ -1684,6 +1684,10 @@ impl ChildProgress {
     fn handle(&mut self, event: Event) {
         match event {
             Event::TextDelta { text } => self.text.push_str(&text),
+            Event::ProviderRetry {
+                interrupted_output: true,
+                ..
+            } => self.text.clear(),
             Event::ProviderUsage { usage, present } => {
                 let text = cap_last_bytes(&self.text, 500).to_string();
                 self.text.clear();
@@ -2614,6 +2618,65 @@ mod tests {
 
         block.cancel();
         wait_final(&tasks, "t1").await;
+    }
+
+    #[tokio::test]
+    async fn chatgpt_stream_recovery_completes_child_and_persists_safe_attempt_facts() {
+        use crate::faults::http::{self, Script};
+        const PARTIAL: &str = r#"{"type":"response.output_text.delta","delta":"abandoned answer long enough to be visible"}"#;
+        const FINAL: &str = r#"{"type":"response.output_text.delta","delta":"recovered answer"}"#;
+        const DONE: &str = r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        let server = http::spawn_scripted(vec![
+            Script::sse_cut_after(&[PARTIAL, DONE], 1),
+            Script::sse_without_done(&[FINAL, DONE]),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&FakeProvider::new(), &tasks, Vec::new());
+        config.provider = Arc::new(crate::provider::chatgpt::Client::with_base_url(
+            &server.url,
+            crate::auth::token::TokenSource::new(
+                crate::auth::Credentials {
+                    access_token: "test-token".into(),
+                    ..Default::default()
+                },
+                dir.path().join("absent-credentials.json"),
+                CancellationToken::new(),
+            ),
+            "test-account",
+        ));
+        let parent = dir.path().join("parent.jsonl");
+        config.child_session = Some(Arc::new(move |task_id: &str| {
+            Ok(Some(child_store(&parent, task_id, None)))
+        }));
+        let (runner, _) = runner(config);
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let task = wait_final(&tasks, "t1").await;
+        assert_eq!(task.status, TaskStatus::Succeeded, "{}", task.error);
+        assert_eq!(task.last_text, "recovered answer");
+        assert_eq!(server.count(), 2);
+        let requests = server.requests();
+        assert_eq!(requests[0].body, requests[1].body);
+        let path = std::path::Path::new(&task.session_path);
+        let entries = read_custom_entries(path);
+        let (_, audit) = entries
+            .iter()
+            .find(|(kind, _)| kind == "otto.provider_recovery")
+            .unwrap();
+        assert_eq!(audit["attempts"], 2);
+        assert_eq!(audit["retries"][0]["interruptedOutput"], true);
+        assert_eq!(audit["retries"][0]["reason"], "connection interrupted");
+        let persisted = std::fs::read_to_string(path).unwrap();
+        assert!(!persisted.contains("abandoned answer"));
+        assert!(!persisted.contains("test-token"));
+        assert!(!persisted.contains("test-account"));
     }
 
     #[tokio::test]

@@ -443,14 +443,17 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     max_attempts,
                     delay,
                     reason,
+                    interrupted_output,
                 } = event
                 {
+                    streamed_bytes.store(0, Ordering::SeqCst);
                     emit(super::Event::ProviderRetry {
                         operation_id: operation_id.clone(),
                         attempt,
                         max_attempts,
                         delay,
                         reason,
+                        interrupted_output,
                     });
                     return;
                 }

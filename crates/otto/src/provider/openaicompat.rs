@@ -525,6 +525,7 @@ impl Provider for Client {
                 max_attempts: RETRY_POLICY.max_attempts,
                 delay,
                 reason: reason.to_owned(),
+                interrupted_output: false,
             });
             if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
                 return if dispatched {
@@ -992,6 +993,7 @@ mod tests {
                     max_attempts: 4,
                     delay: Duration::from_secs(1 << (attempt - 2)),
                     reason: "connection failed".into(),
+                    interrupted_output: false,
                 })
                 .collect::<Vec<_>>()
         );

@@ -45,6 +45,7 @@ struct TurnState {
     status: &'static str,
     error_text: String,
     text: String,
+    completed_text_bytes: usize,
     usage: Usage,
     usage_present: bool,
     tool_start: Option<Instant>,
@@ -92,6 +93,7 @@ impl Turn {
                 status: TURN_RUNNING,
                 error_text: String::new(),
                 text: String::new(),
+                completed_text_bytes: 0,
                 usage: Usage::default(),
                 usage_present: false,
                 tool_start: None,
@@ -269,9 +271,19 @@ impl Turn {
             let mut wire = to_wire(&event);
             {
                 let mut state = self.lock();
+                if matches!(event, Event::ProviderUsage { .. }) {
+                    state.completed_text_bytes = state.text.len();
+                }
                 match &event {
                     Event::AgentStarted => wire.turn_id = self.id.clone(),
                     Event::TextDelta { text } => state.text.push_str(text),
+                    Event::ProviderRetry {
+                        interrupted_output: true,
+                        ..
+                    } => {
+                        let keep = state.completed_text_bytes;
+                        state.text.truncate(keep);
+                    }
                     Event::ProviderUsage { usage, present } if *present => {
                         state.usage_present = true;
                         state.usage.input_tokens += usage.input_tokens;
@@ -422,6 +434,40 @@ mod tests {
             output_tokens: output,
             cached_input_tokens: cached,
         }
+    }
+
+    #[test]
+    fn provider_recovery_summary_keeps_completed_steps_and_only_the_replacement() {
+        let (turn, metrics) = turn();
+        let mut emit = turn.emitter(&metrics);
+        emit(Event::TextDelta {
+            text: "earlier ✓".into(),
+        });
+        emit(Event::ProviderUsage {
+            usage: Default::default(),
+            present: false,
+        });
+        emit(Event::TextDelta {
+            text: "partial 一".into(),
+        });
+        emit(Event::ProviderRetry {
+            operation_id: otto_core::model::OperationId::new("retry-test").unwrap(),
+            attempt: 2,
+            max_attempts: 7,
+            delay: Duration::ZERO,
+            reason: "connection interrupted".into(),
+            interrupted_output: true,
+        });
+        emit(Event::TextDelta {
+            text: "final".into(),
+        });
+        assert_eq!(turn.summary().text, "earlier ✓final");
+        let (events, _) = turn.snapshot(0);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.retry.as_ref().is_some_and(|r| r.interrupted_output))
+        );
     }
 
     #[test]

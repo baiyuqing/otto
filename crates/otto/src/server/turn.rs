@@ -284,7 +284,7 @@ impl Turn {
                         let keep = state.completed_text_bytes;
                         state.text.truncate(keep);
                     }
-                    Event::ProviderUsage { usage, present } if *present => {
+                    Event::ProviderUsage { usage, present, .. } if *present => {
                         state.usage_present = true;
                         state.usage.input_tokens += usage.input_tokens;
                         state.usage.output_tokens += usage.output_tokens;
@@ -298,6 +298,7 @@ impl Turn {
                     }
                     Event::ProviderApiCall {
                         operation_id,
+                        kind: _,
                         provider,
                         model,
                         duration,
@@ -375,7 +376,7 @@ impl Turn {
             }
             self.changed.send_modify(|version| *version += 1);
 
-            if let Event::ProviderUsage { usage, present } = &event
+            if let Event::ProviderUsage { usage, present, .. } = &event
                 && *present
             {
                 metrics.tokens(usage);
@@ -446,6 +447,7 @@ mod tests {
         emit(Event::ProviderUsage {
             usage: Default::default(),
             present: false,
+            cached_input_tokens_present: false,
         });
         emit(Event::TextDelta {
             text: "partial 一".into(),
@@ -484,10 +486,12 @@ mod tests {
         emit(Event::ProviderUsage {
             usage: usage(1, 2, 3),
             present: true,
+            cached_input_tokens_present: false,
         });
         emit(Event::ProviderUsage {
             usage: usage(10, 20, 0),
             present: true,
+            cached_input_tokens_present: false,
         });
         drop(emit);
 
@@ -513,6 +517,7 @@ mod tests {
         emit(Event::ProviderUsage {
             usage: usage(1, 2, 3),
             present: true,
+            cached_input_tokens_present: false,
         });
         emit(Event::Notification {
             kind: None,
@@ -532,11 +537,13 @@ mod tests {
         emit(Event::ProviderUsage {
             usage: Usage::default(),
             present: false,
+            cached_input_tokens_present: false,
         });
         assert!(!turn.summary().usage_present);
         emit(Event::ProviderUsage {
             usage: Usage::default(),
             present: true,
+            cached_input_tokens_present: false,
         });
         drop(emit);
         let summary = turn.summary();
@@ -550,6 +557,7 @@ mod tests {
         let mut emit = turn.emitter(&metrics);
         emit(Event::ProviderApiCall {
             operation_id: otto_core::model::OperationId::new("provider_op").expect("operation id"),
+            kind: otto_core::agent::ProviderOperationKind::Ordinary,
             provider: "chatgpt".to_string(),
             model: "gpt-5".to_string(),
             duration: std::time::Duration::from_millis(1500),
@@ -661,6 +669,7 @@ mod tests {
         emit(Event::ProviderUsage {
             usage: usage(5, 7, 0),
             present: true,
+            cached_input_tokens_present: false,
         });
         drop(emit);
         let body = metrics.render();

@@ -5,10 +5,16 @@ use super::{
 };
 use crate::storage::backends::turso::usage::{self, Store};
 pub struct UsageCodec;
-const KINDS: &[Kind] = &[Kind {
-    record: &crate::usage::migration::RECORDS[0],
-    table: "usage_events",
-}];
+const KINDS: &[Kind] = &[
+    Kind {
+        record: &crate::usage::migration::RECORDS[0],
+        table: "usage_events",
+    },
+    Kind {
+        record: &crate::usage::migration::RECORDS[1],
+        table: "provider_api_operations",
+    },
+];
 impl SqlDomainCodec for UsageCodec {
     fn domain(&self) -> &'static str {
         "usage"
@@ -17,7 +23,7 @@ impl SqlDomainCodec for UsageCodec {
         "otto.usage"
     }
     fn version(&self) -> u32 {
-        1
+        crate::usage::migration::VERSION
     }
     fn committed_cursor(&self, connection: &Connection) -> Result<String> {
         connection
@@ -94,6 +100,7 @@ mod tests {
                     occurred_at: "2026-10-06T00:00:00Z".into(),
                     context: context.clone(),
                     kind: "provider",
+                    cached_input_tokens_present: present,
                     usage,
                     usage_present: present,
                 })

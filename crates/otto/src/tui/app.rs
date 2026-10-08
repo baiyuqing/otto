@@ -76,6 +76,8 @@ pub(crate) enum Action {
 pub(crate) struct App {
     pub entries: Vec<Entry>,
     pub usage: Usage,
+    /// Whether every accumulated usage report included a cache breakdown.
+    pub cache_breakdown_complete: Option<bool>,
     pub pending_image: Option<otto_core::model::Block>,
     pub info: Info,
     pub composer: Composer,
@@ -149,9 +151,12 @@ impl App {
                 .map(|e| e.raw.clone())
                 .collect(),
         );
+        let cache_breakdown_complete =
+            (usage.input_tokens != 0 || usage.output_tokens != 0).then_some(false);
         let mut app = Self {
             entries,
             usage,
+            cache_breakdown_complete,
             pending_image: None,
             info: backend.info(),
             composer,
@@ -1206,6 +1211,9 @@ impl App {
                 &event.text,
             ),
             "provider_usage" if event.usage_present == Some(true) => {
+                let reported = event.cached_input_tokens_present == Some(true);
+                self.cache_breakdown_complete =
+                    Some(self.cache_breakdown_complete.unwrap_or(true) && reported);
                 if let Some(usage) = event.usage {
                     self.usage.input_tokens = self
                         .usage
@@ -1481,14 +1489,17 @@ pub(crate) fn compaction_line(result: &otto_core::wire::events::WireCompaction) 
     if result.noop {
         return "[context] no-op".into();
     }
-    let before = super::layout::format_token_count(result.tokens_before);
-    if result.estimated_tokens_after > 0 {
-        format!(
-            "[context] compacted {before} → {} tokens",
-            super::layout::format_token_count(result.estimated_tokens_after)
-        )
-    } else {
-        format!("[context] compacted {before} tokens")
+    match (result.tokens_before, result.estimated_tokens_after) {
+        (Some(before), Some(after)) => format!(
+            "[context] compacted {} → {} tokens",
+            super::layout::format_token_count(before),
+            super::layout::format_token_count(after)
+        ),
+        (Some(before), None) => format!(
+            "[context] compacted {} tokens",
+            super::layout::format_token_count(before)
+        ),
+        (None, _) => "[context] compacted".into(),
     }
 }
 

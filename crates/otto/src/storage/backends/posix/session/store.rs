@@ -1393,6 +1393,38 @@ impl Session for Store {
         Store::latest_compaction(self)
     }
 
+    fn remote_compaction(&self) -> Option<otto_core::session::RemoteCompaction> {
+        let state = self.lock().expect("session mutex");
+        let leaf = state.leaf_id.as_deref().unwrap_or_default();
+        build_context(&state.entries, leaf)
+            .expect("stored session remains a valid context")
+            .0
+            .remote_compaction
+    }
+
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        let state = self.lock().expect("session mutex");
+        let leaf = state.leaf_id.as_deref().unwrap_or_default();
+        build_context(&state.entries, leaf)
+            .expect("stored session remains a valid context")
+            .0
+            .post_remote_compaction_messages
+    }
+
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: otto_core::session::RemoteCompaction,
+    ) -> Result<(), SessionError> {
+        let encoded = otto_core::session::encode_remote_compaction(&checkpoint)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        Store::append_custom_entry(
+            self,
+            otto_core::session::REMOTE_COMPACTION_CUSTOM_TYPE,
+            &encoded,
+        )
+        .map_err(|error| SessionError::Persist(error.to_string()))
+    }
+
     async fn append_compaction(
         &self,
         checkpoint: CompactionCheckpoint,

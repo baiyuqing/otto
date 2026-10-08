@@ -322,10 +322,10 @@ pub fn usage(
         .summary(Some(&record.context.session_id))
         .map_err(unavailable)?;
     ensure(
-        after.requests == before.requests + 1
-            && after.reported_requests
-                == before.reported_requests + i64::from(record.usage_present),
-        "usage presence or request count differs",
+        after.usage_events == before.usage_events + 1
+            && after.reported_usage_events
+                == before.reported_usage_events + i64::from(record.usage_present),
+        "usage presence or event count differs",
     )?;
     ensure(
         after.input_tokens == before.input_tokens + record.usage.input_tokens,

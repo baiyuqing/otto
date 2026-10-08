@@ -83,6 +83,9 @@ pub(crate) struct App {
     /// The newest guidance the active run has queued, painted only from a
     /// back-end read: the TUI never guesses what the run accepted.
     pub queued_steer: Option<otto_core::agent::steering::Message>,
+    /// Guidance Ctrl+U asked the runtime to withdraw. Its text returns to an
+    /// empty composer only after the runtime reports it as withdrawn.
+    recalling_steer: Option<otto_core::agent::steering::Message>,
     awaiting_user_echo: Option<String>,
     pub scroll: Option<u16>,
     pub max_scroll: std::cell::Cell<u16>,
@@ -154,6 +157,7 @@ impl App {
             composer,
             queued_input: None,
             queued_steer: None,
+            recalling_steer: None,
             awaiting_user_echo: None,
             scroll: None,
             max_scroll: Default::default(),
@@ -218,11 +222,13 @@ impl App {
     /// that could contradict it.
     fn finish_steering(&mut self) {
         let Some(steer) = self.queued_steer.take() else {
+            self.recalling_steer = None;
             return;
         };
         if self.composer.input.is_empty() {
             self.composer.set_input(&steer.text);
         }
+        self.recalling_steer = None;
         self.resolve_steering(&steer);
         self.refresh_steering();
     }
@@ -260,6 +266,7 @@ impl App {
             self.surfaces.clear();
             // The run that owned the tracked guidance ended with the session.
             self.queued_steer = None;
+            self.recalling_steer = None;
             let draft = self.composer.input.iter().collect::<String>();
             self.composer = Composer::new(
                 self.entries
@@ -412,10 +419,37 @@ impl App {
     /// whole transient lifecycle, oldest first, so the newest queued item is
     /// the one the user can still withdraw.
     fn apply_steering(&mut self, messages: Vec<otto_core::agent::steering::Message>) {
+        use otto_core::agent::steering::Status;
+
+        if let Some(recalling) = self.recalling_steer.as_ref()
+            && let Some(status) = messages
+                .iter()
+                .find(|message| message.id == recalling.id)
+                .map(|message| message.status)
+        {
+            match status {
+                Status::Withdrawn => {
+                    let recalled = self.recalling_steer.take().expect("recall is present");
+                    if self.composer.input.is_empty() {
+                        self.composer.set_input(&recalled.text);
+                    }
+                    self.resolve_steering(&recalled);
+                }
+                Status::Delivered | Status::Discarded => {
+                    let recalled = self.recalling_steer.take().expect("recall is present");
+                    self.resolve_steering(&recalled);
+                }
+                Status::Queued => {
+                    // This read is serialized after the withdrawal request. If
+                    // the item is still queued, the runtime did not withdraw it.
+                    self.recalling_steer = None;
+                }
+            }
+        }
         let queued = messages
             .into_iter()
             .rev()
-            .find(|message| message.status == otto_core::agent::steering::Status::Queued);
+            .find(|message| message.status == Status::Queued);
         if let Some(previous) = self.queued_steer.take()
             && queued
                 .as_ref()
@@ -653,6 +687,7 @@ impl App {
             self.session_changes.clear();
             // The run that owned the tracked guidance ended with the session.
             self.queued_steer = None;
+            self.recalling_steer = None;
             self.invalidate_reads();
         }
         if let Some(draft) = draft {
@@ -1070,7 +1105,8 @@ impl App {
                 // The run owns the guidance's state, so the withdrawal goes to
                 // it and the read that follows repaints the display: dropping
                 // it locally could hide a message that is still waiting.
-                if let Some(steer) = &self.queued_steer {
+                if let Some(steer) = self.queued_steer.clone() {
+                    self.recalling_steer = Some(steer.clone());
                     self.enqueue(
                         0,
                         Request::Command(backend::Command::WithdrawSteer(steer.id)),
@@ -1251,6 +1287,7 @@ impl App {
                     .cloned()
                 {
                     self.queued_steer = None;
+                    self.recalling_steer = None;
                     self.resolve_steering(&steer);
                 }
                 if self.attached {
@@ -2168,7 +2205,7 @@ mod tests {
     }
 
     #[test]
-    fn control_u_withdraws_the_queued_guidance_through_the_backend() {
+    fn control_u_recalls_backend_confirmed_guidance_for_editing() {
         let (mut app, remote) = app();
         app.start_turn();
         // Both a queued next input and queued guidance are waiting: Ctrl+U must
@@ -2222,6 +2259,46 @@ mod tests {
             app.awaiting_user_echo.is_none(),
             "withdrawn guidance cannot still be waiting for its echo"
         );
+        assert_eq!(
+            app.composer.input.iter().collect::<String>(),
+            "use the other branch",
+            "backend-confirmed withdrawal recalls the exact guidance"
+        );
+    }
+
+    #[test]
+    fn recalled_guidance_does_not_overwrite_a_new_draft() {
+        let (mut app, remote) = app();
+        app.start_turn();
+        app.queued_steer = Some(steer(3, "use the other branch", Status::Queued));
+
+        app.handle_key(
+            control_u(),
+            &Backend::Attach(&remote),
+            &CancellationToken::new(),
+        );
+        app.composer.set_input("new draft");
+        app.apply_steering(vec![steer(3, "use the other branch", Status::Withdrawn)]);
+
+        assert_eq!(app.composer.input.iter().collect::<String>(), "new draft");
+        assert!(app.recalling_steer.is_none());
+    }
+
+    #[test]
+    fn delivered_guidance_is_not_restored_when_recall_loses_the_race() {
+        let (mut app, remote) = app();
+        app.start_turn();
+        app.queued_steer = Some(steer(3, "use the other branch", Status::Queued));
+
+        app.handle_key(
+            control_u(),
+            &Backend::Attach(&remote),
+            &CancellationToken::new(),
+        );
+        app.apply_steering(vec![steer(3, "use the other branch", Status::Delivered)]);
+
+        assert!(app.composer.input.is_empty());
+        assert!(app.recalling_steer.is_none());
     }
 
     /// The still-live queued-next-input path: Ctrl+U clears it locally, with no

@@ -1338,7 +1338,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         {
             if !state.proactive_attempted {
                 state.proactive_attempted = true;
-                match self.compact_locked(reason, "", emit, control).await {
+                // Compaction futures live on the heap so the local and remote
+                // compaction state machines do not enlarge every turn future.
+                match Box::pin(self.compact_locked(reason, "", emit, control)).await {
                     Err(error) if error.is_nothing_to_compact() => {
                         emit(Event::CompactionCompleted {
                             compaction: CompactionResult {
@@ -1406,9 +1408,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(original_overflow);
         }
 
-        if let Err(compaction_error) = self
-            .compact_locked(CompactionReason::Overflow, "", emit, control)
-            .await
+        if let Err(compaction_error) =
+            Box::pin(self.compact_locked(CompactionReason::Overflow, "", emit, control)).await
         {
             if compaction_error.is_nothing_to_compact() {
                 emit(Event::CompactionCompleted {

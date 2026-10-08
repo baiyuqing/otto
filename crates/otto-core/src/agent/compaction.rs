@@ -21,7 +21,7 @@
 
 use crate::model::{BlockType, Message, Role, ToolDefinition, Usage};
 use crate::operation::OperationControl;
-use crate::provider::{Provider, Request};
+use crate::provider::{Provider, RemoteCompactionSupport, Request};
 use crate::session::{CompactionCheckpoint, CompactionDetails, CompactionMetadata, Session};
 use crate::tool::ToolExecutor;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -144,6 +144,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         if !self.redactor.allows_dynamic_content() {
             return Err(AgentError::NothingToCompact);
         }
+        if focus.trim().is_empty()
+            && matches!(
+                self.provider.capabilities().remote_compaction,
+                RemoteCompactionSupport::ResponsesV2
+            )
+        {
+            return self.compact_remote(reason, automatic, emit, control).await;
+        }
 
         let messages = self.session.model_messages();
         let latest = self.session.latest_compaction();
@@ -204,13 +212,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             plan: CompactionPlan {
                 reason,
                 automatic,
-                tokens_before,
-                estimated_tokens_after: estimate_compacted_context(
+                tokens_before: Some(tokens_before),
+                estimated_tokens_after: Some(estimate_compacted_context(
                     &self.options,
                     &tools,
                     "",
                     &selection.retained,
-                ),
+                )),
                 summarized_messages: selection.historical_source.len()
                     + selection.turn_prefix_source.len(),
                 retained_messages: selection.retained.len(),
@@ -218,7 +226,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             },
         });
 
-        let (generated, mut usage, mut usage_present) = self
+        let (generated, mut usage, mut usage_present, mut cached_input_tokens_present) = self
             .execute_summary_request(
                 &prepared.request,
                 first_maximum_bytes,
@@ -237,7 +245,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let mut details = prepared.details;
 
         if let Some(turn_prepared) = turn_prepared {
-            let (turn, turn_usage, turn_usage_present) = self
+            let (turn, turn_usage, turn_usage_present, turn_cached_input_tokens_present) = self
                 .execute_summary_request(
                     &turn_prepared.request,
                     TURN_SUMMARY_MAXIMUM_BYTES,
@@ -248,6 +256,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .await?;
             final_summary =
                 combine_summary(&generated, &turn).map_err(AgentError::InvalidCompactionSummary)?;
+            cached_input_tokens_present = (usage_present || turn_usage_present)
+                && (!usage_present || cached_input_tokens_present)
+                && (!turn_usage_present || turn_cached_input_tokens_present);
             (usage, usage_present) =
                 combine_compaction_usage(usage, usage_present, turn_usage, turn_usage_present);
             details = turn_prepared.details;
@@ -277,16 +288,17 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
         let mut result = CompactionResult {
             reason,
-            tokens_before,
-            estimated_tokens_after: estimate_compacted_context(
+            tokens_before: Some(tokens_before),
+            estimated_tokens_after: Some(estimate_compacted_context(
                 &self.options,
                 &tools,
                 &final_summary,
                 &selection.retained,
-            ),
+            )),
             automatic,
             usage,
             usage_present,
+            cached_input_tokens_present,
             ..CompactionResult::default()
         };
         let checkpoint = CompactionCheckpoint {
@@ -321,6 +333,155 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         Ok(result)
     }
 
+    async fn compact_remote(
+        &self,
+        reason: CompactionReason,
+        automatic: bool,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<CompactionResult, AgentError> {
+        stopped(control)?;
+        let remote_compaction = self
+            .session
+            .remote_compaction()
+            .filter(|checkpoint| checkpoint.provider == self.options.provider_name);
+        let messages = if remote_compaction.is_some() {
+            self.session.post_remote_compaction_messages()
+        } else {
+            self.session.model_messages()
+        };
+        if messages.is_empty() && remote_compaction.is_none() {
+            return Err(AgentError::NothingToCompact);
+        }
+        let tools = self.tools.definitions();
+        let tokens_before = remote_compaction.is_none().then(|| {
+            estimate_request(
+                &self.plain_request(messages.clone(), tools.clone()),
+                self.session.latest_compaction().as_ref(),
+            )
+        });
+        emit(Event::CompactionPlanned {
+            plan: CompactionPlan {
+                reason,
+                automatic,
+                tokens_before,
+                estimated_tokens_after: None,
+                summarized_messages: messages.len(),
+                retained_messages: 0,
+                mode: CompactionMode::Remote,
+            },
+        });
+        let request = Request {
+            model: self.options.model.clone(),
+            system_prompt: self.options.system_prompt.clone(),
+            thinking: self.options.thinking.clone(),
+            messages,
+            tools,
+            cache_key: self.options.cache_key.clone(),
+            remote_compaction,
+            request_remote_compaction: true,
+        };
+        let operation_id = (self.options.new_operation_id)()
+            .map_err(|message| AgentError::OperationIdentity { message })?;
+        let started = (self.options.now)();
+        let invalid_stream = AtomicBool::new(false);
+        let child = control.cancellation_token().child_token();
+        let remote_control = SummaryControl {
+            token: child.clone(),
+            parent: control,
+        };
+        let outcome = {
+            let mut on_stream = |event: crate::provider::StreamEvent| match event {
+                crate::provider::StreamEvent::Retry {
+                    attempt,
+                    max_attempts,
+                    delay,
+                    reason,
+                    interrupted_output,
+                } => emit(Event::ProviderRetry {
+                    operation_id: operation_id.clone(),
+                    attempt,
+                    max_attempts,
+                    delay,
+                    reason,
+                    interrupted_output,
+                }),
+                // The request carries the thinking setting, so a reasoning
+                // summary can stream; it is not part of the checkpoint.
+                crate::provider::StreamEvent::ReasoningDelta { .. } => {}
+                _ => {
+                    invalid_stream.store(true, Ordering::SeqCst);
+                    child.cancel();
+                }
+            };
+            self.provider
+                .complete(&request, &mut on_stream, &remote_control)
+                .await
+        };
+        let duration = ((self.options.now)() - started)
+            .to_std()
+            .unwrap_or_default();
+        self.emit_provider_api_call(
+            emit,
+            operation_id,
+            super::ProviderOperationKind::RemoteCompaction,
+            duration,
+            &outcome,
+        );
+        stopped(control)?;
+        if invalid_stream.load(Ordering::SeqCst) {
+            return Err(AgentError::CompactionBoundary {
+                message: "remote compaction returned visible output".into(),
+                cause: "responses remote compaction protocol error".into(),
+            });
+        }
+        let response = outcome.result.map_err(AgentError::Provider)?;
+        let usage = response.usage();
+        let cached_input_tokens_present = usage.is_some() && response.cached_input_tokens_present;
+        let checkpoint =
+            response
+                .remote_compaction
+                .ok_or_else(|| AgentError::CompactionBoundary {
+                    message: "remote compaction response was missing its checkpoint".into(),
+                    cause: "responses remote compaction protocol error".into(),
+                })?;
+        stopped(control)?;
+        self.session
+            .append_remote_compaction(checkpoint.clone())
+            .await
+            .map_err(|error| AgentError::CompactionBoundary {
+                message: "persist remote compaction checkpoint failed".into(),
+                cause: error.to_string(),
+            })?;
+        let result = CompactionResult {
+            checkpoint_id: checkpoint.id,
+            reason,
+            tokens_before: usage.map(|usage| usage.input_tokens).or(tokens_before),
+            estimated_tokens_after: None,
+            automatic,
+            usage: usage.unwrap_or_default(),
+            usage_present: usage.is_some(),
+            cached_input_tokens_present,
+            ..CompactionResult::default()
+        };
+        let token = CancellationToken::new();
+        if let Err(message) = self
+            .hook(
+                "after_compaction",
+                serde_json::json!({"checkpoint_id":result.checkpoint_id,"reason":format!("{reason:?}")}),
+                &token,
+            )
+            .await
+        {
+            self.hook_warning(emit, &message);
+        }
+        emit(Event::CompactionCompleted {
+            compaction: result.clone(),
+        });
+        stopped(control)?;
+        Ok(result)
+    }
+
     fn plain_request(&self, messages: Vec<Message>, tools: Vec<ToolDefinition>) -> Request {
         Request {
             model: self.options.model.clone(),
@@ -329,6 +490,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             messages,
             tools,
             cache_key: self.options.cache_key.clone(),
+            ..Request::default()
         }
     }
 
@@ -421,7 +583,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         structured: bool,
         emit: EventSink<'_>,
         control: &dyn OperationControl,
-    ) -> Result<(String, Usage, bool), AgentError> {
+    ) -> Result<(String, Usage, bool, bool), AgentError> {
         stopped(control)?;
         let child = control.cancellation_token().child_token();
         let summary_control = SummaryControl {
@@ -480,7 +642,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
-        self.emit_provider_api_call(emit, operation_id, duration, &outcome);
+        self.emit_provider_api_call(
+            emit,
+            operation_id,
+            super::ProviderOperationKind::LocalCompaction,
+            duration,
+            &outcome,
+        );
 
         stopped(control)?;
         if invalid_stream.load(Ordering::SeqCst) {
@@ -497,6 +665,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             },
         })?;
 
+        let cached_input_tokens_present = response.cached_input_tokens_present;
         let message = response.message;
         validate_provider_response_message(&message)
             .map_err(AgentError::InvalidCompactionSummary)?;
@@ -516,7 +685,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         .map_err(AgentError::InvalidCompactionSummary)?;
 
         let usage_present = message.usage.is_some();
-        Ok((summary, message.usage.unwrap_or_default(), usage_present))
+        Ok((
+            summary,
+            message.usage.unwrap_or_default(),
+            usage_present,
+            usage_present && cached_input_tokens_present,
+        ))
     }
 }
 
@@ -629,6 +803,7 @@ pub fn estimate_compacted_context(
         messages,
         tools: tools.to_vec(),
         cache_key: options.cache_key.clone(),
+        ..Request::default()
     };
     estimate_request(&request, Some(&CompactionMetadata::default()))
 }

@@ -53,7 +53,7 @@ impl<'a> ReadTool<'a> {
 pub fn read_definition() -> ToolDefinition {
     definition(
         "read",
-        "Read a UTF-8 text file from the workspace",
+        "Read a UTF-8 workspace file, including saved bash output; use offset and limit for relevant excerpts. Returns selected lines within the output cap or an error for unreadable, binary or oversized files.",
         json!({
             "type": "object",
             "additionalProperties": false,

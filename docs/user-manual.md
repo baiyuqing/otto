@@ -1516,7 +1516,7 @@ Notes:
   recovers it:
   - Tool calls in the last assistant message without results are run again
     when every one of them names `read`, `ls`, `grep`, `find`,
-    `memory_search`, `agent_status`, `remind_status`, or `list_models`, the
+    `memory_search`, `agent_status`, `agent_yield`, `remind_status`, or `list_models`, the
     tool had the same read-only declaration when the call started, and the
     call was not already run again once. Otherwise the first such call is
     recorded as an error result saying the call may have run, and the calls
@@ -1923,7 +1923,11 @@ canonical workspace, even when `--sandbox off` is selected:
   `new_text` for a single replacement (omit `edits`), or `path` and `edits`
   for a batch (omit top-level `old_text` and `new_text`). The agent is instructed
   to combine all currently known changes to the same file into one `edits` batch
-  rather than making one call per replacement. Put every batch
+  rather than making one call per replacement. After three successful single
+  replacements to the same file in one turn, Otto adds a one-time batching
+  advisory to the successful result. It does not reject or repeat the edit.
+  A successful multi-replacement batch resets the single-edit streak; failed
+  edits do not count. Advisory tracking is bounded to 128 files per turn. Put every batch
   replacement inside `edits`; each entry has its own `old_text` and `new_text`
   and matches against the original file. An empty `new_text` deletes the match.
   When `old_text` has no exact match, `edit` retries with a
@@ -2161,6 +2165,15 @@ the session's model. Child agents do not get this tool.
 
 The `agent` tool starts or resumes a child task and always returns immediately
 with its task id, so a running child cannot hold the parent's agent loop open.
+Before parallel implementation, settle shared types, field meanings and interfaces.
+Assign each writable file to one owner and keep tightly coupled cross-file changes
+in one implementation task, including required call-site adaptations. While a
+child owns its task, the parent does independent work; after delivery it reviews
+change summaries, interface changes and necessary diffs for integration. Shared
+contract revisions must be coordinated before dependent edits continue. These
+are coordination instructions, not new filesystem permissions or file locks;
+existing named-agent `write_policy` and `write_paths` still apply.
+
 Assign bounded file scopes and request findings with file/line evidence. After
 delegation, the parent relies on the child report and reads its saved report
 sections rather than repeating source inspection. Follow-up questions can be
@@ -2219,9 +2232,27 @@ temporary paths. This scratch directory is separate from the durable transcript.
 Filesystem failures or abrupt process termination can prevent cleanup. Without
 `bash`, no scratch directory is allocated; existing web/file tools still work.
 
+When only child dependencies remain, call `agent_yield` with `{}`. It returns
+immediately and requests ending the current model turn at a safe boundary; it
+does not wait inside the tool, cancel a child, or poll. All tool results in the
+batch are persisted before yielding. Tool errors and approval replanning take
+precedence, and queued notifications or user guidance are processed instead of
+being stranded at the yield boundary. Later child notifications or user input
+resume the parent through the existing runtime wake path. Calling it with no
+queued/running child, unsupported arguments or cancellation does not yield.
+Only the parent receives this tool; it is not the old blocking `agent_wait`.
+
+`agent_status` detail includes live activity: `tool`, `provider_or_runtime`,
+`waiting_for_approval`, or `approval_review` (and `unknown` if approval state
+cannot be read). Provider/runtime covers model calls, retries and orchestration;
+it does not claim an in-flight request is stalled. The last-tool field remains
+historical. Do not cancel children merely because that field or counters have
+not changed; use actual failure/timeout evidence or a changed task requirement.
+
 Use `agent_status` to inspect progress or retrieve a report path, `agent_send`
 to send guidance, and
-`agent_cancel` to stop a task; do not poll status to simulate waiting. Children
+`agent_cancel` to stop a task, and `agent_yield` when only dependencies remain.
+Do not poll status to simulate waiting. Children
 never receive these tools, so a child cannot start or stop another child.
 
 `agent_cancel` takes a task id or name and cancels that task. Cancellation is

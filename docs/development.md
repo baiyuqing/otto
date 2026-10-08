@@ -1118,6 +1118,14 @@ Protocol and examples: [Hooks and custom tools](user-manual.md#hooks-and-custom-
 
 ## Agent implementation contracts
 
+A tool executor may request a nonblocking turn yield through `yields_turn` only
+for a successful, completed tool execution. Core settles and persists the whole
+batch first. Failed calls, approval replanning, queued notifications and steering
+win over a yield; later mailbox delivery uses the existing frontend wake path.
+Custom executors default to not yielding. Never infer scheduling control from
+model-visible output text. Native wrappers must preserve the declaration while
+registry outcome/authority checks remain in force.
+
 Apply these requirements to every feature, fix, and refactor:
 
 - Keep agent instruction files short navigation maps and rulebooks. Put detailed contracts next to their owning code or in this development guide, and link to one canonical source instead of copying it across agent instructions.

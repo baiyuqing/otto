@@ -96,6 +96,12 @@ pub trait Tool: Send + Sync {
         Ok(())
     }
 
+    /// Whether a successful call requests ending this provider turn at the
+    /// next safe boundary. The registry checks its settled outcome first.
+    fn yields_turn(&self) -> bool {
+        false
+    }
+
     fn batch_control(&self) -> otto_core::approval::BatchControl {
         otto_core::approval::BatchControl::Continue
     }

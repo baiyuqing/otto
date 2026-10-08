@@ -29,7 +29,7 @@ the runtime, session history, and default memory storage.
 
 ## Code architecture
 
-[![Otto code architecture: access, frontends, application runtime, native services, and portable core](docs/architecture/otto-architecture.png)](docs/architecture/otto-architecture.svg)
+[![Otto code architecture: access, frontends, application runtime, native services, and portable core](docs/architecture/otto-architecture.png?v=a37f68b)](docs/architecture/otto-architecture.svg)
 
 [Code organization](docs/code-organization.md) · [SVG](docs/architecture/otto-architecture.svg) · [Editable HTML](docs/architecture/otto-architecture.html)
 

@@ -33,6 +33,8 @@ pub struct WireRequest {
     pub reasoning: Option<WireReasoning>,
     pub stream: bool,
     pub store: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub prompt_cache_key: String,
 }
 
 /// The reasoning request field, present only when the model asks for an
@@ -278,6 +280,7 @@ pub fn build_request_with(request: &Request, hosted_web_search: bool) -> WireReq
     WireRequest {
         model: request.model.clone(),
         instructions: request.system_prompt.clone(),
+        prompt_cache_key: request.cache_key.clone(),
         input,
         tools: request
             .tools
@@ -414,6 +417,18 @@ mod tests {
     }
 
     #[test]
+    fn prompt_cache_key_is_sent_only_when_the_request_has_a_cache_key() {
+        let keyed = Request {
+            cache_key: "s1".into(),
+            ..Request::default()
+        };
+        let body = serde_json::to_string(&build_request(&keyed)).unwrap();
+        assert!(body.contains(r#""prompt_cache_key":"s1""#), "{body}");
+        let body = serde_json::to_string(&build_request(&Request::default())).unwrap();
+        assert!(!body.contains("prompt_cache_key"), "{body}");
+    }
+
+    #[test]
     fn hosted_web_search_is_one_extra_typed_tool_after_the_functions() {
         let request = Request {
             model: "m".into(),
@@ -495,6 +510,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn full_request_encodes_every_field() {
         let request = Request {
+            cache_key: String::new(),
             model: "test-model".into(),
             system_prompt: "sys".into(),
             thinking: "high".into(),

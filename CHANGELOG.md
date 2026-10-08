@@ -43,6 +43,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
   remains visible even when log storage fails. Agent guidance favors scripts
   that analyze logs locally and return checked summaries instead of full logs.
   ([#437](https://github.com/baiyuqing/otto/pull/437))
+- The ChatGPT provider now sends `prompt_cache_key` with every request, set to
+  the session id (a sub-agent uses its own transcript id), so the backend can
+  route a session's requests to the same prompt cache. The OpenAI-compatible
+  provider does not send it.
+  ([#438](https://github.com/baiyuqing/otto/pull/438))
 
 ## 0.4.5 - 2026-10-07
 

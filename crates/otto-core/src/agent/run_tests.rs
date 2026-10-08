@@ -342,6 +342,26 @@ fn names(events: &[Event]) -> Vec<&'static str> {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn the_options_cache_key_reaches_the_provider_request() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("ok")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            cache_key: "sess-1".into(),
+            ..options()
+        },
+    );
+    agent
+        .run("hi", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+    let requests = agent.provider().normal_requests();
+    assert_eq!(requests[0].cache_key, "sess-1");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn image_is_persisted_and_sent_with_the_user_prompt() {
     let agent = Agent::new(
         FakeProvider::new(vec![Turn::text("ok")]),
@@ -3294,6 +3314,7 @@ async fn prompt_parts_that_do_not_match_the_prompt_fall_back_to_one_part() {
 fn a_compaction_summary_and_mcp_tools_get_their_own_sections() {
     use crate::session::COMPACTION_CONTEXT_TYPE;
     let request = Request {
+        cache_key: String::new(),
         model: "m".into(),
         system_prompt: "p".into(),
         thinking: String::new(),

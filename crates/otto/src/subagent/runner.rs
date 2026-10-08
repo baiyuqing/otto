@@ -1339,6 +1339,18 @@ impl Runner {
             .tasks
             .child_inbox(&task.id)
             .unwrap_or_else(|| Arc::new(Inbox::new(None)) as Arc<dyn Mailbox>);
+        // The transcript file stem (`<task-id>-<child-id>`), never the full
+        // path, which contains the home directory. Empty for memory sessions.
+        let cache_key = self
+            .config
+            .tasks
+            .get(&task.id)
+            .and_then(|t| {
+                std::path::Path::new(&t.session_path)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
         let options = Options {
             hooks: template
                 .plugins
@@ -1371,6 +1383,7 @@ impl Runner {
             provider_name: template.provider_name.clone(),
             system_prompt,
             thinking: redactor.redact_string(&template.thinking),
+            cache_key,
             now: Box::new(move || now_clock()),
             new_id: Box::new(move || new_id()),
             new_operation_id: Box::new(move || new_operation_id()),

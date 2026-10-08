@@ -1,11 +1,13 @@
 //! The process log: `time=<RFC 3339> level=<LEVEL> msg=<event> key=value ...` lines.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
+mod diagnostics;
 
 /// ponytail: no logging crate is pinned and the server writes a handful of
 /// fixed lines, so a small formatter beats adding `tracing` plus a subscriber.
 /// Swap for `tracing` if any other crate needs structured logs.
 pub struct Logger {
+    diagnostics: OnceLock<Arc<diagnostics::Log>>,
     sink: Mutex<Box<dyn std::io::Write + Send>>,
 }
 
@@ -20,15 +22,38 @@ impl Logger {
         Self::new(Box::new(std::io::stderr()))
     }
 
-    /// A logger that writes nothing, for frontends that own the terminal.
+    /// Suppresses ordinary stderr lines for terminal frontends. Startup can
+    /// still enable the separate content-free diagnostic file sink.
     pub fn discard() -> Self {
         Self::new(Box::new(std::io::sink()))
     }
 
     pub fn new(sink: Box<dyn std::io::Write + Send>) -> Self {
         Self {
+            diagnostics: OnceLock::new(),
             sink: Mutex::new(sink),
         }
+    }
+
+    /// Enables a separate content-free file sink, including on terminal-safe
+    /// discard loggers. Ordinary stderr lines are never copied into this file.
+    pub fn enable_diagnostics(&self, home: &std::path::Path) -> std::io::Result<()> {
+        if self.diagnostics.get().is_none() {
+            let log = diagnostics::Log::open(home)?;
+            let _ = self.diagnostics.set(log);
+        }
+        Ok(())
+    }
+
+    pub fn diagnostic_scope(
+        &self,
+        session: &str,
+        task: &str,
+        redactor: otto_core::agent::redactor::Redactor,
+    ) -> Option<Arc<dyn otto_core::diagnostics::Diagnostics>> {
+        self.diagnostics
+            .get()
+            .map(|log| log.scope(session, task, redactor))
     }
 
     pub fn info(&self, message: &str, fields: &[(&str, String)]) {

@@ -184,18 +184,22 @@ pub struct WireUsage {
     pub completion_tokens: i64,
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub prompt_cache_hit_tokens: i64,
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<i64>,
 }
 
 impl WireUsage {
-    /// The cached prompt tokens: the OpenAI detail field when it is positive,
-    /// otherwise the DeepSeek top-level field.
+    /// The cached prompt tokens reported by either spelling. When both are
+    /// present, use the larger count: some compatible providers emit a
+    /// defaulted zero detail alongside the authoritative top-level value.
     pub fn cached_tokens(&self) -> i64 {
-        match &self.prompt_tokens_details {
-            Some(details) if details.cached_tokens > 0 => details.cached_tokens,
-            _ => self.prompt_cache_hit_tokens,
-        }
+        self.prompt_tokens_details
+            .map_or(0, |details| details.cached_tokens)
+            .max(self.prompt_cache_hit_tokens.unwrap_or_default())
+    }
+
+    pub fn cached_tokens_present(&self) -> bool {
+        self.prompt_tokens_details.is_some() || self.prompt_cache_hit_tokens.is_some()
     }
 }
 
@@ -459,6 +463,8 @@ mod tests {
                 description: "read a file".into(),
                 parameters: Some(raw(r#"{"alpha":{"a":3,"b":2},"zeta":1}"#)),
             }],
+            remote_compaction: None,
+            request_remote_compaction: false,
         };
         assert_eq!(
             encode(&request),

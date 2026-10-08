@@ -654,7 +654,11 @@ mod tests {
                 "model",
             );
         }
-        for (id, usage) in [("op_missing", None), ("op_zero", Some(Usage::default()))] {
+        for (id, usage, cache_present) in [
+            ("op_missing", None, false),
+            ("op_zero", Some(Usage::default()), true),
+            ("op_cache_unknown", Some(Usage::default()), false),
+        ] {
             let mut observation =
                 Observation::start(Some(&scope), Kind::Provider, id, None, "chatgpt", "model");
             observation.provider_finished(&ProviderSettlement::succeeded(
@@ -663,6 +667,8 @@ mod tests {
                         usage,
                         ..Default::default()
                     },
+                    cached_input_tokens_present: cache_present,
+                    ..Response::default()
                 },
                 1,
             ));
@@ -682,6 +688,21 @@ mod tests {
             .unwrap();
         assert!(missing["finish"].get("usage").is_none());
         assert_eq!(zero["finish"]["usage"]["input_tokens"], 0);
+        assert_eq!(zero["finish"]["cached_input_tokens_present"], true);
+        let unknown_cache = rows
+            .iter()
+            .find(|r| r["event"] == "operation_finished" && r["operation_id"] == "op_cache_unknown")
+            .unwrap();
+        assert!(unknown_cache["finish"].get("usage").is_some());
+        assert_eq!(
+            unknown_cache["finish"]["cached_input_tokens_present"],
+            false
+        );
+        assert!(
+            missing["finish"]
+                .get("cached_input_tokens_present")
+                .is_none()
+        );
     }
 
     #[test]

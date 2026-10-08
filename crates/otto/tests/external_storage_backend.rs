@@ -212,6 +212,7 @@ mod tests {
                 kind: "provider",
                 usage: Default::default(),
                 usage_present: true,
+                cached_input_tokens_present: true,
             },
         )
         .expect("usage contract");

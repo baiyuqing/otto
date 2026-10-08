@@ -15,6 +15,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Usage and compatibility
+
+- `GET /v1/usage` now distinguishes token-usage rows, logical provider
+  operations and actual HTTP attempts. Cache totals and `cache_hit_rate` are
+  `null` when any reported usage lacks a cached-token breakdown; missing data
+  is no longer presented as a zero cache hit. The former `requests` and
+  `reported_requests` fields are named `usage_events` and
+  `reported_usage_events` to match what they count.
+  ([#447](https://github.com/baiyuqing/otto/pull/447))
+
 ### Features
 
 - Native agent runtimes automatically retain private rotating diagnostic logs
@@ -23,6 +33,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
   locked file family; content and credentials stay out of diagnostics and
   model context.
   ([#450](https://github.com/baiyuqing/otto/pull/450))
+
+- Parent agents can explicitly yield when only child dependencies remain;
+  settled tool results and existing mailbox wakeups preserve user input and
+  completion races. Task detail distinguishes current activity from last tool.
+  ([#448](https://github.com/baiyuqing/otto/pull/448))
+
+- The ChatGPT Responses provider uses capability-gated remote compaction and
+  persists the returned encrypted checkpoint as invisible append-only session
+  state. Other providers, and manual compaction with a retention focus, keep
+  using Otto's validated structured summaries.
+  ([#447](https://github.com/baiyuqing/otto/pull/447))
+
 
 ### Fixes
 
@@ -33,6 +55,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
   child exits. Failed `resume` calls now explain how to inspect completed tasks.
   ([#445](https://github.com/baiyuqing/otto/pull/445))
 
+### Performance
+
+- Implementation guidance settles shared interfaces and file responsibility
+  before delegation, groups coherent edits, and emits one nonblocking batching
+  advisory after repeated single replacements to one file.
+  ([#448](https://github.com/baiyuqing/otto/pull/448))
+
+- Context reporting and automatic compaction treat an opaque provider prefix
+  as unknown until a post-checkpoint usage report anchors its size, rather than
+  making cache and threshold decisions from a partial estimate.
+  ([#447](https://github.com/baiyuqing/otto/pull/447))
+
 ### Build and CI
 
 - Fix the web retrieval byte limit expression to satisfy Clippy’s
@@ -40,6 +74,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([#446](https://github.com/baiyuqing/otto/pull/446))
 
 ### Documentation
+
+- The manual documents remote compaction, provider-locked opaque checkpoints,
+  exact operation/attempt counts, cache-breakdown presence and secret-safe
+  runtime diagnostics.
+  ([#447](https://github.com/baiyuqing/otto/pull/447))
 
 - Contributor and agent instructions leave builds, tests and `make` gates to
   CI: local work runs only `cargo fmt --all`; a test's failure mode is shown

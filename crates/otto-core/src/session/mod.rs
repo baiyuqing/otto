@@ -25,6 +25,7 @@ pub mod fork;
 pub mod operation;
 pub mod pi;
 pub mod plan;
+pub mod remote_compaction;
 pub mod turn;
 pub mod types;
 
@@ -53,6 +54,12 @@ pub use pi::{
 pub use plan::{
     MAX_PLAN_STEP_CHARS, MAX_PLAN_STEPS, PLAN_CUSTOM_TYPE, PLAN_SCHEMA_VERSION, PlanStatus,
     PlanStep, decode_plan, encode_plan, plan_checklist, plan_summary, validate_plan,
+};
+pub use remote_compaction::{
+    MAX_REMOTE_COMPACTION_CONTENT_BYTES, MAX_REMOTE_COMPACTION_ID_BYTES,
+    MAX_REMOTE_COMPACTION_PROVIDER_BYTES, REMOTE_COMPACTION_CUSTOM_TYPE,
+    REMOTE_COMPACTION_SCHEMA_VERSION, RemoteCompaction, decode_remote_compaction,
+    encode_remote_compaction, validate_remote_compaction,
 };
 pub use turn::{
     InterruptedTurn, TURN_CUSTOM_TYPE, TurnOutcome, TurnRecord, TurnTrigger, decode_turn_record,
@@ -187,10 +194,26 @@ pub enum SessionError {
     Persist(String),
 }
 
+/// Platform-specific bounds for an append-only transcript.
+///
+/// Native session futures are `Send`, so shared session references must be
+/// `Sync`. WASM session futures are local and do not need that bound.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait SessionBounds: Sync {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Sync + ?Sized> SessionBounds for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait SessionBounds {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> SessionBounds for T {}
+
 /// An append-only transcript.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Session {
+pub trait Session: SessionBounds {
     /// A copy of the transcript in append order.
     fn messages(&self) -> Vec<Message>;
 
@@ -243,6 +266,30 @@ pub trait Session {
     /// [`pi_entry_to_context_messages`]: crate::session::context::pi_entry_to_context_messages
     async fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError>;
 
+    /// The provider-managed compaction checkpoint currently in force.
+    fn remote_compaction(&self) -> Option<RemoteCompaction> {
+        None
+    }
+
+    /// Model messages appended after [`Self::remote_compaction`]. When no
+    /// remote checkpoint is active this is the ordinary model projection.
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        self.model_messages()
+    }
+
+    /// Atomically appends and activates a provider-managed checkpoint.
+    /// Implementations that persist Pi sessions should override this to append
+    /// an `otto.remote_compaction` custom entry before publishing live state.
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: RemoteCompaction,
+    ) -> Result<(), SessionError> {
+        let data = encode_remote_compaction(&checkpoint)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        self.append_custom(REMOTE_COMPACTION_CUSTOM_TYPE, &data)
+            .await
+    }
+
     /// The latest `otto.capabilities` record on the active path, or `None`
     /// when there is none. Like `append_custom`, it has no
     /// default body: every implementation forwards or states its behavior.
@@ -293,6 +340,8 @@ struct State {
     /// Every message id seen in this session, to reject reuse.
     seen_ids: HashSet<String>,
     latest_compaction: Option<CompactionMetadata>,
+    remote_compaction: Option<RemoteCompaction>,
+    post_remote_compaction_messages: Vec<Message>,
     /// Numbers the synthetic checkpoint ids and the ids generated for messages
     /// appended without one. An in-memory session has no file to share ids
     /// with, so a counter is enough and keeps tests deterministic.
@@ -341,6 +390,9 @@ impl State {
         state.seen_ids.insert(message.id.clone());
         if !message.input_id.is_empty() {
             state.seen_inputs.insert(message.input_id.clone());
+        }
+        if state.remote_compaction.is_some() {
+            state.post_remote_compaction_messages.push(message.clone());
         }
         state.record(message);
         Ok(())
@@ -498,6 +550,35 @@ impl Session for MemorySession {
             .clone()
     }
 
+    fn remote_compaction(&self) -> Option<RemoteCompaction> {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .remote_compaction
+            .clone()
+    }
+
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        let state = self.state.lock().expect("session mutex");
+        if state.remote_compaction.is_some() {
+            state.post_remote_compaction_messages.clone()
+        } else {
+            state.messages.clone()
+        }
+    }
+
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: RemoteCompaction,
+    ) -> Result<(), SessionError> {
+        validate_remote_compaction(&checkpoint)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        let mut state = self.state.lock().expect("session mutex");
+        state.remote_compaction = Some(checkpoint);
+        state.post_remote_compaction_messages.clear();
+        Ok(())
+    }
+
     async fn append_compaction(
         &self,
         checkpoint: CompactionCheckpoint,
@@ -547,6 +628,10 @@ impl Session for MemorySession {
         state.seen_call_ids = replayed.seen_call_ids;
         state.seen_ids.insert(checkpoint_id);
         state.latest_compaction = Some(metadata.clone());
+        // The newest checkpoint kind wins, as in the persistent context
+        // projection: a local summary supersedes an older opaque prefix.
+        state.remote_compaction = None;
+        state.post_remote_compaction_messages.clear();
         Ok(metadata)
     }
 
@@ -618,6 +703,14 @@ impl Session for MemorySession {
             let steps = decode_plan(data)
                 .ok_or_else(|| SessionError::Persist("malformed otto.plan data".into()))?;
             self.state.lock().expect("session mutex").plan = steps;
+            return Ok(());
+        }
+        if custom_type == REMOTE_COMPACTION_CUSTOM_TYPE {
+            let checkpoint = decode_remote_compaction(data)
+                .map_err(|error| SessionError::Persist(error.to_string()))?;
+            let mut state = self.state.lock().expect("session mutex");
+            state.remote_compaction = Some(checkpoint);
+            state.post_remote_compaction_messages.clear();
             return Ok(());
         }
         if custom_type != OPERATION_CUSTOM_TYPE {
@@ -746,6 +839,39 @@ mod tests {
                 .operation_ledger()
                 .operation_for_tool_call("c1")
                 .is_some()
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn a_local_compaction_clears_an_older_remote_checkpoint() {
+        let session = MemorySession::new();
+        session.append(user("before")).await.expect("append");
+        session
+            .append_remote_compaction(RemoteCompaction {
+                provider: "chatgpt".into(),
+                id: "cmp_1".into(),
+                encrypted_content: "opaque".into(),
+            })
+            .await
+            .expect("remote checkpoint");
+        session.append(user("after")).await.expect("append");
+        let first_kept = session.messages()[1].id.clone();
+
+        session
+            .append_compaction(CompactionCheckpoint {
+                summary: "local summary".into(),
+                first_kept_entry_id: first_kept,
+                created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+                ..CompactionCheckpoint::default()
+            })
+            .await
+            .expect("local checkpoint");
+
+        assert_eq!(session.remote_compaction(), None);
+        assert_eq!(
+            session.post_remote_compaction_messages(),
+            session.model_messages()
         );
     }
 

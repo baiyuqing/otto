@@ -11,6 +11,7 @@ pub enum Kind {
     Turn,
     Provider,
     Compaction,
+    RemoteCompaction,
     OneShot,
     Tool,
 }
@@ -70,6 +71,8 @@ pub struct Finish {
     pub attempts: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens_present: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_class: Option<ErrorClass>,
 }
@@ -170,6 +173,12 @@ impl Observation {
                 .as_ref()
                 .ok()
                 .and_then(|response| response.message.usage),
+            cached_input_tokens_present: result.result.as_ref().ok().and_then(|response| {
+                response
+                    .message
+                    .usage
+                    .map(|_| response.cached_input_tokens_present)
+            }),
             error_class: result.result.as_ref().err().map(|error| match error {
                 ProviderError::Overflow(_) => ErrorClass::ContextOverflow,
                 ProviderError::DeadlineExceeded => ErrorClass::Deadline,

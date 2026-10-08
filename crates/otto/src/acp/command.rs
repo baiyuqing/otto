@@ -208,7 +208,11 @@ pub(super) fn context_text(report: &ContextReport) -> String {
         format!("Model: {}", report.model),
         format!("Context window: {window}"),
         format!("Automatic compaction threshold: {threshold}"),
-        format!("Estimated next request: {} tokens", report.estimated_total),
+        if report.estimate_complete {
+            format!("Estimated next request: {} tokens", report.estimated_total)
+        } else {
+            "Estimated next request: unknown (opaque provider context)".into()
+        },
     ];
     if let Some(tokens) = report.reported_input_tokens {
         lines.push(format!("Last reported input: {tokens} tokens"));
@@ -229,16 +233,14 @@ pub(super) fn compaction_text(result: &WireCompaction) -> String {
                 summarized safely."
             .to_string();
     }
-    if result.estimated_tokens_after > 0 {
-        format!(
-            "Compacted the session context: {} tokens before, about {} tokens after (estimated).",
-            result.tokens_before, result.estimated_tokens_after
-        )
-    } else {
-        format!(
-            "Compacted the session context: {} tokens before.",
-            result.tokens_before
-        )
+    match (result.tokens_before, result.estimated_tokens_after) {
+        (Some(before), Some(after)) => format!(
+            "Compacted the session context: {before} tokens before, about {after} tokens after (estimated)."
+        ),
+        (Some(before), None) => {
+            format!("Compacted the session context: {before} tokens before.")
+        }
+        (None, _) => "Compacted the session context.".into(),
     }
 }
 
@@ -383,6 +385,7 @@ mod tests {
             context_window: 0,
             compaction_threshold: 0,
             estimated_total: 120,
+            estimate_complete: true,
             reported_input_tokens: None,
             sections: vec![ContextSection {
                 kind: SectionKind::SystemPrompt,
@@ -405,13 +408,13 @@ mod tests {
     #[test]
     fn compaction_text_covers_noop_estimated_and_unknown_after() {
         let base = WireCompaction {
-            tokens_before: 900,
-            estimated_tokens_after: 200,
+            tokens_before: Some(900),
+            estimated_tokens_after: Some(200),
             ..WireCompaction::default()
         };
         assert!(compaction_text(&base).contains("900 tokens before, about 200 tokens after"));
         let unknown = WireCompaction {
-            estimated_tokens_after: 0,
+            estimated_tokens_after: None,
             ..base.clone()
         };
         assert_eq!(

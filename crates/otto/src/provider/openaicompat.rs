@@ -1507,6 +1507,8 @@ mod tests {
                 ..Message::default()
             }],
             tools: Vec::new(),
+            remote_compaction: None,
+            request_remote_compaction: false,
         };
         let payload = serde_json::to_vec(&build_request(&request)).expect("the request encodes");
         let client = Client::new("https://example.test/v1", "key");

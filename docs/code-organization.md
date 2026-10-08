@@ -118,6 +118,9 @@ The other modules group native responsibilities:
   `cli/plugin.rs` exposes management commands; shared runner construction loads
   packages for every native frontend.
 - **Agent capabilities:** `tool/`, `sandbox/`, `skill/`, and `subagent/`.
+  `subagent/tools.rs` owns the nonblocking `agent_yield` capability;
+  `otto-core/src/agent/mod.rs` settles batches and yields safely, while
+  `agent/progress.rs` owns the bounded per-turn edit-batching advisory.
 - **Runtime assembly:** `runtime/`, and `metrics.rs` (the HTTP and turn
   metrics `server/` exposes and the schedule worker records).
 - **Test-only fault injection:** `faults/` (compiled under `cfg(test)` or the

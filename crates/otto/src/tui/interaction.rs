@@ -6,8 +6,6 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct View {
-    /// Draw this surface over the normal shell instead of replacing it.
-    pub modal: bool,
     pub title: String,
     pub description: String,
     pub columns: Vec<String>,
@@ -52,6 +50,7 @@ pub(crate) struct Action {
 pub(crate) enum Intent {
     Back,
     Move(isize),
+    MoveAction(isize),
     Page(isize),
     NextFocus,
     PreviousFocus,
@@ -69,7 +68,6 @@ pub(crate) enum Intent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Focus {
     Rows,
-    Document,
     Field(String),
     Actions,
 }
@@ -117,8 +115,6 @@ impl State {
             Focus::Actions
         } else if view.collection || !view.rows.is_empty() {
             Focus::Rows
-        } else if !view.document.is_empty() {
-            Focus::Document
         } else if let Some(field) = view.fields.first() {
             Focus::Field(field.id.clone())
         } else {
@@ -243,24 +239,20 @@ impl State {
             Intent::PreviousFocus => self.step_focus(view, -1),
             Intent::Move(delta) => match focus {
                 Focus::Rows => self.move_row(view, delta),
-                Focus::Actions => self.move_action(view, delta),
-                Focus::Document => {
-                    self.scroll = self.scroll.saturating_add_signed(
-                        delta.clamp(i16::MIN as isize, i16::MAX as isize) as i16,
-                    )
-                }
+                Focus::Actions if !view.rows.is_empty() => self.move_row(view, delta),
+                Focus::Actions => self.scroll_document(delta),
                 Focus::Field(id) => self.move_cursor(&id, &Intent::Move(delta)),
             },
+            Intent::MoveAction(delta) => {
+                self.focus = Focus::Actions;
+                self.move_action(view, delta);
+            }
             Intent::Page(delta) => {
                 let amount = delta.signum() * self.page_rows.max(1) as isize;
                 match focus {
                     Focus::Rows => self.move_row(view, amount),
-                    Focus::Actions => self.move_action(view, amount),
-                    Focus::Document => {
-                        self.scroll = self.scroll.saturating_add_signed(
-                            amount.clamp(i16::MIN as isize, i16::MAX as isize) as i16,
-                        )
-                    }
+                    Focus::Actions if !view.rows.is_empty() => self.move_row(view, amount),
+                    Focus::Actions => self.scroll_document(amount),
                     Focus::Field(id) => self.move_cursor(&id, &Intent::Move(amount)),
                 }
             }
@@ -295,6 +287,12 @@ impl State {
             Intent::Shortcut(_) => {}
         }
         None
+    }
+
+    fn scroll_document(&mut self, delta: isize) {
+        self.scroll = self
+            .scroll
+            .saturating_add_signed(delta.clamp(i16::MIN as isize, i16::MAX as isize) as i16);
     }
 
     fn move_row(&mut self, view: &View, delta: isize) {
@@ -444,9 +442,6 @@ fn focus_controls(view: &View) -> Vec<Focus> {
     let mut controls = Vec::new();
     if view.collection || !view.rows.is_empty() {
         controls.push(Focus::Rows);
-    }
-    if !view.document.is_empty() {
-        controls.push(Focus::Document);
     }
     controls.extend(
         view.fields
@@ -720,8 +715,30 @@ mod tests {
         state.error = Some("operation failed".into());
         state.reconcile(&view);
         assert_eq!(state.error.as_deref(), Some("operation failed"));
-        state.handle(&view, Intent::Move(1));
+        state.handle(&view, Intent::MoveAction(1));
         assert_eq!(state.selected_action.as_deref(), Some("reject"));
+        state.handle(&view, Intent::MoveAction(-1));
+        assert_eq!(state.selected_action.as_deref(), Some("accept"));
+    }
+
+    #[test]
+    fn readonly_document_never_takes_focus_from_the_default_action() {
+        let view = View {
+            document: "Read-only approval details".into(),
+            actions: vec![action("accept"), action("reject")],
+            default_action: Some("accept".into()),
+            ..View::default()
+        };
+        let mut state = State::new(&view);
+        assert_eq!(state.focus, Focus::Actions);
+        assert_eq!(state.selected_action.as_deref(), Some("accept"));
+
+        state.handle(&view, Intent::NextFocus);
+        assert_eq!(state.focus, Focus::Actions);
+        state.handle(&view, Intent::Move(1));
+        assert_eq!(state.focus, Focus::Actions);
+        assert_eq!(state.selected_action.as_deref(), Some("accept"));
+        assert_eq!(state.scroll, 1);
     }
 
     #[test]

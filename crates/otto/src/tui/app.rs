@@ -287,14 +287,9 @@ impl App {
         self.info = info;
         self.usage = self.info.usage;
     }
-    pub(crate) fn open_memory_review(&mut self, _controller: &Controller) {
-        match self
-            .catalog
-            .open("/memory review", &self.info, self.attached)
-        {
-            Ok(transition) => self.transition(self.top_id().unwrap_or(0), transition),
-            Err(error) => self.push_system(error),
-        }
+    pub(crate) fn memory_review_available(&mut self) {
+        self.push_system(crate::app::MEMORY_REVIEW_AVAILABLE);
+        self.request_approvals();
     }
     pub(crate) fn push_system(&mut self, text: impl Into<String>) {
         self.entries.push(Entry {
@@ -1649,6 +1644,23 @@ mod tests {
             .map(|surface| surface.model.key())
             .collect();
         assert_eq!(visible, ["approval:a2"]);
+    }
+
+    #[test]
+    fn memory_review_availability_notifies_and_refreshes_approvals_without_a_surface() {
+        let (mut app, _) = app();
+
+        app.memory_review_available();
+
+        assert_eq!(
+            app.entries.last().map(|entry| entry.raw.as_str()),
+            Some(crate::app::MEMORY_REVIEW_AVAILABLE)
+        );
+        assert!(!app.has_surface());
+        assert!(matches!(
+            app.requests.last().map(|(_, request)| request),
+            Some(Request::ApprovalSnapshot)
+        ));
     }
 
     #[test]

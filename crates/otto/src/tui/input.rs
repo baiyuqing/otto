@@ -36,8 +36,8 @@ pub(crate) fn surface_intent(key: KeyEvent, state: &State) -> Option<Intent> {
         KeyCode::Enter => Intent::Activate,
         KeyCode::Up => Intent::Move(-1),
         KeyCode::Down => Intent::Move(1),
-        KeyCode::Left if !field => Intent::Move(-1),
-        KeyCode::Right if !field => Intent::Move(1),
+        KeyCode::Left if !field => Intent::MoveAction(-1),
+        KeyCode::Right if !field => Intent::MoveAction(1),
         KeyCode::Left => Intent::Left,
         KeyCode::Right => Intent::Right,
         KeyCode::Home => Intent::Home,
@@ -95,6 +95,9 @@ pub(crate) fn hints(view: &View, state: &State) -> String {
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
+    if view.actions.iter().filter(|action| action.enabled).count() > 1 {
+        hints.insert(2, "←/→ actions".into());
+    }
     if !matches!(state.focus, Focus::Field(_)) {
         hints.extend(
             view.actions
@@ -109,6 +112,39 @@ pub(crate) fn hints(view: &View, state: &State) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn horizontal_arrows_select_actions_without_reusing_vertical_navigation() {
+        let view = View {
+            actions: vec![
+                super::super::interaction::Action {
+                    id: "accept".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+                super::super::interaction::Action {
+                    id: "reject".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+            ],
+            default_action: Some("accept".into()),
+            ..View::default()
+        };
+        let state = State::new(&view);
+        assert_eq!(
+            surface_intent(KeyEvent::from(KeyCode::Left), &state),
+            Some(Intent::MoveAction(-1))
+        );
+        assert_eq!(
+            surface_intent(KeyEvent::from(KeyCode::Right), &state),
+            Some(Intent::MoveAction(1))
+        );
+        assert_eq!(
+            surface_intent(KeyEvent::from(KeyCode::Down), &state),
+            Some(Intent::Move(1))
+        );
+    }
+
     #[test]
     fn chinese_text_and_shortcuts_follow_the_focused_control() {
         let view = View::default();

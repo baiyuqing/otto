@@ -15,6 +15,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+## 0.4.8 - 2026-10-08
+
 ### Usage and compatibility
 
 - Bash overflow logs are now temporary: guidance asks the model to remove them
@@ -23,6 +25,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([#440](https://github.com/baiyuqing/otto/pull/440))
 
 ### Fixes
+
+- `Ctrl+U` now recalls queued current-turn guidance into an empty TUI composer
+  after the runtime confirms withdrawal, so it can be edited and resubmitted.
+  A new draft typed during the withdrawal is preserved, and guidance already
+  delivered is never restored.
+  ([#443](https://github.com/baiyuqing/otto/pull/443))
 
 - TUI feature interactions now open as centered panels over the conversation
   instead of clearing and replacing the whole terminal. Approval decisions are

@@ -1,8 +1,10 @@
 //! Automatic compaction triggers and the turn-scoped dispatch state.
 //!
-//! The agent compacts on its own in two situations: before a request whose
-//! estimate crosses the soft trigger, and after a request the provider rejected
-//! for context overflow. Both are attempted at most once per turn.
+//! The agent compacts on its own in three situations: before a request whose
+//! estimate crosses the soft trigger, before a request that follows a long idle
+//! gap with a context above half the soft trigger, and after a request the
+//! provider rejected for context overflow. Each is attempted at most once per
+//! turn; the first two share one attempt.
 //!
 //! Ownership: [`RunDispatchState`] lives for one `Agent::run` call and is
 //! dropped with it, so the tool-result overlay never outlives the turn, and the
@@ -10,6 +12,9 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, TimeDelta, Utc};
+
+use crate::model::zero_time;
 use crate::provider::ProviderError;
 
 use super::progress::ProgressGuard;
@@ -35,6 +40,19 @@ pub const OVERFLOW_COMPACTION_FAILURE_MESSAGE: &str =
 /// The provider reported overflow again after the one retry.
 pub const OVERFLOW_RETRY_FAILURE_MESSAGE: &str =
     "context overflow persisted after one automatic compaction retry";
+
+/// Idle time after which the provider prompt cache is treated as expired.
+/// ChatGPT backend sessions (2026-09-01..2026-10-08): requests after 10-20
+/// minutes hit the cache as often as after 5-10 minutes (51%); after more
+/// than 90 minutes, 0 of 31 hit.
+pub const IDLE_CACHE_EXPIRY: TimeDelta = TimeDelta::minutes(60);
+
+/// Whether the last model response is old enough that the prompt cache has
+/// likely expired. Unset timestamps (`zero_time`, from old sessions) and a
+/// clock earlier than the response report false.
+pub fn idle_cache_expired(last_response: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    last_response.is_some_and(|last| last != zero_time() && now - last >= IDLE_CACHE_EXPIRY)
+}
 
 /// What one `Agent::run` call carries across its provider steps.
 #[derive(Debug, Default)]
@@ -170,5 +188,17 @@ mod tests {
             AgentError::AutomaticDispatch { causes, .. } => assert_eq!(causes, ["overflow"]),
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn idle_cache_expires_at_sixty_minutes() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).expect("in range");
+        let ago = |minutes| Some(now - TimeDelta::minutes(minutes));
+        assert!(!idle_cache_expired(ago(59), now));
+        assert!(idle_cache_expired(ago(60), now));
+        assert!(idle_cache_expired(ago(61), now));
+        assert!(!idle_cache_expired(None, now));
+        assert!(!idle_cache_expired(Some(zero_time()), now));
+        assert!(!idle_cache_expired(ago(-5), now));
     }
 }

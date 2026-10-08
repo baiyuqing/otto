@@ -132,14 +132,16 @@ impl Store {
             )
             .map_err(|_| Error)?;
         if has_usage_table != 0 {
-            let has_cache_presence: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name='cached_breakdown_present'",
-                    (),
-                    |row| row.get(0),
-                )
-                .map_err(|_| Error)?;
-            if has_cache_presence == 0 {
+            let mut has_cache_presence = false;
+            for name in connection
+                .prepare("PRAGMA table_info(usage_events)")
+                .map_err(|_| Error)?
+                .query_map((), |row| row.get::<String>(1))
+                .map_err(|_| Error)?
+            {
+                has_cache_presence |= name.map_err(|_| Error)? == "cached_breakdown_present";
+            }
+            if !has_cache_presence {
                 connection
                     .execute_batch(
                         "ALTER TABLE usage_events ADD COLUMN cached_breakdown_present INTEGER CHECK (cached_breakdown_present IN (0, 1))",
@@ -411,5 +413,47 @@ impl UsageRepository for Store {
 
     fn daily(&self, days: u16, session_id: Option<&str>) -> Result<Analysis> {
         Store::daily(self, days, session_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_legacy_usage_table_gains_the_cache_breakdown_column() {
+        let connection = Connection::open_in_memory().expect("connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE usage_events (
+                    id INTEGER PRIMARY KEY,
+                    occurred_at TEXT NOT NULL,
+                    workspace TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    profile TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    cached_input_tokens INTEGER NOT NULL,
+                    usage_present INTEGER NOT NULL
+                ) STRICT;
+                INSERT INTO usage_events (occurred_at, workspace, session_id, task_id,
+                    provider, profile, model, kind, input_tokens, output_tokens,
+                    cached_input_tokens, usage_present)
+                VALUES ('2026-01-01T00:00:00Z', 'w', 's', '', 'chatgpt', 'p', 'm',
+                    'provider', 10, 2, 0, 1);",
+            )
+            .expect("legacy table");
+
+        let store = Store::initialize(connection).expect("upgrade");
+
+        let summary = store.summary(None).expect("summary");
+        assert_eq!(summary.usage_events, 1);
+        assert_eq!(summary.input_tokens, 10);
+        // A legacy row never recorded whether the breakdown was present.
+        assert_eq!(summary.cached_input_tokens, None);
     }
 }

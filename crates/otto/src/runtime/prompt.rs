@@ -43,7 +43,7 @@ pub fn agent_guidance(
         "Use a model ID the user named or the session model. Otto cannot list this provider's models; do not write a model ID from memory."
     };
     format!(
-        "<delegation_policy>\nUse the agent tool to delegate self-contained tasks (exploration, review, independent edits). For substantial research, use a fresh child context: source downloads, searches and analysis stay in the child, not the parent. Require only a concise conclusion, essential evidence references and uncertainty within 4 KiB; never request raw source, logs or a chronological research report. Give each child a bounded file scope and ask for findings with file/line evidence. After delegation, the parent must not read the same assigned files again or duplicate that investigation; rely on the child report and send follow-up questions to the child. It returns immediately: keep working on independent work, or finish the current response and let the runtime-owned wake turn deliver each completed child's [task-notification]. Do not poll agent_status to wait; use it only to inspect progress. Use agent_send when the user adds constraints, priorities, facts, or direction changes, and agent_cancel when a task is stuck, repeating itself, or no longer needed.\n<subagent_runtime {identity}>\n{model_policy}\n</subagent_runtime>\n</delegation_policy>"
+        "<delegation_policy>\nUse the agent tool to delegate self-contained tasks (exploration, review, independent edits). For substantial research, use a fresh child context: source downloads, searches and analysis stay in the child, not the parent. Require a concise conclusion, essential evidence references, uncertainty and a report path with section index within 4 KiB. Longer findings belong in the child's assigned persistent report directory, using write when permitted; oversized final text is automatically saved when workspace storage is available. Never request raw source or logs in the handoff. Give each child a bounded file scope and ask for findings with file/line evidence. After delegation, the parent must not read the same assigned files again or duplicate that investigation; rely on the child report. Use read, when available, on the saved report/index for omitted sections; this remains possible after child completion. Send follow-up questions only to queued or running children; resume is only for interrupted tasks. It returns immediately: keep working on independent work, or finish the current response and let the runtime-owned wake turn deliver each completed child's [task-notification]. Do not poll agent_status to wait; use it to inspect progress or retrieve a saved report path. Use agent_send when the user adds constraints, priorities, facts, or direction changes, and agent_cancel when a task is stuck, repeating itself, or no longer needed.\n<subagent_runtime {identity}>\n{model_policy}\n</subagent_runtime>\n</delegation_policy>"
     )
 }
 
@@ -530,6 +530,8 @@ mod tests {
         )));
         assert!(prompt.contains("parent must not read the same assigned files again"));
         assert!(prompt.contains("rely on the child report"));
+        assert!(prompt.contains("saved report/index"));
+        assert!(prompt.contains("after child completion"));
         assert!(prompt.contains("<subagent_runtime provider=\"openai-compatible\" endpoint=\"gw.example.com\" session_model=\"gpt-test\">"));
         assert!(
             !system_prompt_for(&definitions(&["read"]), off(), "", "", "")

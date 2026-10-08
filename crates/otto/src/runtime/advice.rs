@@ -68,21 +68,23 @@ impl Backend for SessionBackend {
         })
         .to_string();
         let control = Control::new(Deadline::after(limit));
-        let mut emit = |_event: otto_core::agent::Event| {};
+        let collector = self.usage.as_ref().map(|usage| usage.for_task(TASK_ID));
+        let mut emit = |event: otto_core::agent::Event| {
+            if let Some(collector) = &collector {
+                let _ = collector.record(&event);
+            }
+        };
         let call = self.agent.complete_text(&request, &mut emit, &control);
         let (response, result) = match tokio::time::timeout(limit, call).await {
             Err(_) => (None, Err(Failure::Timeout)),
             Ok(Err(error)) => (None, Err(Failure::Error(error.to_string()))),
             Ok(Ok(response)) => {
-                if let Some(usage) = &self.usage {
-                    let _ =
-                        usage
-                            .for_task(TASK_ID)
-                            .record(&otto_core::agent::Event::ProviderUsage {
-                                usage: response.usage,
-                                present: response.usage_present,
-                                cached_input_tokens_present: response.cached_input_tokens_present,
-                            });
+                if let Some(collector) = &collector {
+                    let _ = collector.record(&otto_core::agent::Event::ProviderUsage {
+                        usage: response.usage,
+                        present: response.usage_present,
+                        cached_input_tokens_present: response.cached_input_tokens_present,
+                    });
                 }
                 let result: Result<HashMap<String, Answer>, Failure> =
                     session::parse(&response.text, questions);
@@ -111,7 +113,7 @@ mod tests {
 
     use super::*;
     use crate::memory::advice::{Kind, YES};
-    use crate::usage::{Collector, Context, Sink, UsageRecord};
+    use crate::usage::{ApiOperationRecord, Collector, Context, Sink, UsageRecord};
 
     struct Scripted {
         reply: String,
@@ -152,11 +154,16 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Records(Mutex<Vec<UsageRecord>>);
+    struct Records(Mutex<Vec<UsageRecord>>, Mutex<Vec<ApiOperationRecord>>);
 
     impl Sink for Records {
         fn append(&self, record: &UsageRecord) -> crate::usage::Result<()> {
             self.0.lock().expect("lock").push(record.clone());
+            Ok(())
+        }
+
+        fn append_api_operation(&self, record: &ApiOperationRecord) -> crate::usage::Result<()> {
+            self.1.lock().expect("lock").push(record.clone());
             Ok(())
         }
     }
@@ -222,10 +229,14 @@ mod tests {
         assert_eq!(exchange.response.as_deref(), Some(r#"{"durable":true}"#));
         assert!(exchange.request.contains("state text"));
         assert_eq!(provider.requests.lock().expect("lock").len(), 1);
+        let operations = records.1.lock().expect("lock");
         let records = records.0.lock().expect("lock");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].context.task_id, TASK_ID);
         assert_eq!(records[0].usage.input_tokens, 7);
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].context.task_id, TASK_ID);
+        assert_eq!(operations[0].attempts, 1);
         assert!(!backend.auxiliary());
         assert_eq!(backend.model(), "test-model");
     }

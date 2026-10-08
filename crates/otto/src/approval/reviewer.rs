@@ -132,7 +132,15 @@ impl ReviewProvider for SessionReviewer {
             user_text: &input,
             maximum_bytes: MAX_OUTPUT_BYTES,
         };
-        let mut emit = |_event| {};
+        let collector = self
+            .usage
+            .as_ref()
+            .map(|usage| usage.for_task("approval-review"));
+        let mut emit = |event: otto_core::agent::Event| {
+            if let Some(collector) = &collector {
+                let _ = collector.record(&event);
+            }
+        };
         let completion = self.agent.complete_text(&request, &mut emit, &control);
         let response = tokio::select! {
             biased;
@@ -143,15 +151,12 @@ impl ReviewProvider for SessionReviewer {
         };
         let mut assessment: ReviewAssessment = serde_json::from_str(&response.text)
             .map_err(|_| "Authorization reviewer returned an invalid assessment.".to_string())?;
-        if let Some(usage) = &self.usage {
-            let _ =
-                usage
-                    .for_task("approval-review")
-                    .record(&otto_core::agent::Event::ProviderUsage {
-                        usage: response.usage,
-                        present: response.usage_present,
-                        cached_input_tokens_present: response.cached_input_tokens_present,
-                    });
+        if let Some(collector) = &collector {
+            let _ = collector.record(&otto_core::agent::Event::ProviderUsage {
+                usage: response.usage,
+                present: response.usage_present,
+                cached_input_tokens_present: response.cached_input_tokens_present,
+            });
         }
         assessment.reason = self.agent.redact_text(assessment.reason.trim());
         if assessment.reason.is_empty() || assessment.reason.len() > 1024 {

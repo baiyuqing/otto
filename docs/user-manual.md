@@ -931,20 +931,26 @@ OTTO_UI=repl otto
 ### TUI behavior
 
 - Feature screens share navigation, focus, loading, error and submission
-  behavior. `Tab`/`Shift+Tab` move focus between lists, details, fields and
-  actions; arrows navigate the focused control, and `Enter` activates it.
-  Queries run independently of terminal input and live turn output. Returning
-  from a detail screen restores the previous selection and draft.
+  behavior. Every feature screen opens as a centered panel over the conversation;
+  help, pickers, forms, collections, command results, context, agents and memory
+  review never replace the whole terminal. `Tab`/`Shift+Tab` move focus between
+  lists, details, fields and actions; arrows navigate the focused control, and
+  `Enter` activates it. Queries run independently of terminal input and live turn
+  output. Returning from a detail screen restores the previous selection and
+  draft.
 - `Esc` returns or dismisses a feature screen without making a decision.
-  Approvals open as centered modals over the conversation rather than replacing
-  the whole screen. The modal has no feedback field, starts on **Approve** (or
-  **Accept** for a review), and Enter submits that choice. Approve and Deny both
-  close the modal as soon as the decision succeeds; no extra `Esc` is needed.
-  Multiple pending approvals are shown one at a time in creation order. If you
-  dismiss an undecided approval with `Esc`, it remains pending; `/approve` with
-  no arguments opens pending approvals again. A submitted action prevents
-  duplicate clicks; failures keep the modal open, and safe read failures offer
-  a Retry action.
+  Approval actions are arranged horizontally, with **Approve** (or **Accept**
+  for a review) selected on the left by default and **Deny**/**Reject** on the
+  right. `←`/`→` changes the selected action and Enter submits it. The read-only
+  Document area never takes focus, including when clicked, so inspecting the
+  request cannot unset the selected action; `↑`/`↓` and `PgUp`/`PgDn` still
+  scroll long details. Approval panels have no feedback field. Approve and Deny
+  both close the panel as soon as the decision succeeds; no extra `Esc` is
+  needed. Multiple pending
+  approvals are shown one at a time in creation order. If you dismiss an
+  undecided approval with `Esc`, it remains pending; `/approve` with no arguments
+  opens pending approvals again. A submitted action prevents duplicate clicks;
+  failures keep the panel open, and safe read failures offer a Retry action.
 - Uses the terminal alternate screen buffer.
 - Every transcript entry is one block under a marker in the left gutter, so a
   turn reads as prompt, tool calls, reply. The marker opens the block and an
@@ -1295,7 +1301,7 @@ Shared commands:
   finished (see [Sub-agent task records](#sub-agent-task-records)). The REPL
   prints the latest 50 as one line each: parent session, task id, agent,
   status, created time, and the description (or the start of the prompt). The
-  TUI opens a modal; see TUI-only commands. `/tasks` and `/task` still cover
+  TUI opens a panel; see TUI-only commands. `/tasks` and `/task` still cover
   only the current session.
 - `/exit` exits when idle (REPL EOF also exits).
 
@@ -1313,7 +1319,7 @@ TUI-only commands:
   Delivered guidance is session history and cannot be withdrawn. The same list
   is available over HTTP (see [HTTP API](#http-api)) as
   `GET /v1/sessions/{id}/tasks/steer`.
-- `/context` opens a modal that lists what the next provider request contains:
+- `/context` opens a centered panel that lists what the next provider request contains:
   the system prompt parts (base, environment, workspace instructions, skills,
   agents), built-in and MCP tool definitions, the compaction summary, the
   previous turn's memory recall, and each message. The title shows the model,
@@ -1321,10 +1327,10 @@ TUI-only commands:
   input tokens, and the automatic compaction threshold. Token numbers are
   estimates (about 3 bytes per token), not tokenizer counts. `↑`/`↓` select,
   `Enter` expands a section or opens an item's full text (`↑`/`↓`/`PgUp`/`PgDn`
-  scroll it), and `Esc` returns from details or closes the collection. The report is taken when the modal
+  scroll it), and `Esc` returns from details or closes the collection. The report is taken when the panel
   opens. The memory section is the previous turn's recall; the next turn
   recalls again with its own prompt.
-- `/agents` opens a modal of recorded sub-agent tasks, newest first, with
+- `/agents` opens a centered panel of recorded sub-agent tasks, newest first, with
   status, agent (`default` when none), description, workspace, parent
   session, created time, duration, steps, tool calls, and tokens. It starts
   with this workspace's tasks; `w` toggles between this workspace and all
@@ -1332,23 +1338,23 @@ TUI-only commands:
   succeeded, failed, canceled, and interrupted. `↑`/`↓` or `PgUp`/`PgDn`
   select, `Enter` opens the task's prompt, result or error, and child
   transcript (`↑`/`↓`/`PgUp`/`PgDn` scroll it), and `Esc` goes back one
-  level. The modal re-reads `tasks.db` every 2 seconds while it is open,
+  level. The panel re-reads `tasks.db` every 2 seconds while it is open,
   including while a turn is running. `/agents` can also be opened while a
   turn is running (streaming, or waiting on a sub-agent): typing it and
-  pressing `Enter` opens the modal instead of queuing it as the next prompt.
-  `Esc` closes the modal (or leaves its detail pane) without cancelling the
-  turn; a second `Esc`, with the modal closed, cancels the turn as it always
+  pressing `Enter` opens the panel instead of queuing it as the next prompt.
+  `Esc` closes the panel (or leaves its detail pane) without cancelling the
+  turn; a second `Esc`, with the panel closed, cancels the turn as it always
   does.
 - `/image <path>` attaches one image to the next prompt. The image is stored
   inline in the session; the selected model and provider endpoint must support
   image input. Otto sends images with `detail: high`.
 
-- `/resume` opens a modal of the up to 50 most recently modified valid sessions
+- `/resume` opens a centered panel of the up to 50 most recently modified valid sessions
   for the current canonical workspace. `↑`/`↓` or `PgUp`/`PgDn` to navigate,
   `Enter` to resume, `Esc` to close. It does not search other workspaces. Each
   session id appears once: files that share one (a copy beside the original,
   for example) collapse to the newest-modified file.
-- `/archive` opens the same modal to archive a session. `Enter` on a non-current
+- `/archive` opens the same panel to archive a session. `Enter` on a non-current
   session moves it into `archive/` and shows `archived session <id>`. `Enter` on
   the current session archives it and starts a fresh session. `Esc` closes
   without archiving. It is accepted only while idle (a turn, `/new`, or
@@ -1749,7 +1755,7 @@ decision = "ask"
 ```
 
 Only requests needing your decision appear in pending queues, approval cards and
-modals. A queued or running review is recorded as a noninteractive status.
+panels. A queued or running review is recorded as a noninteractive status.
 Approval and application remain separate: an approved operation can still fail,
 and an operation with an unknown external effect is never replayed automatically.
 
@@ -1832,10 +1838,11 @@ and optional feedback. Later tool calls in that same batch do not run; the model
 must consider your answer first. A plan confirmation gives no additional
 sandbox or external-tool permission. Mandatory domain checks still apply.
 
-- TUI: one centered approval modal is shown at a time over the conversation.
-  **Approve** is selected by default; use Enter, arrows, or y/n. The TUI has no
-  feedback field. A successful Approve or Deny closes the modal immediately
-  and advances to the next pending request.
+- TUI: one centered approval panel is shown at a time over the conversation.
+  **Approve** is selected on the left by default and **Deny** is on the right;
+  use `←`/`→`, Enter, or y/n. The read-only Document area does not take focus,
+  including when clicked. The TUI has no feedback field. A successful Approve
+  or Deny closes the panel immediately and advances to the next pending request.
 - Passive chat delivery is separate from approval visibility. An approval made
   during a Telegram or Feishu turn is presented only to that exact originating
   chat. Workspace-visible memory reviews remain discoverable from authorized
@@ -2602,7 +2609,7 @@ executed command, remove permanent grants, or affect another session.
 While approval waits, you can ask why it is needed or ask Otto to withdraw it.
 This conversation has only help, approval query/withdrawal and queue tools;
 normal tasks keep waiting in the frontend's queue. In the TUI, press `Esc` to
-dismiss the modal without deciding; `/approve` opens pending requests again.
+dismiss the panel without deciding; `/approve` opens pending requests again.
 Telegram and Feishu support this with Otto; other ACP agents keep the ordinary
 queue.
 Explicit Deny/No, `/deny` in chat and `/stop` continue to work.
@@ -3743,12 +3750,15 @@ user decides a candidate and how, so the model can point the user to
 not available from the chat; use `/memory review` in the REPL or TUI.
 
 The local REPL immediately prints **"Memory review available. Run `/memory
-review`."** after any pending proposal is saved. The local TUI opens a review
-modal for the current user/workspace scopes: use Up/Down to choose, `a` to
-accept, `r` to reject, or Esc to close without changing anything. The modal
-reads that scope's existing candidate details for review. The availability
-signal itself contains no candidate content and is process-local, so attached
-TUI, web, and chat connectors retain their existing refresh/command behavior.
+review`."** after any pending proposal is saved. The local TUI prints the same
+notice and refreshes the unified approval queue; the proposal appears in the
+same centered approval panel as other human decisions instead of opening a
+separate memory screen. `/memory review` still opens a centered collection for
+explicit memory-only browsing: use Up/Down to choose, `a` to accept, `r` to
+reject, or Esc to close without changing anything. An empty collection says
+**"No pending memory candidates."** The availability signal itself contains no
+candidate content and is process-local, so attached TUI, web, and chat
+connectors retain their existing refresh/command behavior.
 
 ### Permission requests
 

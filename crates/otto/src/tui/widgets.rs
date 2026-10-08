@@ -33,14 +33,13 @@ pub(crate) struct Geometry {
 
 pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &State) -> Geometry {
     let header_height = if area.height < 12 { 2 } else { 3 }.min(area.height);
-    let footer_wanted = view.actions.len().max(1) as u16
-        + u16::from(
+    let footer_wanted =
+        1 + u16::from(
             view.actions
                 .iter()
                 .any(|a| !a.enabled && a.reason.is_some()),
-        )
-        + u16::from(state.pending)
-        + 2; // borders and generic key hints
+        ) + u16::from(state.pending)
+            + 2; // border, one horizontal action row, and generic key hints
     let footer_height = footer_wanted.min(area.height.saturating_sub(header_height).max(1));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -202,16 +201,8 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title(if state.focus == Focus::Document {
-                                "› Document"
-                            } else {
-                                "Document"
-                            })
-                            .border_style(Style::default().fg(if state.focus == Focus::Document {
-                                ACCENT
-                            } else {
-                                MUTED
-                            })),
+                            .title("Document")
+                            .border_style(Style::default().fg(MUTED)),
                     )
                     .scroll((state.scroll.min(geometry.max_scroll), 0)),
                 rect,
@@ -285,26 +276,33 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
 
     let footer = chunks[2];
     let mut footer_lines = Vec::new();
-    let action_row_y = footer.y.saturating_add(1);
-    for (i, action) in view.actions.iter().enumerate() {
-        let y = action_row_y.saturating_add(i as u16);
-        let rect = Rect {
-            x: footer.x,
-            y,
-            width: footer.width,
-            height: 1,
-        };
-        geometry.actions.push((action.id.clone(), rect));
-        let selected = state.focus == Focus::Actions
-            && state.selected_action.as_deref() == Some(action.id.as_str());
-        let label = match action.shortcut {
-            Some(key) => format!("› [{}] {}", key, action.label),
-            None if selected => format!("› {}", action.label),
-            None => format!("  {}", action.label),
-        };
-        footer_lines.push(Line::from(Span::styled(
-            escape_single_line_text(&label),
-            if !action.enabled {
+    let mut action_widgets = Vec::new();
+    if !view.actions.is_empty() {
+        let action_row_y = footer.y.saturating_add(1);
+        let count = view.actions.len().min(u16::MAX as usize) as u16;
+        for (i, action) in view.actions.iter().enumerate() {
+            let i = i.min(u16::MAX as usize) as u16;
+            let x = footer.x + footer.width.saturating_mul(i) / count;
+            let next_x = footer.x + footer.width.saturating_mul(i.saturating_add(1)) / count;
+            let rect = Rect {
+                x,
+                y: action_row_y,
+                width: next_x.saturating_sub(x),
+                height: 1,
+            };
+            geometry.actions.push((action.id.clone(), rect));
+            let selected = state.focus == Focus::Actions
+                && state.selected_action.as_deref() == Some(action.id.as_str());
+            let label = match action.shortcut {
+                Some(key) => format!(
+                    "{}[{}] {}",
+                    if selected { "› " } else { "  " },
+                    key,
+                    action.label
+                ),
+                None => format!("{}{}", if selected { "› " } else { "  " }, action.label),
+            };
+            let style = if !action.enabled {
                 Style::default().fg(MUTED)
             } else if selected {
                 Style::default()
@@ -313,8 +311,10 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(ACCENT)
-            },
-        )));
+            };
+            action_widgets.push((rect, escape_single_line_text(&label), style));
+        }
+        footer_lines.push(Line::default());
     }
     if let Some(reason) = view
         .actions
@@ -345,6 +345,9 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
         ),
         footer,
     );
+    for (rect, label, style) in action_widgets {
+        frame.render_widget(Paragraph::new(label).style(style), rect);
+    }
     geometry
 }
 
@@ -495,6 +498,45 @@ mod tests {
         assert!(!screen.chars().any(char::is_control), "{screen:?}");
         assert!(screen.contains("\\x1b"), "{screen}");
         assert!(screen.contains("\\x07"), "{screen}");
+    }
+
+    #[test]
+    fn actions_share_one_horizontal_row_with_the_default_on_the_left() {
+        let view = View {
+            actions: vec![
+                Action {
+                    id: "accept".into(),
+                    label: "Accept".into(),
+                    enabled: true,
+                    ..Action::default()
+                },
+                Action {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    enabled: true,
+                    ..Action::default()
+                },
+            ],
+            default_action: Some("accept".into()),
+            ..View::default()
+        };
+        let state = State::new(&view);
+        let mut terminal = Terminal::new(TestBackend::new(70, 20)).expect("terminal");
+        let mut geometry = Geometry::default();
+        terminal
+            .draw(|frame| geometry = draw_surface(frame, frame.area(), &view, &state))
+            .expect("draw");
+
+        let [(accept, accept_rect), (reject, reject_rect)] = geometry.actions.as_slice() else {
+            panic!("two action targets: {:?}", geometry.actions);
+        };
+        assert_eq!(accept, "accept");
+        assert_eq!(reject, "reject");
+        assert_eq!(accept_rect.y, reject_rect.y);
+        assert!(accept_rect.x < reject_rect.x);
+        assert_eq!(accept_rect.right(), reject_rect.x);
+        assert_eq!(state.selected_action.as_deref(), Some("accept"));
+        assert_eq!(state.focus, Focus::Actions);
     }
 
     #[test]

@@ -15,6 +15,16 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Fixes
+
+- TUI feature interactions now open as centered panels over the conversation
+  instead of clearing and replacing the whole terminal. Approval decisions are
+  laid out left-to-right, default to Approve/Accept, and use Left/Right; clicking
+  a read-only Document no longer takes focus from the decision. Memory
+  availability refreshes the unified approval card rather than opening a
+  separate empty review screen, and a manually opened empty memory review states
+  that no candidates are pending.
+
 ## 0.4.5 - 2026-10-07
 
 ### Usage and compatibility

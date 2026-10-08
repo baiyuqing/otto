@@ -308,7 +308,6 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         .expect("start the held turn");
     wait_for_screen_text(&shared, HELD_TEXT);
     wait_for_raw_bytes(&shared, BUSY_TITLE.as_bytes());
-    let raw_before_context = shared.raw.lock().unwrap().len();
     master
         .write_all(b"/context\r")
         .expect("open context while busy");
@@ -316,11 +315,19 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     master
         .write_all(b"\x1b")
         .expect("return from context without canceling the turn");
-    wait_until(&shared, "the busy composer to return", |shared| {
-        shared.raw.lock().unwrap()[raw_before_context..]
-            .windows(BUSY_TITLE.len())
-            .any(|window| window == BUSY_TITLE.as_bytes())
+    wait_for_screen_text_gone(&shared, "Context");
+    wait_until(&shared, "the busy composer to remain visible", |shared| {
+        shared.screen.lock().unwrap().contains(BUSY_TITLE)
     });
+    assert_eq!(
+        server_count.load(Ordering::SeqCst),
+        2,
+        "closing context must not cancel or restart the live turn"
+    );
+
+    // A centered feature panel never covers the composer. Closing it therefore
+    // need not redraw an unchanged busy title; assert the current screen state
+    // above instead of requiring a duplicate title in the raw terminal bytes.
     release_provider
         .send(())
         .expect("release the provider after returning to the composer");

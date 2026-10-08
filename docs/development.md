@@ -1080,11 +1080,16 @@ has no feedback field. MCP calls pass the same native authorization boundary;
 unsupported inbound elicitation modes are not advertised and cannot be
 interpreted as authorization.
 
-The TUI renders approval presenters as centered modal overlays over the normal
-session shell. It selects Approve by default, closes immediately after either
-successful decision, and presents pending requests one at a time in creation
-order; an undecided `Esc` dismissal remains pending and can be reopened from
-`/approve`.
+The TUI renders every presenter as a centered panel over the normal session
+shell; no feature presenter may replace or clear the whole terminal. Approval
+actions share one horizontal row, select Approve/Accept on the left by default,
+and use Left/Right to move between decisions. Read-only documents are scrollable
+content, not focus controls: clicking one must not take focus from the selected
+action. Approval presenters close immediately after either successful decision
+and present pending requests one at a time in creation order; an undecided `Esc`
+dismissal remains pending and can be reopened from `/approve`. Memory
+availability refreshes that shared approval queue instead of opening a separate
+review surface.
 
 Memory proposal routing lives in the candidate's internal
 `otto.presentation_origin` metadata until the corresponding approval is

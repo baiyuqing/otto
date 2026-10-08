@@ -28,6 +28,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 - Fix the web retrieval byte limit expression to satisfy Clippy’s
   `manual_clamp` lint without changing its bounds.
+  ([#446](https://github.com/baiyuqing/otto/pull/446))
 
 ### Documentation
 

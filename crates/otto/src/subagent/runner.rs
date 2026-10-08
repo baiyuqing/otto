@@ -722,6 +722,7 @@ pub struct StartRequest {
 
 /// Builds and runs sub-agent tasks for one session.
 pub struct Runner {
+    output_logs: std::sync::OnceLock<Arc<crate::tool::bash_output::Logs>>,
     config: Config,
     child_registry: Arc<Registry>,
     semaphore: Arc<Semaphore>,
@@ -827,12 +828,21 @@ impl Runner {
         let semaphore = Arc::new(Semaphore::new(config.max_parallel));
         Ok((
             Self {
+                output_logs: std::sync::OnceLock::new(),
                 config,
                 child_registry,
                 semaphore,
             },
             warnings,
         ))
+    }
+
+    pub(crate) fn bind_output_logs(&self, logs: Arc<crate::tool::bash_output::Logs>) {
+        // Bound by native composition before any agent tool can start a task.
+        assert!(
+            self.output_logs.set(logs).is_ok(),
+            "output logs already bound"
+        );
     }
 
     /// The catalog this runner delegates against.
@@ -1393,7 +1403,11 @@ impl Runner {
         let runner = Arc::clone(self);
         let task_id = task.id.clone();
         let prompt = request.prompt;
+        // Acquire before spawning: even a queued child must outlive the parent's
+        // turn lease. The closure releases this on success, error or cancellation.
+        let output_lease = self.output_logs.get().map(|logs| logs.lease());
         tokio::spawn(async move {
+            let _output_lease = output_lease;
             runner
                 .run_child(ChildRun {
                     cancel,

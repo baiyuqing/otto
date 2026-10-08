@@ -35,7 +35,7 @@ use crate::sandbox::{
 };
 use otto_core::safetext::{dynamic_redaction_marker, secret_forms};
 
-use super::bash_output::{Output, PREVIEW_BYTES};
+use super::bash_output::{Logs, Output, PREVIEW_BYTES};
 use super::result::{RedactingCollector, decode_strict_json, redact_exact_text};
 use super::root::Root;
 use super::workspace::Workspace;
@@ -363,6 +363,7 @@ pub struct BashTool {
     grant_control: Option<(PathBuf, Arc<dyn crate::app::SandboxControl>)>,
     workspace_root: PathBuf,
     output_root: Arc<Root>,
+    output_logs: Arc<Logs>,
     executor: Arc<dyn CommandExecutor>,
     shell: String,
     environment: Vec<String>,
@@ -463,6 +464,7 @@ impl BashTool {
 
         Ok(Self {
             grant_control: None,
+            output_logs: Arc::default(),
             workspace_root: workspace.root().to_path_buf(),
             output_root: Arc::new(
                 Root::from_directory(
@@ -490,6 +492,11 @@ impl BashTool {
             excluded: None,
             private_home: false,
         })
+    }
+
+    pub(crate) fn with_output_logs(mut self, logs: Arc<Logs>) -> Self {
+        self.output_logs = logs;
+        self
     }
 
     /// Enables explicit, one-shot elevation for this session.
@@ -958,7 +965,7 @@ fn infrastructure_result(error: &Error) -> ToolResult {
 }
 
 /// The output contract shared by sandboxed and elevated calls.
-const OUTPUT_NOTE: &str = "Return exit status and stdout/stderr previews of at most 4 KiB each (or the smaller configured cap); longer redacted output is saved under .otto/tool-output. Analyze logs with scripts and print only verified summaries or relevant failures; use read with offset/limit for excerpts instead of printing complete logs.";
+const OUTPUT_NOTE: &str = "Return exit status and stdout/stderr previews of at most 4 KiB each (or the smaller configured cap); longer redacted output is saved temporarily under .otto/tool-output and automatically removed after the turn and its children finish. Delete individual logs after analysis when no task still needs them; never remove the shared directory. Analyze logs with scripts and print only verified summaries or relevant failures; use read with offset/limit for excerpts instead of printing complete logs.";
 
 /// Appended when the child's `HOME` is a private sandbox directory.
 const PRIVATE_HOME_NOTE: &str = "HOME and ~ are a private sandbox directory, not the user's home directory; use absolute paths for the user's files.";
@@ -1377,17 +1384,19 @@ this exact elevated Bash command after approval."
         }
 
         let mut stdout = RedactingCollector::with_collector(
-            Output::new(
+            Output::with_logs(
                 Arc::clone(&self.output_root),
                 self.max_output_bytes.min(PREVIEW_BYTES),
+                Arc::clone(&self.output_logs),
             ),
             &self.redact_values,
             &self.redaction_marker,
         );
         let mut stderr = RedactingCollector::with_collector(
-            Output::new(
+            Output::with_logs(
                 Arc::clone(&self.output_root),
                 self.max_output_bytes.min(PREVIEW_BYTES),
+                Arc::clone(&self.output_logs),
             ),
             &self.redact_values,
             &self.redaction_marker,

@@ -31,6 +31,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   overflow logs in the workspace for targeted inspection. Execution status
   remains visible even when log storage fails. Agent guidance favors scripts
   that analyze logs locally and return checked summaries instead of full logs.
+  ([#437](https://github.com/baiyuqing/otto/pull/437))
 
 ## 0.4.5 - 2026-10-07
 

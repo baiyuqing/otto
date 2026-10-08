@@ -26,9 +26,9 @@ use super::{Catalog, runner};
 use crate::tool::result::decode_strict_json;
 use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 
-const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Research stays in the child context: use fresh context, download pinned sources once into its temporary research directory, and return only conclusions, essential evidence references and uncertainty within 4 KiB. The directory is removed when the task exits. Its final report arrives later as a [task-notification] message that starts a runtime-owned wake turn when the parent is idle; do not poll agent_status to wait for it. Use agent_status only to inspect progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Assign a bounded file scope and request findings with file/line evidence. After delegation, do not read those same files again; rely on the child report and ask the child follow-up questions. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
+const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Research stays in the child context: use fresh context, download pinned sources once into its temporary research directory, and return a summary, uncertainty, report path and section index within 4 KiB; put longer findings in the assigned persistent report directory using write when permitted. Oversized final answers are automatically saved when workspace storage is available. Temporary research directories are removed at task exit; report directories persist. Its final report arrives later as a [task-notification] message that starts a runtime-owned wake turn when the parent is idle; do not poll agent_status to wait for it. Use agent_status to inspect progress or retrieve a report path, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Assign a bounded file scope and request findings with file/line evidence. After delegation, do not read those same files again; rely on the child report, use read on its report file for omitted sections, and ask follow-up questions only while the child is queued or running. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
 
-const AGENT_STATUS_DESCRIPTION: &str = "Show task status and a bounded final conclusion (at most 4 KiB plus a truncation marker). Recent research steps are omitted by default; set include_history only when explicitly needed. Omit task_id to list tasks. Do not poll to wait for completion.";
+const AGENT_STATUS_DESCRIPTION: &str = "Show task status and a bounded final conclusion (at most 4 KiB plus truncation and report-file metadata). Recent research steps are omitted by default; set include_history only when explicitly needed. For a truncated final answer, returns its persistent report path when storage succeeds; use read on that file to retrieve sections without restarting the child. Omit task_id to list tasks. Do not poll to wait for completion.";
 
 const AGENT_SEND_DESCRIPTION: &str = "Send a task update to a queued or running sub-agent. Use this when the user adds constraints, clarifies priorities, provides new facts, or asks the child to adjust direction. You can also ask the child a question; the answer arrives later as a [task-report] notification. The child reads updates at the next safe checkpoint; this does not interrupt an in-flight provider or tool call. It cannot be sent to a finished task. Returns an error, and the child does not receive the update, when it cannot be saved to the child's pending-message file. Updates not yet read survive a restart and reach the child when it is resumed. To check progress instead, use agent_status, which reads the task registry and does not run the child model.";
 
@@ -38,7 +38,7 @@ const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (defaul
 
 const AGENT_NAME_DESCRIPTION: &str = "Optional task name, unique in this session; usable instead of the task id in agent_status, agent_send, agent_cancel, and /task. 1 to 64 letters, digits, '_' or '-'.";
 
-const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-agent task in this session. With resume set, this continues that task on its own transcript instead of starting a new one: prompt is the next user message delivered to it, and agent, model, name, and description must be absent or empty, and context absent or \"fresh\"; the task keeps its recorded values.";
+const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-agent task in this session. With resume set, this continues that task on its own transcript instead of starting a new one: prompt is the next user message delivered to it, and agent, model, name, and description must be absent or empty, and context absent or \"fresh\"; the task keeps its recorded values. For completed tasks, use agent_status and read the saved report instead.";
 
 /// The `agent`, `agent_status`, `agent_send` and `agent_cancel` definitions,
 /// without a built [`Runner`]. The redaction boundary check needs the tool set
@@ -127,7 +127,7 @@ fn agent_status_definition() -> ToolDefinition {
                 },
                 "task_id": {
                     "type": "string",
-                    "description": "Task id or name; show status and final conclusion without research history by default"
+                    "description": "Task id or name; show status, final conclusion preview and any saved overflow report path without research history by default"
                 }
             }
         }),
@@ -400,12 +400,7 @@ impl Tool for AgentStatusTool {
                 lines.push(format!("error: {}", task.error));
             }
         }
-        crate::tool::result::capped_text_result(
-            &lines.join("\n"),
-            self.runner
-                .max_output_bytes()
-                .min(runner::PARENT_REPORT_BYTES),
-        )
+        text_result(self.runner.parent_text(&task, &lines.join("\n")))
     }
 }
 
@@ -867,6 +862,155 @@ mod tests {
         .await;
         assert!(result.content.len() < 4300);
         assert!(result.content.contains("truncated"));
+    }
+
+    #[tokio::test]
+    async fn long_final_report_is_readable_after_child_exit_without_another_model_call() {
+        use crate::tool::{read::ReadTool, root::Root, workspace::Workspace};
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FakeProvider::new();
+        let report = format!(
+            "# 摘要\n{}\n## 证据\n末尾证据\n",
+            "中文研究内容".repeat(5000)
+        );
+        provider.add_route(match_any, vec![assistant_text(&report, Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+        runner.bind_scratch_root(Root::open(dir.path()).unwrap());
+        runner
+            .start(StartRequest {
+                prompt: "research".into(),
+                name: "research".into(),
+                ..StartRequest::default()
+            })
+            .await
+            .unwrap();
+        let task = wait_final(&tasks, "t1").await;
+        assert_eq!(task.status, TaskStatus::Succeeded);
+        assert_eq!(task.result, report);
+        let notices = tasks.notifications().snapshot();
+        let notice = &notices[0].text;
+        let report_path = notice
+            .split("[Full report: ")
+            .nth(1)
+            .expect("read pointer survives truncation")
+            .split(" (")
+            .next()
+            .unwrap()
+            .to_owned();
+        assert!(notice.len() < 4700);
+        assert!(notice.contains("truncated"));
+        assert!(notice.contains("UTF-8 bytes"));
+        assert!(notice.contains("/index.md"));
+        let status = run(
+            tool_named(&runner, "agent_status").as_ref(),
+            r#"{"task_id":"research","include_history":true}"#,
+        )
+        .await;
+        assert!(status.content.contains(&report_path));
+        assert!(status.content.len() < 4700);
+        let prompt = &provider.requests()[0].system_prompt;
+        assert!(prompt.contains("<research_report>"));
+        assert!(prompt.contains("/report.md"));
+        assert!(prompt.contains("Existing write permissions"));
+        drop(runner);
+
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let read = ReadTool::new(&workspace, 16384);
+        let index_path = report_path.replace("/final.md", "/index.md");
+        let index = run(&read, &serde_json::json!({"path": index_path}).to_string()).await;
+        assert!(!index.is_error, "{}", index.content);
+        assert!(index.content.contains("line 3: 证据"));
+        let tail = run(
+            &read,
+            &serde_json::json!({"path": report_path, "offset": 3, "limit": 2}).to_string(),
+        )
+        .await;
+        assert!(!tail.is_error, "{}", tail.content);
+        assert!(tail.content.contains("末尾证据"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&report_path)).unwrap(),
+            report
+        );
+        assert_eq!(
+            provider.requests().len(),
+            1,
+            "reading must not restart the child"
+        );
+    }
+
+    #[tokio::test]
+    async fn tiny_preview_keeps_the_read_pointer_and_persisted_report_is_redacted() {
+        use crate::tool::root::Root;
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FakeProvider::new();
+        let private = "private-report-marker";
+        provider.add_route(
+            match_any,
+            vec![assistant_text(
+                &format!("{private}\nfindings"),
+                Usage::default(),
+            )],
+        );
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.max_output_bytes = 1;
+        config.redaction_values = vec![private.to_owned()];
+        let runner = runner(config);
+        runner.bind_scratch_root(Root::open(dir.path()).unwrap());
+        runner
+            .start(StartRequest {
+                prompt: "research".into(),
+                ..StartRequest::default()
+            })
+            .await
+            .unwrap();
+        let task = wait_final(&tasks, "t1").await;
+        let notices = tasks.notifications().snapshot();
+        let path = notices[0]
+            .text
+            .split("[Full report: ")
+            .nth(1)
+            .unwrap()
+            .split(" (")
+            .next()
+            .unwrap();
+        let saved = std::fs::read_to_string(dir.path().join(path)).unwrap();
+        assert!(!saved.contains(private));
+        assert!(saved.contains("findings"));
+        assert_eq!(saved, task.result);
+        let status = run(
+            tool_named(&runner, "agent_status").as_ref(),
+            r#"{"task_id":"t1"}"#,
+        )
+        .await;
+        assert!(status.content.contains(path));
+    }
+
+    #[tokio::test]
+    async fn report_storage_failure_preserves_success_and_reports_the_missing_artifact() {
+        use crate::tool::root::Root;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".otto"), "blocks directory creation").unwrap();
+        let provider = FakeProvider::new();
+        let report = "findings ".repeat(1000);
+        provider.add_route(match_any, vec![assistant_text(&report, Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+        runner.bind_scratch_root(Root::open(dir.path()).unwrap());
+        runner
+            .start(StartRequest {
+                prompt: "research".into(),
+                ..StartRequest::default()
+            })
+            .await
+            .unwrap();
+        let task = wait_final(&tasks, "t1").await;
+        assert_eq!(task.status, TaskStatus::Succeeded);
+        assert_eq!(task.result, report);
+        let notices = tasks.notifications().snapshot();
+        assert!(notices[0].text.contains("report file unavailable"));
+        assert!(!notices[0].text.contains("[Full report:"));
     }
 
     #[tokio::test]

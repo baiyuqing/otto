@@ -15,7 +15,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+## 0.4.5 - 2026-10-07
+
 ### Usage and compatibility
+
+- The TUI now pins queued next-turn input and current-turn guidance immediately
+  above the composer in a yellow `◆ QUEUED …` banner with a shaded background,
+  so queued text remains visible while the transcript scrolls.
 
 - AUTO now reviews requests for additional authority against the original user
   task, including shell escalations, MCP calls and ordinary persistent writes.

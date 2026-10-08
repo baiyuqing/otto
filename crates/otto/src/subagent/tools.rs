@@ -838,7 +838,12 @@ mod tests {
     #[tokio::test]
     async fn parent_handoffs_are_bounded_but_the_full_child_result_is_retained() {
         let provider = FakeProvider::new();
-        let report = "conclusion and evidence ".repeat(1000);
+        // The runner trims the final assistant text; end the fixture without
+        // whitespace so the retained result equals it byte for byte.
+        let report = "conclusion and evidence "
+            .repeat(1000)
+            .trim_end()
+            .to_owned();
         provider.add_route(match_any, vec![assistant_text(&report, Usage::default())]);
         let tasks = Arc::new(Tasks::new());
         let runner = runner(test_config(&provider, &tasks, Vec::new()));
@@ -869,10 +874,7 @@ mod tests {
         use crate::tool::{read::ReadTool, root::Root, workspace::Workspace};
         let dir = tempfile::tempdir().unwrap();
         let provider = FakeProvider::new();
-        let report = format!(
-            "# 摘要\n{}\n## 证据\n末尾证据\n",
-            "中文研究内容".repeat(5000)
-        );
+        let report = format!("# 摘要\n{}\n## 证据\n末尾证据", "中文研究内容".repeat(5000));
         provider.add_route(match_any, vec![assistant_text(&report, Usage::default())]);
         let tasks = Arc::new(Tasks::new());
         let runner = runner(test_config(&provider, &tasks, Vec::new()));
@@ -993,7 +995,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".otto"), "blocks directory creation").unwrap();
         let provider = FakeProvider::new();
-        let report = "findings ".repeat(1000);
+        let report = "findings ".repeat(1000).trim_end().to_owned();
         provider.add_route(match_any, vec![assistant_text(&report, Usage::default())]);
         let tasks = Arc::new(Tasks::new());
         let runner = runner(test_config(&provider, &tasks, Vec::new()));

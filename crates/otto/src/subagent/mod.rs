@@ -18,6 +18,7 @@ pub mod migration;
 pub mod prompt;
 pub mod record;
 pub mod runner;
+mod scratch;
 pub mod tasks;
 #[cfg(test)]
 pub(crate) mod testsupport;

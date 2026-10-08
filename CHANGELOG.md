@@ -27,6 +27,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Native agent runtimes automatically retain private rotating diagnostic logs
+  with session/task/operation IDs, HTTP and stream stages, active-operation
+  heartbeats, outcomes and reported usage. Each runtime has an independently
+  locked file family; content and credentials stay out of diagnostics and
+  model context.
+  ([#450](https://github.com/baiyuqing/otto/pull/450))
+
 - Parent agents can explicitly yield when only child dependencies remain;
   settled tool results and existing mailbox wakeups preserve user input and
   completion races. Task detail distinguishes current activity from last tool.

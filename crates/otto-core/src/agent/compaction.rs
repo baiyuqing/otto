@@ -383,6 +383,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         };
         let operation_id = (self.options.new_operation_id)()
             .map_err(|message| AgentError::OperationIdentity { message })?;
+        let mut diagnostic = crate::diagnostics::Observation::start(
+            self.options.diagnostics.as_ref(),
+            crate::diagnostics::Kind::RemoteCompaction,
+            operation_id.as_str(),
+            None,
+            &self.options.provider_name,
+            &self.options.model,
+        );
         let started = (self.options.now)();
         let invalid_stream = AtomicBool::new(false);
         let child = control.cancellation_token().child_token();
@@ -391,33 +399,42 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             parent: control,
         };
         let outcome = {
-            let mut on_stream = |event: crate::provider::StreamEvent| match event {
-                crate::provider::StreamEvent::Retry {
-                    attempt,
-                    max_attempts,
-                    delay,
-                    reason,
-                    interrupted_output,
-                } => emit(Event::ProviderRetry {
-                    operation_id: operation_id.clone(),
-                    attempt,
-                    max_attempts,
-                    delay,
-                    reason,
-                    interrupted_output,
-                }),
-                // The request carries the thinking setting, so a reasoning
-                // summary can stream; it is not part of the checkpoint.
-                crate::provider::StreamEvent::ReasoningDelta { .. } => {}
-                _ => {
-                    invalid_stream.store(true, Ordering::SeqCst);
-                    child.cancel();
+            let mut on_stream = |event: crate::provider::StreamEvent| {
+                diagnostic.stream(&event);
+                match event {
+                    crate::provider::StreamEvent::Retry {
+                        attempt,
+                        max_attempts,
+                        delay,
+                        reason,
+                        interrupted_output,
+                    } => emit(Event::ProviderRetry {
+                        operation_id: operation_id.clone(),
+                        attempt,
+                        max_attempts,
+                        delay,
+                        reason,
+                        interrupted_output,
+                    }),
+                    // The request carries the thinking setting, so a reasoning
+                    // summary can stream; it is not part of the checkpoint.
+                    crate::provider::StreamEvent::ReasoningDelta { .. } => {}
+                    _ => {
+                        invalid_stream.store(true, Ordering::SeqCst);
+                        child.cancel();
+                    }
                 }
             };
             self.provider
-                .complete(&request, &mut on_stream, &remote_control)
+                .complete_observed(
+                    &request,
+                    &mut on_stream,
+                    &remote_control,
+                    diagnostic.observer(),
+                )
                 .await
         };
+        diagnostic.provider_finished(&outcome);
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
@@ -595,9 +612,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
         let operation_id = (self.options.new_operation_id)()
             .map_err(|message| AgentError::OperationIdentity { message })?;
+        let mut diagnostic = crate::diagnostics::Observation::start(
+            self.options.diagnostics.as_ref(),
+            crate::diagnostics::Kind::Compaction,
+            operation_id.as_str(),
+            None,
+            &self.options.provider_name,
+            &self.options.model,
+        );
         let started = (self.options.now)();
         let outcome = {
             let mut on_stream = |event: crate::provider::StreamEvent| {
+                diagnostic.stream(&event);
                 if invalid_stream.load(Ordering::SeqCst) {
                     return;
                 }
@@ -636,9 +662,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
             };
             self.provider
-                .complete(request, &mut on_stream, &summary_control)
+                .complete_observed(
+                    request,
+                    &mut on_stream,
+                    &summary_control,
+                    diagnostic.observer(),
+                )
                 .await
         };
+        diagnostic.provider_finished(&outcome);
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();

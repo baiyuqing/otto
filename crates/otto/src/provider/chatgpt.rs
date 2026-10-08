@@ -195,62 +195,76 @@ impl Provider for Client {
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
     ) -> ProviderSettlement {
-        let mut attempts = 0;
-        loop {
-            let mut output_started = false;
-            let mut retry_reason = None;
-            let mut settlement = self
-                .attempt(
-                    request,
-                    &mut |event| {
-                        output_started = true;
-                        emit(event);
-                    },
-                    control,
-                    &mut retry_reason,
-                )
-                .await;
-            if attempts > 0 && settlement.result.is_err() {
-                settlement.outcome.effect_certainty = EffectCertainty::Unknown;
-            }
-            attempts += settlement.attempts;
-            settlement.attempts = attempts;
-            // Retry only this completion. A partial stream never authorizes
-            // tools; previously completed tools remain in the borrowed request.
-            // The retry event separates provisional output from its replacement.
-            let Some(retry) = retry_reason else {
-                return settlement;
-            };
-            if let Err(error) = check_running(control) {
-                return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
-            }
-            let Some(delay) = crate::retry::next_delay(
-                RETRY_POLICY,
-                attempts,
-                retry.retry_after,
-                control.remaining().unwrap_or(Duration::MAX),
-                Duration::from_secs(1),
-                &mut Backoff,
-            ) else {
-                if let Err(ProviderError::Other(message)) = &mut settlement.result {
-                    *message = format!(
-                        "{message} ({}; {attempts} attempts; retry budget exhausted)",
-                        retry.reason
-                    );
+        self.complete_observed(request, emit, control, &otto_core::diagnostics::Noop)
+            .await
+    }
+
+    fn complete_observed<'a>(
+        &'a self,
+        request: &'a Request,
+        emit: StreamSink<'a>,
+        control: &'a dyn OperationControl,
+        observer: &'a dyn otto_core::diagnostics::Observer,
+    ) -> otto_core::provider::DiagnosticFuture<'a> {
+        Box::pin(async move {
+            let mut attempts = 0;
+            loop {
+                let mut output_started = false;
+                let mut retry_reason = None;
+                let mut settlement = self
+                    .attempt(
+                        request,
+                        &mut |event| {
+                            output_started = true;
+                            emit(event);
+                        },
+                        control,
+                        &mut retry_reason,
+                        observer,
+                    )
+                    .await;
+                if attempts > 0 && settlement.result.is_err() {
+                    settlement.outcome.effect_certainty = EffectCertainty::Unknown;
                 }
-                return settlement;
-            };
-            emit(StreamEvent::Retry {
-                attempt: attempts + 1,
-                max_attempts: RETRY_POLICY.max_attempts,
-                delay,
-                reason: retry.reason.to_owned(),
-                interrupted_output: output_started,
-            });
-            if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
-                return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
+                attempts += settlement.attempts;
+                settlement.attempts = attempts;
+                // Retry only this completion. A partial stream never authorizes
+                // tools; previously completed tools remain in the borrowed request.
+                // The retry event separates provisional output from its replacement.
+                let Some(retry) = retry_reason else {
+                    return settlement;
+                };
+                if let Err(error) = check_running(control) {
+                    return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
+                }
+                let Some(delay) = crate::retry::next_delay(
+                    RETRY_POLICY,
+                    attempts,
+                    retry.retry_after,
+                    control.remaining().unwrap_or(Duration::MAX),
+                    Duration::from_secs(1),
+                    &mut Backoff,
+                ) else {
+                    if let Err(ProviderError::Other(message)) = &mut settlement.result {
+                        *message = format!(
+                            "{message} ({}; {attempts} attempts; retry budget exhausted)",
+                            retry.reason
+                        );
+                    }
+                    return settlement;
+                };
+                emit(StreamEvent::Retry {
+                    attempt: attempts + 1,
+                    max_attempts: RETRY_POLICY.max_attempts,
+                    delay,
+                    reason: retry.reason.to_owned(),
+                    interrupted_output: output_started,
+                });
+                if let Err(error) = await_control(control, tokio::time::sleep(delay)).await {
+                    return chatgpt_failure(error, attempts, EffectCertainty::Unknown, control);
+                }
             }
-        }
+        })
     }
 }
 
@@ -264,6 +278,7 @@ impl Client {
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
         retry_reason: &mut Option<Retry>,
+        observer: &dyn otto_core::diagnostics::Observer,
     ) -> ProviderSettlement {
         if let Err(error) = check_running(control) {
             return chatgpt_failure(error, 0, EffectCertainty::NotStarted, control);
@@ -328,6 +343,7 @@ impl Client {
             return chatgpt_failure(error, 0, EffectCertainty::NotStarted, control);
         }
 
+        observer.activity(otto_core::diagnostics::Phase::Sending, 0, None);
         let send = http
             .post(format!("{}/responses", self.base_url))
             .header("Authorization", format!("Bearer {access_token}"))
@@ -364,6 +380,7 @@ impl Client {
         };
 
         let status = response.status().as_u16();
+        observer.activity(otto_core::diagnostics::Phase::Headers, 0, Some(status));
         if !(200..300).contains(&status) {
             if let Some(retry) = transient_http_retry(status, response.headers()) {
                 *retry_reason = Some(retry);
@@ -412,6 +429,7 @@ impl Client {
                     return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
                 }
             };
+            observer.activity(otto_core::diagnostics::Phase::Receiving, chunk.len(), None);
             if let Err(error) = assembler.push(&chunk, &mut |event| events.emit(event, &mut *emit))
             {
                 if let Err(stop) = check_running(control) {
@@ -1074,7 +1092,39 @@ mod tests {
         let server = testserver::spawn(move |_| testserver::status_response(401, &body)).await;
         let client = Client::with_base_url(&server.url, static_tokens(access_token), account_id);
 
-        let (settlement, _) = complete(&client, &Request::default()).await;
+        #[derive(Default)]
+        struct Phases(std::sync::Mutex<Vec<(otto_core::diagnostics::Phase, Option<u16>)>>);
+        impl otto_core::diagnostics::Observer for Phases {
+            fn activity(
+                &self,
+                phase: otto_core::diagnostics::Phase,
+                _: usize,
+                status: Option<u16>,
+            ) {
+                self.0.lock().unwrap().push((phase, status));
+            }
+        }
+        let phases = Phases::default();
+        let settlement = client
+            .complete_observed(
+                &Request::default(),
+                &mut |_| {},
+                &CancellationToken::new(),
+                &phases,
+            )
+            .await;
+        assert!(
+            phases
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(
+                    |(phase, code)| matches!(phase, otto_core::diagnostics::Phase::Headers)
+                        && *code == Some(401)
+                )
+        );
+
         let error = settlement.result.unwrap_err();
         assert_eq!(error.to_string(), "chatgpt responses HTTP 401");
     }

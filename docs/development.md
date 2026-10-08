@@ -1118,6 +1118,14 @@ Protocol and examples: [Hooks and custom tools](user-manual.md#hooks-and-custom-
 
 ## Agent implementation contracts
 
+Execution diagnostics are out-of-band: core emits typed metadata through an
+optional injected observer and native startup supplies private rotating files.
+Never pass request/response/tool bodies or raw errors to the observer, copy
+ordinary stderr lines into the diagnostic sink, or inject diagnostic records
+into model history. `Provider::complete_observed` defaults to the original
+provider method; transport adapters and timeout wrappers preserve observation
+without changing stream events, request serialization or cancellation behavior.
+
 A tool executor may request a nonblocking turn yield through `yields_turn` only
 for a successful, completed tool execution. Core settles and persists the whole
 batch first. Failed calls, approval replanning, queued notifications and steering

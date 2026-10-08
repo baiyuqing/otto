@@ -965,6 +965,14 @@ impl Builder {
             redaction_values: redaction_values.to_vec(),
             redaction_complete: redactor.allows_dynamic_content(),
             template: OptionsTemplate {
+                diagnostics: self.logger.diagnostic_scope(
+                    &session.header().id,
+                    "",
+                    Redactor::with_completeness(
+                        redaction_values,
+                        redactor.allows_dynamic_content(),
+                    ),
+                ),
                 plugins: extensions,
                 hook_guard,
                 model: runtime.model.clone(),

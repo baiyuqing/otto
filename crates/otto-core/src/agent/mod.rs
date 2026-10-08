@@ -89,6 +89,8 @@ use tasks::TaskRegistry;
 /// itself: the clock and the identifier generator. Keeping them here is what
 /// lets `otto-core` build for `wasm32-unknown-unknown`.
 pub struct Options {
+    /// Out-of-band content-free observations; never become model context.
+    pub diagnostics: Option<Arc<dyn crate::diagnostics::Diagnostics>>,
     pub hooks: Option<Arc<dyn hooks::Hooks>>,
     pub hook_state: Arc<hooks::State>,
     pub model: String,
@@ -142,6 +144,7 @@ impl Default for Options {
     fn default() -> Self {
         let operation_counter = AtomicU64::new(0);
         Self {
+            diagnostics: None,
             hooks: None,
             hook_state: Arc::default(),
             model: String::new(),
@@ -290,6 +293,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     }
 
     /// The provider this agent calls.
+    pub fn diagnostics(&self) -> Option<&Arc<dyn crate::diagnostics::Diagnostics>> {
+        self.options.diagnostics.as_ref()
+    }
+
     pub fn provider(&self) -> &P {
         &self.provider
     }
@@ -535,6 +542,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .start_turn(wake)
             .await
             .map_err(|error| self.fail(emit, error))?;
+        let mut diagnostic = crate::diagnostics::Observation::start(
+            self.options.diagnostics.as_ref(),
+            crate::diagnostics::Kind::Turn,
+            &turn_id,
+            None,
+            &self.options.provider_name,
+            &self.options.model,
+        );
         let result = self
             .run_turn(
                 user_text,
@@ -548,6 +563,17 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             )
             .await;
         self.end_turn(turn_id, &result, control).await;
+        diagnostic.finish(crate::diagnostics::Finish {
+            status: if result.is_ok() { "ok" } else { "error" },
+            outcome: None,
+            attempts: None,
+            usage: None,
+            cached_input_tokens_present: None,
+            error_class: result
+                .as_ref()
+                .err()
+                .map(|_| crate::diagnostics::ErrorClass::Agent),
+        });
         result
     }
 
@@ -876,6 +902,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
             },
         };
+        let mut diagnostic = crate::diagnostics::Observation::start(
+            self.options.diagnostics.as_ref(),
+            crate::diagnostics::Kind::Tool,
+            operation_id.as_str(),
+            Some(&block.tool_name),
+            &self.options.provider_name,
+            &self.options.model,
+        );
         let attempt_fact = OperationFact::attempt(
             operation_id.clone(),
             attempt,
@@ -1013,6 +1047,17 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         } else {
             self.tools.batch_control(&block.tool_name, &execution)
         };
+        let diagnostic_finish = crate::diagnostics::Finish {
+            status: crate::diagnostics::status(&execution.outcome),
+            outcome: Some(execution.outcome.clone()),
+            attempts: Some(attempt),
+            usage: None,
+            cached_input_tokens_present: None,
+            error_class: execution
+                .result
+                .is_error
+                .then_some(crate::diagnostics::ErrorClass::Tool),
+        };
         let is_error = execution.result.is_error;
         // Observed here because this is the only point that knows both the
         // arguments the model sent and whether the result failed.
@@ -1092,6 +1137,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 },
             ));
         }
+        diagnostic.finish(diagnostic_finish);
         Ok(batch_control)
     }
 
@@ -1592,60 +1638,72 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 );
             }
         };
+        let mut diagnostic = crate::diagnostics::Observation::start(
+            self.options.diagnostics.as_ref(),
+            crate::diagnostics::Kind::Provider,
+            operation_id.as_str(),
+            None,
+            &self.options.provider_name,
+            &self.options.model,
+        );
         let started = (self.options.now)();
         let mut retries = Vec::new();
         let outcome = {
-            let mut on_stream = |event: StreamEvent| match event {
-                StreamEvent::ReasoningDelta { text: delta } => {
-                    let text = reasoning.write(&delta);
-                    if !text.is_empty() {
-                        visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
-                        emit(Event::ReasoningDelta { text });
+            let mut on_stream = |event: StreamEvent| {
+                diagnostic.stream(&event);
+                match event {
+                    StreamEvent::ReasoningDelta { text: delta } => {
+                        let text = reasoning.write(&delta);
+                        if !text.is_empty() {
+                            visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
+                            emit(Event::ReasoningDelta { text });
+                        }
                     }
-                }
-                StreamEvent::TextDelta { text: delta } => {
-                    let held = reasoning.flush();
-                    if !held.is_empty() {
-                        emit(Event::ReasoningDelta { text: held });
+                    StreamEvent::TextDelta { text: delta } => {
+                        let held = reasoning.flush();
+                        if !held.is_empty() {
+                            emit(Event::ReasoningDelta { text: held });
+                        }
+                        let text = stream.write(&delta);
+                        if !text.is_empty() {
+                            visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
+                            emit(Event::TextDelta { text });
+                        }
                     }
-                    let text = stream.write(&delta);
-                    if !text.is_empty() {
-                        visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
-                        emit(Event::TextDelta { text });
-                    }
-                }
-                StreamEvent::Retry {
-                    attempt,
-                    max_attempts,
-                    delay,
-                    reason,
-                    interrupted_output,
-                } => {
-                    stream = redactor.new_stream();
-                    reasoning = redactor.new_stream();
-                    retries.push(serde_json::json!({
-                        "attempt": attempt, "maxAttempts": max_attempts,
-                        "delayMs": u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                        "reason": redactor.redact_string(&reason),
-                        "interruptedOutput": interrupted_output,
-                    }));
-                    emit(Event::ProviderRetry {
-                        operation_id: operation_id.clone(),
+                    StreamEvent::Retry {
                         attempt,
                         max_attempts,
                         delay,
                         reason,
                         interrupted_output,
-                    });
-                }
-                StreamEvent::ToolCallDelta { .. } => {
-                    visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
+                    } => {
+                        stream = redactor.new_stream();
+                        reasoning = redactor.new_stream();
+                        retries.push(serde_json::json!({
+                            "attempt": attempt, "maxAttempts": max_attempts,
+                            "delayMs": u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                            "reason": redactor.redact_string(&reason),
+                            "interruptedOutput": interrupted_output,
+                        }));
+                        emit(Event::ProviderRetry {
+                            operation_id: operation_id.clone(),
+                            attempt,
+                            max_attempts,
+                            delay,
+                            reason,
+                            interrupted_output,
+                        });
+                    }
+                    StreamEvent::ToolCallDelta { .. } => {
+                        visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                 }
             };
             self.provider
-                .complete(request, &mut on_stream, control)
+                .complete_observed(request, &mut on_stream, control, diagnostic.observer())
                 .await
         };
+        diagnostic.provider_finished(&outcome);
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();

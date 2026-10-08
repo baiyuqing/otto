@@ -271,6 +271,13 @@ pub type StreamSink<'a> = &'a mut (dyn FnMut(StreamEvent) + Send);
 #[cfg(target_arch = "wasm32")]
 pub type StreamSink<'a> = &'a mut dyn FnMut(StreamEvent);
 
+#[cfg(not(target_arch = "wasm32"))]
+pub type DiagnosticFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ProviderSettlement> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+pub type DiagnosticFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ProviderSettlement> + 'a>>;
+
 /// A model backend.
 ///
 /// See the module documentation for the ownership, concurrency, cancellation,
@@ -289,6 +296,18 @@ pub trait Provider {
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
     ) -> ProviderSettlement;
+
+    /// Optional content-free transport observations. Existing providers keep
+    /// their behavior; native HTTP adapters override this for request phases.
+    fn complete_observed<'a>(
+        &'a self,
+        request: &'a Request,
+        emit: StreamSink<'a>,
+        control: &'a dyn OperationControl,
+        _observer: &'a dyn crate::diagnostics::Observer,
+    ) -> DiagnosticFuture<'a> {
+        self.complete(request, emit, control)
+    }
 }
 
 #[cfg(test)]

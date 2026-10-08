@@ -2525,6 +2525,7 @@ impl Builder {
             system_prompt: system_prompt.clone(),
             system_prompt_parts,
             thinking: runtime.thinking.clone(),
+            cache_key: session.header().id,
             now: Box::new(Utc::now),
             new_operation_id: Box::new(new_operation_id),
             request_sizer,

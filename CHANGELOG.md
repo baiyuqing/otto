@@ -24,6 +24,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
   child exits. Failed `resume` calls now explain how to inspect completed tasks.
   ([#445](https://github.com/baiyuqing/otto/pull/445))
 
+### Build and CI
+
+- Fix the web retrieval byte limit expression to satisfy Clippy’s
+  `manual_clamp` lint without changing its bounds.
+
 ### Documentation
 
 - Contributor and agent instructions leave builds, tests and `make` gates to

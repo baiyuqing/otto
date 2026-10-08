@@ -909,7 +909,7 @@ mod tests {
                 .unwrap()
                 .summary(None)
                 .unwrap()
-                .requests,
+                .usage_events,
             0
         );
         assert!(

@@ -189,13 +189,13 @@ pub struct WireUsage {
 }
 
 impl WireUsage {
-    /// The cached prompt tokens: the OpenAI detail field when present,
-    /// otherwise the DeepSeek top-level field.
+    /// The cached prompt tokens reported by either spelling. When both are
+    /// present, use the larger count: some compatible providers emit a
+    /// defaulted zero detail alongside the authoritative top-level value.
     pub fn cached_tokens(&self) -> i64 {
-        match &self.prompt_tokens_details {
-            Some(details) => details.cached_tokens,
-            None => self.prompt_cache_hit_tokens.unwrap_or_default(),
-        }
+        self.prompt_tokens_details
+            .map_or(0, |details| details.cached_tokens)
+            .max(self.prompt_cache_hit_tokens.unwrap_or_default())
     }
 
     pub fn cached_tokens_present(&self) -> bool {

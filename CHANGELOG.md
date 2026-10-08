@@ -15,6 +15,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Features
+
+- Parent agents can explicitly yield when only child dependencies remain;
+  settled tool results and existing mailbox wakeups preserve user input and
+  completion races. Task detail distinguishes current activity from last tool.
+
 ### Fixes
 
 - Long sub-agent research can be handed off as persistent report files with a
@@ -23,6 +29,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
   visible after truncation, so parents can retrieve omitted sections after the
   child exits. Failed `resume` calls now explain how to inspect completed tasks.
   ([#445](https://github.com/baiyuqing/otto/pull/445))
+
+### Performance
+
+- Implementation guidance settles shared interfaces and file responsibility
+  before delegation, groups coherent edits, and emits one nonblocking batching
+  advisory after repeated single replacements to one file.
 
 ### Build and CI
 

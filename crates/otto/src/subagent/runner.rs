@@ -81,9 +81,10 @@ pub(crate) const PARENT_REPORT_BYTES: usize = 4096;
 /// because a child's plan would be shown nowhere; and delivery, which only a
 /// parent may start and which would otherwise let a child reach another
 /// workspace.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 15] = [
+pub const EXCLUDED_CHILD_TOOLS: [&str; 16] = [
     "agent",
     "agent_status",
+    "agent_yield",
     "agent_send",
     "agent_cancel",
     "remember",
@@ -101,7 +102,7 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 15] = [
 
 /// Appended to a child's system prompt inside `<subagent_role>` when it has
 /// no definition, or its definition's body is empty.
-const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result. Do not send progress updates, plans, or interim findings with agent_report; put them in the final report instead. Call agent_report only to answer a question that arrives in a [parent-message], or to report a blocker that needs a parent decision while you can keep working on other parts of the task. If you cannot continue, end with a final report that states the blocker.";
+const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete the entire delegated change within its assigned file scope. Reuse the agreed shared interfaces; report a needed contract change before expanding scope. Batch known same-file edits and use checked scripts for repetitive call-site changes. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result. Do not send progress updates, plans, or interim findings with agent_report; put them in the final report instead. Call agent_report only to answer a question that arrives in a [parent-message], or to report a blocker that needs a parent decision while you can keep working on other parts of the task. If you cannot continue, end with a final report that states the blocker.";
 
 const DEFAULT_MAX_PARALLEL: usize = 4;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 16384;
@@ -891,6 +892,32 @@ impl Runner {
     /// The report-text cap in force.
     pub fn max_output_bytes(&self) -> usize {
         self.config.max_output_bytes
+    }
+
+    pub(crate) fn activity(&self, task: &Task) -> &'static str {
+        if task.status == TaskStatus::Running
+            && let Some((service, scope)) = &self.config.approval
+        {
+            let Ok(activity) = service.activity_snapshot(&scope.workspace, Some(&scope.session_id))
+            else {
+                return "unknown";
+            };
+            if activity
+                .requests
+                .iter()
+                .any(|request| request.scope.task_id == task.id)
+            {
+                return "waiting_for_approval";
+            }
+            if activity
+                .reviewing
+                .iter()
+                .any(|request| request.scope.task_id == task.id)
+            {
+                return "approval_review";
+            }
+        }
+        self.config.tasks.activity(&task.id).unwrap_or("unknown")
     }
 
     /// The runner's clock, which the status tool uses for elapsed columns.
@@ -1767,6 +1794,7 @@ impl ChildProgress {
                 self.tasks
                     .record_provider_step(&self.task_id, usage, &text, present);
             }
+            Event::ToolCallFinished { .. } => self.tasks.record_tool_finished(&self.task_id),
             Event::ToolCallStarted {
                 tool_name,
                 arguments,

@@ -56,6 +56,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   last model response is at least 60 minutes old and the request estimate is
   above half of `working_window - reserve_tokens`. Local ChatGPT sessions
   showed no prompt-cache hits after more than 90 idle minutes.
+  ([#441](https://github.com/baiyuqing/otto/pull/441))
 
 ## 0.4.5 - 2026-10-07
 

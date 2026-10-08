@@ -27,11 +27,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Parent agents can explicitly yield when only child dependencies remain;
+  settled tool results and existing mailbox wakeups preserve user input and
+  completion races. Task detail distinguishes current activity from last tool.
+  ([#448](https://github.com/baiyuqing/otto/pull/448))
+
 - The ChatGPT Responses provider uses capability-gated remote compaction and
   persists the returned encrypted checkpoint as invisible append-only session
   state. Other providers, and manual compaction with a retention focus, keep
   using Otto's validated structured summaries.
   ([#447](https://github.com/baiyuqing/otto/pull/447))
+
 
 ### Fixes
 
@@ -43,6 +49,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
   ([#445](https://github.com/baiyuqing/otto/pull/445))
 
 ### Performance
+
+- Implementation guidance settles shared interfaces and file responsibility
+  before delegation, groups coherent edits, and emits one nonblocking batching
+  advisory after repeated single replacements to one file.
+  ([#448](https://github.com/baiyuqing/otto/pull/448))
 
 - Context reporting and automatic compaction treat an opaque provider prefix
   as unknown until a post-checkpoint usage report anchors its size, rather than

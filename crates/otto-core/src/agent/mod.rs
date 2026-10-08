@@ -754,6 +754,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
 
         loop {
+            state.yield_after_batch = false;
+            state.batch_has_errors = false;
             let response = match self
                 .dispatch_normal_provider_step(emit, &mut state, &system_context, control)
                 .await
@@ -815,12 +817,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 return Err(self.fail(emit, AgentError::NoProgress(stall)));
             }
 
-            if !had_tool_call {
+            if !had_tool_call || (state.yield_after_batch && !state.batch_has_errors && !replan) {
                 if let Some(error) = stopped_provider_error(control) {
                     return Err(self.fail(emit, AgentError::Provider(error)));
                 }
                 if self.options.mailbox.queued().iter().any(|entry| {
-                    entry.notification.kind == Some(inbox::NotificationKind::UserMessage)
+                    state.yield_after_batch
+                        || entry.notification.kind == Some(inbox::NotificationKind::UserMessage)
                 }) {
                     if let Err(error) = self.deliver_notifications(emit).await {
                         return Err(self.fail(emit, error));
@@ -974,6 +977,20 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 },
             }
         }
+        if let Some(advice) = state.progress.edit_advice(
+            &block.tool_name,
+            arguments.get(),
+            execution.result.is_error
+                || execution.outcome.disposition != OperationDisposition::Succeeded,
+        ) {
+            execution.result.content.push_str(advice);
+            if let Some(persisted) = &mut execution.result.persisted_content {
+                persisted.push_str(advice);
+            }
+        }
+        state.yield_after_batch |= self.tools.yields_turn(&block.tool_name, &execution);
+        state.batch_has_errors |= execution.result.is_error
+            || execution.outcome.disposition != OperationDisposition::Succeeded;
         execution.result.content = self.redactor.redact_string(&execution.result.content);
         execution.result.persisted_content = execution
             .result

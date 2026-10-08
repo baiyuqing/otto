@@ -159,6 +159,32 @@ impl Root {
         })
     }
 
+    pub(crate) fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            fd: self.fd.try_clone()?,
+        })
+    }
+
+    /// Exclusively creates and pins one normal child component, never a link.
+    pub(crate) fn create_new_child_directory(&self, name: &str, mode: Mode) -> io::Result<Self> {
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "invalid child directory",
+            ));
+        }
+        nix::sys::stat::mkdirat(self.fd.as_fd(), name, mode).map_err(nix_error)?;
+        Ok(Self {
+            fd: open_dir_at(self.fd.as_fd(), OsStr::new(name))?,
+        })
+    }
+
+    pub(crate) fn remove_directory(&self, name: &Path) -> io::Result<()> {
+        self.do_in_root(name, false, &mut |dirfd, component| {
+            unlinkat(dirfd, component, UnlinkatFlags::RemoveDir).map_err(nix_error)
+        })
+    }
+
     /// Runs `operation` on the parent directory and final component of `name`.
     ///
     /// `follow_final` decides what happens when `operation` reports `ELOOP`

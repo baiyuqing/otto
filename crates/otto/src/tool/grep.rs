@@ -25,7 +25,7 @@ use super::search::{
 use super::workspace::Workspace;
 use super::{CONTEXT_CANCELED, Tool, definition, error_result};
 
-const DEFAULT_GREP_LIMIT: usize = 100;
+const DEFAULT_GREP_LIMIT: usize = 30;
 const MAXIMUM_GREP_LIMIT: usize = 1000;
 /// A file containing a longer line is treated as non-text and skipped.
 const MAXIMUM_GREP_LINE_BYTES: usize = 1 << 20;
@@ -59,7 +59,7 @@ impl<'a> GrepTool<'a> {
     pub fn new(workspace: &'a Workspace, max_output_bytes: usize) -> Self {
         Self {
             workspace,
-            max_output_bytes,
+            max_output_bytes: max_output_bytes.min(super::result::RETRIEVAL_BYTES),
         }
     }
 }
@@ -68,7 +68,7 @@ impl<'a> GrepTool<'a> {
 pub fn grep_definition() -> ToolDefinition {
     definition(
         "grep",
-        "Search workspace file contents with a regular expression (read-only). Files the workspace's .gitignore excludes are skipped unless no_ignore is set",
+        "Search workspace file contents with a regular expression (read-only). Returns at most 4 KiB (or the smaller configured cap); narrow path/glob/pattern to inspect omitted matches. Files the workspace's .gitignore excludes are skipped unless no_ignore is set",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -97,7 +97,7 @@ pub fn grep_definition() -> ToolDefinition {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAXIMUM_GREP_LIMIT,
-                    "description": "Maximum matching lines; defaults to 100"
+                    "description": "Maximum matching lines; defaults to 30. The 4 KiB body cap also applies; narrow path/glob/pattern when truncated"
                 }
             },
             "required": ["pattern"]
@@ -224,7 +224,11 @@ impl Tool for GrepTool<'_> {
         if let Err(error) = walk {
             return error_result(error);
         }
-        capped_collector_result(&collector, truncation_marker)
+        let mut result = capped_collector_result(&collector, truncation_marker);
+        if !truncation_marker.is_empty() {
+            result.content.push_str("\nNarrow path, glob or pattern to inspect omitted matches; do not repeat the same broad search.");
+        }
+        result
     }
 }
 
@@ -362,6 +366,24 @@ mod tests {
     use crate::tool::testutil::{
         MAX_OUTPUT_BYTES, run, run_cancelled, workspace, write_search_file,
     };
+
+    #[tokio::test]
+    async fn broad_search_stays_bounded_even_with_a_large_match_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("many.txt"),
+            "match with a long result line\n".repeat(1000),
+        )
+        .unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let tool = GrepTool::new(&workspace, 51200);
+        let args =
+            serde_json::value::to_raw_value(&json!({"pattern":"match", "limit":1000})).unwrap();
+        let result = tool.execute(&args, &CancellationToken::new()).await;
+        assert!(!result.is_error);
+        assert!(result.content.len() < 4400);
+        assert!(result.content.contains("Narrow path, glob or pattern"));
+    }
 
     #[tokio::test]
     async fn gitignored_files_are_skipped_unless_no_ignore_is_set() {

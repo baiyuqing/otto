@@ -295,6 +295,7 @@ fn usage(factory: &SqlRepositories, address: &str) -> Option<Handle> {
                 kind: "provider",
                 usage: Default::default(),
                 usage_present: true,
+                cached_input_tokens_present: true,
             };
             match store.append(&record) {
                 Ok(()) => Outcome::Written,

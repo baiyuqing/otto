@@ -150,6 +150,7 @@ impl ReviewProvider for SessionReviewer {
                     .record(&otto_core::agent::Event::ProviderUsage {
                         usage: response.usage,
                         present: response.usage_present,
+                        cached_input_tokens_present: response.cached_input_tokens_present,
                     });
         }
         assessment.reason = self.agent.redact_text(assessment.reason.trim());

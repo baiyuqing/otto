@@ -292,6 +292,21 @@ impl Session for SharedTranscript {
         self.0.latest_compaction()
     }
 
+    fn remote_compaction(&self) -> Option<otto_core::session::RemoteCompaction> {
+        self.0.remote_compaction()
+    }
+
+    fn post_remote_compaction_messages(&self) -> Vec<Message> {
+        self.0.post_remote_compaction_messages()
+    }
+
+    async fn append_remote_compaction(
+        &self,
+        checkpoint: otto_core::session::RemoteCompaction,
+    ) -> Result<(), otto_core::session::SessionError> {
+        self.0.append_remote_compaction(checkpoint).await
+    }
+
     async fn append_compaction(
         &self,
         checkpoint: otto_core::session::CompactionCheckpoint,
@@ -1744,7 +1759,7 @@ impl ChildProgress {
                 interrupted_output: true,
                 ..
             } => self.text.clear(),
-            Event::ProviderUsage { usage, present } => {
+            Event::ProviderUsage { usage, present, .. } => {
                 let text = cap_last_bytes(&self.text, 500).to_string();
                 self.text.clear();
                 self.tasks
@@ -2058,9 +2073,9 @@ mod tests {
         wait_final(&tasks, "t1").await;
 
         let summary = store.summary(Some("parent")).expect("summary");
-        assert_eq!(summary.requests, 1);
+        assert_eq!(summary.usage_events, 1);
         assert_eq!(summary.input_tokens, 20);
-        assert_eq!(summary.cached_input_tokens, 10);
+        assert_eq!(summary.cached_input_tokens, None);
     }
 
     #[tokio::test]

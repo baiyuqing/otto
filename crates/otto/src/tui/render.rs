@@ -275,7 +275,7 @@ fn footer_text(app: &App) -> String {
         format_token_count(app.usage.input_tokens),
         format_token_count(app.usage.output_tokens)
     );
-    if app.usage.cached_input_tokens > 0 {
+    if app.cache_breakdown_complete == Some(true) && app.usage.cached_input_tokens > 0 {
         text.push_str(&format!(
             " (cached {}",
             format_token_count(app.usage.cached_input_tokens)
@@ -850,6 +850,7 @@ mod tests {
             output_tokens: 37_475,
             cached_input_tokens: 7_091_584,
         };
+        app.cache_breakdown_complete = Some(true);
 
         for width in [72u16, 80, 88, 100] {
             let rows = screen_rows(&app, width, MIN_TERMINAL_HEIGHT);

@@ -51,7 +51,7 @@ mod run_tests;
 
 pub use events::{
     AgentError, ApiStatus, CompactionMode, CompactionPlan, CompactionReason, CompactionResult,
-    CompactionSettings, Event, EventSink,
+    CompactionSettings, Event, EventSink, ProviderOperationKind,
 };
 
 use crate::model::{
@@ -61,7 +61,8 @@ use crate::model::{
 };
 use crate::operation::OperationControl;
 use crate::provider::{
-    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, Response, StreamEvent,
+    Provider, ProviderError, ProviderSettlement, RemoteCompactionSupport, Request, RequestSizer,
+    Response, StreamEvent,
 };
 use crate::session::Session;
 use crate::session::context::pending_tool_calls;
@@ -249,6 +250,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     pub fn context_report(&self) -> context_report::ContextReport {
         let (request, estimated_total) =
             self.build_normal_provider_request(&RunDispatchState::default(), "");
+        let estimate_complete = context_estimate::estimate_complete(&request);
         let memory = self
             .last_memory_context
             .lock()
@@ -270,6 +272,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             context_window: settings.hard_input_window.max(0),
             compaction_threshold,
             estimated_total,
+            estimate_complete,
             reported_input_tokens: snapshot
                 .context_input_tokens_present
                 .then_some(snapshot.context_input_tokens),
@@ -652,7 +655,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 EffectCertainty::NotStarted,
                 reason,
             );
-            self.emit_provider_api_call(emit, operation_id, std::time::Duration::ZERO, &settlement);
+            self.emit_provider_api_call(
+                emit,
+                operation_id,
+                ProviderOperationKind::Ordinary,
+                std::time::Duration::ZERO,
+                &settlement,
+            );
             return Err(self.fail(emit, AgentError::Provider(error)));
         }
 
@@ -753,6 +762,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 Err(error) => return Err(self.fail(emit, error)),
             };
 
+            let cached_input_tokens_present = response.cached_input_tokens_present;
             let mut assistant = self.redact_message(&response.message);
             if assistant.id.is_empty() {
                 assistant.id = (self.options.new_id)();
@@ -786,6 +796,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             emit(Event::ProviderUsage {
                 usage: usage.unwrap_or_default(),
                 present: usage.is_some(),
+                cached_input_tokens_present,
             });
 
             let had_tool_call = !tool_calls.is_empty();
@@ -1297,14 +1308,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     .stop_reason()
                     .unwrap_or(OperationStopReason::UserCancellation),
             );
-            self.emit_provider_api_call(emit, operation_id, std::time::Duration::ZERO, &settlement);
+            self.emit_provider_api_call(
+                emit,
+                operation_id,
+                ProviderOperationKind::Ordinary,
+                std::time::Duration::ZERO,
+                &settlement,
+            );
             return Err(AgentError::Provider(error));
         }
         let (mut request, mut estimate) = self.build_normal_provider_request(state, system_context);
+        let mut estimate_complete = context_estimate::estimate_complete(&request);
         let triggers = automatic_compaction_triggers(&self.options.compaction);
 
         let proactive_reason = triggers.and_then(|(soft_trigger, _)| {
-            if !self.options.compaction.auto {
+            if !self.options.compaction.auto || !estimate_complete {
                 None
             } else if estimate > soft_trigger {
                 Some(CompactionReason::Threshold)
@@ -1358,7 +1376,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         }
                         (request, estimate) =
                             self.build_normal_provider_request(state, system_context);
-                        if estimate > hard_trigger {
+                        estimate_complete = context_estimate::estimate_complete(&request);
+                        if estimate_complete && estimate > hard_trigger {
                             return Err(automatic_dispatch_error(
                                 AUTOMATIC_COMPACTION_STILL_TOO_LARGE_MESSAGE,
                                 Vec::new(),
@@ -1481,7 +1500,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         state: &RunDispatchState,
         system_context: &str,
     ) -> (Request, i64) {
-        let mut messages = self.session.model_messages();
+        let remote_compaction = matches!(
+            self.provider.capabilities().remote_compaction,
+            RemoteCompactionSupport::ResponsesV2
+        )
+        .then(|| self.session.remote_compaction())
+        .flatten()
+        .filter(|checkpoint| checkpoint.provider == self.options.provider_name);
+        let mut messages = if remote_compaction.is_some() {
+            self.session.post_remote_compaction_messages()
+        } else {
+            self.session.model_messages()
+        };
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
         if !state.memory_context.is_empty() {
             let current_user = messages
@@ -1504,6 +1534,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             messages,
             tools: self.tools.definitions(),
             cache_key: self.options.cache_key.clone(),
+            remote_compaction,
+            request_remote_compaction: false,
         };
         let latest = self.session.latest_compaction();
         let estimate = context_estimate::estimate_request(&request, latest.as_ref());
@@ -1592,7 +1624,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
-        self.emit_provider_api_call(emit, operation_id.clone(), duration, &outcome);
+        self.emit_provider_api_call(
+            emit,
+            operation_id.clone(),
+            ProviderOperationKind::Ordinary,
+            duration,
+            &outcome,
+        );
         // Persist only content-free recovery facts. Failed stream fragments
         // never become model context or executable tool calls.
         if !retries.is_empty() || outcome.result.is_err() {
@@ -1646,6 +1684,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         &self,
         emit: EventSink<'_>,
         operation_id: OperationId,
+        kind: ProviderOperationKind,
         duration: std::time::Duration,
         settlement: &ProviderSettlement,
     ) {
@@ -1658,6 +1697,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         };
         emit(Event::ProviderApiCall {
             operation_id,
+            kind,
             provider: self.options.provider_name.clone(),
             model: self.options.model.clone(),
             duration,
@@ -1993,6 +2033,7 @@ mod tests {
                 }],
                 ..Message::default()
             },
+            ..Response::default()
         }
     }
 
@@ -2004,6 +2045,7 @@ mod tests {
                 blocks: vec![Block::text("done")],
                 ..Message::default()
             },
+            ..Response::default()
         }
     }
 
@@ -2168,6 +2210,7 @@ mod tests {
 
         let api_call = Event::ProviderApiCall {
             operation_id: OperationId::new("op_2").expect("operation id"),
+            kind: ProviderOperationKind::Ordinary,
             provider: "fake".into(),
             model: "test-model".into(),
             duration: std::time::Duration::ZERO,
@@ -2181,6 +2224,7 @@ mod tests {
         };
         let second_api_call = Event::ProviderApiCall {
             operation_id: OperationId::new("op_4").expect("operation id"),
+            kind: ProviderOperationKind::Ordinary,
             provider: "fake".into(),
             model: "test-model".into(),
             duration: std::time::Duration::ZERO,
@@ -2204,6 +2248,7 @@ mod tests {
                         cached_input_tokens: 0
                     },
                     present: true,
+                    cached_input_tokens_present: false,
                 },
                 Event::ToolCallStarted {
                     operation_id: OperationId::new("op_3").expect("operation id"),
@@ -2235,7 +2280,8 @@ mod tests {
                 second_api_call,
                 Event::ProviderUsage {
                     usage: Usage::default(),
-                    present: false
+                    present: false,
+                    cached_input_tokens_present: false
                 },
                 Event::AgentFinished,
             ]
@@ -2414,6 +2460,7 @@ mod tests {
                 Event::AgentStarted,
                 Event::ProviderApiCall {
                     operation_id: OperationId::new("op_2").expect("operation id"),
+                    kind: ProviderOperationKind::Ordinary,
                     provider: "fake".into(),
                     model: "test-model".into(),
                     duration: std::time::Duration::ZERO,
@@ -2443,6 +2490,7 @@ mod tests {
                     blocks: vec![Block::text("wrong")],
                     ..Message::default()
                 },
+                ..Response::default()
             },
         )]);
         let agent = Agent::new(provider, EchoExecutor, MemorySession::new(), test_options());

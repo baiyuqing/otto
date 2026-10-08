@@ -406,6 +406,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     reason,
                     interrupted_output,
                 }),
+                // The request carries the thinking setting, so a reasoning
+                // summary can stream; it is not part of the checkpoint.
+                crate::provider::StreamEvent::ReasoningDelta { .. } => {}
                 _ => {
                     invalid_stream.store(true, Ordering::SeqCst);
                     child.cancel();

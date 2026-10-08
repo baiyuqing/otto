@@ -628,6 +628,10 @@ impl Session for MemorySession {
         state.seen_call_ids = replayed.seen_call_ids;
         state.seen_ids.insert(checkpoint_id);
         state.latest_compaction = Some(metadata.clone());
+        // The newest checkpoint kind wins, as in the persistent context
+        // projection: a local summary supersedes an older opaque prefix.
+        state.remote_compaction = None;
+        state.post_remote_compaction_messages.clear();
         Ok(metadata)
     }
 
@@ -835,6 +839,39 @@ mod tests {
                 .operation_ledger()
                 .operation_for_tool_call("c1")
                 .is_some()
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn a_local_compaction_clears_an_older_remote_checkpoint() {
+        let session = MemorySession::new();
+        session.append(user("before")).await.expect("append");
+        session
+            .append_remote_compaction(RemoteCompaction {
+                provider: "chatgpt".into(),
+                id: "cmp_1".into(),
+                encrypted_content: "opaque".into(),
+            })
+            .await
+            .expect("remote checkpoint");
+        session.append(user("after")).await.expect("append");
+        let first_kept = session.messages()[1].id.clone();
+
+        session
+            .append_compaction(CompactionCheckpoint {
+                summary: "local summary".into(),
+                first_kept_entry_id: first_kept,
+                created_at: chrono::Utc::now(),
+                ..CompactionCheckpoint::default()
+            })
+            .await
+            .expect("local checkpoint");
+
+        assert_eq!(session.remote_compaction(), None);
+        assert_eq!(
+            session.post_remote_compaction_messages(),
+            session.model_messages()
         );
     }
 

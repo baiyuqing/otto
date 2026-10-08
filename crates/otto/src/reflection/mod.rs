@@ -1211,6 +1211,8 @@ mod tests {
                             finish_reason: Some(FinishReason::Stop),
                             ..Message::default()
                         },
+                        cached_input_tokens_present: false,
+                        remote_compaction: None,
                     },
                     1,
                 ),

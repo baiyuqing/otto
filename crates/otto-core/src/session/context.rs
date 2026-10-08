@@ -31,6 +31,9 @@ use super::pi::{
     PiContentBlock, PiContextEdit, PiCustomMessage, PiEntry, PiMessage, PiOttoDetails, PiUsage,
     decode_pi_otto_details, encode_pi_otto_details,
 };
+use super::remote_compaction::{
+    REMOTE_COMPACTION_CUSTOM_TYPE, RemoteCompaction, decode_remote_compaction,
+};
 use super::turn::{InterruptedTurn, TURN_CUSTOM_TYPE, apply_turn_record, decode_turn_record};
 use super::types::{Header, RuntimeMetadata, Snapshot, Warning};
 use super::{PiError, PiErrorKind};
@@ -73,6 +76,11 @@ pub struct ResolvedContext {
     /// The active transcript after Pi `context_edit` projection, used only
     /// for provider context and compaction.
     pub model_messages: Vec<Message>,
+    /// The newest valid provider-managed checkpoint on the active path.
+    pub remote_compaction: Option<RemoteCompaction>,
+    /// The model projection strictly after `remote_compaction`. Empty when a
+    /// checkpoint is the leaf; equal to `model_messages` when none is active.
+    pub post_remote_compaction_messages: Vec<Message>,
     pub runtime: RuntimeMetadata,
     pub usage: Usage,
     pub usage_present: bool,
@@ -99,6 +107,8 @@ impl Default for ResolvedContext {
         Self {
             messages: Vec::new(),
             model_messages: Vec::new(),
+            remote_compaction: None,
+            post_remote_compaction_messages: Vec::new(),
             runtime: RuntimeMetadata::default(),
             usage: Usage::default(),
             usage_present: false,
@@ -190,6 +200,7 @@ pub fn build_context(
     let mut latest_runtime: Option<RuntimeMetadata> = None;
     let mut latest_model_change: Option<RuntimeMetadata> = None;
     let mut latest_assistant: Option<RuntimeMetadata> = None;
+    let mut remote_compaction_entry_index = None;
     for entry in &path {
         match entry.type_name.as_str() {
             "message" => {
@@ -232,6 +243,10 @@ pub fn build_context(
                     .compaction
                     .as_ref()
                     .ok_or_else(|| PiError::invalid("compaction payload is required"))?;
+                // The newest checkpoint kind wins. A later local summary must
+                // not leave an older provider-owned opaque prefix active.
+                resolved.remote_compaction = None;
+                remote_compaction_entry_index = None;
                 let usage = optional_pi_usage_to_model(compaction.usage.as_ref())?;
                 resolved.usage = add_resolved_usage(resolved.usage, usage.as_ref());
                 if compaction.usage.is_some() {
@@ -281,6 +296,22 @@ pub fn build_context(
                         None => collector.add(format!(
                             "ignored malformed {} entry {}",
                             crate::session::plan::PLAN_CUSTOM_TYPE,
+                            entry.id
+                        )),
+                    }
+                } else if custom.custom_type == REMOTE_COMPACTION_CUSTOM_TYPE {
+                    let raw = custom
+                        .data
+                        .as_deref()
+                        .map(RawValue::get)
+                        .unwrap_or_default();
+                    match decode_remote_compaction(raw) {
+                        Ok(checkpoint) => {
+                            resolved.remote_compaction = Some(checkpoint);
+                            remote_compaction_entry_index = index.indexes.get(&entry.id).copied();
+                        }
+                        Err(_) => collector.add(format!(
+                            "ignored malformed {REMOTE_COMPACTION_CUSTOM_TYPE} entry {}",
                             entry.id
                         )),
                     }
@@ -341,9 +372,22 @@ pub fn build_context(
         let Some(projected) = project_context_edit(entry, edits.get(&entry_id))? else {
             continue;
         };
-        resolved
-            .model_messages
-            .extend(pi_entry_to_context_messages(&projected)?);
+        let projected_messages = pi_entry_to_context_messages(&projected)?;
+        resolved.model_messages.extend(projected_messages.clone());
+        let is_after_remote = remote_compaction_entry_index.is_some_and(|checkpoint_index| {
+            index
+                .indexes
+                .get(&entry_id)
+                .is_some_and(|entry_index| *entry_index > checkpoint_index)
+        });
+        if is_after_remote {
+            resolved
+                .post_remote_compaction_messages
+                .extend(projected_messages);
+        }
+    }
+    if resolved.remote_compaction.is_none() {
+        resolved.post_remote_compaction_messages = resolved.model_messages.clone();
     }
     Ok((resolved, collector.warnings))
 }
@@ -2189,6 +2233,25 @@ mod tests {
         built
     }
 
+    fn remote_compaction_entry(
+        id: &str,
+        parent_id: Option<&str>,
+        checkpoint: &RemoteCompaction,
+    ) -> PiEntry {
+        let mut built = entry("custom", id, parent_id);
+        built.custom = Some(PiCustom {
+            custom_type: REMOTE_COMPACTION_CUSTOM_TYPE.into(),
+            data: Some(
+                RawValue::from_string(
+                    crate::session::encode_remote_compaction(checkpoint)
+                        .expect("encode checkpoint"),
+                )
+                .expect("valid JSON"),
+            ),
+        });
+        built
+    }
+
     fn decode_entry(raw: &str) -> PiEntry {
         decode_pi_entry(raw.as_bytes()).expect("decode entry")
     }
@@ -2454,6 +2517,59 @@ mod tests {
                 model: "two".into(),
             }
         );
+    });
+
+    test!(build_context_replays_latest_remote_compaction_and_post_checkpoint_messages {
+        let first = user_entry("32000001", None, "before");
+        let first_checkpoint = RemoteCompaction {
+            provider: "openai-compatible".into(),
+            id: "first".into(),
+            encrypted_content: "opaque-one".into(),
+        };
+        let checkpoint_one =
+            remote_compaction_entry("32000002", Some("32000001"), &first_checkpoint);
+        let between = user_entry("32000003", Some("32000002"), "between");
+        let second_checkpoint = RemoteCompaction {
+            provider: "openai-compatible".into(),
+            id: "second".into(),
+            encrypted_content: "opaque-two".into(),
+        };
+        let checkpoint_two =
+            remote_compaction_entry("32000004", Some("32000003"), &second_checkpoint);
+        let after = user_entry("32000005", Some("32000004"), "after");
+
+        let (context, warnings) = build_context(
+            &[first, checkpoint_one, between, checkpoint_two, after],
+            "32000005",
+        )
+        .expect("build context");
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+        assert_eq!(context.remote_compaction, Some(second_checkpoint));
+        assert_eq!(texts(&context.messages), ["before", "between", "after"]);
+        assert_eq!(texts(&context.model_messages), ["before", "between", "after"]);
+        assert_eq!(texts(&context.post_remote_compaction_messages), ["after"]);
+    });
+
+    test!(build_context_ignores_unknown_and_invalid_remote_custom_records {
+        let first = user_entry("33000001", None, "before");
+        let mut unknown = entry("custom", "33000002", Some("33000001"));
+        unknown.custom = Some(PiCustom {
+            custom_type: "future.fixture".into(),
+            data: Some(RawValue::from_string("{\"future\":true}".into()).expect("JSON")),
+        });
+        let mut invalid = entry("custom", "33000003", Some("33000002"));
+        invalid.custom = Some(PiCustom {
+            custom_type: REMOTE_COMPACTION_CUSTOM_TYPE.into(),
+            data: Some(RawValue::from_string("{\"schemaVersion\":2}".into()).expect("JSON")),
+        });
+        let after = user_entry("33000004", Some("33000003"), "after");
+
+        let (context, warnings) =
+            build_context(&[first, unknown, invalid, after], "33000004").expect("build context");
+        assert_eq!(context.remote_compaction, None);
+        assert_eq!(texts(&context.model_messages), ["before", "after"]);
+        assert_eq!(context.post_remote_compaction_messages, context.model_messages);
+        assert_warning_contains(&warnings, "ignored malformed otto.remote_compaction");
     });
 
     test!(build_context_frames_branch_and_custom_messages {

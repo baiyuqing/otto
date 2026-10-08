@@ -125,8 +125,11 @@ impl ProviderSettlement {
 ///
 /// Text and reasoning deltas reach the frontend as they arrive. Tool-call
 /// deltas are reported for progress display only: the authoritative tool
-/// calls are the blocks of [`Response::message`]. The concatenated reasoning
-/// deltas equal the text of the response's [`BlockType::Reasoning`] block.
+/// calls are the blocks of [`Response::message`]. A retry invalidates the
+/// preceding attempt's deltas; only the successful attempt's concatenated
+/// reasoning equals the response's [`BlockType::Reasoning`] block. Consumers
+/// discard pending buffers at every retry and separate already visible output
+/// when `interrupted_output` is true.
 ///
 /// [`BlockType::Reasoning`]: crate::model::BlockType::Reasoning
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +153,9 @@ pub enum StreamEvent {
         max_attempts: u32,
         delay: std::time::Duration,
         reason: String,
+        /// The preceding attempt emitted provisional output. Consumers must
+        /// discard pending stream state and mark its visible text interrupted.
+        interrupted_output: bool,
     },
 }
 

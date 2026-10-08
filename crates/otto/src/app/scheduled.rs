@@ -23,6 +23,7 @@ const BOUNDARY_CLOSED: &str =
 #[derive(Default)]
 pub(super) struct ReplyCollector {
     reply: String,
+    completed_text_bytes: usize,
     after_tool: bool,
     tool_started: bool,
 }
@@ -34,9 +35,17 @@ impl ReplyCollector {
                 if self.after_tool && !self.reply.is_empty() {
                     self.reply.truncate(self.reply.trim_end().len());
                     self.reply.push_str("\n\n");
+                    self.completed_text_bytes = self.reply.len();
                 }
                 self.after_tool = false;
                 self.reply.push_str(text);
+            }
+            Event::ProviderUsage { .. } => self.completed_text_bytes = self.reply.len(),
+            Event::ProviderRetry {
+                interrupted_output: true,
+                ..
+            } => {
+                self.reply.truncate(self.completed_text_bytes);
             }
             Event::ToolCallStarted { .. } => {
                 self.after_tool = true;
@@ -218,6 +227,34 @@ impl Sink for NoticeSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_recovery_discards_only_the_current_reply_fragment() {
+        let mut collector = ReplyCollector::default();
+        collector.observe(&Event::TextDelta {
+            text: "earlier ✓  ".into(),
+        });
+        collector.observe(&Event::ProviderUsage {
+            usage: Default::default(),
+            present: false,
+        });
+        collector.after_tool = true;
+        for text in ["partial 一", "partial 二"] {
+            collector.observe(&Event::TextDelta { text: text.into() });
+            collector.observe(&Event::ProviderRetry {
+                operation_id: otto_core::model::OperationId::new("retry-test").unwrap(),
+                attempt: 2,
+                max_attempts: 7,
+                delay: std::time::Duration::ZERO,
+                reason: "connection interrupted".into(),
+                interrupted_output: true,
+            });
+        }
+        collector.observe(&Event::TextDelta {
+            text: "final".into(),
+        });
+        assert_eq!(collector.reply(), "earlier ✓\n\nfinal");
+    }
 
     #[tokio::test]
     async fn scheduled_lineage_uses_frozen_human_evidence_and_rejects_changed_task() {

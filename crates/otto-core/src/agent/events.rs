@@ -169,6 +169,7 @@ pub enum Event {
         max_attempts: u32,
         delay: std::time::Duration,
         reason: String,
+        interrupted_output: bool,
     },
     ProviderApiCall {
         operation_id: OperationId,

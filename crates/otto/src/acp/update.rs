@@ -98,6 +98,19 @@ pub fn local_wire(event: &Event) -> WireEvent {
 /// The update for one live event; `None` for events ACP has no counterpart for.
 pub fn event_update(event: &WireEvent) -> Option<SessionUpdate> {
     match event.event_type.as_str() {
+        "provider_retry"
+            if event
+                .retry
+                .as_ref()
+                .is_some_and(|retry| retry.interrupted_output) =>
+        {
+            Some(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                text_block(&format!(
+                    "\n\n[{}]\n\n",
+                    otto_core::wire::transcript::INTERRUPTED_OUTPUT_NOTICE
+                )),
+            )))
+        }
         "text_delta" => Some(SessionUpdate::AgentMessageChunk(ContentChunk::new(
             text_block(&event.text),
         ))),
@@ -256,6 +269,31 @@ mod tests {
             tool_call_id: "call-1".into(),
             arguments: arguments.into(),
         }
+    }
+
+    #[test]
+    fn interrupted_output_marks_a_boundary_in_acp_message_chunks() {
+        let event = Event::ProviderRetry {
+            operation_id: OperationId::new("recovery-op").unwrap(),
+            attempt: 2,
+            max_attempts: 7,
+            delay: std::time::Duration::from_secs(1),
+            reason: "connection interrupted".into(),
+            interrupted_output: true,
+        };
+        let wire = local_wire(&event);
+        assert!(wire.retry.as_ref().unwrap().interrupted_output);
+        let update = to_json(&event_update(&wire).unwrap());
+        assert_eq!(update["sessionUpdate"], "agent_message_chunk");
+        assert!(
+            update["content"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Previous response interrupted")
+        );
+        let mut legacy = wire;
+        legacy.retry.as_mut().unwrap().interrupted_output = false;
+        assert!(event_update(&legacy).is_none());
     }
 
     #[test]

@@ -392,9 +392,25 @@ pub fn reduce_json(items: &[Item], event_json: &str) -> Result<Vec<Item>, serde_
     Ok(reduce(items, &event))
 }
 
+/// Marks the boundary between an interrupted attempt and its replacement.
+pub const INTERRUPTED_OUTPUT_NOTICE: &str =
+    "Previous response interrupted; retrying this model step. Completed tools are preserved.";
+
 /// The decoded form of [`reduce_json`].
 pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
     match event.event_type.as_str() {
+        "provider_retry"
+            if event
+                .retry
+                .as_ref()
+                .is_some_and(|retry| retry.interrupted_output) =>
+        {
+            let mut next = items.to_vec();
+            next.push(Item::Notice {
+                text: INTERRUPTED_OUTPUT_NOTICE.into(),
+            });
+            next
+        }
         "reasoning_delta" => {
             if event.text.is_empty() {
                 return items.to_vec();
@@ -1083,6 +1099,25 @@ mod tests {
 
     fn phase_of(event_json: &str) -> Option<String> {
         phase(&serde_json::from_str(event_json).expect("event decodes"))
+    }
+
+    #[test]
+    fn interrupted_output_is_separated_from_the_replacement_and_legacy_retries_decode() {
+        let mut items = reduce_json(&[], r#"{"type":"text_delta","text":"partial"}"#).unwrap();
+        let legacy: WireEvent =
+            serde_json::from_str(r#"{"type":"provider_retry","retry":{"attempt":2}}"#).unwrap();
+        assert!(!legacy.retry.as_ref().unwrap().interrupted_output);
+        assert_eq!(reduce(&items, &legacy), items);
+        items = reduce_json(
+            &items,
+            r#"{"type":"provider_retry","retry":{"attempt":2,"interrupted_output":true}}"#,
+        )
+        .unwrap();
+        items = reduce_json(&items, r#"{"type":"text_delta","text":"replacement"}"#).unwrap();
+        assert_eq!(items.len(), 3);
+        assert!(matches!(&items[0], Item::Assistant { text, .. } if text == "partial"));
+        assert!(matches!(&items[1], Item::Notice { text } if text == INTERRUPTED_OUTPUT_NOTICE));
+        assert!(matches!(&items[2], Item::Assistant { text, .. } if text == "replacement"));
     }
 
     #[test]

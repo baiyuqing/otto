@@ -1494,10 +1494,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         control: &dyn OperationControl,
     ) -> (Response, bool, Option<AgentError>) {
-        let mut stream = self.redactor.new_stream();
+        let redactor = &self.redactor;
+        let mut stream = redactor.new_stream();
         // Reasoning has its own redaction stream; it is flushed before the
         // first text delta so the two keep their provider order.
-        let mut reasoning = self.redactor.new_stream();
+        let mut reasoning = redactor.new_stream();
         let visible_output = std::sync::atomic::AtomicBool::new(false);
         let operation_id = match (self.options.new_operation_id)() {
             Ok(operation_id) => operation_id,
@@ -1510,6 +1511,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
         };
         let started = (self.options.now)();
+        let mut retries = Vec::new();
         let outcome = {
             let mut on_stream = |event: StreamEvent| match event {
                 StreamEvent::ReasoningDelta { text: delta } => {
@@ -1535,13 +1537,25 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     max_attempts,
                     delay,
                     reason,
-                } => emit(Event::ProviderRetry {
-                    operation_id: operation_id.clone(),
-                    attempt,
-                    max_attempts,
-                    delay,
-                    reason,
-                }),
+                    interrupted_output,
+                } => {
+                    stream = redactor.new_stream();
+                    reasoning = redactor.new_stream();
+                    retries.push(serde_json::json!({
+                        "attempt": attempt, "maxAttempts": max_attempts,
+                        "delayMs": u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                        "reason": redactor.redact_string(&reason),
+                        "interruptedOutput": interrupted_output,
+                    }));
+                    emit(Event::ProviderRetry {
+                        operation_id: operation_id.clone(),
+                        attempt,
+                        max_attempts,
+                        delay,
+                        reason,
+                        interrupted_output,
+                    });
+                }
                 StreamEvent::ToolCallDelta { .. } => {
                     visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -1553,7 +1567,31 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
-        self.emit_provider_api_call(emit, operation_id, duration, &outcome);
+        self.emit_provider_api_call(emit, operation_id.clone(), duration, &outcome);
+        // Persist only content-free recovery facts. Failed stream fragments
+        // never become model context or executable tool calls.
+        if !retries.is_empty() || outcome.result.is_err() {
+            let record = serde_json::json!({
+                "schemaVersion": 1, "operationId": operation_id,
+                "attempts": outcome.attempts, "retries": retries,
+                "outcome": outcome.outcome,
+                "outputStarted": visible_output.load(std::sync::atomic::Ordering::SeqCst),
+            });
+            if let Err(source) = self
+                .session
+                .append_custom("otto.provider_recovery", &record.to_string())
+                .await
+            {
+                return (
+                    Response::default(),
+                    true,
+                    Some(AgentError::Persist {
+                        kind: "provider recovery".into(),
+                        source,
+                    }),
+                );
+            }
+        }
         match outcome.result {
             Err(error) => (
                 Response::default(),

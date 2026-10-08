@@ -1156,8 +1156,16 @@ fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -
             max_attempts,
             delay,
             reason,
+            interrupted_output,
             ..
         } => {
+            if *interrupted_output {
+                let _ = writeln!(
+                    stdout,
+                    "\n[{}]",
+                    otto_core::wire::transcript::INTERRUPTED_OUTPUT_NOTICE
+                );
+            }
             let _ = writeln!(
                 stderr,
                 "[provider retry] attempt {attempt}/{max_attempts} in {}ms: {}",
@@ -2228,6 +2236,37 @@ Justification: \"push branch\"\n"
     }
 
     #[test]
+    fn interrupted_provider_output_is_marked_before_replacement_text() {
+        let mut stdout = Buffer::default();
+        let mut stderr = Buffer::default();
+        for event in [
+            Event::TextDelta {
+                text: "partial".into(),
+            },
+            Event::ProviderRetry {
+                operation_id: operation_id(),
+                attempt: 2,
+                max_attempts: 7,
+                delay: std::time::Duration::from_secs(1),
+                reason: "connection interrupted".into(),
+                interrupted_output: true,
+            },
+            Event::TextDelta {
+                text: "replacement".into(),
+            },
+        ] {
+            assert!(!render_event(&mut stdout, &mut stderr, &event));
+        }
+        assert!(
+            stdout
+                .text()
+                .starts_with("partial\n[Previous response interrupted")
+        );
+        assert!(stdout.text().ends_with("]\nreplacement"));
+        assert!(stderr.text().contains("attempt 2/7"));
+    }
+
+    #[test]
     fn provider_retry_renders_progress_without_suppressing_a_terminal_error() {
         let mut stdout = Buffer::default();
         let mut stderr = Buffer::default();
@@ -2241,6 +2280,7 @@ Justification: \"push branch\"\n"
                 max_attempts: 4,
                 delay: std::time::Duration::from_millis(1_250),
                 reason: "HTTP 503\nresponse body omitted".to_string(),
+                interrupted_output: false,
             },
         );
 

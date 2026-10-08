@@ -404,8 +404,20 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn cache_key_is_not_serialized() {
+        let request = Request {
+            cache_key: "s1".into(),
+            ..Request::default()
+        };
+        let body = serde_json::to_string(&build_request(&request)).unwrap();
+        assert!(!body.contains("s1") && !body.contains("cache"), "{body}");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn full_request_encodes_every_field() {
         let request = Request {
+            cache_key: String::new(),
             model: "test-model".into(),
             system_prompt: "sys".into(),
             thinking: "high".into(),

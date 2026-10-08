@@ -20,6 +20,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - Parent agents can explicitly yield when only child dependencies remain;
   settled tool results and existing mailbox wakeups preserve user input and
   completion races. Task detail distinguishes current activity from last tool.
+  ([#448](https://github.com/baiyuqing/otto/pull/448))
 
 ### Fixes
 
@@ -35,6 +36,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - Implementation guidance settles shared interfaces and file responsibility
   before delegation, groups coherent edits, and emits one nonblocking batching
   advisory after repeated single replacements to one file.
+  ([#448](https://github.com/baiyuqing/otto/pull/448))
 
 ### Build and CI
 

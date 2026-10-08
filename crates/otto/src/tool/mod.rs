@@ -14,7 +14,7 @@
 
 pub mod approval;
 pub mod bash;
-mod bash_output;
+pub(crate) mod bash_output;
 pub mod edit;
 pub mod find;
 pub(crate) mod gitignore;

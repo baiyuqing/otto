@@ -26,7 +26,7 @@ use super::{Catalog, runner};
 use crate::tool::result::decode_strict_json;
 use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 
-const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Its final report arrives later as a [task-notification] message that starts a runtime-owned wake turn when the parent is idle; do not poll agent_status to wait for it. Use agent_status only to inspect progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
+const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Its final report arrives later as a [task-notification] message that starts a runtime-owned wake turn when the parent is idle; do not poll agent_status to wait for it. Use agent_status only to inspect progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Assign a bounded file scope and request findings with file/line evidence. After delegation, do not read those same files again; rely on the child report and ask the child follow-up questions. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
 
 const AGENT_STATUS_DESCRIPTION: &str = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error. Stop a task that is stuck or no longer needed with agent_cancel.";
 
@@ -80,7 +80,7 @@ fn agent_definition() -> ToolDefinition {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "The complete task; the sub-agent sees nothing else."
+                    "description": "The complete task with assigned files, constraints and requested evidence; the sub-agent sees nothing else."
                 },
                 "description": {
                     "type": "string",

@@ -201,7 +201,7 @@ pub fn edit_definition() -> ToolDefinition {
     definition(
         "edit",
         concat!(
-            "Replace unique text fragments in a workspace file. Choose exactly one argument form: ",
+            "Replace unique text fragments in a workspace file. Combine all known changes to the same file into one edits batch. Choose exactly one argument form: ",
             "single replacement: {\"path\":\"file.txt\",\"old_text\":\"before\",\"new_text\":\"after\"}; ",
             "batch: {\"path\":\"file.txt\",\"edits\":[{\"old_text\":\"before\",\"new_text\":\"after\"}]}. ",
             "For a single replacement, omit edits. For a batch, put EVERY replacement in edits and omit ",
@@ -231,7 +231,7 @@ pub fn edit_definition() -> ToolDefinition {
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Batch replacements: put every replacement here and omit top-level old_text/new_text. Omit for a single top-level replacement. Entries must not overlap and each matches against the original file.",
+                    "description": "Batch replacements: combine all known changes to this file in one call; put every replacement here and omit top-level old_text/new_text. Omit for a single top-level replacement. Entries must not overlap and each matches against the original file.",
                     "items": {
                         "type": "object",
                         "additionalProperties": false,

@@ -3,12 +3,13 @@
 //! Only normalized, redacted bytes reach this sink. Short streams stay in
 //! memory; overflow creates an exclusive 0600 log through the pinned workspace
 //! handle. Disk errors never change command execution and are reported instead
-//! of advertising a complete log. Logs persist until the user removes them.
+//! of advertising a complete log. Shared leases retain logs while the parent
+//! turn or a child task is active; the last lease removes owned files.
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
@@ -19,8 +20,78 @@ use super::root::Root;
 pub(super) const PREVIEW_BYTES: usize = 4096;
 const DIRECTORY: &str = ".otto/tool-output";
 
+/// One runtime's temporary logs. Parent turns and child tasks share leases so
+/// one completed task cannot delete logs still needed by another task.
+#[derive(Default)]
+pub(crate) struct Logs {
+    state: Mutex<LogState>,
+}
+
+#[derive(Default)]
+struct LogState {
+    active: usize,
+    files: Vec<(Root, String)>,
+}
+
+impl LogState {
+    fn cleanup(&mut self) {
+        self.files.retain(|(directory, name)| {
+            match directory.remove(Path::new(name)) {
+                Ok(()) => false,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(_) => true, // Retry when idle again or when the runtime is dropped.
+            }
+        });
+    }
+}
+
+impl Logs {
+    pub(crate) fn lease(self: &Arc<Self>) -> LogLease {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active += 1;
+        LogLease(Arc::clone(self))
+    }
+
+    fn record(&self, directory: Root, name: String) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .files
+            .push((directory, name));
+    }
+}
+
+impl Drop for Logs {
+    fn drop(&mut self) {
+        self.state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cleanup();
+    }
+}
+
+#[must_use = "retain the lease until the turn or child task finishes"]
+pub(crate) struct LogLease(Arc<Logs>);
+
+impl Drop for LogLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active -= 1;
+        if state.active == 0 {
+            state.cleanup();
+        }
+    }
+}
+
 pub(super) struct Output {
     root: Arc<Root>,
+    logs: Arc<Logs>,
     limit: usize,
     prefix: CappedByteCollector,
     tail: VecDeque<u8>,
@@ -30,9 +101,15 @@ pub(super) struct Output {
 }
 
 impl Output {
+    #[cfg(test)]
     pub(super) fn new(root: Arc<Root>, limit: usize) -> Self {
+        Self::with_logs(root, limit, Arc::default())
+    }
+
+    pub(super) fn with_logs(root: Arc<Root>, limit: usize, logs: Arc<Logs>) -> Self {
         Self {
             root,
+            logs,
             limit,
             prefix: CappedByteCollector::new(limit),
             tail: VecDeque::new(),
@@ -63,6 +140,7 @@ impl Output {
             flags,
             Mode::S_IRUSR | Mode::S_IWUSR,
         )?;
+        self.logs.record(directory, format!("{id}.log"));
         Ok((path, BufWriter::new(file)))
     }
 
@@ -160,6 +238,105 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = Arc::new(Root::open(dir.path()).unwrap());
         (dir, Output::new(root, limit))
+    }
+
+    fn logged_output(logs: &Arc<Logs>, root: &Arc<Root>) -> String {
+        let mut output = Output::with_logs(Arc::clone(root), 4, Arc::clone(logs));
+        output.write(b"head complete log tail");
+        output.finish();
+        output.log.as_ref().unwrap().0.clone()
+    }
+
+    #[test]
+    fn last_turn_or_child_lease_removes_only_owned_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(Root::open(dir.path()).unwrap());
+        let logs = Arc::new(Logs::default());
+        let parent = logs.lease();
+        // Taken before a child is scheduled, so a queued child protects logs too.
+        let child = logs.lease();
+        let path = logged_output(&logs, &root);
+        let unrelated = dir.path().join(".otto/tool-output/keep.log");
+        std::fs::write(&unrelated, "not owned by this runtime").unwrap();
+        drop(parent);
+        assert!(dir.path().join(&path).exists());
+        drop(child);
+        assert!(!dir.path().join(&path).exists());
+        assert!(unrelated.exists());
+        assert!(logs.state.lock().unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn independent_sessions_do_not_clean_each_others_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(Root::open(dir.path()).unwrap());
+        let first = Arc::new(Logs::default());
+        let second = Arc::new(Logs::default());
+        let a = first.lease();
+        let b = second.lease();
+        let first_path = logged_output(&first, &root);
+        let second_path = logged_output(&second, &root);
+        drop(a);
+        assert!(!dir.path().join(first_path).exists());
+        assert!(dir.path().join(&second_path).exists());
+        drop(b);
+        assert!(!dir.path().join(second_path).exists());
+    }
+
+    #[test]
+    fn model_deleted_logs_are_forgotten_and_later_turns_clean_up_normally() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(Root::open(dir.path()).unwrap());
+        let logs = Arc::new(Logs::default());
+        let first_turn = logs.lease();
+        let path = logged_output(&logs, &root);
+        std::fs::remove_file(dir.path().join(path)).unwrap();
+        drop(first_turn);
+        assert!(logs.state.lock().unwrap().files.is_empty());
+        let second_turn = logs.lease();
+        let path = logged_output(&logs, &root);
+        drop(second_turn);
+        assert!(!dir.path().join(path).exists());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_task_releases_its_log_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(Root::open(dir.path()).unwrap());
+        let logs = Arc::new(Logs::default());
+        let lease = logs.lease();
+        let path = logged_output(&logs, &root);
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _lease = lease;
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!dir.path().join(path).exists());
+    }
+
+    #[test]
+    fn cleanup_uses_the_pinned_log_directory_after_a_path_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(Root::open(dir.path()).unwrap());
+        let logs = Arc::new(Logs::default());
+        let lease = logs.lease();
+        let path = logged_output(&logs, &root);
+        let name = Path::new(&path).file_name().unwrap();
+        let original = dir.path().join(".otto/tool-output");
+        let moved = dir.path().join(".otto/moved-output");
+        std::fs::rename(&original, &moved).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(original.join(name), "unrelated replacement").unwrap();
+        drop(lease);
+        assert!(!moved.join(name).exists());
+        assert_eq!(
+            std::fs::read_to_string(original.join(name)).unwrap(),
+            "unrelated replacement"
+        );
     }
 
     #[test]

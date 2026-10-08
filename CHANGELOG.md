@@ -15,6 +15,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Usage and compatibility
+
+- Bash overflow logs are now temporary: guidance asks the model to remove them
+  after analysis, and runtime cleanup removes owned logs once the turn and its child
+  tasks finish. Old transcript paths may no longer exist after task completion.
+
 ### Fixes
 
 - TUI feature interactions now open as centered panels over the conversation
@@ -26,6 +32,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
   that no candidates are pending.
 
 ### Performance
+
+- Agent guidance batches all known changes to one file into a single `edits`
+  call and avoids parent rereads of files assigned to a sub-agent.
 
 - Bash now returns bounded head/tail previews and saves complete redacted
   overflow logs in the workspace for targeted inspection. Execution status

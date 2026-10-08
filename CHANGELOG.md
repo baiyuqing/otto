@@ -52,6 +52,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
   whole conversation: batch independent tool calls, read only the needed line
   ranges, and send `update_plan` in the same batch as the next tool call.
   ([#439](https://github.com/baiyuqing/otto/pull/439))
+- With `compaction.auto` on, Otto now compacts once before a request when the
+  last model response is at least 60 minutes old and the request estimate is
+  above half of `working_window - reserve_tokens`. Local ChatGPT sessions
+  showed no prompt-cache hits after more than 90 idle minutes.
 
 ## 0.4.5 - 2026-10-07
 

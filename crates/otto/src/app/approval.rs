@@ -179,6 +179,7 @@ impl Controller {
             Some(self.begin_operation().map_err(AgentError::Other)?)
         };
         let runner = self.runner().map_err(AgentError::Other)?;
+        let _output_lease = runner.retain_temporary_outputs();
         if let Step::Text(text) | Step::Image(text, _) = &first {
             runner.record_user_authorization(text).await?;
         }

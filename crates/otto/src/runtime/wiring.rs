@@ -1116,6 +1116,23 @@ impl Builder {
         redaction_values: &[String],
         skills: &skill::Catalog,
     ) -> Result<Vec<Box<dyn Tool + Send + Sync>>, BuildError> {
+        self.child_tools_with_output_logs(
+            runtime,
+            max_output,
+            redaction_values,
+            skills,
+            Arc::default(),
+        )
+    }
+
+    pub(crate) fn child_tools_with_output_logs(
+        &self,
+        runtime: &Runtime,
+        max_output: usize,
+        redaction_values: &[String],
+        skills: &skill::Catalog,
+        output_logs: Arc<crate::tool::bash_output::Logs>,
+    ) -> Result<Vec<Box<dyn Tool + Send + Sync>>, BuildError> {
         let mut tools = self.builtin_file_tools(max_output);
         tools.extend(self.web_tools(max_output, redaction_values, Some(runtime)));
         if self.bash_configured() {
@@ -1134,6 +1151,7 @@ impl Builder {
                 redaction_values,
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
+            tool = tool.with_output_logs(output_logs);
             if self.sandbox_info.mode == SandboxMode::Seatbelt {
                 tool = tool.with_private_home();
             }

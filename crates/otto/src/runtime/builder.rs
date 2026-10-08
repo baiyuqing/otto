@@ -643,6 +643,7 @@ impl RequestSizer for ScriptedSizer {
 }
 
 pub struct Runner {
+    output_logs: Arc<crate::tool::bash_output::Logs>,
     authorization_run: Arc<Mutex<String>>,
     approvals: Option<(Arc<crate::approval::Service>, crate::approval::Scope)>,
     review_context: tokio::sync::Mutex<crate::approval::reviewer::ReviewContext>,
@@ -686,6 +687,12 @@ pub struct Runner {
 pub type AdviceAgent = Agent<ProviderClient, Registry, SharedSession>;
 
 impl Runner {
+    /// Keep temporary output across all provider steps of one logical turn,
+    /// including approval retries and queued follow-ups.
+    pub(crate) fn retain_temporary_outputs(&self) -> crate::tool::bash_output::LogLease {
+        self.output_logs.lease()
+    }
+
     pub(crate) fn set_scheduled_authorization_run(&self, label: &str) {
         let mut run = self.authorization_run.lock().expect("authorization run");
         if !run.starts_with("schedule:") {
@@ -858,6 +865,7 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        let _output_lease = self.output_logs.lease();
         let control = Control::new(
             self.turn_timeout
                 .map_or_else(Deadline::unlimited, Deadline::after),
@@ -895,6 +903,7 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        let _output_lease = self.output_logs.lease();
         let control = Control::new(
             self.turn_timeout
                 .map_or_else(Deadline::unlimited, Deadline::after),
@@ -943,6 +952,7 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        let _output_lease = self.output_logs.lease();
         let control = Control::new(
             self.turn_timeout
                 .map_or_else(Deadline::unlimited, Deadline::after),
@@ -1326,6 +1336,7 @@ impl Runner {
         let inbox = tasks.notifications().clone();
         let mailbox: Arc<dyn otto_core::mailbox::Mailbox> = inbox.clone();
         Self {
+            output_logs: Arc::default(),
             agent: Agent::new(
                 ProviderClient::Scripted(provider),
                 registry,
@@ -2073,6 +2084,7 @@ impl Builder {
             .protect_secrets(&redaction_values)
             .map_err(|e| e.to_string())?;
         let max_output = output_cap(runtime.max_output_bytes);
+        let output_logs = Arc::new(crate::tool::bash_output::Logs::default());
         let schedule_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let presentation_origin = Arc::new(crate::schedule::tools::TurnOrigin::default());
         let skills = otto_core::config::resolve_skills(
@@ -2104,6 +2116,7 @@ impl Builder {
                 &redaction_values,
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
+            tool = tool.with_output_logs(Arc::clone(&output_logs));
             if self.sandbox_info.mode == SandboxMode::Seatbelt {
                 tool = tool.with_private_home();
             }
@@ -2255,8 +2268,13 @@ impl Builder {
         mark_build_trace(&mut trace, "runner/workspace-context");
         let parent_agent_section = redactor.redact_string(&catalogs.agent_section);
         let endpoint_host = boundary::endpoint_host_for(&runtime.base_url);
-        let mut child_tools =
-            self.child_tools(runtime, max_output, &redaction_values, &catalogs.skills)?;
+        let mut child_tools = self.child_tools_with_output_logs(
+            runtime,
+            max_output,
+            &redaction_values,
+            &catalogs.skills,
+            Arc::clone(&output_logs),
+        )?;
         child_tools.extend(super::wiring::mcp_child_tools(&mcp_connected, max_output));
         if redactor.allows_dynamic_content() {
             child_tools.extend(extensions.tools());
@@ -2282,6 +2300,9 @@ impl Builder {
             Some(hook_guard.clone()),
             warnings,
         )?;
+        if let Some(runner) = &subagents.runner {
+            runner.bind_output_logs(Arc::clone(&output_logs));
+        }
         mark_build_trace(&mut trace, "runner/subagents");
 
         let task_control = Arc::new(crate::app::task_control::TaskControl::default());
@@ -2568,6 +2589,7 @@ impl Builder {
         }
         let trace_entries = trace.map(|trace| trace.entries).unwrap_or_default();
         let runner = Runner {
+            output_logs,
             authorization_run,
             review_context: tokio::sync::Mutex::new(review_context),
             pending_authorization: Mutex::new(Vec::new()),

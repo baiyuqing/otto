@@ -13,9 +13,8 @@ contracts and stays buildable for `wasm32-unknown-unknown`.
   Never serialize merged/defaulted configuration back over an owning source.
 - In-place config edits use `config::edit` and must reject changes beyond the
   intended key/table while preserving supported comments and layout.
-- Shared contract changes keep native/browser consumers consistent. Run the
-  relevant host tests and `make rust-wasm-check`; the root local gate remains
-  `make check-fast`.
+- Shared contract changes keep native/browser consumers consistent. CI runs
+  the host tests and `make rust-wasm-check`.
 
 See [package boundaries](../../docs/development.md#package-boundaries) for
 module ownership and [the architecture design](../../docs/specs/2026-09-05-architecture-contracts.md)

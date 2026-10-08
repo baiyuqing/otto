@@ -2250,6 +2250,120 @@ async fn remote_compaction_persists_opaque_state_and_reuses_only_the_new_tail() 
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn remote_compaction_accepts_a_streamed_reasoning_summary() {
+    let provider = FakeProvider::new(vec![
+        Turn::remote_compaction("compact-1", "opaque").with_events(vec![
+            StreamEvent::ReasoningDelta {
+                text: "thinking".into(),
+            },
+        ]),
+    ])
+    .with_remote_compaction();
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        seeded_session_with_echo_capabilities().await,
+        options(),
+    );
+
+    let result = agent
+        .compact("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("remote compact");
+
+    assert_eq!(result.checkpoint_id, "compact-1");
+    assert!(agent.session().remote_compaction().is_some());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_remote_tail_usage_anchors_the_estimate_after_an_older_local_checkpoint() {
+    let session = seeded_session_with_echo_capabilities().await;
+    session
+        .append_compaction(crate::session::CompactionCheckpoint {
+            summary: "local summary".into(),
+            first_kept_entry_id: "u2".into(),
+            created_at: clock(),
+            ..crate::session::CompactionCheckpoint::default()
+        })
+        .await
+        .expect("local checkpoint");
+    for (id, role) in [("u3", Role::User), ("a3", Role::Assistant)] {
+        session
+            .append(Message {
+                id: id.into(),
+                role,
+                blocks: vec![Block::text("z")],
+                ..Message::default()
+            })
+            .await
+            .expect("append");
+    }
+    session
+        .append_remote_compaction(RemoteCompaction {
+            provider: "fake".into(),
+            id: "compact-1".into(),
+            encrypted_content: "opaque".into(),
+        })
+        .await
+        .expect("remote checkpoint");
+    session
+        .append(Message {
+            id: "u4".into(),
+            role: Role::User,
+            blocks: vec![Block::text("q")],
+            ..Message::default()
+        })
+        .await
+        .expect("append");
+    session
+        .append(Message {
+            id: "a4".into(),
+            role: Role::Assistant,
+            blocks: vec![Block::text("a")],
+            usage: Some(Usage {
+                input_tokens: 200_000,
+                output_tokens: 1,
+                cached_input_tokens: 0,
+            }),
+            ..Message::default()
+        })
+        .await
+        .expect("append");
+    let provider = FakeProvider::new(vec![
+        Turn::remote_compaction("compact-2", "opaque-2"),
+        Turn::text("ok"),
+    ])
+    .with_remote_compaction();
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        session,
+        Options {
+            compaction: CompactionSettings {
+                auto: true,
+                hard_input_window: 1_000_000,
+                working_window: 100_000,
+                reserve_tokens: 16_384,
+                keep_recent_tokens: 20_000,
+            },
+            ..options()
+        },
+    );
+
+    // Only the first request matters here: the compacted turn's later
+    // ordinary request has an empty tail.
+    let _ = agent
+        .run("next", &mut |_| {}, &CancellationToken::new())
+        .await;
+
+    // The reported 200,000 input tokens cross the soft trigger, so the turn
+    // compacts before its ordinary request.
+    assert!(agent.provider().requests()[0].request_remote_compaction);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn a_manual_compaction_with_nothing_to_compact_is_a_bounded_no_op() {
     let provider = FakeProvider::new(Vec::new());
     let agent = Agent::new(

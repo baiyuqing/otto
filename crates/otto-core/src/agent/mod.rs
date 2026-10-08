@@ -1538,7 +1538,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             remote_compaction,
             request_remote_compaction: false,
         };
-        let latest = self.session.latest_compaction();
+        // A remote checkpoint supersedes any older local one, and the request
+        // carries only its tail, so the local checkpoint's first message id
+        // cannot anchor the estimate there.
+        let latest = request
+            .remote_compaction
+            .is_none()
+            .then(|| self.session.latest_compaction())
+            .flatten();
         let estimate = context_estimate::estimate_request(&request, latest.as_ref());
         (request, estimate)
     }

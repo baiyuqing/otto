@@ -33,6 +33,9 @@ pub struct Request {
     pub thinking: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
+    /// Identifies the conversation so a provider can route requests that share
+    /// a prompt prefix to the same cache. Empty means none.
+    pub cache_key: String,
 }
 
 /// One completion response.

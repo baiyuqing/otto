@@ -15,6 +15,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Fixes
+
+- Long sub-agent research can be handed off as persistent report files with a
+  summary and section index. Oversized final answers are saved automatically;
+  completion notifications and `agent_status` keep the full report's read path
+  visible after truncation, so parents can retrieve omitted sections after the
+  child exits. Failed `resume` calls now explain how to inspect completed tasks.
+
 ### Documentation
 
 - Contributor and agent instructions leave builds, tests and `make` gates to

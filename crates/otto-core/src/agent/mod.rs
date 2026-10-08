@@ -78,7 +78,7 @@ use overflow::{
     AUTOMATIC_COMPACTION_STILL_TOO_LARGE_MESSAGE, AUTOMATIC_COMPACTION_WARNING_MESSAGE,
     OVERFLOW_COMPACTION_FAILURE_MESSAGE, OVERFLOW_RETRY_FAILURE_MESSAGE, RunDispatchState,
     automatic_cancellation, automatic_compaction_triggers, automatic_dispatch_error,
-    is_typed_context_overflow,
+    idle_cache_expired, is_typed_context_overflow,
 };
 use progress::{ProgressGuard, ProgressPolicy};
 use redactor::Redactor;
@@ -1303,20 +1303,28 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let (mut request, mut estimate) = self.build_normal_provider_request(state, system_context);
         let triggers = automatic_compaction_triggers(&self.options.compaction);
 
-        if let Some((soft_trigger, hard_trigger)) = triggers
-            && self.options.compaction.auto
-            && estimate > soft_trigger
+        let proactive_reason = triggers.and_then(|(soft_trigger, _)| {
+            if !self.options.compaction.auto {
+                None
+            } else if estimate > soft_trigger {
+                Some(CompactionReason::Threshold)
+            } else if estimate > soft_trigger / 2 && self.last_response_idle() {
+                Some(CompactionReason::Idle)
+            } else {
+                None
+            }
+        });
+
+        if let Some((_, hard_trigger)) = triggers
+            && let Some(reason) = proactive_reason
         {
             if !state.proactive_attempted {
                 state.proactive_attempted = true;
-                match self
-                    .compact_locked(CompactionReason::Threshold, "", emit, control)
-                    .await
-                {
+                match self.compact_locked(reason, "", emit, control).await {
                     Err(error) if error.is_nothing_to_compact() => {
                         emit(Event::CompactionCompleted {
                             compaction: CompactionResult {
-                                reason: CompactionReason::Threshold,
+                                reason,
                                 automatic: true,
                                 noop: true,
                                 ..CompactionResult::default()
@@ -1449,6 +1457,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             ),
             version: (!self.options.version.is_empty()).then(|| self.options.version.clone()),
         }
+    }
+
+    /// Whether the last assistant message is old enough that the provider
+    /// prompt cache has likely expired.
+    fn last_response_idle(&self) -> bool {
+        let last = self
+            .session
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .map(|message| message.created_at);
+        idle_cache_expired(last, (self.options.now)())
     }
 
     /// Builds the request for one ordinary provider step and estimates it.

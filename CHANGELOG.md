@@ -48,6 +48,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
   route a session's requests to the same prompt cache. The OpenAI-compatible
   provider does not send it.
   ([#438](https://github.com/baiyuqing/otto/pull/438))
+- Model guidance now tells the agent that each tool round trip resends the
+  whole conversation: batch independent tool calls, read only the needed line
+  ranges, and send `update_plan` in the same batch as the next tool call.
+  ([#439](https://github.com/baiyuqing/otto/pull/439))
 
 ## 0.4.5 - 2026-10-07
 

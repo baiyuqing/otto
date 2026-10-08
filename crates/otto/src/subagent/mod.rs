@@ -17,6 +17,7 @@ pub mod interrupted;
 pub mod migration;
 pub mod prompt;
 pub mod record;
+mod reports;
 pub mod runner;
 mod scratch;
 pub mod tasks;

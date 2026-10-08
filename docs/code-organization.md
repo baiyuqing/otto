@@ -159,6 +159,10 @@ async adapter I/O, `storage/conformance.rs` exposes contract checks, and
 crate using a different JSON repository. See the [storage contract](development.md#native-storage-contracts)
 for capability, migration, and compatibility boundaries.
 
+`subagent/reports.rs` owns persistent workspace research reports and automatic
+final-answer overflow capture; `subagent/scratch.rs` owns temporary downloads
+that are removed when the child exits. Both use pinned workspace handles.
+
 Place native tool execution and workspace enforcement in `tool/`; `bash`
 execution goes through `sandbox/`. Keep session persistence append-only.
 

@@ -55,7 +55,7 @@ impl<'a> ReadTool<'a> {
 pub fn read_definition() -> ToolDefinition {
     definition(
         "read",
-        "Read a UTF-8 workspace file, including temporary bash output (removed after its turn and child tasks finish); use offset and limit for relevant excerpts. Returns at most 4 KiB of selected text (or the smaller configured cap); truncation gives character_offset to resume within the same line range. Returns an error for unreadable, binary or oversized files.",
+        "Read a UTF-8 workspace file, including persistent sub-agent reports and indexes, or temporary bash output (removed after its turn and child tasks finish); use offset and limit for relevant excerpts. Returns at most 4 KiB of selected text (or the smaller configured cap); truncation gives character_offset to resume within the same line range. Returns an error for unreadable, binary or oversized files.",
         json!({
             "type": "object",
             "additionalProperties": false,

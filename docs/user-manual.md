@@ -2177,8 +2177,10 @@ the session's model. Child agents do not get this tool.
 The `agent` tool starts or resumes a child task and always returns immediately
 with its task id, so a running child cannot hold the parent's agent loop open.
 Assign bounded file scopes and request findings with file/line evidence. After
-delegation, the parent relies on the child report and sends follow-up questions
-to the child instead of reading the same files again. Continue independent work
+delegation, the parent relies on the child report and reads its saved report
+sections rather than repeating source inspection. Follow-up questions can be
+sent only while the child is queued or running; `resume` only accepts interrupted
+tasks, not completed ones. Continue independent work
 after delegation, or finish the current response. A
 child report or completion is queued in the parent mailbox; if the parent is
 idle, the runtime starts a wake turn and delivers it as a `[task-notification]`.
@@ -2186,11 +2188,40 @@ idle, the runtime starts a wake turn and delivers it as a `[task-notification]`.
 Research downloads, search output and local analysis stay in the child's
 context. The child is instructed to return only verified conclusions, essential
 original-source references, uncertainty and decisions needed from the parent.
-Automatic completion/error notifications and `agent_report` are bounded to
-4 KiB plus truncation metadata (or the smaller configured budget). Complete child transcripts and task results remain recorded locally; only the
-bounded result is handed to the parent, not the transcript or raw tool output. `agent_status` defaults to bounded status/result text without
-recent steps; `include_history: true` explicitly includes recent steps within
-the same cap.
+Parent-facing previews remain bounded to 4 KiB (or the smaller configured
+budget), plus truncation and report-file metadata. For longer research, a child
+with permitted `write` access saves `report.md` with Markdown section headings
+in its assigned `.otto/reports/<task-id>-<unique-id>/` directory. Its final
+handoff contains a concise summary, uncertainty, the report path and a section
+index with line numbers. This does not grant additional write permissions or
+expand an assigned file scope.
+
+If final text exceeds the parent preview budget, the runtime automatically
+saves the complete redacted answer as `final.md` and generates `index.md` with
+Markdown heading line numbers. These two names are reserved for runtime use.
+The completion notification and `agent_status` include the full report path,
+byte/line counts and index path outside the preview cap. Use `read` with the
+report path and the index's 1-based `offset` plus `limit` to retrieve a section;
+when a selected range is still truncated, use the returned `character_offset`
+with the same line range. Reading a saved report never restarts the child.
+Reports without Markdown headings remain readable using the same cursor.
+
+Each task attempt gets a unique directory, including resumed tasks and sessions
+that reuse task IDs. Reports persist across child completion, cancellation and
+process restart; scratch cleanup does not remove them. They are workspace-local,
+ignored by Git and remain until explicitly removed. Existing read permissions
+still apply. File storage failures produce an explicit warning instead of a
+nonexistent report pointer and do not change the task outcome. If only index
+creation fails, the complete report path is still returned. Runtimes without a
+bound workspace cannot save report files. Completed tasks from before this
+feature are not retroactively exported.
+
+Complete child transcripts and task results remain recorded as before.
+`agent_status` defaults to bounded status/result text without recent steps;
+`include_history: true` includes recent steps within the same preview cap.
+`agent_report` messages remain bounded handoffs while a child is running; use
+an authored report file for longer interim content. Automatic file capture
+applies to final answers.
 
 A native child with `bash` receives a private workspace-relative directory under
 `.otto/tool-output/research-<id>/`. Download each pinned upstream source once
@@ -2203,7 +2234,8 @@ temporary paths. This scratch directory is separate from the durable transcript.
 Filesystem failures or abrupt process termination can prevent cleanup. Without
 `bash`, no scratch directory is allocated; existing web/file tools still work.
 
-Use `agent_status` only to inspect progress, `agent_send` to send guidance, and
+Use `agent_status` to inspect progress or retrieve a report path, `agent_send`
+to send guidance, and
 `agent_cancel` to stop a task; do not poll status to simulate waiting. Children
 never receive these tools, so a child cannot start or stop another child.
 

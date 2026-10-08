@@ -3524,6 +3524,8 @@ fn a_compaction_summary_and_mcp_tools_get_their_own_sections() {
                 ..ToolDefinition::default()
             },
         ],
+        remote_compaction: None,
+        request_remote_compaction: false,
     };
     let sections = super::context_report::sections(&request, &[], "");
     let kinds: Vec<SectionKind> = sections.iter().map(|section| section.kind).collect();

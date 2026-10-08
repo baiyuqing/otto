@@ -194,10 +194,26 @@ pub enum SessionError {
     Persist(String),
 }
 
+/// Platform-specific bounds for an append-only transcript.
+///
+/// Native session futures are `Send`, so shared session references must be
+/// `Sync`. WASM session futures are local and do not need that bound.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait SessionBounds: Sync {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Sync + ?Sized> SessionBounds for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait SessionBounds {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> SessionBounds for T {}
+
 /// An append-only transcript.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Session {
+pub trait Session: SessionBounds {
     /// A copy of the transcript in append order.
     fn messages(&self) -> Vec<Message>;
 

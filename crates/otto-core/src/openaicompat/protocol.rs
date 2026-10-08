@@ -463,6 +463,8 @@ mod tests {
                 description: "read a file".into(),
                 parameters: Some(raw(r#"{"alpha":{"a":3,"b":2},"zeta":1}"#)),
             }],
+            remote_compaction: None,
+            request_remote_compaction: false,
         };
         assert_eq!(
             encode(&request),

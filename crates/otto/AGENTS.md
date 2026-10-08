@@ -27,9 +27,9 @@ and [package contracts](../../docs/development.md#package-boundaries).
   limit claims to the platform actually tested.
 - External MCP/provider transports, OAuth, Turso, scheduling, failover and
   native process control remain in this crate, outside the WASM-safe core.
-- Run adjacent behavioral tests and relevant architecture guards, then the
-  root `make check-fast`. macOS-only acceptance cannot be validated by a
-  Linux run that discovers zero tests.
+- Add or update adjacent behavioral tests and architecture guards; CI runs
+  them. macOS-only acceptance cannot be validated by a Linux run that
+  discovers zero tests.
 
 Detailed reflection, memory, ACP, task and storage contracts live in the
 linked development guide; keep one canonical contract rather than copying

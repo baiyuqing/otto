@@ -15,6 +15,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ## Unreleased
 
+### Documentation
+
+- Contributor and agent instructions leave builds, tests and `make` gates to
+  CI: local work runs only `cargo fmt --all`; a test's failure mode is shown
+  by naming the assertion instead of reverting the change; opening the PR
+  ends the task without polling CI; feature and fix PRs never edit version
+  files; and the changelog PR link is added, committed and pushed in one
+  command.
+
 ## 0.4.8 - 2026-10-08
 
 ### Usage and compatibility

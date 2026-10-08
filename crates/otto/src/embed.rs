@@ -1794,7 +1794,7 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
     }
 
     /// The files under `~/.otto` and the session root of a fixture, as
-    /// relative paths with the session id replaced.
+    /// relative paths with session, workspace and diagnostic runtime ids replaced.
     fn tree(fixture: &Fixture, session: &str) -> Vec<String> {
         let mut names: Vec<String> = walk(&fixture.home)
             .iter()
@@ -1816,11 +1816,50 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
                 if parts.len() == 4 && parts[1] == "sessions" {
                     parts[2] = "<workspace>".to_string();
                 }
+                // Each runtime owns a random diagnostic family. Keep suffixes
+                // and duplicate entries so missing or extra files still differ.
+                if parts.len() == 3
+                    && parts[0] == ".otto"
+                    && parts[1] == "logs"
+                    && let Some((family, suffix)) = parts[2].split_once('.')
+                    && family.starts_with("diagnostic-")
+                {
+                    parts[2] = format!("diagnostic-<runtime>.{suffix}");
+                }
                 parts.join("/")
             })
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn diagnostic_tree_normalization_preserves_file_kinds_and_counts() {
+        let fixture = fixture("");
+        let logs = fixture.home.join(".otto/logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        for family in [
+            "diagnostic-123-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "diagnostic-456-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ] {
+            for suffix in ["jsonl", "jsonl.1", "lock"] {
+                std::fs::write(logs.join(format!("{family}.{suffix}")), "").unwrap();
+            }
+        }
+        std::fs::write(logs.join("other.jsonl"), "").unwrap();
+        assert_eq!(
+            tree(&fixture, "unused-session"),
+            vec![
+                ".config/otto/config.toml",
+                ".otto/logs/diagnostic-<runtime>.jsonl",
+                ".otto/logs/diagnostic-<runtime>.jsonl",
+                ".otto/logs/diagnostic-<runtime>.jsonl.1",
+                ".otto/logs/diagnostic-<runtime>.jsonl.1",
+                ".otto/logs/diagnostic-<runtime>.lock",
+                ".otto/logs/diagnostic-<runtime>.lock",
+                ".otto/logs/other.jsonl",
+            ]
+        );
     }
 
     fn normalize(text: &str, fixture: &Fixture, session: &str) -> String {

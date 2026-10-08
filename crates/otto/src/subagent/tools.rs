@@ -26,9 +26,9 @@ use super::{Catalog, runner};
 use crate::tool::result::decode_strict_json;
 use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 
-const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Its final report arrives later as a [task-notification] message that starts a runtime-owned wake turn when the parent is idle; do not poll agent_status to wait for it. Use agent_status only to inspect progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Assign a bounded file scope and request findings with file/line evidence. After delegation, do not read those same files again; rely on the child report and ask the child follow-up questions. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
+const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Research stays in the child context: use fresh context, download pinned sources once into its temporary research directory, and return only conclusions, essential evidence references and uncertainty within 4 KiB. The directory is removed when the task exits. Its final report arrives later as a [task-notification] message that starts a runtime-owned wake turn when the parent is idle; do not poll agent_status to wait for it. Use agent_status only to inspect progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Assign a bounded file scope and request findings with file/line evidence. After delegation, do not read those same files again; rely on the child report and ask the child follow-up questions. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
 
-const AGENT_STATUS_DESCRIPTION: &str = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error. Stop a task that is stuck or no longer needed with agent_cancel.";
+const AGENT_STATUS_DESCRIPTION: &str = "Show task status and a bounded final conclusion (at most 4 KiB plus a truncation marker). Recent research steps are omitted by default; set include_history only when explicitly needed. Omit task_id to list tasks. Do not poll to wait for completion.";
 
 const AGENT_SEND_DESCRIPTION: &str = "Send a task update to a queued or running sub-agent. Use this when the user adds constraints, clarifies priorities, provides new facts, or asks the child to adjust direction. You can also ask the child a question; the answer arrives later as a [task-report] notification. The child reads updates at the next safe checkpoint; this does not interrupt an in-flight provider or tool call. It cannot be sent to a finished task. Returns an error, and the child does not receive the update, when it cannot be saved to the child's pending-message file. Updates not yet read survive a restart and reach the child when it is resumed. To check progress instead, use agent_status, which reads the task registry and does not run the child model.";
 
@@ -121,9 +121,13 @@ fn agent_status_definition() -> ToolDefinition {
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "include_history": {
+                    "type": "boolean",
+                    "description": "Include recent child steps only when explicitly needed; default false. The response still has a 4 KiB cap"
+                },
                 "task_id": {
                     "type": "string",
-                    "description": "Task id or name; show one task's detail, including its recent steps."
+                    "description": "Task id or name; show status and final conclusion without research history by default"
                 }
             }
         }),
@@ -335,6 +339,8 @@ fn count_running(tasks: &Tasks) -> usize {
 #[serde(deny_unknown_fields)]
 struct AgentStatusArgs {
     #[serde(default)]
+    include_history: bool,
+    #[serde(default)]
     task_id: String,
 }
 
@@ -366,7 +372,12 @@ impl Tool for AgentStatusTool {
         let now = self.runner.now();
         if args.task_id.is_empty() {
             let lines: Vec<String> = all.iter().map(|task| status_line(task, now)).collect();
-            return text_result(lines.join("\n"));
+            return crate::tool::result::capped_text_result(
+                &lines.join("\n"),
+                self.runner
+                    .max_output_bytes()
+                    .min(runner::PARENT_REPORT_BYTES),
+            );
         }
 
         let Some(task) = tasks.get(&args.task_id) else {
@@ -376,9 +387,11 @@ impl Tool for AgentStatusTool {
         if !task.model.is_empty() {
             lines.push(format!("model: {}", task.model));
         }
-        lines.extend(history_lines(
-            &tasks.history(&args.task_id).unwrap_or_default(),
-        ));
+        if args.include_history {
+            lines.extend(history_lines(
+                &tasks.history(&args.task_id).unwrap_or_default(),
+            ));
+        }
         if task.is_final() {
             if task.error.is_empty() {
                 lines.push("result:".to_string());
@@ -387,7 +400,12 @@ impl Tool for AgentStatusTool {
                 lines.push(format!("error: {}", task.error));
             }
         }
-        text_result(lines.join("\n"))
+        crate::tool::result::capped_text_result(
+            &lines.join("\n"),
+            self.runner
+                .max_output_bytes()
+                .min(runner::PARENT_REPORT_BYTES),
+        )
     }
 }
 
@@ -797,9 +815,18 @@ mod tests {
             .expect("start succeeds");
         wait_final(&tasks, "t1").await;
 
-        let result = run(
+        let summary = run(
             tool_named(&runner, "agent_status").as_ref(),
             r#"{"task_id":"t1"}"#,
+        )
+        .await;
+        assert!(summary.content.contains("result:\nwrap-up"));
+        assert!(!summary.content.contains("assistant:"));
+        assert!(!summary.content.contains("→ echo"));
+
+        let result = run(
+            tool_named(&runner, "agent_status").as_ref(),
+            r#"{"task_id":"t1","include_history":true}"#,
         )
         .await;
         assert!(!result.is_error, "{}", result.content);
@@ -811,6 +838,35 @@ mod tests {
             "{}",
             result.content
         );
+    }
+
+    #[tokio::test]
+    async fn parent_handoffs_are_bounded_but_the_full_child_result_is_retained() {
+        let provider = FakeProvider::new();
+        let report = "conclusion and evidence ".repeat(1000);
+        provider.add_route(match_any, vec![assistant_text(&report, Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+        runner
+            .start(StartRequest {
+                prompt: "research".into(),
+                ..StartRequest::default()
+            })
+            .await
+            .unwrap();
+        wait_final(&tasks, "t1").await;
+        assert_eq!(tasks.get("t1").unwrap().result, report);
+        let notices = tasks.notifications().snapshot();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].text.len() < 4300);
+        assert!(notices[0].text.contains("truncated"));
+        let result = run(
+            tool_named(&runner, "agent_status").as_ref(),
+            r#"{"task_id":"t1"}"#,
+        )
+        .await;
+        assert!(result.content.len() < 4300);
+        assert!(result.content.contains("truncated"));
     }
 
     #[tokio::test]

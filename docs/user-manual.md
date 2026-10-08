@@ -1903,10 +1903,15 @@ The six file tools are always enabled and always restricted to the initial
 canonical workspace, even when `--sandbox off` is selected:
 
 - `read` reads UTF-8 text with optional line offsets and limits; files larger
-  than 64 MiB are rejected before being read into memory.
+  than 64 MiB are rejected before being read into memory. Each call returns at
+  most 4 KiB of body text, or the smaller configured output cap. A truncated
+  result gives `character_offset`: use it with the same `path`, `offset` and
+  `limit` to resume the selected range without losing part of a long line.
+  It counts Unicode characters from zero within that selected line range.
 - `grep` searches file contents with RE2-style regular expressions
-  (case-insensitive matching, optional `**` glob filtering, up to 100 matches by
-  default, 1000 maximum).
+  (case-insensitive matching, optional `**` glob filtering, up to 30 matches by
+  default, 1000 maximum). Results also have a 4 KiB body cap; narrow the path,
+  glob or pattern when truncated rather than repeating a broad query.
 - `find` returns sorted regular-file paths matching `**` globs (up to 1000 by
   default, 10000 maximum).
 - `ls` lists one directory level in sorted order; directories end in `/` and
@@ -2064,7 +2069,9 @@ in the `bash` sandbox, so they work on Linux and without `bash`.
 sends an HTTP GET with no cookies or credentials. HTML becomes Markdown with
 scripts, styles and navigation removed, and links made absolute; JSON and other
 text types are returned as text; images, PDFs and other binary types are an
-error. A page is cut at 2 MiB of download and at the output cap; the result
+error. The default page is 4096 characters and every call has a 4 KiB body cap
+(or the smaller configured output budget), even with a larger `limit`. A page
+is cut at 2 MiB of download and at the output cap; the result
 header then gives the `offset` to continue from. Each call fetches the page
 again. Pages that need JavaScript return only what the server sent.
 
@@ -2160,6 +2167,27 @@ to the child instead of reading the same files again. Continue independent work
 after delegation, or finish the current response. A
 child report or completion is queued in the parent mailbox; if the parent is
 idle, the runtime starts a wake turn and delivers it as a `[task-notification]`.
+
+Research downloads, search output and local analysis stay in the child's
+context. The child is instructed to return only verified conclusions, essential
+original-source references, uncertainty and decisions needed from the parent.
+Automatic completion/error notifications and `agent_report` are bounded to
+4 KiB plus truncation metadata (or the smaller configured budget). Complete child transcripts and task results remain recorded locally; only the
+bounded result is handed to the parent, not the transcript or raw tool output. `agent_status` defaults to bounded status/result text without
+recent steps; `include_history: true` explicitly includes recent steps within
+the same cap.
+
+A native child with `bash` receives a private workspace-relative directory under
+`.otto/tool-output/research-<id>/`. Download each pinned upstream source once
+there, then analyze it with scripts instead of fetching repeated large snippets.
+This directory is deleted when the child task exits, including error, queued
+cancellation and normal cancellation. Cleanup operates through pinned directory
+handles and never follows links outside the owned tree or deletes siblings.
+Keep durable deliverables outside it and cite original URLs/file locations, not
+temporary paths. This scratch directory is separate from the durable transcript.
+Filesystem failures or abrupt process termination can prevent cleanup. Without
+`bash`, no scratch directory is allocated; existing web/file tools still work.
+
 Use `agent_status` only to inspect progress, `agent_send` to send guidance, and
 `agent_cancel` to stop a task; do not poll status to simulate waiting. Children
 never receive these tools, so a child cannot start or stop another child.
@@ -2370,8 +2398,8 @@ protection against same-user or same-kernel attacks, pre-existing hard links,
 intentional damage inside the writable workspace. Docker and Apple Container are
 not detected or supported.
 
-The default shell timeout is 120 seconds. Other tools retain the default
-50 KiB output cap. Bash previews each stdout/stderr stream at at most 4 KiB,
+The default shell timeout is 120 seconds. The general tool-output cap is
+50 KiB; `read`, `grep` and `web_fetch` additionally bound body text to 4 KiB. Bash previews each stdout/stderr stream at at most 4 KiB,
 or the smaller `agent.max_output_bytes` setting. Short output is unchanged;
 long output retains the head and tail, reports the normalized/redacted byte
 count and omitted bytes, and gives a workspace-relative `full_output` path.

@@ -22,6 +22,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   heartbeats, outcomes and reported usage. Each runtime has an independently
   locked file family; content and credentials stay out of diagnostics and
   model context.
+  ([#450](https://github.com/baiyuqing/otto/pull/450))
 
 ### Fixes
 

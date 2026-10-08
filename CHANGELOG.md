@@ -69,6 +69,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- Normalize per-runtime diagnostic log identities in the embedded/ACP parity
+  test while retaining file kinds and counts in the comparison.
+
 - Fix the web retrieval byte limit expression to satisfy Clippy’s
   `manual_clamp` lint without changing its bounds.
   ([#446](https://github.com/baiyuqing/otto/pull/446))

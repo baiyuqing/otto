@@ -137,6 +137,7 @@ pub fn build_summary_request(
             ..Message::default()
         }],
         tools: Vec::new(),
+        ..Request::default()
     };
 
     let Some(sizer) = options.request_sizer.as_ref() else {

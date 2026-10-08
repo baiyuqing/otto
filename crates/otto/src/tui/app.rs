@@ -1149,6 +1149,14 @@ impl App {
             self.retry_event = (event.event_type == "provider_retry").then(|| event.clone());
         }
         match event.event_type.as_str() {
+            "provider_retry"
+                if event
+                    .retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.interrupted_output) =>
+            {
+                self.push_system(transcript::INTERRUPTED_OUTPUT_NOTICE);
+            }
             "plan_updated" => {
                 if let Some(steps) = &event.steps {
                     self.info.plan = steps.clone();
@@ -1487,6 +1495,26 @@ mod tests {
         let app = App::new(&Backend::Attach(&remote));
         (app, remote)
     }
+    #[test]
+    fn provider_recovery_separates_partial_output_in_local_and_attached_tui() {
+        for attached in [false, true] {
+            let (mut app, _remote) = app();
+            app.attached = attached;
+            for json in [
+                r#"{"type":"text_delta","text":"partial"}"#,
+                r#"{"type":"provider_retry","retry":{"attempt":2,"max_attempts":7,"interrupted_output":true}}"#,
+                r#"{"type":"text_delta","text":"replacement"}"#,
+            ] {
+                app.apply_event(&serde_json::from_str(json).unwrap());
+            }
+            let entries = &app.entries[app.entries.len() - 3..];
+            assert_eq!(entries[0].raw, "partial");
+            assert_eq!(entries[1].kind, Some(EntryKind::System));
+            assert_eq!(entries[1].raw, transcript::INTERRUPTED_OUTPUT_NOTICE);
+            assert_eq!(entries[2].raw, "replacement");
+        }
+    }
+
     fn probe(key: &'static str, view: View, received: Arc<AtomicUsize>) -> Box<dyn Presenter> {
         Box::new(Probe {
             key,

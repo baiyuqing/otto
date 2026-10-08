@@ -1294,6 +1294,7 @@ async fn a_provider_retry_is_forwarded_before_the_reply() {
             max_attempts: 3,
             delay: std::time::Duration::from_millis(250),
             reason: "HTTP 503".into(),
+            interrupted_output: false,
         },
     );
     let agent = Agent::new(
@@ -1328,6 +1329,7 @@ async fn a_provider_retry_is_forwarded_before_the_reply() {
                     max_attempts: 3,
                     delay,
                     reason,
+                                    interrupted_output: false,
                 } if !operation_id.as_str().is_empty()
                     && *delay == std::time::Duration::from_millis(250)
                     && reason == "HTTP 503"
@@ -1967,6 +1969,7 @@ async fn a_manual_compaction_persists_the_summary_and_emits_the_plan_first() {
         max_attempts: 4,
         delay: std::time::Duration::from_secs(1),
         reason: "connection interrupted".into(),
+        interrupted_output: false,
     });
     let provider = FakeProvider::new(vec![turn]);
     let agent = Agent::new(
@@ -3354,6 +3357,7 @@ async fn complete_text_sends_one_tool_less_redacted_message_and_touches_no_histo
         max_attempts: 4,
         delay: std::time::Duration::from_secs(1),
         reason: "connection interrupted".into(),
+        interrupted_output: false,
     });
     let agent = Agent::with_redactor(
         FakeProvider::new(vec![turn]),
@@ -4581,4 +4585,140 @@ async fn a_disabled_policy_runs_a_repeating_turn_to_its_natural_end() {
         .expect("a disabled guard never stops a turn");
 
     assert_eq!(agent.provider().normal_requests().len(), 21);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn provider_recovery_discards_redaction_tails_and_persists_only_the_final_answer() {
+    let retry = StreamEvent::Retry {
+        attempt: 2,
+        max_attempts: 7,
+        delay: std::time::Duration::from_secs(1),
+        reason: "connection interrupted".into(),
+        interrupted_output: true,
+    };
+    let turn = Turn::text("final answer").with_events(vec![
+        StreamEvent::ReasoningDelta {
+            text: "abandoned reasoning".into(),
+        },
+        StreamEvent::TextDelta {
+            text: "abandoned answer".into(),
+        },
+        retry,
+        StreamEvent::TextDelta {
+            text: "final answer".into(),
+        },
+    ]);
+    let agent = Agent::with_redactor(
+        FakeProvider::new(vec![turn]),
+        EchoExecutor {
+            content: None,
+            persisted: None,
+        },
+        MemorySession::new(),
+        options(),
+        Redactor::new(&["long-configured-sensitive-value".into()]),
+    );
+    let mut events = Vec::new();
+    agent
+        .run(
+            "hi",
+            &mut |event| events.push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let retry = events
+        .iter()
+        .position(|event| matches!(event, Event::ProviderRetry { .. }))
+        .unwrap();
+    let after: String = events[retry + 1..]
+        .iter()
+        .filter_map(|event| match event {
+            Event::TextDelta { text } | Event::ReasoningDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(after, "final answer");
+    let messages = agent.session().messages();
+    assert_eq!(messages.last().unwrap().text(), "final answer");
+    assert!(!format!("{messages:?}").contains("abandoned"));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn complete_text_recovery_resets_the_per_response_byte_bound() {
+    let turn = Turn::text("done").with_events(vec![
+        StreamEvent::TextDelta {
+            text: "partial".into(),
+        },
+        StreamEvent::Retry {
+            attempt: 2,
+            max_attempts: 7,
+            delay: std::time::Duration::ZERO,
+            reason: "connection interrupted".into(),
+            interrupted_output: true,
+        },
+        StreamEvent::TextDelta {
+            text: "done".into(),
+        },
+    ]);
+    let agent = Agent::new(
+        FakeProvider::new(vec![turn]),
+        EchoExecutor {
+            content: None,
+            persisted: None,
+        },
+        MemorySession::new(),
+        options(),
+    );
+    let answer = agent
+        .complete_text(
+            &text_request("hi", 8),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer.text, "done");
+    assert!(agent.session().messages().is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn compaction_recovery_resets_the_per_response_byte_bound() {
+    let summary = structured_summary();
+    let turn = Turn::summary(&summary).with_events(vec![
+        StreamEvent::TextDelta {
+            text: "x".repeat(super::summary::SUMMARY_MAXIMUM_BYTES),
+        },
+        StreamEvent::Retry {
+            attempt: 2,
+            max_attempts: 7,
+            delay: std::time::Duration::ZERO,
+            reason: "connection interrupted".into(),
+            interrupted_output: true,
+        },
+        StreamEvent::TextDelta {
+            text: summary.clone(),
+        },
+    ]);
+    let agent = Agent::new(
+        FakeProvider::new(vec![turn]),
+        EchoExecutor::default(),
+        seeded_session().await,
+        options(),
+    );
+    agent
+        .compact("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        agent
+            .session()
+            .latest_compaction()
+            .unwrap()
+            .summary
+            .starts_with(&summary)
+    );
 }

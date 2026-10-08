@@ -562,6 +562,18 @@ separately proven and tested.
 > this spec that ChatGPT completions do not retry predate the transport
 > amendment above.
 
+> Amended 2026-10-08 (approved). ChatGPT's existing transient failure classes
+> may also retry after partial reasoning, text or tool-call output. This
+> supersedes the pre-output restriction above for ChatGPT only. Every retry
+> repeats the current borrowed model request within the original seven-attempt
+> and deadline budget. Failed stream fragments never authorize Otto tool
+> execution or enter assistant history. Consumers reset pending stream state
+> and mark partial output interrupted through the additive retry flag. Backend
+> computation or read-only hosted search may repeat; completed Otto tools do
+> not. Native and child turns share this transport contract. Cancellation,
+> permanent errors and exhausted budgets still settle the turn. Recovery facts
+> are append-only custom entries after the normal model operation settles.
+
 ## Phase 1: identity, disposition, and effect-certainty contract
 
 ### Scope

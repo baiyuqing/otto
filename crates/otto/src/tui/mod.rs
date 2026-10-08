@@ -400,10 +400,7 @@ async fn run_app<B: Backend>(
             IdleEvent::Completion(completion) => app.apply_completion(*completion),
             IdleEvent::Tick => app.request_approvals(),
             IdleEvent::FeaturesTick => app.tick_features(),
-            IdleEvent::MemoryReviewAvailable => {
-                app.push_system(crate::app::MEMORY_REVIEW_AVAILABLE);
-                app.open_memory_review(controller);
-            }
+            IdleEvent::MemoryReviewAvailable => app.memory_review_available(),
             IdleEvent::Notices => {}
             IdleEvent::Registry(false) => updates = None,
             IdleEvent::Registry(true) => {
@@ -517,29 +514,35 @@ fn apply_input<B: Backend>(
 }
 
 fn focus_surface(app: &mut App, col: u16, row: u16) {
-    use interaction::Focus;
     let point = ratatui::layout::Position::new(col, row);
     let geometry = app.geometry.borrow();
     let Some(surface) = app.surfaces.top_mut() else {
         return;
     };
+    focus_surface_state(&mut surface.state, &geometry, point);
+}
+
+fn focus_surface_state(
+    state: &mut interaction::State,
+    geometry: &widgets::Geometry,
+    point: ratatui::layout::Position,
+) {
+    use interaction::Focus;
     if geometry.rows.is_some_and(|rect| rect.contains(point)) {
-        surface.state.focus = Focus::Rows;
-    } else if geometry.document.is_some_and(|rect| rect.contains(point)) {
-        surface.state.focus = Focus::Document;
+        state.focus = Focus::Rows;
     } else if let Some((id, _)) = geometry
         .fields
         .iter()
         .find(|(_, rect)| rect.contains(point))
     {
-        surface.state.focus = Focus::Field(id.clone());
+        state.focus = Focus::Field(id.clone());
     } else if let Some((id, _)) = geometry
         .actions
         .iter()
         .find(|(_, rect)| rect.contains(point))
     {
-        surface.state.focus = Focus::Actions;
-        surface.state.selected_action = Some(id.clone());
+        state.focus = Focus::Actions;
+        state.selected_action = Some(id.clone());
     }
 }
 
@@ -1078,6 +1081,41 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 
     use super::*;
+
+    #[test]
+    fn clicking_readonly_document_keeps_the_approval_action_focused() {
+        let view = interaction::View {
+            document: "Review details".into(),
+            actions: vec![
+                interaction::Action {
+                    id: "accept".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+                interaction::Action {
+                    id: "reject".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+            ],
+            default_action: Some("accept".into()),
+            ..Default::default()
+        };
+        let mut state = interaction::State::new(&view);
+        let geometry = widgets::Geometry {
+            document: Some(ratatui::layout::Rect::new(10, 3, 30, 8)),
+            actions: vec![
+                ("accept".into(), ratatui::layout::Rect::new(10, 12, 15, 1)),
+                ("reject".into(), ratatui::layout::Rect::new(25, 12, 15, 1)),
+            ],
+            ..Default::default()
+        };
+
+        focus_surface_state(&mut state, &geometry, ratatui::layout::Position::new(20, 6));
+
+        assert_eq!(state.focus, interaction::Focus::Actions);
+        assert_eq!(state.selected_action.as_deref(), Some("accept"));
+    }
 
     /// The drag phases have to survive the mapping intact: a selection that
     /// loses its `Down` never gets an anchor, and one that loses its `Up`

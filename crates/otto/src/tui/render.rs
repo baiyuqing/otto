@@ -24,14 +24,6 @@ use crate::subagent::tasks::{Task, TaskStatus};
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let active = app.active_view().zip(app.surfaces.top());
-    if let Some((view, surface)) = active.as_ref()
-        && !view.modal
-    {
-        frame.render_widget(Clear, area);
-        let geometry = super::widgets::draw_surface(frame, area, view, &surface.state);
-        *app.geometry.borrow_mut() = geometry;
-        return;
-    }
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
         frame.render_widget(
             Paragraph::new(format!(
@@ -44,21 +36,21 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     }
     draw_shell(frame, app, area);
     if let Some((view, surface)) = active {
-        let modal = approval_modal_area(area);
-        frame.render_widget(Clear, modal);
+        let panel = surface_panel_area(area);
+        frame.render_widget(Clear, panel);
         frame.render_widget(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Cyan))
                 .style(Style::default().bg(Color::Black)),
-            modal,
+            panel,
         );
         let inner = Rect {
-            x: modal.x.saturating_add(1),
-            y: modal.y.saturating_add(1),
-            width: modal.width.saturating_sub(2),
-            height: modal.height.saturating_sub(2),
+            x: panel.x.saturating_add(1),
+            y: panel.y.saturating_add(1),
+            width: panel.width.saturating_sub(2),
+            height: panel.height.saturating_sub(2),
         };
         let geometry = super::widgets::draw_surface(frame, inner, &view, &surface.state);
         *app.geometry.borrow_mut() = geometry;
@@ -132,7 +124,7 @@ fn draw_shell(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn approval_modal_area(area: Rect) -> Rect {
+fn surface_panel_area(area: Rect) -> Rect {
     let width = area.width.saturating_sub(4).clamp(1, 88);
     let wanted_height = (area.height * 7 / 10).max(8);
     let height = area.height.saturating_sub(2).min(wanted_height).max(1);
@@ -754,7 +746,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_draws_as_a_centered_modal_over_the_session_shell() {
+    async fn every_feature_draws_as_a_centered_panel_over_the_session_shell() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.entries.push(Entry {
+            kind: Some(EntryKind::User),
+            raw: "underlying conversation".into(),
+            ..Entry::default()
+        });
+        let remote = std::sync::Arc::new(crate::tui::attach::Remote::offline(Vec::new()));
+        let backend = super::super::app::Backend::Attach(&remote);
+        app.dispatch_line(
+            "/help",
+            &backend,
+            &tokio_util::sync::CancellationToken::new(),
+        );
+
+        let screen = rendered(&app, 100, 24);
+        assert!(screen.contains("underlying conversation"), "{screen}");
+        assert!(screen.contains("Commands"), "{screen}");
+        assert!(screen.contains("/help  show commands"), "{screen}");
+        assert!(screen.contains("AUTO | tokens"), "{screen}");
+        let rows = screen_rows(&app, 100, 24);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains('╭') && row.contains('╮'))
+        );
+        assert!(
+            !rows[0].contains('╭'),
+            "panel reached the top edge: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_draws_as_a_centered_panel_over_the_session_shell() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
         app.entries.push(Entry {
             kind: Some(EntryKind::User),
@@ -775,7 +799,7 @@ mod tests {
         );
         assert!(
             !rows[0].contains('╭'),
-            "modal reached the top edge: {rows:?}"
+            "panel reached the top edge: {rows:?}"
         );
     }
 

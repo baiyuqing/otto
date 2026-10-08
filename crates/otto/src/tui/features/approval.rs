@@ -102,7 +102,6 @@ impl Presenter for Approval {
     }
     fn view(&self) -> View {
         View {
-            modal: true,
             title: self.title.clone(),
             description: self.outcome.clone(),
             document: self.details.clone(),

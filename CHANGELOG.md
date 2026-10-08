@@ -36,6 +36,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   the session id (a sub-agent uses its own transcript id), so the backend can
   route a session's requests to the same prompt cache. The OpenAI-compatible
   provider does not send it.
+  ([#438](https://github.com/baiyuqing/otto/pull/438))
 
 ## 0.4.5 - 2026-10-07
 

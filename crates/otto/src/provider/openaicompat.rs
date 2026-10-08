@@ -299,7 +299,7 @@ impl Client {
                 });
             }
         };
-        self.read_response(response, emit, control).await
+        self.read_response(response, emit, control, observer).await
     }
 
     /// Reads a sent request's response: an error status, or the whole stream.
@@ -314,6 +314,7 @@ impl Client {
         response: reqwest::Response,
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
+        observer: &dyn otto_core::diagnostics::Observer,
     ) -> Result<Response, AttemptError> {
         let status = response.status();
         observer.activity(

@@ -71,6 +71,9 @@ use crate::tool::registry::Registry;
 use crate::tool::result::{capped_text_result, decode_strict_json};
 use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 
+/// Body budget for parent-facing child summaries; full transcripts stay local.
+pub(crate) const PARENT_REPORT_BYTES: usize = 4096;
+
 /// Tools a child never receives: the agent-control tools, because delegation
 /// depth is fixed at one; the memory tools, because a child gets no memory
 /// binding; the timer tools, which read and wake the parent session; the schedule
@@ -400,7 +403,7 @@ impl ChildTools {
     /// [`ChildTools::report`].
     fn agent_report_definition() -> ToolDefinition {
         let description = format!(
-            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, or interim findings; put those in your final report. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent. A report that cannot be saved to the parent's pending-notification file also returns an error and does not reach the parent."
+            "Send a message to the parent agent without ending this sub-agent task. Use it only to answer a question the parent sent as a [parent-message], or to report a blocker that needs a parent decision while you keep working on other parts of the task. Do not use it for progress updates, plans, raw logs, source dumps or interim findings. Keep the answer or blocker within 4 KiB; the parent transport truncates longer reports. Limited to {REPORT_BUDGET} reports per task on your own initiative, plus one more for each [parent-message] received; a call past the limit returns an error instead of reaching the parent. A report that cannot be saved to the parent's pending-notification file also returns an error and does not reach the parent."
         );
         definition(
             "agent_report",
@@ -425,7 +428,7 @@ impl ChildTools {
     fn report(&self, message: &str) -> ToolResult {
         let text = capped_text_result(
             &format!("[task-report] task {}\n{}", self.task_id, message),
-            self.max_output_bytes,
+            self.max_output_bytes.min(PARENT_REPORT_BYTES),
         )
         .content;
         if let Err(otto_core::agent::inbox::MailboxError::NotPersisted { seq, reason }) =
@@ -722,6 +725,7 @@ pub struct StartRequest {
 
 /// Builds and runs sub-agent tasks for one session.
 pub struct Runner {
+    scratch_root: std::sync::OnceLock<crate::tool::root::Root>,
     output_logs: std::sync::OnceLock<Arc<crate::tool::bash_output::Logs>>,
     config: Config,
     child_registry: Arc<Registry>,
@@ -829,12 +833,20 @@ impl Runner {
         Ok((
             Self {
                 output_logs: std::sync::OnceLock::new(),
+                scratch_root: std::sync::OnceLock::new(),
                 config,
                 child_registry,
                 semaphore,
             },
             warnings,
         ))
+    }
+
+    pub(crate) fn bind_scratch_root(&self, root: crate::tool::root::Root) {
+        assert!(
+            self.scratch_root.set(root).is_ok(),
+            "scratch root already bound"
+        );
     }
 
     pub(crate) fn bind_output_logs(&self, logs: Arc<crate::tool::bash_output::Logs>) {
@@ -1318,6 +1330,16 @@ impl Runner {
                 .unwrap_or_else(|| Arc::new(AtomicUsize::new(REPORT_BUDGET))),
         };
 
+        let scratch = self
+            .scratch_root
+            .get()
+            .filter(|_| tools.permits("bash") && self.child_registry.lookup("bash").is_some())
+            .map(super::scratch::Scratch::new)
+            .transpose()
+            .map_err(|_| StartError::ScratchUnavailable)?;
+        let scratch_policy = scratch.as_ref().map_or_else(String::new, |scratch| format!(
+            "\n<research_workspace>Use {} for temporary source downloads and analysis scripts. Download each pinned source once, then search/analyze locally and return only conclusions with original URL or file/line evidence. Keep durable deliverables outside this directory. Otto deletes this directory when your task exits, including failure or cancellation. Do not return its temporary paths as evidence.</research_workspace>", scratch.path()));
+
         let role_body = definition
             .as_ref()
             .map(|d| d.body.as_str())
@@ -1325,7 +1347,7 @@ impl Runner {
             .unwrap_or(GENERIC_SUBAGENT_INSTRUCTION);
         let redactor = self.redactor();
         let system_prompt = redactor.redact_string(&format!(
-            "{}\n<subagent_role>\n{}\n</subagent_role>\n</otto_system_prompt>",
+            "{}\n<subagent_role>\n{}\n</subagent_role>{scratch_policy}\n<child_report_policy>Keep research process, source text and logs in your own context. Return only the verified conclusion, essential evidence references, uncertainty and decisions needed from the parent. Final answers and agent_report messages must fit within 4 KiB; no raw logs, code dumps or chronological research report. The parent-facing transport caps reports. The full transcript remains local.</child_report_policy>\n</otto_system_prompt>",
             (self.config.prompt_for)(&tools.definitions()),
             crate::skill::prompt::escape_html(role_body),
         ));
@@ -1421,6 +1443,7 @@ impl Runner {
         let output_lease = self.output_logs.get().map(|logs| logs.lease());
         tokio::spawn(async move {
             let _output_lease = output_lease;
+            let _scratch = scratch;
             runner
                 .run_child(ChildRun {
                     cancel,
@@ -1644,7 +1667,11 @@ impl Runner {
             self.config.tasks.notifications().push(Notification {
                 task_id: task_id.to_string(),
                 kind: Some(NotificationKind::TaskFinished),
-                text: completion_text(&final_task, self.config.max_output_bytes),
+                text: capped_text_result(
+                    &completion_text(&final_task, usize::MAX),
+                    self.config.max_output_bytes.min(PARENT_REPORT_BYTES),
+                )
+                .content,
                 usage: final_task.usage_present.then_some(final_task.usage),
                 ..Default::default()
             });
@@ -1669,10 +1696,12 @@ async fn append_task_custom(
     transcript.append_custom(custom_type, &json).await
 }
 
-/// Why [`Runner::start`] refused a request. Every variant is reported before a
-/// task record is created.
+/// Why task admission or setup failed. The start guard finalizes any task
+/// already registered when later setup (such as scratch creation) fails.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StartError {
+    #[error("sub-agent temporary research directory unavailable")]
+    ScratchUnavailable,
     #[error("unknown agent {0:?}")]
     UnknownAgent(String),
     #[error(r#"context must be "fresh" or "inherit""#)]

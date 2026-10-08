@@ -596,3 +596,18 @@ fn definitions_are_strict_schemas() {
         assert_eq!(schema["type"], "object");
     }
 }
+
+#[tokio::test]
+async fn explicit_large_fetch_limit_still_returns_a_bounded_page() {
+    let body = "x".repeat(6000);
+    let server = serve(Arc::new(move |_| {
+        response("200 OK", &[("Content-Type", "text/plain")], body.as_bytes())
+    }))
+    .await;
+    let tool = fetch(&runtime());
+    let url = format!("http://page.test:{}/", server.port());
+    let result = run(&tool, &format!(r#"{{"url":"{url}","limit":50000}}"#)).await;
+    assert!(result.content.contains("continue with offset 4096"));
+    assert!(result.content.ends_with(&"x".repeat(4096)));
+    assert!(result.content.len() < 4600);
+}

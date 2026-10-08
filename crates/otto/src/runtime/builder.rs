@@ -2302,6 +2302,12 @@ impl Builder {
         )?;
         if let Some(runner) = &subagents.runner {
             runner.bind_output_logs(Arc::clone(&output_logs));
+            runner.bind_scratch_root(
+                self.workspace
+                    .root_fs()
+                    .try_clone()
+                    .map_err(|error| format!("pin child research workspace: {error}"))?,
+            );
         }
         mark_build_trace(&mut trace, "runner/subagents");
 

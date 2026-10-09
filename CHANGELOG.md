@@ -69,6 +69,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- Check persisted tool-result blocks directly in the batching-advice regression
+  test, restoring the macOS and Linux CI gates without weakening its assertions.
+  ([#453](https://github.com/baiyuqing/otto/pull/453))
+
 - Normalize per-runtime diagnostic log identities in the embedded/ACP parity
   test while retaining file kinds and counts in the comparison.
 

@@ -48,13 +48,13 @@ time, so running it beside the tests takes it off the critical path; the lint
 job keeps its own dependency cache, since the tests' cache holds no
 check-mode metadata.
 A documentation-only change skips every gate. The workflow's `changes` job
-classifies the diff first: when every changed path is Markdown outside
-`crates/` and `testdata/`, under `docs/`, or `LICENSE`, the gates start and
-skip every step, so they still report a status without installing a toolchain.
-Anything else — including a workflow edit, `testdata/server/openapi.yaml`, or a
-Markdown fixture the skill and agent loaders discover by name — runs the full
-gate. An unusual range, such as a new branch or a force push that dropped the
-old tip, also runs it.
+classifies the diff first: when every changed path is ordinary Markdown, under
+`docs/`, or `LICENSE`, the gates start and skip every step, so they still report
+a status without installing a toolchain. Runtime `SKILL.md` and `AGENT.md`
+definitions are product inputs rather than documentation and always run the
+full gate, as does anything else — including a workflow edit or
+`testdata/server/openapi.yaml`. An unusual range, such as a new branch or a
+force push that dropped the old tip, also runs it.
 
 ### CI build cache
 

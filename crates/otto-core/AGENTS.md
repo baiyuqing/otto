@@ -16,6 +16,6 @@ contracts and stays buildable for `wasm32-unknown-unknown`.
 - Shared contract changes keep native/browser consumers consistent. CI runs
   the host tests and `make rust-wasm-check`.
 
-See [package boundaries](../../docs/development.md#package-boundaries) for
+See [package boundaries](../../docs/development/architecture.md#package-boundaries) for
 module ownership and [the architecture design](../../docs/specs/2026-09-05-architecture-contracts.md)
 for compatibility rationale.

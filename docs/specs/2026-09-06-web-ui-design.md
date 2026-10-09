@@ -2,7 +2,7 @@
 
 Status: approved 2026-09-06. Records the decisions behind the loopback TCP
 listener, the bearer token, `POST .../compact`, and the embedded browser UI.
-Current behavior is documented in the [user manual](../user-manual.md#agent-server).
+Current behavior is documented in the [user manual](../manual/servers-and-connectors.md#agent-server).
 
 ## Goal
 

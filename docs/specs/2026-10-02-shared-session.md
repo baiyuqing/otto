@@ -3,7 +3,7 @@
 Status: approved 2026-10-02. Change 1 (serve and web UI) merged in #273;
 change 2 (`otto acp --attach`, otto-connect `/sessions` and `/use`) merged
 in #276. Change 3 (`otto --attach`) is described in the
-[user manual](../user-manual.md#the-tui-attached-to-otto-serve).
+[user manual](../manual/interactive-use.md#the-tui-attached-to-otto-serve).
 
 Extends the [chat connector design](2026-10-02-otto-connect.md): its "Not in
 this change" list names session listing and switching from the chat; this

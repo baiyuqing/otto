@@ -2,7 +2,7 @@
 
 The [repository rules](../../AGENTS.md) apply. Start with the
 [ownership map](../../docs/code-organization.md#cratesotto-native-application)
-and [package contracts](../../docs/development.md#package-boundaries).
+and [package contracts](../../docs/development/architecture.md#package-boundaries).
 
 - `runtime/startup.rs` is the startup composition root; `cli::run`,
   `otto serve` and `embed` call its phases. `runtime` assembles agents;
@@ -10,7 +10,7 @@ and [package contracts](../../docs/development.md#package-boundaries).
   services and `embed` never import frontends. `tests/runtime_boundary.rs`
   enforces this.
 - `otto::embed` is public API and changes only by addition; see the
-  [embedding API contract](../../docs/development.md#embedding-api).
+  [embedding API contract](../../docs/development/architecture.md#embedding-api).
 - Native `config` owns source discovery, executable trust and the backed-up
   compare-and-swap writer. `tool/project_guard.rs` rechecks authorization at
   effects. Provider identity/credentials and security grants never come from

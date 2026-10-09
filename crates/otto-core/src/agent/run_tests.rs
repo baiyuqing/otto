@@ -1418,16 +1418,7 @@ async fn local_compaction_guard_blocks_before_planned_event_and_provider_poll() 
             .append(Message {
                 id: format!("local-guard-u{index}"),
                 role: Role::User,
-                blocks: if index == 0 {
-                    vec![Block {
-                        block_type: BlockType::Image,
-                        data: candidate.clone(),
-                        mime_type: "image/png".into(),
-                        ..Block::default()
-                    }]
-                } else {
-                    vec![Block::text("historic user text".repeat(8))]
-                },
+                blocks: vec![Block::text("historic user text".repeat(8))],
                 ..Message::default()
             })
             .await
@@ -1449,6 +1440,7 @@ async fn local_compaction_guard_blocks_before_planned_event_and_provider_poll() 
         EchoExecutor::default(),
         session,
         Options {
+            model: candidate.clone(),
             diagnostics: Some(diagnostics),
             ..options()
         },
@@ -1574,18 +1566,13 @@ async fn remote_compaction_guard_blocks_before_planned_event_and_provider_poll()
     let session = MemorySession::new();
     session
         .append(Message {
-            id: "unsafe-image".into(),
+            id: "remote-guard-user".into(),
             role: Role::User,
-            blocks: vec![Block {
-                block_type: BlockType::Image,
-                data: candidate.clone(),
-                mime_type: "image/png".into(),
-                ..Block::default()
-            }],
+            blocks: vec![Block::text("historic user text")],
             ..Message::default()
         })
         .await
-        .expect("seed image");
+        .expect("seed history");
     let diagnostics = Arc::new(CapturingDiagnostics::default());
     let captured_models = diagnostics.models.clone();
     let agent = Agent::new(
@@ -1594,6 +1581,7 @@ async fn remote_compaction_guard_blocks_before_planned_event_and_provider_poll()
         EchoExecutor::default(),
         session,
         Options {
+            model: candidate.clone(),
             diagnostics: Some(diagnostics),
             ..options()
         },

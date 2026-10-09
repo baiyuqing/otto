@@ -5354,11 +5354,26 @@ async fn batching_advice_is_persisted_with_the_third_successful_edit() {
         .messages()
         .into_iter()
         .filter(|message| message.role == Role::Tool)
+        .map(|message| {
+            assert_eq!(message.blocks.len(), 1);
+            message.blocks.into_iter().next().unwrap()
+        })
         .collect();
     assert_eq!(results.len(), 3);
-    assert!(!results[0].text().contains("Batching advice"));
-    assert!(!results[1].text().contains("Batching advice"));
-    assert!(results[2].text().contains("Batching advice"));
-    assert!(results[2].text().contains("This edit succeeded"));
-    assert!(results.iter().all(|message| !message.blocks[0].is_error));
+    assert_eq!(
+        results
+            .iter()
+            .map(|block| block.tool_call_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["e1", "e2", "e3"]
+    );
+    assert!(
+        results
+            .iter()
+            .all(|block| block.block_type == BlockType::ToolResult && !block.is_error)
+    );
+    assert!(!results[0].text.contains("Batching advice"));
+    assert!(!results[1].text.contains("Batching advice"));
+    assert!(results[2].text.contains("Batching advice"));
+    assert!(results[2].text.contains("This edit succeeded"));
 }

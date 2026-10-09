@@ -369,6 +369,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 self.session.latest_compaction().as_ref(),
             )
         });
+        let summarized_messages = messages.len();
         let request = Request {
             model: self.options.model.clone(),
             system_prompt: self.options.system_prompt.clone(),
@@ -386,7 +387,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 automatic,
                 tokens_before,
                 estimated_tokens_after: None,
-                summarized_messages: messages.len(),
+                summarized_messages,
                 retained_messages: 0,
                 mode: CompactionMode::Remote,
             },

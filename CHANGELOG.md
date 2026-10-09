@@ -32,6 +32,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   secret forms from safely rewritable text, and blocks requests whose structural
   or opaque fields cannot be changed safely; ordinary turns, compaction,
   sub-agents and auxiliary model calls share the same boundary.
+  ([#455](https://github.com/baiyuqing/otto/pull/455))
 
 - Native agent runtimes automatically retain private rotating diagnostic logs
   with session/task/operation IDs, HTTP and stream stages, active-operation

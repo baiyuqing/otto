@@ -48,6 +48,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Keep `otto_help` complete after the user manual split by embedding every
+  topic page and indexing sections within their source page boundaries.
+
 - Long sub-agent research can be handed off as persistent report files with a
   summary and section index. Oversized final answers are saved automatically;
   completion notifications and `agent_status` keep the full report's read path

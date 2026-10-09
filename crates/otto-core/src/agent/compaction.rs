@@ -178,7 +178,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
         })?;
 
-        let prepared_selection = self.redact_compaction_selection(&selection);
+        let prepared_selection = self.redact_compaction_selection(&selection)?;
+
         let previous_details = latest
             .as_ref()
             .map(|latest| self.redact_compaction_details(&latest.details))
@@ -522,31 +523,45 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
     }
 
-    fn redact_compaction_selection(&self, selection: &CompactionSelection) -> CompactionSelection {
-        let redact_all = |messages: &[Message]| -> Vec<Message> {
+    fn redact_compaction_selection(
+        &self,
+        selection: &CompactionSelection,
+    ) -> Result<CompactionSelection, AgentError> {
+        let redact_all = |messages: &[Message]| -> Result<Vec<Message>, AgentError> {
             messages
                 .iter()
-                .map(|message| self.redact_message(message))
+                .map(|message| {
+                    let request = Request {
+                        messages: vec![message.clone()],
+                        ..Request::default()
+                    };
+                    self.redactor
+                        .guard_provider_request(&request)?
+                        .messages
+                        .into_iter()
+                        .next()
+                        .ok_or(AgentError::ProviderEgressSecret)
+                })
                 .collect()
         };
-        CompactionSelection {
-            previous_summary: self.redactor.redact_string(&selection.previous_summary),
-            previous_user_messages: selection
-                .previous_user_messages
+        let redact_texts = |messages: &[String]| -> Result<Vec<String>, AgentError> {
+            messages
                 .iter()
-                .map(|message| self.redactor.redact_string(message))
-                .collect(),
-            previous_capability_updates: selection
-                .previous_capability_updates
-                .iter()
-                .map(|message| self.redactor.redact_string(message))
-                .collect(),
-            historical_source: redact_all(&selection.historical_source),
-            turn_prefix_source: redact_all(&selection.turn_prefix_source),
-            retained: redact_all(&selection.retained),
+                .map(|message| self.redactor.redact_provider_text(message))
+                .collect()
+        };
+        Ok(CompactionSelection {
+            previous_summary: self
+                .redactor
+                .redact_provider_text(&selection.previous_summary)?,
+            previous_user_messages: redact_texts(&selection.previous_user_messages)?,
+            previous_capability_updates: redact_texts(&selection.previous_capability_updates)?,
+            historical_source: redact_all(&selection.historical_source)?,
+            turn_prefix_source: redact_all(&selection.turn_prefix_source)?,
+            retained: redact_all(&selection.retained)?,
             first_kept_id: selection.first_kept_id.clone(),
             split_turn: selection.split_turn,
-        }
+        })
     }
 
     fn redact_compaction_details(&self, details: &CompactionDetails) -> CompactionDetails {

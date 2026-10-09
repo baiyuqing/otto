@@ -420,6 +420,15 @@ impl Redactor {
         self.complete
     }
 
+    /// Redacts known and high-confidence heuristic secrets from provider-bound
+    /// free text, or refuses when the boundary cannot transform it safely.
+    pub(super) fn redact_provider_text(&self, text: &str) -> Result<String, AgentError> {
+        if !self.complete {
+            return Err(AgentError::ProviderEgressSecret);
+        }
+        redact_heuristic_text(self, text).ok_or(AgentError::ProviderEgressSecret)
+    }
+
     /// Clones a provider request, redacting known and high-confidence secrets
     /// only in free text and JSON string keys/values. Structural and opaque
     /// fields are preserved byte-for-byte or cause a local refusal.

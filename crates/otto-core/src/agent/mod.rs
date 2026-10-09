@@ -465,6 +465,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
         followup: bool,
     ) -> Result<(), AgentError> {
+        if self.redactor.allows_dynamic_content() {
+            self.preflight_ordinary_turn(user_text, image.as_ref(), system_context, followup)?;
+        }
         if self.options.hooks.is_none() || !self.redactor.allows_dynamic_content() {
             return self
                 .run_inner(user_text, image, system_context, emit, control, followup)
@@ -1555,6 +1558,73 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         idle_cache_expired(last, (self.options.now)())
     }
 
+    /// Validates everything already known when an ordinary turn is admitted,
+    /// before hooks, operation IDs, diagnostics, events, or durable writes.
+    /// The prospective input exists only in this cloned provider request.
+    fn preflight_ordinary_turn(
+        &self,
+        user_text: &str,
+        image: Option<&Block>,
+        system_context: &str,
+        followup: bool,
+    ) -> Result<(), AgentError> {
+        let (mut request, _) =
+            self.build_normal_provider_request(&RunDispatchState::default(), system_context);
+        for entry in self.options.mailbox.queued() {
+            let notification = entry.notification;
+            let user_message = notification.kind == Some(inbox::NotificationKind::UserMessage);
+            let context_type = if user_message {
+                String::new()
+            } else {
+                notification.context_type().to_owned()
+            };
+            let metadata = ContextMetadata {
+                task_id: notification.task_id,
+            };
+            request.messages.push(Message {
+                role: if user_message {
+                    Role::User
+                } else {
+                    Role::Context
+                },
+                context_type,
+                context_metadata: (!user_message && metadata.validate().is_ok())
+                    .then_some(metadata),
+                blocks: vec![Block::text(notification.text)],
+                ..Message::default()
+            });
+        }
+        if !trim_go_space(user_text).is_empty() || image.is_some() {
+            let mut blocks = Vec::new();
+            if !trim_go_space(user_text).is_empty() {
+                blocks.push(Block::text(if followup {
+                    format!("[Agent follow-up]\n{user_text}")
+                } else {
+                    user_text.to_owned()
+                }));
+            }
+            blocks.extend(image.cloned());
+            request.messages.push(Message {
+                role: if followup { Role::Context } else { Role::User },
+                context_type: if followup {
+                    "agent_followup".into()
+                } else {
+                    String::new()
+                },
+                display: followup,
+                input_id: self
+                    .next_input_id
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .unwrap_or_default(),
+                blocks,
+                ..Message::default()
+            });
+        }
+        self.redactor.guard_provider_request(&request).map(|_| ())
+    }
+
     /// Builds the request for one ordinary provider step and estimates it.
     ///
     /// The messages are clones, so the overlay substitution and the memory
@@ -1628,6 +1698,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         // first text delta so the two keep their provider order.
         let mut reasoning = redactor.new_stream();
         let visible_output = std::sync::atomic::AtomicBool::new(false);
+        let guarded_request = match self.redactor.guard_provider_request(request) {
+            Ok(request) => request,
+            Err(error) => return (Response::default(), false, Some(error)),
+        };
         let operation_id = match (self.options.new_operation_id)() {
             Ok(operation_id) => operation_id,
             Err(message) => {
@@ -1700,7 +1774,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
             };
             self.provider
-                .complete_observed(request, &mut on_stream, control, diagnostic.observer())
+                .complete_observed(
+                    &guarded_request,
+                    &mut on_stream,
+                    control,
+                    diagnostic.observer(),
+                )
                 .await
         };
         diagnostic.provider_finished(&outcome);

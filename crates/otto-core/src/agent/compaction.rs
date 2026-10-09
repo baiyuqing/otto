@@ -15,9 +15,10 @@
 //!
 //! Errors: [`AgentError::NothingToCompact`] means there was no safe prefix, a
 //! successful no-op for a manual compaction.
-//! [`AgentError::InvalidCompactionSummary`] covers every rejection of the
-//! summary request or its response. [`AgentError::CompactionBoundary`] covers a
-//! failure the agent does not own.
+//! [`AgentError::InvalidCompactionSummary`] covers summary construction and
+//! response rejection. [`AgentError::ProviderEgressSecret`] refuses unsafe
+//! provider input locally. [`AgentError::CompactionBoundary`] covers a failure
+//! the agent does not own.
 
 use crate::model::{BlockType, Message, Role, ToolDefinition, Usage};
 use crate::operation::OperationControl;
@@ -190,6 +191,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             )
             .map_err(AgentError::InvalidCompactionSummary)?;
 
+        let guarded_request = self.redactor.guard_provider_request(&prepared.request)?;
+        let guarded_turn_request = turn_prepared
+            .as_ref()
+            .map(|prepared| self.redactor.guard_provider_request(&prepared.request))
+            .transpose()?;
         let structured = !prepared_selection.historical_source.is_empty()
             || (!prepared_selection.turn_prefix_source.is_empty()
                 && prepared_selection.previous_summary.is_empty());
@@ -228,7 +234,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
         let (generated, mut usage, mut usage_present, mut cached_input_tokens_present) = self
             .execute_summary_request(
-                &prepared.request,
+                &guarded_request,
                 first_maximum_bytes,
                 structured,
                 emit,
@@ -245,9 +251,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let mut details = prepared.details;
 
         if let Some(turn_prepared) = turn_prepared {
+            let guarded_turn_request = guarded_turn_request
+                .as_ref()
+                .expect("split-turn request was guarded before planning");
             let (turn, turn_usage, turn_usage_present, turn_cached_input_tokens_present) = self
                 .execute_summary_request(
-                    &turn_prepared.request,
+                    guarded_turn_request,
                     TURN_SUMMARY_MAXIMUM_BYTES,
                     false,
                     emit,
@@ -360,6 +369,17 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 self.session.latest_compaction().as_ref(),
             )
         });
+        let request = Request {
+            model: self.options.model.clone(),
+            system_prompt: self.options.system_prompt.clone(),
+            thinking: self.options.thinking.clone(),
+            messages,
+            tools,
+            cache_key: self.options.cache_key.clone(),
+            remote_compaction,
+            request_remote_compaction: true,
+        };
+        let guarded_request = self.redactor.guard_provider_request(&request)?;
         emit(Event::CompactionPlanned {
             plan: CompactionPlan {
                 reason,
@@ -371,16 +391,6 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 mode: CompactionMode::Remote,
             },
         });
-        let request = Request {
-            model: self.options.model.clone(),
-            system_prompt: self.options.system_prompt.clone(),
-            thinking: self.options.thinking.clone(),
-            messages,
-            tools,
-            cache_key: self.options.cache_key.clone(),
-            remote_compaction,
-            request_remote_compaction: true,
-        };
         let operation_id = (self.options.new_operation_id)()
             .map_err(|message| AgentError::OperationIdentity { message })?;
         let mut diagnostic = crate::diagnostics::Observation::start(
@@ -427,7 +437,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             };
             self.provider
                 .complete_observed(
-                    &request,
+                    &guarded_request,
                     &mut on_stream,
                     &remote_control,
                     diagnostic.observer(),
@@ -610,6 +620,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let streamed_bytes = AtomicUsize::new(0);
         let invalid_stream = AtomicBool::new(false);
 
+        let guarded_request = self.redactor.guard_provider_request(request)?;
         let operation_id = (self.options.new_operation_id)()
             .map_err(|message| AgentError::OperationIdentity { message })?;
         let mut diagnostic = crate::diagnostics::Observation::start(
@@ -663,7 +674,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             };
             self.provider
                 .complete_observed(
-                    request,
+                    &guarded_request,
                     &mut on_stream,
                     &summary_control,
                     diagnostic.observer(),

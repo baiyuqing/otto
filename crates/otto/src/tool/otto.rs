@@ -8,7 +8,20 @@ use serde_json::{json, value::RawValue};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-const MANUAL: &str = include_str!("../../../../docs/user-manual.md");
+const MANUALS: &[&str] = &[
+    include_str!("../../../../docs/manual/getting-started.md"),
+    include_str!("../../../../docs/manual/interactive-use.md"),
+    include_str!("../../../../docs/manual/safety-and-tools.md"),
+    include_str!("../../../../docs/manual/servers-and-connectors.md"),
+    include_str!("../../../../docs/manual/automation.md"),
+    include_str!("../../../../docs/manual/memory-and-extensions.md"),
+    include_str!("../../../../docs/manual/troubleshooting.md"),
+];
+
+struct ManualTopic<'a> {
+    title: &'a str,
+    content: &'a str,
+}
 
 /// Uses the canonical manual embedded in the executable, so help works outside
 /// the source checkout and follows the installed version.
@@ -53,15 +66,15 @@ impl Tool for Help {
                 48_000,
             );
         }
-        let headings = manual_headings(MANUAL);
+        let topics = manual_topics(MANUALS);
         if args.topic.trim().is_empty() {
             return super::result::capped_text_result(
                 &format!(
                     "Otto {} user manual\n\n{}",
                     crate::VERSION,
-                    headings
+                    topics
                         .iter()
-                        .map(|(_, title)| *title)
+                        .map(|topic| topic.title)
                         .collect::<Vec<_>>()
                         .join("\n")
                 ),
@@ -69,26 +82,20 @@ impl Tool for Help {
             );
         }
         let topic = args.topic.trim().to_lowercase();
-        let Some((index, (start, title))) = headings
-            .iter()
-            .enumerate()
-            .find(|(_, (_, title))| title.trim_start_matches('#').trim().to_lowercase() == topic)
-        else {
+        let Some(topic) = topics.iter().find(|candidate| {
+            candidate
+                .title
+                .trim_start_matches('#')
+                .trim()
+                .to_lowercase()
+                == topic
+        }) else {
             return error_result(
                 "Unknown help topic. Call otto_help with an empty topic for section titles.",
             );
         };
-        let depth = title.bytes().take_while(|b| *b == b'#').count();
-        let end = headings[index + 1..]
-            .iter()
-            .find(|(_, heading)| heading.bytes().take_while(|b| *b == b'#').count() <= depth)
-            .map_or(MANUAL.len(), |(offset, _)| *offset);
         super::result::capped_text_result(
-            &format!(
-                "Otto {} user manual\n\n{}",
-                crate::VERSION,
-                &MANUAL[*start..end]
-            ),
+            &format!("Otto {} user manual\n\n{}", crate::VERSION, topic.content),
             48_000,
         )
     }
@@ -118,6 +125,30 @@ fn manual_headings(manual: &str) -> Vec<(usize, &str)> {
         offset += line.len();
     }
     headings
+}
+
+fn manual_topics<'a>(manuals: &'a [&'a str]) -> Vec<ManualTopic<'a>> {
+    let mut topics = Vec::new();
+    for manual in manuals {
+        let headings = manual_headings(manual);
+        for (index, (start, title)) in headings.iter().enumerate() {
+            let depth = title.bytes().take_while(|byte| *byte == b'#').count();
+            if depth == 1 {
+                continue;
+            }
+            let end = headings[index + 1..]
+                .iter()
+                .find(|(_, heading)| {
+                    heading.bytes().take_while(|byte| *byte == b'#').count() <= depth
+                })
+                .map_or(manual.len(), |(offset, _)| *offset);
+            topics.push(ManualTopic {
+                title,
+                content: &manual[*start..end],
+            });
+        }
+    }
+    topics
 }
 
 #[derive(Deserialize)]
@@ -281,10 +312,21 @@ mod tests {
     }
 
     #[test]
+    fn manual_topics_ignore_page_titles_and_keep_page_boundaries() {
+        let topics = manual_topics(&[
+            "# First page\npage navigation\n\n## First\nfirst body\n",
+            "# Second page\npage navigation\n\n## Second\nsecond body\n",
+        ]);
+        assert_eq!(topics.len(), 2);
+        assert_eq!(topics[0].content, "## First\nfirst body\n");
+        assert_eq!(topics[1].content, "## Second\nsecond body\n");
+    }
+
+    #[test]
     fn manual_titles_are_unique() {
         let mut seen = std::collections::HashSet::new();
-        for (_, heading) in manual_headings(MANUAL) {
-            let title = heading.trim_start_matches('#').trim().to_lowercase();
+        for topic in manual_topics(MANUALS) {
+            let title = topic.title.trim_start_matches('#').trim().to_lowercase();
             assert!(seen.insert(title.clone()), "duplicate manual title {title}");
         }
     }

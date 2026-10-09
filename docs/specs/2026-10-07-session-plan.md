@@ -40,7 +40,7 @@ Facts from the code at `374dc8f`.
    - HTTP session object and SSE;
    - TUI.
 4. Turn it on by default, with the descriptions and policy text the
-   [capability description](../development.md#capability-descriptions)
+   [capability description](../development/contracts.md#capability-descriptions)
    rules require.
 
 ## Non-goals

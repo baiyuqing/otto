@@ -1,7 +1,7 @@
 # Layered configuration and project trust
 
 Status: approved 2026-10-05 and implemented in this change. Current user
-behavior is documented in the [user manual](../user-manual.md#configuration).
+behavior is documented in the [user manual](../manual/getting-started.md#configuration).
 
 ## Problem and existing behavior
 

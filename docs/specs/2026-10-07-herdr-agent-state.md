@@ -163,7 +163,7 @@ tokio's `net` feature), matching the bundled integrations:
   is fixed to `custom:otto` and the label to `otto`: changing either needs a
   real use, not a setting.
 - Capability rule: this adds no tool, so the
-  [capability descriptions](../development.md#capability-descriptions)
+  [capability descriptions](../development/contracts.md#capability-descriptions)
   obligations do not apply.
 
 ## Compatibility and safety

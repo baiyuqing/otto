@@ -4,7 +4,7 @@
 
 # Otto — 本地优先的通用个人 AI Agent
 
-[English](README.md) · [用户手册（英文）](docs/user-manual.md) · [更新日志（英文）](CHANGELOG.md)
+[English](README.md) · [文档总索引（英文）](docs/README.md) · [完整用户手册（英文）](docs/user-manual.md) · [更新日志（英文）](CHANGELOG.md)
 
 **Otto 是一个使用 Rust 编写的通用个人 AI Agent，帮助你研究、写作、规划、编程和处理日常任务。**
 它按需调用当前会话可用的工具，并受对应权限约束。可在终端和浏览器中使用，
@@ -12,7 +12,7 @@
 支持通过 API key 连接 OpenAI-compatible 接口，或通过 `otto login` 登录使用 ChatGPT provider。
 模型请求会发送给所选服务；“本地优先”指运行时、会话历史和默认记忆存储位于本地，并不表示模型在本地运行。
 
-- **多种入口：** 终端中的全屏 TUI、REPL 和脚本模式，独立的 [otto-plus](https://github.com/baiyuqing/otto-plus) Web UI，以及通过 `otto-connect` 接入的 Telegram、飞书。
+- **多种入口：** 终端中的交互式 TUI（保留终端 scrollback）、REPL 和脚本模式，独立的 [otto-plus](https://github.com/baiyuqing/otto-plus) Web UI，以及通过 `otto-connect` 接入的 Telegram、飞书。
 - **持续协作：** 持久化会话、统一审批的记忆候选、可复用 Skills、按需或自动反思、有边界的子代理、定时器和可恢复的持久化 workflow。
 - **限定访问范围：** 文件工具限制在工作区内；macOS 默认通过 Seatbelt 沙箱执行 Shell 命令。
 
@@ -53,7 +53,7 @@ make run                       # 等价于 scripts/otto.sh
 ```
 
 `otto.env` 不会进入 Git，按 shell profile 的方式加载；详见
-[启动脚本](docs/user-manual.md#launcher-script)。
+[启动脚本](docs/manual/getting-started.md#launcher-script)。
 
 ## 在 Mac 上使用 Docker
 
@@ -66,12 +66,13 @@ docker compose up -d
 docker compose logs otto
 ```
 
-在 Mac 浏览器中打开日志中的 `http://127.0.0.1:8787/?token=...` 地址。
-镜像会按本机架构构建，支持 M 系列和 Intel Mac，包含完整 Web UI。
+镜像会按本机架构构建，支持 M 系列和 Intel Mac，并提供 Otto API；
+浏览器前端位于独立的 [otto-plus](https://github.com/baiyuqing/otto-plus) 项目。
+可将日志中打印的主机、端口和 token 交给 API 客户端或 otto-plus 使用。
 配置和会话保存在命名卷中；可通过 `OTTO_WORKSPACE` 指定挂载的工作目录。
 使用 API key 时，在 setup 中将环境变量名选为 `OTTO_API_KEY`，并在启动
 Compose 前导出该变量。CLI 用法、指定架构、停止和升级步骤见
-[Docker 使用说明](docs/user-manual.md#docker-on-mac)。容器内运行 Linux，
+[Docker 使用说明](docs/manual/getting-started.md#docker-on-mac)。容器内运行 Linux，
 没有 macOS Seatbelt；执行 Bash 需要显式指定 `--sandbox off`。
 
 ## 快速开始
@@ -118,7 +119,7 @@ export OPENAI_API_KEY=your-key
 
 API key 从配置中的 `api_key_env` 指定变量读取，回退变量为 `OTTO_API_KEY`。
 没有 `--api-key` 参数，也不要把密钥写入 TOML。长期使用可设置
-[默认 profile](docs/user-manual.md#configuration)。
+[默认 profile](docs/manual/getting-started.md#configuration)。
 
 ## 试一次任务
 
@@ -151,17 +152,17 @@ Web UI 可点击 **Image** 或粘贴截图。所选模型和 OpenAI-compatible �
 
 ## 更多用法
 
-- [会话与归档](docs/user-manual.md#sessions)
-- [本地记忆与反思](docs/user-manual.md#memory)：反思会生成供你审核的记忆候选，也可按证据和安全检查写入可撤销的 Skills。
-- [Skills](docs/user-manual.md#skills)：反思可将成功执行过的流程沉淀成 `SKILL.md` 和 Python 脚本，经语法检查与审批后发布；`/skill revert` 可一起回滚说明和代码。
+- [会话与归档](docs/manual/interactive-use.md#sessions)
+- [本地记忆与反思](docs/manual/memory-and-extensions.md#memory)：反思会生成供你审核的记忆候选，也可按证据和安全检查写入可撤销的 Skills。
+- [Skills](docs/manual/memory-and-extensions.md#skills)：反思可将成功执行过的流程沉淀成 `SKILL.md` 和 Python 脚本，经语法检查与审批后发布；`/skill revert` 可一起回滚说明和代码。
 - [子代理](README.md#delegate-work-to-sub-agents)
-- [本地服务：otto serve](docs/user-manual.md#agent-server)
-- [ACP agent：otto acp](docs/user-manual.md#acp-agent-server)
-- [聊天连接器 otto-connect](docs/user-manual.md#chat-connector)：`chat-connector/` 中独立的 Go 程序，运行 `otto acp` 并接入 Telegram 和飞书；可连接 `otto serve`，与 Web UI 和附加终端共享会话。也可用 `scripts/otto-tcp.sh` 直接走 ACP TCP：由 `otto serve --acp-listen` 充当 agent，连接器不再自行启动进程，脚本负责启动、重启、查看状态与日志。
-- [MCP 服务](docs/user-manual.md#mcp-servers)：连接 stdio 或 HTTP 的 MCP 服务，在同一轮循环中调用它们的工具
-- [定时提醒](docs/user-manual.md#remind) · [持久化 workflow](docs/user-manual.md#durable-workflows)：TOML 描述的 DAG，支持顺序/并发的 agent 与 handoff 步骤、持久化审批、重启恢复、CLI 控制和 Web UI 查看
-- [用量历史](docs/user-manual.md#observability)：Web UI 分析页展示本地 token 趋势和缓存命中率，不保存提示词或工具内容
-- [命令参考](docs/user-manual.md#command-line-reference)与[问题排查](docs/user-manual.md#troubleshooting)
+- [本地服务：otto serve](docs/manual/servers-and-connectors.md#agent-server)
+- [ACP agent：otto acp](docs/manual/servers-and-connectors.md#acp-agent-server)
+- [聊天连接器 otto-connect](docs/manual/servers-and-connectors.md#chat-connector)：`chat-connector/` 中独立的 Go 程序，运行 `otto acp` 并接入 Telegram 和飞书；可连接 `otto serve`，与 Web UI 和附加终端共享会话。也可用 `scripts/otto-tcp.sh` 直接走 ACP TCP：由 `otto serve --acp-listen` 充当 agent，连接器不再自行启动进程，脚本负责启动、重启、查看状态与日志。
+- [MCP 服务](docs/manual/memory-and-extensions.md#mcp-servers)：连接 stdio 或 HTTP 的 MCP 服务，在同一轮循环中调用它们的工具
+- [定时提醒](docs/manual/safety-and-tools.md#remind) · [持久化 workflow](docs/manual/automation.md#durable-workflows)：TOML 描述的 DAG，支持顺序/并发的 agent 与 handoff 步骤、持久化审批、重启恢复、CLI 控制和 Web UI 查看
+- [用量历史](docs/manual/servers-and-connectors.md#observability)：Web UI 分析页展示本地 token 趋势和缓存命中率，不保存提示词或工具内容
+- [命令参考](docs/manual/getting-started.md#command-line-reference)与[问题排查](docs/manual/troubleshooting.md#troubleshooting)
 
 ## 安全与限制
 
@@ -174,11 +175,11 @@ provider 仅支持 `openai-compatible` 和 `chatgpt`。
 Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏。
 会话文件可能包含工作区文件、提示词、图片和工具结果，应按敏感数据处理。
 
-会话默认使用 **AUTO** 智能审批：工作区内的受限操作直接执行，额外权限请求依据原始用户任务和具体操作接受独立审核。明确的人工检查点、问题和安全权限修改仍需你决定；审核期间不弹审批卡片或窗口。`/auto off` 切换人工审批，`/auto on` 恢复 AUTO；`/permissions policy never` 无提示拒绝额外权限，且不关闭沙箱。设置在恢复会话后保留。升级后需重启 Otto、`otto serve` 和连接器；审批数据库升级到版本 4，降级二进制前须恢复升级备份。详见[统一审批](docs/user-manual.md#unified-approvals)。
+会话默认使用 **AUTO** 智能审批：工作区内的受限操作直接执行，额外权限请求依据原始用户任务和具体操作接受独立审核。明确的人工检查点、问题和安全权限修改仍需你决定；审核期间不弹审批卡片或窗口。`/auto off` 切换人工审批，`/auto on` 恢复 AUTO；`/permissions policy never` 无提示拒绝额外权限，且不关闭沙箱。设置在恢复会话后保留。升级后需重启 Otto、`otto serve` 和连接器；审批数据库升级到版本 4，降级二进制前须恢复升级备份。详见[统一审批](docs/manual/safety-and-tools.md#unified-approvals)。
 
 反思生成的 Skills 会经过证据与安全检查后写入，并可用 `/skill revert` 撤销。当前不支持嵌套子代理。
 其他限制见[英文 README](README.md#safety-and-limitations)，完整访问规则见
-[工具与安全](docs/user-manual.md#tools-and-safety)。
+[工具与安全](docs/manual/safety-and-tools.md#tools-and-safety)。
 
 ## 参与贡献
 

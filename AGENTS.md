@@ -37,16 +37,16 @@ advertise other providers or planned roadmap features.
   environment API key, may determine whether a feature can run.
 - Update code, schemas, tests and canonical docs together. Notable changes
   update [CHANGELOG.md](CHANGELOG.md) using the
-  [changelog rules](docs/development.md#changelog).
+  [changelog rules](docs/development/workflow.md#changelog).
 - Preserve append-only session history and compatibility. Keep dependencies
   explicit and one-way, reuse existing contracts, validate trust boundaries,
   and add abstractions only at real consumer boundaries. Detailed
-  [implementation contracts](docs/development.md#agent-implementation-contracts)
+  [implementation contracts](docs/development/contracts.md#agent-implementation-contracts)
   apply to every feature, fix and refactor.
 - If work is delegated, the parent owns interfaces, integration and acceptance;
   hand off bounded file ownership and preserve other workers' changes.
 - Adding, changing, removing or renaming a model-callable capability updates
-  its [capability descriptions](docs/development.md#capability-descriptions)
+  its [capability descriptions](docs/development/contracts.md#capability-descriptions)
   in the same PR. Descriptions are short and unambiguous and state the
   capability, inputs and outputs. This rule is mandatory.
 - Version numbers change only in release PRs via `make bump VERSION=X.Y.Z`.
@@ -81,7 +81,7 @@ commands or `make` gates. Feature/fix tests must fail when the added/fixed
 behavior breaks; when that is not evident from the test, name in the PR the
 assertion that fails without the change instead of reverting it locally.
 Documentation-only changes need no new tests. See
-[local verification](docs/development.md#local-verification) for reading CI
+[local verification](docs/development/workflow.md#local-verification) for reading CI
 failures.
 
 Full sandbox validation requires macOS 26+ and standalone Command Line Tools;

@@ -358,8 +358,6 @@ fn block_type_is_safe(redactor: &Redactor, block_type: &BlockType) -> bool {
 }
 
 /// The preferred replacement rune.
-
-/// The preferred replacement rune.
 pub const REDACTION_MARKER: &str = "\u{E000}";
 
 /// How deeply [`Redactor::redact_json_strings`] will descend before it fails

@@ -27,6 +27,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Every provider request now passes through a local egress secret guard before
+  transmission. Otto redacts known credentials and conservative high-confidence
+  secret forms from safely rewritable text, and blocks requests whose structural
+  or opaque fields cannot be changed safely; ordinary turns, compaction,
+  sub-agents and auxiliary model calls share the same boundary.
+
 - Native agent runtimes automatically retain private rotating diagnostic logs
   with session/task/operation IDs, HTTP and stream stages, active-operation
   heartbeats, outcomes and reported usage. Each runtime has an independently

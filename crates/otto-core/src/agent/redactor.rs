@@ -10,17 +10,354 @@
 //! Concurrency: a [`Redactor`] is immutable after construction and is `Sync`. A
 //! [`StreamRedactor`] holds mutable carry-over state and belongs to one stream.
 //!
-//! Errors: nothing here fails. When exact redaction is not representable the
-//! redactor fails closed, dropping the text instead of risking a leak.
+//! Errors: output redaction fails closed by dropping unsafe text. Provider
+//! request guarding returns a payload-free [`AgentError::ProviderEgressSecret`]
+//! when a safe transformed clone cannot be produced.
 
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use crate::provider::ProviderError;
+use crate::model::BlockType;
+use crate::provider::{ProviderError, Request};
 use crate::safetext;
 
 use super::events::AgentError;
+
+/// Provider-bound request fields that may contain prose are transformed on a
+/// clone. Structural and provider-opaque fields are checked but never changed.
+const MINIMUM_CREDENTIAL_BYTES: usize = 8;
+const MINIMUM_PREFIXED_TOKEN_BYTES: usize = 20;
+const MAXIMUM_EGRESS_JSON_DEPTH: usize = 128;
+
+fn blocked() -> AgentError {
+    AgentError::ProviderEgressSecret
+}
+
+fn placeholder(value: &str) -> bool {
+    let normalized: String = value
+        .trim_matches(|character: char| {
+            character.is_ascii_whitespace()
+                || matches!(
+                    character,
+                    '"' | '\'' | '`' | '<' | '>' | '[' | ']' | '{' | '}'
+                )
+        })
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    normalized.is_empty()
+        || matches!(
+            normalized.as_str(),
+            "redacted"
+                | "placeholder"
+                | "example"
+                | "sample"
+                | "changeme"
+                | "replace"
+                | "replaceme"
+                | "yourkey"
+                | "yourtoken"
+                | "yoursecret"
+                | "yourpassword"
+                | "secret"
+                | "password"
+                | "token"
+                | "apikey"
+                | "none"
+                | "null"
+                | "undefined"
+        )
+        || normalized.starts_with("example")
+        || normalized.starts_with("dummy")
+        || normalized.starts_with("testonly")
+}
+
+fn sensitive_key(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "TOKEN"
+            | "ACCESSTOKEN"
+            | "AUTHTOKEN"
+            | "BEARERTOKEN"
+            | "SECRET"
+            | "CLIENTSECRET"
+            | "PASSWORD"
+            | "PASSWD"
+            | "PRIVATEKEY"
+            | "SECRETACCESSKEY"
+    ) || normalized.ends_with("APIKEY")
+        || normalized.ends_with("TOKEN")
+        || normalized.ends_with("SECRET")
+        || normalized.ends_with("PASSWORD")
+        || normalized.ends_with("PRIVATEKEY")
+        || normalized.ends_with("SECRETACCESSKEY")
+        || normalized.ends_with("ACCESSTOKEN")
+}
+
+fn credential_value(value: &str) -> bool {
+    let trimmed = value.trim_matches(|character: char| {
+        character.is_ascii_whitespace() || matches!(character, '"' | '\'' | '`' | ',' | ';')
+    });
+    trimmed.len() >= MINIMUM_CREDENTIAL_BYTES && !placeholder(trimmed)
+}
+
+fn strong_prefixed_token(value: &str) -> bool {
+    let token = value.trim_matches(|character: char| {
+        !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_')
+    });
+    if token.len() < MINIMUM_PREFIXED_TOKEN_BYTES || placeholder(token) {
+        return false;
+    }
+    let strong_prefix = token.starts_with("sk-")
+        || token.starts_with("ghp_")
+        || token.starts_with("gho_")
+        || token.starts_with("github_pat_")
+        || token.starts_with("xoxb-")
+        || token.starts_with("xoxp-")
+        || token.starts_with("xoxa-")
+        || token.starts_with("AKIA");
+    strong_prefix
+        && token
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+fn delimited_value_range(value: &str) -> Option<std::ops::Range<usize>> {
+    let leading = value.len() - value.trim_start().len();
+    let value = value.get(leading..)?;
+    if let Some(quote) = value
+        .chars()
+        .next()
+        .filter(|character| matches!(character, '"' | '\'' | '`'))
+    {
+        let start = leading + quote.len_utf8();
+        let quoted = value.get(quote.len_utf8()..)?;
+        let length = quoted.find(quote).unwrap_or(quoted.len());
+        return Some(start..start + length);
+    }
+    let length = value
+        .find(|character: char| character.is_ascii_whitespace() || matches!(character, ',' | ';'))
+        .unwrap_or(value.len());
+    Some(leading..leading + length)
+}
+
+fn assignment_finding(line: &str) -> Option<std::ops::Range<usize>> {
+    let separator = line.find(['=', ':'])?;
+    let key = line.get(..separator)?.trim_matches(|character: char| {
+        character.is_ascii_whitespace()
+            || (!character.is_ascii_alphanumeric() && !matches!(character, '_' | '-'))
+    });
+    if !sensitive_key(key) && !key.eq_ignore_ascii_case("authorization") {
+        return None;
+    }
+    let after_separator = separator + 1;
+    let mut value = line.get(after_separator..)?;
+    let mut offset = after_separator;
+    let whitespace = value.len() - value.trim_start().len();
+    value = value.get(whitespace..)?;
+    offset += whitespace;
+    if key.eq_ignore_ascii_case("authorization") {
+        let scheme_length = "bearer".len();
+        let (Some(scheme), Some(after_scheme)) =
+            (value.get(..scheme_length), value.get(scheme_length..))
+        else {
+            return None;
+        };
+        if !scheme.eq_ignore_ascii_case("bearer") {
+            return None;
+        }
+        let separators = after_scheme
+            .chars()
+            .take_while(|character| matches!(character, ' ' | '\t'))
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if separators == 0 {
+            return None;
+        }
+        offset += scheme_length + separators;
+        value = after_scheme.get(separators..)?;
+    }
+    let range = delimited_value_range(value)?;
+    let finding = offset + range.start..offset + range.end;
+    credential_value(line.get(finding.clone())?).then_some(finding)
+}
+
+fn independent_finding_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut findings = Vec::new();
+    for label in ["PRIVATE", "RSA PRIVATE", "EC PRIVATE", "OPENSSH PRIVATE"] {
+        // Construct PEM boundaries from fragments so repository secret scanners
+        // do not mistake the detector itself for embedded key material.
+        let begin = format!("-----{} {label} KEY-----", "BEGIN");
+        let end = format!("-----{} {label} KEY-----", "END");
+        let mut offset = 0;
+        while let Some(relative_start) = text[offset..].find(&begin) {
+            let start = offset + relative_start;
+            let after_begin = start + begin.len();
+            let finish = text[after_begin..]
+                .find(&end)
+                .map_or(text.len(), |relative_end| {
+                    after_begin + relative_end + end.len()
+                });
+            findings.push(start..finish);
+            offset = finish;
+            if offset == text.len() {
+                break;
+            }
+        }
+    }
+    let mut offset = 0;
+    for token in text.split_ascii_whitespace() {
+        let relative = text[offset..].find(token).unwrap_or_default();
+        let token_start = offset + relative;
+        let trimmed_start = token
+            .find(|character: char| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+            .unwrap_or(token.len());
+        let trimmed_end = token
+            .rfind(|character: char| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+            .map_or(trimmed_start, |index| index + 1);
+        if strong_prefixed_token(token) {
+            findings.push(token_start + trimmed_start..token_start + trimmed_end);
+        }
+        offset = token_start + token.len();
+    }
+    findings
+}
+
+fn heuristic_finding_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut findings = independent_finding_ranges(text);
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        if let Some(range) = assignment_finding(content) {
+            findings.push(offset + range.start..offset + range.end);
+        }
+        offset += line.len();
+    }
+    findings
+}
+
+fn heuristic_secret(text: &str) -> bool {
+    !heuristic_finding_ranges(text).is_empty()
+}
+
+fn redact_ranges(
+    redactor: &Redactor,
+    text: &str,
+    mut ranges: Vec<std::ops::Range<usize>>,
+) -> Option<String> {
+    let mut marker_inputs = redactor.values.clone();
+    marker_inputs.extend(ranges.iter().map(|range| text[range.clone()].to_owned()));
+    let marker = safetext::shared_redaction_marker(&marker_inputs)?;
+    ranges.sort_by_key(|range| (range.start, std::cmp::Reverse(range.end)));
+    let mut redacted = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for range in ranges {
+        if range.start < cursor || range.start >= range.end {
+            continue;
+        }
+        redacted.push_str(&text[cursor..range.start]);
+        redacted.push_str(&marker);
+        cursor = range.end;
+    }
+    redacted.push_str(&text[cursor..]);
+    Some(redacted)
+}
+
+fn json_strings_are_safe(redactor: &Redactor, value: &serde_json::Value, depth: usize) -> bool {
+    if depth > MAXIMUM_EGRESS_JSON_DEPTH {
+        return false;
+    }
+    match value {
+        serde_json::Value::String(value) => protected_text_is_safe(redactor, value),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .all(|value| json_strings_are_safe(redactor, value, depth + 1)),
+        serde_json::Value::Object(values) => values.iter().all(|(key, value)| {
+            protected_text_is_safe(redactor, key)
+                && !(matches!(value, serde_json::Value::String(value)
+                    if sensitive_key(key) && credential_value(value)))
+                && json_strings_are_safe(redactor, value, depth + 1)
+        }),
+        _ => true,
+    }
+}
+
+fn protected_json_is_safe(redactor: &Redactor, raw: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    json_strings_are_safe(redactor, &value, 0)
+}
+
+fn redact_heuristic_text(redactor: &Redactor, text: &str) -> Option<String> {
+    let exact = redactor.redact_string(text);
+    let ranges = heuristic_finding_ranges(&exact);
+    if ranges.is_empty() {
+        return Some(exact);
+    }
+    redact_ranges(redactor, &exact, ranges)
+}
+
+fn protected_text_is_safe(redactor: &Redactor, text: &str) -> bool {
+    redactor.redact_string(text) == text && !heuristic_secret(text)
+}
+
+fn redact_json_string_value(
+    redactor: &Redactor,
+    text: &str,
+    sensitive_association: bool,
+) -> Option<String> {
+    let exact = redactor.redact_string(text);
+    let mut ranges = independent_finding_ranges(&exact);
+    if sensitive_association && credential_value(&exact) {
+        ranges.push(0..exact.len());
+    }
+    if ranges.is_empty() {
+        Some(exact)
+    } else {
+        redact_ranges(redactor, &exact, ranges)
+    }
+}
+
+fn redact_egress_json(redactor: &Redactor, raw: &str) -> Option<Box<RawValue>> {
+    let text = redactor.redact_egress_json_text(raw)?;
+    RawValue::from_string(text).ok()
+}
+
+fn finish_reason_is_safe(redactor: &Redactor, reason: &crate::model::FinishReason) -> bool {
+    match reason {
+        crate::model::FinishReason::Other(value) => protected_text_is_safe(redactor, value),
+        _ => true,
+    }
+}
+
+fn role_is_safe(redactor: &Redactor, role: &crate::model::Role) -> bool {
+    match role {
+        crate::model::Role::Other(value) => protected_text_is_safe(redactor, value),
+        _ => true,
+    }
+}
+
+fn block_type_is_safe(redactor: &Redactor, block_type: &BlockType) -> bool {
+    match block_type {
+        BlockType::Other(value) => protected_text_is_safe(redactor, value),
+        _ => true,
+    }
+}
+
+/// The preferred replacement rune.
 
 /// The preferred replacement rune.
 pub const REDACTION_MARKER: &str = "\u{E000}";
@@ -85,6 +422,79 @@ impl Redactor {
         self.complete
     }
 
+    /// Clones a provider request, redacting known and high-confidence secrets
+    /// only in free text and JSON string keys/values. Structural and opaque
+    /// fields are preserved byte-for-byte or cause a local refusal.
+    pub fn guard_provider_request(&self, request: &Request) -> Result<Request, AgentError> {
+        if !self.complete
+            || !protected_text_is_safe(self, &request.model)
+            || !protected_text_is_safe(self, &request.thinking)
+            || !protected_text_is_safe(self, &request.cache_key)
+        {
+            return Err(blocked());
+        }
+        if let Some(remote) = &request.remote_compaction
+            && (!protected_text_is_safe(self, &remote.provider)
+                || !protected_text_is_safe(self, &remote.id)
+                || !protected_text_is_safe(self, &remote.encrypted_content))
+        {
+            return Err(blocked());
+        }
+        for tool in &request.tools {
+            if !protected_text_is_safe(self, &tool.name)
+                || !protected_text_is_safe(self, &tool.description)
+                || tool
+                    .parameters
+                    .as_ref()
+                    .is_some_and(|parameters| !protected_json_is_safe(self, parameters.get()))
+            {
+                return Err(blocked());
+            }
+        }
+
+        let mut guarded = request.clone();
+        guarded.system_prompt =
+            redact_heuristic_text(self, &request.system_prompt).ok_or_else(blocked)?;
+        for message in &mut guarded.messages {
+            if !protected_text_is_safe(self, &message.id)
+                || !role_is_safe(self, &message.role)
+                || !protected_text_is_safe(self, &message.context_type)
+                || !protected_text_is_safe(self, &message.input_id)
+                || message
+                    .finish_reason
+                    .as_ref()
+                    .is_some_and(|reason| !finish_reason_is_safe(self, reason))
+                || message
+                    .context_metadata
+                    .as_ref()
+                    .is_some_and(|metadata| !protected_text_is_safe(self, &metadata.task_id))
+            {
+                return Err(blocked());
+            }
+            for block in &mut message.blocks {
+                if !block_type_is_safe(self, &block.block_type)
+                    || !protected_text_is_safe(self, &block.data)
+                    || !protected_text_is_safe(self, &block.mime_type)
+                    || !protected_text_is_safe(self, &block.tool_call_id)
+                    || !protected_text_is_safe(self, &block.tool_name)
+                    || block.operation_metadata.as_ref().is_some_and(|metadata| {
+                        metadata.operation_id.as_ref().is_some_and(|operation_id| {
+                            !protected_text_is_safe(self, operation_id.as_str())
+                        })
+                    })
+                {
+                    return Err(blocked());
+                }
+                block.text = redact_heuristic_text(self, &block.text).ok_or_else(blocked)?;
+                if let Some(arguments) = &block.arguments {
+                    block.arguments =
+                        Some(redact_egress_json(self, arguments.get()).ok_or_else(blocked)?);
+                }
+            }
+        }
+        Ok(guarded)
+    }
+
     /// The text with every configured secret replaced by the marker, or the
     /// empty string when redaction is not representable.
     pub fn redact_string(&self, text: &str) -> String {
@@ -138,7 +548,8 @@ impl Redactor {
                 AgentError::Provider(
                     ProviderError::Cancelled | ProviderError::DeadlineExceeded,
                 )
-                | AgentError::EmptyUserText => error,
+                | AgentError::EmptyUserText
+                | AgentError::ProviderEgressSecret => error,
                 AgentError::InvalidCompactionSummary(cause) if cause.is_empty() => error,
                 _ => AgentError::Redacted {
                     message: String::new(),
@@ -184,6 +595,121 @@ impl Redactor {
             return None;
         }
         Some(value)
+    }
+
+    /// Parses provider-bound JSON while preserving scalar literals verbatim
+    /// and applying heuristic redaction at each string's own tree position.
+    fn redact_egress_json_text(&self, raw: &str) -> Option<String> {
+        let mut parser = Parser {
+            bytes: raw.as_bytes(),
+            index: 0,
+        };
+        let value = self.parse_egress_value(&mut parser)?;
+        parser.skip_whitespace();
+        (parser.index == parser.bytes.len()).then_some(value)
+    }
+
+    fn parse_egress_value(&self, parser: &mut Parser<'_>) -> Option<String> {
+        let mut stack: Vec<EgressFrame> = Vec::new();
+        'read: loop {
+            parser.skip_whitespace();
+            let sensitive_association =
+                matches!(stack.last(), Some(EgressFrame::Object(_, Some((_, true)))));
+            let mut value = match parser.peek()? {
+                b'{' => {
+                    parser.index += 1;
+                    if stack.len() >= MAXIMUM_EGRESS_JSON_DEPTH {
+                        return None;
+                    }
+                    parser.skip_whitespace();
+                    if parser.peek()? == b'}' {
+                        parser.index += 1;
+                        "{}".to_owned()
+                    } else {
+                        let key = self.parse_egress_member_key(parser)?;
+                        stack.push(EgressFrame::Object(Vec::new(), Some(key)));
+                        continue 'read;
+                    }
+                }
+                b'[' => {
+                    parser.index += 1;
+                    if stack.len() >= MAXIMUM_EGRESS_JSON_DEPTH {
+                        return None;
+                    }
+                    parser.skip_whitespace();
+                    if parser.peek()? == b']' {
+                        parser.index += 1;
+                        "[]".to_owned()
+                    } else {
+                        stack.push(EgressFrame::Array(Vec::new()));
+                        continue 'read;
+                    }
+                }
+                b'"' => encode_json_string(&redact_json_string_value(
+                    self,
+                    &parser.parse_string()?,
+                    sensitive_association,
+                )?),
+                _ => parser.parse_scalar()?,
+            };
+
+            loop {
+                match stack.last_mut() {
+                    None => return Some(value),
+                    Some(EgressFrame::Array(items)) => {
+                        items.push(value);
+                        parser.skip_whitespace();
+                        match parser.next()? {
+                            b',' => continue 'read,
+                            b']' => {}
+                            _ => return None,
+                        }
+                        let Some(EgressFrame::Array(items)) = stack.pop() else {
+                            unreachable!("the frame was just matched as an array")
+                        };
+                        value = encode_array(&items);
+                    }
+                    Some(EgressFrame::Object(members, pending_key)) => {
+                        let (key, _) = pending_key.take()?;
+                        members.push((key, value));
+                        parser.skip_whitespace();
+                        match parser.next()? {
+                            b',' => {
+                                *pending_key = Some(self.parse_egress_member_key(parser)?);
+                                continue 'read;
+                            }
+                            b'}' => {}
+                            _ => return None,
+                        }
+                        let Some(EgressFrame::Object(members, _)) = stack.pop() else {
+                            unreachable!("the frame was just matched as an object")
+                        };
+                        value = encode_object(members);
+                    }
+                }
+            }
+        }
+    }
+
+    fn parse_egress_member_key(&self, parser: &mut Parser<'_>) -> Option<(String, bool)> {
+        parser.skip_whitespace();
+        if parser.peek()? != b'"' {
+            return None;
+        }
+        let original = parser.parse_string()?;
+        let sensitive = sensitive_key(&original);
+        let exact = self.redact_string(&original);
+        let ranges = independent_finding_ranges(&exact);
+        let key = if ranges.is_empty() {
+            exact
+        } else {
+            redact_ranges(self, &exact, ranges)?
+        };
+        parser.skip_whitespace();
+        if parser.next()? != b':' {
+            return None;
+        }
+        Some((key, sensitive))
     }
 
     /// An iterative JSON parse that emits redacted JSON text directly. It uses
@@ -286,6 +812,12 @@ enum Frame {
     Array(Vec<String>),
     /// Members in source order plus the key whose value is being read.
     Object(Vec<(String, String)>, Option<String>),
+}
+
+/// Provider-egress JSON frame retaining the pending key's sensitivity.
+enum EgressFrame {
+    Array(Vec<String>),
+    Object(Vec<(String, String)>, Option<(String, bool)>),
 }
 
 /// Redacts a text stream that arrives in pieces.
@@ -600,6 +1132,252 @@ mod tests {
             "fixture omitted the marker"
         );
         value
+    }
+
+    fn candidate() -> String {
+        ["gh", "p_", "abcdefghijkl", "mnopqrstuvwx"].concat()
+    }
+
+    #[test]
+    fn egress_guard_detects_high_confidence_forms_and_ignores_placeholders() {
+        let token = candidate();
+        assert!(heuristic_secret(&format!("Authorization: Bearer {token}")));
+        assert!(heuristic_secret(&format!(
+            "Authorization: BeArEr   \t{token}"
+        )));
+        assert!(heuristic_secret(&format!("private-key = {token}")));
+        assert!(heuristic_secret(
+            &[
+                "-----BEGIN ",
+                "PRIVATE KEY-----\nbody\n-----END PRIVATE KEY-----",
+            ]
+            .concat()
+        ));
+        assert!(strong_prefixed_token(&token));
+        assert!(!strong_prefixed_token("ghp_example"));
+        assert!(!heuristic_secret("API_KEY=<redacted>"));
+        assert!(!heuristic_secret("TOKEN=your-token"));
+        assert!(!heuristic_secret(
+            "The authorization requirements use a bearer identity."
+        ));
+    }
+
+    #[test]
+    fn egress_guard_preserves_non_ascii_authorization_value() {
+        let authorization = "Authorization: €€€";
+        let request = Request {
+            system_prompt: authorization.into(),
+            ..Request::default()
+        };
+        let guarded = Redactor::new(&[])
+            .guard_provider_request(&request)
+            .expect("non-Bearer authorization is benign");
+        assert_eq!(guarded.system_prompt, authorization);
+    }
+
+    #[test]
+    fn egress_guard_preserves_benign_authorization_and_bearer_prose() {
+        let prose = "Discuss authorization requirements and bearer identity semantics.";
+        let request = Request {
+            system_prompt: prose.into(),
+            messages: vec![crate::model::Message {
+                role: crate::model::Role::User,
+                blocks: vec![crate::model::Block::text(prose)],
+                ..crate::model::Message::default()
+            }],
+            ..Request::default()
+        };
+        let guarded = Redactor::new(&[])
+            .guard_provider_request(&request)
+            .expect("benign prose");
+        assert_eq!(guarded.system_prompt, prose);
+        assert_eq!(guarded.messages[0].blocks[0].text, prose);
+
+        let token = candidate();
+        let assignment = Request {
+            system_prompt: format!("prefix API_KEY={token} suffix"),
+            ..Request::default()
+        };
+        let guarded = Redactor::new(&[])
+            .guard_provider_request(&assignment)
+            .expect("sensitive assignment");
+        assert!(!guarded.system_prompt.contains(&token));
+        assert!(guarded.system_prompt.starts_with("prefix API_KEY="));
+        assert!(guarded.system_prompt.ends_with(" suffix"));
+    }
+
+    #[test]
+    fn egress_guard_redacts_only_the_assigned_occurrence() {
+        let candidate = "abcdefgh";
+        let request = Request {
+            system_prompt: format!("API_KEY={candidate}\nThe unrelated identifier is {candidate}"),
+            ..Request::default()
+        };
+        let guarded = Redactor::new(&[])
+            .guard_provider_request(&request)
+            .expect("guarded request");
+        assert!(
+            !guarded
+                .system_prompt
+                .starts_with(&format!("API_KEY={candidate}"))
+        );
+        assert!(
+            guarded
+                .system_prompt
+                .ends_with(&format!("identifier is {candidate}"))
+        );
+    }
+
+    #[test]
+    fn egress_guard_redacts_json_strings_and_preserves_valid_json() {
+        let token = candidate();
+        let request = Request {
+            system_prompt: format!("API_KEY={token}"),
+            messages: vec![crate::model::Message {
+                role: crate::model::Role::Assistant,
+                blocks: vec![crate::model::Block {
+                    block_type: BlockType::ToolCall,
+                    tool_name: "echo".into(),
+                    tool_call_id: "call-1".into(),
+                    arguments: Some(
+                        RawValue::from_string(format!(r#"{{"{token}":{{"api_key":"{token}"}}}}"#))
+                            .expect("valid JSON"),
+                    ),
+                    ..crate::model::Block::default()
+                }],
+                ..crate::model::Message::default()
+            }],
+            ..Request::default()
+        };
+        let guarded = Redactor::new(&[])
+            .guard_provider_request(&request)
+            .expect("guarded request");
+        assert!(!guarded.system_prompt.contains(&token));
+        let arguments = guarded.messages[0].blocks[0]
+            .arguments
+            .as_ref()
+            .expect("arguments")
+            .get();
+        assert!(!arguments.contains(&token));
+        assert!(serde_json::from_str::<serde_json::Value>(arguments).is_ok());
+        assert!(
+            request.system_prompt.contains(&token),
+            "input clone unchanged"
+        );
+    }
+
+    #[test]
+    fn egress_guard_associates_json_sensitive_keys_with_their_values() {
+        let candidate = "abcdefgh";
+        let request = Request {
+            messages: vec![crate::model::Message {
+                role: crate::model::Role::Assistant,
+                blocks: vec![crate::model::Block {
+                    block_type: BlockType::ToolCall,
+                    arguments: Some(
+                        RawValue::from_string(format!(
+                            r#"{{"token":"redacted","api_key":"{candidate}","query":"{candidate}"}}"#
+                        ))
+                        .expect("valid JSON")),
+                    ..crate::model::Block::default()
+                }],
+                ..crate::model::Message::default()
+            }],
+            ..Request::default()
+        };
+        let guarded = Redactor::new(&[])
+            .guard_provider_request(&request)
+            .expect("guarded request");
+        let arguments = guarded.messages[0].blocks[0]
+            .arguments
+            .as_ref()
+            .expect("arguments")
+            .get();
+        let parsed: serde_json::Value = serde_json::from_str(arguments).expect("valid JSON");
+        assert_eq!(parsed["token"], "redacted");
+        assert_eq!(parsed["query"], candidate);
+        assert_ne!(parsed["api_key"], candidate);
+    }
+
+    #[test]
+    fn egress_guard_removes_known_exact_secret_and_blocks_incomplete_redactor() {
+        let secret = "known-exact-provider-secret";
+        let request = Request {
+            system_prompt: format!("prefix API_KEY={secret} suffix"),
+            ..Request::default()
+        };
+        let guarded = Redactor::new(&[secret.into()])
+            .guard_provider_request(&request)
+            .expect("known secret is removable from prose");
+        assert!(!guarded.system_prompt.contains(secret));
+        assert!(guarded.system_prompt.starts_with("prefix API_KEY="));
+        assert!(guarded.system_prompt.ends_with(" suffix"));
+        let incomplete = Redactor {
+            values: Vec::new(),
+            marker: String::new(),
+            complete: false,
+        };
+        assert!(matches!(
+            incomplete.guard_provider_request(&Request::default()),
+            Err(AgentError::ProviderEgressSecret)
+        ));
+    }
+
+    #[test]
+    fn egress_guard_refuses_protected_image_and_tool_definition_fields() {
+        let token = candidate();
+        let image_request = Request {
+            messages: vec![crate::model::Message {
+                role: crate::model::Role::User,
+                blocks: vec![crate::model::Block {
+                    block_type: BlockType::Image,
+                    data: token.clone(),
+                    mime_type: "image/png".into(),
+                    ..crate::model::Block::default()
+                }],
+                ..crate::model::Message::default()
+            }],
+            ..Request::default()
+        };
+        assert!(matches!(
+            Redactor::new(&[]).guard_provider_request(&image_request),
+            Err(AgentError::ProviderEgressSecret)
+        ));
+        let tool_request = Request {
+            tools: vec![crate::model::ToolDefinition {
+                name: "echo".into(),
+                description: format!("TOKEN={token}"),
+                parameters: None,
+            }],
+            ..Request::default()
+        };
+        assert!(matches!(
+            Redactor::new(&[]).guard_provider_request(&tool_request),
+            Err(AgentError::ProviderEgressSecret)
+        ));
+        let cache_request = Request {
+            cache_key: token.clone(),
+            ..Request::default()
+        };
+        assert!(matches!(
+            Redactor::new(&[]).guard_provider_request(&cache_request),
+            Err(AgentError::ProviderEgressSecret)
+        ));
+        let schema_request = Request {
+            tools: vec![crate::model::ToolDefinition {
+                name: "echo".into(),
+                description: "safe".into(),
+                parameters: Some(
+                    RawValue::from_string(format!(r#"{{"api_key":"{token}"}}"#))
+                        .expect("valid schema"),
+                ),
+            }],
+            ..Request::default()
+        };
+        assert!(matches!(
+            Redactor::new(&[]).guard_provider_request(&schema_request),
+            Err(AgentError::ProviderEgressSecret)
+        ));
     }
 
     #[test]

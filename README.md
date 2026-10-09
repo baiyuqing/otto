@@ -325,6 +325,12 @@ never retried automatically.
 - In an interactive parent session, Otto can request one-time unsandboxed Bash
   execution. Review the exact command and run `/approve <id>` to grant it once;
   the request remains pending until it is replaced, consumed, or Otto exits, and never changes `config.toml`.
+- Before every model-provider call, Otto locally removes known credentials and
+  high-confidence secret forms from safely rewritable text. If a match occurs in
+  a structural or opaque request field, Otto blocks the call without echoing the
+  value. This guard covers normal turns, compaction, sub-agents and auxiliary
+  model calls, but it does not recognize every custom format or inspect image
+  pixels. See [provider egress secret guard](docs/manual/safety-and-tools.md#provider-egress-secret-guard).
 - Session files may contain workspace files, prompts, images, and tool results. Treat
   them as sensitive.
 - Plugin packages support Skills, MCP and [Otto hooks/custom tools](docs/manual/memory-and-extensions.md#hooks-and-custom-tools); legacy host Hooks, Commands, Agents, LSP,

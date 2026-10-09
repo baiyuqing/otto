@@ -125,7 +125,7 @@ The other modules group native responsibilities:
   metrics `server/` exposes and the schedule worker records).
 - **Test-only fault injection:** `faults/` (compiled under `cfg(test)` or the
   `fault-injection` feature; `faults/http.rs` is the scripted loopback HTTP
-  server; see [Fault injection](development.md#fault-injection)).
+  server; see [Fault injection](development/testing.md#fault-injection)).
 - **Cross-cutting native helpers:** `deadline.rs`, `retry.rs`, `gourl.rs`,
   `urlprivacy.rs`, and `log.rs` (the process logger: one instance built at the
   composition root and passed to its consumers). `log/diagnostics.rs` owns the
@@ -161,7 +161,7 @@ has a public extension entry point in `runtime/storage/backend.rs` and
 includes only its existing local backends. `storage/worker.rs` owns optional
 async adapter I/O, `storage/conformance.rs` exposes contract checks, and
 `tests/external_storage_backend.rs` is an independently compiled acceptance
-crate using a different JSON repository. See the [storage contract](development.md#native-storage-contracts)
+crate using a different JSON repository. See the [storage contract](development/architecture.md#native-storage-contracts)
 for capability, migration, and compatibility boundaries.
 
 `subagent/reports.rs` owns persistent workspace research reports and automatic
@@ -210,7 +210,7 @@ guards these dependency directions.
 | Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `acp/mod.rs` wake loop | [Design](specs/2026-10-04-acp-wake-replies.md), the `wake-replies` HTTP route, `client/`, `chat-connector/internal/bridge` |
 | Scheduled deliveries (`schedule` tools, due runs, delivery and write-back) | `crates/otto/src/schedule/`, `app/scheduled.rs` | [Design](specs/2026-10-04-scheduled-deliveries.md), turn origin in `app/approval.rs`, the worker spawn in `cli/run.rs` and `cli/serve.rs`, HTTP schedule routes, ACP `_otto/schedule/deliver`, `chat-connector/internal/bridge`, external otto-plus |
 | Persistent memories, sessions, workflow runs, or token aggregates | The matching native state module | Its store and lifecycle tests |
-| Cross-workspace delivery tasks (target admission, approval, worktree setup, handoff) | `crates/otto/src/delivery.rs`, then `cli/serve.rs` (`DeliveryManager`, `DeliveryBroker`, `DeliveryToolFactory`) | [Design](specs/2026-10-06-cross-workspace-delivery-design.md), [user manual](user-manual.md#cross-workspace-deliveries), `runtime/workspace_admission.rs`, `ParentToolSlot` in `runtime/builder.rs`, the receipt/task ledger tests |
+| Cross-workspace delivery tasks (target admission, approval, worktree setup, handoff) | `crates/otto/src/delivery.rs`, then `cli/serve.rs` (`DeliveryManager`, `DeliveryBroker`, `DeliveryToolFactory`) | [Design](specs/2026-10-06-cross-workspace-delivery-design.md), [user manual](manual/servers-and-connectors.md#cross-workspace-deliveries), `runtime/workspace_admission.rs`, `ParentToolSlot` in `runtime/builder.rs`, the receipt/task ledger tests |
 
 ## Dependency and documentation rules
 
@@ -229,4 +229,4 @@ guards these dependency directions.
 
 For documentation-only changes, check links and review the rendered Markdown.
 For code organization changes, CI runs the canonical repository gates
-described in the [development guide](development.md#local-verification).
+described in the [development guide](development/workflow.md#local-verification).

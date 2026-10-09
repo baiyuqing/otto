@@ -180,7 +180,7 @@ session switch writes no configuration, so it needs no restart and stays
 available while the default profile is out of quota. `otto acp --attach` relays
 it to the new `POST /v1/sessions/{id}/profile` route on `otto serve`; the
 process-level save-on-switch behavior of the TUI's `/model` is deliberately not
-part of it. See the [user manual](../user-manual.md#compact-and-context-are-slash-commands).
+part of it. See the [user manual](../manual/servers-and-connectors.md#compact-and-context-are-slash-commands).
 
 ### Apply and restart semantics
 

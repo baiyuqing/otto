@@ -4,7 +4,7 @@
 
 # Otto — a local-first personal AI agent
 
-[简体中文](README.zh-CN.md) · [User manual](docs/user-manual.md) · [Changelog](CHANGELOG.md)
+[简体中文](README.zh-CN.md) · [Documentation](docs/README.md) · [User manual](docs/user-manual.md) · [Changelog](CHANGELOG.md)
 
 **Otto helps with research, writing, planning, coding, and practical tasks.**
 Work with it from your terminal, a browser, Telegram, or Feishu. It uses the
@@ -23,7 +23,7 @@ the runtime, session history, and default memory storage.
   review, reusable skills and plugin packages, and selective reflection after completed work.
 - **Carry work forward.** Workspace tools, web fetch and search, and MCP integrations, bounded
   sub-agents, timers, durable workflows with approvals and restart recovery, and
-  [delivery tasks](docs/user-manual.md#cross-workspace-deliveries) that hand work to another admitted repository.
+  [delivery tasks](docs/manual/servers-and-connectors.md#cross-workspace-deliveries) that hand work to another admitted repository.
 - **Control access.** Workspace-confined file tools, macOS Seatbelt shell
   sandboxing by default, and explicit permission requests for additional access.
 
@@ -64,7 +64,7 @@ make run                       # or: scripts/otto.sh
 ```
 
 `otto.env` is ignored by Git and read like a shell profile; see the
-[launcher script](docs/user-manual.md#launcher-script).
+[launcher script](docs/manual/getting-started.md#launcher-script).
 
 ## Docker Desktop on Mac
 
@@ -82,7 +82,7 @@ Use the printed host/port and token with an API client or the separate
 The image builds natively on Apple Silicon and Intel Macs and serves the API. Configuration and sessions persist in a named volume;
 `OTTO_WORKSPACE` selects the directory mounted into the container.
 For API-key profiles, select `OTTO_API_KEY` during setup and export it before
-starting Compose. See [Docker on Mac](docs/user-manual.md#docker-on-mac) for
+starting Compose. See [Docker on Mac](docs/manual/getting-started.md#docker-on-mac) for
 CLI usage, architecture selection and lifecycle commands. Containers run
 Linux, so Bash requires explicitly selecting `--sandbox off`.
 
@@ -122,7 +122,7 @@ Sign in, then choose a model available to your account (replace `YOUR_MODEL_ID`)
 ./otto --provider chatgpt --model YOUR_MODEL_ID
 ```
 
-See [sign-in and profiles](docs/user-manual.md#chatgpt-subscription) for details.
+See [sign-in and profiles](docs/manual/getting-started.md#chatgpt-subscription) for details.
 
 ### OpenAI-compatible API
 
@@ -138,7 +138,7 @@ Chat Completions.
 
 Otto reads API keys from the profile's `api_key_env` variable or falls back to
 `OTTO_API_KEY`. Keys have no CLI flag and must not be stored in TOML. For a
-persistent setup, see [configuration](docs/user-manual.md#configuration).
+persistent setup, see [configuration](docs/manual/getting-started.md#configuration).
 Otto merges user, shared and local project configuration beneath managed
 policy. `otto config explain --json` shows sources and ignored fields;
 `otto config set KEY TOML_VALUE --scope user|shared|local` edits one source.
@@ -169,11 +169,11 @@ After configuring a default profile, you can also run one prompt and exit:
 ```
 
 Use `/help` for interactive commands. Sessions support continuing, resuming, and
-archiving. See [sessions](docs/user-manual.md#sessions) and
-[headless mode](docs/user-manual.md#headless-mode).
+archiving. See [sessions](docs/manual/interactive-use.md#sessions) and
+[headless mode](docs/manual/interactive-use.md#headless-mode).
 
 Workspace identities persist across restarts and directory moves. See
-[workspace identity](docs/user-manual.md#workspace-identity) for copying and forking.
+[workspace identity](docs/manual/automation.md#workspace-identity) for copying and forking.
 
 In the TUI, `/image <path>` attaches one PNG, JPEG, or WebP image to the next
 prompt. In the Web UI, choose **Image** or paste a screenshot before sending.
@@ -181,26 +181,26 @@ The selected model and OpenAI-compatible endpoint must support image input.
 
 ## More workflows
 
-- [Local memory](docs/user-manual.md#memory): search, remember, review, and forget, plus [reflection](docs/user-manual.md#reflection), which writes a retrospective of a session to `~/.otto/reflection/runs/`, proposes memories from it for your review, and can write vetted skills you can undo with `/skill revert`. It runs on `/reflect`, when you ask the agent for a retrospective, and, by default, after a completed turn with at least 10 successful tool operations or a compaction; `auto = "off"` turns that off.
-- [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files. Reflection can also extract reusable Python scripts, syntax-check them without execution, and publish the complete skill after approval; `/skill revert` restores both instructions and scripts.
-- [MCP servers](docs/user-manual.md#mcp-servers): connect stdio or HTTP Model
+- [Local memory](docs/manual/memory-and-extensions.md#memory): search, remember, review, and forget, plus [reflection](docs/manual/memory-and-extensions.md#reflection), which writes a retrospective of a session to `~/.otto/reflection/runs/`, proposes memories from it for your review, and can write vetted skills you can undo with `/skill revert`. It runs on `/reflect`, when you ask the agent for a retrospective, and, by default, after a completed turn with at least 10 successful tool operations or a compaction; `auto = "off"` turns that off.
+- [Skills](docs/manual/memory-and-extensions.md#skills): reusable instructions in `SKILL.md` files. Reflection can also extract reusable Python scripts, syntax-check them without execution, and publish the complete skill after approval; `/skill revert` restores both instructions and scripts.
+- [MCP servers](docs/manual/memory-and-extensions.md#mcp-servers): connect stdio or HTTP Model
   Context Protocol servers and use their tools from the same turn loop.
-- [Timers](docs/user-manual.md#remind): the model schedules a later wake with
+- [Timers](docs/manual/safety-and-tools.md#remind): the model schedules a later wake with
   `remind`; `/timers` lists this session's outstanding timers and
   `/timers cancel <id>` stops one.
-- [Scheduled deliveries](docs/user-manual.md#schedule): `schedule` sends a
+- [Scheduled deliveries](docs/manual/safety-and-tools.md#schedule): `schedule` sends a
   message or the reply of a prompt run at a later time, once or daily, to the
   chat, terminal or browser UI that asked for it. A prompt run needs authorization
   through the session's approval policy when it is created.
-- [Local server](docs/user-manual.md#agent-server): `otto serve` exposes an
+- [Local server](docs/manual/servers-and-connectors.md#agent-server): `otto serve` exposes an
   authenticated API over a Unix socket or a loopback TCP port. The browser UI
   lives in [otto-plus](https://github.com/baiyuqing/otto-plus).
-  [`otto --attach`](docs/user-manual.md#the-tui-attached-to-otto-serve) runs
+  [`otto --attach`](docs/manual/interactive-use.md#the-tui-attached-to-otto-serve) runs
   the TUI on the same sessions.
-- [ACP agent](docs/user-manual.md#acp-agent-server): `otto acp` speaks the
+- [ACP agent](docs/manual/servers-and-connectors.md#acp-agent-server): `otto acp` speaks the
   Agent Client Protocol on stdio for ACP clients; `otto acp --attach`
   forwards it to a running `otto serve`.
-- [Chat connector](docs/user-manual.md#chat-connector): `otto-connect`, a
+- [Chat connector](docs/manual/servers-and-connectors.md#chat-connector): `otto-connect`, a
   separate Go program in `chat-connector/`, runs `otto acp` and connects it to
   Telegram and Feishu chats, one session per chat, with Approve / Deny buttons and `/allow` / `/deny` for
   elevated `bash` commands and `/sessions` and `/use` to pick a session.
@@ -208,15 +208,15 @@ The selected model and OpenAI-compatible endpoint must support image input.
   and `otto --attach` terminals; `scripts/otto-tcp.sh` supervises the direct
   ACP TCP pair instead, where `otto serve --acp-listen` is the agent and
   connect starts no process of its own.
-- [Usage history](docs/user-manual.md#observability): a Web UI analysis page
+- [Usage history](docs/manual/servers-and-connectors.md#observability): a Web UI analysis page
   for local provider token trends and cache hit rate, without prompt or tool
   content.
-- [Durable workflows](docs/user-manual.md#durable-workflows): versioned TOML
+- [Durable workflows](docs/manual/automation.md#durable-workflows): versioned TOML
   DAGs with sequential/concurrent agent and handoff steps, persisted approvals,
   restart recovery, CLI control, and a Web UI inspector.
-- [Configuration](docs/user-manual.md#configuration),
-  [CLI reference](docs/user-manual.md#command-line-reference), and
-  [troubleshooting](docs/user-manual.md#troubleshooting).
+- [Configuration](docs/manual/getting-started.md#configuration),
+  [CLI reference](docs/manual/getting-started.md#command-line-reference), and
+  [troubleshooting](docs/manual/troubleshooting.md#troubleshooting).
 
 ### Delegate work to sub-agents
 
@@ -262,7 +262,7 @@ checkpoint. Tasks do not need to be stopped by hand to be bounded: a turn
 whose model keeps repeating the same call, or keeps getting tool errors, ends
 by itself with a `no progress: ...` error, and each sub-agent inherits the
 parent's limits (see
-[`[agent].no_progress_repeats`](docs/user-manual.md#stopping-a-turn-that-makes-no-progress)).
+[`[agent].no_progress_repeats`](docs/manual/safety-and-tools.md#stopping-a-turn-that-makes-no-progress)).
 
 Child agents cannot start nested agents. Their child-only `agent_report` tool
 sends one message to the parent without ending the task; children use it only
@@ -321,15 +321,15 @@ never retried automatically.
   a VM and does not prevent destructive changes inside the writable workspace.
   The workspace's `.git` entry, `.git/config` and `.git/hooks` are read-only
   under Seatbelt; see
-  [the user manual](docs/user-manual.md#git-metadata-is-read-only-in-the-seatbelt-sandbox).
+  [the user manual](docs/manual/safety-and-tools.md#git-metadata-is-read-only-in-the-seatbelt-sandbox).
 - In an interactive parent session, Otto can request one-time unsandboxed Bash
   execution. Review the exact command and run `/approve <id>` to grant it once;
   the request remains pending until it is replaced, consumed, or Otto exits, and never changes `config.toml`.
 - Session files may contain workspace files, prompts, images, and tool results. Treat
   them as sensitive.
-- Plugin packages support Skills, MCP and [Otto hooks/custom tools](docs/user-manual.md#hooks-and-custom-tools); legacy host Hooks, Commands, Agents, LSP,
+- Plugin packages support Skills, MCP and [Otto hooks/custom tools](docs/manual/memory-and-extensions.md#hooks-and-custom-tools); legacy host Hooks, Commands, Agents, LSP,
   OpenAI Apps and Pi runtime extensions are not loaded. See
-  [plugin packages](docs/user-manual.md#plugin-packages).
+  [plugin packages](docs/manual/memory-and-extensions.md#plugin-packages).
 - No automatic project-local config discovery, session trees/forks,
   deletion, or search.
 - No memory backup/restore/verify commands.
@@ -365,10 +365,10 @@ manual approval; `/auto on` restores AUTO for this session. `/permissions`
 shows the policy and reviewer; `/permissions policy never` rejects additional
 authority without prompting. These settings survive resume. Terminal and Web status
 bars show the mode; Telegram and Feishu support the same commands, and Telegram
-also offers mode buttons. See [unified approvals](docs/user-manual.md#unified-approvals).
+also offers mode buttons. See [unified approvals](docs/manual/safety-and-tools.md#unified-approvals).
 
 Configure shell permissions interactively with `otto sandbox setup`; see the
-[setup guide](docs/user-manual.md#interactive-sandbox-setup). In a running
+[setup guide](docs/manual/safety-and-tools.md#interactive-sandbox-setup). In a running
 session, `/sandbox allow <path>` and `/sandbox network allow|deny` write the
 same `[sandbox]` settings and apply them to the current process. Models can
 also request a persistent read-path grant; in MANUAL mode this uses a centered
@@ -381,12 +381,12 @@ only to the exact originating chat rather than every chat bound to the same
 session or workspace. While an approval waits, you can ask Otto to explain or
 withdraw it; normal tasks remain queued.
 Otto can also consult its installed-version user manual and current tool list;
-see [self-help and approval controls](docs/user-manual.md#ottos-own-help-and-approval-controls).
+see [self-help and approval controls](docs/manual/servers-and-connectors.md#ottos-own-help-and-approval-controls).
 `[sandbox].excluded_commands` lists simple commands, such as `lark-cli *`, that
 run outside the sandbox with the real `HOME`; see the
-[user manual](docs/user-manual.md#configuration).
+[user manual](docs/manual/getting-started.md#configuration).
 
-Read [tools and safety](docs/user-manual.md#tools-and-safety) before granting
+Read [tools and safety](docs/manual/safety-and-tools.md#tools-and-safety) before granting
 access to a workspace.
 
 ## Use Otto as a library
@@ -445,7 +445,7 @@ The code is a Cargo workspace of two crates:
 See the [code organization map](docs/code-organization.md) for a quick
 repository and ownership overview, [AGENTS.md](AGENTS.md) for the task map,
 and the [development guide](docs/development.md) for detailed contracts and
-validation. Design documents live in [docs/specs](docs/specs/); the
+validation. Design documents live in [docs/specs](docs/specs); the
 [Rust rewrite plan](docs/specs/2026-09-13-rust-rewrite-plan.md) records why the
 Go implementation (tagged `go-final`) was replaced.
 

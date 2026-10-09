@@ -46,4 +46,4 @@ otto plugin disable hook-demo
 # Or: otto plugin remove hook-demo
 ```
 
-Protocol: [Hooks and custom tools](../../../docs/user-manual.md#hooks-and-custom-tools).
+Protocol: [Hooks and custom tools](../../../docs/manual/memory-and-extensions.md#hooks-and-custom-tools).

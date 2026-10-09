@@ -13,8 +13,8 @@ may deny or supply permitted rewrites; after hooks preserve execution facts.
 Parameter rewrites precede policy/validation/authorization. Context is untrusted.
 No automatic replay after process loss, marketplace, or in-process extension ABI.
 
-Canonical protocol: [Hooks and custom tools](../user-manual.md#hooks-and-custom-tools).
-Implementation invariants: [Plugin execution contracts](../development.md#plugin-execution-contracts).
+Canonical protocol: [Hooks and custom tools](../manual/memory-and-extensions.md#hooks-and-custom-tools).
+Implementation invariants: [Plugin execution contracts](../development/contracts.md#plugin-execution-contracts).
 
 Integration: retain Agent Plugins `plugin.json` and the installed snapshot registry.
 Versioned hook/tool declarations live in `extensions.dev.otto`; no parallel

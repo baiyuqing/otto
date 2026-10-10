@@ -81,16 +81,28 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
     );
 
     let body = chunks[1];
-    let has_collection = !view.rows.is_empty();
-    let has_detail = !view.document.is_empty() || !view.fields.is_empty();
+    let has_rows = !view.rows.is_empty();
+    let selected_detail = view
+        .rows
+        .iter()
+        .find(|row| state.selected_row.as_deref() == Some(row.id.as_str()))
+        .map(|row| row.detail.as_str())
+        .filter(|detail| !detail.is_empty());
+    let document = if view.document.is_empty() {
+        selected_detail.unwrap_or_default()
+    } else {
+        view.document.as_str()
+    };
+    let has_detail = !document.is_empty() || !view.fields.is_empty();
     let mut geometry = Geometry::default();
-    let (rows_area, detail_area) = if has_collection && has_detail && body.height >= 5 {
+
+    let (rows_area, detail_area) = if has_rows && has_detail && body.height >= 5 {
         let parts = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(35), Constraint::Min(1)])
             .split(body);
         (Some(parts[0]), Some(parts[1]))
-    } else if has_collection {
+    } else if has_rows || (view.collection && !has_detail) {
         (Some(body), None)
     } else if has_detail {
         (None, Some(body))
@@ -172,7 +184,7 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
 
     if let Some(rect) = detail_area {
         let content = rect;
-        let sections = match (view.document.is_empty(), view.fields.is_empty()) {
+        let sections = match (document.is_empty(), view.fields.is_empty()) {
             (false, false) if content.height >= 4 => Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(55), Constraint::Min(1)])
@@ -181,13 +193,13 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
             _ => vec![content],
         };
         let mut index = 0;
-        if !view.document.is_empty() {
+        if !document.is_empty() {
             let rect = sections[index];
             index += 1;
             geometry.document = Some(rect);
             let visible = rect.height.saturating_sub(2).max(1);
             geometry.page_rows = visible;
-            let document = escape_plain_text(&view.document);
+            let document = escape_plain_text(document);
             let paragraph = Paragraph::new(document).wrap(Wrap { trim: false });
             let total_rows = paragraph
                 .line_count(rect.width.saturating_sub(2))
@@ -267,9 +279,14 @@ pub(crate) fn draw_surface(frame: &mut Frame, area: Rect, view: &View, state: &S
         }
     }
 
-    if !has_collection && !has_detail && !view.loading {
+    if !has_rows && !has_detail {
         frame.render_widget(
-            Paragraph::new("No items").style(Style::default().fg(MUTED)),
+            Paragraph::new(if view.loading {
+                "Loading…"
+            } else {
+                "No items"
+            })
+            .style(Style::default().fg(MUTED)),
             body,
         );
     }
@@ -418,6 +435,142 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["save"]
         );
+    }
+
+    #[test]
+    fn collection_renders_the_selected_rows_full_detail() {
+        let view = View {
+            collection: true,
+            title: "Memory review".into(),
+            rows: vec![
+                Row {
+                    id: "one".into(),
+                    cells: vec!["create fact/color".into()],
+                    detail: "favorite color is blue\nReason: stated directly".into(),
+                },
+                Row {
+                    id: "two".into(),
+                    cells: vec!["forget fact/city".into()],
+                    detail: "forget Paris\nReason: user requested deletion".into(),
+                },
+            ],
+            actions: vec![Action {
+                id: "accept".into(),
+                label: "Accept".into(),
+                enabled: true,
+                ..Action::default()
+            }],
+            ..View::default()
+        };
+        let mut state = State::new(&view);
+        state.handle(&view, crate::tui::interaction::Intent::Move(1));
+        let backend = TestBackend::new(70, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut geometry = Geometry::default();
+        terminal
+            .draw(|frame| geometry = draw_surface(frame, frame.area(), &view, &state))
+            .expect("draw");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(geometry.document.is_some());
+        assert!(screen.contains("forget Paris"));
+        assert!(screen.contains("user requested deletion"));
+        assert!(!screen.contains("favorite color is blue"));
+    }
+
+    #[test]
+    fn unloaded_memory_review_collection_has_a_visible_loading_state() {
+        let view = View {
+            collection: true,
+            title: "Memory review".into(),
+            loading: true,
+            ..View::default()
+        };
+        let state = State::new(&view);
+        let backend = TestBackend::new(70, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw_surface(frame, frame.area(), &view, &state);
+            })
+            .expect("draw");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(screen.matches("Loading…").count() >= 2);
+    }
+
+    #[test]
+    fn memory_review_empty_state_is_visible() {
+        let view = View {
+            collection: true,
+            title: "Memory review".into(),
+            document: "No pending memory candidates.".into(),
+            ..View::default()
+        };
+        let state = State::new(&view);
+        let backend = TestBackend::new(70, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw_surface(frame, frame.area(), &view, &state);
+            })
+            .expect("draw");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(screen.contains("No pending memory candidates."));
+    }
+
+    #[test]
+    fn memory_review_loading_failure_is_visible_with_retry() {
+        let view = View {
+            collection: true,
+            title: "Memory review".into(),
+            loading: false,
+            actions: vec![Action {
+                id: "otto:retry".into(),
+                label: "Retry".into(),
+                enabled: true,
+                ..Action::default()
+            }],
+            ..View::default()
+        };
+        let mut state = State::new(&view);
+        state.error = Some("Memory review is unavailable.".into());
+        let backend = TestBackend::new(70, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                draw_surface(frame, frame.area(), &view, &state);
+            })
+            .expect("draw");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(screen.contains("Memory review is unavailable."));
+        assert!(screen.contains("Retry"));
     }
 
     #[test]

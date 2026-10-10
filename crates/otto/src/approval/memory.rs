@@ -215,11 +215,10 @@ fn proposal(
         authority: Authority::Durable,
         scope: super::Scope {
             workspace: workspace.into(),
-            // Memory candidates outlive their originating session. Keep the
-            // accept/reject decision one-shot, but make its approval visible
-            // to every session in this workspace so `/memory review` can
-            // always clear a pending candidate.
-            session_id: String::new(),
+            // Route the decision through the originating session so AUTO can
+            // review it under that session's policy. `publish` separately adds
+            // workspace visibility to the same deduplicated request.
+            session_id: candidate.proposed.source.session_id.clone(),
             task_id: String::new(),
             run_id: String::new(),
         },
@@ -256,14 +255,19 @@ pub fn publish(
     if !scopes.contains(&candidate.proposed.scope) {
         return Ok(());
     }
-    service.create_with_origin(
-        proposal(scopes, workspace, candidate)?,
-        candidate
-            .proposed
-            .metadata
-            .get(crate::memory::PRESENTATION_ORIGIN_METADATA)
-            .map_or("", String::as_str),
-    )?;
+    let origin = candidate
+        .proposed
+        .metadata
+        .get(crate::memory::PRESENTATION_ORIGIN_METADATA)
+        .map_or("", String::as_str);
+    service.create_with_origin(proposal(scopes, workspace, candidate)?, origin)?;
+    // Approval storage deduplicates memory requests by subject and adds the
+    // supplied scope to their visibility set. This second publication does not
+    // create another decision; it keeps the one-shot request reachable after
+    // its originating session ends and upgrades legacy session-only requests.
+    let mut visible = proposal(scopes, workspace, candidate)?;
+    visible.scope.session_id.clear();
+    service.create_with_origin(visible, origin)?;
     Ok(())
 }
 
@@ -330,8 +334,7 @@ mod tests {
             .unwrap()
             .remove(0);
         let approvals = Arc::new(Service::in_memory().unwrap());
-        let mut legacy = proposal(std::slice::from_ref(&user), "/w", &candidate).unwrap();
-        legacy.scope.session_id = "old-session".into();
+        let legacy = proposal(std::slice::from_ref(&user), "/w", &candidate).unwrap();
         approvals.create(legacy).unwrap();
         assert!(
             approvals
@@ -400,7 +403,8 @@ mod tests {
             .remove(0);
         let requests = approvals.snapshot("/w", Some("session")).unwrap().requests;
 
-        let candidates = human_pending_candidates(&memory, &[user.clone()], &requests, 20).unwrap();
+        let candidates =
+            human_pending_candidates(&memory, std::slice::from_ref(&user), &requests, 20).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id, actionable.id);
         assert_eq!(

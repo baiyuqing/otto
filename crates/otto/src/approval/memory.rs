@@ -1,5 +1,6 @@
 //! Memory retains review data and the atomic candidate/result receipt.
 use super::{Authority, Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
+use crate::memory::service::PendingSummary;
 use crate::memory::{
     CandidateListRequest, CandidateRef, CandidateState, ReviewDecision, ReviewRequest, Scope,
 };
@@ -63,9 +64,9 @@ pub fn human_pending_summary(
     memory: &crate::memory::Service,
     scopes: &[Scope],
     requests: &[Request],
-) -> crate::memory::Result<crate::memory::PendingSummary> {
+) -> crate::memory::Result<PendingSummary> {
     let candidates = human_pending_candidates(memory, scopes, requests, usize::MAX)?;
-    Ok(crate::memory::PendingSummary {
+    Ok(PendingSummary {
         count: candidates.len(),
         oldest: candidates
             .iter()
@@ -404,7 +405,7 @@ mod tests {
         assert_eq!(candidates[0].id, actionable.id);
         assert_eq!(
             human_pending_summary(&memory, &[user], &requests).unwrap(),
-            crate::memory::PendingSummary {
+            PendingSummary {
                 count: 1,
                 oldest: Some(actionable.created_at),
             }

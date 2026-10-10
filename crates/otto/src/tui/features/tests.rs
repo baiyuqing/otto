@@ -210,6 +210,17 @@ fn empty_memory_review_has_an_explicit_empty_state() {
 }
 
 #[test]
+fn memory_review_exposes_full_candidate_information_as_selected_row_detail() {
+    let mut reviews = Reviews::default();
+    reviews.receive(Reply::Reviews(vec![candidate("candidate-2")]));
+
+    let view = reviews.view();
+    let detail = &view.rows[0].detail;
+    assert!(detail.contains("favorite color is blue"));
+    assert!(detail.contains("Reason: stated directly"));
+}
+
+#[test]
 fn memory_review_defaults_to_accept_but_only_dispatches_on_activation() {
     let mut reviews = Reviews::default();
     assert!(matches!(

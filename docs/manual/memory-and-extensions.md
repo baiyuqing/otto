@@ -296,9 +296,11 @@ first prompt, and a local `otto acp` session sends it as a notice for that
 session. `GET /v1/sessions/{id}/notices` returns it, but the Web UI and ACP
 connections through `otto serve` (`otto acp --attach` and ACP TCP) start at the
 current notice cursor and do not show it; the chat connector shows pending
-candidates after each turn instead. `otto memory status`
-prints `pending: N` for the same scopes. A candidate stays pending until you
-decide it; it does not expire.
+candidates after each turn instead. `otto memory status` prints the number of
+storage-level pending candidates in the same scopes; this diagnostic count can
+include a candidate whose approval is no longer awaiting human review. A
+candidate stays pending until you decide it; it does not expire, and its
+one-shot review remains visible after the session that proposed it ends.
 
 ### Standing preferences
 

@@ -66,6 +66,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   text, reason and advice in its detail pane instead of reducing that information
   to a one-line list preview. Loading failures and the explicit empty state remain
   visible with Retry or Esc recovery.
+  ([#458](https://github.com/baiyuqing/otto/pull/458))
 
 - Keep `otto_help` complete after the user manual split by embedding every
   topic page and indexing sections within their source page boundaries. A

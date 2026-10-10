@@ -231,8 +231,13 @@ stored, returned, sent in `agent_error` or `turn_end`, or logged.
 
 The agent can consult `otto_help` for the user manual embedded in the installed
 executable. An empty topic lists section titles; `capabilities` lists this
-session's actual tool names and descriptions. User commands and HTTP/ACP APIs
-are not automatically model-callable tools.
+session's actual tool names and descriptions. Other topics match a section
+title case-insensitively. A phrase that differs only by generic words such as
+`commands`, `help`, or `topic` also opens the section when exactly one title
+matches; for example, `Memory commands` opens `Memory`. Unknown or ambiguous
+topics remain errors and include up to five related section titles when their
+meaningful words overlap the index. User commands and HTTP/ACP APIs are not
+automatically model-callable tools.
 
 `approval_pending` queries the pending requests visible to this session. `approval_revoke` withdraws it by exact ID. It cannot approve, undo an
 executed command, remove permanent grants, or affect another session.

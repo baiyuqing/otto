@@ -40,8 +40,8 @@ impl Tool for Help {
     fn definition(&self) -> ToolDefinition {
         definition(
             "otto_help",
-            "Read Otto's installed-version user manual or current session capabilities. Consult this before answering questions about Otto commands, APIs, configuration, or limitations. Empty topic lists section titles; capabilities lists current tools; otherwise use a section title from the index.",
-            json!({"type":"object","additionalProperties":false,"properties":{"topic":{"type":"string"}},"required":[]}),
+            "Read Otto's installed-version user manual or current session capabilities. Consult this before answering questions about Otto commands, APIs, configuration, or limitations. Empty topic lists section titles; capabilities lists current tools; a section title or uniquely matching title phrase returns that section; an unknown or ambiguous title fails with related section suggestions when available.",
+            json!({"type":"object","additionalProperties":false,"properties":{"topic":{"type":"string","description":"Section title or uniquely matching title phrase, capabilities, or empty to list section titles."}},"required":[]}),
         )
     }
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
@@ -82,23 +82,94 @@ impl Tool for Help {
             );
         }
         let topic = args.topic.trim().to_lowercase();
-        let Some(topic) = topics.iter().find(|candidate| {
-            candidate
-                .title
-                .trim_start_matches('#')
-                .trim()
-                .to_lowercase()
-                == topic
-        }) else {
-            return error_result(
-                "Unknown help topic. Call otto_help with an empty topic for section titles.",
-            );
+        let exact = topics
+            .iter()
+            .find(|candidate| topic_title(candidate.title) == topic);
+        let normalized = normalized_topic_match(&args.topic, &topics);
+        let Some(topic) = exact.or(normalized) else {
+            let suggestions = related_topic_titles(&args.topic, &topics);
+            let suffix = if suggestions.is_empty() {
+                String::new()
+            } else {
+                format!(" Related section titles: {}.", suggestions.join(", "))
+            };
+            return error_result(format!(
+                "Unknown or ambiguous help topic.{suffix} Call otto_help with an empty topic for all section titles."
+            ));
         };
         super::result::capped_text_result(
             &format!("Otto {} user manual\n\n{}", crate::VERSION, topic.content),
             48_000,
         )
     }
+}
+
+fn topic_title(title: &str) -> String {
+    title.trim_start_matches('#').trim().to_lowercase()
+}
+
+fn topic_words(value: &str) -> Vec<String> {
+    value
+        .split(|char: char| !char.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .filter(|word| {
+            !matches!(
+                word.as_str(),
+                "command" | "commands" | "help" | "topic" | "topics"
+            )
+        })
+        .collect()
+}
+
+fn normalized_topic_match<'a>(
+    query: &str,
+    topics: &'a [ManualTopic<'a>],
+) -> Option<&'a ManualTopic<'a>> {
+    let query_words = topic_words(query);
+    if query_words.is_empty() {
+        return None;
+    }
+    let mut matches = topics
+        .iter()
+        .filter(|topic| topic_words(&topic_title(topic.title)) == query_words);
+    let matched = matches.next()?;
+    matches.next().is_none().then_some(matched)
+}
+
+fn related_topic_titles<'a>(query: &str, topics: &'a [ManualTopic<'a>]) -> Vec<&'a str> {
+    let query_words = topic_words(query);
+    if query_words.is_empty() {
+        return Vec::new();
+    }
+    let mut matches = topics
+        .iter()
+        .filter_map(|topic| {
+            let title = topic_title(topic.title);
+            let title_words = topic_words(&title);
+            let shared = query_words
+                .iter()
+                .filter(|word| title_words.contains(word))
+                .count();
+            (shared > 0).then_some((
+                topic.title.trim_start_matches('#').trim(),
+                shared,
+                title_words.len().saturating_sub(shared),
+            ))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.0.cmp(right.0))
+    });
+    matches
+        .into_iter()
+        .take(5)
+        .map(|(title, _, _)| title)
+        .collect()
 }
 
 fn manual_headings(manual: &str) -> Vec<(usize, &str)> {
@@ -297,7 +368,26 @@ mod tests {
         assert!(capabilities.content.contains(crate::VERSION));
         assert!(capabilities.content.contains("fixture_tool"));
         assert!(!capabilities.content.contains("bash"));
-        assert!(run(&help, r#"{"topic":"invented"}"#).await.is_error);
+
+        let normalized = run(&help, r#"{"topic":"Memory commands"}"#).await;
+        assert!(!normalized.is_error);
+        assert!(normalized.content.contains("## Memory"));
+        assert!(normalized.content.contains("enabled by default"));
+
+        let ambiguous = run(&help, r#"{"topic":"memory service review"}"#).await;
+        assert!(ambiguous.is_error);
+        assert!(ambiguous.content.contains("Related section titles:"));
+        assert!(ambiguous.content.contains("Rust memory service extensions"));
+        assert!(ambiguous.content.contains("Memory review"));
+
+        let unrelated = run(&help, r#"{"topic":"invented"}"#).await;
+        assert!(unrelated.is_error);
+        assert!(!unrelated.content.contains("Related section titles"));
+        assert!(
+            unrelated
+                .content
+                .contains("empty topic for all section titles")
+        );
     }
 
     #[test]

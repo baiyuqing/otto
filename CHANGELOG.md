@@ -63,7 +63,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 ### Fixes
 
 - Keep `otto_help` complete after the user manual split by embedding every
-  topic page and indexing sections within their source page boundaries.
+  topic page and indexing sections within their source page boundaries. A
+  uniquely matching title phrase such as `Memory commands` now opens `Memory`;
+  unknown or ambiguous topics include related section-title suggestions when
+  available.
+  ([#457](https://github.com/baiyuqing/otto/pull/457))
 
 - Long sub-agent research can be handed off as persistent report files with a
   summary and section index. Oversized final answers are saved automatically;

@@ -326,6 +326,7 @@ async fn run_app<B: Backend>(
 ) -> Result<(), ReplError> {
     let backend = app::Backend::Local(controller);
     let mut app = App::new(&backend);
+    app.enable_program_status();
     app.driver = Some(backend::Driver::new(backend::Connection::Local(
         Arc::clone(controller),
     )));
@@ -716,11 +717,13 @@ async fn run_turn<B: Backend>(
         )
         .await
     };
-    app.end_turn();
+    let parent_cancelled = cancel.is_cancelled();
+    let turn_cancelled = result.as_ref().err().is_some_and(AgentError::is_cancelled);
+    app.finish_turn(result.is_ok(), parent_cancelled || turn_cancelled);
     if !error_rendered && let Err(error) = &result {
         app.push_system(error.to_string());
     }
-    if cancel.is_cancelled() {
+    if parent_cancelled {
         return Err(ReplError::Cancelled);
     }
     match result {
@@ -834,11 +837,13 @@ async fn run_wake<B: Backend>(
         )
         .await
     };
-    app.end_turn();
+    let parent_cancelled = cancel.is_cancelled();
+    let turn_cancelled = result.as_ref().err().is_some_and(AgentError::is_cancelled);
+    app.finish_turn(result.is_ok(), parent_cancelled || turn_cancelled);
     if !error_rendered && let Err(error) = &result {
         app.push_system(error.to_string());
     }
-    if cancel.is_cancelled() {
+    if parent_cancelled {
         return Err(ReplError::Cancelled);
     }
     match result {
@@ -907,8 +912,10 @@ async fn run_compact<B: Backend>(
         )
         .await
     };
-    app.end_turn();
-    if cancel.is_cancelled() {
+    let parent_cancelled = cancel.is_cancelled();
+    let turn_cancelled = result.as_ref().err().is_some_and(AgentError::is_cancelled);
+    app.finish_turn(result.is_ok(), parent_cancelled || turn_cancelled);
+    if parent_cancelled {
         return Err(ReplError::Cancelled);
     }
     match result {
@@ -964,7 +971,9 @@ async fn run_reflect<B: Backend>(
         )
         .await
     };
-    app.end_turn();
+    let cancelled =
+        cancel.is_cancelled() || matches!(&result, Err(crate::reflection::Error::Cancelled));
+    app.finish_turn(result.is_ok(), cancelled);
     if cancel.is_cancelled() {
         return Err(ReplError::Cancelled);
     }

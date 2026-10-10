@@ -19,6 +19,29 @@ otto --ui repl
 OTTO_UI=repl otto
 ```
 
+When stdin and stdout are terminals, the local REPL, one-shot prompt, TUI and
+`--attach` TUI report Otto's root lifecycle through the terminal-native
+[OSC 7501 Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status).
+A supporting terminal can use these reports for tab indicators, notifications
+or an agent inbox:
+
+- before work starts, or after a canceled turn, the state is `idle`;
+- an active turn is `working`;
+- a pending human approval is `blocked` with `kind=permission`;
+- a successful turn is `done`, and a failed turn is `error`.
+
+`done` is intentionally retained while Otto waits for the next input, so a
+supporting terminal can keep an unseen result in its inbox. Starting another
+turn replaces it with `working`.
+
+Reports use `app=otto` and fixed, non-sensitive messages; prompts, commands,
+approval details and model output are never included. Otto sends reports
+without a feature-detection query because terminals are required to ignore
+unknown OSC sequences. Redirected and piped output receives no status escape
+sequences. This integration currently reports only the root Otto process: it
+does not report per-sub-agent records, progress percentages or a terminfo
+capability.
+
 ### TUI behavior
 
 - Feature screens share navigation, focus, loading, error and submission

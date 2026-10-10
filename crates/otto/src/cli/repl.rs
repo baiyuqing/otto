@@ -67,6 +67,7 @@ pub struct Repl<'a> {
     pub(super) controller: &'a Controller,
     pub(super) stdout: Box<dyn Write + Send + 'a>,
     pub(super) stderr: Box<dyn Write + Send + 'a>,
+    program_status: Option<crate::program_status::Reporter>,
 }
 
 impl<'a> Repl<'a> {
@@ -79,6 +80,24 @@ impl<'a> Repl<'a> {
             controller,
             stdout,
             stderr,
+            program_status: None,
+        }
+    }
+
+    /// Enables OSC 7501 for a frontend that established stdin and stdout are
+    /// terminals. Tests and embedded callers keep using [`Self::new`].
+    pub fn with_program_status(
+        controller: &'a Controller,
+        mut stdout: Box<dyn Write + Send + 'a>,
+        stderr: Box<dyn Write + Send + 'a>,
+    ) -> Self {
+        let reporter = crate::program_status::Reporter::default();
+        reporter.report(&mut *stdout, crate::program_status::State::Idle);
+        Self {
+            controller,
+            stdout,
+            stderr,
+            program_status: Some(reporter),
         }
     }
 
@@ -174,8 +193,11 @@ impl<'a> Repl<'a> {
                     _ = cancel.cancelled() => return Err(Error::Cancelled),
                     requests = approval_signal => {
                         for request in requests {
-                            render_event(&mut *self.stdout, &mut *self.stderr,
-                                &Event::ApprovalChanged { request: Box::new(request) });
+                            let event = Event::ApprovalChanged { request: Box::new(request) };
+                            if let Some(reporter) = &self.program_status {
+                                reporter.observe(&mut *self.stdout, &event);
+                            }
+                            render_event(&mut *self.stdout, &mut *self.stderr, &event);
                         }
                         Err(None)
                     },
@@ -262,22 +284,35 @@ impl<'a> Repl<'a> {
             controller,
             stdout,
             stderr,
+            program_status,
         } = self;
         let wake = controller.prepare_wake().map_err(|message| Error::Turn {
             fatal: false,
             message,
         })?;
         let Some(wake) = wake else { return Ok(false) };
+        if let Some(reporter) = program_status {
+            reporter.report(&mut **stdout, crate::program_status::State::Working);
+        }
         let _ = writeln!(stdout);
         let turn = cancel.child_token();
         let mut error_rendered = false;
         let result = {
             let mut sink = |event: Event| {
+                if let Some(reporter) = program_status.as_ref() {
+                    reporter.observe(&mut **stdout, &event);
+                }
                 if render_event(&mut **stdout, &mut **stderr, &event) {
                     error_rendered = true;
                 }
             };
             wake.run(&mut sink, &turn).await
+        };
+        if let Some(reporter) = program_status {
+            let canceled = cancel.is_cancelled()
+                || result.as_ref().err().is_some_and(AgentError::is_cancelled);
+            let state = crate::program_status::State::finished(result.is_ok(), canceled);
+            reporter.report(&mut **stdout, state);
         };
         if let Err(error) = &result
             && !error_rendered
@@ -330,17 +365,30 @@ impl<'a> Repl<'a> {
             controller,
             stdout,
             stderr,
+            program_status,
         } = self;
+        if let Some(reporter) = program_status {
+            reporter.report(&mut **stdout, crate::program_status::State::Working);
+        }
         let turn = cancel.child_token();
         let mut error_rendered = false;
         let result = {
             let mut sink = |event: Event| {
+                if let Some(reporter) = program_status.as_ref() {
+                    reporter.observe(&mut **stdout, &event);
+                }
                 if render_event(&mut **stdout, &mut **stderr, &event) {
                     error_rendered = true;
                 }
             };
             controller.prompt(line, &mut sink, &turn).await
         };
+        if let Some(reporter) = program_status {
+            let canceled = cancel.is_cancelled()
+                || result.as_ref().err().is_some_and(AgentError::is_cancelled);
+            let state = crate::program_status::State::finished(result.is_ok(), canceled);
+            reporter.report(&mut **stdout, state);
+        }
         if let Err(error) = &result
             && !error_rendered
         {
@@ -369,6 +417,9 @@ impl<'a> Repl<'a> {
         queue: &mut std::collections::VecDeque<String>,
     ) -> Result<(), Error> {
         let controller = self.controller;
+        if let Some(reporter) = &self.program_status {
+            reporter.report(&mut *self.stdout, crate::program_status::State::Working);
+        }
         let turn = cancel.child_token();
         let (send, mut events) = tokio::sync::mpsc::unbounded_channel();
         let mut sink = |event| {
@@ -386,6 +437,9 @@ impl<'a> Repl<'a> {
                 Some(event) = events.recv() => {
                     if let Event::ApprovalChanged { request } = &event {
                         waiting = request.blocking && request.state == crate::approval::State::Pending;
+                    }
+                    if let Some(reporter) = &self.program_status {
+                        reporter.observe(&mut *self.stdout, &event);
                     }
                     error_rendered |= render_event(&mut *self.stdout, &mut *self.stderr, &event);
                     let _ = self.stdout.flush();
@@ -460,7 +514,16 @@ impl<'a> Repl<'a> {
             }
         };
         while let Ok(event) = events.try_recv() {
+            if let Some(reporter) = &self.program_status {
+                reporter.observe(&mut *self.stdout, &event);
+            }
             error_rendered |= render_event(&mut *self.stdout, &mut *self.stderr, &event);
+        }
+        if let Some(reporter) = &self.program_status {
+            let canceled = cancel.is_cancelled()
+                || result.as_ref().err().is_some_and(AgentError::is_cancelled);
+            let state = crate::program_status::State::finished(result.is_ok(), canceled);
+            reporter.report(&mut *self.stdout, state);
         }
         if let Err(error) = &result
             && !error_rendered
@@ -978,7 +1041,11 @@ impl<'a> Repl<'a> {
             controller,
             stdout,
             stderr,
+            program_status,
         } = self;
+        if let Some(reporter) = program_status {
+            reporter.report(&mut **stdout, crate::program_status::State::Working);
+        }
         let turn = cancel.child_token();
         let mut rendered_ids: Vec<String> = Vec::new();
         let mut rendered_noop_empty = false;
@@ -1007,6 +1074,12 @@ impl<'a> Repl<'a> {
             };
             controller.compact(focus, &mut sink, &turn).await
         };
+        if let Some(reporter) = program_status {
+            let canceled = cancel.is_cancelled()
+                || result.as_ref().err().is_some_and(AgentError::is_cancelled);
+            let state = crate::program_status::State::finished(result.is_ok(), canceled);
+            reporter.report(&mut **stdout, state);
+        }
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }

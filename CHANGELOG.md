@@ -62,6 +62,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- The TUI Memory Review collection now renders the selected candidate's full
+  text, reason and advice in its detail pane instead of reducing that information
+  to a one-line list preview. Loading failures and the explicit empty state remain
+  visible with Retry or Esc recovery.
+
 - Keep `otto_help` complete after the user manual split by embedding every
   topic page and indexing sections within their source page boundaries. A
   uniquely matching title phrase such as `Memory commands` now opens `Memory`;

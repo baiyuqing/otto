@@ -454,7 +454,12 @@ impl Controller {
             memory.user_scope.clone(),
             self.builder.workspace_scope.clone(),
         ];
-        if let Ok(summary) = memory.service.pending_summary(&scopes)
+        if let Ok(pending) = self.approval_snapshot()
+            && let Ok(summary) = crate::approval::memory::human_pending_summary(
+                &memory.service,
+                &scopes,
+                &pending.requests,
+            )
             && let Some(oldest) = summary.oldest
         {
             let line = match summary.count {
@@ -4232,6 +4237,7 @@ mod tests {
                 confidence: 0.5,
                 source: crate::memory::Provenance {
                     origin: Some(crate::memory::Origin::Model),
+                    session_id: controller.info().session_id,
                     ..crate::memory::Provenance::default()
                 },
                 ..crate::memory::ProposeRequest::default()
@@ -4269,6 +4275,17 @@ mod tests {
             )]
         );
         assert!(controller.take_notices().is_empty(), "queued once");
+        let review = controller
+            .management(crate::app::management::Request::MemoryReviewList)
+            .expect("review list");
+        let crate::app::management::Reply::MemoryCandidates(candidates) = review else {
+            panic!("unexpected management reply");
+        };
+        assert_eq!(
+            candidates.len(),
+            2,
+            "proposals from the previous session remain actionable"
+        );
 
         controller.close().expect("close");
         let reopened = crate::cli::testutil::controller_with_memory(

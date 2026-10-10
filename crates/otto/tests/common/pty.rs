@@ -9,9 +9,10 @@ pub const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const WIDE_CONTINUATION: char = '\0';
 
 /// A minimal terminal screen, built only for the ANSI vocabulary ratatui's
-/// crossterm backend can emit (see the module doc). Fragmentation-tolerant:
-/// `feed` buffers an incomplete escape sequence or a multi-byte UTF-8
-/// character split across two reads.
+/// crossterm backend and Otto's OSC 7501 status reports can emit (see the
+/// module doc). Fragmentation-tolerant: `feed` buffers an incomplete escape
+/// sequence or a multi-byte UTF-8 character split across two reads.
+
 pub struct Screen {
     width: usize,
     height: usize,
@@ -46,6 +47,43 @@ impl Screen {
             if first == 0x1b {
                 if self.pending.len() < 2 {
                     return Ok(()); // wait for the rest of the escape sequence
+                }
+                if self.pending[1] == b']' {
+                    const PREFIX: &[u8] = b"\x1b]7501;";
+                    let compared = self.pending.len().min(PREFIX.len());
+                    if self.pending[..compared] != PREFIX[..compared] {
+                        return Err("unsupported OSC sequence".to_string());
+                    }
+                    if self.pending.len() < PREFIX.len() {
+                        return Ok(()); // wait for the complete OSC selector
+                    }
+                    let mut end = PREFIX.len();
+                    loop {
+                        let Some(&byte) = self.pending.get(end) else {
+                            return Ok(()); // wait for BEL or ST
+                        };
+                        match byte {
+                            0x07 => {
+                                self.pending.drain(..=end);
+                                break;
+                            }
+                            0x1b => match self.pending.get(end + 1) {
+                                Some(b'\\') => {
+                                    self.pending.drain(..=end + 1);
+                                    break;
+                                }
+                                Some(_) => {
+                                    return Err("unsupported control byte in OSC 7501".to_string());
+                                }
+                                None => return Ok(()), // fragmented ST
+                            },
+                            0x00..=0x1f | 0x7f => {
+                                return Err("unsupported control byte in OSC 7501".to_string());
+                            }
+                            _ => end += 1,
+                        }
+                    }
+                    continue;
                 }
                 if self.pending[1] != b'[' {
                     return Err(format!("unsupported escape 0x{:02x}", self.pending[1]));
@@ -338,6 +376,33 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::Screen;
+
+    #[test]
+    fn screen_consumes_fragmented_osc_7501_without_drawing_it() {
+        let mut screen = Screen::new(20, 1);
+        screen.feed(b"before").expect("visible prefix");
+        screen
+            .feed(b"\x1b]7501;state=working:app=otto\x1b")
+            .expect("fragmented status");
+        assert!(screen.contains("before"), "{}", screen.dump());
+        assert!(!screen.contains("7501"), "{}", screen.dump());
+        screen.feed(b"\\after").expect("status terminator and text");
+        assert!(screen.contains("beforeafter"), "{}", screen.dump());
+
+        screen
+            .feed(b"\x1b]7501;state=idle\x07bell")
+            .expect("BEL-terminated status");
+        assert!(screen.contains("beforeafterbell"), "{}", screen.dump());
+    }
+
+    #[test]
+    fn screen_still_rejects_unknown_osc_sequences() {
+        let mut screen = Screen::new(8, 1);
+        assert_eq!(
+            screen.feed(b"\x1b]9;notification\x07"),
+            Err("unsupported OSC sequence".to_string())
+        );
+    }
 
     #[test]
     fn screen_positions_and_clears_wide_unicode_cells() {

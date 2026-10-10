@@ -36,8 +36,8 @@ use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, KeyEvent, KeyEventKind,
     MouseButton, MouseEventKind,
 };
-use otto_core::agent::Event;
 use otto_core::agent::inbox::NotificationKind;
+use otto_core::agent::{AgentError, Event};
 use otto_core::model::{Block, MAX_IMAGE_BYTES};
 use otto_core::wire::events::{WireEvent, to_wire, to_wire_compaction};
 use ratatui::Terminal;

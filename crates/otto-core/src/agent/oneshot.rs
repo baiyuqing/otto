@@ -13,8 +13,9 @@
 //! stopped under a child token without cancelling the caller's control.
 //!
 //! Errors: provider cancellation and deadlines keep their [`AgentError::Provider`]
-//! form; every other rejection is [`AgentError::InvalidResponse`] or
-//! [`AgentError::Other`] carrying redacted text.
+//! form; unsafe provider input is [`AgentError::ProviderEgressSecret`]; other
+//! rejection is [`AgentError::InvalidResponse`] or [`AgentError::Other`]
+//! carrying redacted text.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -108,6 +109,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             ..Request::default()
         };
 
+        let guarded_request = self.redactor.guard_provider_request(&provider_request)?;
         let child = control.cancellation_token().child_token();
         let child_control = ChildControl {
             token: child.clone(),
@@ -169,7 +171,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             };
             self.provider
                 .complete_observed(
-                    &provider_request,
+                    &guarded_request,
                     &mut on_stream,
                     &child_control,
                     diagnostic.observer(),

@@ -114,6 +114,7 @@ pub(crate) struct App {
     skill_names: Vec<String>,
     hidden_approvals: HashSet<String>,
     pub outgoing: Vec<Action>,
+    program_status: Option<crate::program_status::Reporter>,
 }
 impl Deref for App {
     type Target = Composer;
@@ -189,6 +190,7 @@ impl App {
             skill_names: Vec::new(),
             hidden_approvals: HashSet::new(),
             outgoing: Vec::new(),
+            program_status: None,
         };
         app.refresh_tasks(backend);
         app
@@ -206,8 +208,19 @@ impl App {
             self.skill_names.sort();
         }
     }
+    pub(crate) fn enable_program_status(&mut self) {
+        let reporter = crate::program_status::Reporter::default();
+        reporter.report_stdout(crate::program_status::State::Idle);
+        self.program_status = Some(reporter);
+    }
     pub fn start_turn(&mut self) {
+        self.report_program_status(crate::program_status::State::Working);
         self.start_operation("waiting for model");
+    }
+    pub(crate) fn report_program_status(&self, state: crate::program_status::State) {
+        if let Some(reporter) = &self.program_status {
+            reporter.report_stdout(state);
+        }
     }
     pub(crate) fn start_operation(&mut self, phase: &str) {
         let now = Instant::now();
@@ -218,6 +231,10 @@ impl App {
     pub fn end_turn(&mut self) {
         self.busy_since = None;
         self.finish_steering();
+    }
+    pub(crate) fn finish_turn(&mut self, success: bool, canceled: bool) {
+        self.end_turn();
+        self.report_program_status(crate::program_status::State::finished(success, canceled));
     }
 
     /// A turn end is the last moment tracked guidance can be resolved. Guidance
@@ -1178,6 +1195,9 @@ impl App {
     }
 
     pub fn apply_event(&mut self, event: &WireEvent) -> bool {
+        if let Some(reporter) = &self.program_status {
+            reporter.observe_wire_stdout(event);
+        }
         if let Some(phase) = transcript::phase(event)
             && phase != self.phase.0
         {

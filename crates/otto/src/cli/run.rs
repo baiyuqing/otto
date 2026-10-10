@@ -983,13 +983,27 @@ pub async fn run_with_extensions(
 
     let run_error = match frontend {
         Frontend::Once => {
-            let mut console =
-                Repl::new(&controller, Box::new(&mut *stdout), Box::new(&mut *stderr));
+            let mut console = if terminal {
+                Repl::with_program_status(
+                    &controller,
+                    Box::new(&mut *stdout),
+                    Box::new(&mut *stderr),
+                )
+            } else {
+                Repl::new(&controller, Box::new(&mut *stdout), Box::new(&mut *stderr))
+            };
             console.run_once(&prompt, cancel).await
         }
         Frontend::Repl => {
-            let mut console =
-                Repl::new(&controller, Box::new(&mut *stdout), Box::new(&mut *stderr));
+            let mut console = if terminal {
+                Repl::with_program_status(
+                    &controller,
+                    Box::new(&mut *stdout),
+                    Box::new(&mut *stderr),
+                )
+            } else {
+                Repl::new(&controller, Box::new(&mut *stdout), Box::new(&mut *stderr))
+            };
             console.run(stdin, cancel).await
         }
         Frontend::Tui => crate::tui::run(&controller, cancel).await,

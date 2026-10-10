@@ -27,6 +27,7 @@ pub mod mcp;
 pub mod memory;
 pub mod metrics;
 pub mod plugin;
+pub mod program_status;
 pub mod provider;
 pub mod reflection;
 pub mod retry;

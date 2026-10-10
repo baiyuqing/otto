@@ -15,9 +15,10 @@
 //!
 //! Errors: [`AgentError::NothingToCompact`] means there was no safe prefix, a
 //! successful no-op for a manual compaction.
-//! [`AgentError::InvalidCompactionSummary`] covers every rejection of the
-//! summary request or its response. [`AgentError::CompactionBoundary`] covers a
-//! failure the agent does not own.
+//! [`AgentError::InvalidCompactionSummary`] covers summary construction and
+//! response rejection. [`AgentError::ProviderEgressSecret`] refuses unsafe
+//! provider input locally. [`AgentError::CompactionBoundary`] covers a failure
+//! the agent does not own.
 
 use crate::model::{BlockType, Message, Role, ToolDefinition, Usage};
 use crate::operation::OperationControl;
@@ -177,7 +178,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
         })?;
 
-        let prepared_selection = self.redact_compaction_selection(&selection);
+        let prepared_selection = self.redact_compaction_selection(&selection)?;
+
         let previous_details = latest
             .as_ref()
             .map(|latest| self.redact_compaction_details(&latest.details))
@@ -190,6 +192,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             )
             .map_err(AgentError::InvalidCompactionSummary)?;
 
+        let guarded_request = self.redactor.guard_provider_request(&prepared.request)?;
+        let guarded_turn_request = turn_prepared
+            .as_ref()
+            .map(|prepared| self.redactor.guard_provider_request(&prepared.request))
+            .transpose()?;
         let structured = !prepared_selection.historical_source.is_empty()
             || (!prepared_selection.turn_prefix_source.is_empty()
                 && prepared_selection.previous_summary.is_empty());
@@ -228,7 +235,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
         let (generated, mut usage, mut usage_present, mut cached_input_tokens_present) = self
             .execute_summary_request(
-                &prepared.request,
+                &guarded_request,
                 first_maximum_bytes,
                 structured,
                 emit,
@@ -245,9 +252,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let mut details = prepared.details;
 
         if let Some(turn_prepared) = turn_prepared {
+            let guarded_turn_request = guarded_turn_request
+                .as_ref()
+                .expect("split-turn request was guarded before planning");
             let (turn, turn_usage, turn_usage_present, turn_cached_input_tokens_present) = self
                 .execute_summary_request(
-                    &turn_prepared.request,
+                    guarded_turn_request,
                     TURN_SUMMARY_MAXIMUM_BYTES,
                     false,
                     emit,
@@ -360,17 +370,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 self.session.latest_compaction().as_ref(),
             )
         });
-        emit(Event::CompactionPlanned {
-            plan: CompactionPlan {
-                reason,
-                automatic,
-                tokens_before,
-                estimated_tokens_after: None,
-                summarized_messages: messages.len(),
-                retained_messages: 0,
-                mode: CompactionMode::Remote,
-            },
-        });
+        let summarized_messages = messages.len();
         let request = Request {
             model: self.options.model.clone(),
             system_prompt: self.options.system_prompt.clone(),
@@ -381,6 +381,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             remote_compaction,
             request_remote_compaction: true,
         };
+        let guarded_request = self.redactor.guard_provider_request(&request)?;
+        emit(Event::CompactionPlanned {
+            plan: CompactionPlan {
+                reason,
+                automatic,
+                tokens_before,
+                estimated_tokens_after: None,
+                summarized_messages,
+                retained_messages: 0,
+                mode: CompactionMode::Remote,
+            },
+        });
         let operation_id = (self.options.new_operation_id)()
             .map_err(|message| AgentError::OperationIdentity { message })?;
         let mut diagnostic = crate::diagnostics::Observation::start(
@@ -427,7 +439,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             };
             self.provider
                 .complete_observed(
-                    &request,
+                    &guarded_request,
                     &mut on_stream,
                     &remote_control,
                     diagnostic.observer(),
@@ -511,31 +523,45 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
     }
 
-    fn redact_compaction_selection(&self, selection: &CompactionSelection) -> CompactionSelection {
-        let redact_all = |messages: &[Message]| -> Vec<Message> {
+    fn redact_compaction_selection(
+        &self,
+        selection: &CompactionSelection,
+    ) -> Result<CompactionSelection, AgentError> {
+        let redact_all = |messages: &[Message]| -> Result<Vec<Message>, AgentError> {
             messages
                 .iter()
-                .map(|message| self.redact_message(message))
+                .map(|message| {
+                    let request = Request {
+                        messages: vec![message.clone()],
+                        ..Request::default()
+                    };
+                    self.redactor
+                        .guard_provider_request(&request)?
+                        .messages
+                        .into_iter()
+                        .next()
+                        .ok_or(AgentError::ProviderEgressSecret)
+                })
                 .collect()
         };
-        CompactionSelection {
-            previous_summary: self.redactor.redact_string(&selection.previous_summary),
-            previous_user_messages: selection
-                .previous_user_messages
+        let redact_texts = |messages: &[String]| -> Result<Vec<String>, AgentError> {
+            messages
                 .iter()
-                .map(|message| self.redactor.redact_string(message))
-                .collect(),
-            previous_capability_updates: selection
-                .previous_capability_updates
-                .iter()
-                .map(|message| self.redactor.redact_string(message))
-                .collect(),
-            historical_source: redact_all(&selection.historical_source),
-            turn_prefix_source: redact_all(&selection.turn_prefix_source),
-            retained: redact_all(&selection.retained),
+                .map(|message| self.redactor.redact_provider_text(message))
+                .collect()
+        };
+        Ok(CompactionSelection {
+            previous_summary: self
+                .redactor
+                .redact_provider_text(&selection.previous_summary)?,
+            previous_user_messages: redact_texts(&selection.previous_user_messages)?,
+            previous_capability_updates: redact_texts(&selection.previous_capability_updates)?,
+            historical_source: redact_all(&selection.historical_source)?,
+            turn_prefix_source: redact_all(&selection.turn_prefix_source)?,
+            retained: redact_all(&selection.retained)?,
             first_kept_id: selection.first_kept_id.clone(),
             split_turn: selection.split_turn,
-        }
+        })
     }
 
     fn redact_compaction_details(&self, details: &CompactionDetails) -> CompactionDetails {
@@ -610,6 +636,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let streamed_bytes = AtomicUsize::new(0);
         let invalid_stream = AtomicBool::new(false);
 
+        let guarded_request = self.redactor.guard_provider_request(request)?;
         let operation_id = (self.options.new_operation_id)()
             .map_err(|message| AgentError::OperationIdentity { message })?;
         let mut diagnostic = crate::diagnostics::Observation::start(
@@ -663,7 +690,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             };
             self.provider
                 .complete_observed(
-                    request,
+                    &guarded_request,
                     &mut on_stream,
                     &summary_control,
                     diagnostic.observer(),

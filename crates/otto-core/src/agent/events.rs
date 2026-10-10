@@ -304,6 +304,10 @@ pub enum AgentError {
     OperationIdentity { message: String },
     #[error("invalid provider response: {0}")]
     InvalidResponse(String),
+    /// Provider input could not be made safe without changing an opaque or
+    /// structural field. This message is deliberately payload-free.
+    #[error("provider request blocked by the secret guard")]
+    ProviderEgressSecret,
     /// There was no safe historic prefix to summarize. A successful no-op for a
     /// manual compaction.
     #[error("nothing to compact")]

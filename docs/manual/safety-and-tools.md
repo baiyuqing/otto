@@ -169,7 +169,45 @@ configured model review and the artifact checks still run. Saving a profile
 change still requires a restart.
 Read-path requests explicitly disclose persistence; commands remain sandboxed.
 
+## Provider egress secret guard
+
+Sandboxing controls what an agent can access; it does not by itself control what
+an authorized read may send to a remote model. Before every provider call, Otto
+therefore inspects an ephemeral copy of the complete request locally. This
+boundary covers ordinary turns, local and remote context compaction, sub-agents,
+and one-shot model calls used by approvals, advice, memory and reflection.
+
+The guard first removes credential values Otto already knows from its runtime
+configuration. It also recognizes a conservative set of high-confidence secret
+forms, including private-key blocks, authorization credentials, sensitive
+configuration assignments and strongly identified token formats. Detection is
+deterministic local code: suspect text is not sent to another model for
+classification.
+
+Free text and JSON strings that can be changed without altering their meaning are
+replaced before transmission. If a credential appears in a structural or opaque
+field—such as a model or tool identifier, tool schema, image payload, cache key,
+or provider-owned remote-compaction checkpoint—Otto refuses the provider call
+instead of rewriting the field. The error identifies the local safety refusal
+without echoing the credential. An admission-time structural refusal happens before
+persistence and appends nothing. If later dynamically produced state is refused,
+Otto preserves only the history already appended and appends no provider response.
+Remove the credential from the source or replace it with an obvious placeholder,
+then retry the request.
+
+This is defense in depth, not a guarantee that arbitrary secrets can always be
+recognized. Otto deliberately avoids broad entropy guessing because source code,
+fixtures and encoded data would produce frequent false positives. Unrecognized
+custom credential formats can still be transmitted, and the guard does not OCR
+images or inspect decoded binary payloads. Keep secrets out of prompts, workspace
+files intended for model review, session files, skills and plugin output whenever
+possible.
+
 ## Tools and safety
+
+Tools execute on the local machine under the capability and sandbox rules below.
+Their text results still pass through the provider egress guard before they can
+enter a model request.
 
 Startup appends `~/.config/otto/AGENTS.md`, then instruction files along the
 same Git-root-to-workspace directory chain as configuration. Each directory

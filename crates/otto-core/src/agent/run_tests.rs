@@ -27,6 +27,25 @@ use super::summary::SUMMARIZATION_SYSTEM_PROMPT;
 use super::summary_validate::REQUIRED_SUMMARY_HEADINGS;
 use super::{Agent, AgentError, CompactionSettings, Event, Options};
 
+#[derive(Default)]
+struct CapturingDiagnostics {
+    models: Arc<Mutex<Vec<String>>>,
+}
+
+impl crate::diagnostics::Diagnostics for CapturingDiagnostics {
+    fn start(
+        &self,
+        _kind: crate::diagnostics::Kind,
+        _operation_id: &str,
+        _tool: Option<&str>,
+        _provider: &str,
+        model: &str,
+    ) -> Arc<dyn crate::diagnostics::Observer> {
+        self.models.lock().expect("diagnostics").push(model.into());
+        Arc::new(crate::diagnostics::Noop)
+    }
+}
+
 // -- harness ---------------------------------------------------------------
 
 fn raw(json: &str) -> Box<RawValue> {
@@ -1296,6 +1315,349 @@ async fn an_empty_persisted_override_still_overlays_the_live_text() {
 }
 
 // -- redaction -------------------------------------------------------------
+
+fn heuristic_credential() -> String {
+    ["gh", "p_", "abcdefghijkl", "mnopqrstuvwx"].concat()
+}
+
+async fn seeded_session_with_candidate(candidate: &str) -> MemorySession {
+    let session = MemorySession::new();
+    for index in 0..3 {
+        session
+            .append(Message {
+                id: format!("guard-u{index}"),
+                role: Role::User,
+                blocks: vec![Block::text(if index == 0 {
+                    format!("API_KEY={candidate}")
+                } else {
+                    "historic user text".repeat(8)
+                })],
+                ..Message::default()
+            })
+            .await
+            .expect("append user");
+        session
+            .append(Message {
+                id: format!("guard-a{index}"),
+                role: Role::Assistant,
+                blocks: vec![Block::text("historic assistant text".repeat(8))],
+                ..Message::default()
+            })
+            .await
+            .expect("append assistant");
+    }
+    session
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn provider_egress_guard_redacts_ordinary_dynamic_fields_and_json() {
+    let candidate = heuristic_credential();
+    let provider = FakeProvider::new(vec![
+        Turn::tool_call("guard-call", &format!(r#"{{"token":"{candidate}"}}"#)),
+        Turn::text("done"),
+    ]);
+    let agent = Agent::new(
+        provider,
+        EchoExecutor {
+            persisted: None,
+            content: Some(format!("PASSWORD={candidate}")),
+        },
+        MemorySession::new(),
+        Options {
+            system_prompt: format!("API_KEY={candidate}"),
+            ..options()
+        },
+    );
+    agent
+        .run_with_system_context(
+            &format!("Authorization: Bearer {candidate}"),
+            &format!("TOKEN={candidate}"),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+    let requests = agent.provider().requests();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert!(
+            !format!("{request:?}").contains(&candidate),
+            "candidate reached ordinary provider request"
+        );
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn provider_egress_guard_redacts_local_compaction_request() {
+    let candidate = heuristic_credential();
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::summary(&structured_summary())]),
+        EchoExecutor::default(),
+        seeded_session_with_candidate(&candidate).await,
+        options(),
+    );
+    agent
+        .compact("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("compact");
+    let requests = agent.provider().requests();
+    assert_eq!(requests.len(), 1);
+    assert!(!format!("{:?}", requests[0]).contains(&candidate));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn local_compaction_guard_blocks_before_planned_event_and_provider_poll() {
+    let candidate = heuristic_credential();
+    let session = MemorySession::new();
+    for index in 0..3 {
+        session
+            .append(Message {
+                id: format!("local-guard-u{index}"),
+                role: Role::User,
+                blocks: vec![Block::text("historic user text".repeat(8))],
+                ..Message::default()
+            })
+            .await
+            .expect("append user");
+        session
+            .append(Message {
+                id: format!("local-guard-a{index}"),
+                role: Role::Assistant,
+                blocks: vec![Block::text("historic assistant text".repeat(8))],
+                ..Message::default()
+            })
+            .await
+            .expect("append assistant");
+    }
+    let diagnostics = Arc::new(CapturingDiagnostics::default());
+    let captured_models = diagnostics.models.clone();
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::summary(&structured_summary())]),
+        EchoExecutor::default(),
+        session,
+        Options {
+            model: candidate.clone(),
+            diagnostics: Some(diagnostics),
+            ..options()
+        },
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let error = agent
+        .compact(
+            "",
+            &mut |event| sink.lock().expect("events").push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("unsafe local request must block");
+
+    assert!(matches!(error, AgentError::ProviderEgressSecret));
+    assert!(!error.to_string().contains(&candidate));
+    assert!(agent.provider().requests().is_empty());
+    assert!(captured_models.lock().expect("diagnostics").is_empty());
+    let captured_events = collect(&events);
+    assert!(
+        captured_events
+            .iter()
+            .all(|event| !matches!(event, Event::CompactionPlanned { .. }))
+    );
+    assert!(
+        captured_events
+            .iter()
+            .all(|event| !format!("{event:?}").contains(&candidate))
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn provider_egress_guard_redacts_remote_compaction_request() {
+    let candidate = heuristic_credential();
+    let provider = FakeProvider::new(vec![Turn::remote_compaction("guard-checkpoint", "opaque")])
+        .with_remote_compaction();
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        seeded_session_with_candidate(&candidate).await,
+        options(),
+    );
+    agent
+        .compact("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("compact");
+    let requests = agent.provider().requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].request_remote_compaction);
+    assert!(!format!("{:?}", requests[0]).contains(&candidate));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn provider_egress_guard_redacts_one_shot_request() {
+    let candidate = heuristic_credential();
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::summary("safe answer")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent
+        .complete_text(
+            &text_request(&format!("PRIVATE_KEY={candidate}"), 1024),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("complete");
+    let requests = agent.provider().requests();
+    assert_eq!(requests.len(), 1);
+    assert!(!format!("{:?}", requests[0]).contains(&candidate));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn provider_egress_guard_refuses_structural_image_before_all_turn_sinks() {
+    let candidate = heuristic_credential();
+    let diagnostics = Arc::new(CapturingDiagnostics::default());
+    let captured_models = diagnostics.models.clone();
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("must not run")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            diagnostics: Some(diagnostics),
+            ..options()
+        },
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let error = agent
+        .run_with_image_system_context(
+            "must not be persisted before the request is guarded",
+            Some(Block {
+                block_type: BlockType::Image,
+                data: candidate.clone(),
+                mime_type: "image/png".into(),
+                ..Block::default()
+            }),
+            "",
+            &mut |event| sink.lock().expect("events").push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("structural image candidate must block");
+
+    assert!(matches!(error, AgentError::ProviderEgressSecret));
+    assert!(!error.to_string().contains(&candidate));
+    assert!(agent.provider().requests().is_empty());
+    assert!(agent.session().messages().is_empty());
+    assert!(captured_models.lock().expect("diagnostics").is_empty());
+    assert!(collect(&events).is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn remote_compaction_guard_blocks_before_planned_event_and_provider_poll() {
+    let candidate = heuristic_credential();
+    let session = MemorySession::new();
+    session
+        .append(Message {
+            id: "remote-guard-user".into(),
+            role: Role::User,
+            blocks: vec![Block::text("historic user text")],
+            ..Message::default()
+        })
+        .await
+        .expect("seed history");
+    let diagnostics = Arc::new(CapturingDiagnostics::default());
+    let captured_models = diagnostics.models.clone();
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::remote_compaction("must-not-run", "opaque")])
+            .with_remote_compaction(),
+        EchoExecutor::default(),
+        session,
+        Options {
+            model: candidate.clone(),
+            diagnostics: Some(diagnostics),
+            ..options()
+        },
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let error = agent
+        .compact(
+            "",
+            &mut |event| sink.lock().expect("events").push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("unsafe remote request must block");
+
+    assert!(matches!(error, AgentError::ProviderEgressSecret));
+    assert!(!error.to_string().contains(&candidate));
+    assert!(agent.provider().requests().is_empty());
+    assert!(captured_models.lock().expect("diagnostics").is_empty());
+    let captured_events = collect(&events);
+    assert!(
+        captured_events
+            .iter()
+            .all(|event| !matches!(event, Event::CompactionPlanned { .. }))
+    );
+    assert!(
+        captured_events
+            .iter()
+            .all(|event| !format!("{event:?}").contains(&candidate))
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn provider_egress_guard_refuses_structural_secret_without_provider_poll() {
+    let candidate = heuristic_credential();
+    let diagnostics = Arc::new(CapturingDiagnostics::default());
+    let captured_models = diagnostics.models.clone();
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("must not run")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            diagnostics: Some(diagnostics),
+            model: candidate.clone(),
+            ..options()
+        },
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let error = agent
+        .run(
+            "must not be persisted before the request is guarded",
+            &mut |event| sink.lock().expect("events").push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("structural candidate must block");
+
+    assert!(matches!(error, AgentError::ProviderEgressSecret));
+    assert!(!error.to_string().contains(&candidate));
+    assert!(agent.provider().requests().is_empty());
+    assert!(agent.session().messages().is_empty());
+    assert!(captured_models.lock().expect("diagnostics").is_empty());
+    let captured_events = collect(&events);
+    assert!(
+        captured_events
+            .iter()
+            .all(|event| !matches!(event, Event::ProviderApiCall { .. }))
+    );
+    assert!(
+        captured_events
+            .iter()
+            .all(|event| !format!("{event:?}").contains(&candidate))
+    );
+}
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]

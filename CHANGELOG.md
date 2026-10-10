@@ -62,6 +62,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Pending memory proposals remain visible in `/memory review` after their
+  originating session ends, so session-open reminders always lead to proposals
+  that can be accepted or rejected. Review listing also pages past non-actionable
+  storage candidates instead of letting them hide later actionable proposals.
+
 - The TUI Memory Review collection now renders the selected candidate's full
   text, reason and advice in its detail pane instead of reducing that information
   to a one-line list preview. Loading failures and the explicit empty state remain

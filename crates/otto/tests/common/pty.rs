@@ -12,7 +12,6 @@ const WIDE_CONTINUATION: char = '\0';
 /// crossterm backend and Otto's OSC 7501 status reports can emit (see the
 /// module doc). Fragmentation-tolerant: `feed` buffers an incomplete escape
 /// sequence or a multi-byte UTF-8 character split across two reads.
-
 pub struct Screen {
     width: usize,
     height: usize,

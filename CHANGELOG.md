@@ -67,6 +67,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   uniquely matching title phrase such as `Memory commands` now opens `Memory`;
   unknown or ambiguous topics include related section-title suggestions when
   available.
+  ([#457](https://github.com/baiyuqing/otto/pull/457))
 
 - Long sub-agent research can be handed off as persistent report files with a
   summary and section index. Oversized final answers are saved automatically;

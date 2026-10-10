@@ -32,6 +32,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   approval-blocked, completed and failed turns without parsing screen content;
   redirected output remains free of escape sequences and reports contain only
   fixed, non-sensitive messages.
+  ([#456](https://github.com/baiyuqing/otto/pull/456))
 
 - Every provider request now passes through a local egress secret guard before
   transmission. Otto redacts known credentials and conservative high-confidence

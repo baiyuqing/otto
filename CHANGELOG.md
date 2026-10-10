@@ -27,6 +27,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- Real terminal sessions now report Otto's root lifecycle with the OSC 7501
+  Program Status Protocol. Supporting terminals can distinguish idle, working,
+  approval-blocked, completed and failed turns without parsing screen content;
+  redirected output remains free of escape sequences and reports contain only
+  fixed, non-sensitive messages.
+
 - Every provider request now passes through a local egress secret guard before
   transmission. Otto redacts known credentials and conservative high-confidence
   secret forms from safely rewritable text, and blocks requests whose structural

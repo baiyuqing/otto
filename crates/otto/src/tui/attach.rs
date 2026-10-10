@@ -421,6 +421,7 @@ async fn run_loop<B: TerminalBackend>(
     deliveries: &mut mpsc::Receiver<String>,
 ) -> Result<(), ReplError> {
     let mut app = App::new(&Backend::Attach(remote));
+    app.enable_program_status();
     app.driver = Some(super::backend::Driver::new(
         super::backend::Connection::Attach(Arc::clone(remote)),
     ));
@@ -544,7 +545,7 @@ async fn run_loop<B: TerminalBackend>(
                     ui.last_row = None;
                     ui.fresh = true;
                     ui.app.pending_image = None;
-                    ui.app.end_turn();
+                    ui.app.finish_turn(false, true);
                 }
             }
             Ev::FeaturesTick => ui.app.tick_features(),
@@ -609,7 +610,7 @@ impl<'a> Ui<'a> {
         self.compacting = None;
         self.rows.clear();
         self.last_row = None;
-        self.app.end_turn();
+        self.app.finish_turn(false, true);
         self.app.connected = false;
         self.app.push_system(DISCONNECTED);
         self.transcript = self.transcript.wrapping_add(1);
@@ -735,7 +736,12 @@ impl<'a> Ui<'a> {
         let id = followed.stream.turn_id;
         self.remote.finish(&id);
         self.last_done = Some(id);
-        self.app.end_turn();
+        let (success, canceled) = match event.status.as_str() {
+            "error" => (false, false),
+            "canceled" => (false, true),
+            _ => (true, false),
+        };
+        self.app.finish_turn(success, canceled);
         match event.status.as_str() {
             "error" if !followed.error_rendered => {
                 self.app.push_system(if event.error.is_empty() {
@@ -869,8 +875,8 @@ impl<'a> Ui<'a> {
                         .cloned();
                     self.last_done = self.last_row.as_ref().and_then(|row| row.turn_id.clone());
                 }
-                if self.followed.is_none() && self.compacting.is_none() {
-                    self.app.end_turn();
+                if self.followed.is_none() && self.compacting.is_none() && self.app.busy() {
+                    self.app.finish_turn(false, false);
                 }
                 self.report("serve", error);
                 return;
@@ -912,7 +918,7 @@ impl<'a> Ui<'a> {
                         self.adopt_stream(stream);
                     }
                 } else if self.followed.is_none() && self.compacting.is_none() {
-                    self.app.end_turn();
+                    self.app.finish_turn(false, true);
                 }
                 if self.cancel_after_send {
                     self.cancel_after_send = false;
@@ -984,7 +990,9 @@ impl<'a> Ui<'a> {
 
     fn on_compact(&mut self, result: Result<Option<WireCompaction>, Error>) {
         self.compacting = None;
-        self.app.end_turn();
+        let success = matches!(&result, Ok(Some(_)));
+        let canceled = matches!(&result, Ok(None));
+        self.app.finish_turn(success, canceled);
         self.transcript = self.transcript.wrapping_add(1);
         match result {
             Ok(Some(compaction)) => self.app.push_system(compaction_line(&compaction)),

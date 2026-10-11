@@ -110,6 +110,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `scripts/ci-cache.mjs`. Pull requests no longer run the build, lint, test or
   Gitleaks history checks; `make check`, `make check-linux` and the
   pre-commit secret-scanning hook remain.
+  ([#464](https://github.com/baiyuqing/otto/pull/464))
 
 - Check persisted tool-result blocks directly in the batching-advice regression
   test, restoring the macOS and Linux CI gates without weakening its assertions.

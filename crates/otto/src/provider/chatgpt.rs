@@ -64,9 +64,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// TCP keepalive interval.
 const KEEPALIVE: Duration = Duration::from_secs(30);
 /// Longest wait for a single read from the socket. reqwest has no header-only
-/// timeout, so 60 seconds is applied per read instead, which also bounds a
-/// stream that stalls mid-body.
+/// timeout, so 60 seconds is applied per read instead. Any received byte
+/// restarts it, so a body that keeps sending bytes without model output is
+/// bounded by [`MODEL_IDLE_TIMEOUT`] instead.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Longest time between model-output events (text, reasoning or tool-argument
+/// deltas) on a 2xx body. Keepalive bytes and SSE comments do not reset it.
+const MODEL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Authorization is unusable, and the user has to sign in again.
 const AUTHORIZATION_FAILED: &str = "chatgpt authorization failed; run 'otto login'";
@@ -75,6 +79,9 @@ const REQUEST_FAILED: &str = "chatgpt request failed";
 /// `Retry` event reason for transport failures and a clean stream close before
 /// any terminal event. In either case the dispatched request may have run.
 const TRANSPORT_RETRY_REASON: &str = "connection interrupted";
+/// `Retry` event reason for a body that produced no model output within
+/// [`MODEL_IDLE_TIMEOUT`].
+const MODEL_IDLE_RETRY_REASON: &str = "model output idle timeout";
 
 /// Classifies a Responses stream failure for the bounded transport retry.
 /// Partial output is provisional; the retry event marks its replacement.
@@ -128,6 +135,8 @@ pub struct Client {
     /// `Err` records why the HTTP client could not be built. Construction never
     /// fails; the message becomes the first `complete` failure.
     http: Result<reqwest::Client, String>,
+    /// Longest time between model-output events on a response body.
+    model_idle_timeout: Duration,
 }
 
 impl Client {
@@ -141,6 +150,12 @@ impl Client {
     /// The backend runs the search itself; Otto sees no tool call for it.
     pub fn with_hosted_web_search(mut self, enabled: bool) -> Self {
         self.hosted_web_search = enabled;
+        self
+    }
+
+    /// Overrides the model-output idle bound; tests use a short one.
+    pub fn with_model_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.model_idle_timeout = timeout;
         self
     }
 
@@ -179,6 +194,7 @@ impl Client {
             account_id: account_id.to_owned(),
             hosted_web_search: false,
             http,
+            model_idle_timeout: MODEL_IDLE_TIMEOUT,
         }
     }
 }
@@ -401,37 +417,59 @@ impl Client {
         let mut assembler =
             StreamAssembler::with_remote_compaction(request.request_remote_compaction, "chatgpt");
         let mut body = Box::pin(response.bytes_stream());
+        let mut deadline = tokio::time::Instant::now() + self.model_idle_timeout;
         loop {
-            let chunk = match await_control(control, body.try_next()).await {
-                Ok(Ok(Some(chunk))) => chunk,
-                Ok(Ok(None)) => break,
-                Ok(Err(error)) => {
-                    if !error.is_builder() && !error.is_redirect() {
+            let chunk =
+                match await_control(control, tokio::time::timeout_at(deadline, body.try_next()))
+                    .await
+                {
+                    Ok(Ok(Ok(Some(chunk)))) => chunk,
+                    Ok(Ok(Ok(None))) => break,
+                    Ok(Err(_elapsed)) => {
                         *retry_reason = Some(Retry {
-                            reason: if error.is_timeout() {
-                                "stream read timeout"
-                            } else {
-                                TRANSPORT_RETRY_REASON
-                            },
+                            reason: MODEL_IDLE_RETRY_REASON,
                             retry_after: None,
                         });
+                        return ProviderSettlement::failed(
+                            ProviderError::Other(REQUEST_FAILED.to_owned()),
+                            1,
+                            EffectCertainty::Unknown,
+                        );
                     }
-                    if let Err(error) = check_running(control) {
+                    Ok(Ok(Err(error))) => {
+                        if !error.is_builder() && !error.is_redirect() {
+                            *retry_reason = Some(Retry {
+                                reason: if error.is_timeout() {
+                                    "stream read timeout"
+                                } else {
+                                    TRANSPORT_RETRY_REASON
+                                },
+                                retry_after: None,
+                            });
+                        }
+                        if let Err(error) = check_running(control) {
+                            return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
+                        }
+                        return ProviderSettlement::failed(
+                            ProviderError::Other(REQUEST_FAILED.to_owned()),
+                            1,
+                            EffectCertainty::Unknown,
+                        );
+                    }
+                    Err(error) => {
                         return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
                     }
-                    return ProviderSettlement::failed(
-                        ProviderError::Other(REQUEST_FAILED.to_owned()),
-                        1,
-                        EffectCertainty::Unknown,
-                    );
-                }
-                Err(error) => {
-                    return chatgpt_failure(error, 1, EffectCertainty::Unknown, control);
-                }
-            };
+                };
             observer.activity(otto_core::diagnostics::Phase::Receiving, chunk.len(), None);
-            if let Err(error) = assembler.push(&chunk, &mut |event| events.emit(event, &mut *emit))
-            {
+            let mut progressed = false;
+            let pushed = assembler.push(&chunk, &mut |event| {
+                progressed = true;
+                events.emit(event, &mut *emit)
+            });
+            if progressed {
+                deadline = tokio::time::Instant::now() + self.model_idle_timeout;
+            }
+            if let Err(error) = pushed {
                 if let Err(stop) = check_running(control) {
                     return chatgpt_failure(stop, 1, EffectCertainty::Unknown, control);
                 }

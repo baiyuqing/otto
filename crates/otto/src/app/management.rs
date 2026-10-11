@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::app::Controller;
 use crate::memory::{
-    self, CandidateRef, CandidateState, ForgetRequest, ListRequest, RecordRef, RememberRequest,
-    ReviewDecision, ReviewRequest, Scope, SearchRequest, SearchResult, Service,
+    self, CandidateRef, ForgetRequest, ListRequest, RecordRef, RememberRequest, ReviewDecision,
+    ReviewRequest, Scope, SearchRequest, SearchResult, Service,
 };
 use crate::skill;
 use chrono::Utc;
@@ -403,34 +403,9 @@ impl Controller {
                     last.map(|e| format!(": {e}")).unwrap_or_default()
                 ))
             }
-            MemoryReviewList => {
-                let Some((service, user, workspace)) = self.memory_manager() else {
-                    return Err("memory is not available".into());
-                };
-                let result = service
-                    .search(&SearchRequest {
-                        scopes: vec![user, workspace],
-                        include_candidates: true,
-                        candidate_states: vec![CandidateState::Pending],
-                        limit: SEARCH_LIMIT,
-                        token_budget: SEARCH_TOKEN_BUDGET,
-                        now: Utc::now(),
-                        ..Default::default()
-                    })
-                    .map_err(|e| e.to_string())?;
-                let pending = self
-                    .approval_snapshot()
-                    .map_err(|error| error.to_string())?;
-                Ok(Reply::MemoryCandidates(
-                    result
-                        .candidates
-                        .into_iter()
-                        .filter(|candidate| {
-                            crate::approval::memory::is_human_pending(candidate, &pending.requests)
-                        })
-                        .collect(),
-                ))
-            }
+            MemoryReviewList => Ok(Reply::MemoryCandidates(
+                self.pending_memory_reviews().map_err(|e| e.to_string())?,
+            )),
             MemoryReview { id, decision } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
                     return Err("memory is not available".into());

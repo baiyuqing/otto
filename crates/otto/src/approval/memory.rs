@@ -149,6 +149,48 @@ pub fn reconcile(
     service.apply_available(workspace)
 }
 
+fn proposal(
+    scopes: &[Scope],
+    workspace: &str,
+    candidate: &crate::memory::Candidate,
+) -> Result<Proposal> {
+    let reference = CandidateRef {
+        scope: candidate.proposed.scope.clone(),
+        id: candidate.id.clone(),
+    };
+    Ok(Proposal {
+        kind: Kind::Authorization,
+        authority: Authority::Durable,
+        scope: super::Scope {
+            workspace: workspace.into(),
+            session_id: candidate.proposed.source.session_id.clone(),
+            task_id: String::new(),
+            run_id: String::new(),
+        },
+        subject: Subject {
+            tool_call_id: String::new(),
+            source: "memory".into(),
+            id: format!(
+                "{}/{}/{}/{}",
+                scopes.first().map_or("", |s| s.id.as_str()),
+                reference.scope.namespace,
+                reference.scope.id,
+                reference.id
+            ),
+            version: super::digest(&format!(
+                "{}:{}:{:?}",
+                candidate.created_at, candidate.base_revision, candidate.proposed
+            )),
+            details: serde_json::to_string(&reference).map_err(|_| Error::Unavailable)?,
+        },
+        title: format!("Review memory {}", candidate.action.as_str()),
+        reason: "Review this memory change before it is applied.".into(),
+        persistent: false,
+        blocking: false,
+        expires_at: None,
+    })
+}
+
 pub fn publish(
     service: &Service,
     scopes: &[Scope],
@@ -158,48 +200,18 @@ pub fn publish(
     if !scopes.contains(&candidate.proposed.scope) {
         return Ok(());
     }
-    let reference = CandidateRef {
-        scope: candidate.proposed.scope.clone(),
-        id: candidate.id.clone(),
-    };
-    service.create_with_origin(
-        Proposal {
-            kind: Kind::Authorization,
-            authority: Authority::Durable,
-            scope: super::Scope {
-                workspace: workspace.into(),
-                session_id: candidate.proposed.source.session_id.clone(),
-                task_id: String::new(),
-                run_id: String::new(),
-            },
-            subject: Subject {
-                tool_call_id: String::new(),
-                source: "memory".into(),
-                id: format!(
-                    "{}/{}/{}/{}",
-                    scopes.first().map_or("", |s| s.id.as_str()),
-                    reference.scope.namespace,
-                    reference.scope.id,
-                    reference.id
-                ),
-                version: super::digest(&format!(
-                    "{}:{}:{:?}",
-                    candidate.created_at, candidate.base_revision, candidate.proposed
-                )),
-                details: serde_json::to_string(&reference).map_err(|_| Error::Unavailable)?,
-            },
-            title: format!("Review memory {}", candidate.action.as_str()),
-            reason: "Review this memory change before it is applied.".into(),
-            persistent: false,
-            blocking: false,
-            expires_at: None,
-        },
-        candidate
-            .proposed
-            .metadata
-            .get(crate::memory::PRESENTATION_ORIGIN_METADATA)
-            .map_or("", String::as_str),
-    )?;
+    let origin = candidate
+        .proposed
+        .metadata
+        .get(crate::memory::PRESENTATION_ORIGIN_METADATA)
+        .map_or("", String::as_str);
+    let proposal = proposal(scopes, workspace, candidate)?;
+    service.create_with_origin(proposal.clone(), origin)?;
+    if !proposal.scope.session_id.is_empty() {
+        let mut workspace_visible = proposal;
+        workspace_visible.scope.session_id.clear();
+        service.create_with_origin(workspace_visible, origin)?;
+    }
     Ok(())
 }
 
@@ -271,6 +283,97 @@ mod tests {
             CandidateState::Pending
         );
     }
+
+    #[test]
+    fn candidate_source_session_does_not_limit_request_visibility() {
+        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let user = store.identity().unwrap().user_scope;
+        let memory = Arc::new(crate::memory::Service::new(
+            store,
+            crate::memory::decide_default_policy,
+        ));
+        let service = Arc::new(Service::in_memory().unwrap());
+        attach(&service, &memory, vec![user.clone()], "/w").unwrap();
+        let candidate = memory
+            .propose(&crate::memory::ProposeRequest {
+                scope: user,
+                kind: "preference".into(),
+                key: "source-session".into(),
+                text: "keep candidate provenance".into(),
+                reason: "review outside the source session".into(),
+                source: crate::memory::Provenance {
+                    session_id: "source-session".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let request = service
+            .snapshot("/w", Some("other-session"))
+            .unwrap()
+            .requests
+            .pop()
+            .unwrap();
+        assert_eq!(request.scope.session_id, "source-session");
+        assert!(request.subject.id.ends_with(&candidate.id));
+        assert_eq!(candidate.proposed.source.session_id, "source-session");
+    }
+
+    #[test]
+    fn reconcile_adds_workspace_visibility_to_legacy_session_request() {
+        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let user = store.identity().unwrap().user_scope;
+        let memory = Arc::new(crate::memory::Service::new(
+            store,
+            crate::memory::decide_default_policy,
+        ));
+        let service = Service::in_memory().unwrap();
+        let candidate = memory
+            .propose(&crate::memory::ProposeRequest {
+                scope: user.clone(),
+                kind: "preference".into(),
+                key: "legacy-session".into(),
+                text: "recover legacy visibility".into(),
+                reason: "created before workspace-scoped publication".into(),
+                source: crate::memory::Provenance {
+                    session_id: "legacy-session".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut legacy_proposal = proposal(&[user.clone()], "/w", &candidate).unwrap();
+        legacy_proposal.scope.session_id = "legacy-session".into();
+        let legacy = service.create(legacy_proposal).unwrap();
+        assert!(
+            service
+                .snapshot("/w", Some("other-session"))
+                .unwrap()
+                .requests
+                .is_empty()
+        );
+
+        reconcile(&service, &memory, &[user], "/w").unwrap();
+
+        let recovered = service
+            .snapshot("/w", Some("other-session"))
+            .unwrap()
+            .requests
+            .pop()
+            .unwrap();
+        assert_eq!(recovered.id, legacy.id);
+        assert_eq!(recovered.subject, legacy.subject);
+        assert_eq!(service.events("/w", None, 0).unwrap().len(), 1);
+        // The old publisher reused the candidate's source session here, so
+        // idempotent create only reinserted the same session visibility and
+        // the cross-session snapshot above remained empty.
+    }
+
     #[test]
     fn one_memory_request_is_shared_across_authorized_workspaces_without_copying_text() {
         let (_dir, store) = crate::memory::turso::testsupport::open_temp();
@@ -319,6 +422,8 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(one.id, two.id);
+        assert!(one.scope.session_id.is_empty());
+        assert!(two.scope.session_id.is_empty());
         assert_eq!(one.presentation_origin, "chat:telegram:42");
         assert_eq!(two.presentation_origin, "chat:telegram:42");
         assert!(one.subject.details.contains("prefers tabs"));

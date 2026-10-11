@@ -78,6 +78,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   is open, an approval request is announced in the panel and opened with `a`
   instead of being shown over it. See
   [`/trace`](docs/manual/interactive-use.md#slash-commands).
+  ([#472](https://github.com/baiyuqing/otto/pull/472))
 
 - Real terminal sessions now report Otto's root lifecycle with the OSC 7501
   Program Status Protocol. Supporting terminals can distinguish idle, working,

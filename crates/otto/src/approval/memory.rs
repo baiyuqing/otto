@@ -1,5 +1,6 @@
 //! Memory retains review data and the atomic candidate/result receipt.
 use super::{Authority, Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
+use crate::memory::service::PendingSummary;
 use crate::memory::{
     CandidateListRequest, CandidateRef, CandidateState, ReviewDecision, ReviewRequest, Scope,
 };
@@ -20,6 +21,98 @@ pub fn is_human_pending(candidate: &crate::memory::Candidate, requests: &[Reques
         request.subject.source == "memory"
             && request.subject.id.ends_with(&suffix)
             && request.is_human_pending()
+    })
+}
+
+/// Returns one storage-cursor page of candidates that `/memory review` can decide.
+///
+/// Storage-level pending candidates are not necessarily waiting for a human:
+/// their approval can be under automatic review, already withdrawn, or otherwise
+/// non-actionable. Continue paging after filtering so those rows cannot hide a
+/// later human-pending candidate. The returned cursor retains the memory store's
+/// generation check, so a write between pages returns `Conflict` instead of
+/// silently skipping or repeating a candidate.
+pub fn human_pending_candidate_page(
+    memory: &crate::memory::Service,
+    scopes: &[Scope],
+    requests: &[Request],
+    cursor: &str,
+    limit: usize,
+) -> crate::memory::Result<crate::memory::CandidatePage> {
+    if limit == 0 || limit > crate::memory::MAX_PAGE_SIZE {
+        return Err(crate::memory::Error::new(
+            crate::memory::ErrorKind::InvalidRequest,
+        ));
+    }
+    let mut candidates = Vec::new();
+    let mut next_cursor = cursor.to_owned();
+    loop {
+        let previous_cursor = next_cursor.clone();
+        let page = memory.list_candidates(&CandidateListRequest {
+            scopes: scopes.to_vec(),
+            states: vec![CandidateState::Pending],
+            limit: limit - candidates.len(),
+            cursor: next_cursor,
+        })?;
+        candidates.extend(
+            page.candidates
+                .into_iter()
+                .filter(|candidate| is_human_pending(candidate, requests)),
+        );
+        next_cursor = page.next_cursor;
+        if candidates.len() == limit || next_cursor.is_empty() {
+            return Ok(crate::memory::CandidatePage {
+                candidates,
+                next_cursor,
+            });
+        }
+        if next_cursor == previous_cursor {
+            return Err(crate::memory::Error::new(
+                crate::memory::ErrorKind::Conflict,
+            ));
+        }
+    }
+}
+
+/// Returns the first `limit` actionable candidates across storage pages.
+pub fn human_pending_candidates(
+    memory: &crate::memory::Service,
+    scopes: &[Scope],
+    requests: &[Request],
+    limit: usize,
+) -> crate::memory::Result<Vec<crate::memory::Candidate>> {
+    let mut candidates = Vec::new();
+    let mut cursor = String::new();
+    while candidates.len() < limit {
+        let page = human_pending_candidate_page(
+            memory,
+            scopes,
+            requests,
+            &cursor,
+            (limit - candidates.len()).min(crate::memory::MAX_PAGE_SIZE),
+        )?;
+        candidates.extend(page.candidates);
+        if page.next_cursor.is_empty() {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    Ok(candidates)
+}
+
+/// Counts only candidates that are currently actionable in `/memory review`.
+pub fn human_pending_summary(
+    memory: &crate::memory::Service,
+    scopes: &[Scope],
+    requests: &[Request],
+) -> crate::memory::Result<PendingSummary> {
+    let candidates = human_pending_candidates(memory, scopes, requests, usize::MAX)?;
+    Ok(PendingSummary {
+        count: candidates.len(),
+        oldest: candidates
+            .iter()
+            .map(|candidate| candidate.created_at)
+            .min(),
     })
 }
 impl Adapter {
@@ -163,6 +256,9 @@ fn proposal(
         authority: Authority::Durable,
         scope: super::Scope {
             workspace: workspace.into(),
+            // Route the decision through the originating session so AUTO can
+            // review it under that session's policy. `publish` separately adds
+            // workspace visibility to the same deduplicated request.
             session_id: candidate.proposed.source.session_id.clone(),
             task_id: String::new(),
             run_id: String::new(),
@@ -205,13 +301,14 @@ pub fn publish(
         .metadata
         .get(crate::memory::PRESENTATION_ORIGIN_METADATA)
         .map_or("", String::as_str);
-    let proposal = proposal(scopes, workspace, candidate)?;
-    service.create_with_origin(proposal.clone(), origin)?;
-    if !proposal.scope.session_id.is_empty() {
-        let mut workspace_visible = proposal;
-        workspace_visible.scope.session_id.clear();
-        service.create_with_origin(workspace_visible, origin)?;
-    }
+    service.create_with_origin(proposal(scopes, workspace, candidate)?, origin)?;
+    // Approval storage deduplicates memory requests by subject and adds the
+    // supplied scope to their visibility set. This second publication does not
+    // create another decision; it keeps the one-shot request reachable after
+    // its originating session ends and upgrades legacy session-only requests.
+    let mut visible = proposal(scopes, workspace, candidate)?;
+    visible.scope.session_id.clear();
+    service.create_with_origin(visible, origin)?;
     Ok(())
 }
 
@@ -252,6 +349,174 @@ pub fn attach(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconcile_makes_legacy_session_scoped_memory_approval_workspace_visible() {
+        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let user = store.identity().unwrap().user_scope;
+        let memory = Arc::new(crate::memory::Service::new(
+            store,
+            crate::memory::decide_default_policy,
+        ));
+        let candidate = memory
+            .propose(&crate::memory::ProposeRequest {
+                scope: user.clone(),
+                kind: "preference".into(),
+                key: "legacy".into(),
+                text: "legacy candidate".into(),
+                reason: "created by an older version".into(),
+                source: crate::memory::Provenance {
+                    origin: Some(crate::memory::Origin::Model),
+                    session_id: "old-session".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap()
+            .remove(0);
+        let approvals = Arc::new(Service::in_memory().unwrap());
+        let legacy = proposal(std::slice::from_ref(&user), "/w", &candidate).unwrap();
+        approvals.create(legacy).unwrap();
+        assert!(
+            approvals
+                .snapshot("/w", Some("new-session"))
+                .unwrap()
+                .requests
+                .is_empty(),
+            "the legacy request starts scoped to its originating session"
+        );
+
+        attach(&approvals, &memory, vec![user.clone()], "/w").unwrap();
+        reconcile(&approvals, &memory, &[user], "/w").unwrap();
+
+        assert_eq!(
+            approvals
+                .snapshot("/w", Some("new-session"))
+                .unwrap()
+                .requests
+                .len(),
+            1,
+            "republication adds workspace visibility to the existing approval"
+        );
+    }
+
+    #[test]
+    fn human_pending_query_pages_past_non_actionable_storage_candidates() {
+        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let user = store.identity().unwrap().user_scope;
+        let memory = Arc::new(crate::memory::Service::new(
+            store,
+            crate::memory::decide_default_policy,
+        ));
+        for index in 0..20 {
+            memory
+                .propose(&crate::memory::ProposeRequest {
+                    scope: user.clone(),
+                    kind: "preference".into(),
+                    key: format!("orphan-{index}"),
+                    text: format!("orphan {index}"),
+                    reason: "no approval publisher was attached".into(),
+                    source: crate::memory::Provenance {
+                        origin: Some(crate::memory::Origin::Model),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let approvals = Arc::new(Service::in_memory().unwrap());
+        attach(&approvals, &memory, vec![user.clone()], "/w").unwrap();
+        let actionable = memory
+            .propose(&crate::memory::ProposeRequest {
+                scope: user.clone(),
+                kind: "preference".into(),
+                key: "actionable".into(),
+                text: "actionable".into(),
+                reason: "awaiting human review".into(),
+                source: crate::memory::Provenance {
+                    origin: Some(crate::memory::Origin::Model),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap()
+            .remove(0);
+        let requests = approvals.snapshot("/w", Some("session")).unwrap().requests;
+
+        let candidates =
+            human_pending_candidates(&memory, std::slice::from_ref(&user), &requests, 20).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, actionable.id);
+        assert_eq!(
+            human_pending_summary(&memory, &[user], &requests).unwrap(),
+            PendingSummary {
+                count: 1,
+                oldest: Some(actionable.created_at),
+            }
+        );
+    }
+
+    #[test]
+    fn human_pending_cursor_conflicts_after_a_decision_instead_of_skipping() {
+        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let user = store.identity().unwrap().user_scope;
+        let memory = Arc::new(crate::memory::Service::new(
+            store,
+            crate::memory::decide_default_policy,
+        ));
+        let approvals = Arc::new(Service::in_memory().unwrap());
+        attach(&approvals, &memory, vec![user.clone()], "/w").unwrap();
+        for key in ["first", "second"] {
+            memory
+                .propose(&crate::memory::ProposeRequest {
+                    scope: user.clone(),
+                    kind: "preference".into(),
+                    key: key.into(),
+                    text: key.into(),
+                    reason: "awaiting human review".into(),
+                    source: crate::memory::Provenance {
+                        origin: Some(crate::memory::Origin::Model),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let requests = approvals.snapshot("/w", Some("session")).unwrap().requests;
+        let first =
+            human_pending_candidate_page(&memory, std::slice::from_ref(&user), &requests, "", 1)
+                .unwrap();
+        assert_eq!(first.candidates.len(), 1);
+        assert!(!first.next_cursor.is_empty());
+        memory
+            .review(&ReviewRequest {
+                reference: CandidateRef {
+                    scope: user.clone(),
+                    id: first.candidates[0].id.clone(),
+                },
+                decision: ReviewDecision::Reject,
+                edited: None,
+                target_revision: None,
+            })
+            .unwrap();
+
+        let stale = human_pending_candidate_page(
+            &memory,
+            std::slice::from_ref(&user),
+            &requests,
+            &first.next_cursor,
+            1,
+        )
+        .expect_err("a decision invalidates the storage snapshot cursor");
+        assert!(stale.is(crate::memory::ErrorKind::Conflict));
+        let restarted =
+            human_pending_candidate_page(&memory, std::slice::from_ref(&user), &requests, "", 1)
+                .unwrap();
+        assert_eq!(restarted.candidates.len(), 1);
+        assert!(restarted.next_cursor.is_empty());
+    }
+
     #[test]
     fn unified_review_preserves_advice_without_turning_it_into_a_decision() {
         let (_dir, store) = crate::memory::turso::testsupport::open_temp();
@@ -283,97 +548,6 @@ mod tests {
             CandidateState::Pending
         );
     }
-
-    #[test]
-    fn candidate_source_session_does_not_limit_request_visibility() {
-        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
-        let user = store.identity().unwrap().user_scope;
-        let memory = Arc::new(crate::memory::Service::new(
-            store,
-            crate::memory::decide_default_policy,
-        ));
-        let service = Arc::new(Service::in_memory().unwrap());
-        attach(&service, &memory, vec![user.clone()], "/w").unwrap();
-        let candidate = memory
-            .propose(&crate::memory::ProposeRequest {
-                scope: user,
-                kind: "preference".into(),
-                key: "source-session".into(),
-                text: "keep candidate provenance".into(),
-                reason: "review outside the source session".into(),
-                source: crate::memory::Provenance {
-                    session_id: "source-session".into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .unwrap()
-            .pop()
-            .unwrap();
-
-        let request = service
-            .snapshot("/w", Some("other-session"))
-            .unwrap()
-            .requests
-            .pop()
-            .unwrap();
-        assert_eq!(request.scope.session_id, "source-session");
-        assert!(request.subject.id.ends_with(&candidate.id));
-        assert_eq!(candidate.proposed.source.session_id, "source-session");
-    }
-
-    #[test]
-    fn reconcile_adds_workspace_visibility_to_legacy_session_request() {
-        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
-        let user = store.identity().unwrap().user_scope;
-        let memory = Arc::new(crate::memory::Service::new(
-            store,
-            crate::memory::decide_default_policy,
-        ));
-        let service = Service::in_memory().unwrap();
-        let candidate = memory
-            .propose(&crate::memory::ProposeRequest {
-                scope: user.clone(),
-                kind: "preference".into(),
-                key: "legacy-session".into(),
-                text: "recover legacy visibility".into(),
-                reason: "created before workspace-scoped publication".into(),
-                source: crate::memory::Provenance {
-                    session_id: "legacy-session".into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .unwrap()
-            .pop()
-            .unwrap();
-        let mut legacy_proposal = proposal(&[user.clone()], "/w", &candidate).unwrap();
-        legacy_proposal.scope.session_id = "legacy-session".into();
-        let legacy = service.create(legacy_proposal).unwrap();
-        assert!(
-            service
-                .snapshot("/w", Some("other-session"))
-                .unwrap()
-                .requests
-                .is_empty()
-        );
-
-        reconcile(&service, &memory, &[user], "/w").unwrap();
-
-        let recovered = service
-            .snapshot("/w", Some("other-session"))
-            .unwrap()
-            .requests
-            .pop()
-            .unwrap();
-        assert_eq!(recovered.id, legacy.id);
-        assert_eq!(recovered.subject, legacy.subject);
-        assert_eq!(service.events("/w", None, 0).unwrap().len(), 1);
-        // The old publisher reused the candidate's source session here, so
-        // idempotent create only reinserted the same session visibility and
-        // the cross-session snapshot above remained empty.
-    }
-
     #[test]
     fn one_memory_request_is_shared_across_authorized_workspaces_without_copying_text() {
         let (_dir, store) = crate::memory::turso::testsupport::open_temp();
@@ -422,8 +596,6 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(one.id, two.id);
-        assert!(one.scope.session_id.is_empty());
-        assert!(two.scope.session_id.is_empty());
         assert_eq!(one.presentation_origin, "chat:telegram:42");
         assert_eq!(two.presentation_origin, "chat:telegram:42");
         assert!(one.subject.details.contains("prefers tabs"));

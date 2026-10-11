@@ -101,6 +101,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- A provider stream that keeps sending bytes without model output now ends
+  the attempt after 120 s on `chatgpt` and 300 s on `openai-compatible`.
+  Previously the 60 s read timeout restarted on every received byte, so a
+  stream that sent only keepalive data held the turn in responding until the
+  user cancelled it. Only text, reasoning and tool-argument deltas restart the
+  new timer. A `chatgpt` attempt is then retried under the existing policy with
+  reason `model output idle timeout`; an `openai-compatible` attempt is retried
+  only if no delta reached the caller. See
+  [configuration](docs/manual/getting-started.md#configuration).
+  ([#471](https://github.com/baiyuqing/otto/pull/471))
+
 - Review facts for escalated bash commands cover every command in a list such
   as `make&&./run`, and read a leading `cd <dir>` and `git -C <dir>` from the
   parsed command instead of separate tokenizers.

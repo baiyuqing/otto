@@ -647,12 +647,24 @@ Key points:
   name when the JSON payload omits `type`. One event payload is limited to
   1 MiB; an SSE line may hold one whole event at that limit.
 
-  OpenAI-compatible requests are not automatically retried after dispatch.
-  When the connection to an OpenAI-compatible endpoint cannot be
-  established (refused, unreachable, or a failed TLS or connect timeout), the
-  request never left Otto, so it is tried again up to three times, 1, 2,
-  then 4 seconds apart within the same turn deadline, and reported as not
-  started if all attempts fail.
+  An OpenAI-compatible request is tried again up to three times, 1, 2, then
+  4 seconds apart within the same turn deadline, in two cases. When the
+  connection cannot be established (refused, unreachable, or a failed TLS or
+  connect timeout), the request never left Otto and is reported as not
+  started if all attempts fail. When the request was sent but its transport
+  failed or its stream timed out before any text, reasoning or tool-call delta
+  reached Otto, the endpoint may have started the completion, so the outcome
+  is reported as unknown. A failure after a delta, every HTTP status and every
+  malformed stream event are not retried.
+
+  Each response stream must produce a text, reasoning or tool-call delta at
+  least every 120 seconds on ChatGPT and every 300 seconds on an
+  OpenAI-compatible endpoint, counted from the response headers. Keepalive
+  bytes and SSE comments do not count. When the interval passes, the attempt
+  ends with retry reason `model output idle timeout` and follows the rules
+  above. A response that sends no bytes for 60 seconds ends with
+  `stream read timeout` on ChatGPT. These intervals are fixed and cannot be
+  configured.
 
 Deadline checks are cooperative at synchronous filesystem and Turso
 boundaries: Otto checks before and after the call, but does not detach an

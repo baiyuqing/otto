@@ -195,6 +195,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
   calls, and `otto` tests fail when `otto` source re-exports an `otto-core`
   item. ([#466](https://github.com/baiyuqing/otto/pull/466))
 
+- Contributor and agent instructions run `cargo fmt --all` and the tests that
+  cover the changed code before a Rust commit, and list each test command and
+  its result in the PR body; the full `make` gates run only when asked.
+  ([#466](https://github.com/baiyuqing/otto/pull/466))
+
 ## 0.4.8 - 2026-10-08
 
 ### Usage and compatibility

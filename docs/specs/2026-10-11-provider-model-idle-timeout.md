@@ -89,8 +89,10 @@ at 121.5 s instead of 815.8 s.
   (4 attempts, 1/2/4 s). `Interrupted` gains a reason field so the `Retry`
   event reads `model output idle timeout` instead of `connection interrupted`.
   After a delta reached the caller, the attempt is `AttemptError::Sent` with
-  `chat completion stream produced no model output for 300 s` and is not
+  `read chat completion stream: no model output for 300s` and is not
   retried, matching the existing rule that visible output is never replayed.
+  The `read chat completion stream:` prefix makes the settlement
+  `transport_lost` with `Unknown` certainty, like other body read failures.
 - `otto_core::diagnostics` maps the reason `model output idle timeout` to
   `RetryReason::Timeout`.
 
@@ -124,7 +126,7 @@ a 500 ms model idle bound. Each test is wrapped in a 10 s
 | `chatgpt_keepalive_after_one_delta_is_retried` | same, with `interrupted_output: true` |
 | `chatgpt_spaced_deltas_do_not_time_out` | deltas every 300 ms for 1.5 s, interleaved with keepalives: no retry, one request |
 | `compat_keepalive_before_output_is_retried` | one retry with reason `model output idle timeout`, second attempt succeeds |
-| `compat_keepalive_after_output_fails_without_retry` | error contains `no model output`, `server.count() == 1` |
+| `compat_keepalive_after_output_fails_without_retry` | error contains `no model output`, certainty `Unknown`, `server.count() == 1` |
 
 ## Documentation
 

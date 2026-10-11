@@ -45,10 +45,11 @@ leading static words of every simple command (`ShellCommand`). An allow
 `command_prefix` rule matches only a fully static list/pipeline whose every
 segment has the prefix; a deny or ask prefix rule matches any segment, also
 in a command with expansions. Other allow rules skip non-static commands.
-`shell::classify` marks a sandboxed `use_default` command that changes
-external state (`Boundary`) or deletes workspace content (`Bounded`); the bash
-tool then returns an approval spec with `sandboxed: true` and `effect`, and
-runs the command in the sandbox only through `execute_approved`. It never
+`shell::classify` marks a sandboxed `use_default` command or an
+`excluded_commands` match that changes external state (`Boundary`) or deletes
+workspace content (`Bounded`); the bash tool then returns an approval spec
+with `effect` and `sandboxed` (false for an excluded command), and runs the
+command on its usual executor only through `execute_approved`. It never
 creates or consumes `BashApprovals` grants, which are keyed by command text
 and also authorize escalation.
 

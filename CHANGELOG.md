@@ -35,7 +35,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   commands; the `never` policy now rejects them unless an `allow` rule
   matches; deletions prompt only in MANUAL. See
   [classified commands](docs/manual/safety-and-tools.md#classified-commands-wait-for-approval-inside-the-sandbox).
-  (PR_LINK)
+  ([#462](https://github.com/baiyuqing/otto/pull/462))
 
 - `GET /v1/usage` now distinguishes token-usage rows, logical provider
   operations and actual HTTP attempts. Cache totals and `cache_hit_rate` are

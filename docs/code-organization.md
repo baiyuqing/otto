@@ -87,7 +87,7 @@ contract or format and `otto` holds the implementation:
 
 | Module | `otto-core` | `otto` |
 | --- | --- | --- |
-| `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning | `SessionHandle`; the JSONL `Store` in `storage/backends/posix/session/`, which `session/` re-exports |
+| `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning, trace building (`session::trace`) | `SessionHandle`; the JSONL `Store` in `storage/backends/posix/session/`, which `session/` re-exports |
 | `config` | configuration schema, layered merge, provenance, managed constraints, resolution, `config::edit` | source discovery, executable trust, the compare-and-swap writer |
 | `memory` | `MemoryService` open contract, scoped requests, context projections | built-in domain `Service`, validation, `client::Client`, `adapter::BuiltinAdapter`; Turso store under `storage/` |
 | `approval` | approval requests, choices, modes and lifecycle values | durable approval authority `Service`, policy, repository port; Turso store under `storage/` |

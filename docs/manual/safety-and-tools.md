@@ -22,7 +22,9 @@ and a reviewer (`user`, `auto_review` or `bypass`). The familiar modes are prese
 | **AUTO** (default) | `on_request` / `auto_review` | Review eligible operations against the task and exact targets. |
 | **YOLO** | `on_request` / `bypass` | Approve requests owned by this session without review. |
 
-AUTO reviews shell escalations, external MCP calls, memory/skill writes, ordinary
+AUTO reviews shell escalations, sandboxed shell commands that change external
+state ([classified commands](#classified-commands-wait-for-approval-inside-the-sandbox)),
+external MCP calls, memory/skill writes, ordinary
 profile changes, schedules and cross-workspace delivery. Task-related low or
 medium risk operations can proceed; ordinary persistent writes need evidence
 covering their contents and scope. High risk needs exact user authorization and
@@ -718,6 +720,46 @@ Commands matching `[sandbox].excluded_commands` run through the same unconfined
 driver without an approval. They apply to child agents and `otto --prompt`
 runs as well, and only to simple commands; see
 [`[sandbox]`](getting-started.md#configuration) for the entry syntax and the rule.
+
+### Classified commands wait for approval inside the sandbox
+
+Under Seatbelt, Otto parses each `use_default` command and classifies it
+before it runs. A command in one of two classes creates an approval request;
+after approval it runs inside the sandbox, without escalation. The model does
+not need to give a justification.
+
+| Class | Commands | Authority |
+| --- | --- | --- |
+| Changes external state | `git push` (not `--dry-run`); `gh` except read-only subcommands such as `pr view`, `issue list`, `run watch`, `search` and `api` with `GET`; `curl` with data, form, upload or a method other than `GET`/`HEAD`; `wget` with post/body data or such a method; `npm`/`pnpm`/`yarn` `publish`, `unpublish`, `deprecate`; `cargo publish`, `yank`, `owner`; `docker`/`podman push`; `twine upload`; `gem push`; `kubectl` apply, create, delete, patch and other mutating verbs; `helm` install, upgrade, uninstall, rollback, push; `terraform`/`tofu` apply, destroy, import | `Boundary` |
+| Deletes workspace or repository content | `git reset --hard`; `git clean -f` (not `-n`); `git checkout -f`, `--` or `.`; `git restore` without `--staged` only; `git switch -f`/`--discard-changes`; `git stash drop`/`clear`; `git branch -D`; `git reflog expire`/`delete`; `git filter-branch`/`filter-repo`; `rm -r`; `find -delete` | `Bounded` |
+
+Every simple command in a list or pipeline is checked, including commands in
+substitutions, commands after `env`, `sudo`, `timeout`, `xargs` and similar
+wrappers, and commands run by `find -exec`. Arguments written as `$VAR` or
+other expansions are not known; flags written literally after them still
+count, so `find "$DIR" -delete` is classified.
+
+| Approval mode | Changes external state | Deletes workspace or repository content |
+| --- | --- | --- |
+| allow rule matches | runs | runs |
+| AUTO | isolated review | runs, recorded as bounded authority |
+| MANUAL | you decide | you decide |
+| `never` policy | rejected | runs, recorded as bounded authority |
+| YOLO | runs | runs |
+
+An `allow` command-prefix rule such as `["git", "push"]` approves matching
+requests in every mode. A `git push` review requires branch, remote and
+outgoing-diff facts; without them the request goes to you.
+
+Limits of this check:
+
+- It reads the command text. Programs started by a script, `make`,
+  `npm run`, `python -c`, `bash -c` or `eval` are not classified. Only
+  `[sandbox] network = "deny"` stops network writes from them.
+- Cloud CLIs such as `aws`, `gcloud` and `az` are not classified.
+- [`excluded_commands`](getting-started.md#configuration) still run without
+  approval, and a `require_escalated` request keeps its own approval.
+- With `--sandbox off` and on Linux, commands are not classified.
 
 ### Git metadata is read-only in the Seatbelt sandbox
 

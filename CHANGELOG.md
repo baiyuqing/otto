@@ -26,6 +26,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [approval rules](docs/manual/safety-and-tools.md).
   ([#461](https://github.com/baiyuqing/otto/pull/461))
 
+- Under Seatbelt, a sandboxed Bash command that changes external state
+  (`git push`, `gh` writes, `curl -X POST`, `npm publish`, `kubectl apply`
+  and similar) now creates a `Boundary` approval request, and a command that
+  deletes workspace or repository content (`git reset --hard`,
+  `git clean -f`, `rm -r`, `find -delete`) creates a `Bounded` request. The
+  command runs inside the sandbox after approval. AUTO reviews external-state
+  commands; the `never` policy now rejects them unless an `allow` rule
+  matches; deletions prompt only in MANUAL. See
+  [classified commands](docs/manual/safety-and-tools.md#classified-commands-wait-for-approval-inside-the-sandbox).
+  ([#462](https://github.com/baiyuqing/otto/pull/462))
+
 - `GET /v1/usage` now distinguishes token-usage rows, logical provider
   operations and actual HTTP attempts. Cache totals and `cache_hit_rate` are
   `null` when any reported usage lacks a cached-token breakdown; missing data

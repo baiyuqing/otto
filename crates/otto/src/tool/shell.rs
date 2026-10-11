@@ -49,6 +49,10 @@ pub struct WriteTarget {
 #[derive(Debug, Clone, Default)]
 pub struct Parsed {
     pub command: ShellCommand,
+    /// Every word of each `command` node that has one, in the order of
+    /// `command.segments`. A static word is its unquoted value; any other
+    /// word is its source text. Assignments and redirects are not words.
+    pub commands: Vec<Vec<String>>,
     pub write_targets: Vec<WriteTarget>,
     /// True when the program assigns a shell variable anywhere (`A=1 cmd`,
     /// `A=1;`, `export A=1`). Such a command can redirect `git` through
@@ -93,10 +97,20 @@ pub fn parse(command: &str) -> Parsed {
         match kind {
             "variable_assignment" => parsed.assigns_variables = true,
             "command" => {
-                let (words, all_static) = command_words(node, source);
-                complete &= all_static && program_allowed(&words);
+                let (words, separated) = command_words(node, source);
+                let leading: Vec<String> = words
+                    .iter()
+                    .take_while(|(_, is_static)| *is_static)
+                    .map(|(word, _)| word.clone())
+                    .collect();
+                complete &= separated && leading.len() == words.len() && program_allowed(&leading);
+                if !leading.is_empty() {
+                    parsed.command.segments.push(leading);
+                }
                 if !words.is_empty() {
-                    parsed.command.segments.push(words);
+                    parsed
+                        .commands
+                        .push(words.into_iter().map(|(word, _)| word).collect());
                 }
             }
             "file_redirect" => {
@@ -138,11 +152,14 @@ pub fn parse(command: &str) -> Parsed {
     parsed
 }
 
-/// Leading static words of a `command` node and whether every word was
-/// static. Assignments and redirects are not words. Words separated only by
-/// line continuations are one word, as in bash.
-fn command_words(node: Node, source: &[u8]) -> (Vec<String>, bool) {
-    let mut words: Vec<String> = Vec::new();
+/// Words of a `command` node, each with whether it is static: a static word
+/// is its unquoted value, any other word its source text. Assignments and
+/// redirects are not words. Words separated only by line continuations are
+/// one word, as in bash. The flag is false when a continuation joins a word
+/// with an assignment or redirect.
+fn command_words(node: Node, source: &[u8]) -> (Vec<(String, bool)>, bool) {
+    let mut words: Vec<(String, bool)> = Vec::new();
+    let mut separated = true;
     // End byte of the previous child and whether it was a word.
     let mut previous: Option<(usize, bool)> = None;
     let mut cursor = node.walk();
@@ -154,25 +171,26 @@ fn command_words(node: Node, source: &[u8]) -> (Vec<String>, bool) {
         let joined = previous.is_some_and(|(end, _)| continued(source, end, child.start_byte()));
         let after_word = previous.is_some_and(|(_, word)| word);
         previous = Some((child.end_byte(), is_word));
-        if joined && !(is_word && after_word) {
-            // bash joins the assignment or redirect with the adjacent word.
-            return (words, false);
-        }
         if !is_word {
+            // bash joins the assignment or redirect with the adjacent word.
+            separated &= !joined;
             continue;
         }
-        let Some(word) = word_value(child, source, !joined) else {
-            if joined {
-                words.pop();
-            }
-            return (words, false);
-        };
+        let value = word_value(child, source, !joined);
+        let is_static = value.is_some();
+        let text = value.unwrap_or_else(|| node_text(child, source).to_owned());
         match words.last_mut() {
-            Some(last) if joined => last.push_str(&word),
-            _ => words.push(word),
+            Some((last, last_static)) if joined && after_word => {
+                last.push_str(&text);
+                *last_static &= is_static;
+            }
+            _ => {
+                separated &= !joined;
+                words.push((text, is_static));
+            }
         }
     }
-    (words, true)
+    (words, separated)
 }
 
 /// True when only line continuations (backslash-newline) lie between two
@@ -336,6 +354,266 @@ pub fn git_subcommand(words: &[String]) -> Option<(usize, &str)> {
         }
     }
     None
+}
+
+/// What a command changes beyond the sandboxed workspace session. The
+/// variant order is the ranking: `ExternalState` is the highest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Effect {
+    Destructive,
+    ExternalState,
+}
+
+impl Effect {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effect::Destructive => "destructive",
+            Effect::ExternalState => "external_state",
+        }
+    }
+}
+
+/// Programs that run the command given in their later words.
+const WRAPPERS: &[&str] = &[
+    "env", "command", "exec", "nohup", "nice", "timeout", "time", "sudo", "xargs",
+];
+
+/// Programs [`effect`] has rules for.
+const CLASSIFIED: &[&str] = &[
+    "git",
+    "gh",
+    "curl",
+    "wget",
+    "npm",
+    "pnpm",
+    "yarn",
+    "cargo",
+    "docker",
+    "podman",
+    "twine",
+    "gem",
+    "kubectl",
+    "helm",
+    "terraform",
+    "tofu",
+    "rm",
+    "find",
+];
+
+/// Highest effect among `parsed.commands` and the words of the first command
+/// that has it.
+pub fn classify(parsed: &Parsed) -> Option<(Effect, &[String])> {
+    let mut best: Option<(Effect, &[String])> = None;
+    for words in &parsed.commands {
+        if let Some(found) = effect(words)
+            && best.is_none_or(|(current, _)| found > current)
+        {
+            best = Some((found, words));
+        }
+    }
+    best
+}
+
+fn program_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or_default()
+}
+
+/// Letters of a short-flag cluster such as `-rf`: one leading `-`, then
+/// anything that does not start with another `-`.
+fn cluster(word: &str) -> Option<&str> {
+    word.strip_prefix('-')
+        .filter(|letters| !letters.is_empty() && !letters.starts_with('-'))
+}
+
+fn has_letter(args: &[String], letter: char) -> bool {
+    args.iter()
+        .filter_map(|arg| cluster(arg))
+        .any(|letters| letters.contains(letter))
+}
+
+fn has_arg(args: &[String], names: &[&str]) -> bool {
+    args.iter().any(|arg| names.contains(&arg.as_str()))
+}
+
+/// If `args[index]` sets an HTTP method through `long` (`--long M`,
+/// `--long=M`) or the `X` letter of a short cluster (`-XM`, `-X M`), the
+/// method; the inner `None` means the value is missing.
+fn method_flag<'a>(
+    args: &'a [String],
+    index: usize,
+    long: &str,
+    short: bool,
+) -> Option<Option<&'a str>> {
+    let arg = args[index].as_str();
+    let next = || args.get(index + 1).map(String::as_str);
+    if arg == long {
+        return Some(next());
+    }
+    if let Some(value) = arg
+        .strip_prefix(long)
+        .and_then(|rest| rest.strip_prefix('='))
+    {
+        return Some(Some(value));
+    }
+    if short && let Some((_, rest)) = cluster(arg)?.split_once('X') {
+        return Some(if rest.is_empty() { next() } else { Some(rest) });
+    }
+    None
+}
+
+fn is_read_method(method: Option<&str>) -> bool {
+    method.is_some_and(|m| m.eq_ignore_ascii_case("GET") || m.eq_ignore_ascii_case("HEAD"))
+}
+
+fn gh_api_read_only(args: &[String]) -> bool {
+    (0..args.len()).all(|index| {
+        let arg = args[index].as_str();
+        let writes_field = matches!(arg, "-f" | "-F" | "--field" | "--raw-field" | "--input")
+            || ["--field=", "--raw-field=", "--input="]
+                .iter()
+                .any(|prefix| arg.starts_with(prefix))
+            || cluster(arg).is_some_and(|l| l.starts_with(['f', 'F']));
+        let method_ok = method_flag(args, index, "--method", true)
+            .is_none_or(|m| m.is_some_and(|m| m.eq_ignore_ascii_case("GET")));
+        !writes_field && method_ok
+    })
+}
+
+fn curl_writes(args: &[String]) -> bool {
+    (0..args.len()).any(|index| {
+        let arg = args[index].as_str();
+        if matches!(
+            arg,
+            "-d" | "-F" | "-T" | "--json" | "--form" | "--upload-file"
+        ) || arg.starts_with("--data")
+            || arg.starts_with("--form")
+        {
+            return true;
+        }
+        // Letters after `X` are the method, not flags (`-XGET` has a `T`).
+        if let Some(letters) = cluster(arg)
+            && letters
+                .split('X')
+                .next()
+                .is_some_and(|flags| flags.contains(['d', 'F', 'T']))
+        {
+            return true;
+        }
+        method_flag(args, index, "--request", true).is_some_and(|m| !is_read_method(m))
+    })
+}
+
+fn wget_writes(args: &[String]) -> bool {
+    (0..args.len()).any(|index| {
+        let arg = args[index].as_str();
+        ["--post-data", "--post-file", "--body-data", "--body-file"]
+            .iter()
+            .any(|prefix| arg.starts_with(prefix))
+            || method_flag(args, index, "--method", false).is_some_and(|m| !is_read_method(m))
+    })
+}
+
+fn git_effect(words: &[String]) -> Option<Effect> {
+    // An unrecognized global option (`git -P push`) hides the subcommand.
+    let Some((index, subcommand)) = git_subcommand(words) else {
+        return has_arg(words, &["push"]).then_some(Effect::ExternalState);
+    };
+    let args = &words[index + 1..];
+    let first = args.first().map(String::as_str);
+    match subcommand {
+        "push" => (!has_arg(args, &["-n", "--dry-run"])).then_some(Effect::ExternalState),
+        "reset" => has_arg(args, &["--hard"]).then_some(Effect::Destructive),
+        "clean" => {
+            let force = has_arg(args, &["--force"]) || has_letter(args, 'f');
+            let dry = has_arg(args, &["--dry-run"]) || has_letter(args, 'n');
+            (force && !dry).then_some(Effect::Destructive)
+        }
+        "checkout" => has_arg(args, &["-f", "--force", "--", "."]).then_some(Effect::Destructive),
+        "restore" => {
+            let staged_only =
+                has_arg(args, &["--staged", "-S"]) && !has_arg(args, &["--worktree", "-W"]);
+            (!staged_only).then_some(Effect::Destructive)
+        }
+        "switch" => {
+            has_arg(args, &["-f", "--force", "--discard-changes"]).then_some(Effect::Destructive)
+        }
+        "stash" => matches!(first, Some("drop" | "clear")).then_some(Effect::Destructive),
+        "branch" => {
+            let delete = has_arg(args, &["--delete"]) || has_letter(args, 'd');
+            let force = has_arg(args, &["--force"]) || has_letter(args, 'f');
+            (has_letter(args, 'D') || (delete && force)).then_some(Effect::Destructive)
+        }
+        "reflog" => matches!(first, Some("expire" | "delete")).then_some(Effect::Destructive),
+        "filter-branch" | "filter-repo" => Some(Effect::Destructive),
+        _ => None,
+    }
+}
+
+fn gh_effect(args: &[String]) -> Option<Effect> {
+    let group = args.first().map_or("", String::as_str);
+    let action = args.get(1).map_or("", String::as_str);
+    let read_only = match group {
+        "pr" | "issue" => matches!(action, "list" | "view" | "status" | "diff" | "checks"),
+        "repo" => matches!(action, "view" | "list" | "clone"),
+        "run" => matches!(action, "list" | "view" | "watch" | "download"),
+        "release" => matches!(action, "list" | "view" | "download"),
+        "search" | "status" | "browse" | "help" | "version" | "--help" | "--version" | "-h" => true,
+        "auth" => action == "status",
+        "api" => gh_api_read_only(&args[1..]),
+        _ => false,
+    };
+    (!read_only).then_some(Effect::ExternalState)
+}
+
+/// Effect of one command given as its full word list.
+fn effect(words: &[String]) -> Option<Effect> {
+    let program = program_name(words.first()?);
+    let args = &words[1..];
+    if WRAPPERS.contains(&program) {
+        let index = args
+            .iter()
+            .position(|word| CLASSIFIED.contains(&program_name(word)))?;
+        return effect(&args[index..]);
+    }
+    match program {
+        "git" => git_effect(words),
+        "gh" => gh_effect(args),
+        "curl" => curl_writes(args).then_some(Effect::ExternalState),
+        "wget" => wget_writes(args).then_some(Effect::ExternalState),
+        "npm" | "pnpm" | "yarn" => {
+            has_arg(args, &["publish", "unpublish", "deprecate"]).then_some(Effect::ExternalState)
+        }
+        "cargo" => has_arg(args, &["publish", "yank", "owner"]).then_some(Effect::ExternalState),
+        "docker" | "podman" | "gem" => has_arg(args, &["push"]).then_some(Effect::ExternalState),
+        "twine" => has_arg(args, &["upload"]).then_some(Effect::ExternalState),
+        "kubectl" => has_arg(
+            args,
+            &[
+                "apply", "create", "delete", "patch", "replace", "edit", "scale", "rollout",
+                "label", "annotate", "set", "drain", "cordon", "uncordon", "taint",
+            ],
+        )
+        .then_some(Effect::ExternalState),
+        "helm" => has_arg(
+            args,
+            &["install", "upgrade", "uninstall", "rollback", "push"],
+        )
+        .then_some(Effect::ExternalState),
+        "terraform" | "tofu" => {
+            has_arg(args, &["apply", "destroy", "import"]).then_some(Effect::ExternalState)
+        }
+        "rm" => (has_arg(args, &["--recursive"]) || has_letter(args, 'r') || has_letter(args, 'R'))
+            .then_some(Effect::Destructive),
+        "find" => {
+            let delete = has_arg(args, &["-delete"]).then_some(Effect::Destructive);
+            let executed = (0..args.len())
+                .filter(|&i| matches!(args[i].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"))
+                .filter_map(|i| effect(&args[i + 1..]))
+                .max();
+            delete.max(executed)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -567,5 +845,171 @@ mod tests {
         assert_eq!(sub("echo push"), None);
         // `commit -C <rev>` is a subcommand option, not a global one.
         assert_eq!(sub("git commit -C HEAD"), Some((1, "commit".into())));
+    }
+
+    fn classified(command: &str) -> Option<(&'static str, Vec<String>)> {
+        let parsed = parse(command);
+        classify(&parsed).map(|(effect, words)| (effect.as_str(), words.to_vec()))
+    }
+
+    #[test]
+    fn commands_keep_dynamic_words_as_source_text() {
+        let parsed = parse(r#"find "$D" -name x -delete"#);
+        assert_eq!(parsed.command.segments, vec![vec!["find".to_owned()]]);
+        assert_eq!(
+            parsed.commands,
+            vec![
+                ["find", "\"$D\"", "-name", "x", "-delete"]
+                    .map(str::to_owned)
+                    .to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_flags_external_state_and_destructive_commands() {
+        for command in [
+            "git push",
+            "git push origin main",
+            "git -C \"$D\" push",
+            "timeout 30 git push",
+            "env A=1 git push",
+            "echo $(git push)",
+            "make && git push origin main",
+            "gh pr create",
+            "gh",
+            "gh api -f a=b x",
+            "gh api -fa=b x",
+            "gh api --field=a=b x",
+            "gh api --input=f x",
+            "gh api -X POST x",
+            "gh api -XPOST x",
+            "gh api --method POST x",
+            "gh api --method=post x",
+            "gh api -X",
+            "curl \"$URL\" -d x",
+            "curl -sSd x https://x",
+            "curl -d@x https://x",
+            "curl -T f https://x",
+            "curl --json {} https://x",
+            "curl --data-raw x https://x",
+            "curl --form-string a=b https://x",
+            "curl -X POST https://x",
+            "curl -XDELETE https://x",
+            "curl --request=PUT https://x",
+            "curl -sX POST https://x",
+            "curl -X",
+            "wget --post-data=x https://x",
+            "wget --method=PUT https://x",
+            "wget --method DELETE https://x",
+            "npm publish",
+            "npm publish --tag x",
+            "npm --registry x publish",
+            "docker image push img",
+            "git -P push",
+            "git pu\\\nsh origin",
+            "pnpm unpublish x",
+            "yarn npm publish",
+            "cargo +nightly publish",
+            "cargo yank --vers 1",
+            "docker push img",
+            "podman -D push img",
+            "twine upload dist/*",
+            "gem push x.gem",
+            "kubectl -n ns apply -f x",
+            "helm upgrade x y",
+            "terraform apply",
+            "tofu destroy",
+        ] {
+            assert_eq!(
+                classified(command).map(|c| c.0),
+                Some("external_state"),
+                "{command}"
+            );
+        }
+        for command in [
+            "git reset --hard",
+            "git clean -f",
+            "git clean --force -d",
+            "git checkout -f x",
+            "git checkout -- f",
+            "git checkout .",
+            "git restore f",
+            "git restore --staged --worktree f",
+            "git switch --discard-changes x",
+            "git stash drop",
+            "git stash clear",
+            "git branch -D x",
+            "git branch -d -f x",
+            "git reflog expire --all",
+            "git filter-branch x",
+            "git filter-repo",
+            "rm -rf x",
+            "rm -r x",
+            "rm -R x",
+            "rm --recursive x",
+            "sudo rm -rf x",
+            "find . -delete",
+            "find \"$D\" -delete",
+            "find . -exec rm -r {} +",
+            "xargs rm -r",
+        ] {
+            assert_eq!(
+                classified(command).map(|c| c.0),
+                Some("destructive"),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_ignores_read_only_and_unrelated_commands() {
+        for command in [
+            "ls",
+            "git push --dry-run",
+            "git push -n",
+            "git status",
+            "git restore --staged f",
+            "git clean -n",
+            "git clean -fn",
+            "git branch -d x",
+            "gh pr view 1",
+            "gh api repos/o/r",
+            "gh api -X GET x",
+            "gh api -XGET x",
+            "gh api --method=get x",
+            "curl -I https://x",
+            "curl -sS https://x",
+            "curl -X GET https://x",
+            "curl -XGET https://x",
+            "curl -XHEAD https://x",
+            "wget https://x",
+            "wget --method=GET https://x",
+            "rm file",
+            "cargo build",
+            "npm install",
+            "git -P log",
+            "find . -name x",
+            "find . -exec ls {} +",
+            "$GIT push",
+            "bash -c 'git push'",
+            "sudo ls",
+        ] {
+            assert_eq!(classified(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn classify_ranks_external_state_above_destructive() {
+        let (effect, words) = classified("rm -r x && git push").unwrap();
+        assert_eq!(effect, "external_state");
+        assert_eq!(words, ["git", "push"]);
+        let (effect, words) = classified("rm -r x && git reset --hard").unwrap();
+        assert_eq!(effect, "destructive");
+        assert_eq!(words, ["rm", "-r", "x"]);
+        assert_eq!(
+            classified("git push origin main").unwrap().1,
+            ["git", "push", "origin", "main"]
+        );
     }
 }

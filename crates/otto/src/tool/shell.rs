@@ -119,9 +119,18 @@ pub fn parse(command: &str) -> Parsed {
             }
             _ => {}
         }
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        // `command_words` joins continued words; elsewhere bash would join
+        // tokens the tree keeps apart (`>/dev/null\<newline>x`).
+        if kind != "command"
+            && children
+                .windows(2)
+                .any(|pair| continued(source, pair[0].end_byte(), pair[1].start_byte()))
+        {
+            complete = false;
+        }
         if descend {
-            let mut cursor = node.walk();
-            let children: Vec<Node> = node.children(&mut cursor).collect();
             stack.extend(children.into_iter().rev());
         }
     }
@@ -130,23 +139,60 @@ pub fn parse(command: &str) -> Parsed {
 }
 
 /// Leading static words of a `command` node and whether every word was
-/// static. Assignments and redirects are not words.
+/// static. Assignments and redirects are not words. Words separated only by
+/// line continuations are one word, as in bash.
 fn command_words(node: Node, source: &[u8]) -> (Vec<String>, bool) {
-    let mut words = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    // End byte of the previous child and whether it was a word.
+    let mut previous: Option<(usize, bool)> = None;
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if matches!(
+        let is_word = !matches!(
             child.kind(),
             "variable_assignment" | "file_redirect" | "herestring_redirect" | "heredoc_redirect"
-        ) {
+        );
+        let joined = previous.is_some_and(|(end, _)| continued(source, end, child.start_byte()));
+        let after_word = previous.is_some_and(|(_, word)| word);
+        previous = Some((child.end_byte(), is_word));
+        if joined && !(is_word && after_word) {
+            // bash joins the assignment or redirect with the adjacent word.
+            return (words, false);
+        }
+        if !is_word {
             continue;
         }
-        match word_value(child, source, true) {
-            Some(word) => words.push(word),
-            None => return (words, false),
+        let Some(word) = word_value(child, source, !joined) else {
+            if joined {
+                words.pop();
+            }
+            return (words, false);
+        };
+        match words.last_mut() {
+            Some(last) if joined => last.push_str(&word),
+            _ => words.push(word),
         }
     }
     (words, true)
+}
+
+/// True when only line continuations (backslash-newline) lie between two
+/// nodes. tree-sitter-bash skips a continuation as whitespace, but bash
+/// removes it before splitting words, so `rm -\<newline>rf` runs `rm -rf`.
+fn continued(source: &[u8], end: usize, start: usize) -> bool {
+    let mut gap = source.get(end..start).unwrap_or_default();
+    if gap.is_empty() {
+        return false;
+    }
+    while !gap.is_empty() {
+        gap = match gap
+            .strip_prefix(b"\\\n")
+            .or_else(|| gap.strip_prefix(b"\\\r\n"))
+        {
+            Some(rest) => rest,
+            None => return false,
+        };
+    }
+    true
 }
 
 /// False for programs that run another command, assignments and keywords.
@@ -334,6 +380,15 @@ mod tests {
         );
         check(r#""git" status"#, true, &[&["git", "status"]]);
         check("echo a\\\nb", true, &[&["echo", "ab"]]);
+        check("rm -\\\nrf x", true, &[&["rm", "-rf", "x"]]);
+        check(
+            "gi\\\nt push \\\n origin",
+            true,
+            &[&["git", "push", "origin"]],
+        );
+        check("git pu\\\n$X", false, &[&["git"]]);
+        assert!(!analyze("echo x >/dev/null\\\ny").complete);
+        assert!(!analyze("A=1\\\nrm -rf x").complete);
     }
 
     #[test]

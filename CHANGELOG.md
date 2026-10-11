@@ -17,6 +17,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Approval `command_prefix` rules now check each command of a shell list or
+  pipeline, parsed with tree-sitter-bash. An `allow` rule applies to
+  `cargo fmt && cargo test` when every command starts with the prefix and the
+  program has no expansions or other unsupported syntax. A `deny` or `ask`
+  rule matches any command that starts with the prefix, including
+  `git push origin "$BRANCH"`, which previously matched no prefix rule. See
+  [approval rules](docs/manual/safety-and-tools.md).
+  (PR_LINK)
+
 - `GET /v1/usage` now distinguishes token-usage rows, logical provider
   operations and actual HTTP attempts. Cache totals and `cache_hit_rate` are
   `null` when any reported usage lacks a cached-token breakdown; missing data
@@ -61,6 +70,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 
 ### Fixes
+
+- Review facts for escalated bash commands cover every command in a list such
+  as `make&&./run`, and read a leading `cd <dir>` and `git -C <dir>` from the
+  parsed command instead of separate tokenizers.
+  (PR_LINK)
 
 - Pending memory proposals remain visible in `/memory review` after their
   originating session ends, so session-open reminders always lead to proposals

@@ -302,6 +302,11 @@ include a candidate whose approval is no longer awaiting human review. A
 candidate stays pending until you decide it; it does not expire, and its
 one-shot review remains visible after the session that proposed it ends.
 
+ACP memory review pages use the memory store's opaque snapshot cursor. If a
+candidate changes between page requests, `_otto/memory/pending` returns a memory
+conflict; restart with an empty cursor to read the new actionable set without
+silently skipping a candidate.
+
 ### Standing preferences
 
 A working habit that should apply in every workspace, such as "explain the plan

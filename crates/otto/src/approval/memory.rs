@@ -24,12 +24,57 @@ pub fn is_human_pending(candidate: &crate::memory::Candidate, requests: &[Reques
     })
 }
 
-/// Returns the actionable candidates that `/memory review` can decide.
+/// Returns one storage-cursor page of candidates that `/memory review` can decide.
 ///
 /// Storage-level pending candidates are not necessarily waiting for a human:
 /// their approval can be under automatic review, already withdrawn, or otherwise
-/// non-actionable. Page before filtering so those rows cannot hide a later
-/// human-pending candidate.
+/// non-actionable. Continue paging after filtering so those rows cannot hide a
+/// later human-pending candidate. The returned cursor retains the memory store's
+/// generation check, so a write between pages returns `Conflict` instead of
+/// silently skipping or repeating a candidate.
+pub fn human_pending_candidate_page(
+    memory: &crate::memory::Service,
+    scopes: &[Scope],
+    requests: &[Request],
+    cursor: &str,
+    limit: usize,
+) -> crate::memory::Result<crate::memory::CandidatePage> {
+    if limit == 0 || limit > crate::memory::MAX_PAGE_SIZE {
+        return Err(crate::memory::Error::new(
+            crate::memory::ErrorKind::InvalidRequest,
+        ));
+    }
+    let mut candidates = Vec::new();
+    let mut next_cursor = cursor.to_owned();
+    loop {
+        let previous_cursor = next_cursor.clone();
+        let page = memory.list_candidates(&CandidateListRequest {
+            scopes: scopes.to_vec(),
+            states: vec![CandidateState::Pending],
+            limit: limit - candidates.len(),
+            cursor: next_cursor,
+        })?;
+        candidates.extend(
+            page.candidates
+                .into_iter()
+                .filter(|candidate| is_human_pending(candidate, requests)),
+        );
+        next_cursor = page.next_cursor;
+        if candidates.len() == limit || next_cursor.is_empty() {
+            return Ok(crate::memory::CandidatePage {
+                candidates,
+                next_cursor,
+            });
+        }
+        if next_cursor == previous_cursor {
+            return Err(crate::memory::Error::new(
+                crate::memory::ErrorKind::Conflict,
+            ));
+        }
+    }
+}
+
+/// Returns the first `limit` actionable candidates across storage pages.
 pub fn human_pending_candidates(
     memory: &crate::memory::Service,
     scopes: &[Scope],
@@ -39,18 +84,14 @@ pub fn human_pending_candidates(
     let mut candidates = Vec::new();
     let mut cursor = String::new();
     while candidates.len() < limit {
-        let page = memory.list_candidates(&CandidateListRequest {
-            scopes: scopes.to_vec(),
-            states: vec![CandidateState::Pending],
-            limit: crate::memory::MAX_PAGE_SIZE,
-            cursor,
-        })?;
-        candidates.extend(
-            page.candidates
-                .into_iter()
-                .filter(|candidate| is_human_pending(candidate, requests))
-                .take(limit - candidates.len()),
-        );
+        let page = human_pending_candidate_page(
+            memory,
+            scopes,
+            requests,
+            &cursor,
+            (limit - candidates.len()).min(crate::memory::MAX_PAGE_SIZE),
+        )?;
+        candidates.extend(page.candidates);
         if page.next_cursor.is_empty() {
             break;
         }
@@ -414,6 +455,66 @@ mod tests {
                 oldest: Some(actionable.created_at),
             }
         );
+    }
+
+    #[test]
+    fn human_pending_cursor_conflicts_after_a_decision_instead_of_skipping() {
+        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let user = store.identity().unwrap().user_scope;
+        let memory = Arc::new(crate::memory::Service::new(
+            store,
+            crate::memory::decide_default_policy,
+        ));
+        let approvals = Arc::new(Service::in_memory().unwrap());
+        attach(&approvals, &memory, vec![user.clone()], "/w").unwrap();
+        for key in ["first", "second"] {
+            memory
+                .propose(&crate::memory::ProposeRequest {
+                    scope: user.clone(),
+                    kind: "preference".into(),
+                    key: key.into(),
+                    text: key.into(),
+                    reason: "awaiting human review".into(),
+                    source: crate::memory::Provenance {
+                        origin: Some(crate::memory::Origin::Model),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let requests = approvals.snapshot("/w", Some("session")).unwrap().requests;
+        let first =
+            human_pending_candidate_page(&memory, std::slice::from_ref(&user), &requests, "", 1)
+                .unwrap();
+        assert_eq!(first.candidates.len(), 1);
+        assert!(!first.next_cursor.is_empty());
+        memory
+            .review(&ReviewRequest {
+                reference: CandidateRef {
+                    scope: user.clone(),
+                    id: first.candidates[0].id.clone(),
+                },
+                decision: ReviewDecision::Reject,
+                edited: None,
+                target_revision: None,
+            })
+            .unwrap();
+
+        let stale = human_pending_candidate_page(
+            &memory,
+            std::slice::from_ref(&user),
+            &requests,
+            &first.next_cursor,
+            1,
+        )
+        .expect_err("a decision invalidates the storage snapshot cursor");
+        assert!(stale.is(crate::memory::ErrorKind::Conflict));
+        let restarted =
+            human_pending_candidate_page(&memory, std::slice::from_ref(&user), &requests, "", 1)
+                .unwrap();
+        assert_eq!(restarted.candidates.len(), 1);
+        assert!(restarted.next_cursor.is_empty());
     }
 
     #[test]

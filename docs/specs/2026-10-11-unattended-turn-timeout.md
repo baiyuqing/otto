@@ -1,8 +1,9 @@
 # Default deadline for unattended turns
 
-Status: draft, awaiting approval, 2026-10-11. The user asked for a limit on
-unattended runs ("无人值守的") and accepted ("OK") a time deadline in place of
-a step ceiling, with interactive turns unchanged.
+Status: approved for implementation, 2026-10-11. The user asked for a limit on
+unattended runs ("无人值守的"), accepted ("OK") a time deadline in place of a
+step ceiling with interactive turns unchanged, and approved ("OK") this design
+with the 30-minute default and the per-step budget.
 
 ## Current behavior
 

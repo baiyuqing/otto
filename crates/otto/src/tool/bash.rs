@@ -106,7 +106,7 @@ struct BashArgs {
     justification: String,
 }
 
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum SandboxPermissions {
     #[default]

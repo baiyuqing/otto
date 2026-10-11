@@ -146,6 +146,13 @@ text, so a flag written after `$VAR` still counts (`find "$D" -delete`).
 - `find -exec`, `-execdir`, `-ok` and `-okdir` classify the words after the
   flag.
 - Other runners (`bash -c`, `sh -c`, `eval`, `source`) are not classified.
+- Package, container and cluster verbs match any argument, so
+  `npm --registry x publish` and `docker image push` count; `cargo test
+  publish` also counts.
+- A `git` command with a global option other than those listed under review
+  facts (`git -P push`) counts as `git push` when any word is `push`.
+- Words separated only by a line continuation (backslash-newline) are one
+  word, as in bash: `git pu\<newline>sh` is `git push`.
 
 `Effect::ExternalState` (writes outside this machine):
 

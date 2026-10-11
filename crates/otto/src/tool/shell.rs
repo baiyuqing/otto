@@ -244,12 +244,12 @@ fn accepted_redirect(node: Node, source: &[u8]) -> bool {
     let destination = node
         .child_by_field_name("destination")
         .and_then(|destination| word_value(destination, source, true));
-    match (descriptor, redirect_operator(node), destination.as_deref()) {
-        (None | Some("1" | "2"), Some(">"), Some("/dev/null")) => true,
-        (None, Some("&>"), Some("/dev/null")) => true,
-        (Some("2"), Some(">&"), Some("1")) => true,
-        _ => false,
-    }
+    matches!(
+        (descriptor, redirect_operator(node), destination.as_deref()),
+        (None | Some("1" | "2"), Some(">"), Some("/dev/null"))
+            | (None, Some("&>"), Some("/dev/null"))
+            | (Some("2"), Some(">&"), Some("1"))
+    )
 }
 
 /// Unquoted value of a static word node, or `None` for anything whose value

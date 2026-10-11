@@ -139,6 +139,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- The TUI PTY tests (`tui_pty`, `tui_attach_pty`) pass under `make check` run
+  from an interactive terminal. The spawned `otto` kept that terminal as its
+  controlling terminal, and crossterm read the window size from `/dev/tty`, so
+  frames were drawn at the developer's terminal size instead of the 120x30
+  test PTY and the startup wait for the composer border timed out. The test
+  helper now starts the child in a new session, and a wait timeout no longer
+  poisons the screen lock.
+
 - Remove the GitHub Actions `Checks` workflow and its cache helper
   `scripts/ci-cache.mjs`. Pull requests no longer run the build, lint, test or
   Gitleaks history checks; `make check`, `make check-linux` and the

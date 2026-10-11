@@ -182,10 +182,15 @@ segment. `details` keeps the existing fields (`command`, `workspace`,
 current `Boundary` spec.
 
 After approval the command runs with the sandboxed executor. In
-`execute_inner`, a classified `use_default` command needs the same
-authorization as an escalated command (`authorized`, or an exact one-shot
-grant from `BashApprovals::take`); without it the tool returns the existing
-"approval required" result. Escalation is not granted by this approval.
+`execute_inner`, a classified `use_default` command runs only when
+`authorized` is true (the registry dispatched it through
+`execute_approved`); otherwise the tool returns an "approval required"
+error and the command does not run. It does not create or consume
+`BashApprovals` exact-command grants: those grants are keyed by session and
+command text only, and an escalated retry of the same text would consume a
+grant given for sandboxed execution. Every production registry that holds
+`BashApprovals` also holds the approval service, so `execute_approved` is
+the path in practice. Escalation is not granted by this approval.
 
 Existing policy then applies without change:
 

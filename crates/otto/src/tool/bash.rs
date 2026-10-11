@@ -993,7 +993,7 @@ pub fn bash_definition_with_approvals(private_home: bool) -> ToolDefinition {
     definition(
         "bash",
         &describe(
-            "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the authorized task; include a justification. AUTO reviews the exact command and bounded native script/build facts against original user evidence; missing or changed payloads require human review. Inside the sandbox, a command that changes external state (git push, gh writes, curl or wget uploads, package publish, kubectl/helm/terraform changes) or deletes workspace or repository content (git reset --hard, git clean -f, rm -r, find -delete) waits for the same approval without a justification, then runs in the sandbox. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. Persistent security grants require a person in AUTO. The command runs only after authority is recorded; MANUAL asks, NEVER rejects additional authority, and YOLO bypasses review while retaining hard checks.",
+            "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the authorized task; include a justification. AUTO reviews the exact command and bounded native script/build facts against original user evidence; missing or changed payloads require human review. A command that changes external state (git push, gh writes, curl or wget uploads, package publish, kubectl/helm/terraform changes) or deletes workspace or repository content (git reset --hard, git clean -f, rm -r, find -delete) waits for the same approval without a justification, then runs in the sandbox, or outside it when it matches [sandbox] excluded_commands. To request persistent sandbox read access, set sandbox_read_path to one absolute existing path and include a justification; keep sandbox_permissions as use_default. Persistent security grants require a person in AUTO. The command runs only after authority is recorded; MANUAL asks, NEVER rejects additional authority, and YOLO bypasses review while retaining hard checks.",
             private_home,
         ),
         json!({
@@ -1091,7 +1091,8 @@ impl Tool for BashTool {
         let version=serde_json::json!({"arguments":crate::approval::digest(arguments.get()),"config":config_version,"path":read_path,"facts":crate::approval::digest(&facts.to_string())}).to_string();
         // One escalation leaves the sandbox for a single command; a read path
         // is a persistent grant outside the workspace; a gated command runs
-        // in the sandbox after one approval.
+        // in the sandbox after one approval, and a gated excluded command
+        // runs outside the sandbox after one approval.
         let (authority, title) = match &gate {
             Some((shell::Effect::ExternalState, _)) => (
                 crate::approval::Authority::Boundary,
@@ -1113,7 +1114,7 @@ impl Tool for BashTool {
         let mut details = serde_json::json!({"command":args.command,"workspace":self.workspace_root,"read_path":read_path,"native_facts":facts});
         let mut reason = args.justification;
         if let Some((effect, segment)) = &gate {
-            details["sandboxed"] = true.into();
+            details["sandboxed"] = (!excluded).into();
             details["effect"] = serde_json::json!({"class":effect.as_str(),"segment":segment});
             if reason.trim().is_empty() {
                 reason = match effect {
@@ -1307,13 +1308,14 @@ impl Tool for BashTool {
 }
 
 impl BashTool {
-    /// The effect class and command words when this call runs in the sandbox
-    /// but needs approval: approvals are available, the command is not
-    /// excluded and it changes external state or deletes content.
+    /// The effect class and command words when this call needs approval for
+    /// its effect: approvals are available and it changes external state or
+    /// deletes content. An excluded command is gated whatever its
+    /// `sandbox_permissions`, because every excluded command runs on the
+    /// excluded executor.
     fn effect_gate(&self, args: &BashArgs, excluded: bool) -> Option<(shell::Effect, Vec<String>)> {
-        if args.sandbox_permissions != SandboxPermissions::UseDefault
-            || !args.sandbox_read_path.is_empty()
-            || excluded
+        if !args.sandbox_read_path.is_empty()
+            || (args.sandbox_permissions != SandboxPermissions::UseDefault && !excluded)
             || !self.dynamic_content
             || self.approvals.is_none()
         {
@@ -1381,27 +1383,26 @@ Only the user or their session approval mode can approve; do not run /approve in
         if !self.dynamic_content {
             return self.execute_suppressed(&args.command, cancel).await;
         }
-        // An excluded command never asks for approval and never consumes one.
+        // An excluded command needs no escalation grant and never consumes
+        // one; a classified excluded command still needs the effect approval.
         let excluded = self.excluded.as_ref().filter(|excluded| {
             args.sandbox_read_path.is_empty() && excluded.matches(&args.command)
         });
+        if !authorized && let Some((effect, segment)) = self.effect_gate(&args, excluded.is_some())
+        {
+            let what = match effect {
+                shell::Effect::ExternalState => "changes external state",
+                shell::Effect::Destructive => "deletes workspace or repository content",
+            };
+            let segment = serde_json::to_string(&segment.join(" ")).expect("string encodes");
+            return self.argument_error(&format!(
+                "approval required: this command {what} ({segment}).\n\
+The command did not run. This tool call has no approval flow; ask the user to run the command or to approve it in a session with approvals."
+            ));
+        }
         let (executor, environment) = match (excluded, args.sandbox_permissions) {
             (Some(excluded), _) => (&excluded.executor, excluded.environment.as_slice()),
-            (None, SandboxPermissions::UseDefault) => {
-                if !authorized && let Some((effect, segment)) = self.effect_gate(&args, false) {
-                    let what = match effect {
-                        shell::Effect::ExternalState => "changes external state",
-                        shell::Effect::Destructive => "deletes workspace or repository content",
-                    };
-                    let segment =
-                        serde_json::to_string(&segment.join(" ")).expect("string encodes");
-                    return self.argument_error(&format!(
-                        "approval required: this command {what} ({segment}).\n\
-The command did not run. This tool call has no approval flow; ask the user to run the command or to approve it in a session with approvals."
-                    ));
-                }
-                (&self.executor, self.environment.as_slice())
-            }
+            (None, SandboxPermissions::UseDefault) => (&self.executor, self.environment.as_slice()),
             (None, SandboxPermissions::RequireEscalated) => {
                 if args.justification.trim().is_empty() {
                     return self.argument_error("justification is required for elevated execution");
@@ -2346,16 +2347,73 @@ The command did not run. Only the user or their session approval mode can approv
     }
 
     #[test]
-    fn effect_gate_needs_approvals_and_skips_excluded_commands() {
+    fn effect_gate_needs_approvals_and_covers_excluded_commands() {
         let (_dir, workspace) = temp_workspace();
         let sandboxed = Arc::new(FakeExecutor::default());
         let plain = bash(&workspace, sandboxed.clone(), &[], 1024, &[]);
         assert!(use_default_spec(&plain, "git push").is_none());
 
-        let list = excluded(&sandboxed, &["git push *"]);
+        let list = excluded(&sandboxed, &["git push *", "lark-cli *"]);
         let (tool, _approvals) = gated_tool(&workspace, &sandboxed, &sandboxed);
         let tool = tool.with_excluded_commands(list);
-        assert!(use_default_spec(&tool, "git push origin").is_none());
+        let spec = use_default_spec(&tool, "git push origin").unwrap();
+        assert_eq!(spec.authority, crate::approval::Authority::Boundary);
+        let details: serde_json::Value = serde_json::from_str(&spec.details).unwrap();
+        assert_eq!(details["sandboxed"], false);
+        assert_eq!(details["effect"]["class"], "external_state");
+
+        let escalated = json!({"command":"git push origin","sandbox_permissions":"require_escalated","justification":"publish"}).to_string();
+        let spec = tool.approval_spec(&raw(&escalated)).unwrap().unwrap();
+        assert_eq!(spec.authority, crate::approval::Authority::Boundary);
+        let details: serde_json::Value = serde_json::from_str(&spec.details).unwrap();
+        assert_eq!(details["sandboxed"], false);
+
+        assert!(use_default_spec(&tool, "lark-cli docs list").is_none());
+    }
+
+    fn excluded_effect_tool(
+        workspace: &Workspace,
+        sandboxed: &Arc<FakeExecutor>,
+        unconfined: &Arc<FakeExecutor>,
+    ) -> BashTool {
+        let (tool, _approvals) =
+            gated_tool(workspace, sandboxed, &Arc::new(FakeExecutor::default()));
+        tool.with_excluded_commands(excluded(unconfined, &["git push *"]))
+    }
+
+    #[tokio::test]
+    async fn unauthorized_excluded_effect_command_does_not_run() {
+        let (_dir, workspace) = temp_workspace();
+        let sandboxed = Arc::new(FakeExecutor::default());
+        let unconfined = Arc::new(FakeExecutor::default());
+        let tool = excluded_effect_tool(&workspace, &sandboxed, &unconfined);
+
+        let result = run(&tool, "git push origin").await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("approval required"),
+            "{}",
+            result.content
+        );
+        assert_eq!((sandboxed.calls(), unconfined.calls()), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn approved_excluded_effect_command_runs_unconfined() {
+        let (_dir, workspace) = temp_workspace();
+        let sandboxed = Arc::new(FakeExecutor::default());
+        let unconfined = Arc::new(FakeExecutor::default());
+        let tool = excluded_effect_tool(&workspace, &sandboxed, &unconfined);
+
+        let arguments = json!({ "command": "git push origin" }).to_string();
+        let result = tool
+            .execute_inner(&raw(&arguments), &CancellationToken::new(), true)
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!((sandboxed.calls(), unconfined.calls()), (0, 1));
+        let request = &unconfined.requests()[0];
+        assert!(request.argv.iter().any(|arg| arg == "git push origin"));
+        assert_eq!(request.env, strings(&["HOME=/real-home"]));
     }
 
     #[tokio::test]

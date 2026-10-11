@@ -261,14 +261,24 @@ impl Provider for FakeProvider {
                 crate::model::EffectCertainty::NotStarted,
             );
         };
+        // Every scripted retry event starts one more attempt.
+        let attempts = 1 + u32::try_from(
+            turn.events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::Retry { .. }))
+                .count(),
+        )
+        .expect("small count");
         for event in turn.events {
             emit(event);
         }
         match turn.outcome {
-            Ok(response) => ProviderSettlement::succeeded(response, 1),
-            Err(error) => {
-                ProviderSettlement::failed(error, 1, crate::model::EffectCertainty::Completed)
-            }
+            Ok(response) => ProviderSettlement::succeeded(response, attempts),
+            Err(error) => ProviderSettlement::failed(
+                error,
+                attempts,
+                crate::model::EffectCertainty::Completed,
+            ),
         }
     }
 }
@@ -4607,11 +4617,16 @@ async fn a_summarized_notice_is_carried_in_the_capability_updates_block() {
 struct TurnRecordingSession {
     inner: MemorySession,
     turns: Mutex<Vec<crate::session::TurnRecord>>,
+    calls: Mutex<Vec<crate::session::ProviderCallRecord>>,
 }
 
 impl TurnRecordingSession {
     fn turns(&self) -> Vec<crate::session::TurnRecord> {
         self.turns.lock().expect("turns").clone()
+    }
+
+    fn calls(&self) -> Vec<crate::session::ProviderCallRecord> {
+        self.calls.lock().expect("calls").clone()
     }
 }
 
@@ -4674,6 +4689,11 @@ impl Session for TurnRecordingSession {
                 .lock()
                 .expect("turns")
                 .push(crate::session::decode_turn_record(data).expect("valid turn record"));
+        }
+        if custom_type == crate::session::PROVIDER_CALL_CUSTOM_TYPE {
+            self.calls.lock().expect("calls").push(
+                crate::session::decode_provider_call(data).expect("valid provider call record"),
+            );
         }
         self.inner.append_custom(custom_type, data).await
     }
@@ -5738,4 +5758,149 @@ async fn batching_advice_is_persisted_with_the_third_successful_edit() {
     assert!(!results[1].text.contains("Batching advice"));
     assert!(results[2].text.contains("Batching advice"));
     assert!(results[2].text.contains("This edit succeeded"));
+}
+
+// -- provider call records -------------------------------------------------
+
+/// Options whose clock advances 100 ms on every read.
+fn ticking_options() -> Options {
+    let tick = std::sync::atomic::AtomicI64::new(0);
+    Options {
+        now: Box::new(move || {
+            clock() + chrono::TimeDelta::milliseconds(100 * tick.fetch_add(1, Ordering::SeqCst))
+        }),
+        ..options()
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_retried_request_appends_one_provider_call_record() {
+    use crate::session::ProviderCallKind;
+    let mut turn = Turn::text("final").with_events(vec![
+        StreamEvent::ReasoningDelta {
+            text: "abandoned".into(),
+        },
+        StreamEvent::Retry {
+            attempt: 2,
+            max_attempts: 3,
+            delay: std::time::Duration::from_secs(2),
+            reason: "connection interrupted".into(),
+            interrupted_output: true,
+        },
+        StreamEvent::TextDelta {
+            text: "final".into(),
+        },
+    ]);
+    let usage = Usage {
+        input_tokens: 40,
+        output_tokens: 3,
+        cached_input_tokens: 10,
+    };
+    turn.outcome
+        .as_mut()
+        .expect("scripted response")
+        .message
+        .usage = Some(usage);
+    let agent = Agent::new(
+        FakeProvider::new(vec![turn]),
+        EchoExecutor::default(),
+        TurnRecordingSession::default(),
+        ticking_options(),
+    );
+    agent
+        .run("hello", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+
+    let calls = agent.session().calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.kind, ProviderCallKind::Ordinary);
+    assert_eq!(call.attempts, 2);
+    assert_eq!(call.usage, Some(usage));
+    assert_eq!(call.finish_reason, Some(FinishReason::Stop));
+    // The clock reads 100 ms apart: start, reasoning, retry, text, end.
+    assert_eq!(call.retries.len(), 1);
+    assert_eq!(call.retries[0].at_ms, 200);
+    assert_eq!(call.retries[0].delay_ms, 2000);
+    assert_eq!(call.retries[0].reason, "connection interrupted");
+    // The reasoning delta before the retry does not count.
+    assert_eq!(call.first_output_ms, Some(300));
+    assert_eq!(call.duration_ms, 400);
+    assert_eq!(call.started_at % 100, 0);
+    assert!(call.started_at >= clock().timestamp_millis());
+    let request = call.request.as_ref().expect("request estimate");
+    assert!(request.system_prompt_tokens > 0);
+    assert!(request.message_tokens > 0);
+    assert_eq!(request.memory_tokens, 0);
+    assert!(request.memory_record_ids.is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn provider_call_record_lists_the_recalled_memory_records() {
+    let mut records = one_record();
+    records.push(Record {
+        id: "rec-2".into(),
+        key: "shell".into(),
+        text: "prefers zsh".into(),
+        ..records[0].clone()
+    });
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("ok")]),
+        EchoExecutor::default(),
+        TurnRecordingSession::default(),
+        Options {
+            memory: Some(Arc::new(FakeMemory::with_records(records))),
+            ..options()
+        },
+    );
+    agent
+        .run("hello", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+
+    let calls = agent.session().calls();
+    let request = calls[0].request.as_ref().expect("request estimate");
+    assert_eq!(request.memory_record_ids, ["rec-1", "rec-2"]);
+    assert!(request.memory_tokens > 0);
+    // The memory message is counted once, as memory.
+    let user_only =
+        super::context_estimate::estimate_message(&agent.provider().requests()[0].messages[1]);
+    assert_eq!(request.message_tokens, user_only);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_compaction_appends_a_provider_call_record_of_its_kind() {
+    use crate::session::ProviderCallKind;
+    let mut turn = Turn::summary(&structured_summary());
+    turn.events.push(StreamEvent::Retry {
+        attempt: 2,
+        max_attempts: 4,
+        delay: std::time::Duration::from_secs(1),
+        reason: "connection interrupted".into(),
+        interrupted_output: false,
+    });
+    let agent = Agent::new(
+        FakeProvider::new(vec![turn]),
+        EchoExecutor::default(),
+        TurnRecordingSession {
+            inner: seeded_session().await,
+            ..TurnRecordingSession::default()
+        },
+        options(),
+    );
+    agent
+        .compact("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("compact");
+
+    let calls = agent.session().calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].kind, ProviderCallKind::LocalCompaction);
+    assert_eq!(calls[0].attempts, 2);
+    assert_eq!(calls[0].retries.len(), 1);
+    assert!(calls[0].request.as_ref().expect("estimate").message_tokens > 0);
 }

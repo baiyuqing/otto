@@ -61,6 +61,8 @@ pub struct RunDispatchState {
     pub proactive_attempted: bool,
     /// The rendered memory block, prepended to every request of this turn.
     pub memory_context: String,
+    /// The ids of the records `memory_context` renders.
+    pub memory_record_ids: Vec<String>,
     /// The full redacted tool-result text, keyed by tool-call id, for results
     /// whose stored text is a placeholder. It is substituted into provider
     /// requests only, never into the session.

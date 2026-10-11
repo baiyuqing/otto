@@ -15,7 +15,7 @@ use std::time::Duration;
 use otto::auth::Credentials;
 use otto::auth::token::TokenSource;
 use otto::deadline::{Control, Deadline};
-use otto::faults::http::{self, Script, Server};
+use otto::faults::http::{self, Script, Server, Step};
 use otto::provider::{chatgpt, openaicompat};
 use otto_core::model::{EffectCertainty, OperationDisposition, OperationStopReason};
 use otto_core::operation::OperationControl;
@@ -623,4 +623,133 @@ async fn chatgpt_stall_after_one_content_delta_recovers() {
             ..
         }
     )));
+}
+
+/// A script that sends the head, then `lead`, then an SSE comment every 50 ms
+/// for about 5 s. Every read is far inside the 200 ms read timeout, so only
+/// the model-output idle bound can end the attempt.
+fn keepalive_script(lead: &[&str]) -> Script {
+    let mut script = Script::new(vec![Step::Head {
+        status: 200,
+        headers: vec![("Content-Type".into(), "text/event-stream".into())],
+    }]);
+    for event in lead {
+        script = script.then(Step::Sse((*event).into()));
+    }
+    for _ in 0..100 {
+        script = script
+            .then(Step::Chunk(b": keepalive\n\n".to_vec()))
+            .then(Step::Stall(Some(Duration::from_millis(50))));
+    }
+    script.then(Step::Close)
+}
+
+const IDLE: Duration = Duration::from_millis(500);
+const IDLE_REASON: &str = "model output idle timeout";
+
+fn chatgpt_idle(server: &Server) -> chatgpt::Client {
+    chatgpt::Client::with_http_client(&server.url, tokens("token"), "acct-1", short_timeout_http())
+        .with_model_idle_timeout(IDLE)
+}
+
+fn openai_idle(server: &Server) -> openaicompat::Client {
+    openai_short(server).with_model_idle_timeout(IDLE)
+}
+
+async fn chatgpt_keepalive_retry(lead: &[&str], interrupted_output: bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server = http::spawn_scripted(vec![
+            keepalive_script(lead),
+            Script::sse_without_done(&[TEXT, COMPLETED]),
+        ])
+        .await;
+        let (settlement, events) = complete_plain(&chatgpt_idle(&server)).await;
+        assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
+        assert_eq!(server.count(), 2);
+        assert_eq!(retries(&events), [(2, Duration::from_secs(1), IDLE_REASON)]);
+        let marked: Vec<bool> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Retry {
+                    interrupted_output, ..
+                } => Some(*interrupted_output),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(marked, [interrupted_output]);
+    })
+    .await
+    .expect("the idle bound must end the keepalive-only attempt");
+}
+
+#[tokio::test]
+async fn chatgpt_keepalive_without_model_output_is_retried() {
+    chatgpt_keepalive_retry(&[], false).await;
+}
+
+#[tokio::test]
+async fn chatgpt_keepalive_after_one_delta_is_retried() {
+    chatgpt_keepalive_retry(&[TEXT], true).await;
+}
+
+#[tokio::test]
+async fn chatgpt_spaced_deltas_do_not_time_out() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut script = Script::new(vec![Step::Head {
+            status: 200,
+            headers: vec![("Content-Type".into(), "text/event-stream".into())],
+        }]);
+        // A delta every 300 ms: past the 200 ms read timeout without the
+        // keepalive, inside the 500 ms idle bound with it.
+        for _ in 0..5 {
+            script = script
+                .then(Step::Stall(Some(Duration::from_millis(150))))
+                .then(Step::Chunk(b": keepalive\n\n".to_vec()))
+                .then(Step::Stall(Some(Duration::from_millis(150))))
+                .then(Step::Sse(TEXT.into()));
+        }
+        let script = script.then(Step::Sse(COMPLETED.into())).then(Step::Close);
+        let server = http::spawn_scripted(vec![script]).await;
+        let (settlement, events) = complete_plain(&chatgpt_idle(&server)).await;
+        assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
+        assert!(retries(&events).is_empty());
+        assert_eq!(server.count(), 1);
+    })
+    .await
+    .expect("spaced deltas must complete");
+}
+
+#[tokio::test]
+async fn compat_keepalive_before_output_is_retried() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server = http::spawn_scripted(vec![
+            keepalive_script(&[]),
+            Script::sse_done(&[DELTA, STOP]),
+        ])
+        .await;
+        let (settlement, events) = complete_plain(&openai_idle(&server)).await;
+        assert!(settlement.result.is_ok(), "{:?}", settlement.result.err());
+        assert_eq!(server.count(), 2);
+        assert_eq!(retries(&events), [(2, Duration::from_secs(1), IDLE_REASON)]);
+    })
+    .await
+    .expect("the idle bound must end the keepalive-only attempt");
+}
+
+#[tokio::test]
+async fn compat_keepalive_after_output_fails_without_retry() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server = http::spawn_repeating(keepalive_script(&[DELTA])).await;
+        let (settlement, events) = complete_plain(&openai_idle(&server)).await;
+        let error = format!("{:?}", settlement.result.err());
+        assert!(error.contains("no model output"), "{error}");
+        assert_eq!(
+            settlement.outcome.effect_certainty,
+            EffectCertainty::Unknown
+        );
+        assert!(retries(&events).is_empty());
+        assert_eq!(server.count(), 1);
+    })
+    .await
+    .expect("the idle bound must end the keepalive-only stream");
 }

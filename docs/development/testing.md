@@ -84,8 +84,10 @@ HTTP faults use `otto::faults::http`, a raw-TCP loopback server:
   `late_listener(port, after, scripts)` starts listening after a delay.
 
 A test that reads a response from a live socket runs in real time: paused
-tokio time advances into the client's 60 s read timeout while the socket is
-idle. The slowest provider rows wait out the 1, 2 and 4 s retry backoff.
+tokio time advances into the client's 60 s read timeout and the provider's
+model-output idle deadline while the socket is idle. Rows that exercise the
+idle deadline set it to 500 ms with `with_model_idle_timeout`. The slowest
+provider rows wait out the 1, 2 and 4 s retry backoff.
 
 A fault test must prove the fault fired: assert the request count or the
 recorded request, not only that the client returned an error. The provider

@@ -205,7 +205,7 @@ guards these dependency directions.
 | Model-requested reflection (`reflect` tool) and run logs | `tool/reflect.rs` (port), `app/requested_reflection.rs` (binding), `reflection/runlog.rs` (`/reflect list|show`) | [Design](specs/2026-10-05-reflect-tool.md), `cli/repl_commands.rs` (`reflect_runs_report`) |
 | Web fetch and search tools, destination policy | `tool/web/` (`policy.rs` is the SSRF boundary) | [Design](specs/2026-10-04-web-fetch.md), `runtime/builder.rs` (`web_tools`), `reflection/taint.rs` |
 | Native tool execution or sandbox behavior | `crates/otto/src/tool/` or `sandbox/` | Workspace and sandbox contract tests |
-| Bash command parsing for approval rules and review facts | `crates/otto/src/tool/shell.rs` | [Design](specs/2026-10-11-shell-command-analysis.md), `tool/bash.rs`, `approval/policy.rs`, `otto-core/src/approval/rules.rs` |
+| Bash command parsing for approval rules, review facts and effect classification | `crates/otto/src/tool/shell.rs` | [Design](specs/2026-10-11-shell-command-analysis.md), `tool/bash.rs`, `approval/policy.rs`, `otto-core/src/approval/rules.rs` |
 | Web API or browser behavior | `crates/otto/src/server/` or external otto-plus | `otto-core` for shared wire codecs |
 | ACP integrations | `crates/otto/src/acp/` | `client/` for attach mode; `chat-connector/` for chat connector behavior |
 | Wake-turn replies sent outside a prompt | `app/approval.rs` (`run_with_channel`), `acp/mod.rs` wake loop | [Design](specs/2026-10-04-acp-wake-replies.md), the `wake-replies` HTTP route, `client/`, `chat-connector/internal/bridge` |

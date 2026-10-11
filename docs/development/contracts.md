@@ -45,6 +45,12 @@ leading static words of every simple command (`ShellCommand`). An allow
 `command_prefix` rule matches only a fully static list/pipeline whose every
 segment has the prefix; a deny or ask prefix rule matches any segment, also
 in a command with expansions. Other allow rules skip non-static commands.
+`shell::classify` marks a sandboxed `use_default` command that changes
+external state (`Boundary`) or deletes workspace content (`Bounded`); the bash
+tool then returns an approval spec with `sandboxed: true` and `effect`, and
+runs the command in the sandbox only through `execute_approved`. It never
+creates or consumes `BashApprovals` grants, which are keyed by command text
+and also authorize escalation.
 
 Native `approval/reviewer.rs` defines the isolated `ReviewProvider` and immutable
 `ReviewContext`; the service owns coordination, journal/leases and decisions.

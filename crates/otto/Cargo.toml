@@ -16,7 +16,10 @@ storage-conformance = []
 fault-injection = []
 
 [dependencies]
-shlex = "=2.0.1"
+# Static shell analysis for approval rules and review facts (`tool::shell`).
+# Native-only C grammar; otto-core must stay wasm32-buildable.
+tree-sitter = "=0.27.0"
+tree-sitter-bash = "=0.25.1"
 otto-core.workspace = true
 async-trait.workspace = true
 base64.workspace = true

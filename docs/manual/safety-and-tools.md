@@ -35,8 +35,13 @@ User questions, explicit approval checkpoints, workflow human gates and security
 authority changes still require you in AUTO. A previously authorized operation
 does not need the same confirmation again. The model cannot invent a new choice.
 User/managed permission rules are checked first: deny takes precedence over ask,
-which takes precedence over allow. A command-prefix rule applies only to a
-strictly simple command; a complex shell program requires review.
+which takes precedence over allow. Otto parses the command and checks each
+simple command in it. An `allow` command-prefix rule applies when every
+command joined by `&&`, `||`, `;` or `|` starts with the prefix and the
+program uses no expansions, substitutions, control flow or redirects other
+than `2>&1` and output to `/dev/null`; anything else requires review. A `deny` or
+`ask` command-prefix rule applies when any command starts with the prefix,
+so `["git", "push"]` also matches `git push origin "$BRANCH"`.
 
 User or managed configuration can set defaults in `[approval]` and select an
 existing configured profile with `reviewer_profile`. Without an override, the

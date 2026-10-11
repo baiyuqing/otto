@@ -34,54 +34,13 @@ confirmation; seek clarification only for material scope or contract changes.
 ## Rust workflow
 
 Full host validation uses macOS 26+ with standalone Command Line Tools selected.
-Linux builds and runs Otto without a sandbox, so its gate is `make check-linux`,
-which CI runs on `ubuntu-24.04`: the same format, lint, test, wasm-check and
+Linux builds and runs Otto without a sandbox, so its gate is `make check-linux`:
+the same format, lint, test, wasm-check and
 PTY targets, minus the Seatbelt conformance suite, which is compiled only for
 macOS, and minus the release build, the Node wasm tests, and the web UI, which
-are platform independent and stay on the macOS job. Keep platform-specific
+are platform independent and stay in the macOS gate. Keep platform-specific
 code behind `cfg` rather than runtime checks, so a target that cannot use it
 does not compile it.
-On macOS, CI runs `make check` as two parallel jobs: `macOS lint` runs
-`rust-fmt` and `rust-lint`, and `macOS acceptance` runs `make check-tests`,
-which is everything else in `check`. Clippy compiles the workspace a second
-time, so running it beside the tests takes it off the critical path; the lint
-job keeps its own dependency cache, since the tests' cache holds no
-check-mode metadata.
-A documentation-only change skips every gate. The workflow's `changes` job
-classifies the diff first: when every changed path is ordinary Markdown, under
-`docs/`, or `LICENSE`, the gates start and skip every step, so they still report
-a status without installing a toolchain. Runtime `SKILL.md` and `AGENT.md`
-definitions are product inputs rather than documentation and always run the
-full gate, as does anything else — including a workflow edit or
-`testdata/server/openapi.yaml`. An unusual range, such as a new branch or a
-force push that dropped the old tip, also runs it.
-
-### CI build cache
-
-Most of a CI run is compilation, so the workflow keeps it down in three ways:
-
-- It sets `CARGO_INCREMENTAL=0` and `line-tables-only` debuginfo for the dev
-  and test profiles. A CI build never reuses incremental state, and line
-  tables are enough for a failing test's backtrace. Local builds keep Cargo's
-  defaults.
-- The cargo cache holds the registry and the third-party part of `target/`,
-  keyed by the root `Cargo.toml` (which holds the profiles), `Cargo.lock` and
-  `rust-toolchain.toml`. A run saves it only when no
-  cache matched the key exactly, after `node scripts/ci-cache.mjs prune`
-  removes the workspace crates' own output, which changes with every commit
-  and is most of `target/`. A failed gate still saves once
-  `cargo test --workspace --no-run` finishes the build, since the key is
-  saved only once and a failing test would otherwise leave every later run
-  building cold. A push to `main` restores only an exact match, so
-  the cache it saves never accumulates artifacts of older lock files; a pull
-  request may fall back to `main`'s previous cache. Bump the `v2-` key prefix
-  when a workflow change makes the cached artifacts unusable, such as the
-  `CARGO_PROFILE_*` variables.
-- `wasm-pack` and `wasm-bindgen-cli` are cached by version, saved right
-  after they are installed. wasm-pack uses the
-  `wasm-bindgen` on `PATH` when it matches the version `Cargo.lock` pins
-  (`node scripts/ci-cache.mjs lock-version wasm-bindgen`); without it,
-  wasm-pack compiles its own copy on every run.
 
 Each gate builds `crates/otto` once per feature set, so its targets must not
 ask Cargo for a different one; see `connect-check` below. The root
@@ -91,9 +50,9 @@ runs them about three times faster at a compile cost paid once per Turso
 version.
 
 The copied Apple broker fixtures are ad-hoc-signed arm64e executables, which
-require the third-party arm64e support introduced in macOS 26. CI selects
-`/Library/Developer/CommandLineTools` so Git and Clang use the existing reviewed
-developer read root. See [the workflow](../../.github/workflows/checks.yml) for pins.
+require the third-party arm64e support introduced in macOS 26. Select
+`/Library/Developer/CommandLineTools` with `xcode-select` so Git and Clang use
+the existing reviewed developer read root.
 
 `rust-toolchain.toml` pins the exact channel (1.98.0) and the
 `wasm32-unknown-unknown` target; `rustup toolchain install` in a repository
@@ -106,7 +65,7 @@ The canonical Make targets are:
 ```bash
 make check-fast     # manual use only: the checks for paths changed since origin/main
 make check          # full macOS gate: rust-fmt, rust-lint, all tests (PTY tests included), core wasm tests (no release build)
-make check-tests    # `check` without rust-fmt and rust-lint (CI's macOS acceptance job)
+make check-tests    # `check` without rust-fmt and rust-lint
 make build          # the release build: cargo build --release, then copy ./otto
 make install        # build and install otto, otto-connect and bundled skills
 make rust-fmt       # cargo fmt --all -- --check
@@ -128,16 +87,15 @@ checks, and the core wasm tests under Node. It does not run `cargo build
 --release` or `rust-wasm-check`; `make build` is the release build, and
 `make check-linux` runs `rust-wasm-check`.
 
-`connect-check` needs the Go version named in `chat-connector/go.mod`; CI installs it
-with `actions/setup-go`. It gets `target/debug/otto` from
+`connect-check` needs the Go version named in `chat-connector/go.mod`. It gets `target/debug/otto` from
 `cargo test --workspace --no-run`, which resolves the same features as
 `rust-test` and so reuses its build; `cargo build -p otto` would leave the
 dev-dependency features off and recompile most of the dependency tree. Its end-to-end tests drive the real
 `otto acp`, and `otto serve` with `otto acp --attach`, from `target/debug/otto`
 against a loopback fake provider, so they are offline like the Rust tests.
 
-`rust-wasm-test` needs `wasm-pack` (pinned to
-0.15.0 in CI via `cargo install wasm-pack --version 0.15.0 --locked`).
+`rust-wasm-test` needs `wasm-pack`
+(`cargo install wasm-pack --version 0.15.0 --locked`).
 The PTY tests (`tui_pty`, `tui_attach_pty`) open a pseudo-terminal, which is
 unavailable in some sandboxed shells; `cargo test --workspace` runs them, and
 `make test-tui` runs only them. Neither gate runs `test-tui` separately:
@@ -178,7 +136,7 @@ dependency graph (`cargo metadata --locked`, all targets), and fails when a lice
 satisfied by the allowlist `ALLOWED`: MIT, Apache-2.0, BSD-2-Clause,
 BSD-3-Clause, ISC, Zlib, Unicode-3.0 and Unlicense. An `OR` expression passes
 when one alternative is allowed; `AND` requires all. The check needs network
-access in CI only if `cargo metadata` has to fetch crates. `cargo metadata`
+access only if `cargo metadata` has to fetch crates. `cargo metadata`
 resolves features for all targets together with dev-dependencies, so the
 checked set also contains optional crates that a release build does not
 compile (36 of 479 on 2026-10-05); such a crate can fail the check without
@@ -198,11 +156,10 @@ binaries are distributed, the MIT, BSD and Apache-2.0 terms require one.
 
 ### Local verification
 
-CI runs `make check` and `make check-linux` on every PR; do not build or test
-locally. Before committing a Rust change, run only `cargo fmt --all`. Opening
-the PR ends the task; do not poll CI. When asked to fix a failed run, read
-only the failed jobs' log with `gh run view <run-id> --log-failed`, fix the
-cause, and push; do not rerun the gate locally to reproduce it.
+`make check` (macOS) and `make check-linux` (Linux) are the full gates. The
+repository has no CI, so no gate runs on a PR. Do not build or test locally;
+before committing a Rust change, run only `cargo fmt --all`. Opening the PR
+ends the task.
 
 `make check-fast` remains for manual use. It runs `scripts/check-changed.mjs`,
 whose `plan` function maps the paths changed since
@@ -241,22 +198,20 @@ changes and blocks commits on findings or scanner errors, including a missing
 Gitleaks binary. The hook is shared with this clone's worktrees; installation
 refuses to overwrite a different hook. Other clones need their own setup.
 
-The independent **Secret scan** CI job scans full Git history on every PR and
-push to `main`, including documentation-only changes. It uses Gitleaks 8.30.1
-with a pinned download checksum and redacted output. Configure this job as a
-required status check for `main`. GitHub Secret Scanning and Push Protection
-provide complementary server-side detection for supported secret types.
+No CI job scans pushed history; the hook and a manual scan are the only
+Gitleaks checks. GitHub Secret Scanning and Push Protection provide
+server-side detection for supported secret types.
 
 For a manual scan, run `gitleaks git -v --redact --ignore-gitleaks-allow` from
 the repository root. Inline `gitleaks:allow` comments do not bypass the hook
-or CI. The root `.gitleaksignore` lists reviewed historical false positives
+or a manual scan. The root `.gitleaksignore` lists reviewed historical false positives
 by exact fingerprint, with a reason for each group. All files and new commits
 remain scanned. Before adding an entry, inspect the finding in its original
 commit and confirm its provenance; do not ignore whole test directories,
 rules, or commits. Changes to ignore lists or scanner configuration need the
 same careful review as security-sensitive code.
 
-Hooks can be bypassed and CI runs after upload; neither guarantees that secrets
+Hooks can be bypassed, so the hook does not guarantee that secrets
 never reach the remote. Keep real credentials outside tracked files. If a real
 secret is uploaded, revoke or rotate it immediately; deleting it in a later
 commit leaves it in history.

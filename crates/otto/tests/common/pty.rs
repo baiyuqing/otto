@@ -283,10 +283,10 @@ pub fn wait_until(shared: &Shared, what: &str, mut predicate: impl FnMut(&Shared
             return;
         }
         if start.elapsed() > WAIT_TIMEOUT {
-            panic!(
-                "timed out after {WAIT_TIMEOUT:?} waiting for {what}\nscreen:\n{}",
-                shared.screen.lock().unwrap().dump()
-            );
+            // Release the lock before panicking so the reader thread does not
+            // fail on a poisoned mutex after the real failure.
+            let screen = shared.screen.lock().unwrap().dump();
+            panic!("timed out after {WAIT_TIMEOUT:?} waiting for {what}\nscreen:\n{screen}");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -322,12 +322,15 @@ pub fn wait_for_raw_bytes(shared: &Shared, needle: &[u8]) {
     );
 }
 
-/// Spawns `command` on a 120x30 PTY and starts the reader thread that feeds
-/// the screen. Returns the master (type into it), the child and the screen.
+/// Spawns `command` in a new session on a 120x30 PTY and starts the reader
+/// thread that feeds the screen. Returns the master (type into it), the child
+/// and the screen.
+#[allow(unsafe_code)]
 pub fn spawn(
     mut command: std::process::Command,
 ) -> (std::fs::File, std::process::Child, std::sync::Arc<Shared>) {
     use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
     let winsize = nix::pty::Winsize {
         ws_row: 30,
@@ -342,6 +345,21 @@ pub fn spawn(
         .stdin(Stdio::from(slave.try_clone().expect("clone slave")))
         .stdout(Stdio::from(slave.try_clone().expect("clone slave")))
         .stderr(Stdio::from(slave));
+    // crossterm reads the window size from `/dev/tty` before stdout. The
+    // child otherwise keeps the controlling terminal of whatever ran
+    // `cargo test`, so a run from an interactive terminal draws frames sized
+    // to that terminal. A new session has no controlling terminal: opening
+    // `/dev/tty` fails and crossterm falls back to stdout, this PTY.
+    // SAFETY: runs in the forked child before exec; `setsid` is
+    // async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let child = command.spawn().expect("spawn the otto binary");
     let shared = std::sync::Arc::new(Shared {
         screen: Mutex::new(Screen::new(120, 30)),

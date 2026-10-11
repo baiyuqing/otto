@@ -235,6 +235,28 @@ the request to the user, as for escalations today.
 The bash tool description (approval variant) states that classified
 commands wait for approval and then run inside the sandbox.
 
+## Part 3: approval for classified excluded commands
+
+Decision (user, 2026-10-11): a command matching `[sandbox] excluded_commands`
+goes through the Part 2 classification and approval. This changes the earlier
+contract that an excluded command never asks.
+
+- `effect_gate` classifies a command when `sandbox_read_path` is empty and
+  the command is either `use_default` or an excluded command. An excluded
+  command is gated whatever its `sandbox_permissions`, because
+  `execute_inner` sends every excluded command to the excluded executor.
+- The approval spec is the Part 2 spec with `"sandboxed": false`.
+- `execute_inner` applies the gate before it selects the executor. An
+  unauthorized classified excluded command returns the "approval required"
+  error and does not run; an authorized one runs on the excluded executor
+  with the excluded environment.
+- An excluded command that is not classified runs as before, without an
+  approval request.
+- `/approve <id> always` is unchanged. It adds an exact entry; when that
+  command is classified, it still asks on each run.
+- The tool description states that a classified command runs outside the
+  sandbox after approval when it matches `excluded_commands`.
+
 ## Limitations
 
 - Commands executed by scripts, `make`, `npm run`, `python -c`, `bash -c`
@@ -243,14 +265,16 @@ commands wait for approval and then run inside the sandbox.
   boundary. Only `[sandbox] network = "deny"` stops network writes from
   those programs.
 - Cloud CLIs (`aws`, `gcloud`, `az`) are not classified.
-- `[sandbox] excluded_commands` run outside the sandbox without approval, as
-  before; a classified excluded command does not ask.
+- A classified `[sandbox] excluded_commands` match asks before it runs
+  (Part 3); an excluded command added by `/approve <id> always` therefore
+  still asks on each run when it is classified.
 - `Destructive` requests prompt only in MANUAL.
 - NEVER rejects `ExternalState` requests that it ran before this change,
   unless an allow rule matches.
 - The gate needs the bash tool's approval support, which startup creates
   only with an active Seatbelt sandbox (`runtime/startup.rs`, `elevate`).
-  With `--sandbox off` and on Linux no classified command asks.
+  With `--sandbox off`, on Linux and in `otto --prompt` runs (`elevate` is
+  false) no classified command asks, including an excluded one.
 
 ## Tests
 
@@ -264,3 +288,7 @@ commands wait for approval and then run inside the sandbox.
   `gh pr view`, `curl -I`, `rm file`, `git restore --staged`); approval
   spec authority/title/details; `execute_inner` refuses an unapproved
   classified command and runs an approved one with the sandboxed executor.
+- Part 3: a classified excluded command yields a spec with
+  `sandboxed: false` for `use_default` and `require_escalated`; an
+  unapproved one runs on no executor; an approved one runs on the excluded
+  executor; an unclassified excluded command (`lark-cli`) needs no approval.

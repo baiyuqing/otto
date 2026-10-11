@@ -717,16 +717,21 @@ minutes; cancellation withdraws pending foreground requests. Persistent
 read-path requests explicitly disclose that they change sandbox configuration.
 
 Commands matching `[sandbox].excluded_commands` run through the same unconfined
-driver without an approval. They apply to child agents and `otto --prompt`
-runs as well, and only to simple commands; see
-[`[sandbox]`](getting-started.md#configuration) for the entry syntax and the rule.
+driver without an escalation approval. An excluded command in one of the
+[classified commands](#classified-commands-wait-for-approval-inside-the-sandbox)
+classes still waits for that approval and then runs unconfined. Exclusions
+apply to child agents and `otto --prompt` runs as well, and only to simple
+commands; see [`[sandbox]`](getting-started.md#configuration) for the entry
+syntax and the rule.
 
 ### Classified commands wait for approval inside the sandbox
 
-Under Seatbelt, Otto parses each `use_default` command and classifies it
-before it runs. A command in one of two classes creates an approval request;
-after approval it runs inside the sandbox, without escalation. The model does
-not need to give a justification.
+Under Seatbelt, Otto parses each `use_default` command and each command
+matching `[sandbox].excluded_commands`, and classifies it before it runs. A
+command in one of two classes creates an approval request; after approval it
+runs inside the sandbox, without escalation, or through the unconfined driver
+when it is an excluded command. The model does not need to give a
+justification.
 
 | Class | Commands | Authority |
 | --- | --- | --- |
@@ -757,9 +762,12 @@ Limits of this check:
   `npm run`, `python -c`, `bash -c` or `eval` are not classified. Only
   `[sandbox] network = "deny"` stops network writes from them.
 - Cloud CLIs such as `aws`, `gcloud` and `az` are not classified.
-- [`excluded_commands`](getting-started.md#configuration) still run without
-  approval, and a `require_escalated` request keeps its own approval.
-- With `--sandbox off` and on Linux, commands are not classified.
+- A `require_escalated` request that is not an excluded command keeps its
+  own approval.
+- `/approve <id> always` adds the command to `excluded_commands`; a
+  classified command added this way still asks on each run.
+- With `--sandbox off`, on Linux and in `otto --prompt` runs, which have no
+  approval flow, commands are not classified.
 
 ### Git metadata is read-only in the Seatbelt sandbox
 

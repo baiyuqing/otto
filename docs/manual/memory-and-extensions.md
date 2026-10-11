@@ -251,21 +251,7 @@ and scope, while requests needing a user decision remain pending.
 `/memory review` lists the pending candidates for the current user and workspace scopes (id,
 scope, action, kind, key, text, reason, confidence, origin), and `/memory review <id> accept`
 or `/memory review <id> reject` decides one. Accepting creates the active record (or applies the
-update or forget); rejecting leaves memory unchanged. A memory review remains visible after
-`/new`, resume or a restart: Otto reconciles persisted candidates with the workspace's approval
-queue before listing them, including candidates whose original publication was interrupted.
-Variants created by older versions with session-only approval visibility are repaired through the
-same idempotent reconciliation; no database editing is required.
-
-The session-open notice and `/memory review` use the same reconciled actionable set, including all
-pages. If the notice reports a count, the review list exposes those candidates rather than counting
-unreviewable candidate rows. ACP review pagination uses the memory store's opaque cursor. If a
-candidate changes between pages, the endpoint returns a memory conflict; restart paging with an
-empty cursor to read the new actionable set without silently skipping an item.
-
-`otto memory status` reports the number of persisted pending candidate rows in the current scopes;
-it does not start the approval runtime or perform reconciliation.
-
+update or forget); rejecting leaves memory unchanged.
 
 #### Advice on candidates
 
@@ -310,8 +296,16 @@ first prompt, and a local `otto acp` session sends it as a notice for that
 session. `GET /v1/sessions/{id}/notices` returns it, but the Web UI and ACP
 connections through `otto serve` (`otto acp --attach` and ACP TCP) start at the
 current notice cursor and do not show it; the chat connector shows pending
-candidates after each turn instead. A candidate stays pending until you decide
-it; it does not expire.
+candidates after each turn instead. `otto memory status` prints the number of
+storage-level pending candidates in the same scopes; this diagnostic count can
+include a candidate whose approval is no longer awaiting human review. A
+candidate stays pending until you decide it; it does not expire, and its
+one-shot review remains visible after the session that proposed it ends.
+
+ACP memory review pages use the memory store's opaque snapshot cursor. If a
+candidate changes between page requests, `_otto/memory/pending` returns a memory
+conflict; restart with an empty cursor to read the new actionable set without
+silently skipping a candidate.
 
 ### Standing preferences
 

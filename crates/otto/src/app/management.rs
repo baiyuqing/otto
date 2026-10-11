@@ -403,9 +403,22 @@ impl Controller {
                     last.map(|e| format!(": {e}")).unwrap_or_default()
                 ))
             }
-            MemoryReviewList => Ok(Reply::MemoryCandidates(
-                self.pending_memory_reviews().map_err(|e| e.to_string())?,
-            )),
+            MemoryReviewList => {
+                let Some((service, user, workspace)) = self.memory_manager() else {
+                    return Err("memory is not available".into());
+                };
+                let pending = self
+                    .approval_snapshot()
+                    .map_err(|error| error.to_string())?;
+                let candidates = crate::approval::memory::human_pending_candidates(
+                    &service,
+                    &[user, workspace],
+                    &pending.requests,
+                    SEARCH_LIMIT,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(Reply::MemoryCandidates(candidates))
+            }
             MemoryReview { id, decision } => {
                 let Some((service, user, workspace)) = self.memory_manager() else {
                     return Err("memory is not available".into());

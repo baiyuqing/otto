@@ -441,7 +441,7 @@ impl Controller {
     }
 
     /// Queues the notices about memory that needs the user's attention:
-    /// actionable candidates in the current user and workspace scopes, and
+    /// pending candidates in the current user and workspace scopes, and
     /// standing preferences that recall does not inject because the standing
     /// set is over its budget. Called once per session open: on construction
     /// and when `commit` installs a replacement session.
@@ -450,13 +450,19 @@ impl Controller {
         if !memory.usable {
             return;
         }
-        if let Ok(candidates) = self.pending_memory_reviews()
-            && let Some(oldest) = candidates
-                .iter()
-                .map(|candidate| candidate.created_at)
-                .min()
+        let scopes = [
+            memory.user_scope.clone(),
+            self.builder.workspace_scope.clone(),
+        ];
+        if let Ok(pending) = self.approval_snapshot()
+            && let Ok(summary) = crate::approval::memory::human_pending_summary(
+                &memory.service,
+                &scopes,
+                &pending.requests,
+            )
+            && let Some(oldest) = summary.oldest
         {
-            let line = match candidates.len() {
+            let line = match summary.count {
                 1 => format!(
                     "1 memory proposal is pending review (since {}). Run /memory review to accept or reject it.",
                     oldest.format("%Y-%m-%d")
@@ -1159,69 +1165,6 @@ impl Controller {
         self.approval_service().apply_available(&scope.workspace)?;
         self.approval_service()
             .snapshot(&scope.workspace, Some(&scope.session_id))
-    }
-
-    /// Returns one stable storage-cursor page of memory candidates that the
-    /// current session can act on. Reconciliation runs first so a persisted
-    /// candidate whose publication was interrupted, or whose legacy approval
-    /// was session-scoped, becomes visible.
-    pub fn pending_memory_review_page(
-        &self,
-        cursor: &str,
-        limit: usize,
-    ) -> crate::memory::Result<crate::memory::CandidatePage> {
-        if limit == 0 || limit > crate::memory::MAX_PAGE_SIZE {
-            return Err(crate::memory::Error::new(
-                crate::memory::ErrorKind::InvalidRequest,
-            ));
-        }
-        let (memory, user, workspace) = self
-            .memory_manager()
-            .ok_or_else(|| crate::memory::Error::new(crate::memory::ErrorKind::Unavailable))?;
-        let approvals = self
-            .approval_snapshot()
-            .map_err(|_| crate::memory::Error::new(crate::memory::ErrorKind::Unavailable))?;
-        let scopes = vec![user, workspace];
-        let mut candidates = Vec::new();
-        let mut next_cursor = cursor.to_owned();
-        loop {
-            let previous_cursor = next_cursor.clone();
-            let page = memory.list_candidates(&crate::memory::CandidateListRequest {
-                scopes: scopes.clone(),
-                states: vec![crate::memory::CandidateState::Pending],
-                limit: limit - candidates.len(),
-                cursor: next_cursor,
-            })?;
-            candidates.extend(page.candidates.into_iter().filter(|candidate| {
-                crate::approval::memory::is_human_pending(candidate, &approvals.requests)
-            }));
-            next_cursor = page.next_cursor;
-            if candidates.len() == limit || next_cursor.is_empty() {
-                return Ok(crate::memory::CandidatePage {
-                    candidates,
-                    next_cursor,
-                });
-            }
-            if next_cursor == previous_cursor {
-                return Err(crate::memory::Error::new(
-                    crate::memory::ErrorKind::Conflict,
-                ));
-            }
-        }
-    }
-
-    /// Returns every actionable memory candidate across all storage pages.
-    pub fn pending_memory_reviews(&self) -> crate::memory::Result<Vec<crate::memory::Candidate>> {
-        let mut candidates = Vec::new();
-        let mut cursor = String::new();
-        loop {
-            let page = self.pending_memory_review_page(&cursor, crate::memory::MAX_PAGE_SIZE)?;
-            candidates.extend(page.candidates);
-            if page.next_cursor.is_empty() {
-                return Ok(candidates);
-            }
-            cursor = page.next_cursor;
-        }
     }
 
     pub fn decide_shared_approval(
@@ -4332,46 +4275,17 @@ mod tests {
             )]
         );
         assert!(controller.take_notices().is_empty(), "queued once");
+        let review = controller
+            .management(crate::app::management::Request::MemoryReviewList)
+            .expect("review list");
+        let crate::app::management::Reply::MemoryCandidates(candidates) = review else {
+            panic!("unexpected management reply");
+        };
         assert_eq!(
-            controller
-                .pending_memory_reviews()
-                .expect("review list")
-                .len(),
+            candidates.len(),
             2,
-            "the startup notice and /memory review must use the same actionable set"
+            "proposals from the previous session remain actionable"
         );
-        let first = controller
-            .pending_memory_review_page("", 1)
-            .expect("first page");
-        assert_eq!(first.candidates.len(), 1);
-        assert!(!first.next_cursor.is_empty());
-        controller
-            .review_memory(
-                &crate::memory::ReviewRequest {
-                    reference: crate::memory::CandidateRef {
-                        scope: first.candidates[0].proposed.scope.clone(),
-                        id: first.candidates[0].id.clone(),
-                    },
-                    decision: crate::memory::ReviewDecision::Reject,
-                    edited: None,
-                    target_revision: None,
-                },
-                "test-human",
-            )
-            .expect("review first page");
-        let stale = controller
-            .pending_memory_review_page(&first.next_cursor, 1)
-            .expect_err("a decision invalidates the storage snapshot cursor");
-        assert!(stale.is(crate::memory::ErrorKind::Conflict));
-        let restarted = controller
-            .pending_memory_review_page("", 1)
-            .expect("restart after cursor conflict");
-        assert_eq!(
-            restarted.candidates.len(),
-            1,
-            "restarting after conflict must expose the remaining candidate"
-        );
-        assert!(restarted.next_cursor.is_empty());
 
         controller.close().expect("close");
         let reopened = crate::cli::testutil::controller_with_memory(

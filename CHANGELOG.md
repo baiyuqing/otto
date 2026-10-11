@@ -37,6 +37,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
   [classified commands](docs/manual/safety-and-tools.md#classified-commands-wait-for-approval-inside-the-sandbox).
   ([#462](https://github.com/baiyuqing/otto/pull/462))
 
+- A command matching `[sandbox] excluded_commands` that changes external
+  state or deletes workspace or repository content now waits for the same
+  classified-command approval, then runs outside the sandbox. Excluded
+  commands outside those classes, such as `lark-cli`, still run without an
+  approval request. See
+  [classified commands](docs/manual/safety-and-tools.md#classified-commands-wait-for-approval-inside-the-sandbox).
+  ([#463](https://github.com/baiyuqing/otto/pull/463))
+
 - `GET /v1/usage` now distinguishes token-usage rows, logical provider
   operations and actual HTTP attempts. Cache totals and `cache_hit_rate` are
   `null` when any reported usage lacks a cached-token breakdown; missing data

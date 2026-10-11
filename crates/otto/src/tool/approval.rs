@@ -1,8 +1,9 @@
 //! Model initiation is discretionary; only admitted user handlers can decide.
 use super::{Tool, definition, error_result, text_result};
-use crate::approval::{Authority, Kind, Proposal, Scope, Service, State, Subject};
+use crate::approval::{Proposal, Service};
 use async_trait::async_trait;
 use otto_core::approval::BatchControl;
+use otto_core::approval::{Authority, Kind, Scope, State, Subject};
 use otto_core::model::ToolDefinition;
 use otto_core::tool::{ToolCall, ToolResult};
 use serde::Deserialize;
@@ -210,7 +211,7 @@ impl Tool for Control {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::ApprovalMode;
+    use otto_core::approval::ApprovalMode;
     use otto_core::model::OperationId;
     #[tokio::test]
     async fn child_controls_cannot_read_or_withdraw_another_tasks_request() {

@@ -685,7 +685,7 @@ pub type ParentSession = Arc<dyn Fn() -> Vec<Message> + Send + Sync>;
 
 /// Everything a [`Runner`] needs from the parent runtime.
 pub struct Config {
-    pub approval: Option<(Arc<crate::approval::Service>, crate::approval::Scope)>,
+    pub approval: Option<(Arc<crate::approval::Service>, otto_core::approval::Scope)>,
     pub provider: Arc<dyn Provider + Send + Sync>,
     /// The parent's tool set; the runner drops [`EXCLUDED_CHILD_TOOLS`] by name
     /// to build the child registry. These are the children's own tool

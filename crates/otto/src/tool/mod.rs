@@ -56,10 +56,10 @@ pub struct ApprovalSpec {
     pub version: String,
     pub source: String,
     /// The authority class this tool's authorization reaches for; see
-    /// [`crate::approval::Authority`]. A tool that stays inside the sandbox and
+    /// [`otto_core::approval::Authority`]. A tool that stays inside the sandbox and
     /// the workspace declares `Bounded`, which the session AUTO policy may
     /// decide; anything else always waits for the user.
-    pub authority: crate::approval::Authority,
+    pub authority: otto_core::approval::Authority,
     pub title: String,
     pub reason: String,
     pub details: String,
@@ -92,7 +92,7 @@ pub trait Tool: Send + Sync {
         &self,
         _arguments: &RawValue,
         _cancel: &CancellationToken,
-        _request: &crate::approval::Request,
+        _request: &otto_core::approval::Request,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -111,7 +111,7 @@ pub trait Tool: Send + Sync {
         &self,
         call: otto_core::tool::ToolCall<'_>,
         cancel: &CancellationToken,
-        _request: &crate::approval::Request,
+        _request: &otto_core::approval::Request,
     ) -> ToolResult {
         self.execute_call(call, cancel).await
     }

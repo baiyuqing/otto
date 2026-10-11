@@ -302,7 +302,7 @@ pub async fn events_shared(
         |(service, scope, mut cursor, mut buffer)| async move {
             loop {
                 if let Some(change) = buffer.pop_front() {
-                    let change: crate::approval::Change = change;
+                    let change: otto_core::approval::Change = change;
                     cursor = change.sequence;
                     let event = Event::default()
                         .event("approval_changed")
@@ -359,18 +359,18 @@ struct ModeBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    mode: Option<crate::approval::ApprovalMode>,
+    mode: Option<otto_core::approval::ApprovalMode>,
 }
 
 impl ModeBody {
     /// The mode this body selects: the explicit mode, the boolean's meaning
     /// (MANUAL or AUTO), or nothing when a read leaves both out.
-    fn selected(&self) -> Option<crate::approval::ApprovalMode> {
+    fn selected(&self) -> Option<otto_core::approval::ApprovalMode> {
         match (self.mode, self.automatic) {
             (Some(mode), Some(automatic)) if mode.is_automatic() != automatic => None,
             (Some(mode), _) => Some(mode),
-            (None, Some(true)) => Some(crate::approval::ApprovalMode::Auto),
-            (None, Some(false)) => Some(crate::approval::ApprovalMode::Manual),
+            (None, Some(true)) => Some(otto_core::approval::ApprovalMode::Auto),
+            (None, Some(false)) => Some(otto_core::approval::ApprovalMode::Manual),
             (None, None) => None,
         }
     }
@@ -400,11 +400,11 @@ pub async fn mode(State(server): State<Arc<Server>>, Path(id): Path<String>) -> 
     }
 }
 
-pub(crate) fn policy_body(settings: crate::approval::ApprovalSettings) -> serde_json::Value {
+pub(crate) fn policy_body(settings: otto_core::approval::ApprovalSettings) -> serde_json::Value {
     serde_json::json!({"policy":settings.policy,"reviewer":settings.reviewer,
         "revision":settings.revision,"mode":settings.mode(),
         "automatic":settings.is_automatic(),
-        "reviewer_active":settings.policy != crate::approval::ApprovalPolicy::Never})
+        "reviewer_active":settings.policy != otto_core::approval::ApprovalPolicy::Never})
 }
 
 pub async fn policy(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
@@ -429,8 +429,8 @@ pub async fn policy(State(server): State<Arc<Server>>, Path(id): Path<String>) -
 #[serde(deny_unknown_fields)]
 struct PolicyInput {
     expected_revision: u64,
-    policy: crate::approval::ApprovalPolicy,
-    reviewer: crate::approval::ApprovalReviewer,
+    policy: otto_core::approval::ApprovalPolicy,
+    reviewer: otto_core::approval::ApprovalReviewer,
 }
 
 pub async fn set_policy(

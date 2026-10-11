@@ -528,7 +528,7 @@ impl crate::tool::Tool for CommandTool {
             .map_err(|e| otto_core::tool::ToolResult::error(e).not_started())?;
         Ok(Some(crate::tool::ApprovalSpec {
             source: "plugin".into(),
-            authority: crate::approval::Authority::Bounded,
+            authority: otto_core::approval::Authority::Bounded,
             version: self.package.installed.digest.clone(),
             title: format!("Run {}", self.definition().name),
             details:
@@ -556,7 +556,7 @@ impl crate::tool::Tool for CommandTool {
         &self,
         call: otto_core::tool::ToolCall<'_>,
         cancel: &CancellationToken,
-        request: &crate::approval::Request,
+        request: &otto_core::approval::Request,
     ) -> otto_core::tool::ToolResult {
         self.invoke(call.arguments,cancel,json!({"tool_call_id":call.tool_call_id,"operation_id":call.operation_id,"attempt":call.attempt,"session_id":request.scope.session_id,"task_id":request.scope.task_id,"workspace":request.scope.workspace})).await
     }

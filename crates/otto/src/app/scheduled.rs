@@ -123,7 +123,7 @@ pub(crate) async fn inherit_authority(
         return Err("Scheduled task changed since it was authorized.".into());
     }
     authority.context.instructions.push(format!("This unattended task is limited to the approved scheduled prompt: {}. Original user messages cannot authorize effects beyond this scheduled scope.", item.body));
-    let source_scope = crate::approval::Scope {
+    let source_scope = otto_core::approval::Scope {
         workspace: item.workspace.clone(),
         session_id: item.session_id.clone(),
         task_id: String::new(),
@@ -297,7 +297,7 @@ mod tests {
             .approval_service()
             .set_mode(
                 &source.approval_scope(),
-                crate::approval::ApprovalMode::Manual,
+                otto_core::approval::ApprovalMode::Manual,
             )
             .unwrap();
         let runtime = source.current_runtime().unwrap();
@@ -325,7 +325,7 @@ mod tests {
                 .settings(&target.approval_scope())
                 .unwrap()
                 .reviewer,
-            crate::approval::ApprovalReviewer::User
+            otto_core::approval::ApprovalReviewer::User
         );
         let mut changed = item.clone();
         changed.body = "Publish instead".into();

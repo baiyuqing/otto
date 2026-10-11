@@ -16,22 +16,22 @@ use crate::tui::interaction::{Activation, Focus, Intent, State};
 use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
 
-fn approval_request() -> crate::approval::Request {
-    crate::approval::Request {
+fn approval_request() -> otto_core::approval::Request {
+    otto_core::approval::Request {
         options: vec![],
         schema_version: 1,
         id: "approval-7".into(),
         revision: 7,
-        kind: crate::approval::Kind::Authorization,
-        authority: crate::approval::Authority::Boundary,
-        scope: crate::approval::Scope {
+        kind: otto_core::approval::Kind::Authorization,
+        authority: otto_core::approval::Authority::Boundary,
+        scope: otto_core::approval::Scope {
             workspace: "/work".into(),
             session_id: "session".into(),
             task_id: String::new(),
             run_id: String::new(),
         },
         presentation_origin: String::new(),
-        subject: crate::approval::Subject {
+        subject: otto_core::approval::Subject {
             tool_call_id: "call-1".into(),
             source: "tool".into(),
             id: "bash".into(),
@@ -44,9 +44,9 @@ fn approval_request() -> crate::approval::Request {
         blocking: true,
         created_at: 1,
         expires_at: None,
-        state: crate::approval::State::Pending,
+        state: otto_core::approval::State::Pending,
         decision: None,
-        application: crate::approval::ApplicationState::NotRequired,
+        application: otto_core::approval::ApplicationState::NotRequired,
         application_error: String::new(),
         review: None,
     }
@@ -78,8 +78,8 @@ fn candidate(id: &str) -> Candidate {
 #[test]
 fn approval_activity_inspection_separates_counts_and_review_has_no_actions() {
     let mut request = approval_request();
-    request.review = Some(crate::approval::ReviewMetadata {
-        status: crate::approval::ReviewStatus::Reviewing,
+    request.review = Some(otto_core::approval::ReviewMetadata {
+        status: otto_core::approval::ReviewStatus::Reviewing,
         assessment: None,
         settings_revision: 1,
         evidence_digest: "evidence".into(),
@@ -111,8 +111,8 @@ fn approval_activity_inspection_separates_counts_and_review_has_no_actions() {
 #[test]
 fn automatic_review_and_denial_have_no_human_actions() {
     let mut request = approval_request();
-    request.review = Some(crate::approval::ReviewMetadata {
-        status: crate::approval::ReviewStatus::Reviewing,
+    request.review = Some(otto_core::approval::ReviewMetadata {
+        status: otto_core::approval::ReviewStatus::Reviewing,
         assessment: None,
         settings_revision: 1,
         evidence_digest: "evidence".into(),
@@ -122,13 +122,13 @@ fn automatic_review_and_denial_have_no_human_actions() {
     assert!(view.actions.is_empty());
     assert!(view.default_action.is_none());
     assert_eq!(view.description.split(" · ").next(), Some("Reviewing"));
-    request.state = crate::approval::State::Rejected;
+    request.state = otto_core::approval::State::Rejected;
     let review = request.review.as_mut().unwrap();
-    review.status = crate::approval::ReviewStatus::Completed;
-    review.assessment = Some(crate::approval::ReviewAssessment {
-        risk: crate::approval::RiskLevel::Critical,
-        user_authorization: crate::approval::UserAuthorization::Unknown,
-        outcome: crate::approval::ReviewOutcome::Deny,
+    review.status = otto_core::approval::ReviewStatus::Completed;
+    review.assessment = Some(otto_core::approval::ReviewAssessment {
+        risk: otto_core::approval::RiskLevel::Critical,
+        user_authorization: otto_core::approval::UserAuthorization::Unknown,
+        outcome: otto_core::approval::ReviewOutcome::Deny,
         reason: "The target is outside the authorized scope.".into(),
     });
     let view = Approval::shared(&request).view();
@@ -176,7 +176,7 @@ fn approval_refresh_keeps_the_exact_revision_and_approve_default() {
     let mut approval = Approval::shared(&request);
     let mut refreshed = request.clone();
     refreshed.revision = 8;
-    approval.receive(Reply::ApprovalSnapshot(crate::approval::Snapshot {
+    approval.receive(Reply::ApprovalSnapshot(otto_core::approval::Snapshot {
         requests: vec![refreshed],
         cursor: 1,
     }));

@@ -230,8 +230,8 @@ impl Client {
     pub async fn approval_mode(
         &self,
         session: &str,
-        mode: Option<crate::approval::ApprovalMode>,
-    ) -> Result<crate::approval::ApprovalMode, Error> {
+        mode: Option<otto_core::approval::ApprovalMode>,
+    ) -> Result<otto_core::approval::ApprovalMode, Error> {
         self.approval_mode_response(session, mode)
             .await
             .map(|(mode, _)| mode)
@@ -242,7 +242,7 @@ impl Client {
         let (mode, policy) = self.approval_mode_response(session, selected).await?;
         Ok(format!(
             "Approval mode: {}",
-            if policy == Some(crate::approval::ApprovalPolicy::Never) {
+            if policy == Some(otto_core::approval::ApprovalPolicy::Never) {
                 "NEVER (reviewer disabled)"
             } else {
                 mode.label()
@@ -253,11 +253,11 @@ impl Client {
     async fn approval_mode_response(
         &self,
         session: &str,
-        mode: Option<crate::approval::ApprovalMode>,
+        mode: Option<otto_core::approval::ApprovalMode>,
     ) -> Result<
         (
-            crate::approval::ApprovalMode,
-            Option<crate::approval::ApprovalPolicy>,
+            otto_core::approval::ApprovalMode,
+            Option<otto_core::approval::ApprovalPolicy>,
         ),
         Error,
     > {
@@ -275,9 +275,9 @@ impl Client {
             #[serde(default)]
             automatic: bool,
             #[serde(default)]
-            mode: Option<crate::approval::ApprovalMode>,
+            mode: Option<otto_core::approval::ApprovalMode>,
             #[serde(default)]
-            policy: Option<crate::approval::ApprovalPolicy>,
+            policy: Option<otto_core::approval::ApprovalPolicy>,
         }
         let response = self.send(request).await?;
         let body: Mode =
@@ -285,9 +285,9 @@ impl Client {
                 .map_err(unreachable_error)?;
         Ok((
             body.mode.unwrap_or(if body.automatic {
-                crate::approval::ApprovalMode::Auto
+                otto_core::approval::ApprovalMode::Auto
             } else {
-                crate::approval::ApprovalMode::Manual
+                otto_core::approval::ApprovalMode::Manual
             }),
             body.policy,
         ))
@@ -298,10 +298,10 @@ impl Client {
         session: &str,
         update: Option<(
             u64,
-            crate::approval::ApprovalPolicy,
-            crate::approval::ApprovalReviewer,
+            otto_core::approval::ApprovalPolicy,
+            otto_core::approval::ApprovalReviewer,
         )>,
-    ) -> Result<crate::approval::ApprovalSettings, Error> {
+    ) -> Result<otto_core::approval::ApprovalSettings, Error> {
         let url = format!("{BASE}/v1/sessions/{session}/approval-policy");
         let request = match update {
             Some((revision, policy, reviewer)) => self
@@ -316,15 +316,15 @@ impl Client {
         };
         #[derive(Deserialize)]
         struct Body {
-            policy: crate::approval::ApprovalPolicy,
-            reviewer: crate::approval::ApprovalReviewer,
+            policy: otto_core::approval::ApprovalPolicy,
+            reviewer: otto_core::approval::ApprovalReviewer,
             revision: u64,
         }
         let response = self.send(request).await?;
         let body: Body =
             serde_json::from_slice(&response.bytes().await.map_err(unreachable_error)?)
                 .map_err(unreachable_error)?;
-        Ok(crate::approval::ApprovalSettings {
+        Ok(otto_core::approval::ApprovalSettings {
             policy: body.policy,
             reviewer: body.reviewer,
             revision: body.revision,
@@ -344,12 +344,12 @@ impl Client {
             .await?;
         #[derive(Deserialize)]
         struct Body {
-            requests: Vec<crate::approval::Request>,
+            requests: Vec<otto_core::approval::Request>,
             cursor: i64,
             #[serde(default)]
-            reviewing: Vec<crate::approval::Request>,
+            reviewing: Vec<otto_core::approval::Request>,
             #[serde(default)]
-            recent_decisions: Vec<crate::approval::Request>,
+            recent_decisions: Vec<otto_core::approval::Request>,
             #[serde(default)]
             counts: Option<crate::approval::ApprovalCounts>,
         }
@@ -357,7 +357,7 @@ impl Client {
         let requests: Vec<_> = body
             .requests
             .into_iter()
-            .filter(crate::approval::Request::is_human_pending)
+            .filter(otto_core::approval::Request::is_human_pending)
             .collect();
         let counts = body.counts.unwrap_or(crate::approval::ApprovalCounts {
             human_pending: requests.len(),
@@ -1193,9 +1193,9 @@ struct SessionWire {
     /// The exact policy; a server older than the field sends only
     /// `auto_mode`, which maps to AUTO or MANUAL.
     #[serde(default)]
-    approval_mode: Option<crate::approval::ApprovalMode>,
+    approval_mode: Option<otto_core::approval::ApprovalMode>,
     #[serde(default)]
-    approval_settings: Option<crate::approval::ApprovalSettings>,
+    approval_settings: Option<otto_core::approval::ApprovalSettings>,
     #[serde(default)]
     forked_from: Option<crate::app::ForkedFrom>,
     #[serde(default)]
@@ -1228,18 +1228,18 @@ impl SessionWire {
         };
         crate::app::Info {
             approval_settings: self.approval_settings.unwrap_or_else(|| {
-                crate::approval::ApprovalSettings::from_mode(self.approval_mode.unwrap_or(
+                otto_core::approval::ApprovalSettings::from_mode(self.approval_mode.unwrap_or(
                     if self.auto_mode {
-                        crate::approval::ApprovalMode::Auto
+                        otto_core::approval::ApprovalMode::Auto
                     } else {
-                        crate::approval::ApprovalMode::Manual
+                        otto_core::approval::ApprovalMode::Manual
                     },
                 ))
             }),
             approval_mode: self.approval_mode.unwrap_or(if self.auto_mode {
-                crate::approval::ApprovalMode::Auto
+                otto_core::approval::ApprovalMode::Auto
             } else {
-                crate::approval::ApprovalMode::Manual
+                otto_core::approval::ApprovalMode::Manual
             }),
             forked_from: self.forked_from,
             plan: self.plan,
@@ -1351,7 +1351,7 @@ pub struct StatusRow {
     pub auto_mode: bool,
     /// The exact policy; absent from a server older than the field.
     #[serde(default)]
-    pub approval_mode: Option<crate::approval::ApprovalMode>,
+    pub approval_mode: Option<otto_core::approval::ApprovalMode>,
     pub id: String,
     #[serde(default)]
     pub workspace: String,
@@ -1721,14 +1721,17 @@ mod tests {
                 "session",
                 Some((
                     7,
-                    crate::approval::ApprovalPolicy::Never,
-                    crate::approval::ApprovalReviewer::User,
+                    otto_core::approval::ApprovalPolicy::Never,
+                    otto_core::approval::ApprovalReviewer::User,
                 )),
             )
             .await
             .unwrap();
-        assert_eq!(settings.policy, crate::approval::ApprovalPolicy::Never);
-        assert_eq!(settings.reviewer, crate::approval::ApprovalReviewer::User);
+        assert_eq!(settings.policy, otto_core::approval::ApprovalPolicy::Never);
+        assert_eq!(
+            settings.reviewer,
+            otto_core::approval::ApprovalReviewer::User
+        );
         assert_eq!(settings.revision, 8);
         let (path, body) = request(&seen, 0);
         assert_eq!(path, "PUT /v1/sessions/session/approval-policy");

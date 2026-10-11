@@ -1095,19 +1095,19 @@ impl Tool for BashTool {
         // runs outside the sandbox after one approval.
         let (authority, title) = match &gate {
             Some((shell::Effect::ExternalState, _)) => (
-                crate::approval::Authority::Boundary,
+                otto_core::approval::Authority::Boundary,
                 "Run a command that changes external state?",
             ),
             Some((shell::Effect::Destructive, _)) => (
-                crate::approval::Authority::Bounded,
+                otto_core::approval::Authority::Bounded,
                 "Run a destructive workspace command?",
             ),
             None if read_path.is_empty() => (
-                crate::approval::Authority::Boundary,
+                otto_core::approval::Authority::Boundary,
                 "Run an unsandboxed command?",
             ),
             None => (
-                crate::approval::Authority::Consent,
+                otto_core::approval::Authority::Consent,
                 "Save persistent sandbox read access?",
             ),
         };
@@ -1258,7 +1258,7 @@ impl Tool for BashTool {
         &self,
         arguments: &RawValue,
         cancel: &CancellationToken,
-        request: &crate::approval::Request,
+        request: &otto_core::approval::Request,
     ) -> Result<(), String> {
         let args: BashArgs =
             serde_json::from_str(arguments.get()).map_err(|_| "invalid Bash arguments")?;
@@ -1301,7 +1301,7 @@ impl Tool for BashTool {
         &self,
         call: otto_core::tool::ToolCall<'_>,
         cancel: &CancellationToken,
-        _request: &crate::approval::Request,
+        _request: &otto_core::approval::Request,
     ) -> ToolResult {
         self.execute_inner(call.arguments, cancel, true).await
     }
@@ -2307,7 +2307,7 @@ The command did not run. Only the user or their session approval mode can approv
         let (tool, _approvals) = gated_tool(&workspace, &sandboxed, &elevated);
 
         let spec = use_default_spec(&tool, "git push origin main").unwrap();
-        assert_eq!(spec.authority, crate::approval::Authority::Boundary);
+        assert_eq!(spec.authority, otto_core::approval::Authority::Boundary);
         assert_eq!(spec.title, "Run a command that changes external state?");
         assert_eq!(spec.source, "sandbox");
         assert!(!spec.persistent);
@@ -2326,7 +2326,7 @@ The command did not run. Only the user or their session approval mode can approv
         );
 
         let spec = use_default_spec(&tool, "rm -rf build").unwrap();
-        assert_eq!(spec.authority, crate::approval::Authority::Bounded);
+        assert_eq!(spec.authority, otto_core::approval::Authority::Bounded);
         assert!(
             spec.reason
                 .starts_with("Deletes workspace or repository content: ")
@@ -2357,14 +2357,14 @@ The command did not run. Only the user or their session approval mode can approv
         let (tool, _approvals) = gated_tool(&workspace, &sandboxed, &sandboxed);
         let tool = tool.with_excluded_commands(list);
         let spec = use_default_spec(&tool, "git push origin").unwrap();
-        assert_eq!(spec.authority, crate::approval::Authority::Boundary);
+        assert_eq!(spec.authority, otto_core::approval::Authority::Boundary);
         let details: serde_json::Value = serde_json::from_str(&spec.details).unwrap();
         assert_eq!(details["sandboxed"], false);
         assert_eq!(details["effect"]["class"], "external_state");
 
         let escalated = json!({"command":"git push origin","sandbox_permissions":"require_escalated","justification":"publish"}).to_string();
         let spec = tool.approval_spec(&raw(&escalated)).unwrap().unwrap();
-        assert_eq!(spec.authority, crate::approval::Authority::Boundary);
+        assert_eq!(spec.authority, otto_core::approval::Authority::Boundary);
         let details: serde_json::Value = serde_json::from_str(&spec.details).unwrap();
         assert_eq!(details["sandboxed"], false);
 

@@ -1297,7 +1297,7 @@ async fn assemble(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::ApprovalMode;
+    use otto_core::approval::ApprovalMode;
     use std::os::unix::fs::DirBuilderExt;
 
     fn fixture() -> (tempfile::TempDir, Options) {
@@ -1317,9 +1317,9 @@ mod tests {
             },
         )
     }
-    fn approvals(home: &Path) -> crate::approval::Scope {
+    fn approvals(home: &Path) -> otto_core::approval::Scope {
         let service = crate::approval::Service::open(&home.join(".otto/approvals.db")).unwrap();
-        let scope = crate::approval::Scope {
+        let scope = otto_core::approval::Scope {
             workspace: "/workspace".into(),
             session_id: "parent".into(),
             task_id: String::new(),
@@ -1530,10 +1530,10 @@ mod tests {
             crate::approval::Service::open(&options.home.join(".otto/approvals.db")).unwrap();
         let request = service
             .create(crate::approval::Proposal {
-                kind: crate::approval::Kind::Authorization,
-                authority: crate::approval::Authority::Durable,
+                kind: otto_core::approval::Kind::Authorization,
+                authority: otto_core::approval::Authority::Durable,
                 scope: scope.clone(),
-                subject: crate::approval::Subject {
+                subject: otto_core::approval::Subject {
                     tool_call_id: String::new(),
                     source: "unsupported-live-source".into(),
                     id: "op".into(),
@@ -1581,7 +1581,7 @@ mod tests {
                 .get(&request.id, &scope.workspace, Some(&scope.session_id))
                 .unwrap()
                 .state,
-            crate::approval::State::Pending
+            otto_core::approval::State::Pending
         );
         drop(original);
         assert_eq!(abort(&abort_args, &mut Vec::new(), &mut stderr).await, 0);

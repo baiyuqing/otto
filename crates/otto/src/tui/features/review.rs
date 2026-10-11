@@ -11,7 +11,7 @@ pub(crate) struct Reviews {
 }
 
 impl Presenter for Reviews {
-    fn covers_approval(&self, request: &crate::approval::Request) -> bool {
+    fn covers_approval(&self, request: &otto_core::approval::Request) -> bool {
         (!self.loaded && request.subject.source == "memory" && request.is_human_pending())
             || self.rows.iter().any(|candidate| {
                 crate::approval::memory::is_human_pending(candidate, std::slice::from_ref(request))

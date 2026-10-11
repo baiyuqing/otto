@@ -953,7 +953,7 @@ impl Builder {
         let (runner, warnings) = SubagentRunner::new(RunnerConfig {
             approval: Some((
                 self.approvals.clone(),
-                crate::approval::Scope {
+                otto_core::approval::Scope {
                     workspace: self.workspace_path.clone(),
                     session_id: session.header().id,
                     task_id: String::new(),

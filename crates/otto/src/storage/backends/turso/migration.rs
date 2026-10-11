@@ -825,7 +825,7 @@ impl SqlDomainCodec for ApprovalCodec {
                             0 if canonical => ApprovalRecord::Settings {
                                 workspace: r.get(0)?,
                                 session_id: r.get(1)?,
-                                settings: crate::approval::ApprovalSettings {
+                                settings: otto_core::approval::ApprovalSettings {
                                     policy: serde_json::from_value(serde_json::Value::String(
                                         r.get(2)?,
                                     ))
@@ -845,26 +845,30 @@ impl SqlDomainCodec for ApprovalCodec {
                                     revision: r.get(4)?,
                                 },
                             },
-                            0 => ApprovalRecord::Mode {
-                                workspace: r.get(0)?,
-                                session_id: r.get(1)?,
-                                mode: crate::approval::migration::StoredMode::Mode {
-                                    mode: if legacy {
-                                        // `automatic` was an integer boolean.
-                                        match r.get::<i64>(2)? {
-                                            0 => crate::approval::ApprovalMode::Manual,
-                                            _ => crate::approval::ApprovalMode::Auto,
-                                        }
-                                    } else {
-                                        crate::approval::ApprovalMode::parse(&r.get::<String>(2)?)
-                                            .ok_or_else(|| {
-                                            crate::storage::Error::ConversionFailure(
-                                                "unknown approval mode".into(),
+                            0 => {
+                                ApprovalRecord::Mode {
+                                    workspace: r.get(0)?,
+                                    session_id: r.get(1)?,
+                                    mode: crate::approval::migration::StoredMode::Mode {
+                                        mode: if legacy {
+                                            // `automatic` was an integer boolean.
+                                            match r.get::<i64>(2)? {
+                                                0 => otto_core::approval::ApprovalMode::Manual,
+                                                _ => otto_core::approval::ApprovalMode::Auto,
+                                            }
+                                        } else {
+                                            otto_core::approval::ApprovalMode::parse(
+                                                &r.get::<String>(2)?,
                                             )
-                                        })?
+                                            .ok_or_else(|| {
+                                                crate::storage::Error::ConversionFailure(
+                                                    "unknown approval mode".into(),
+                                                )
+                                            })?
+                                        },
                                     },
-                                },
-                            },
+                                }
+                            }
                             1 => ApprovalRecord::Request {
                                 subject_key: r.get(0)?,
                                 request: r.get(1)?,
@@ -1027,14 +1031,14 @@ impl SqlDomainCodec for ApprovalCodec {
                 session_id,
                 mode,
             } => {
-                let mode: crate::approval::ApprovalMode = mode.into();
+                let mode: otto_core::approval::ApprovalMode = mode.into();
                 connection
                     .execute(
                         "INSERT INTO approval_modes VALUES (?1,?2,?3)",
                         params![workspace, session_id, mode.as_str()],
                     )
                     .map_err(sql_error)?;
-                let settings = crate::approval::ApprovalSettings::from_mode(mode);
+                let settings = otto_core::approval::ApprovalSettings::from_mode(mode);
                 let reviewer = serde_json::to_value(settings.reviewer).map_err(json_error)?;
                 connection
                     .execute(
@@ -1226,10 +1230,9 @@ fn approval_request(value: &str) -> Result<otto_core::approval::Request> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::ApprovalMode;
-    use crate::approval::{
-        Actor, ApplicationState, Authority, Kind, Proposal, Scope, Service, Subject,
-    };
+    use crate::approval::{Actor, Proposal, Service};
+    use otto_core::approval::ApprovalMode;
+    use otto_core::approval::{ApplicationState, Authority, Kind, Scope, Subject};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct Fence(AtomicBool);

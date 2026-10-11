@@ -1,9 +1,12 @@
 //! Offline coordinator contract tests; ACP tests separately verify startup wiring.
 
 use otto::approval::{
-    ApprovalPolicy, ApprovalReviewer, Authority, Kind, Proposal, Request, ReviewAssessment,
-    ReviewOutcome, ReviewStatus, RiskLevel, Scope, Service, State, Subject, UserAuthorization,
+    Proposal, Service,
     reviewer::{ReviewContext, ReviewProvider},
+};
+use otto_core::approval::{
+    ApprovalPolicy, ApprovalReviewer, Authority, Kind, Request, ReviewAssessment, ReviewOutcome,
+    ReviewStatus, RiskLevel, Scope, State, Subject, UserAuthorization,
 };
 use std::sync::{
     Arc,
@@ -367,7 +370,7 @@ async fn auto_memory_review_applies_exact_content_once_and_retains_the_domain_re
     assert_eq!(approval.decision.as_ref().unwrap().transport, "auto-review");
     assert_eq!(
         approval.application,
-        otto::approval::ApplicationState::Applied
+        otto_core::approval::ApplicationState::Applied
     );
     assert_eq!(reviewer.calls.load(Ordering::SeqCst), 1);
     drop(service);

@@ -17,8 +17,8 @@ fn unavailable<E>(_: E) -> Error {
 pub fn approvals(
     store: &dyn ApprovalStore,
     key: &str,
-    expected: &crate::approval::Request,
-    next: &crate::approval::Request,
+    expected: &otto_core::approval::Request,
+    next: &otto_core::approval::Request,
 ) -> Result<()> {
     let (created, inserted) = store.create(key, expected).map_err(unavailable)?;
     ensure(
@@ -133,8 +133,8 @@ pub fn memory_queries(
 pub fn approval_race(
     first: std::sync::Arc<dyn ApprovalStore>,
     second: std::sync::Arc<dyn ApprovalStore>,
-    expected: &crate::approval::Request,
-    next: &crate::approval::Request,
+    expected: &otto_core::approval::Request,
+    next: &otto_core::approval::Request,
 ) -> Result<()> {
     first.create("race", expected).map_err(unavailable)?;
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));

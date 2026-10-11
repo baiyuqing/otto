@@ -1,7 +1,7 @@
 use super::super::backend::{Command, Reply, Request};
 use super::super::interaction::{Action, Activation, Row, View};
 use super::{Presenter, Transition};
-use crate::approval::Request as ApprovalRequest;
+use otto_core::approval::Request as ApprovalRequest;
 
 pub(crate) struct Approval {
     pub id: String,
@@ -22,7 +22,7 @@ impl Approval {
                 "{}\n\nReason: {}\n\nAuthorization: {}{}",
                 request.subject.details,
                 request.reason,
-                if request.kind == crate::approval::Kind::Confirmation {
+                if request.kind == otto_core::approval::Kind::Confirmation {
                     "proposal confirmation"
                 } else if request.persistent {
                     "persistent"
@@ -48,21 +48,22 @@ impl Approval {
             outcome: format!(
                 "{} · {}{}",
                 match request.state {
-                    crate::approval::State::Pending if !request.is_human_pending() => "Reviewing",
-                    crate::approval::State::Pending => "Waiting for a decision",
-                    crate::approval::State::Approved => "Approved",
-                    crate::approval::State::Rejected => "Rejected",
-                    crate::approval::State::Withdrawn => "Withdrawn",
-                    crate::approval::State::Expired => "Expired",
-                    crate::approval::State::Superseded => "Superseded",
+                    otto_core::approval::State::Pending if !request.is_human_pending() =>
+                        "Reviewing",
+                    otto_core::approval::State::Pending => "Waiting for a decision",
+                    otto_core::approval::State::Approved => "Approved",
+                    otto_core::approval::State::Rejected => "Rejected",
+                    otto_core::approval::State::Withdrawn => "Withdrawn",
+                    otto_core::approval::State::Expired => "Expired",
+                    otto_core::approval::State::Superseded => "Superseded",
                 },
                 match request.application {
-                    crate::approval::ApplicationState::NotRequired => "No further application",
-                    crate::approval::ApplicationState::NotStarted => "Waiting to apply",
-                    crate::approval::ApplicationState::Applying => "Applying",
-                    crate::approval::ApplicationState::Applied => "Applied",
-                    crate::approval::ApplicationState::Failed => "Application failed",
-                    crate::approval::ApplicationState::Unknown => "Outcome unknown",
+                    otto_core::approval::ApplicationState::NotRequired => "No further application",
+                    otto_core::approval::ApplicationState::NotStarted => "Waiting to apply",
+                    otto_core::approval::ApplicationState::Applying => "Applying",
+                    otto_core::approval::ApplicationState::Applied => "Applied",
+                    otto_core::approval::ApplicationState::Failed => "Application failed",
+                    otto_core::approval::ApplicationState::Unknown => "Outcome unknown",
                 },
                 if request.application_error.is_empty() {
                     String::new()
@@ -212,7 +213,7 @@ impl Presenter for Approvals {
         if let Activation::Open(id) = activation
             && let Some(request) = self.requests.iter().find(|r| r.id == id)
         {
-            if request.state == crate::approval::State::Pending && !request.is_human_pending() {
+            if request.state == otto_core::approval::State::Pending && !request.is_human_pending() {
                 return Transition::Push(Box::new(super::Document {
                     key: format!("review:{}", request.id),
                     title: "Review in progress".into(),

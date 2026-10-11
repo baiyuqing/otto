@@ -5,8 +5,9 @@ mod support;
 #[cfg(feature = "storage-conformance")]
 mod tests {
     use super::support;
-    use otto::approval::{self, Authority, Kind, Proposal, Scope, Subject};
+    use otto::approval::{self, Proposal};
     use otto::runtime::storage::{BackendRegistry, Storage};
+    use otto_core::approval::{Authority, Kind, Scope, Subject};
     use std::collections::HashMap;
     use std::sync::{Arc, atomic::Ordering};
     use support::JsonBackend;
@@ -84,11 +85,11 @@ mod tests {
         let native = Storage::default();
         let service = approval::Service::in_memory().unwrap();
         service
-            .set_mode(&proposal().scope, otto::approval::ApprovalMode::Manual)
+            .set_mode(&proposal().scope, otto_core::approval::ApprovalMode::Manual)
             .unwrap();
         let expected = service.create(proposal()).unwrap();
         let mut next = expected.clone();
-        next.state = approval::State::Withdrawn;
+        next.state = otto_core::approval::State::Withdrawn;
         conformance::approvals(
             native
                 .approvals(&temp.path().join("approvals.db"))
@@ -279,7 +280,7 @@ mod tests {
     #[test]
     fn independent_approval_store_rejects_stale_settings_and_automatic_application() {
         use otto::approval::repository::ApprovalStore;
-        use otto::approval::{ApprovalMode, ApprovalPolicy, ApprovalReviewer};
+        use otto_core::approval::{ApprovalMode, ApprovalPolicy, ApprovalReviewer};
         let temp = tempfile::tempdir().unwrap();
         let backend = JsonBackend::new(temp.path().join("authority.json"), "probe:authority");
         let service = approval::Service::from_store(backend.store.clone()).unwrap();
@@ -306,7 +307,7 @@ mod tests {
         assert_eq!(service.settings(&scope).unwrap(), current);
         service.set_mode(&scope, ApprovalMode::Yolo).unwrap();
         let request = service.create(proposal()).unwrap();
-        assert_eq!(request.state, approval::State::Approved);
+        assert_eq!(request.state, otto_core::approval::State::Approved);
         assert!(backend.store.authorization_current(&request).unwrap());
         service.set_mode(&scope, ApprovalMode::Manual).unwrap();
         assert!(
@@ -331,7 +332,7 @@ mod tests {
         let service = approval::Service::from_store(backend.store.clone()).unwrap();
         let scope = proposal().scope;
         service
-            .set_mode(&scope, approval::ApprovalMode::Manual)
+            .set_mode(&scope, otto_core::approval::ApprovalMode::Manual)
             .unwrap();
         let mut context = approval::reviewer::ReviewContext {
             trusted_user_messages: vec!["Review the exact operation.".into()],
@@ -368,7 +369,7 @@ mod tests {
         assert_eq!(resumed.review, request.review);
         assert_eq!(
             resumed.state,
-            approval::State::Pending,
+            otto_core::approval::State::Pending,
             "a persisted digest alone cannot approve anything"
         );
         let previous = backend.store.settings(&scope).unwrap().unwrap();
@@ -397,10 +398,10 @@ mod tests {
                 .get(&request.id, &scope.workspace, Some(&scope.session_id))
                 .unwrap()
                 .state,
-            approval::State::Pending
+            otto_core::approval::State::Pending
         );
         service
-            .set_mode(&scope, approval::ApprovalMode::Manual)
+            .set_mode(&scope, otto_core::approval::ApprovalMode::Manual)
             .unwrap();
         let fresh = service
             .get(&request.id, &scope.workspace, Some(&scope.session_id))
@@ -418,7 +419,7 @@ mod tests {
                 )
                 .unwrap()
                 .state,
-            approval::State::Approved
+            otto_core::approval::State::Approved
         );
     }
 
@@ -431,14 +432,14 @@ mod tests {
         impl ReviewProvider for Reviewer {
             async fn assess(
                 &self,
-                _: &approval::Request,
+                _: &otto_core::approval::Request,
                 _: &ReviewContext,
                 _: &tokio_util::sync::CancellationToken,
-            ) -> std::result::Result<approval::ReviewAssessment, String> {
-                Ok(approval::ReviewAssessment {
-                    risk: approval::RiskLevel::Low,
-                    user_authorization: approval::UserAuthorization::High,
-                    outcome: approval::ReviewOutcome::Allow,
+            ) -> std::result::Result<otto_core::approval::ReviewAssessment, String> {
+                Ok(otto_core::approval::ReviewAssessment {
+                    risk: otto_core::approval::RiskLevel::Low,
+                    user_authorization: otto_core::approval::UserAuthorization::High,
+                    outcome: otto_core::approval::ReviewOutcome::Allow,
                     reason: "Exact authorized operation.".into(),
                 })
             }
@@ -476,7 +477,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(approved.state, approval::State::Approved);
+        assert_eq!(approved.state, otto_core::approval::State::Approved);
         assert_eq!(approved.decision.as_ref().unwrap().transport, "auto-review");
         assert!(backend.store.authorization_current(&approved).unwrap());
         let before = backend.store.settings(&scope).unwrap().unwrap_or_default();
@@ -484,7 +485,7 @@ mod tests {
             .store
             .policy_config(
                 &scope.workspace,
-                approval::ApprovalSettings::default(),
+                otto_core::approval::ApprovalSettings::default(),
                 "new-workspace-policy",
             )
             .unwrap();
@@ -678,7 +679,7 @@ mod tests {
             approval::Service::from_store(storage.approvals(&home.join("unused.db")).unwrap())
                 .unwrap();
         service
-            .set_mode(&proposal().scope, otto::approval::ApprovalMode::Manual)
+            .set_mode(&proposal().scope, otto_core::approval::ApprovalMode::Manual)
             .unwrap();
         let request = service.create(proposal()).unwrap();
         let events = service
@@ -741,7 +742,7 @@ mod tests {
         std::fs::create_dir(&home).unwrap();
         let service = approval::Service::open(&home.join(".otto/approvals.db")).unwrap();
         service
-            .set_mode(&proposal().scope, otto::approval::ApprovalMode::Manual)
+            .set_mode(&proposal().scope, otto_core::approval::ApprovalMode::Manual)
             .unwrap();
         let expected = service.create(proposal()).unwrap();
         let events = service.events("/contract", None, 0).unwrap();

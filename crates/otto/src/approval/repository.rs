@@ -1,5 +1,6 @@
 //! Approval persistence: atomic request/event/claim commits against a persisted snapshot.
-use super::{ApprovalMode, ApprovalSettings, Change, Error, Request, Result, Scope, Snapshot};
+use super::{Error, Result};
+use otto_core::approval::{ApprovalMode, ApprovalSettings, Change, Request, Scope, Snapshot};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Claim {
@@ -89,8 +90,8 @@ pub fn automatic_decision_allowed(mode: ApprovalMode, request: &Request) -> bool
 /// Nullable legacy metadata and review-status-only updates do not create a
 /// synthetic operation revision. A changed authority basis does.
 pub fn pending_basis_changed(expected: &Request, next: &Request) -> bool {
-    expected.state == super::State::Pending
-        && next.state == super::State::Pending
+    expected.state == otto_core::approval::State::Pending
+        && next.state == otto_core::approval::State::Pending
         && expected
             .review
             .as_ref()

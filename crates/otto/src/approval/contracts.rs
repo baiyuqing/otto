@@ -1,4 +1,4 @@
-pub use otto_core::approval::*;
+use otto_core::approval::{Authority, Kind, Request, Scope, Subject};
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("approval storage is unavailable")]

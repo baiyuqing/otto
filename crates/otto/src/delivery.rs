@@ -1404,7 +1404,7 @@ impl StartDeliveryTask {
         ApprovalSpec {
             version: hash(&details),
             source: "delivery".into(),
-            authority: crate::approval::Authority::Boundary,
+            authority: otto_core::approval::Authority::Boundary,
             title: "Start a cross-workspace delivery task?".into(),
             reason: "Creates one target-local worktree after approval; GitHub push and PR permissions remain separate.".into(),
             details,
@@ -1444,7 +1444,7 @@ impl Tool for StartDeliveryTask {
         &self,
         arguments: &RawValue,
         cancel: &CancellationToken,
-        approval: &crate::approval::Request,
+        approval: &otto_core::approval::Request,
     ) -> Result<(), String> {
         if cancel.is_cancelled() {
             return Err("delivery approval cancelled".into());
@@ -1477,7 +1477,7 @@ impl Tool for StartDeliveryTask {
         &self,
         _call: ToolCall<'_>,
         cancel: &CancellationToken,
-        approval: &crate::approval::Request,
+        approval: &otto_core::approval::Request,
     ) -> ToolResult {
         let receipt = match self.receipts.lock() {
             Ok(receipts) => receipts.get(&approval.id).cloned(),
@@ -1653,22 +1653,22 @@ mod tests {
         RawValue::from_string(value.into()).unwrap()
     }
 
-    fn approval(id: &str, spec: &ApprovalSpec) -> crate::approval::Request {
-        crate::approval::Request {
+    fn approval(id: &str, spec: &ApprovalSpec) -> otto_core::approval::Request {
+        otto_core::approval::Request {
             options: Vec::new(),
             schema_version: 1,
             id: id.into(),
             revision: 1,
-            kind: crate::approval::Kind::Authorization,
-            authority: crate::approval::Authority::Boundary,
-            scope: crate::approval::Scope {
+            kind: otto_core::approval::Kind::Authorization,
+            authority: otto_core::approval::Authority::Boundary,
+            scope: otto_core::approval::Scope {
                 workspace: "/source".into(),
                 session_id: "s1".into(),
                 task_id: String::new(),
                 run_id: String::new(),
             },
             presentation_origin: String::new(),
-            subject: crate::approval::Subject {
+            subject: otto_core::approval::Subject {
                 tool_call_id: "call".into(),
                 source: "delivery".into(),
                 id: "op".into(),
@@ -1681,9 +1681,9 @@ mod tests {
             blocking: true,
             created_at: 1,
             expires_at: Some(2),
-            state: crate::approval::State::Approved,
+            state: otto_core::approval::State::Approved,
             decision: None,
-            application: crate::approval::ApplicationState::Applying,
+            application: otto_core::approval::ApplicationState::Applying,
             application_error: String::new(),
             review: None,
         }

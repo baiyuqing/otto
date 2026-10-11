@@ -221,8 +221,9 @@ commands wait for approval and then run inside the sandbox.
 - `Destructive` requests prompt only in MANUAL.
 - NEVER rejects `ExternalState` requests that it ran before this change,
   unless an allow rule matches.
-- Linux has no confined bash driver; part 2 changes no Linux behavior beyond
-  what the shared approval path already does.
+- The gate needs the bash tool's approval support, which startup creates
+  only with an active Seatbelt sandbox (`runtime/startup.rs`, `elevate`).
+  With `--sandbox off` and on Linux no classified command asks.
 
 ## Tests
 

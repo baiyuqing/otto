@@ -110,7 +110,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   reason `model output idle timeout`; an `openai-compatible` attempt is retried
   only if no delta reached the caller. See
   [configuration](docs/manual/getting-started.md#configuration).
-  ([#470](https://github.com/baiyuqing/otto/issues/470))
+  ([#471](https://github.com/baiyuqing/otto/pull/471))
 
 - Review facts for escalated bash commands cover every command in a list such
   as `make&&./run`, and read a leading `cd <dir>` and `git -C <dir>` from the

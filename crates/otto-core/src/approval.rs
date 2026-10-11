@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 mod rules;
-pub use rules::{ApprovalRule, RuleDecision, command_argv, evaluate_rules};
+pub use rules::{ApprovalRule, RuleDecision, ShellCommand, evaluate_rules};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

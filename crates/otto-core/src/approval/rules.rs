@@ -1,4 +1,4 @@
-//! Pure explicit policy matching. This parses argv; it never runs a shell.
+//! Pure explicit policy matching over pre-parsed commands; it never runs a shell.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,89 +48,59 @@ impl ApprovalRule {
     }
 }
 
-/// Extract a single command's literal argv. Shell expansions, assignments,
-/// control syntax, redirections and substitutions fail closed.
-pub fn command_argv(command: &str) -> Option<Vec<String>> {
-    if !crate::config::sandbox::is_simple_command(command) || command.contains(['\n', '\r', '\0']) {
-        return None;
-    }
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-    for c in command.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if single {
-            single = c != '\'';
-            continue;
-        }
-        match c {
-            '\\' => escaped = true,
-            '"' => double = !double,
-            '\'' if !double => single = true,
-            '*' | '?' | '[' | ']' | '{' | '}' | '~' if !double => return None,
-            _ => {}
-        }
-    }
-    let argv = shlex::split(command)?;
-    let program = argv.first()?;
-    let basename = program.rsplit('/').next()?;
-    if program.is_empty()
-        || (basename != "git" && crate::config::sandbox::COMMAND_RUNNERS.contains(&basename))
-        || program.contains('=')
-        || matches!(
-            program.as_str(),
-            "!" | "if"
-                | "then"
-                | "else"
-                | "elif"
-                | "fi"
-                | "for"
-                | "while"
-                | "until"
-                | "do"
-                | "done"
-                | "case"
-                | "esac"
-                | "function"
-                | "select"
-                | "time"
-                | "coproc"
-                | "[["
-                | "]]"
-        )
-    {
-        return None;
-    }
-    Some(argv)
+/// Static view of a bash command, produced by the native shell parser.
+/// otto-core only evaluates rules against it; it never parses shell text.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShellCommand {
+    /// One entry per simple command found anywhere in the program, in
+    /// source order, including commands inside substitutions and compound
+    /// statements. Each entry is the command's leading static words: the
+    /// unquoted value of every word up to the first word that is not static.
+    pub segments: Vec<Vec<String>>,
+    /// True only when the whole program is a list of pipelines of simple
+    /// commands whose every word is static, with no syntax outside the
+    /// accepted set.
+    pub complete: bool,
 }
 
-/// Match literal source/tool identities or an argv prefix. Stronger decisions
-/// win regardless of configuration order: deny, then ask, then allow.
+/// Match literal source/tool identities or a command prefix. An allow prefix
+/// needs a complete command in which every segment starts with the prefix;
+/// deny and ask prefixes match any segment. Stronger decisions win
+/// regardless of configuration order: deny, then ask, then allow.
 /// Invalid rules cannot grant authority, even for callers that skipped validation.
 pub fn evaluate_rules(
     rules: &[ApprovalRule],
     source: &str,
     tool: &str,
-    command: Option<&str>,
+    command: Option<&ShellCommand>,
 ) -> Option<RuleDecision> {
-    let argv = command.and_then(command_argv);
     let mut result = None;
     for rule in rules {
         if rule.validate().is_err() {
             continue;
         }
-        if rule.decision == RuleDecision::Allow && command.is_some() && argv.is_none() {
+        if rule.decision == RuleDecision::Allow && command.is_some_and(|command| !command.complete)
+        {
             continue;
         }
         let matched = rule.source.as_deref() == Some(source)
             || rule.tool.as_deref() == Some(tool)
-            || rule
-                .command_prefix
-                .as_ref()
-                .is_some_and(|prefix| argv.as_ref().is_some_and(|argv| argv.starts_with(prefix)));
+            || rule.command_prefix.as_ref().is_some_and(|prefix| {
+                command.is_some_and(|command| {
+                    if rule.decision == RuleDecision::Allow {
+                        !command.segments.is_empty()
+                            && command
+                                .segments
+                                .iter()
+                                .all(|words| words.starts_with(prefix))
+                    } else {
+                        command
+                            .segments
+                            .iter()
+                            .any(|words| words.starts_with(prefix))
+                    }
+                })
+            });
         if matched {
             result = match (result, rule.decision) {
                 (_, RuleDecision::Deny) | (Some(RuleDecision::Deny), _) => Some(RuleDecision::Deny),
@@ -146,45 +116,13 @@ pub fn evaluate_rules(
 mod tests {
     use super::*;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[test]
-    fn argv_preserves_quotes_and_rejects_shell_effects() {
-        assert_eq!(
-            command_argv("git commit -m 'two words'"),
-            Some(vec![
-                "git".into(),
-                "commit".into(),
-                "-m".into(),
-                "two words".into()
-            ])
-        );
-        assert_eq!(
-            command_argv("echo \"literal *\" '$HOME'"),
-            Some(vec!["echo".into(), "literal *".into(), "$HOME".into()])
-        );
-        for command in [
-            "git status && rm x",
-            "git status; rm x",
-            "git status | cat",
-            "echo $(id)",
-            "echo `id`",
-            "echo $HOME",
-            "echo \"$HOME\"",
-            "echo *",
-            "echo ~",
-            "echo {a,b}",
-            "echo a > b",
-            "X=y git status",
-            "git 'status",
-            "git status\necho x",
-            "if true",
-            "bash -lc 'git status && rm x'",
-            "sh -c 'git status; rm x'",
-            "env bash -lc 'git status && rm x'",
-            "/bin/bash -lc 'git status && rm x'",
-            "",
-        ] {
-            assert_eq!(command_argv(command), None, "{command}");
+    fn command(complete: bool, segments: &[&[&str]]) -> ShellCommand {
+        ShellCommand {
+            segments: segments
+                .iter()
+                .map(|words| words.iter().map(|word| word.to_string()).collect())
+                .collect(),
+            complete,
         }
     }
 
@@ -197,45 +135,61 @@ mod tests {
         }
     }
 
+    fn eval(rules: &[ApprovalRule], command: &ShellCommand) -> Option<RuleDecision> {
+        evaluate_rules(rules, "bash", "bash", Some(command))
+    }
+
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[test]
-    fn prefixes_match_argv_and_precedence_is_order_independent() {
-        let allow = prefix(RuleDecision::Allow);
+    fn allow_prefix_needs_complete_command_with_prefix_in_every_segment() {
+        let allow = [prefix(RuleDecision::Allow)];
+        let status = ["git", "status"].as_slice();
         assert_eq!(
-            evaluate_rules(
-                std::slice::from_ref(&allow),
-                "bash",
-                "bash",
-                Some("git 'status' --short")
+            eval(
+                &allow,
+                &command(true, &[status, &["git", "status", "--short"]])
             ),
             Some(RuleDecision::Allow)
         );
-        for command in [
-            "git status-other",
-            "git status && echo x",
-            "git status $X",
-            "git diff",
+        for rejected in [
+            command(true, &[status, &["rm", "x"]]),
+            command(true, &[&["git", "status-other"]]),
+            command(true, &[&["git", "diff"]]),
+            command(true, &[]),
+            command(false, &[status]),
         ] {
+            assert_eq!(eval(&allow, &rejected), None, "{rejected:?}");
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
+    fn deny_and_ask_prefix_match_any_segment_even_when_incomplete() {
+        let incomplete = command(false, &[&["echo", "x"], &["git", "status", "origin"]]);
+        for decision in [RuleDecision::Deny, RuleDecision::Ask] {
+            assert_eq!(eval(&[prefix(decision)], &incomplete), Some(decision));
             assert_eq!(
-                evaluate_rules(std::slice::from_ref(&allow), "bash", "bash", Some(command)),
+                eval(&[prefix(decision)], &command(true, &[&["git", "diff"]])),
                 None
             );
         }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
+    fn precedence_is_order_independent() {
+        let allow = prefix(RuleDecision::Allow);
+        let status = command(true, &[&["git", "status"]]);
         for rules in [
             vec![allow.clone(), prefix(RuleDecision::Ask)],
             vec![prefix(RuleDecision::Ask), allow.clone()],
         ] {
-            assert_eq!(
-                evaluate_rules(&rules, "bash", "bash", Some("git status")),
-                Some(RuleDecision::Ask)
-            );
+            assert_eq!(eval(&rules, &status), Some(RuleDecision::Ask));
         }
         assert_eq!(
-            evaluate_rules(
+            eval(
                 &[prefix(RuleDecision::Deny), allow, prefix(RuleDecision::Ask)],
-                "bash",
-                "bash",
-                Some("git status")
+                &status
             ),
             Some(RuleDecision::Deny)
         );
@@ -259,8 +213,22 @@ mod tests {
             Some(RuleDecision::Allow)
         );
         assert_eq!(
-            evaluate_rules(&[rule.clone()], "sandbox", "bash", Some("echo $HOME")),
+            evaluate_rules(
+                &[rule.clone()],
+                "sandbox",
+                "bash",
+                Some(&command(false, &[&["echo"]]))
+            ),
             None
+        );
+        assert_eq!(
+            evaluate_rules(
+                &[rule.clone()],
+                "sandbox",
+                "bash",
+                Some(&command(true, &[&["echo"]]))
+            ),
+            Some(RuleDecision::Allow)
         );
         rule.tool = Some("bash".into());
         assert!(rule.validate().is_err());

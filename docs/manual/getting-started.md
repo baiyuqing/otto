@@ -688,7 +688,10 @@ external side effect did not occur.
   A matched command runs through the executor `/approve` uses: no Seatbelt, the
   real `HOME`, network allowed, and the same filtered environment (provider API
   key names removed; sensitive names only when listed in `allow_env`). It runs
-  without an approval request. An excluded program has your full user access:
+  without an escalation request. A matched command in a
+  [classified class](safety-and-tools.md#classified-commands-wait-for-approval-inside-the-sandbox),
+  such as `gh pr create` or `rm -r`, still waits for that approval first. An
+  excluded program has your full user access:
   list only programs you trust with that, such as `lark-cli`, which keeps its
   configuration in `~/.lark-cli` and its secret in the keychain.
 

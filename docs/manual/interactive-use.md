@@ -385,8 +385,10 @@ Shared commands:
   to `[sandbox].excluded_commands` (see [`[sandbox]`](getting-started.md#configuration)) and
   reloads the sandbox, then grants the pending command once as `/approve <id>`
   does. From then on the same command line, in this and later sessions, runs
-  unconfined with no approval; the same program with other arguments stays
-  sandboxed. Otto refuses, writes nothing, and states the reason when:
+  unconfined with no escalation approval; the same program with other
+  arguments stays sandboxed. A command in a
+  [classified class](safety-and-tools.md#classified-commands-wait-for-approval-inside-the-sandbox),
+  such as `gh pr create`, still asks on each run. Otto refuses, writes nothing, and states the reason when:
   - the command is not simple (it chains, redirects or substitutes), or it
     contains `*`;
   - the first word is not a bare program name looked up on `PATH`: it contains

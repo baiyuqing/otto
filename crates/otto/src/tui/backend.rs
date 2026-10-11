@@ -39,6 +39,12 @@ pub(crate) enum Request {
     ForkPoints,
     Profiles,
     Context,
+    /// The current session's span tree.
+    #[allow(dead_code)] // remove when the /trace panel sends it
+    Trace,
+    /// The text of one span of the trace.
+    #[allow(dead_code)] // remove when the /trace panel sends it
+    TraceSpan(String),
     SandboxPath(String),
     Agents(ListQuery),
     AgentDetail {
@@ -119,6 +125,10 @@ pub(crate) enum Reply {
     Sessions(Vec<SessionChoice>),
     Profiles(Vec<ProfileSummary>),
     Context(ContextReport),
+    #[allow(dead_code)] // remove when the /trace panel reads it
+    Trace(otto_core::session::trace::Trace),
+    #[allow(dead_code)] // remove when the /trace panel reads it
+    TraceSpan(otto_core::session::trace::SpanContent),
     SandboxPath(String),
     Agents(ListResult),
     AgentDetail {
@@ -336,6 +346,11 @@ async fn local(
                     .context_report()
                     .map(Reply::Context)
                     .ok_or_else(|| "no session is open".into()),
+                Request::Trace => c.trace().map(Reply::Trace),
+                Request::TraceSpan(span_id) => c
+                    .trace_span(&span_id)?
+                    .map(Reply::TraceSpan)
+                    .ok_or_else(|| "span not found".to_string()),
                 Request::SandboxPath(path) => {
                     c.resolve_sandbox_read_path(&path).map(Reply::SandboxPath)
                 }
@@ -808,6 +823,17 @@ async fn remote_call(remote: &Remote, ticket: &Ticket, request: Request) -> Resu
             .await
             .map(Reply::Context)
             .map_err(|e| e.to_string()),
+        Request::Trace => client
+            .trace(session)
+            .await
+            .map(Reply::Trace)
+            .map_err(|e| e.to_string()),
+        Request::TraceSpan(span_id) => client
+            .trace_span(session, &span_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(Reply::TraceSpan)
+            .ok_or_else(|| "span not found".to_string()),
         Request::Agents(query) => client
             .tasks(&query)
             .await

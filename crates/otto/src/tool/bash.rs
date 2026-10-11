@@ -38,6 +38,7 @@ use otto_core::safetext::{dynamic_redaction_marker, secret_forms};
 use super::bash_output::{Logs, Output, PREVIEW_BYTES};
 use super::result::{RedactingCollector, decode_strict_json, redact_exact_text};
 use super::root::Root;
+use super::shell;
 use super::workspace::Workspace;
 use super::{Tool, definition};
 
@@ -547,28 +548,19 @@ impl BashTool {
     /// Bounded read-only payload snapshots become part of the exact prepared
     /// version, so a changed script/build recipe invalidates authorization.
     fn review_facts(&self, command: &str) -> serde_json::Value {
-        let (cwd, words) = match self.review_command_target(command) {
+        let parsed = shell::parse(command);
+        let (cwd, segments) = match self.review_command_target(&parsed.command) {
             Ok(target) => target,
             Err(()) => return json!({"operation_unavailable":true,"complex_shell":true,"files":[]}),
         };
         let mut paths = Vec::<String>::new();
         let workspace = Workspace::new(&self.workspace_root);
-        for (index, word) in words.iter().enumerate() {
-            if index > 0
-                && matches!(
-                    words[index - 1].as_str(),
-                    ">" | ">>" | ">|" | "2>" | "2>>" | "&>"
-                )
-            {
-                continue;
-            }
+        for (index, word) in segments.iter().flat_map(|words| words.iter().enumerate()) {
             let name = Path::new(word)
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
-            let command_word = index == 0
-                || matches!(words[index - 1].as_str(), "&&" | "||" | "|" | ";")
-                || words[index - 1].ends_with(';');
+            let command_word = index == 0;
             match name {
                 "make" | "gmake" if command_word => {
                     let recipe = ["GNUmakefile", "makefile", "Makefile"]
@@ -635,30 +627,26 @@ impl BashTool {
                 }
             })
             .collect();
-        let dynamic_redirect = words.windows(2).any(|pair| {
-            matches!(pair[0].as_str(), ">" | ">>" | ">|" | "2>" | "2>>" | "&>")
-                && pair[1].contains(['$', '`'])
-        });
-        let mut target_unavailable = dynamic_redirect;
-        let targets: Vec<_> = words.windows(2).filter(|pair| matches!(pair[0].as_str(), ">" | ">>" | ">|" | "2>" | "2>>" | "&>"))
-            .map(|pair| {
-                let path = cwd.join(&pair[1]);
+        let mut target_unavailable = parsed.write_targets.iter().any(|target| !target.is_static);
+        let targets: Vec<_> = parsed.write_targets.iter()
+            .map(|target| {
+                let path = cwd.join(&target.path);
                 let resolved = workspace.as_ref().ok().and_then(|workspace| workspace.resolve_for_write(&path).ok())
                     .or_else(|| path.canonicalize().ok())
                     .or_else(|| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?)));
                 match resolved {
-                    Some(resolved) if !pair[1].contains(['$', '`', '*', '?', '~']) => {
+                    Some(resolved) if target.is_static && !target.path.contains(['$', '`', '*', '?', '~']) => {
                         let metadata = std::fs::metadata(&resolved).ok();
-                        json!({"path":pair[1],"resolved":resolved,"exists":metadata.is_some(),
+                        json!({"path":target.path,"resolved":resolved,"exists":metadata.is_some(),
                             "regular_file":metadata.as_ref().is_some_and(|metadata| metadata.is_file()),
                             "outside_workspace":!resolved.starts_with(&self.workspace_root)})
                     },
-                    _ => { target_unavailable = true; json!({"path":pair[1],"unavailable":true}) },
+                    _ => { target_unavailable = true; json!({"path":target.path,"unavailable":true}) },
                 }
             }).collect();
         json!({"cwd":cwd,"cwd_semantics":"initial literal cwd; the complete shell program remains untrusted operation data",
             "files":files,"targets":targets,"required_facts_truncated":required_facts_truncated,"target_unavailable":target_unavailable,
-            "complex_shell":otto_core::approval::command_argv(command).is_none(),
+            "complex_shell":!parsed.command.complete,
             "scope":"read-only workspace payload snapshots; unavailable or indirect effects require human review"})
     }
 
@@ -678,46 +666,44 @@ impl BashTool {
         Some(redact_exact_text(body, &secrets, &marker))
     }
 
-    fn review_command_target(&self, command: &str) -> Result<(PathBuf, Vec<String>), ()> {
+    /// Directory and remaining commands for the review facts. A first
+    /// `cd <dir>` sets the directory; any other `cd`, `pushd` or `popd`, or a
+    /// `cd` whose arguments are not all static, makes the target unavailable.
+    fn review_command_target(
+        &self,
+        analysis: &otto_core::approval::ShellCommand,
+    ) -> Result<(PathBuf, Vec<Vec<String>>), ()> {
         let mut cwd = self.workspace_root.clone();
-        let operation = if command.trim_start().starts_with("cd ")
-            || command.trim_start().starts_with("cd\t")
-        {
-            match command.split_once("&&") {
-                Some((cd, operation)) => {
-                    let argv = otto_core::approval::command_argv(cd).ok_or(())?;
-                    if argv.len() != 2 || argv[0] != "cd" {
-                        return Err(());
-                    }
-                    cwd = cwd.join(&argv[1]);
-                    operation
-                }
-                _ => return Err(()),
+        let mut segments = analysis.segments.as_slice();
+        let first = segments.first().ok_or(())?;
+        if shell::is_program(&first[0], "cd") {
+            if !analysis.complete || first.len() != 2 {
+                return Err(());
             }
-        } else {
-            command
-        };
-        if operation.contains('\0')
-            || regex::Regex::new(r"(?m)(?:^|[;&|()])\s*(?:cd|pushd|popd)\b")
-                .expect("fixed cwd pattern")
-                .is_match(operation)
-        {
+            cwd = cwd.join(&first[1]);
+            segments = &segments[1..];
+        }
+        let words = segments.first().ok_or(())?;
+        if segments.iter().any(|words| {
+            ["cd", "pushd", "popd"]
+                .iter()
+                .any(|name| shell::is_program(&words[0], name))
+        }) {
             return Err(());
         }
-        let argv = shlex::split(operation).ok_or(())?;
-        if argv.is_empty() {
-            return Err(());
-        }
-        if Path::new(&argv[0])
-            .file_name()
-            .is_some_and(|name| name == "git" || name == "make" || name == "gmake")
-        {
+        let git = shell::is_program(&words[0], "git");
+        if git || shell::is_program(&words[0], "make") || shell::is_program(&words[0], "gmake") {
+            let end = if git {
+                shell::git_subcommand(words).map_or(words.len(), |(index, _)| index)
+            } else {
+                words.len()
+            };
             let mut index = 1;
-            while index < argv.len() && !matches!(argv[index].as_str(), "&&" | "||" | ";" | "|") {
-                if argv[index] == "-C" {
-                    cwd = cwd.join(argv.get(index + 1).ok_or(())?);
+            while index < end {
+                if words[index] == "-C" {
+                    cwd = cwd.join(words.get(index + 1).ok_or(())?);
                     index += 2;
-                } else if let Some(path) = argv[index].strip_prefix("-C") {
+                } else if let Some(path) = words[index].strip_prefix("-C") {
                     cwd = cwd.join(path);
                     index += 1;
                 } else {
@@ -733,20 +719,21 @@ impl BashTool {
         if !cwd.is_dir() {
             return Err(());
         }
-        Ok((cwd, argv))
+        Ok((cwd, segments.to_vec()))
     }
 
     /// Resolve only literal git cwd syntax. Ambiguous shell/config overrides
     /// never borrow branch or diff facts from the original workspace.
     fn git_review_target(&self, command: &str) -> Result<Option<PathBuf>, ()> {
-        let (cwd, argv) = self.review_command_target(command)?;
-        if !Path::new(&argv[0])
-            .file_name()
-            .is_some_and(|name| name == "git")
-        {
+        let parsed = shell::parse(command);
+        if parsed.assigns_variables {
+            return Err(());
+        }
+        let (cwd, segments) = self.review_command_target(&parsed.command)?;
+        if !shell::is_program(&segments[0][0], "git") {
             return Ok(None);
         }
-        if argv.iter().any(|arg| {
+        if segments.iter().flatten().any(|arg| {
             arg == "-c" || arg.starts_with("--git-dir") || arg.starts_with("--work-tree")
         }) {
             return Err(());
@@ -763,8 +750,11 @@ impl BashTool {
         deadline: tokio::time::Instant,
         cancel: &CancellationToken,
     ) -> Option<(String, serde_json::Value)> {
-        let words = shlex::split(command)?;
-        let push = words.iter().position(|word| word == "push")?;
+        let analysis = shell::analyze(command);
+        let (words, push) = analysis.segments.iter().find_map(|words| {
+            let (index, subcommand) = shell::git_subcommand(words)?;
+            (subcommand == "push").then_some((words, index))
+        })?;
         let remote = words[push + 1..]
             .iter()
             .find(|word| !word.starts_with('-'))?;
@@ -1126,12 +1116,13 @@ impl Tool for BashTool {
         };
         let args: BashArgs = decode_strict_json(arguments.get(), &["command"])
             .map_err(|error| self.argument_error(&error))?;
-        let words = shlex::split(&args.command).unwrap_or_default();
-        if words.iter().any(|word| {
-            Path::new(word)
-                .file_name()
-                .is_some_and(|name| name == "git")
-        }) {
+        let analysis = shell::analyze(&args.command);
+        if analysis
+            .segments
+            .iter()
+            .flatten()
+            .any(|word| shell::is_program(word, "git"))
+        {
             let target = match self.git_review_target(&args.command) {
                 Ok(Some(target)) => target,
                 _ => {
@@ -1719,6 +1710,95 @@ The command did not run.";
     }
 
     #[test]
+    fn review_facts_read_scripts_and_builds_from_every_chained_command() {
+        let (_dir, workspace) = temp_workspace();
+        std::fs::write(workspace.root().join("Makefile"), "all:\n").unwrap();
+        std::fs::write(workspace.root().join("run"), "printf run\n").unwrap();
+        let tool = bash(
+            &workspace,
+            Arc::new(FakeExecutor::default()),
+            &[],
+            1024,
+            &[],
+        );
+        let facts = tool.review_facts("make&&./run");
+        let paths: Vec<_> = facts["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["path"].as_str().unwrap().to_ascii_lowercase())
+            .collect();
+        assert_eq!(paths, ["./run", "makefile"]);
+        assert!(
+            facts["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|file| file["unavailable"] != true)
+        );
+        assert_eq!(facts["complex_shell"], false);
+        assert_eq!(tool.review_facts("make && ./run $X")["complex_shell"], true);
+    }
+
+    #[test]
+    fn review_facts_apply_leading_cd_and_make_directory_and_refuse_later_cd() {
+        let (_dir, workspace) = temp_workspace();
+        std::fs::create_dir_all(workspace.root().join("sub")).unwrap();
+        std::fs::write(workspace.root().join("sub/Makefile"), "all:\n").unwrap();
+        let tool = bash(
+            &workspace,
+            Arc::new(FakeExecutor::default()),
+            &[],
+            1024,
+            &[],
+        );
+        let expected = json!(workspace.root().join("sub"));
+        for command in ["cd sub && make", "make -C sub", "make -Csub test"] {
+            let facts = tool.review_facts(command);
+            assert_eq!(facts["cwd"], expected, "{command}");
+            assert_eq!(
+                facts["files"][0]["path"]
+                    .as_str()
+                    .unwrap()
+                    .to_ascii_lowercase(),
+                "makefile",
+                "{command}"
+            );
+            assert!(facts["files"][0]["sha256"].is_string(), "{command}");
+        }
+        for command in [
+            "ls && cd sub",
+            "cd sub",
+            "cd \"$D\" && make",
+            "cd sub; cd .. && make",
+        ] {
+            assert_eq!(
+                tool.review_facts(command)["operation_unavailable"],
+                true,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_facts_report_redirect_targets() {
+        let (_dir, workspace) = temp_workspace();
+        let tool = bash(
+            &workspace,
+            Arc::new(FakeExecutor::default()),
+            &[],
+            1024,
+            &[],
+        );
+        let facts = tool.review_facts("echo a >./out.txt");
+        assert_eq!(facts["targets"][0]["path"], "./out.txt");
+        assert_eq!(facts["target_unavailable"], false);
+        let facts = tool.review_facts("echo a > \"$F\"");
+        assert_eq!(facts["targets"][0]["unavailable"], true);
+        assert_eq!(facts["target_unavailable"], true);
+    }
+
+    #[test]
     fn git_facts_resolve_literal_worktree_cwd_and_refuse_ambiguous_or_escaping_targets() {
         let (_dir, workspace) = temp_workspace();
         std::fs::create_dir_all(workspace.root().join(".worktree/feature")).unwrap();
@@ -1739,6 +1819,20 @@ The command did not run.";
             tool.git_review_target("cd .worktree/feature && git push")
                 .unwrap(),
             Some(expected)
+        );
+        assert_eq!(
+            tool.git_review_target("git --no-pager -C .worktree/feature push origin \"$B\"")
+                .unwrap(),
+            Some(workspace.root().join(".worktree/feature"))
+        );
+        assert!(tool.git_review_target("git -C \"$D\" push").is_err());
+        assert!(
+            tool.git_review_target("GIT_DIR=/tmp/other git push")
+                .is_err()
+        );
+        assert!(
+            tool.git_review_target("git status && GIT_WORK_TREE=/tmp git push")
+                .is_err()
         );
         assert!(tool.git_review_target("cd ../outside && git push").is_err());
         assert!(

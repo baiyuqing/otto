@@ -39,8 +39,12 @@ directly. `never` rejects requests needing additional authority; AUTO reviews
 eligible session-owned requests; explicit checkpoints, workflow human gates,
 questions and security permission changes still require human action. A child
 inherits its root session's live settings; unrelated/workspace requests cannot
-borrow them. User/managed rules precede isolated review, with deny > ask > allow;
-complex shell programs cannot match a simple argv-prefix rule.
+borrow them. User/managed rules precede isolated review, with deny > ask > allow.
+Native `tool/shell.rs` parses the command with tree-sitter-bash into the
+leading static words of every simple command (`ShellCommand`). An allow
+`command_prefix` rule matches only a fully static list/pipeline whose every
+segment has the prefix; a deny or ask prefix rule matches any segment, also
+in a command with expansions. Other allow rules skip non-static commands.
 
 Native `approval/reviewer.rs` defines the isolated `ReviewProvider` and immutable
 `ReviewContext`; the service owns coordination, journal/leases and decisions.

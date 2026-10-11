@@ -349,7 +349,7 @@ fn draw_suggestions(frame: &mut Frame, app: &App, suggestions: &[Completion], ar
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn queued_banner_style() -> Style {
+pub(super) fn queued_banner_style() -> Style {
     Style::default()
         .fg(Color::Yellow)
         .bg(QUEUED_BACKGROUND)
@@ -823,6 +823,34 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    fn trace_app() -> App {
+        let remote = crate::tui::attach::Remote::offline(Vec::new());
+        let mut app = App::new(&crate::tui::app::Backend::Attach(&remote));
+        let mut trace = crate::tui::features::TraceView::new();
+        let _ = crate::tui::features::Presenter::receive(
+            &mut trace,
+            crate::tui::backend::Reply::Trace(crate::tui::features::sample_trace()),
+        );
+        let view = crate::tui::features::Presenter::view(&trace);
+        app.surfaces.push(Box::new(trace), &view);
+        app
+    }
+
+    const BAR_GLYPHS: [char; 4] = ['░', '▒', '◇', '█'];
+
+    #[test]
+    fn trace_bars_are_drawn_only_when_the_panel_is_wide_enough() {
+        let app = trace_app();
+        let wide = screen_rows(&app, 100, 30).join("\n");
+        assert!(wide.contains("model #1"), "{wide}");
+        assert!(wide.contains('░') && wide.contains('█'), "{wide}");
+        assert!(wide.contains("10s"), "axis marks: {wide}");
+
+        let narrow = screen_rows(&app, 79, 30).join("\n");
+        assert!(narrow.contains("model #1"), "{narrow}");
+        assert!(!narrow.contains(BAR_GLYPHS), "{narrow}");
     }
 
     /// The drawn rows above the status line, joined.

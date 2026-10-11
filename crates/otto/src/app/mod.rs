@@ -33,6 +33,7 @@ pub const MEMORY_REVIEW_AVAILABLE: &str = "Memory review available. Run /memory 
 pub mod sandbox;
 pub(crate) mod scheduled;
 pub mod tasks;
+mod trace;
 pub mod wake;
 
 use std::path::{Path, PathBuf};
@@ -325,6 +326,8 @@ pub struct Controller {
     /// process. `None` outside Herdr and for every frontend that is not the
     /// pane's agent.
     herdr: std::sync::RwLock<Option<Arc<crate::herdr::Reporter>>>,
+    /// Parsed session files read for the trace.
+    trace_cache: trace::TraceCache,
 }
 
 /// Clears passive presentation routing when one logical user turn ends.
@@ -395,6 +398,7 @@ impl Controller {
             approval_control: tokio::sync::Mutex::new(()),
             bell: std::sync::atomic::AtomicBool::new(false),
             herdr: std::sync::RwLock::new(None),
+            trace_cache: trace::TraceCache::default(),
         };
         controller.notify_memory_state();
         controller.bind_reflection();
@@ -2555,6 +2559,7 @@ impl Controller {
             approval_control: tokio::sync::Mutex::new(()),
             bell: std::sync::atomic::AtomicBool::new(false),
             herdr: std::sync::RwLock::new(None),
+            trace_cache: trace::TraceCache::default(),
         };
         controller.notify_memory_state();
         controller.bind_reflection();

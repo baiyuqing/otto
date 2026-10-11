@@ -36,7 +36,7 @@ CLI / TUI / HTTP server / ACP
        crates/otto: app and native services
               │
               ▼
- crates/otto-core: shared contracts and agent loop
+ crates/otto-core: I/O-free contracts, formats and agent loop
               ▲
               │
 otto-plus (separate repository): browser UI and WASM bindings
@@ -45,12 +45,18 @@ otto-plus (separate repository): browser UI and WASM bindings
         React/TypeScript browser client
 ```
 
-`otto-core` must remain buildable for `wasm32-unknown-unknown`. Native-only
-concerns—filesystem access, network transports, process control, Turso,
-authentication, and the sandbox—belong in `otto`, not in `otto-core`.
-`make rust-wasm-check` enforces this boundary.
+`otto-core` holds I/O-free contracts (traits and types), formats (Pi v3
+session, provider wire formats, wire DTOs, configuration schema and layered
+merge) and the agent loop. `otto` holds the implementations: domain services,
+filesystem, process, network and clock access, persistence, authentication,
+the sandbox, startup composition and frontends. A domain service stays in
+`otto` even where a part of it performs no I/O. `otto` imports core items as
+`otto_core::...` and does not re-export them. The
+[otto-core rules](../crates/otto-core/AGENTS.md) state the rule and the source
+guards that check it; `otto-core` also remains buildable for
+`wasm32-unknown-unknown`.
 
-### `crates/otto-core`: shared, WASM-safe logic
+### `crates/otto-core`: I/O-free contracts, formats and agent loop
 
 `crates/otto-core` contains no native runtime integration. Its principal
 modules are:
@@ -76,9 +82,19 @@ workspace sources and content-bound executable trust; `cli/config_command.rs`
 composes offline inspection/scoped editing, and `tool/project_guard.rs`
 rechecks authorization at tool effects and requests cancellation on revocation.
 
-Change shared contracts here only when both native and browser consumers need
-them. Keep provider-specific transport and credential behavior out of this
-crate.
+Six module names exist in both crates. In each pair `otto-core` holds the
+contract or format and `otto` holds the implementation:
+
+| Module | `otto-core` | `otto` |
+| --- | --- | --- |
+| `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning | `SessionHandle`; the JSONL `Store` in `storage/backends/posix/session/`, which `session/` re-exports |
+| `config` | configuration schema, layered merge, provenance, managed constraints, resolution, `config::edit` | source discovery, executable trust, the compare-and-swap writer |
+| `memory` | `MemoryService` open contract, scoped requests, context projections | built-in domain `Service`, validation, `client::Client`, `adapter::BuiltinAdapter`; Turso store under `storage/` |
+| `approval` | approval requests, choices, modes and lifecycle values | durable approval authority `Service`, policy, repository port; Turso store under `storage/` |
+| `provider` | `Provider` trait; wire codecs in `openaicompat` and `openairesponses` | HTTP transports in `provider/openaicompat.rs` and `provider/chatgpt.rs` |
+| `tool` | tool definitions, schema assembly, `ToolExecutor` trait | `Tool` trait, `Registry` (implements `ToolExecutor`), native tool execution, MCP tool adapter |
+
+Keep provider transport and credential behavior out of this crate.
 
 ### `crates/otto`: native application
 
@@ -99,8 +115,8 @@ runtime for another Rust program; see the
 The frontends (`cli/`, `tui/`, `acp/`, `server/` and `client/`) build on every
 other module, and no other module may import a frontend:
 `crates/otto/tests/runtime_boundary.rs` fails when one does.
-`crates/otto/tests/storage_boundary.rs` checks storage ownership and dependency
-direction. `crates/otto/tests/faults_boundary.rs` keeps `faults` out of
+`crates/otto/tests/storage_boundary.rs` checks storage ownership, dependency
+direction, and that no `otto` source re-exports an `otto-core` item. `crates/otto/tests/faults_boundary.rs` keeps `faults` out of
 production code. See the [crate split design](specs/2026-10-05-otto-crate-split.md).
 
 The other modules group native responsibilities:

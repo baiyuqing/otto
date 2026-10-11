@@ -24,7 +24,6 @@ Older external links to `development.md#…` no longer land directly on the move
 | `#embedding-api` | [Embedding API](development/architecture.md#embedding-api) |
 | `#development-isolation-and-ownership` | [Development isolation and ownership](development/workflow.md#development-isolation-and-ownership) |
 | `#rust-workflow` | [Rust workflow](development/workflow.md#rust-workflow) |
-| `#ci-build-cache` | [CI build cache](development/workflow.md#ci-build-cache) |
 | `#dependency-licenses` | [Dependency licenses](development/workflow.md#dependency-licenses) |
 | `#local-verification` | [Local verification](development/workflow.md#local-verification) |
 | `#acp-integration-test-navigation` | [ACP integration-test navigation](development/workflow.md#acp-integration-test-navigation) |

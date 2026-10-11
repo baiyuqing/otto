@@ -19,8 +19,8 @@ not aspirational behavior.
 
 Use small, focused commits with imperative subjects, for example
 `feat: add OpenAI-compatible streaming` or `docs: document the ChatGPT sign-in
-flow`. Before committing a Rust change, run only `cargo fmt --all`; CI runs the
-build and test gates. Confirm that the working tree contains only intentional
+flow`. Before committing a Rust change, run only `cargo fmt --all`.
+Confirm that the working tree contains only intentional
 changes.
 
 ### Unified approval contract

@@ -150,7 +150,7 @@ impl Observation {
                     "connection interrupted" | "request could not be sent" => {
                         RetryReason::Transport
                     }
-                    "request timeout" => RetryReason::Timeout,
+                    "request timeout" | "model output idle timeout" => RetryReason::Timeout,
                     "transient HTTP response" => RetryReason::Http,
                     "server_is_overloaded" => RetryReason::ServerOverloaded,
                     "server_error" => RetryReason::ServerError,

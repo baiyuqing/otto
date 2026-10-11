@@ -47,11 +47,14 @@ const KEEPALIVE: Duration = Duration::from_secs(30);
 /// Longest wait for a single read from the socket.
 ///
 /// reqwest has no header-only timeout, so the bound is applied per read
-/// instead. It therefore also bounds a stream that stalls mid-body. A streaming
-/// chat completion sends something well inside 60 seconds, and there is
+/// instead. Any received byte restarts it, so a body that keeps sending bytes
+/// without model output is bounded by [`MODEL_IDLE_TIMEOUT`] instead. There is
 /// deliberately no overall request timeout, because a long completion may
 /// legitimately take minutes.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Longest time between model-output events (text, reasoning or tool-argument
+/// deltas) on a 2xx body. Keepalive bytes and SSE comments do not reset it.
+const MODEL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Largest number of redirect hops followed before the policy stops.
 const MAX_REDIRECTS: usize = 3;
 /// The text an API key is replaced with when it is long enough to hold it.
@@ -75,6 +78,9 @@ const CONNECT_RETRY_REASON: &str = "connection failed";
 /// `Retry` event reason for a dispatched request whose transport failed
 /// before any stream event reached the caller.
 const TRANSPORT_RETRY_REASON: &str = "connection interrupted";
+/// `Retry` event reason for a body that produced no model output within
+/// [`MODEL_IDLE_TIMEOUT`] before any delta reached the caller.
+const MODEL_IDLE_RETRY_REASON: &str = "model output idle timeout";
 
 // Fixed exponential backoff (1, 2, 4 s); no randomness dependency.
 struct Backoff;
@@ -92,8 +98,8 @@ enum AttemptError {
     /// The request was dispatched and the transport failed before any stream
     /// event reached the caller. Output cannot be replayed, so nothing
     /// visible is duplicated, but the endpoint may already have started the
-    /// completion.
-    Interrupted(ProviderError),
+    /// completion. The reason is the `Retry` event reason.
+    Interrupted(ProviderError, &'static str),
     /// No retry: output was already visible, or the failure is not a
     /// transport failure.
     Sent(ProviderError),
@@ -114,6 +120,8 @@ pub struct Client {
     /// `Err` records why the client is unusable. Construction never fails; the
     /// stored message is returned from the first `complete`.
     state: Result<Ready, String>,
+    /// Longest time between model-output events on a response body.
+    model_idle_timeout: Duration,
 }
 
 impl Client {
@@ -130,6 +138,7 @@ impl Client {
         Self {
             api_key: api_key.to_string(),
             state,
+            model_idle_timeout: MODEL_IDLE_TIMEOUT,
         }
     }
 
@@ -142,7 +151,14 @@ impl Client {
         Self {
             api_key: api_key.to_string(),
             state: Self::ready(base_url, http),
+            model_idle_timeout: MODEL_IDLE_TIMEOUT,
         }
+    }
+
+    /// Overrides the model-output idle bound; tests use a short one.
+    pub fn with_model_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.model_idle_timeout = timeout;
+        self
     }
 
     fn ready(base_url: &str, http: reqwest::Client) -> Result<Ready, String> {
@@ -293,7 +309,7 @@ impl Client {
                 } else if is_transient_transport(&error) {
                     // The request may already be at the endpoint even though
                     // its response never arrived.
-                    AttemptError::Interrupted(ProviderError::Other(message))
+                    AttemptError::Interrupted(ProviderError::Other(message), TRANSPORT_RETRY_REASON)
                 } else {
                     AttemptError::Sent(ProviderError::Other(message))
                 });
@@ -332,32 +348,59 @@ impl Client {
         let mut assembler = StreamAssembler::new();
         let mut body = Box::pin(response.bytes_stream());
         let mut emitted = false;
+        // Set by every event, cleared after each chunk to restart the idle
+        // deadline. Shared by reference because `forward` stays borrowed
+        // across the loop; atomic so the future stays `Send`.
+        let progressed = std::sync::atomic::AtomicBool::new(false);
         let mut forward = |event: StreamEvent| {
             emitted = true;
+            progressed.store(true, std::sync::atomic::Ordering::Relaxed);
             emit(event);
         };
+        let mut deadline = tokio::time::Instant::now() + self.model_idle_timeout;
         while !assembler.is_done() {
-            let chunk = match await_control(control, body.try_next())
-                .await
-                .map_err(AttemptError::Sent)?
-            {
-                Ok(Some(chunk)) => chunk,
-                Ok(None) => break,
-                Err(error) => {
-                    check_running(control).map_err(AttemptError::Sent)?;
-                    let message = format!("read chat completion stream: {}", error_chain(&error));
-                    return Err(if !emitted && is_transient_transport(&error) {
-                        AttemptError::Interrupted(ProviderError::Other(message))
-                    } else {
-                        AttemptError::Sent(ProviderError::Other(message))
-                    });
-                }
-            };
+            let chunk =
+                match await_control(control, tokio::time::timeout_at(deadline, body.try_next()))
+                    .await
+                    .map_err(AttemptError::Sent)?
+                {
+                    Ok(Ok(Some(chunk))) => chunk,
+                    Ok(Ok(None)) => break,
+                    Err(_elapsed) => {
+                        // The prefix makes the settlement `Unknown`: the endpoint
+                        // may still be generating.
+                        let error = ProviderError::Other(format!(
+                            "read chat completion stream: no model output for {:?}",
+                            self.model_idle_timeout
+                        ));
+                        return Err(if !emitted {
+                            AttemptError::Interrupted(error, MODEL_IDLE_RETRY_REASON)
+                        } else {
+                            AttemptError::Sent(error)
+                        });
+                    }
+                    Ok(Err(error)) => {
+                        check_running(control).map_err(AttemptError::Sent)?;
+                        let message =
+                            format!("read chat completion stream: {}", error_chain(&error));
+                        return Err(if !emitted && is_transient_transport(&error) {
+                            AttemptError::Interrupted(
+                                ProviderError::Other(message),
+                                TRANSPORT_RETRY_REASON,
+                            )
+                        } else {
+                            AttemptError::Sent(ProviderError::Other(message))
+                        });
+                    }
+                };
             observer.activity(otto_core::diagnostics::Phase::Receiving, chunk.len(), None);
             {
                 if let Err(error) = assembler.push(&chunk, &mut forward) {
                     check_running(control).map_err(AttemptError::Sent)?;
                     return Err(AttemptError::Sent(ProviderError::Other(error.to_string())));
+                }
+                if progressed.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    deadline = tokio::time::Instant::now() + self.model_idle_timeout;
                 }
                 // Once a complete response has been received and validated, it
                 // wins a simultaneous stop. Before then, the stop reason wins.
@@ -528,7 +571,7 @@ impl Provider for Client {
                     Ok(response) => break Ok(response),
                     Err(AttemptError::Sent(error)) => break Err(error),
                     Err(AttemptError::NotSent(error)) => (error, CONNECT_RETRY_REASON, false),
-                    Err(AttemptError::Interrupted(error)) => (error, TRANSPORT_RETRY_REASON, true),
+                    Err(AttemptError::Interrupted(error, reason)) => (error, reason, true),
                 };
                 let Some(delay) = crate::retry::next_delay(
                     RETRY_POLICY,

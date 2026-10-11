@@ -499,15 +499,19 @@ impl App {
         match transition {
             Transition::Stay => {}
             Transition::Close => {
-                let approval = self
-                    .surfaces
-                    .remove(surface)
-                    .is_some_and(|surface| surface.model.key().starts_with("approval:"));
+                let removed = self.surfaces.remove(surface);
                 self.pending.retain(|(id, _)| *id != surface);
-                if approval {
+                let Some(removed) = removed else {
+                    return;
+                };
+                if let Some(id) = removed.model.key().strip_prefix("approval:") {
+                    // The snapshot is stale until the poll below answers.
+                    self.approval_snapshot.retain(|request| request.id != id);
                     self.request_approvals();
                 }
-                self.release_deferred_approvals();
+                if removed.model.defers_approvals() {
+                    self.release_deferred_approvals();
+                }
             }
             Transition::Push(mut presenter) => {
                 if let Some(id) = presenter.key().strip_prefix("approval:") {
@@ -1079,8 +1083,13 @@ impl App {
                     {
                         self.hidden_approvals.insert(id.to_string());
                     }
-                    self.surfaces.pop();
-                    self.release_deferred_approvals();
+                    if self
+                        .surfaces
+                        .pop()
+                        .is_some_and(|surface| surface.model.defers_approvals())
+                    {
+                        self.release_deferred_approvals();
+                    }
                     return None;
                 }
                 let surface = self.surfaces.top_mut()?;
@@ -1786,6 +1795,21 @@ mod tests {
         assert_eq!(top_key(&app), "trace");
         press(&mut app, &remote, KeyCode::Esc);
         assert_eq!(top_key(&app), "approval:a1");
+    }
+
+    #[test]
+    fn a_decided_approval_is_not_presented_again_from_the_stale_snapshot() {
+        let (mut app, _) = app();
+        app.sync_shared_approval(&[approval("a1")]);
+        let surface = app.surfaces.top().unwrap().id;
+
+        app.transition(surface, Transition::Close);
+        assert!(app.surfaces.top().is_none());
+
+        open_trace(&mut app);
+        let trace = app.surfaces.top().unwrap().id;
+        app.transition(trace, Transition::Close);
+        assert!(app.surfaces.top().is_none());
     }
 
     #[test]

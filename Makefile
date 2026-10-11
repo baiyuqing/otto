@@ -83,8 +83,6 @@ check-fast: ## local gate: only the checks for paths changed since origin/main
 
 check: rust-fmt rust-lint check-tests ## full macOS acceptance: format, lint, all Rust tests (PTY tests included), host integration (no release build; see `build`)
 
-# CI's macOS acceptance job runs this, and a separate job runs rust-fmt and
-# rust-lint at the same time.
 check-tests: rust-test connect-check rust-wasm-test scripts-test ## `check` without rust-fmt and rust-lint
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 

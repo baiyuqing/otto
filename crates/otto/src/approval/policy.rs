@@ -44,7 +44,13 @@ pub(super) fn rule(
         .as_ref()
         .and_then(|v| v.get("command"))
         .and_then(|v| v.as_str());
-    evaluate_rules(&config.rules, &request.subject.source, tool, command)
+    let analysis = command.map(crate::tool::shell::analyze);
+    evaluate_rules(
+        &config.rules,
+        &request.subject.source,
+        tool,
+        analysis.as_ref(),
+    )
 }
 
 /// Risk alone never supplies authorization. In particular, persistence needs

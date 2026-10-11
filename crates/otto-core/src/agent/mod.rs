@@ -1796,7 +1796,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             duration,
             &outcome,
         );
-        let retries = serde_json::json!(tracker.retries());
+        let retries = tracker.retries().to_vec();
         if let Err(error) = self
             .append_provider_call(provider_call::SettledCall {
                 operation_id: &operation_id,
@@ -1816,7 +1816,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
         // Persist only content-free recovery facts. Failed stream fragments
         // never become model context or executable tool calls.
-        if retries.as_array().is_some_and(|r| !r.is_empty()) || outcome.result.is_err() {
+        if !retries.is_empty() || outcome.result.is_err() {
             let record = serde_json::json!({
                 "schemaVersion": 1, "operationId": operation_id,
                 "attempts": outcome.attempts, "retries": retries,

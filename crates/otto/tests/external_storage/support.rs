@@ -8,17 +8,18 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use otto::approval;
 use otto::approval::migration::ApprovalRecord;
 use otto::approval::repository::{ApprovalStore, Claim, ClaimChange, ReviewLease};
-use otto::approval::{
-    self, ApplicationState, ApprovalMode, ApprovalPolicy, ApprovalReviewer, ApprovalSettings,
-    Change, Request, Scope, Snapshot, State,
-};
 use otto::runtime::storage::backend::{MigrationContext, PreparedImport};
 use otto::runtime::storage::{
     Endpoint, NamespaceIdentity, RepositoryFactory, RepositoryRequirements, StorageEndpoint,
 };
 use otto::storage::migration::{self, *};
+use otto_core::approval::{
+    ApplicationState, ApprovalMode, ApprovalPolicy, ApprovalReviewer, ApprovalSettings, Change,
+    Request, Scope, Snapshot, State,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,8 +274,8 @@ impl JsonStore {
             }
         }
         if transport == Some("bounded-authority") {
-            return request.kind == approval::Kind::Authorization
-                && request.authority == approval::Authority::Bounded
+            return request.kind == otto_core::approval::Kind::Authorization
+                && request.authority == otto_core::approval::Authority::Bounded
                 && !request.persistent
                 && (settings.policy == ApprovalPolicy::Never
                     || settings.reviewer != ApprovalReviewer::User);
@@ -724,7 +725,7 @@ impl JsonStore {
             && next
                 .review
                 .as_ref()
-                .is_some_and(|m| m.status == approval::ReviewStatus::HumanRequired);
+                .is_some_and(|m| m.status == otto_core::approval::ReviewStatus::HumanRequired);
         if next.id != expected.id
             || next.scope != expected.scope
             || (next.revision != expected.revision && !basis_refresh && !unstarted_reauthorization)

@@ -99,7 +99,8 @@ fn rows(path: &Path, table: &str) -> i64 {
 // Fixtures: one write per repository. `n` makes each write a distinct row.
 
 fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
-    use otto::approval::{self, Authority, Kind, Proposal, Scope, Subject};
+    use otto::approval::{self, Proposal};
+    use otto_core::approval::{Authority, Kind, Scope, Subject};
     let store = factory.approvals(endpoint(address)).ok()?;
     let service = approval::Service::in_memory().unwrap();
     let scope = Scope {
@@ -109,7 +110,7 @@ fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
         run_id: String::new(),
     };
     service
-        .set_mode(&scope, otto::approval::ApprovalMode::Manual)
+        .set_mode(&scope, otto_core::approval::ApprovalMode::Manual)
         .unwrap();
     let listed = store.clone();
     Some(Handle {

@@ -5,6 +5,11 @@ use super::{
     reviewer::{ReviewContext, ReviewProvider},
     *,
 };
+use otto_core::approval::{
+    ApplicationState, ApprovalMode, ApprovalPolicy, ApprovalReviewer, ApprovalSettings, Authority,
+    Kind, Request, ReviewAssessment, ReviewMetadata, ReviewOutcome, ReviewStatus, RiskLevel,
+    RuleDecision, Scope, State, UserAuthorization,
+};
 use std::{
     collections::BTreeMap,
     sync::{Arc, OnceLock},

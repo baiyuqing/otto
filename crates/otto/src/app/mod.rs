@@ -115,7 +115,7 @@ pub struct Info {
     pub sandbox: SandboxInfo,
     /// The session's approval policy: MANUAL, AUTO or YOLO.
     pub approval_mode: ApprovalMode,
-    pub approval_settings: crate::approval::ApprovalSettings,
+    pub approval_settings: otto_core::approval::ApprovalSettings,
     /// Where this session was forked from, when it is a fork.
     pub forked_from: Option<ForkedFrom>,
     /// The session plan in force; empty when there is none.
@@ -165,15 +165,15 @@ pub struct ResumeResult {
 
 pub fn permissions_update(
     args: &str,
-    current: crate::approval::ApprovalSettings,
+    current: otto_core::approval::ApprovalSettings,
 ) -> Result<
     Option<(
-        crate::approval::ApprovalPolicy,
-        crate::approval::ApprovalReviewer,
+        otto_core::approval::ApprovalPolicy,
+        otto_core::approval::ApprovalReviewer,
     )>,
     String,
 > {
-    use crate::approval::{ApprovalPolicy as Policy, ApprovalReviewer as Reviewer};
+    use otto_core::approval::{ApprovalPolicy as Policy, ApprovalReviewer as Reviewer};
     match args.split_whitespace().collect::<Vec<_>>().as_slice() {
         [] => Ok(None),
         ["policy", "on_request"] => Ok(Some((Policy::OnRequest, current.reviewer))),
@@ -186,8 +186,8 @@ pub fn permissions_update(
     }
 }
 
-pub fn format_permissions(settings: crate::approval::ApprovalSettings) -> String {
-    use crate::approval::{ApprovalPolicy, ApprovalReviewer};
+pub fn format_permissions(settings: otto_core::approval::ApprovalSettings) -> String {
+    use otto_core::approval::{ApprovalPolicy, ApprovalReviewer};
     let policy = match settings.policy {
         ApprovalPolicy::OnRequest => "on_request",
         ApprovalPolicy::Never => "never",
@@ -705,7 +705,7 @@ impl Controller {
         let approval_settings = self
             .builder
             .approvals
-            .settings(&crate::approval::Scope {
+            .settings(&otto_core::approval::Scope {
                 workspace: header.workspace.clone(),
                 session_id: header.id.clone(),
                 task_id: String::new(),
@@ -1035,7 +1035,7 @@ impl Controller {
             .map_err(|e| e.to_string())?;
         Ok(format!(
             "Approval mode: {}",
-            if settings.policy == crate::approval::ApprovalPolicy::Never {
+            if settings.policy == otto_core::approval::ApprovalPolicy::Never {
                 "NEVER (reviewer disabled)"
             } else {
                 settings.mode().label()
@@ -1074,9 +1074,9 @@ impl Controller {
         &self.builder.approvals
     }
 
-    pub fn approval_scope(&self) -> crate::approval::Scope {
+    pub fn approval_scope(&self) -> otto_core::approval::Scope {
         let info = self.info();
-        crate::approval::Scope {
+        otto_core::approval::Scope {
             workspace: info.workspace,
             session_id: info.session_id,
             task_id: String::new(),
@@ -1126,15 +1126,15 @@ impl Controller {
             .map_err(|_| Error::new(ErrorKind::Conflict))?;
         let result = memory.review(request);
         let state = if result.is_ok() {
-            crate::approval::ApplicationState::Applied
+            otto_core::approval::ApplicationState::Applied
         } else {
-            crate::approval::ApplicationState::Failed
+            otto_core::approval::ApplicationState::Failed
         };
         self.approval_service()
             .application(
                 &approval.id,
                 &approval.scope,
-                crate::approval::ApplicationState::Applying,
+                otto_core::approval::ApplicationState::Applying,
                 state,
                 if result.is_err() {
                     "Memory review could not be applied."
@@ -1146,7 +1146,9 @@ impl Controller {
         result
     }
 
-    pub fn approval_snapshot(&self) -> Result<crate::approval::Snapshot, crate::approval::Error> {
+    pub fn approval_snapshot(
+        &self,
+    ) -> Result<otto_core::approval::Snapshot, crate::approval::Error> {
         let scope = self.approval_scope();
         if let Some((memory, user, workspace)) = self.memory_manager() {
             crate::approval::memory::attach(
@@ -1173,7 +1175,7 @@ impl Controller {
         allow: bool,
         feedback: &str,
         transport: &str,
-    ) -> Result<crate::approval::Request, crate::approval::Error> {
+    ) -> Result<otto_core::approval::Request, crate::approval::Error> {
         let scope = self.approval_scope();
         let request = self
             .approval_service()
@@ -2794,16 +2796,22 @@ mod tests {
         );
         controller.permissions_command("reviewer user").unwrap();
         let settings = controller.info().approval_settings;
-        assert_eq!(settings.policy, crate::approval::ApprovalPolicy::Never);
-        assert_eq!(settings.reviewer, crate::approval::ApprovalReviewer::User);
+        assert_eq!(settings.policy, otto_core::approval::ApprovalPolicy::Never);
+        assert_eq!(
+            settings.reviewer,
+            otto_core::approval::ApprovalReviewer::User
+        );
         assert_eq!(controller.info().sandbox, sandbox);
         assert!(controller.permissions_command("reviewer bypass").is_err());
         controller.auto_mode_command("auto").unwrap();
         let settings = controller.info().approval_settings;
-        assert_eq!(settings.policy, crate::approval::ApprovalPolicy::OnRequest);
+        assert_eq!(
+            settings.policy,
+            otto_core::approval::ApprovalPolicy::OnRequest
+        );
         assert_eq!(
             settings.reviewer,
-            crate::approval::ApprovalReviewer::AutoReview
+            otto_core::approval::ApprovalReviewer::AutoReview
         );
         assert_eq!(controller.info().sandbox, sandbox);
     }

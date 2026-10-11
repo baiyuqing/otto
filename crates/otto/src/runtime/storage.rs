@@ -698,8 +698,8 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::ApprovalMode;
     use crate::storage::{SqlCapabilities, SqlConnection, SqlDialect, WriteIsolation};
+    use otto_core::approval::ApprovalMode;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct RegisteredFactory {
@@ -839,7 +839,7 @@ mod tests {
         let service =
             crate::approval::Service::from_store(storage.approvals(Path::new("unused")).unwrap())
                 .unwrap();
-        let scope = crate::approval::Scope {
+        let scope = otto_core::approval::Scope {
             workspace: "/workspace".into(),
             session_id: "session".into(),
             task_id: String::new(),
@@ -1040,7 +1040,7 @@ mod tests {
         let service =
             crate::approval::Service::from_store(Storage::default().approvals(&path).unwrap())
                 .unwrap();
-        let scope = crate::approval::Scope {
+        let scope = otto_core::approval::Scope {
             workspace: "/workspace".into(),
             session_id: "session".into(),
             task_id: String::new(),

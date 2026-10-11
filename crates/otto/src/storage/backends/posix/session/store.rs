@@ -121,8 +121,6 @@ pub struct Recovery {
     pub interrupted_turn: Option<InterruptedTurn>,
 }
 
-pub use otto_core::session::turn::MAX_AUTOMATIC_RESUMES;
-
 impl Recovery {
     /// Whether the interrupted turn already used its automatic resume.
     pub fn resume_exhausted(&self) -> bool {

@@ -436,7 +436,7 @@ impl<'a> Repl<'a> {
                 result = &mut run => break result,
                 Some(event) = events.recv() => {
                     if let Event::ApprovalChanged { request } = &event {
-                        waiting = request.blocking && request.state == crate::approval::State::Pending;
+                        waiting = request.blocking && request.state == otto_core::approval::State::Pending;
                     }
                     if let Some(reporter) = &self.program_status {
                         reporter.observe(&mut *self.stdout, &event);
@@ -1444,7 +1444,7 @@ fn spawn_reader<R: BufRead + Send + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use crate::approval::ApprovalMode;
+    use otto_core::approval::ApprovalMode;
     use std::path::Path;
 
     use super::*;
@@ -1554,10 +1554,10 @@ mod tests {
             .unwrap();
         let request = service
             .create(crate::approval::Proposal {
-                kind: crate::approval::Kind::Confirmation,
-                authority: crate::approval::Authority::Consent,
+                kind: otto_core::approval::Kind::Confirmation,
+                authority: otto_core::approval::Authority::Consent,
                 scope: controller.approval_scope(),
-                subject: crate::approval::Subject {
+                subject: otto_core::approval::Subject {
                     tool_call_id: "plan-call".into(),
                     source: "conversation".into(),
                     id: "restored-operation".into(),
@@ -1584,11 +1584,11 @@ mod tests {
                 Some(&request.scope.session_id),
             )
             .unwrap();
-        assert_eq!(decided.state, crate::approval::State::Approved);
+        assert_eq!(decided.state, otto_core::approval::State::Approved);
         assert_eq!(decided.decision.unwrap().feedback, "Keep the old syntax");
         assert_eq!(
             decided.application,
-            crate::approval::ApplicationState::NotRequired
+            otto_core::approval::ApplicationState::NotRequired
         );
         assert!(
             stdout.contains("Approved; application: NotRequired"),

@@ -267,7 +267,7 @@ fn footer_text(app: &App) -> String {
     };
     let mut text = format!(
         "{profile_model} | {} | tokens {}/{}",
-        if app.info.approval_settings.policy == crate::approval::ApprovalPolicy::Never {
+        if app.info.approval_settings.policy == otto_core::approval::ApprovalPolicy::Never {
             "NEVER"
         } else {
             app.info.approval_mode.label()
@@ -709,22 +709,22 @@ mod tests {
         format!("{}", terminal.backend())
     }
 
-    fn approval() -> crate::approval::Request {
-        crate::approval::Request {
+    fn approval() -> otto_core::approval::Request {
+        otto_core::approval::Request {
             options: Vec::new(),
             schema_version: 1,
             id: "approval-1".into(),
             revision: 1,
-            kind: crate::approval::Kind::Confirmation,
-            authority: crate::approval::Authority::Consent,
-            scope: crate::approval::Scope {
+            kind: otto_core::approval::Kind::Confirmation,
+            authority: otto_core::approval::Authority::Consent,
+            scope: otto_core::approval::Scope {
                 workspace: "/work".into(),
                 session_id: "session".into(),
                 task_id: String::new(),
                 run_id: String::new(),
             },
             presentation_origin: String::new(),
-            subject: crate::approval::Subject {
+            subject: otto_core::approval::Subject {
                 tool_call_id: String::new(),
                 source: "conversation".into(),
                 id: "plan".into(),
@@ -737,9 +737,9 @@ mod tests {
             blocking: true,
             created_at: 1,
             expires_at: None,
-            state: crate::approval::State::Pending,
+            state: otto_core::approval::State::Pending,
             decision: None,
-            application: crate::approval::ApplicationState::NotRequired,
+            application: otto_core::approval::ApplicationState::NotRequired,
             application_error: String::new(),
             review: None,
         }

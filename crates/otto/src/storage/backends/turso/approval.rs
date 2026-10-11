@@ -1014,8 +1014,8 @@ use crate::approval::codec::merge_persisted;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::ApprovalMode;
     use crate::approval::{Actor, Proposal, Service};
+    use otto_core::approval::ApprovalMode;
     use std::sync::Arc;
 
     fn fixture_proposal() -> Proposal {

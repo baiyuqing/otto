@@ -1,5 +1,6 @@
 //! Workflow owns the transactional request/step/result receipt and DAG resume.
-use super::{Authority, Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
+use super::{Domain, Error, Proposal, Result, Service};
+use otto_core::approval::{Authority, Kind, Request, State, Subject};
 use std::sync::{Arc, Weak};
 pub struct Adapter {
     pub controller: Weak<crate::workflow::Controller>,
@@ -38,7 +39,7 @@ pub fn publish(
     service.create(Proposal {
         kind: Kind::Authorization,
         authority: Authority::Consent,
-        scope: super::Scope {
+        scope: otto_core::approval::Scope {
             workspace: workspace.into(),
             session_id: String::new(),
             task_id: String::new(),

@@ -27,6 +27,7 @@ pub mod pi;
 pub mod plan;
 pub mod provider_call;
 pub mod remote_compaction;
+pub mod trace;
 pub mod turn;
 pub mod types;
 

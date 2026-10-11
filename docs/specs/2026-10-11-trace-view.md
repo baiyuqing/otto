@@ -1,6 +1,6 @@
 # Trace view: a timeline of turns, provider requests, tool calls and sub-agents
 
-Status: draft 2026-10-11, awaiting approval.
+Status: approved 2026-10-11.
 
 User decisions, 2026-10-11:
 
@@ -53,13 +53,19 @@ settles, at the point where it emits `Event::ProviderApiCall`
   "schemaVersion": 1,
   "operationId": "op_7",
   "kind": "ordinary",
+  "startedAt": 1791700000000,
   "durationMs": 7900,
   "firstOutputMs": 4400,
   "attempts": 2,
-  "retries": [{ "attempt": 1, "delayMs": 2000, "reason": "connection interrupted" }],
-  "status": "ok",
-  "stopReason": "tool_use",
-  "usage": { "input": 14000, "output": 402, "cachedInput": 11200 },
+  "retries": [{
+    "attempt": 1, "maxAttempts": 3, "delayMs": 2000,
+    "reason": "connection interrupted", "interruptedOutput": false,
+    "atMs": 1791700001800
+  }],
+  "disposition": "succeeded",
+  "effectCertainty": "completed",
+  "finishReason": "tool_calls",
+  "usage": { "input_tokens": 14000, "output_tokens": 402, "cached_input_tokens": 11200 },
   "request": {
     "systemPromptTokens": 6100,
     "toolTokens": 6300,
@@ -70,23 +76,28 @@ settles, at the point where it emits `Event::ProviderApiCall`
 }
 ```
 
-- The start time is the entry timestamp minus `durationMs`.
+- `startedAt` and `retries[].atMs` are unix milliseconds. The disposition
+  fields are the flattened `OperationOutcome`; `stopReason` appears when
+  the operation stopped early. `usage` uses the `Usage` field names.
 - `firstOutputMs` is measured from the start to the first decoded model
   output event (reasoning, text or tool call). It is absent when no output
   arrived.
 - `retries[].reason` is the reason text that `ProviderRetry` already
   carries and that the status line already shows.
 - `usage` is copied from the provider report so that the trace does not
-  need to match entries to assistant messages. It is `null` when the
-  provider reported no usage, and `cachedInput` is absent when the cached
-  breakdown was not reported, with the same meaning as the footer.
+  need to match entries to assistant messages. It is absent when the
+  provider reported no usage, and `cached_input_tokens` is absent when it
+  is zero.
 - `request` token counts are estimates from the estimators `/context` uses
-  (`agent::context_estimate`). `memoryRecordIds` are the ids of the
-  `agent::memory::Record` values recalled for the turn.
+  (`context_report::sections`). The recalled memory message is counted in
+  `memoryTokens`, not in `messageTokens`. `memoryRecordIds` are the ids of
+  the `agent::memory::Record` values recalled for the turn.
 - The entry holds no prompt, message, tool argument or result text.
   An entry is about 400 bytes.
 - An append failure is handled the same way as an `otto.operation` append
   failure.
+- `otto.provider_recovery` is still written for retried or failed
+  requests; its retries now carry `atMs`.
 - Compatibility: the session codec keeps unknown entries unchanged
   (`decode_pi_v3_preserves_unknown_entry_raw_json`). Older Otto versions
   ignore the entry.
@@ -153,17 +164,26 @@ Input: the parent session's entries, and for each child its
   `otto.provider_call` of kind `local_compaction` or `remote_compaction`.
 - **Sub-agent**: one span per child, nested under the tool span whose
   `tool_call_id` equals `parentToolCallId`. Its children are built from
-  the child's own entries with the same rules. Delegation depth is one, so
-  the tree has at most three levels below a turn.
+  the child's own entries with the same rules, and their ids are prefixed
+  with `<task id>:`. Delegation depth is one, so the tree has at most three
+  levels below a turn. A resumed sub-agent appears once, under the call
+  that started it.
+- Provider and compaction entries outside any turn are not shown.
+- A tool label carries the tool name and an argument preview of at most
+  60 characters.
 
 ### 5. Transport
 
-- **Local TUI**: a `backend::Request::Trace` reads the parent session from
-  memory and the child files from the session's children directory, the
-  directory `subagent::interrupted::scan` already reads. A child file is
-  read again only when its length changed since the last read.
+- **Local TUI**: `backend::Request::Trace` calls `Controller::trace`, which
+  reads the parent session file and every `*.jsonl` file in the session's
+  children directory, the directory `subagent::interrupted::scan` already
+  reads, so tasks started by an earlier process are included. A file is
+  parsed again only when its length or modification time changed since the
+  last read. A child is running while its task in the registry has not
+  reached a final status.
 - **HTTP**: `GET /v1/sessions/{id}/trace` returns the `Trace` as JSON. It
-  holds no message, argument or result text.
+  holds no message or result text; tool labels hold the 60-character
+  argument preview.
   `GET /v1/sessions/{id}/trace/{span_id}` returns the content of one span:
   tool arguments and result; for a provider span, the messages that
   preceded it, its reply, and the `request` estimates; for a sub-agent, its
@@ -243,8 +263,8 @@ requests use the same path.
   it. The system prompt and tool definitions are represented by their
   token estimates only. A memory record looked up by id can have changed
   or been deleted since the request.
-- With `--no-session`, children use in-memory sessions; their rows show
-  the `tasks.db` summary only.
+- With `--no-session` there is no session file, and `/trace` reports an
+  error.
 - Sessions written before this change show estimated provider spans.
 
 ## Out of scope

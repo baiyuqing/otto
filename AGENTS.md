@@ -14,7 +14,7 @@ the owning code instead of restating it.
 
 | Work | Instructions and entry point |
 | --- | --- |
-| Shared domain/config/wire logic | [otto-core rules](crates/otto-core/AGENTS.md), `crates/otto-core/src/` |
+| I/O-free contracts, formats and agent loop | [otto-core rules](crates/otto-core/AGENTS.md), `crates/otto-core/src/` |
 | Native runtime, tools and frontends | [otto rules](crates/otto/AGENTS.md), `crates/otto/src/cli/` |
 | Documentation | [documentation rules](docs/AGENTS.md), `docs/user-manual.md` |
 | Browser frontend | [otto-plus](https://github.com/baiyuqing/otto-plus); separate client of Otto HTTP APIs |

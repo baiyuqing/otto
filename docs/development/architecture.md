@@ -6,7 +6,7 @@ Previous: — · [Documentation index](../README.md) · Next: [Development workf
 
 Keep responsibilities split along the current Rust crate/module layout:
 
-- `crates/otto-core` (wasm-safe library; no filesystem, network, process, or wall-clock API):
+- `crates/otto-core` (I/O-free contracts, formats and agent loop; wasm-safe; no filesystem, network, process, environment, stdio or wall-clock API; see the [layer map](../code-organization.md#rust-layers)):
   - `model`: provider-neutral message/tool types, message/block validation, and shared deep-copy helpers
   - `provider`: neutral provider contract
   - `openaicompat`: all OpenAI-compatible Chat Completions HTTP/JSON/SSE wire code

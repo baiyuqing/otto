@@ -1314,7 +1314,7 @@ paths:
           application/json:
             schema:
               type: object
-              description: Typed operation: set_default_profile, create_profile, set_profile_field, or remove_profile. Raw TOML and credential values are not accepted.
+              description: "Typed operation: set_default_profile, create_profile, set_profile_field, or remove_profile. Raw TOML and credential values are not accepted."
       responses:
         "200": { description: Redacted preview and one-time 10-minute confirmation capability token }
         "400": { description: Invalid or unsupported profile change }
@@ -1627,11 +1627,12 @@ paths:
     parameters:
       - $ref: "#/components/parameters/sessionID"
     get:
-      summary: Timeline of the session's turns, provider requests, tool calls and sub-agents
+      summary: Timeline of the session's turns, provider requests, tool calls, compactions and sub-agents
       description: >-
         otto_core::session::trace::Trace, built from the session file and
         the sub-agent task files. It holds no message or result text; a tool
-        label carries an argument preview of at most 60 characters.
+        label carries an argument preview of at most 60 characters, and a
+        sub-agent label the first 40 characters of the task description.
       responses:
         "200":
           description: OK
@@ -1646,7 +1647,16 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The session has no file, or the redaction boundary withholds dynamic content
+          description: >-
+            trace_unavailable: the redaction boundary withholds dynamic
+            content, the session is closed or has no file, or the session
+            file cannot be read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: The trace could not be read
           content:
             application/json:
               schema:
@@ -1662,8 +1672,11 @@ paths:
     get:
       summary: The text of one trace span
       description: >-
-        otto_core::session::trace::SpanContent: titled sections such as
-        tool arguments and result, or a sub-agent prompt and result.
+        otto_core::session::trace::SpanContent: titled text sections, empty
+        ones omitted. A turn has input; a provider request input, request
+        (token estimates) and reply; a tool arguments and result; a
+        compaction summary; a sub-agent prompt and result. The text is the
+        session content as stored, which the agent redacts before writing it.
       responses:
         "200":
           description: OK
@@ -1678,7 +1691,16 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The session has no file, or the redaction boundary withholds dynamic content
+          description: >-
+            trace_unavailable: the redaction boundary withholds dynamic
+            content, the session is closed or has no file, or the session
+            file cannot be read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: The trace could not be read
           content:
             application/json:
               schema:

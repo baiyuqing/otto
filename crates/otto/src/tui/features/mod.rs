@@ -31,7 +31,7 @@ pub(crate) trait Presenter: Send {
     fn periodic(&self) -> bool {
         false
     }
-    fn covers_approval(&self, _: &crate::approval::Request) -> bool {
+    fn covers_approval(&self, _: &otto_core::approval::Request) -> bool {
         false
     }
 }

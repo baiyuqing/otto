@@ -1637,7 +1637,7 @@ impl Server {
                 };
                 if !shared.is_human_pending() {
                     return match shared.state {
-                        crate::approval::State::Approved => ApprovalDecision::Allow,
+                        otto_core::approval::State::Approved => ApprovalDecision::Allow,
                         _ if cancel.is_cancelled() => ApprovalDecision::Cancelled,
                         _ => ApprovalDecision::Deny,
                     };
@@ -1674,7 +1674,7 @@ impl Server {
                         session.ctrl.approval_service().wait(&shared.id,&shared.scope,cancel).await.ok()
                     } else { std::future::pending().await }
                 } => match shared {
-                    Some(r) if r.state == crate::approval::State::Approved => (ApprovalDecision::Allow,"allow", false),
+                    Some(r) if r.state == otto_core::approval::State::Approved => (ApprovalDecision::Allow,"allow", false),
                     _ => (ApprovalDecision::Deny,"deny", false),
                 },
                 () = async {
@@ -1684,7 +1684,7 @@ impl Server {
                     let mut poll = tokio::time::interval(Duration::from_millis(200));
                     loop {
                         if let Ok(current) = service.get(&binding.id, &binding.scope.workspace, Some(&binding.scope.session_id))
-                            && current.state == crate::approval::State::Pending
+                            && current.state == otto_core::approval::State::Pending
                             && (current.revision != binding.revision || current.subject != binding.subject) {
                             return;
                         }
@@ -2182,7 +2182,7 @@ struct SessionWire {
     /// read `approval_mode` for the exact policy.
     auto_mode: bool,
     approval_mode: &'static str,
-    approval_settings: crate::approval::ApprovalSettings,
+    approval_settings: otto_core::approval::ApprovalSettings,
     turn: Option<SessionTurnWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     forked_from: Option<app::ForkedFrom>,
@@ -2233,7 +2233,7 @@ struct StatusSessionWire {
     /// read `approval_mode` for the exact policy.
     auto_mode: bool,
     approval_mode: &'static str,
-    approval_settings: crate::approval::ApprovalSettings,
+    approval_settings: otto_core::approval::ApprovalSettings,
     id: String,
     workspace: String,
     turn: Option<String>,
@@ -9737,19 +9737,19 @@ mod tests {
         impl crate::approval::reviewer::ReviewProvider for AskReviewer {
             async fn assess(
                 &self,
-                _: &crate::approval::Request,
+                _: &otto_core::approval::Request,
                 _: &crate::approval::reviewer::ReviewContext,
                 cancel: &CancellationToken,
-            ) -> std::result::Result<crate::approval::ReviewAssessment, String> {
+            ) -> std::result::Result<otto_core::approval::ReviewAssessment, String> {
                 self.started.cancel();
                 tokio::select! {
                     () = cancel.cancelled() => return Err("cancelled".into()),
                     () = self.release.cancelled() => {},
                 }
-                Ok(crate::approval::ReviewAssessment {
-                    risk: crate::approval::RiskLevel::Medium,
-                    user_authorization: crate::approval::UserAuthorization::Unknown,
-                    outcome: crate::approval::ReviewOutcome::Ask,
+                Ok(otto_core::approval::ReviewAssessment {
+                    risk: otto_core::approval::RiskLevel::Medium,
+                    user_authorization: otto_core::approval::UserAuthorization::Unknown,
+                    outcome: otto_core::approval::ReviewOutcome::Ask,
                     reason: "Confirm the exact target before running.".into(),
                 })
             }
@@ -9785,10 +9785,10 @@ mod tests {
             .unwrap();
         let request = service
             .create(crate::approval::Proposal {
-                kind: crate::approval::Kind::Authorization,
-                authority: crate::approval::Authority::Boundary,
+                kind: otto_core::approval::Kind::Authorization,
+                authority: otto_core::approval::Authority::Boundary,
                 scope: scope.clone(),
-                subject: crate::approval::Subject {
+                subject: otto_core::approval::Subject {
                     tool_call_id: "held-call".into(),
                     source: "tool".into(),
                     id: "held-operation".into(),
@@ -9855,7 +9855,7 @@ mod tests {
             Some(current.revision)
         );
         service
-            .set_mode(&scope, crate::approval::ApprovalMode::Manual)
+            .set_mode(&scope, otto_core::approval::ApprovalMode::Manual)
             .unwrap();
         let fresh = service
             .get(&request.id, &scope.workspace, Some(&scope.session_id))
@@ -10026,10 +10026,10 @@ mod tests {
         let request = ctrl
             .approval_service()
             .create(crate::approval::Proposal {
-                kind: crate::approval::Kind::Authorization,
-                authority: crate::approval::Authority::Bounded,
+                kind: otto_core::approval::Kind::Authorization,
+                authority: otto_core::approval::Authority::Bounded,
                 scope: ctrl.approval_scope(),
-                subject: crate::approval::Subject {
+                subject: otto_core::approval::Subject {
                     source: "plugin".into(),
                     id: "api-test".into(),
                     version: "1".into(),
@@ -10043,15 +10043,15 @@ mod tests {
                 expires_at: None,
             })
             .unwrap();
-        assert_eq!(request.state, crate::approval::State::Approved);
+        assert_eq!(request.state, otto_core::approval::State::Approved);
         // A plan review is a human judgement, so AUTO leaves it pending.
         let review = ctrl
             .approval_service()
             .create(crate::approval::Proposal {
-                kind: crate::approval::Kind::Confirmation,
-                authority: crate::approval::Authority::Consent,
+                kind: otto_core::approval::Kind::Confirmation,
+                authority: otto_core::approval::Authority::Consent,
                 scope: ctrl.approval_scope(),
-                subject: crate::approval::Subject {
+                subject: otto_core::approval::Subject {
                     source: "conversation".into(),
                     id: "api-test-plan".into(),
                     version: "1".into(),
@@ -10065,7 +10065,7 @@ mod tests {
                 expires_at: None,
             })
             .unwrap();
-        assert_eq!(review.state, crate::approval::State::Pending);
+        assert_eq!(review.state, otto_core::approval::State::Pending);
         let events = harness
             .send(
                 "GET",

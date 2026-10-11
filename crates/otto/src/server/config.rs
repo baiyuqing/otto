@@ -313,15 +313,15 @@ pub(super) async fn preview(
         }
     };
     let approval = match service.create(crate::approval::Proposal {
-        kind: crate::approval::Kind::Authorization,
+        kind: otto_core::approval::Kind::Authorization,
         authority: artifact.authority(),
-        scope: crate::approval::Scope {
+        scope: otto_core::approval::Scope {
             workspace: server.info.workspace.clone(),
             session_id: String::new(),
             task_id: String::new(),
             run_id: String::new(),
         },
-        subject: crate::approval::Subject {
+        subject: otto_core::approval::Subject {
             tool_call_id: String::new(),
             source: "config".into(),
             id: match super::new_id() {
@@ -387,7 +387,7 @@ pub async fn confirm(
     let request = match service.get(&id, &server.info.workspace, None) {
         Ok(request)
             if request.subject.source == "config"
-                && request.state == crate::approval::State::Pending =>
+                && request.state == otto_core::approval::State::Pending =>
         {
             request
         }
@@ -427,7 +427,7 @@ pub async fn confirm(
         );
     }
     match service.get(&id, &server.info.workspace, None) {
-        Ok(request) if request.application == crate::approval::ApplicationState::Applied => {
+        Ok(request) if request.application == otto_core::approval::ApplicationState::Applied => {
             server.logger().info(
                 "config_change_confirmed",
                 &[("request_id", request_id), ("approval_id", id)],

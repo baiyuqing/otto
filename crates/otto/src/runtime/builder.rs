@@ -729,7 +729,7 @@ impl RequestSizer for ScriptedSizer {
 pub struct Runner {
     output_logs: Arc<crate::tool::bash_output::Logs>,
     authorization_run: Arc<Mutex<String>>,
-    approvals: Option<(Arc<crate::approval::Service>, crate::approval::Scope)>,
+    approvals: Option<(Arc<crate::approval::Service>, otto_core::approval::Scope)>,
     review_context: tokio::sync::Mutex<crate::approval::reviewer::ReviewContext>,
     pending_authorization: Mutex<Vec<String>>,
     agent: Agent<ProviderClient, Registry, SharedSession>,
@@ -2503,7 +2503,7 @@ impl Builder {
         if self.boundary_allows_dynamic(Some(runtime)) {
             tools.push(Box::new(crate::tool::approval::RequestApproval {
                 service: self.approvals.clone(),
-                scope: crate::approval::Scope {
+                scope: otto_core::approval::Scope {
                     workspace: self.workspace_path.clone(),
                     session_id: session.header().id,
                     task_id: String::new(),
@@ -2514,7 +2514,7 @@ impl Builder {
             for revoke in [false, true] {
                 tools.push(Box::new(crate::tool::approval::Control {
                     service: self.approvals.clone(),
-                    scope: crate::approval::Scope {
+                    scope: otto_core::approval::Scope {
                         workspace: self.workspace_path.clone(),
                         session_id: session.header().id,
                         task_id: String::new(),
@@ -2579,7 +2579,7 @@ impl Builder {
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
         let registry = registry.with_approval_origin(
             self.approvals.clone(),
-            crate::approval::Scope {
+            otto_core::approval::Scope {
                 workspace: self.workspace_path.clone(),
                 session_id: session.header().id,
                 task_id: String::new(),
@@ -2789,7 +2789,7 @@ impl Builder {
             pending_authorization: Mutex::new(Vec::new()),
             approvals: Some((
                 self.approvals.clone(),
-                crate::approval::Scope {
+                otto_core::approval::Scope {
                     workspace: self.workspace_path.clone(),
                     session_id: session.header().id,
                     task_id: String::new(),

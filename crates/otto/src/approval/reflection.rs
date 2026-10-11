@@ -1,7 +1,8 @@
 //! Durable skill review artifacts. The guard still constructs every Vetted;
 //! only reflection::skillwrite mutates skill files.
-use super::{Authority, Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
+use super::{Domain, Error, Proposal, Result, Service};
 use crate::reflection::{guard, repository::ReflectionStore, skillwrite, transcript};
+use otto_core::approval::{Authority, Kind, Request, State, Subject};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -166,7 +167,7 @@ pub fn publish(
         Proposal {
             kind: Kind::Authorization,
             authority: Authority::Durable,
-            scope: super::Scope {
+            scope: otto_core::approval::Scope {
                 workspace: workspace.into(),
                 session_id: session_id.into(),
                 task_id: String::new(),

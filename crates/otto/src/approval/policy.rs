@@ -1,5 +1,8 @@
 //! Native authority routing. A review cannot replace an explicit human gate.
-use super::*;
+use otto_core::approval::{
+    Authority, Kind, Request, ReviewAssessment, ReviewOutcome, RiskLevel, RuleDecision,
+    UserAuthorization, evaluate_rules,
+};
 
 pub(super) fn human_gate(request: &Request) -> bool {
     request.kind == Kind::Confirmation

@@ -257,7 +257,7 @@ pub fn validate_records(
         }
     }
     for request in approvals {
-        use crate::approval::{ApplicationState, State};
+        use otto_core::approval::{ApplicationState, State};
         if request.state != State::Pending
             && !matches!(
                 request.application,
@@ -374,7 +374,7 @@ pub fn validate_records(
                 }
             }
             "conversation"
-                if request.kind == crate::approval::Kind::Confirmation
+                if request.kind == otto_core::approval::Kind::Confirmation
                     && request.application == ApplicationState::NotRequired => {}
             _ => {
                 return Err(invalid(

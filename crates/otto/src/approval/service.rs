@@ -5,6 +5,10 @@ use super::contracts::*;
 use super::repository::{ApprovalStore, Claim, ClaimChange};
 use crate::memory::guard::{ContentGuard, DefaultGuard, ExactGuard};
 use chrono::Utc;
+use otto_core::approval::{
+    ApplicationState, ApprovalMode, ApprovalSettings, Change, Choice, Decision, Kind, Request,
+    ReviewStatus, Scope, Snapshot, State,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -878,6 +882,7 @@ pub fn digest(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use otto_core::approval::{Authority, Subject};
     use std::sync::Mutex;
 
     struct TestStore {

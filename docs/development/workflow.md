@@ -156,10 +156,13 @@ binaries are distributed, the MIT, BSD and Apache-2.0 terms require one.
 
 ### Local verification
 
-`make check` (macOS) and `make check-linux` (Linux) are the full gates. The
-repository has no CI, so no gate runs on a PR. Do not build or test locally;
-before committing a Rust change, run only `cargo fmt --all`. Opening the PR
-ends the task.
+`make check` (macOS) and `make check-linux` (Linux) are the full gates; run
+them only when asked. The repository has no CI, so no gate runs on a PR.
+Before committing a Rust change, run `cargo fmt --all` and the tests that
+cover the changed code, for example `cargo test -p otto --test
+storage_boundary` or `cargo test -p otto --lib approval`. The PR body lists
+each command, its result and the cause of any failure. Opening the PR ends the
+task.
 
 `make check-fast` remains for manual use. It runs `scripts/check-changed.mjs`,
 whose `plan` function maps the paths changed since

@@ -13,11 +13,15 @@ fn json_error(_: serde_json::Error) -> Error {
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StoredMode {
-    Automatic { automatic: bool },
-    Mode { mode: crate::approval::ApprovalMode },
+    Automatic {
+        automatic: bool,
+    },
+    Mode {
+        mode: otto_core::approval::ApprovalMode,
+    },
 }
 
-impl From<StoredMode> for crate::approval::ApprovalMode {
+impl From<StoredMode> for otto_core::approval::ApprovalMode {
     fn from(stored: StoredMode) -> Self {
         match stored {
             StoredMode::Automatic { automatic: true } => Self::Auto,
@@ -32,13 +36,13 @@ impl From<StoredMode> for crate::approval::ApprovalMode {
 pub enum ApprovalRecord {
     ManagedPolicy {
         workspace: String,
-        policy: Option<crate::approval::ApprovalPolicy>,
-        reviewer: Option<crate::approval::ApprovalReviewer>,
+        policy: Option<otto_core::approval::ApprovalPolicy>,
+        reviewer: Option<otto_core::approval::ApprovalReviewer>,
     },
     Settings {
         workspace: String,
         session_id: String,
-        settings: crate::approval::ApprovalSettings,
+        settings: otto_core::approval::ApprovalSettings,
     },
     ReviewContext {
         workspace: String,
@@ -83,7 +87,7 @@ impl ApprovalRecord {
     pub fn mode(
         workspace: String,
         session_id: String,
-        mode: crate::approval::ApprovalMode,
+        mode: otto_core::approval::ApprovalMode,
     ) -> Self {
         Self::Mode {
             workspace,

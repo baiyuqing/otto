@@ -3,7 +3,9 @@
 //! Domain services own state semantics and import typed repository ports.
 //! Concrete drivers and repository adapters live under `storage/`; only domain
 //! `mod.rs` files may retain transitional constructors. Three named legacy
-//! facades may contain only a pure backend Store reexport.
+//! facades may contain only a pure backend Store reexport. Non-test sources
+//! never reexport `otto_core`; each of its items has the single path
+//! `otto_core::...`.
 
 use std::path::{Path, PathBuf};
 
@@ -558,6 +560,40 @@ fn migration_contracts_do_not_depend_on_physical_backends() {
     );
 }
 
+fn core_reexport_violations(source: &str) -> Vec<String> {
+    without_line_comments(&non_test(source))
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            let rest = line.strip_prefix("pub")?;
+            let rest = match rest.strip_prefix('(') {
+                Some(restricted) => restricted.split_once(')')?.1,
+                None => rest,
+            };
+            let import = rest.trim_start().strip_prefix("use ")?.trim_start();
+            (import.starts_with("otto_core") || import.starts_with("::otto_core"))
+                .then(|| format!("reexports otto-core: `{line}`"))
+        })
+        .collect()
+}
+
+#[test]
+fn otto_does_not_reexport_core() {
+    let mut offenders = Vec::new();
+    for path in sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src")) {
+        let body = std::fs::read_to_string(&path).expect("read source");
+        for problem in core_reexport_violations(&body) {
+            offenders.push(format!("{}: {problem}", path.display()));
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "otto-core items are imported from `otto_core::` directly so each has one path:\n{}",
+        offenders.join("\n")
+    );
+}
+
 #[test]
 fn fixtures_prove_forbidden_edges_are_detected() {
     let service = Path::new("workflow/service.rs");
@@ -636,4 +672,19 @@ fn fixtures_prove_forbidden_edges_are_detected() {
     assert!(!domain_violations(&legacy_session, mutating_constructor).is_empty());
     let test_only_sql = "#[cfg(test)]\nmod tests { const SQL: &str = \"SELECT * FROM runs\"; }";
     assert!(domain_violations(service, test_only_sql).is_empty());
+    assert!(!core_reexport_violations("pub use otto_core::approval::*;").is_empty());
+    assert!(
+        !core_reexport_violations(
+            "pub(crate) use otto_core::session::turn::MAX_AUTOMATIC_RESUMES;"
+        )
+        .is_empty()
+    );
+    assert!(core_reexport_violations("use otto_core::approval::ApprovalMode;").is_empty());
+    assert!(core_reexport_violations("//! pub use otto_core::x;").is_empty());
+    assert!(
+        core_reexport_violations(
+            "#[cfg(test)]\nmod tests {\n    pub use otto_core::approval::*;\n}"
+        )
+        .is_empty()
+    );
 }

@@ -2,6 +2,11 @@ use super::{
     reviewer::{ReviewContext, ReviewProvider},
     *,
 };
+use otto_core::approval::{
+    ApplicationState, ApprovalMode, ApprovalPolicy, ApprovalReviewer, ApprovalRule,
+    ApprovalSettings, Authority, Kind, Request, ReviewAssessment, ReviewOutcome, RiskLevel,
+    RuleDecision, Scope, State, Subject, UserAuthorization,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},

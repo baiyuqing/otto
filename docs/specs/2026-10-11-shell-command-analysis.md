@@ -110,10 +110,18 @@ Callers: `approval/policy.rs::rule` and the reviewer tests call
 - `review_facts`: script and build detection runs per segment, so
   `make&&./run` reports both `make` and `./run`. `complex_shell` becomes
   `!complete`.
-- `first_push_diff`, git detection in `approval_spec_async` and `pushing` in
-  the reviewer use the first segment whose words start with `git` (after
-  `git` global options `-C <dir>`, `-c <k=v>`, `--no-pager`,
+- `first_push_diff` uses the first segment whose words start with `git`
+  (after `git` global options `-C <dir>`, `-c <k=v>`, `--no-pager`,
   `--git-dir=<p>`, `--work-tree=<p>`) and whose subcommand is `push`.
+- Git facts are collected when any static word is `git` (as before, so
+  `sudo git push` marks the git target unavailable). A command that assigns
+  a shell variable anywhere (`GIT_DIR=/x git push`) marks the git target
+  unavailable, because `GIT_DIR` and `GIT_WORK_TREE` select another
+  repository.
+- The reviewer treats a command as a push when any static word is `push`, or
+  when the command is not `complete` and its text contains `push`
+  (`$GIT push`). A push without branch, remote and outgoing-diff facts goes
+  to a person.
 
 `is_simple_command` and `[sandbox] excluded_commands` are unchanged. An
 excluded command still has to be one simple command; this part does not

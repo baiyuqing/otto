@@ -94,10 +94,17 @@ impl ReviewProvider for SessionReviewer {
                         .iter()
                         .any(|file| file["unavailable"] == true && file["optional"] != true)
                 });
-            let pushing = details["command"]
-                .as_str()
-                .and_then(shlex::split)
-                .is_some_and(|argv| argv.iter().any(|word| word == "push"));
+            // Any static `push` word, or `push` anywhere in a command the
+            // parser cannot read completely (`$GIT push`, `bash -c '...'`).
+            let pushing = details["command"].as_str().is_some_and(|command| {
+                let analysis = crate::tool::shell::analyze(command);
+                analysis
+                    .segments
+                    .iter()
+                    .flatten()
+                    .any(|word| word == "push")
+                    || (!analysis.complete && command.contains("push"))
+            });
             let missing_push = pushing
                 && ["branch", "remotes", "outgoing_diff"].iter().any(|fact| {
                     details["native_facts"]["git"][fact]["body"]
@@ -310,12 +317,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn literal_append_and_benign_compound_enter_review_without_matching_prefix_allow_rules() {
+    async fn append_and_mixed_pipeline_do_not_match_prefix_allow_but_all_enter_review() {
         let root = tempfile::tempdir().unwrap();
-        for command in [
-            "printf approved >> ./result.txt",
-            "printf first && printf second",
-            "printf first | tr a-z A-Z",
+        for (command, allowed) in [
+            ("printf approved >> ./result.txt", None),
+            (
+                "printf first && printf second",
+                Some(otto_core::approval::RuleDecision::Allow),
+            ),
+            ("printf first | tr a-z A-Z", None),
         ] {
             let request = shell_request(root.path(), command).await;
             let rule = otto_core::approval::ApprovalRule {
@@ -325,8 +335,13 @@ mod tests {
                 decision: otto_core::approval::RuleDecision::Allow,
             };
             assert_eq!(
-                otto_core::approval::evaluate_rules(&[rule], "sandbox", "bash", Some(command)),
-                None
+                otto_core::approval::evaluate_rules(
+                    &[rule],
+                    "sandbox",
+                    "bash",
+                    Some(&crate::tool::shell::analyze(command))
+                ),
+                allowed
             );
             let (reviewer, fake) = reviewer(
                 r#"{"risk":"low","user_authorization":"high","outcome":"allow","reason":"Exact requested operation."}"#,
@@ -359,6 +374,8 @@ mod tests {
             "cd \"$TARGET\" && printf approved",
             "printf approved >> \"$TARGET\"",
             "./unreadable-script.sh",
+            "sudo git push origin main",
+            "git status && $GIT push origin main",
         ] {
             let request = shell_request(root.path(), command).await;
             let (reviewer, fake) = reviewer("{}");

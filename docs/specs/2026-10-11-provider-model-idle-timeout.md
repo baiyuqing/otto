@@ -1,6 +1,6 @@
 # Provider model-output idle timeout
 
-Status: draft, awaiting approval. Issue
+Status: approved 2026-10-11. Issue
 [#470](https://github.com/baiyuqing/otto/issues/470).
 
 Decision 2026-10-11: only model output resets the timer. Model output is a

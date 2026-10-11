@@ -1623,6 +1623,66 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/trace:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: Timeline of the session's turns, provider requests, tool calls and sub-agents
+      description: >-
+        otto_core::session::trace::Trace, built from the session file and
+        the sub-agent task files. It holds no message or result text; a tool
+        label carries an argument preview of at most 60 characters.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The session has no file, or the redaction boundary withholds dynamic content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/trace/{span_id}:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - name: span_id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: The text of one trace span
+      description: >-
+        otto_core::session::trace::SpanContent: titled sections such as
+        tool arguments and result, or a sub-agent prompt and result.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Session not open, or no such span
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The session has no file, or the redaction boundary withholds dynamic content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}/profile:
     parameters:
       - $ref: "#/components/parameters/sessionID"

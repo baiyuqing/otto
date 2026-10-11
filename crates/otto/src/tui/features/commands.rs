@@ -155,6 +155,7 @@ const ENTRIES: &[Entry] = &[
     entry!("/task", "inspect or cancel a task", true, task),
     entry!("/agents", "browse recorded agents", false, agents),
     entry!("/context", "inspect context", false, context),
+    entry!("/trace", "show the turn timeline", false, trace),
     entry!("/timers", "list or cancel reminders", true, timers),
     entry!("/skill", "list, inspect or configure skills", true, skill),
     entry!("/mcp", "inspect MCP servers or authenticate one", true, mcp),
@@ -421,6 +422,10 @@ fn steering_status(status: otto_core::agent::steering::Status) -> &'static str {
 fn context(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;
     push(Context::new())
+}
+fn trace(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
+    empty(args)?;
+    push(super::trace::TraceView::new())
 }
 fn agents(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;

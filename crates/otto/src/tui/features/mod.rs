@@ -7,9 +7,12 @@ mod commands;
 mod review;
 #[cfg(test)]
 mod tests;
+mod trace;
 
 pub(crate) use approval::Approval;
 pub(crate) use commands::Catalog;
+#[cfg(test)]
+pub(crate) use trace::{TraceView, sample_trace};
 
 use super::backend::{Reply, Request};
 use super::interaction::{Activation, View};
@@ -34,6 +37,13 @@ pub(crate) trait Presenter: Send {
     fn covers_approval(&self, _: &otto_core::approval::Request) -> bool {
         false
     }
+    /// Whether approvals wait while this surface is on top; it shows them
+    /// itself and opens one on request.
+    fn defers_approvals(&self) -> bool {
+        false
+    }
+    /// The approval snapshot, delivered with every approval poll.
+    fn pending_approvals(&mut self, _: &[otto_core::approval::Request]) {}
 }
 
 pub(crate) enum Transition {

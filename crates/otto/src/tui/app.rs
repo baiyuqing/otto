@@ -113,6 +113,10 @@ pub(crate) struct App {
     ctrl_c_armed_at: Option<Instant>,
     skill_names: Vec<String>,
     hidden_approvals: HashSet<String>,
+    /// The last approval snapshot, kept for a surface that defers approvals.
+    approval_snapshot: Vec<otto_core::approval::Request>,
+    /// Approvals that arrived as events while a surface deferred them.
+    deferred_approvals: Vec<features::Approval>,
     pub outgoing: Vec<Action>,
     program_status: Option<crate::program_status::Reporter>,
 }
@@ -189,6 +193,8 @@ impl App {
             ctrl_c_armed_at: None,
             skill_names: Vec::new(),
             hidden_approvals: HashSet::new(),
+            approval_snapshot: Vec::new(),
+            deferred_approvals: Vec::new(),
             outgoing: Vec::new(),
             program_status: None,
         };
@@ -501,6 +507,7 @@ impl App {
                 if approval {
                     self.request_approvals();
                 }
+                self.release_deferred_approvals();
             }
             Transition::Push(mut presenter) => {
                 if let Some(id) = presenter.key().strip_prefix("approval:") {
@@ -779,11 +786,16 @@ impl App {
                 surface.state.reconcile(&surface.model.view());
             }
         }
+        self.approval_snapshot = requests.to_vec();
+        for surface in self.surfaces.iter_mut() {
+            surface.model.pending_approvals(requests);
+        }
         let approval_open = self
             .surfaces
             .iter()
             .any(|surface| surface.model.key().starts_with("approval:"));
         if !approval_open
+            && !self.top_defers_approvals()
             && let Some(request) = requests.iter().find(|r| {
                 r.is_human_pending()
                     && !existing.contains(&r.id)
@@ -798,7 +810,29 @@ impl App {
         }
     }
 
+    fn top_defers_approvals(&self) -> bool {
+        self.surfaces
+            .top()
+            .is_some_and(|surface| surface.model.defers_approvals())
+    }
+
+    /// Presents the approvals a closed surface was holding back.
+    fn release_deferred_approvals(&mut self) {
+        if self.top_defers_approvals() {
+            return;
+        }
+        let snapshot = std::mem::take(&mut self.approval_snapshot);
+        self.sync_shared_approval(&snapshot);
+        for presenter in std::mem::take(&mut self.deferred_approvals) {
+            self.show_approval(presenter);
+        }
+    }
+
     fn show_approval(&mut self, presenter: features::Approval) {
+        if self.top_defers_approvals() {
+            self.deferred_approvals.push(presenter);
+            return;
+        }
         if self
             .surfaces
             .iter()
@@ -1046,6 +1080,7 @@ impl App {
                         self.hidden_approvals.insert(id.to_string());
                     }
                     self.surfaces.pop();
+                    self.release_deferred_approvals();
                     return None;
                 }
                 let surface = self.surfaces.top_mut()?;
@@ -1688,6 +1723,69 @@ mod tests {
         );
         assert!(app.has_surface());
         assert!(!app.hidden_approvals.contains("a1"));
+    }
+
+    fn open_trace(app: &mut App) {
+        app.transition(0, Transition::Push(Box::new(features::TraceView::new())));
+        let _ = app
+            .surfaces
+            .top_mut()
+            .unwrap()
+            .model
+            .receive(Reply::Trace(features::sample_trace()));
+    }
+
+    fn press(app: &mut App, remote: &Remote, code: KeyCode) {
+        app.handle_key(
+            KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
+            &Backend::Attach(remote),
+            &CancellationToken::new(),
+        );
+    }
+
+    fn top_key(app: &App) -> String {
+        app.surfaces.top().unwrap().model.key()
+    }
+
+    #[test]
+    fn trace_defers_an_approval_until_a_opens_it() {
+        let (mut app, remote) = app();
+        open_trace(&mut app);
+        let request = approval("a1");
+
+        app.sync_shared_approval(std::slice::from_ref(&request));
+        assert_eq!(top_key(&app), "trace");
+        assert!(app.surfaces.iter().all(|s| s.model.key() == "trace"));
+        assert_eq!(
+            app.surfaces
+                .top()
+                .and_then(|s| s.model.view().notice)
+                .as_deref(),
+            Some("1 approval pending · a open")
+        );
+
+        press(&mut app, &remote, KeyCode::Char('a'));
+        assert_eq!(top_key(&app), "approval:a1");
+    }
+
+    #[test]
+    fn closing_the_trace_presents_the_deferred_approval() {
+        let (mut app, remote) = app();
+        open_trace(&mut app);
+        app.sync_shared_approval(&[approval("a1")]);
+        press(&mut app, &remote, KeyCode::Esc);
+        assert_eq!(top_key(&app), "approval:a1");
+        assert_eq!(app.surfaces.iter().count(), 1);
+    }
+
+    #[test]
+    fn trace_defers_an_approval_event_until_it_closes() {
+        let (mut app, remote) = app();
+        open_trace(&mut app);
+        app.show_approval(features::Approval::shared(&approval("a1")));
+        assert_eq!(top_key(&app), "trace");
+        press(&mut app, &remote, KeyCode::Esc);
+        assert_eq!(top_key(&app), "approval:a1");
     }
 
     #[test]

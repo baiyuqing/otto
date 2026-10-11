@@ -945,6 +945,39 @@ impl Client {
         decode(response).await
     }
 
+    /// `GET /v1/sessions/{id}/trace`.
+    pub async fn trace(&self, session_id: &str) -> Result<otto_core::session::trace::Trace, Error> {
+        let response = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/trace")),
+            )
+            .await?;
+        decode(response).await
+    }
+
+    /// `GET /v1/sessions/{id}/trace/{span_id}`. `None` means the session or
+    /// the span is not found.
+    pub async fn trace_span(
+        &self,
+        session_id: &str,
+        span_id: &str,
+    ) -> Result<Option<otto_core::session::trace::SpanContent>, Error> {
+        let span_id = percent_encode_segment(span_id);
+        let result = self
+            .send(
+                self.http
+                    .get(format!("{BASE}/v1/sessions/{session_id}/trace/{span_id}")),
+            )
+            .await;
+        let response = match result {
+            Ok(response) => response,
+            Err(Error::Http { status: 404, .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(decode(response).await?))
+    }
+
     /// `GET /v1/sessions/{id}/tasks`: the open session's sub-agent tasks.
     /// `prompt` and `context` are empty; the wire omits them.
     pub async fn session_tasks(
@@ -1155,6 +1188,19 @@ impl Client {
             message: field("message").to_string(),
         })
     }
+}
+
+/// Escapes every byte of one URL path segment except unreserved characters.
+fn percent_encode_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 async fn decode<T: for<'de> Deserialize<'de>>(response: reqwest::Response) -> Result<T, Error> {
@@ -1942,6 +1988,27 @@ mod tests {
         assert_eq!(
             request(&seen, 2).0,
             "GET /v1/sessions/s1/reflection/runs/a%2Fb"
+        );
+    }
+
+    #[tokio::test]
+    async fn trace_span_escapes_the_span_id_and_maps_404_to_none() {
+        let (client, seen, _dir) = stub(|_, path| match path {
+            "/v1/sessions/s1/trace/t1%3Acall%2F1" => {
+                json_body(StatusCode::OK, r#"{"spanId":"t1:call/1","sections":[]}"#)
+            }
+            _ => json_body(
+                StatusCode::NOT_FOUND,
+                r#"{"error":{"code":"not_found","message":"span not found"}}"#,
+            ),
+        });
+
+        let content = client.trace_span("s1", "t1:call/1").await.unwrap();
+        assert_eq!(content.expect("content").span_id, "t1:call/1");
+        assert!(client.trace_span("s1", "other").await.unwrap().is_none());
+        assert_eq!(
+            request(&seen, 0).0,
+            "GET /v1/sessions/s1/trace/t1%3Acall%2F1"
         );
     }
 

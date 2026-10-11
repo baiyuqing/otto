@@ -139,6 +139,13 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- `otto --version` reports the current commit when checkouts share a target
+  directory. The build script ran `git` in the `CARGO_MANIFEST_DIR` captured
+  when the script was compiled; Cargo reused that compiled script in other
+  checkouts, so after the compiling worktree was deleted `git` failed, the
+  build metadata became `unknown`, and no HEAD watch was registered to rebuild
+  it. The script now runs `git` in the directory Cargo starts it in.
+
 - The TUI PTY tests (`tui_pty`, `tui_attach_pty`) pass under `make check` run
   from an interactive terminal. The spawned `otto` kept that terminal as its
   controlling terminal, and crossterm read the window size from `/dev/tty`, so

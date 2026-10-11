@@ -543,8 +543,9 @@ mode = "auto"
 [agent]
 shell_timeout = "120s"
 max_output_bytes = 51200
-# End-to-end deadlines are disabled when omitted.
+# End-to-end deadlines are disabled when omitted, except the unattended one.
 # turn_timeout = "30m"
+# unattended_turn_timeout = "30m"  # chat and --prompt turns; "0" disables
 # provider_timeout = "10m"
 # subagent_timeout = "1h"
 # workflow_step_timeout = "1h"
@@ -603,9 +604,21 @@ Key points:
   `provider_timeout`, `subagent_timeout`, and `workflow_step_timeout` values.
   Omitted deadlines are unlimited for backward compatibility. A child always
   inherits the earlier of its own configured deadline and its parent's
-  remaining deadline; compaction and follow-up work never reset that budget.
-  `cancellation_grace` defaults to `5s` and bounds cooperative cleanup before
-  Bash or a shared stdio MCP server is force-stopped.
+  remaining deadline. The turn deadline covers one prompt step: compaction and
+  provider retries inside the step never reset it, while each task-queue
+  follow-up and each retry after an approved command starts a new budget, and
+  time spent waiting for an approval decision is not counted.
+- `[agent].unattended_turn_timeout` (default `30m`) is the turn deadline for
+  unattended turns: turns from a Telegram or Feishu chat (through `otto acp`,
+  directly or relayed to `otto serve`) and every turn of an `otto --prompt`
+  run. Such a turn uses the earlier of `turn_timeout` and
+  `unattended_turn_timeout`. `"0"` disables it. TUI, REPL, web UI and editor
+  ACP turns are not affected; scheduled prompt runs keep their own 10-minute
+  limit. When the deadline expires the step ends with
+  `provider call deadline exceeded`; the session keeps its history and the
+  next prompt continues it.
+- `[agent].cancellation_grace` defaults to `5s` and bounds cooperative
+  cleanup before Bash or a shared stdio MCP server is force-stopped.
 - `[agent].no_progress_repeats` (default `8`) and
   `[agent].no_progress_failures` (default `12`) stop a turn that makes no
   progress, for every turn including each sub-agent's. `0` disables one

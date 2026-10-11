@@ -12,7 +12,8 @@ adds or fixes:
 2. A test must fail when the behavior it covers breaks. When that is not
    evident from the test, name in the PR the assertion that fails without
    the change; do not revert the change locally to demonstrate it.
-3. The `make` gates run the tests; see [Local verification](workflow.md#local-verification).
+3. Run the tests that cover the change locally before opening the PR; see
+   [Local verification](workflow.md#local-verification).
 
 Tests may be written before, during, or after the code. Docs-only and other
 non-code changes need no tests.

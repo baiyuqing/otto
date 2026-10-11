@@ -25,7 +25,9 @@ pub mod fork;
 pub mod operation;
 pub mod pi;
 pub mod plan;
+pub mod provider_call;
 pub mod remote_compaction;
+pub mod trace;
 pub mod turn;
 pub mod types;
 
@@ -54,6 +56,10 @@ pub use pi::{
 pub use plan::{
     MAX_PLAN_STEP_CHARS, MAX_PLAN_STEPS, PLAN_CUSTOM_TYPE, PLAN_SCHEMA_VERSION, PlanStatus,
     PlanStep, decode_plan, encode_plan, plan_checklist, plan_summary, validate_plan,
+};
+pub use provider_call::{
+    PROVIDER_CALL_CUSTOM_TYPE, PROVIDER_CALL_SCHEMA_VERSION, ProviderCallKind, ProviderCallRecord,
+    ProviderRetryRecord, RequestEstimate, decode_provider_call,
 };
 pub use remote_compaction::{
     MAX_REMOTE_COMPACTION_CONTENT_BYTES, MAX_REMOTE_COMPACTION_ID_BYTES,

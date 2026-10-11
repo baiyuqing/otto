@@ -66,6 +66,20 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- `/trace` opens a panel with the timeline of a turn: provider requests,
+  tool calls, compactions and sub-agents as a tree with durations and bars
+  on a time axis, plus attempts, retries, time to first output, token usage
+  and the text of each span. Each provider request now appends an
+  `otto.provider_call` session entry with its timing, retries, usage and
+  request token estimates, and a sub-agent's `otto.task_spec` records the
+  spawning call as `parentToolCallId`; sessions written earlier show
+  estimated provider spans. `GET /v1/sessions/{id}/trace` and
+  `GET /v1/sessions/{id}/trace/{span_id}` serve the same data. While `/trace`
+  is open, an approval request is announced in the panel and opened with `a`
+  instead of being shown over it. See
+  [`/trace`](docs/manual/interactive-use.md#slash-commands).
+  ([#472](https://github.com/baiyuqing/otto/pull/472))
+
 - Real terminal sessions now report Otto's root lifecycle with the OSC 7501
   Program Status Protocol. Supporting terminals can distinguish idle, working,
   approval-blocked, completed and failed turns without parsing screen content;

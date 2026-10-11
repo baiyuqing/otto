@@ -83,9 +83,20 @@ pub(super) fn pending(controller: &Controller, params: &PendingParams) -> Reply 
     if limit == 0 || limit > MAX_PAGE {
         return Err(invalid_params(format!("limit must be 1 to {MAX_PAGE}")));
     }
-    let page = controller
-        .pending_memory_review_page(&params.cursor, limit)
-        .map_err(|failure| memory_error(&failure))?;
+    let (memory, user_scope, workspace_scope) = controller
+        .memory_manager()
+        .ok_or_else(|| error(MEMORY_UNAVAILABLE, UNAVAILABLE))?;
+    let approvals = controller
+        .approval_snapshot()
+        .map_err(|failure| error(INTERNAL_ERROR, failure.to_string()))?;
+    let page = crate::approval::memory::human_pending_candidate_page(
+        &memory,
+        &[user_scope, workspace_scope],
+        &approvals.requests,
+        &params.cursor,
+        limit,
+    )
+    .map_err(|failure| memory_error(&failure))?;
     let candidates: Vec<Value> = page.candidates.iter().map(candidate_json).collect();
     Ok(json!({ "candidates": candidates, "nextCursor": page.next_cursor }))
 }

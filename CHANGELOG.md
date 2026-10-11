@@ -62,11 +62,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
-- Pending memory reviews now remain actionable across `/new`, resume and process
-  restarts. Startup notices, terminal review and ACP review use one reconciled,
-  fully paged candidate set, and Otto automatically restores workspace-wide
-  visibility for requests created by older versions instead of repeatedly
-  advertising an empty review list.
+- Pending memory proposals remain visible in `/memory review` after their
+  originating session ends, so session-open reminders always lead to proposals
+  that can be accepted or rejected. Review listing also pages past non-actionable
+  storage candidates instead of letting them hide later actionable proposals.
+
+- ACP memory review pagination now preserves the memory store's opaque snapshot
+  cursor. If a proposal changes between pages, clients receive a conflict and can
+  restart from an empty cursor instead of silently skipping another proposal.
   ([#460](https://github.com/baiyuqing/otto/pull/460))
 
 - The TUI Memory Review collection now renders the selected candidate's full

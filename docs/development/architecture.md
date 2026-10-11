@@ -205,6 +205,16 @@ endpoint may have started the completion even though no output was visible.
 Every HTTP status, every stream-codec error, a local builder or redirect-policy
 rejection, and any failure after a reasoning, text or tool-call delta stays
 single-attempt.
+reqwest's `read_timeout` (60 s) restarts on every received byte, so it does
+not bound a body that sends only keepalive bytes. Both transports therefore
+keep a per-attempt deadline from the 2xx response head, `MODEL_IDLE_TIMEOUT`
+(120 s `chatgpt`, 300 s `openai-compatible`), that restarts only when the
+stream assembler emits a delta event; the ChatGPT check runs before
+`EventRedactor`, so held-back text counts. Expiry has `Retry` reason
+`model output idle timeout`, which diagnostics map to `RetryReason::Timeout`.
+ChatGPT retries it like any body failure; OpenAI-compatible handles it as a
+transport interruption before the first delta and as a terminal error after
+it. Design: `docs/specs/2026-10-11-provider-model-idle-timeout.md`.
 Retry progress uses the existing provider event; core owns countdown formatting
 and native/browser frontends supply elapsed time.
 The fixed race rule is completion-first only after the owner has obtained and

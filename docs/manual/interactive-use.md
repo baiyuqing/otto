@@ -860,6 +860,12 @@ read the prompt from a file (bounded to 1 MiB).
 `--prompt` cannot be combined with `--ui tui` or `--archive`, and composes with
 `--continue`, `--resume`, and `--no-session`.
 
+Every turn of a `--prompt` run, including the wake turns that deliver
+background task results, stops after
+[`[agent].unattended_turn_timeout`](getting-started.md#configuration)
+(default `30m`) and the run exits with `1`. Set it to `"0"` to remove the
+limit.
+
 ---
 
 Previous: [Getting started](getting-started.md) · [Documentation index](../README.md) · Next: [Safety and tools](safety-and-tools.md)

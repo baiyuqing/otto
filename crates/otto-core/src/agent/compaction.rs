@@ -404,6 +404,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             &self.options.model,
         );
         let started = (self.options.now)();
+        let mut tracker = super::provider_call::CallTracker::new(started);
+        let now = &self.options.now;
+        let redactor = &self.redactor;
         let invalid_stream = AtomicBool::new(false);
         let child = control.cancellation_token().child_token();
         let remote_control = SummaryControl {
@@ -413,6 +416,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let outcome = {
             let mut on_stream = |event: crate::provider::StreamEvent| {
                 diagnostic.stream(&event);
+                tracker.observe(&event, now(), redactor);
                 match event {
                     crate::provider::StreamEvent::Retry {
                         attempt,
@@ -452,11 +456,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .unwrap_or_default();
         self.emit_provider_api_call(
             emit,
-            operation_id,
+            operation_id.clone(),
             super::ProviderOperationKind::RemoteCompaction,
             duration,
             &outcome,
         );
+        self.append_provider_call(super::provider_call::SettledCall {
+            operation_id: &operation_id,
+            kind: super::ProviderOperationKind::RemoteCompaction,
+            tracker,
+            duration,
+            settlement: &outcome,
+            request: &request,
+            memory: super::provider_call::RequestMemory::default(),
+        })
+        .await?;
         stopped(control)?;
         if invalid_stream.load(Ordering::SeqCst) {
             return Err(AgentError::CompactionBoundary {
@@ -648,9 +662,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             &self.options.model,
         );
         let started = (self.options.now)();
+        let mut tracker = super::provider_call::CallTracker::new(started);
+        let now = &self.options.now;
+        let redactor = &self.redactor;
         let outcome = {
             let mut on_stream = |event: crate::provider::StreamEvent| {
                 diagnostic.stream(&event);
+                tracker.observe(&event, now(), redactor);
                 if invalid_stream.load(Ordering::SeqCst) {
                     return;
                 }
@@ -703,11 +721,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .unwrap_or_default();
         self.emit_provider_api_call(
             emit,
-            operation_id,
+            operation_id.clone(),
             super::ProviderOperationKind::LocalCompaction,
             duration,
             &outcome,
         );
+        self.append_provider_call(super::provider_call::SettledCall {
+            operation_id: &operation_id,
+            kind: super::ProviderOperationKind::LocalCompaction,
+            tracker,
+            duration,
+            settlement: &outcome,
+            request,
+            memory: super::provider_call::RequestMemory::default(),
+        })
+        .await?;
 
         stopped(control)?;
         if invalid_stream.load(Ordering::SeqCst) {

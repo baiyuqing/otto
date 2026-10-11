@@ -145,6 +145,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   checkouts, so after the compiling worktree was deleted `git` failed, the
   build metadata became `unknown`, and no HEAD watch was registered to rebuild
   it. The script now runs `git` in the directory Cargo starts it in.
+  ([#467](https://github.com/baiyuqing/otto/pull/467))
 
 - The TUI PTY tests (`tui_pty`, `tui_attach_pty`) pass under `make check` run
   from an interactive terminal. The spawned `otto` kept that terminal as its

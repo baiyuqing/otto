@@ -10,10 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::app::Controller;
-use crate::memory::{
-    Candidate, CandidateListRequest, CandidateRef, CandidateState, ErrorKind, ReviewDecision,
-    ReviewRequest,
-};
+use crate::memory::{Candidate, CandidateRef, ErrorKind, ReviewDecision, ReviewRequest};
 
 use super::{
     INTERNAL_ERROR, MEMORY_CONFLICT, MEMORY_UNAVAILABLE, RESOURCE_NOT_FOUND, Reply, error,
@@ -82,32 +79,14 @@ fn candidate_json(candidate: &Candidate) -> Value {
 }
 
 pub(super) fn pending(controller: &Controller, params: &PendingParams) -> Reply {
-    let (service, user_scope, workspace_scope) = controller
-        .memory_manager()
-        .ok_or_else(|| error(MEMORY_UNAVAILABLE, UNAVAILABLE))?;
     let limit = params.limit.unwrap_or(DEFAULT_PAGE);
     if limit == 0 || limit > MAX_PAGE {
         return Err(invalid_params(format!("limit must be 1 to {MAX_PAGE}")));
     }
-    let page = service
-        .list_candidates(&CandidateListRequest {
-            scopes: vec![user_scope, workspace_scope],
-            states: vec![CandidateState::Pending],
-            limit,
-            cursor: params.cursor.clone(),
-        })
+    let page = controller
+        .pending_memory_review_page(&params.cursor, limit)
         .map_err(|failure| memory_error(&failure))?;
-    let snapshot = controller
-        .approval_snapshot()
-        .map_err(|failure| error(super::INTERNAL_ERROR, failure.to_string()))?;
-    let candidates: Vec<Value> = page
-        .candidates
-        .iter()
-        .filter(|candidate| {
-            crate::approval::memory::is_human_pending(candidate, &snapshot.requests)
-        })
-        .map(candidate_json)
-        .collect();
+    let candidates: Vec<Value> = page.candidates.iter().map(candidate_json).collect();
     Ok(json!({ "candidates": candidates, "nextCursor": page.next_cursor }))
 }
 

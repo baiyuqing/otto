@@ -62,6 +62,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Pending memory reviews now remain actionable across `/new`, resume and process
+  restarts. Startup notices, terminal review and ACP review use one reconciled,
+  fully paged candidate set, and Otto automatically restores workspace-wide
+  visibility for requests created by older versions instead of repeatedly
+  advertising an empty review list.
+
 - The TUI Memory Review collection now renders the selected candidate's full
   text, reason and advice in its detail pane instead of reducing that information
   to a one-line list preview. Loading failures and the explicit empty state remain

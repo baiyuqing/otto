@@ -22,7 +22,7 @@ guide rather than being copied into those instruction files.
 | `crates/otto/src/storage/` | Native SQL/file capability contracts, drivers, backend repositories and logical migration ports | `runtime/storage.rs` composition and route registry |
 | `docs/` | User manual, contributor documentation, and historical design rationale | `user-manual.md`, `development.md`, and `specs/` |
 | `testdata/` | Shared test fixtures and wire-contract inputs | The adjacent test that consumes a fixture |
-| `scripts/` | Build and development helpers invoked by the Makefile and CI; `release.mjs` implements `make bump` and `make release-tag`, `ci-cache.mjs` reads tool versions from `Cargo.lock` and prunes the cached `target/` for the workflow, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-tcp.sh` supervises the ACP TCP pair (`otto serve --acp-listen` plus `otto-connect`) | `Makefile`, `.github/workflows/checks.yml` |
+| `scripts/` | Build and development helpers invoked by the Makefile; `release.mjs` implements `make bump` and `make release-tag`, `license-check.mjs` implements `make license-check`, `otto.sh` is the `make run` launcher that turns `otto.env` into command-line options, and `otto-tcp.sh` supervises the ACP TCP pair (`otto serve --acp-listen` plus `otto-connect`) | `Makefile` |
 
 The root Cargo workspace contains `otto-core` and `otto` only.
 `chat-connector/` has its own build definition and is not a root workspace crate.
@@ -228,5 +228,5 @@ guards these dependency directions.
 ## Verification
 
 For documentation-only changes, check links and review the rendered Markdown.
-For code organization changes, CI runs the canonical repository gates
-described in the [development guide](development/workflow.md#local-verification).
+For code organization changes, the canonical repository gates are described
+in the [development guide](development/workflow.md#local-verification).

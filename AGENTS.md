@@ -55,7 +55,7 @@ advertise other providers or planned roadmap features.
 - Use small, focused commits with imperative subjects such as
   `feat: add ...` or `docs: document ...`.
 - After implementation and `cargo fmt --all`, open a PR without asking again.
-  Opening the PR ends the task; do not poll CI.
+  Opening the PR ends the task.
 
 ## Safety
 
@@ -75,15 +75,15 @@ advertise other providers or planned roadmap features.
 
 ## Verification
 
-CI runs every build, lint and test gate on each PR. Locally, run only
-`cargo fmt --all` before committing a Rust change; do not run other Cargo
-commands or `make` gates. Feature/fix tests must fail when the added/fixed
-behavior breaks; when that is not evident from the test, name in the PR the
-assertion that fails without the change instead of reverting it locally.
-Documentation-only changes need no new tests. See
-[local verification](docs/development/workflow.md#local-verification) for reading CI
-failures.
+The repository has no CI; no build, lint or test gate runs on a PR. Locally,
+run only `cargo fmt --all` before committing a Rust change; do not run other
+Cargo commands or `make` gates. Feature/fix tests must fail when the
+added/fixed behavior breaks; when that is not evident from the test, name in
+the PR the assertion that fails without the change instead of reverting it
+locally. Documentation-only changes need no new tests. See
+[local verification](docs/development/workflow.md#local-verification) for the
+`make` gates.
 
 Full sandbox validation requires macOS 26+ and standalone Command Line Tools;
-Linux checks cannot establish Seatbelt behavior. CI commands/toolchain pins
-live in [.github/workflows/checks.yml](.github/workflows/checks.yml).
+Linux checks cannot establish Seatbelt behavior. The Rust toolchain pin lives
+in [rust-toolchain.toml](rust-toolchain.toml).

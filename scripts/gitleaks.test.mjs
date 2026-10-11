@@ -12,7 +12,7 @@ const available = spawnSync('gitleaks', ['version']).status === 0;
 test('hook blocks staged secrets and history scan detects secrets deleted later', {
   skip: !available && !process.env.GITLEAKS_TEST_REQUIRED,
 }, () => {
-  assert.ok(available, 'Gitleaks must be installed for the secret-scan CI job');
+  assert.ok(available, 'Gitleaks must be installed when GITLEAKS_TEST_REQUIRED is set');
   const dir = mkdtempSync(join(tmpdir(), 'otto-gitleaks-'));
   const run = (cmd, args, env = process.env) => spawnSync(cmd, args, { cwd: dir, env, encoding: 'utf8' });
   const ok = (cmd, args) => {

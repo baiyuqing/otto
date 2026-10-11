@@ -496,3 +496,80 @@ fn registered_commands_extend_help_completion_and_dispatch() {
         "custom value"
     );
 }
+
+fn trace_ids(view: &crate::tui::interaction::View) -> Vec<&str> {
+    view.rows.iter().map(|row| row.id.as_str()).collect()
+}
+
+#[test]
+fn trace_rows_follow_the_span_tree_and_sub_agents_toggle() {
+    let mut trace = super::TraceView::new();
+    assert!(trace.view().loading);
+    assert!(matches!(trace.refresh(), Some(BackendRequest::Trace)));
+    assert!(trace.periodic());
+    trace.receive(Reply::Trace(super::sample_trace()));
+
+    let view = trace.view();
+    assert_eq!(trace_ids(&view), ["turn-1", "m1", "b1", "s1", "t3"]);
+    assert_eq!(
+        view.title,
+        format!(
+            "Trace · turn 1/1 · user · 48.0s · in {} out {}",
+            crate::tui::layout::format_token_count(31_400).to_lowercase(),
+            crate::tui::layout::format_token_count(2_100).to_lowercase()
+        )
+    );
+    assert_eq!(view.rows[1].cells[0], "  ├ model #1  3.6s");
+    assert_eq!(view.rows[4].cells[0], "    └ ▸ agent t3  21.0s");
+    let detail = &view.rows[1].detail;
+    assert!(detail.contains("attempts 2"), "{detail}");
+    assert!(detail.contains("retry 1/3: connection interrupted, waited 500ms"));
+    assert!(detail.contains("ttft 3.1s"), "{detail}");
+
+    trace.activate(Activation::Open("t3".into()));
+    assert_eq!(
+        trace_ids(&trace.view()),
+        ["turn-1", "m1", "b1", "s1", "t3", "t3:m1", "t3:b1"]
+    );
+    trace.activate(Activation::Open("t3".into()));
+    assert_eq!(trace_ids(&trace.view()).len(), 5);
+
+    assert!(matches!(
+        trace.activate(Activation::Open("b1".into())),
+        Transition::Request(BackendRequest::TraceSpan(id)) if id == "b1"
+    ));
+    let content = otto_core::session::trace::SpanContent {
+        span_id: "b1".into(),
+        sections: vec![otto_core::session::trace::ContentSection {
+            title: "Arguments".into(),
+            text: "cargo test".into(),
+        }],
+    };
+    let Transition::Push(document) = trace.receive(Reply::TraceSpan(content)) else {
+        panic!("a span reply opens a document");
+    };
+    assert_eq!(document.view().title, "bash cargo test");
+    assert_eq!(document.view().document, "Arguments\ncargo test");
+}
+
+#[test]
+fn trace_other_turns_are_collapsed_rows_that_select_on_open() {
+    let mut sample = super::sample_trace();
+    let mut first = sample.turns[0].clone();
+    first.id = "turn-0".into();
+    first.children.clear();
+    sample.turns.insert(0, first);
+    let mut trace = super::TraceView::new();
+    trace.receive(Reply::Trace(sample));
+
+    let view = trace.view();
+    assert_eq!(view.rows[0].id, "turn-0");
+    assert!(view.rows[0].cells[0].starts_with("▸ turn 1"));
+    assert!(view.title.contains("turn 2/2"));
+    assert_eq!(view.default_row.as_deref(), Some("turn-1"));
+
+    trace.activate(Activation::Open("turn-0".into()));
+    let view = trace.view();
+    assert!(view.title.contains("turn 1/2"));
+    assert!(view.rows[0].cells[0].starts_with("▾ turn 1"));
+}

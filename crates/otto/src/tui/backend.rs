@@ -40,10 +40,8 @@ pub(crate) enum Request {
     Profiles,
     Context,
     /// The current session's span tree.
-    #[allow(dead_code)] // remove when the /trace panel sends it
     Trace,
     /// The text of one span of the trace.
-    #[allow(dead_code)] // remove when the /trace panel sends it
     TraceSpan(String),
     SandboxPath(String),
     Agents(ListQuery),
@@ -125,9 +123,7 @@ pub(crate) enum Reply {
     Sessions(Vec<SessionChoice>),
     Profiles(Vec<ProfileSummary>),
     Context(ContextReport),
-    #[allow(dead_code)] // remove when the /trace panel reads it
     Trace(otto_core::session::trace::Trace),
-    #[allow(dead_code)] // remove when the /trace panel reads it
     TraceSpan(otto_core::session::trace::SpanContent),
     SandboxPath(String),
     Agents(ListResult),

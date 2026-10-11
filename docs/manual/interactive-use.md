@@ -256,7 +256,7 @@ Turns:
 
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
-`/image`, `/context`, `/agents`, `/auto [manual|auto|yolo]`, `/permissions`, `/sandbox`, `/sandbox reload`,
+`/image`, `/context`, `/trace`, `/agents`, `/auto [manual|auto|yolo]`, `/permissions`, `/sandbox`, `/sandbox reload`,
 `/approve [<id>]`, `/steer`, `/inputs`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/reflect`, `/memory`, `/remember`, `/skill`,
@@ -456,6 +456,41 @@ TUI-only commands:
   scroll it), and `Esc` returns from details or closes the collection. The report is taken when the panel
   opens. The memory section is the previous turn's recall; the next turn
   recalls again with its own prompt.
+- `/trace` opens a centered panel with the timeline of one turn. The title shows
+  the turn number out of the total, its trigger (`user`, `wake` or `recovery`),
+  its duration, and the provider input and output tokens summed over the turn.
+  The selected turn is the last one; the other turns are collapsed rows
+  (`▸ turn N`), and `Enter` on one selects it. `[` and `]` select the previous
+  or next turn (`←`/`→` move between the footer actions and are not used).
+  Under the turn, a tree lists the provider requests (`model #N`), tool calls,
+  compactions and sub-agents in start order, each with its duration; a span
+  that did not end normally shows `error`, `cancelled`, `interrupted` or
+  `running`. A sub-agent row (`▸`/`▾`) is collapsed when finished and expanded
+  while running; `Enter` toggles it. `Enter` on any other row opens that
+  span's text: tool arguments and result, a provider request's input messages
+  and reply, or a sub-agent's prompt and result (`↑`/`↓`/`PgUp`/`PgDn`
+  scroll it; `Esc` goes back). The detail box shows the selected span's
+  duration, status, attempts, each retry with its reason and wait, time to
+  first output, input (cached) and output tokens, finish reason, and for a
+  provider request the estimated tokens of its system prompt, tools, messages
+  and memory with the recalled memory record ids.
+  Beside the rows, a bar column on the time axis of the selected turn shows
+  `░` a request sent and waiting for its first output, `▒` a wait before a
+  retry, `◇` a tool call waiting for approval, and `█` output arriving or a
+  tool running. A failed span is red; a span whose times were estimated
+  (sessions written before provider timing was recorded) is dim. A running
+  span extends to the current time at every redraw. A panel narrower than 80
+  columns (a terminal narrower than 84) shows the tree and durations without
+  bars. The trace is re-read every 2 seconds while the panel is open,
+  including while a turn is running; Otto does not start a model request for
+  it. With `--no-session` there is no session file and the panel shows an
+  error.
+  An approval request that arrives while `/trace` is on top is not shown over
+  it. The panel shows `N approval pending · a open` under the title, with the
+  time left when the request expires; `a` opens the oldest one over the panel
+  and the panel returns after the decision. Closing the panel presents a
+  pending approval at once. A tool call waiting for approval draws `◇` from
+  the time the request was created.
 - `/agents` opens a centered panel of recorded sub-agent tasks, newest first, with
   status, agent (`default` when none), description, workspace, parent
   session, created time, duration, steps, tool calls, and tokens. It starts

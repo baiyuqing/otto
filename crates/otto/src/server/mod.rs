@@ -727,6 +727,8 @@ impl Server {
             .route("/v1/sessions/{id}/fork-points", get(fork_points))
             .route("/v1/sessions/{id}/history", get(history))
             .route("/v1/sessions/{id}/context", get(context))
+            .route("/v1/sessions/{id}/trace", get(trace))
+            .route("/v1/sessions/{id}/trace/{span_id}", get(trace_span))
             .route(
                 "/v1/sessions/{id}/approvals/message",
                 post(approvals::message),
@@ -2627,6 +2629,42 @@ async fn context(State(server): State<Arc<Server>>, Path(id): Path<String>) -> R
             StatusCode::CONFLICT,
             "context_unavailable",
             "the session context is not available",
+        ),
+    }
+}
+
+async fn trace(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let ctrl = session.ctrl.clone();
+    match tokio::task::spawn_blocking(move || ctrl.trace()).await {
+        Ok(Ok(trace)) => json_response(StatusCode::OK, &trace),
+        Ok(Err(message)) => error_response(StatusCode::CONFLICT, "trace_unavailable", &message),
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "the trace could not be read",
+        ),
+    }
+}
+
+async fn trace_span(
+    State(server): State<Arc<Server>>,
+    Path((id, span_id)): Path<(String, String)>,
+) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    let ctrl = session.ctrl.clone();
+    match tokio::task::spawn_blocking(move || ctrl.trace_span(&span_id)).await {
+        Ok(Ok(Some(content))) => json_response(StatusCode::OK, &content),
+        Ok(Ok(None)) => not_found("span not found"),
+        Ok(Err(message)) => error_response(StatusCode::CONFLICT, "trace_unavailable", &message),
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "the trace could not be read",
         ),
     }
 }
@@ -4933,6 +4971,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_trace_is_served_without_message_text_and_spans_carry_the_content() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                tool_command: Some("echo hi".to_string()),
+                deltas: vec!["done".to_string()],
+                ..Script::default()
+            },
+            elevate: true,
+            persistent: true,
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let response = post_turn(&harness, &id, "run the secret prompt", false).await;
+        let turn_id = turn_header(&response);
+        let mut reader = SseReader::new(response);
+        let requested = frame_named(&mut reader, "approval_requested").await;
+        let approval = requested["approval_id"].as_str().expect("id").to_string();
+        decide(&harness, &id, &approval, "allow").await;
+        ends_of(reader).await;
+        harness.wait_turn_done(&id, &turn_id).await;
+
+        let reply = harness
+            .send("GET", &format!("/v1/sessions/{id}/trace"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert!(!reply.body.contains("elevated ok"), "{}", reply.body);
+        assert!(!reply.body.contains("secret prompt"), "{}", reply.body);
+        let trace = reply.json();
+        let turns = trace["turns"].as_array().expect("turns");
+        // The elevated command is approved on a retry turn, so the last
+        // turn holds the completed tool call.
+        let children = turns.last().expect("a turn")["children"]
+            .as_array()
+            .expect("children");
+        let kinds: Vec<&str> = children
+            .iter()
+            .map(|span| span["kind"].as_str().expect("kind"))
+            .collect();
+        assert!(kinds.contains(&"provider"), "{kinds:?}");
+        let tool = children
+            .iter()
+            .find(|span| span["kind"] == "tool" && span["status"] == "ok")
+            .unwrap_or_else(|| panic!("no tool span: {}", reply.body));
+
+        let span_id = tool["id"].as_str().expect("span id");
+        let content = harness
+            .send("GET", &format!("/v1/sessions/{id}/trace/{span_id}"), None)
+            .await;
+        assert_eq!(content.status, StatusCode::OK, "{}", content.body);
+        let titles: Vec<String> = content.json()["sections"]
+            .as_array()
+            .expect("sections")
+            .iter()
+            .map(|section| section["title"].as_str().expect("title").to_string())
+            .collect();
+        assert_eq!(titles, ["arguments", "result"]);
+        assert!(content.body.contains("elevated ok"), "{}", content.body);
+
+        assert_eq!(
+            harness
+                .send(
+                    "GET",
+                    &format!("/v1/sessions/{id}/trace/no-such-span"),
+                    None
+                )
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            harness
+                .send("GET", "/v1/sessions/missing/trace", None)
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            harness
+                .send("GET", "/v1/sessions/missing/trace/x", None)
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
     async fn listing_merges_open_sessions_over_the_disk_list() {
         let harness = Harness::with(HarnessOptions {
             list: Some(ListResult::default()),
@@ -6462,6 +6586,8 @@ mod tests {
         "/v1/sessions/{id}",
         "/v1/sessions/{id}/history",
         "/v1/sessions/{id}/context",
+        "/v1/sessions/{id}/trace",
+        "/v1/sessions/{id}/trace/{span_id}",
         "/v1/sessions/{id}/profile",
         "/v1/sessions/{id}/approvals/{approval_id}",
         "/v1/sessions/{id}/inputs",
@@ -6529,6 +6655,7 @@ mod tests {
                 .replace("{id}", &id)
                 .replace("{turn_id}", "nope")
                 .replace("{task_id}", "nope")
+                .replace("{span_id}", "nope")
                 .replace("{timer_id}", "nope")
                 .replace("{approval_id}", "nope")
                 .replace("{name}", "nope");

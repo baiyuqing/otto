@@ -18,6 +18,43 @@ pub(crate) struct View {
     pub default_action: Option<String>,
     pub loading: bool,
     pub error: Option<String>,
+    /// Bars drawn beside the rows when the panel is wide enough.
+    pub timeline: Option<Timeline>,
+    /// One line drawn under the title in the queued-input banner style.
+    pub notice: Option<String>,
+}
+
+/// A time axis and the bars of the rows, keyed by row id. Times are unix
+/// milliseconds; `end_ms` is already resolved for running spans.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Timeline {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub bars: BTreeMap<String, Bar>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Bar {
+    pub segments: Vec<Segment>,
+    pub failed: bool,
+    pub estimated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Segment {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub kind: SegmentKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SegmentKind {
+    /// Request sent, no output yet.
+    Waiting,
+    RetryWait,
+    ApprovalWait,
+    /// Output arriving or a tool running.
+    Output,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

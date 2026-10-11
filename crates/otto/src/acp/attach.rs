@@ -578,11 +578,11 @@ impl Relay {
                     match event.event_type.as_str() {
                         "approval_requested" => {
                             let shared=self.client.shared_approval("_otto/approvals/get",session_id,&event.approval_id,0,"","",0).await.ok()
-                                .and_then(|value|serde_json::from_value::<crate::approval::Request>(value).ok());
+                                .and_then(|value|serde_json::from_value::<otto_core::approval::Request>(value).ok());
                             if shared.as_ref().is_some_and(|request| !request.is_human_pending()) { continue; }
                             let caps=connection.client_capabilities.lock().expect("ACP capabilities").clone();
                             if shared.is_some() && caps.pointer("/_meta/otto/approvals").is_some() {continue}
-                            let confirmation=shared.as_ref().is_some_and(|r|r.kind==crate::approval::Kind::Confirmation);
+                            let confirmation=shared.as_ref().is_some_and(|r|r.kind==otto_core::approval::Kind::Confirmation);
                             let (method,mut params)=if confirmation {
                                 if caps.pointer("/clientCapabilities/elicitation/form").is_none_or(Value::is_null) {
                                     connection.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("Approval {} is pending. This client cannot display confirmation; use Otto's approval UI.",event.approval_id)}}}}));

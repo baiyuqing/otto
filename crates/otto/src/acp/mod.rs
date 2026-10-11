@@ -1409,12 +1409,12 @@ impl Connection {
                         };
                         if !shared.is_human_pending() {
                             return match shared.state {
-                                crate::approval::State::Approved => ApprovalDecision::Allow,
+                                otto_core::approval::State::Approved => ApprovalDecision::Allow,
                                 _ if cancel.is_cancelled() => ApprovalDecision::Cancelled,
                                 _ => ApprovalDecision::Deny,
                             };
                         }
-                        if shared.kind == crate::approval::Kind::Confirmation
+                        if shared.kind == otto_core::approval::Kind::Confirmation
                             || self
                                 .client_capabilities
                                 .lock()

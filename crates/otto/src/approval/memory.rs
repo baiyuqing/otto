@@ -1,9 +1,10 @@
 //! Memory retains review data and the atomic candidate/result receipt.
-use super::{Authority, Domain, Error, Kind, Proposal, Request, Result, Service, State, Subject};
+use super::{Domain, Error, Proposal, Result, Service};
 use crate::memory::service::PendingSummary;
 use crate::memory::{
     CandidateListRequest, CandidateRef, CandidateState, ReviewDecision, ReviewRequest, Scope,
 };
+use otto_core::approval::{Authority, Kind, Request, State, Subject};
 use std::sync::Arc;
 
 pub struct Adapter {
@@ -137,7 +138,7 @@ impl Domain for Adapter {
         } else {
             CandidateState::Rejected
         };
-        if request.application == super::ApplicationState::Applied
+        if request.application == otto_core::approval::ApplicationState::Applied
             && candidate.state == expected
             && candidate.decided_at.is_some()
         {
@@ -254,7 +255,7 @@ fn proposal(
     Ok(Proposal {
         kind: Kind::Authorization,
         authority: Authority::Durable,
-        scope: super::Scope {
+        scope: otto_core::approval::Scope {
             workspace: workspace.into(),
             // Route the decision through the originating session so AUTO can
             // review it under that session's policy. `publish` separately adds

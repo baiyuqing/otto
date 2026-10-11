@@ -31,7 +31,7 @@ pub struct Registry {
     guard: Option<Arc<dyn CallGuard>>,
     approval: Option<(
         Arc<crate::approval::Service>,
-        crate::approval::Scope,
+        otto_core::approval::Scope,
         Option<Arc<crate::schedule::tools::TurnOrigin>>,
     )>,
 }
@@ -57,7 +57,7 @@ impl Registry {
     pub fn with_approval(
         self,
         service: Arc<crate::approval::Service>,
-        scope: crate::approval::Scope,
+        scope: otto_core::approval::Scope,
     ) -> Self {
         self.with_approval_origin(service, scope, None)
     }
@@ -65,7 +65,7 @@ impl Registry {
     pub fn with_approval_origin(
         mut self,
         service: Arc<crate::approval::Service>,
-        scope: crate::approval::Scope,
+        scope: otto_core::approval::Scope,
         origin: Option<Arc<crate::schedule::tools::TurnOrigin>>,
     ) -> Self {
         self.approval = Some((service, scope, origin));
@@ -97,7 +97,7 @@ impl Registry {
         &self,
     ) -> Option<(
         Arc<crate::approval::Service>,
-        crate::approval::Scope,
+        otto_core::approval::Scope,
         Option<Arc<crate::schedule::tools::TurnOrigin>>,
     )> {
         self.approval.clone()
@@ -106,7 +106,7 @@ impl Registry {
         &self,
         call: ToolCall<'_>,
         control: &dyn OperationControl,
-        scope_override: Option<&crate::approval::Scope>,
+        scope_override: Option<&otto_core::approval::Scope>,
     ) -> ToolExecution {
         if let Some(reason) = control.admission_stop_reason() {
             return stopped_not_started(reason);
@@ -141,10 +141,10 @@ impl Registry {
                 let origin = presentation_origin.as_ref().and_then(|origin| origin.get());
                 let mut request = match service.create_with_origin(
                     crate::approval::Proposal {
-                        kind: crate::approval::Kind::Authorization,
+                        kind: otto_core::approval::Kind::Authorization,
                         authority: spec.authority,
                         scope: scope.clone(),
-                        subject: crate::approval::Subject {
+                        subject: otto_core::approval::Subject {
                             tool_call_id: call.tool_call_id.into(),
                             source: spec.source,
                             id: call.operation_id.to_string(),
@@ -177,10 +177,10 @@ impl Registry {
                         Ok(request) => request,
                         Err(error) => return not_started(ToolResult::error(error.to_string())),
                     };
-                    if request.state == crate::approval::State::Pending {
+                    if request.state == otto_core::approval::State::Pending {
                         continue;
                     }
-                    if request.state != crate::approval::State::Approved {
+                    if request.state != otto_core::approval::State::Approved {
                         let reason = request
                             .review
                             .as_ref()
@@ -226,14 +226,15 @@ impl Registry {
                     if let Err(e) = service.application(
                         &request.id,
                         &request.scope,
-                        crate::approval::ApplicationState::NotStarted,
-                        crate::approval::ApplicationState::Applying,
+                        otto_core::approval::ApplicationState::NotStarted,
+                        otto_core::approval::ApplicationState::Applying,
                         "",
                     ) {
                         if matches!(e, crate::approval::Error::Conflict)
                             && let Ok(current) = service.revalidate_authorization(&request)
-                            && current.application == crate::approval::ApplicationState::NotStarted
-                            && current.state != crate::approval::State::Approved
+                            && current.application
+                                == otto_core::approval::ApplicationState::NotStarted
+                            && current.state != otto_core::approval::State::Approved
                         {
                             request = current;
                             continue;
@@ -249,8 +250,8 @@ impl Registry {
                     let _ = service.application(
                         &request.id,
                         &request.scope,
-                        crate::approval::ApplicationState::Applying,
-                        crate::approval::ApplicationState::Failed,
+                        otto_core::approval::ApplicationState::Applying,
+                        otto_core::approval::ApplicationState::Failed,
                         "Authorization could not be applied.",
                     );
                     return not_started(ToolResult::error(error));
@@ -278,16 +279,16 @@ impl Registry {
             && let Some((service, _, _)) = &self.approval
         {
             let state = if execution.outcome.effect_certainty == EffectCertainty::Unknown {
-                crate::approval::ApplicationState::Unknown
+                otto_core::approval::ApplicationState::Unknown
             } else if execution.result.is_error {
-                crate::approval::ApplicationState::Failed
+                otto_core::approval::ApplicationState::Failed
             } else {
-                crate::approval::ApplicationState::Applied
+                otto_core::approval::ApplicationState::Applied
             };
             let _ = service.application(
                 &request.id,
                 &request.scope,
-                crate::approval::ApplicationState::Applying,
+                otto_core::approval::ApplicationState::Applying,
                 state,
                 if execution.result.is_error {
                     "Operation did not complete successfully."
@@ -302,9 +303,9 @@ impl Registry {
 
 async fn wait_for_authorization(
     service: &crate::approval::Service,
-    request: &crate::approval::Request,
+    request: &otto_core::approval::Request,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<crate::approval::Request, String> {
+) -> Result<otto_core::approval::Request, String> {
     let wait = service.wait(&request.id, &request.scope, cancel);
     tokio::pin!(wait);
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -314,8 +315,8 @@ async fn wait_for_authorization(
             _ = tick.tick(), if request.scope.run_id.starts_with("schedule:") => {
                 let current = service.get(&request.id, &request.scope.workspace, Some(&request.scope.session_id))
                     .map_err(|error| error.to_string())?;
-                if current.state == crate::approval::State::Pending
-                    && current.review.as_ref().is_none_or(|review| review.status == crate::approval::ReviewStatus::HumanRequired)
+                if current.state == otto_core::approval::State::Pending
+                    && current.review.as_ref().is_none_or(|review| review.status == otto_core::approval::ReviewStatus::HumanRequired)
                 {
                     return Err(format!("Human authority is required for approval {}; this unattended operation was not started. The exact request remains available for review.", current.id));
                 }
@@ -480,7 +481,7 @@ mod tests {
                 }
                 .into(),
                 source: "test".into(),
-                authority: crate::approval::Authority::Bounded,
+                authority: otto_core::approval::Authority::Bounded,
                 title: "Approve?".into(),
                 reason: "test".into(),
                 details: if self.change_on_second_call && call > 0 {
@@ -497,7 +498,7 @@ mod tests {
             &self,
             _arguments: &serde_json::value::RawValue,
             _cancel: &CancellationToken,
-            _request: &crate::approval::Request,
+            _request: &otto_core::approval::Request,
         ) -> Result<(), String> {
             self.applied.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -512,8 +513,8 @@ mod tests {
         }
     }
 
-    fn approval_scope() -> crate::approval::Scope {
-        crate::approval::Scope {
+    fn approval_scope() -> otto_core::approval::Scope {
+        otto_core::approval::Scope {
             workspace: "/workspace".into(),
             session_id: "session".into(),
             task_id: String::new(),

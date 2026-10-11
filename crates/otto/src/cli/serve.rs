@@ -2248,22 +2248,22 @@ mod tests {
     fn approval_for_delivery(
         id: &str,
         spec: &crate::tool::ApprovalSpec,
-    ) -> crate::approval::Request {
-        crate::approval::Request {
+    ) -> otto_core::approval::Request {
+        otto_core::approval::Request {
             options: Vec::new(),
             schema_version: 1,
             id: id.into(),
             revision: 1,
-            kind: crate::approval::Kind::Authorization,
-            authority: crate::approval::Authority::Boundary,
-            scope: crate::approval::Scope {
+            kind: otto_core::approval::Kind::Authorization,
+            authority: otto_core::approval::Authority::Boundary,
+            scope: otto_core::approval::Scope {
                 workspace: "/source".into(),
                 session_id: "source-session".into(),
                 task_id: String::new(),
                 run_id: String::new(),
             },
             presentation_origin: String::new(),
-            subject: crate::approval::Subject {
+            subject: otto_core::approval::Subject {
                 tool_call_id: "delivery-call".into(),
                 source: "delivery".into(),
                 id: "op_delivery".into(),
@@ -2276,9 +2276,9 @@ mod tests {
             blocking: true,
             created_at: 1,
             expires_at: Some(2),
-            state: crate::approval::State::Approved,
+            state: otto_core::approval::State::Approved,
             decision: None,
-            application: crate::approval::ApplicationState::Applying,
+            application: otto_core::approval::ApplicationState::Applying,
             application_error: String::new(),
             review: None,
         }

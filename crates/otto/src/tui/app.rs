@@ -719,7 +719,7 @@ impl App {
             self.actions.push(Action::Prompt(prompt));
         }
     }
-    pub(crate) fn sync_shared_approval(&mut self, requests: &[crate::approval::Request]) {
+    pub(crate) fn sync_shared_approval(&mut self, requests: &[otto_core::approval::Request]) {
         let present: HashSet<_> = requests
             .iter()
             .filter(|r| r.is_human_pending())
@@ -769,12 +769,13 @@ impl App {
         }
         for surface in self.surfaces.iter_mut() {
             if surface.model.key().starts_with("approval:") {
-                let _ = surface
-                    .model
-                    .receive(Reply::ApprovalSnapshot(crate::approval::Snapshot {
-                        requests: requests.to_vec(),
-                        cursor: 0,
-                    }));
+                let _ =
+                    surface
+                        .model
+                        .receive(Reply::ApprovalSnapshot(otto_core::approval::Snapshot {
+                            requests: requests.to_vec(),
+                            cursor: 0,
+                        }));
                 surface.state.reconcile(&surface.model.view());
             }
         }
@@ -1417,7 +1418,7 @@ impl App {
                             decision.feedback
                         ));
                     }
-                    if request.state == crate::approval::State::Pending
+                    if request.state == otto_core::approval::State::Pending
                         && !request.is_human_pending()
                     {
                         self.push_system(format!(
@@ -1585,22 +1586,22 @@ mod tests {
             received,
         })
     }
-    fn approval(id: &str) -> crate::approval::Request {
-        crate::approval::Request {
+    fn approval(id: &str) -> otto_core::approval::Request {
+        otto_core::approval::Request {
             options: vec![],
             schema_version: 1,
             id: id.into(),
             revision: 1,
-            kind: crate::approval::Kind::Confirmation,
-            authority: crate::approval::Authority::Consent,
-            scope: crate::approval::Scope {
+            kind: otto_core::approval::Kind::Confirmation,
+            authority: otto_core::approval::Authority::Consent,
+            scope: otto_core::approval::Scope {
                 workspace: "/work".into(),
                 session_id: "session".into(),
                 task_id: String::new(),
                 run_id: String::new(),
             },
             presentation_origin: String::new(),
-            subject: crate::approval::Subject {
+            subject: otto_core::approval::Subject {
                 tool_call_id: String::new(),
                 source: "test".into(),
                 id: id.into(),
@@ -1613,9 +1614,9 @@ mod tests {
             blocking: true,
             created_at: 1,
             expires_at: None,
-            state: crate::approval::State::Pending,
+            state: otto_core::approval::State::Pending,
             decision: None,
-            application: crate::approval::ApplicationState::NotRequired,
+            application: otto_core::approval::ApplicationState::NotRequired,
             application_error: String::new(),
             review: None,
         }
@@ -1739,7 +1740,7 @@ mod tests {
         app.apply_completion(Completion {
             mutation: false,
             ticket: first,
-            result: Ok(Reply::ApprovalSnapshot(crate::approval::Snapshot {
+            result: Ok(Reply::ApprovalSnapshot(otto_core::approval::Snapshot {
                 requests: vec![],
                 cursor: 0,
             })),
@@ -2042,8 +2043,8 @@ mod tests {
     fn reviewing_approval_never_opens_an_approval_surface() {
         let (mut app, _) = app();
         let mut request = approval("reviewing");
-        request.review = Some(crate::approval::ReviewMetadata {
-            status: crate::approval::ReviewStatus::Reviewing,
+        request.review = Some(otto_core::approval::ReviewMetadata {
+            status: otto_core::approval::ReviewStatus::Reviewing,
             assessment: None,
             settings_revision: 1,
             evidence_digest: "evidence".into(),

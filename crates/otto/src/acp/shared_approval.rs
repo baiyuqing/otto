@@ -30,8 +30,8 @@ impl Connection {
         struct Input {
             session_id: String,
             expected_revision: Option<u64>,
-            policy: Option<crate::approval::ApprovalPolicy>,
-            reviewer: Option<crate::approval::ApprovalReviewer>,
+            policy: Option<otto_core::approval::ApprovalPolicy>,
+            reviewer: Option<otto_core::approval::ApprovalReviewer>,
         }
         let input: Input = serde_json::from_value(params)
             .map_err(|_| invalid_params("invalid approval policy request"))?;
@@ -84,7 +84,7 @@ impl Connection {
         result(
             json!({"policy":settings.policy,"reviewer":settings.reviewer,"revision":settings.revision,
             "mode":settings.mode(),"automatic":settings.is_automatic(),
-            "reviewer_active":settings.policy != crate::approval::ApprovalPolicy::Never}),
+            "reviewer_active":settings.policy != otto_core::approval::ApprovalPolicy::Never}),
         )
     }
 
@@ -172,7 +172,7 @@ impl Connection {
     pub(super) async fn confirmation(
         &self,
         ctrl: &crate::app::Controller,
-        request: &crate::approval::Request,
+        request: &otto_core::approval::Request,
         cancel: &CancellationToken,
     ) -> ApprovalDecision {
         let current = match ctrl
@@ -186,7 +186,7 @@ impl Connection {
         let request = &current;
         if !request.is_human_pending() {
             return match request.state {
-                crate::approval::State::Approved => ApprovalDecision::Allow,
+                otto_core::approval::State::Approved => ApprovalDecision::Allow,
                 _ if cancel.is_cancelled() => ApprovalDecision::Cancelled,
                 _ => ApprovalDecision::Deny,
             };
@@ -202,8 +202,11 @@ impl Connection {
                 .wait(&request.id, &request.scope, cancel)
                 .await
             {
-                Ok(r) if r.state == crate::approval::State::Approved => ApprovalDecision::Allow,
-                Ok(r) if r.state == crate::approval::State::Withdrawn && cancel.is_cancelled() => {
+                Ok(r) if r.state == otto_core::approval::State::Approved => ApprovalDecision::Allow,
+                Ok(r)
+                    if r.state == otto_core::approval::State::Withdrawn
+                        && cancel.is_cancelled() =>
+                {
                     ApprovalDecision::Cancelled
                 }
                 _ => ApprovalDecision::Deny,
@@ -219,7 +222,7 @@ impl Connection {
                 .wait(&request.id, &request.scope, cancel)
                 .await
             {
-                Ok(r) if r.state == crate::approval::State::Approved => ApprovalDecision::Allow,
+                Ok(r) if r.state == otto_core::approval::State::Approved => ApprovalDecision::Allow,
                 _ => ApprovalDecision::Deny,
             };
         }
@@ -266,7 +269,7 @@ impl Connection {
             .wait(&request.id, &request.scope, cancel)
             .await
         {
-            Ok(r) if r.state == crate::approval::State::Approved => ApprovalDecision::Allow,
+            Ok(r) if r.state == otto_core::approval::State::Approved => ApprovalDecision::Allow,
             _ => ApprovalDecision::Deny,
         }
     }
@@ -274,7 +277,7 @@ impl Connection {
 
 impl Connection {
     pub(super) async fn approval_mode(&self, method: &str, params: Value) -> Reply {
-        use crate::approval::ApprovalMode;
+        use otto_core::approval::ApprovalMode;
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Input {
@@ -327,7 +330,7 @@ impl Connection {
                 match relay.client.approval_policy(&input.session_id, None).await {
                     Ok(settings) => settings,
                     Err(crate::client::Error::Http { status: 404, .. }) => {
-                        crate::approval::ApprovalSettings::from_mode(mode)
+                        otto_core::approval::ApprovalSettings::from_mode(mode)
                     }
                     Err(e) => return Err(error(INTERNAL_ERROR, e.to_string())),
                 }
@@ -336,7 +339,7 @@ impl Connection {
         result(
             json!({"automatic":settings.is_automatic(),"mode":settings.mode(),
             "policy":settings.policy,"reviewer":settings.reviewer,"revision":settings.revision,
-            "reviewer_active":settings.policy != crate::approval::ApprovalPolicy::Never}),
+            "reviewer_active":settings.policy != otto_core::approval::ApprovalPolicy::Never}),
         )
     }
 }

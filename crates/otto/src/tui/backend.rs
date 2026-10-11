@@ -127,7 +127,7 @@ pub(crate) enum Reply {
         missing: bool,
     },
     Reviews(Vec<Candidate>),
-    ApprovalSnapshot(crate::approval::Snapshot),
+    ApprovalSnapshot(otto_core::approval::Snapshot),
     ApprovalActivity(crate::approval::ApprovalActivity),
     Steering(Vec<otto_core::agent::steering::Message>),
     Management(crate::app::management::Reply),
@@ -1045,7 +1045,7 @@ async fn remote_management(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::ApprovalMode;
+    use otto_core::approval::ApprovalMode;
     #[tokio::test]
     async fn repeated_reads_are_coalesced_and_keep_the_original_ticket() {
         let remote = Arc::new(Remote::offline(Vec::new()));
@@ -1196,7 +1196,8 @@ mod tests {
 
     #[tokio::test]
     async fn exact_approval_revision_cannot_be_rebound_to_current_state() {
-        use crate::approval::{ApplicationState, Authority, Kind, Proposal, State, Subject};
+        use crate::approval::Proposal;
+        use otto_core::approval::{ApplicationState, Authority, Kind, State, Subject};
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
         let (controller, _, _) =

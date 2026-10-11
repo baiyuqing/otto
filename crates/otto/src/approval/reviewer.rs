@@ -6,10 +6,10 @@ use otto_core::agent::{Agent, oneshot::TextRequest};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::{Request, ReviewAssessment, ReviewOutcome, RiskLevel, UserAuthorization};
 use crate::deadline::{Control, Deadline};
 use crate::runtime::builder::{ProviderClient, SharedSession};
 use crate::tool::registry::Registry;
+use otto_core::approval::{Request, ReviewAssessment, ReviewOutcome, RiskLevel, UserAuthorization};
 
 pub const CONTEXT_CUSTOM_TYPE: &str = "otto.authorization";
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -242,15 +242,15 @@ mod tests {
         crate::approval::Service::in_memory()
             .unwrap()
             .create(crate::approval::Proposal {
-                kind: super::super::Kind::Authorization,
-                authority: super::super::Authority::Boundary,
-                scope: super::super::Scope {
+                kind: otto_core::approval::Kind::Authorization,
+                authority: otto_core::approval::Authority::Boundary,
+                scope: otto_core::approval::Scope {
                     workspace: "/w".into(),
                     session_id: "root".into(),
                     task_id: String::new(),
                     run_id: String::new(),
                 },
-                subject: super::super::Subject {
+                subject: otto_core::approval::Subject {
                     source: "mcp".into(),
                     id: "op".into(),
                     version: "v".into(),

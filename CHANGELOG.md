@@ -67,6 +67,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
   that can be accepted or rejected. Review listing also pages past non-actionable
   storage candidates instead of letting them hide later actionable proposals.
 
+- ACP memory review pagination now preserves the memory store's opaque snapshot
+  cursor. If a proposal changes between pages, clients receive a conflict and can
+  restart from an empty cursor instead of silently skipping another proposal.
+  ([#460](https://github.com/baiyuqing/otto/pull/460))
+
 - The TUI Memory Review collection now renders the selected candidate's full
   text, reason and advice in its detail pane instead of reducing that information
   to a one-line list preview. Loading failures and the explicit empty state remain

@@ -131,11 +131,21 @@ widen what runs outside the sandbox.
 
 ### Classification
 
-`shell::classify(&ShellCommand) -> Option<Effect>` walks every segment and
-returns the highest class found. Classification uses the segment's static
-words; it does not need `complete`. A segment whose program is not static,
-or is a `COMMAND_RUNNERS` entry (`bash -c`, `eval`, `env`, `sudo`, …), is
-not classified.
+`shell::classify(&Parsed) -> Option<(Effect, &[String])>` walks every
+command and returns the highest class found (`ExternalState` over
+`Destructive`) with the words of the first command that has it.
+Classification does not need `complete`. It reads `Parsed.commands`: every
+word of each command, static words unquoted and other words as their source
+text, so a flag written after `$VAR` still counts (`find "$D" -delete`).
+`segments` stop at the first non-static word and would miss it.
+
+- A command whose program is not static is not classified.
+- After `env`, `command`, `exec`, `nohup`, `nice`, `timeout`, `time`,
+  `sudo` or `xargs`, the words from the first classified program onward are
+  classified (`timeout 30 git push`, `xargs rm -rf`).
+- `find -exec`, `-execdir`, `-ok` and `-okdir` classify the words after the
+  flag.
+- Other runners (`bash -c`, `sh -c`, `eval`, `source`) are not classified.
 
 `Effect::ExternalState` (writes outside this machine):
 
@@ -220,12 +230,14 @@ commands wait for approval and then run inside the sandbox.
 
 ## Limitations
 
-- Commands executed by scripts, `make`, `npm run`, `python -c`, `bash -c`,
-  `eval`, `xargs`, `env`, `sudo` or similar programs are not classified.
+- Commands executed by scripts, `make`, `npm run`, `python -c`, `bash -c`
+  or `eval` are not classified.
   This is a check on the command text the model writes, not a sandbox
   boundary. Only `[sandbox] network = "deny"` stops network writes from
   those programs.
 - Cloud CLIs (`aws`, `gcloud`, `az`) are not classified.
+- `[sandbox] excluded_commands` run outside the sandbox without approval, as
+  before; a classified excluded command does not ask.
 - `Destructive` requests prompt only in MANUAL.
 - NEVER rejects `ExternalState` requests that it ran before this change,
   unless an allow rule matches.

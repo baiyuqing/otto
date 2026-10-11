@@ -141,6 +141,15 @@ pub(crate) struct TaskSpecData {
     #[serde(default)]
     pub(crate) prompt: String,
     pub(crate) definition: Option<TaskSpecDefinition>,
+    /// The tool call of the parent session that started this task; empty for
+    /// tasks started outside a tool call and for transcripts written before
+    /// this field existed.
+    #[serde(
+        rename = "parentToolCallId",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub(crate) parent_tool_call_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -755,6 +764,9 @@ pub struct StartRequest {
     /// `"fresh"` or `"inherit"`. Empty falls back to the definition's setting,
     /// then `"fresh"`.
     pub context: String,
+    /// The parent session's tool call that starts the task, recorded in the
+    /// child's `otto.task_spec`. Empty when no tool call started it.
+    pub parent_tool_call_id: String,
 }
 
 /// Builds and runs sub-agent tasks for one session.
@@ -1149,6 +1161,7 @@ impl Runner {
             model: record.model.clone(),
             agent: record.agent.clone(),
             context: record.context.clone(),
+            parent_tool_call_id: String::new(),
         };
         self.spawn(
             request,
@@ -1363,6 +1376,7 @@ impl Runner {
                     write_policy: definition.write_policy.as_str().to_string(),
                     write_paths: definition.write_paths.clone(),
                 }),
+                parent_tool_call_id: request.parent_tool_call_id.clone(),
             };
             if let Err(error) =
                 append_task_custom(&transcript, TASK_SPEC_CUSTOM_TYPE, &task_spec).await
@@ -4211,6 +4225,7 @@ mod tests {
             context: "fresh".to_string(),
             prompt: prompt.to_string(),
             definition,
+            parent_tool_call_id: String::new(),
         })
         .expect("serialize task_spec");
         store
@@ -4749,6 +4764,7 @@ mod tests {
             context: "fresh".to_string(),
             prompt: "look at this".to_string(),
             definition: None,
+            parent_tool_call_id: String::new(),
         })
         .expect("serialize task_spec");
         store

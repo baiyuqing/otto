@@ -266,6 +266,25 @@ impl Tool for AgentTool {
     }
 
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
+        self.run(arguments, "", cancel).await
+    }
+
+    async fn execute_call(
+        &self,
+        call: otto_core::tool::ToolCall<'_>,
+        cancel: &CancellationToken,
+    ) -> ToolResult {
+        self.run(call.arguments, call.tool_call_id, cancel).await
+    }
+}
+
+impl AgentTool {
+    async fn run(
+        &self,
+        arguments: &RawValue,
+        tool_call_id: &str,
+        cancel: &CancellationToken,
+    ) -> ToolResult {
         let args: AgentArgs = match decode_strict_json(arguments.get(), &["prompt"]) {
             Ok(args) => args,
             Err(message) => return error_result(message),
@@ -295,6 +314,7 @@ impl Tool for AgentTool {
                 agent: args.agent,
                 context: args.context,
                 name: args.name,
+                parent_tool_call_id: tool_call_id.to_string(),
             })
             .await
         {
@@ -326,9 +346,7 @@ impl Tool for AgentTool {
         };
         text_result(started)
     }
-}
 
-impl AgentTool {
     /// The `resume` branch of `agent`: continues an interrupted sub-agent
     /// task on its own transcript instead of starting a new one.
     async fn execute_resume(
@@ -675,6 +693,58 @@ mod tests {
                 }
             })
         })
+    }
+
+    #[tokio::test]
+    async fn agent_records_the_spawning_tool_call_in_the_child_task_spec() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent = dir.path().join("parent.jsonl");
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.child_session = Some(Arc::new(move |task_id: &str| {
+            let name = format!("{task_id}-child");
+            let store = crate::session::Store::create_child_lazy(
+                &parent,
+                &name,
+                otto_core::session::Header {
+                    id: "child".into(),
+                    workspace: parent.parent().expect("dir").to_string_lossy().into_owned(),
+                    provider: "openai-compatible".into(),
+                    model: "test-model".into(),
+                    created_at: chrono::Utc::now(),
+                    ..otto_core::session::Header::default()
+                },
+            )
+            .expect("child store");
+            let path = crate::session::Store::child_path(&parent, &name);
+            Ok(Some((Arc::new(store), path.to_string_lossy().into_owned())))
+        }));
+        let runner = runner(config);
+        let tool = tool_named(&runner, "agent");
+        let operation_id = otto_core::model::OperationId::new("op_test").expect("operation id");
+        let arguments = raw(r#"{"prompt":"look"}"#);
+        tool.execute_call(
+            otto_core::tool::ToolCall {
+                tool_call_id: "call_7",
+                operation_id: &operation_id,
+                name: "agent",
+                arguments: &arguments,
+                attempt: 1,
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        let task = wait_final(&tasks, "t1").await;
+
+        let text = std::fs::read_to_string(&task.session_path).expect("child transcript");
+        let spec: serde_json::Value = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|entry| entry["customType"] == "otto.task_spec")
+            .expect("task spec entry");
+        assert_eq!(spec["data"]["parentToolCallId"], "call_7");
     }
 
     #[tokio::test(start_paused = true)]

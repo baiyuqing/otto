@@ -23,22 +23,19 @@
 //! something unexpected) and fails the test loudly rather than silently
 //! mis-rendering.
 
-use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 mod common;
 use common::pty::{
-    Screen, Shared, raw_contains, wait_for_raw_bytes, wait_for_screen_text,
+    Screen, raw_contains, spawn, wait_for_raw_bytes, wait_for_screen_text,
     wait_for_screen_text_gone, wait_until,
 };
 
-const WIDTH: usize = 120;
-const HEIGHT: usize = 30;
 /// The text both busy composer titles end with (`draw_composer` in
 /// `src/tui/render.rs`): "Working — type, then Enter to queue next input ·
 /// Esc cancels turn" and "Queued next input · Ctrl+U withdraw · Esc cancels
@@ -175,19 +172,6 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     )
     .expect("write config");
 
-    let winsize = nix::pty::Winsize {
-        ws_row: HEIGHT as u16,
-        ws_col: WIDTH as u16,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    let pty = nix::pty::openpty(Some(&winsize), None).expect("open a pty");
-    let mut master = File::from(pty.master);
-    let slave = File::from(pty.slave);
-    let stdin_fd = slave.try_clone().expect("clone slave for stdin");
-    let stdout_fd = slave.try_clone().expect("clone slave for stdout");
-    let stderr_fd = slave; // moved in; no clone needed for the last use
-
     let mut command = Command::new(env!("CARGO_BIN_EXE_otto"));
     command
         .env_clear()
@@ -198,45 +182,11 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         .arg("--cwd")
         .arg(workspace.path())
         .arg("--ui")
-        .arg("tui")
-        .stdin(Stdio::from(stdin_fd))
-        .stdout(Stdio::from(stdout_fd))
-        .stderr(Stdio::from(stderr_fd));
+        .arg("tui");
     if let Some(tmpdir) = std::env::var_os("TMPDIR") {
         command.env("TMPDIR", tmpdir);
     }
-    let mut child = command.spawn().expect("spawn the otto binary");
-    // The parent must hold no slave-side descriptor once the child owns its
-    // copies, or the master will never see EOF after the child exits; the
-    // `Stdio::from` handles above are consumed into `command` and closed by
-    // `spawn()` on the parent side, so nothing further to drop here.
-
-    let shared = Arc::new(Shared {
-        screen: Mutex::new(Screen::new(WIDTH, HEIGHT)),
-        raw: Mutex::new(Vec::new()),
-        parse_error: Mutex::new(None),
-    });
-    let reader_shared = Arc::clone(&shared);
-    let mut reader_master = master
-        .try_clone()
-        .expect("clone master for the reader thread");
-    std::thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
-        loop {
-            match reader_master.read(&mut buffer) {
-                Ok(0) | Err(_) => return,
-                Ok(read) => {
-                    let chunk = &buffer[..read];
-                    reader_shared.raw.lock().unwrap().extend_from_slice(chunk);
-                    let mut screen = reader_shared.screen.lock().unwrap();
-                    if let Err(message) = screen.feed(chunk) {
-                        *reader_shared.parse_error.lock().unwrap() = Some(message);
-                        return;
-                    }
-                }
-            }
-        }
-    });
+    let (mut master, mut child, shared) = spawn(command);
 
     eprintln!("[tui_pty] waiting for startup marker {STARTUP_MARKER:?}");
     wait_for_screen_text(&shared, STARTUP_MARKER);

@@ -64,6 +64,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         session_root: session_root.to_path_buf(),
         shell: "/bin/sh".to_string(),
         no_session: false,
+        headless: false,
         host_entries: Vec::new(),
         overrides: Overrides {
             shell_timeout: Duration::from_secs(30),
@@ -125,6 +126,7 @@ pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {
         session_root: root.join("sessions"),
         shell: "/bin/sh".to_string(),
         no_session: true,
+        headless: false,
         overrides: Overrides::default(),
         host_entries: vec![b"HOME=/tmp".to_vec()],
         sandbox_secrets_baseline: Vec::new(),
@@ -162,6 +164,7 @@ pub fn shared_with_sandbox_driver_override(root: &Path, driver: &str) -> Arc<Sha
         session_root: root.join("sessions"),
         shell: "/bin/sh".to_string(),
         no_session: true,
+        headless: false,
         overrides: Overrides::default(),
         host_entries: vec![b"HOME=/tmp".to_vec()],
         sandbox_secrets_baseline: Vec::new(),

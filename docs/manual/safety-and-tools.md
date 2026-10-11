@@ -600,8 +600,10 @@ error instead.
 #### Stopping a turn that makes no progress
 
 A turn whose model keeps issuing the same tool call, or keeps receiving tool
-errors, would otherwise run until a deadline — and deadlines are unlimited
-unless you configure one. Otto watches this itself and ends such a turn with
+errors, would otherwise run until a deadline. Interactive turns have no
+deadline unless you configure one; chat and `--prompt` turns stop after
+[`[agent].unattended_turn_timeout`](getting-started.md#configuration)
+(default `30m`). Otto watches this itself and ends such a turn with
 the error `no progress: the same <tool> call repeated <n> times in a row`, or
 `no progress: <n> tool calls in a row failed (last: <tool>)`. This applies to
 every turn, including each sub-agent's, which inherits your limits. A turn
@@ -611,7 +613,8 @@ can send the next prompt.
 Two calls count as the same call when the tool name and the arguments are the
 same; key order and spacing in the arguments are ignored. Only *consecutive*
 conditions are detected, so a cycle that alternates between different calls is
-not stopped — use `agent_status` and `agent_cancel` when you see one.
+not stopped — use `agent_status` and `agent_cancel` when you see one. In a
+chat or `--prompt` turn, the unattended deadline ends such a cycle.
 
 `[agent].no_progress_repeats` (default 8) and
 `[agent].no_progress_failures` (default 12) set the two limits. Set one to `0`

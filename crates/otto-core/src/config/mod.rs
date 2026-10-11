@@ -192,6 +192,9 @@ pub struct Agent {
     #[serde(default)]
     pub max_output_bytes: i64,
     pub turn_timeout: Option<String>,
+    /// Deadline for chat and `otto --prompt` turns. `None` keeps the default
+    /// of 30 minutes; `0` disables it.
+    pub unattended_turn_timeout: Option<String>,
     pub provider_timeout: Option<String>,
     pub cancellation_grace: Option<String>,
     pub subagent_timeout: Option<String>,

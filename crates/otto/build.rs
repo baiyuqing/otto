@@ -3,6 +3,10 @@ use std::process::Command;
 
 /// Runs `git <args>` in the crate directory and returns trimmed stdout, or
 /// `None` when git is missing, fails, or prints nothing.
+/// Cargo starts build scripts in the package directory. `env!` is not used
+/// for it: a compiled build script is reused from a shared target directory
+/// by other checkouts, and a compile-time path names the checkout that
+/// compiled it.
 /// `GIT_OPTIONAL_LOCKS=0` stops `git status` from rewriting the index, so a
 /// build neither takes `index.lock` from a concurrent git command nor touches
 /// the watched index file.
@@ -10,20 +14,19 @@ fn git(args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .ok()?;
     let text = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (out.status.success() && !text.is_empty()).then_some(text)
 }
 
-/// Emits rerun-if-changed for a git-resolved path. Cargo reruns the script on
-/// every build when a listed path does not exist, so missing paths are skipped.
+/// Emits rerun-if-changed for a git-resolved path, relative to the package
+/// directory. Cargo reruns the script on every build when a listed path does
+/// not exist, so missing paths are skipped.
 fn watch_git_path(name: &str) {
     if let Some(path) = git(&["rev-parse", "--git-path", name]) {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
-        if path.exists() {
-            println!("cargo:rerun-if-changed={}", path.display());
+        if Path::new(&path).exists() {
+            println!("cargo:rerun-if-changed={path}");
         }
     }
 }

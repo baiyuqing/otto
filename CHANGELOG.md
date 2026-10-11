@@ -67,6 +67,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   fully paged candidate set, and Otto automatically restores workspace-wide
   visibility for requests created by older versions instead of repeatedly
   advertising an empty review list.
+  ([#460](https://github.com/baiyuqing/otto/pull/460))
 
 - The TUI Memory Review collection now renders the selected candidate's full
   text, reason and advice in its detail pane instead of reducing that information

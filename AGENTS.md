@@ -54,8 +54,8 @@ advertise other providers or planned roadmap features.
   preference about version increments says.
 - Use small, focused commits with imperative subjects such as
   `feat: add ...` or `docs: document ...`.
-- After implementation and `cargo fmt --all`, open a PR without asking again.
-  Opening the PR ends the task.
+- After implementation, `cargo fmt --all` and the focused tests, open a PR
+  without asking again. Opening the PR ends the task.
 
 ## Safety
 
@@ -75,12 +75,13 @@ advertise other providers or planned roadmap features.
 
 ## Verification
 
-The repository has no CI; no build, lint or test gate runs on a PR. Locally,
-run only `cargo fmt --all` before committing a Rust change; do not run other
-Cargo commands or `make` gates. Feature/fix tests must fail when the
-added/fixed behavior breaks; when that is not evident from the test, name in
-the PR the assertion that fails without the change instead of reverting it
-locally. Documentation-only changes need no new tests. See
+The repository has no CI; no build, lint or test gate runs on a PR. Before
+committing a Rust change, run `cargo fmt --all` and the tests that cover the
+changed code; run the full `make` gates only when asked. The PR body lists
+each test command, its result and the cause of any failure. Feature/fix tests
+must fail when the added/fixed behavior breaks; when that is not evident from
+the test, name in the PR the assertion that fails without the change instead
+of reverting it locally. Documentation-only changes need no new tests. See
 [local verification](docs/development/workflow.md#local-verification) for the
 `make` gates.
 

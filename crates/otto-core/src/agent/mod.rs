@@ -36,6 +36,7 @@ pub mod memory;
 pub mod oneshot;
 pub mod overflow;
 pub mod progress;
+mod provider_call;
 pub mod redactor;
 pub mod steering;
 pub mod summary;
@@ -767,6 +768,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         state.memory_context = self
                             .redactor
                             .redact_string(&memory::render_memory_context(&result.records));
+                        state.memory_record_ids = result
+                            .records
+                            .iter()
+                            .map(|record| record.id.clone())
+                            .collect();
                     }
                     Err(error) => emit(Event::MemoryWarning {
                         message: error.to_string(),
@@ -1462,7 +1468,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
 
         let (response, visible_output, error) = self
-            .complete_normal_provider_attempt(&request, emit, control)
+            .complete_normal_provider_attempt(&request, state, emit, control)
             .await;
         let Some(original_overflow) = error else {
             return Ok(response);
@@ -1514,7 +1520,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             ));
         }
         let (response, _, error) = self
-            .complete_normal_provider_attempt(&retry_request, emit, control)
+            .complete_normal_provider_attempt(&retry_request, state, emit, control)
             .await;
         match error {
             Some(error) if is_typed_context_overflow(&error) => Err(automatic_dispatch_error(
@@ -1689,6 +1695,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     async fn complete_normal_provider_attempt(
         &self,
         request: &Request,
+        state: &RunDispatchState,
         emit: EventSink<'_>,
         control: &dyn OperationControl,
     ) -> (Response, bool, Option<AgentError>) {
@@ -1721,10 +1728,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             &self.options.model,
         );
         let started = (self.options.now)();
-        let mut retries = Vec::new();
+        let mut tracker = provider_call::CallTracker::new(started);
+        let now = &self.options.now;
         let outcome = {
             let mut on_stream = |event: StreamEvent| {
                 diagnostic.stream(&event);
+                tracker.observe(&event, now(), redactor);
                 match event {
                     StreamEvent::ReasoningDelta { text: delta } => {
                         let text = reasoning.write(&delta);
@@ -1753,12 +1762,6 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     } => {
                         stream = redactor.new_stream();
                         reasoning = redactor.new_stream();
-                        retries.push(serde_json::json!({
-                            "attempt": attempt, "maxAttempts": max_attempts,
-                            "delayMs": u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                            "reason": redactor.redact_string(&reason),
-                            "interruptedOutput": interrupted_output,
-                        }));
                         emit(Event::ProviderRetry {
                             operation_id: operation_id.clone(),
                             attempt,
@@ -1793,9 +1796,27 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             duration,
             &outcome,
         );
+        let retries = serde_json::json!(tracker.retries());
+        if let Err(error) = self
+            .append_provider_call(provider_call::SettledCall {
+                operation_id: &operation_id,
+                kind: ProviderOperationKind::Ordinary,
+                tracker,
+                duration,
+                settlement: &outcome,
+                request,
+                memory: provider_call::RequestMemory {
+                    text: &state.memory_context,
+                    record_ids: &state.memory_record_ids,
+                },
+            })
+            .await
+        {
+            return (Response::default(), true, Some(error));
+        }
         // Persist only content-free recovery facts. Failed stream fragments
         // never become model context or executable tool calls.
-        if !retries.is_empty() || outcome.result.is_err() {
+        if retries.as_array().is_some_and(|r| !r.is_empty()) || outcome.result.is_err() {
             let record = serde_json::json!({
                 "schemaVersion": 1, "operationId": operation_id,
                 "attempts": outcome.attempts, "retries": retries,

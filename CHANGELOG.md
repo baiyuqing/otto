@@ -26,7 +26,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   Set `unattended_turn_timeout = "0"` to restore the previous behavior. TUI,
   REPL, web UI and editor ACP turns are unchanged. See
   [configuration](docs/manual/getting-started.md#configuration).
-  (PR_LINK)
+  ([#469](https://github.com/baiyuqing/otto/pull/469))
 
 - Approval `command_prefix` rules now check each command of a shell list or
   pipeline, parsed with tree-sitter-bash. An `allow` rule applies to

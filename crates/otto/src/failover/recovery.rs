@@ -308,9 +308,9 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> &str {
 mod tests {
     use super::*;
     use crate::failover::lease;
-    use crate::session::MAX_AUTOMATIC_RESUMES;
     use otto_core::agent::inbox::Inbox;
     use otto_core::model::{Block, FinishReason};
+    use otto_core::session::turn::MAX_AUTOMATIC_RESUMES;
 
     fn takeover(repaired: Vec<UnansweredCall>) -> Recovery {
         Recovery {

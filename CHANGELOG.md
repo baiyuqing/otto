@@ -188,6 +188,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
   files; and the changelog PR link is added, committed and pushed in one
   command. ([#444](https://github.com/baiyuqing/otto/pull/444))
 
+- `otto-core` holds I/O-free contracts, formats and the agent loop; `otto`
+  holds their implementations. The code organization map lists the `otto`
+  implementation of each core contract. `otto-core` tests fail on standard
+  library filesystem, process, network, environment, stdio and wall-clock
+  calls, and `otto` tests fail when `otto` source re-exports an `otto-core`
+  item. ([#466](https://github.com/baiyuqing/otto/pull/466))
+
+- Contributor and agent instructions run `cargo fmt --all` and the tests that
+  cover the changed code before a Rust commit, and list each test command and
+  its result in the PR body; the full `make` gates run only when asked.
+  ([#466](https://github.com/baiyuqing/otto/pull/466))
+
 ## 0.4.8 - 2026-10-08
 
 ### Usage and compatibility

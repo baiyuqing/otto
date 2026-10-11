@@ -14,7 +14,7 @@ pub use fork::Forked;
 pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
 pub use prepared::{ArchiveResult, Prepared};
 pub(crate) use store::unanswered_calls_from;
-pub use store::{MAX_AUTOMATIC_RESUMES, Recovery, RecoveryCause, Store, UnansweredCall};
+pub use store::{Recovery, RecoveryCause, Store, UnansweredCall};
 
 use std::path::Path;
 use std::sync::Arc;

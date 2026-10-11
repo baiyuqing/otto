@@ -21,7 +21,7 @@ use crate::app::ApprovalDecision as Decision;
 pub(super) async fn shared_request_permission(
     connection: &Connection,
     controller: &crate::app::Controller,
-    initial: &crate::approval::Request,
+    initial: &otto_core::approval::Request,
     prompt: &crate::app::ApprovalRequest,
     cancel: &CancellationToken,
 ) -> Decision {
@@ -40,7 +40,7 @@ pub(super) async fn shared_request_permission(
             return Decision::Cancelled;
         }
         if !request.is_human_pending() {
-            return if request.state == crate::approval::State::Approved {
+            return if request.state == otto_core::approval::State::Approved {
                 Decision::Allow
             } else {
                 Decision::Deny
@@ -86,7 +86,7 @@ pub(super) async fn shared_request_permission(
                 Ok(current) => current,
                 Err(_) => break None,
             };
-            if current.state != crate::approval::State::Pending
+            if current.state != otto_core::approval::State::Pending
                 || current.revision != request.revision
                 || current.subject != request.subject
             {
@@ -109,7 +109,7 @@ pub(super) async fn shared_request_permission(
             "",
             &crate::approval::Actor::local("acp-permission"),
         ) {
-            Ok(request) if request.state == crate::approval::State::Approved => {
+            Ok(request) if request.state == otto_core::approval::State::Approved => {
                 return Decision::Allow;
             }
             Ok(_) => return Decision::Deny,

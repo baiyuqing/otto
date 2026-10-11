@@ -1405,7 +1405,7 @@ mod tests {
                         .get(&id, &header.workspace, None)
                         .expect("applied")
                         .application,
-                    crate::approval::ApplicationState::Applied
+                    otto_core::approval::ApplicationState::Applied
                 );
                 report.skills.push((name, action));
             }

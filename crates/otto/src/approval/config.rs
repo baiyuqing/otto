@@ -1,6 +1,7 @@
 //! Profile changes retain typed operations and hashes, not whole config copies.
-use super::{Domain, Error, Request, Result, State};
+use super::{Domain, Error, Result};
 use crate::config::{ProfileChange, ProfileChangePreview};
+use otto_core::approval::{Request, State};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 #[derive(Serialize, Deserialize)]
@@ -12,7 +13,7 @@ pub struct Artifact {
     pub diff: String,
 }
 impl Artifact {
-    pub fn authority(&self) -> super::Authority {
+    pub fn authority(&self) -> otto_core::approval::Authority {
         use crate::config::{ProfileChange, ProfileField};
         if matches!(
             &self.change,
@@ -22,9 +23,9 @@ impl Artifact {
                     ..
                 }
         ) {
-            super::Authority::Consent
+            otto_core::approval::Authority::Consent
         } else {
-            super::Authority::Durable
+            otto_core::approval::Authority::Durable
         }
     }
     pub fn prepare(change: ProfileChange, preview: &ProfileChangePreview) -> Self {

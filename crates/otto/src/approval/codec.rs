@@ -1,5 +1,6 @@
 //! Backend-independent persisted approval envelopes and additive metadata.
-use super::{Error, Request, Result};
+use super::{Error, Result};
+use otto_core::approval::Request;
 
 const REQUEST_FIELDS: &[&str] = &[
     "options",

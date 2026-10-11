@@ -211,7 +211,7 @@ fn new_session(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> 
     command("New session", Command::NewSession)
 }
 fn permissions(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
-    crate::app::permissions_update(args, crate::approval::ApprovalSettings::default())?;
+    crate::app::permissions_update(args, otto_core::approval::ApprovalSettings::default())?;
     command("Approval permissions", Command::Permissions(args.into()))
 }
 

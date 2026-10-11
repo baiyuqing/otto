@@ -136,7 +136,7 @@ impl Tool for Guarded {
         &self,
         arguments: &RawValue,
         cancel: &CancellationToken,
-        request: &crate::approval::Request,
+        request: &otto_core::approval::Request,
     ) -> Result<(), String> {
         self.guard
             .arguments(&self.inner.definition().name, arguments)
@@ -172,7 +172,7 @@ impl Tool for Guarded {
         &self,
         request: ToolCall<'_>,
         cancel: &CancellationToken,
-        approval: &crate::approval::Request,
+        approval: &otto_core::approval::Request,
     ) -> ToolResult {
         if let Err(result) = self.guard.arguments(request.name, request.arguments) {
             return result;

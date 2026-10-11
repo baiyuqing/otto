@@ -543,14 +543,14 @@ mod tests {
             let scope = controller.approval_scope();
             let service = controller.approval_service().clone();
             service
-                .set_mode(&scope, crate::approval::ApprovalMode::Manual)
+                .set_mode(&scope, otto_core::approval::ApprovalMode::Manual)
                 .unwrap();
             let request = service
                 .create(crate::approval::Proposal {
-                    kind: crate::approval::Kind::Authorization,
-                    authority: crate::approval::Authority::Boundary,
+                    kind: otto_core::approval::Kind::Authorization,
+                    authority: otto_core::approval::Authority::Boundary,
                     scope: scope.clone(),
-                    subject: crate::approval::Subject {
+                    subject: otto_core::approval::Subject {
                         tool_call_id: "call".into(),
                         source: "mcp".into(),
                         id: "prepared".into(),
@@ -585,7 +585,7 @@ mod tests {
                         )
                         .await
                         .map_err(|error| AgentError::Other(error.to_string()))?;
-                    if final_request.state != crate::approval::State::Approved {
+                    if final_request.state != otto_core::approval::State::Approved {
                         return Err(AgentError::Other("Wrong rejection".into()));
                     }
                     runner_executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -603,18 +603,18 @@ mod tests {
                     async move {
                         if is_first {
                             service
-                                .set_mode(&scope, crate::approval::ApprovalMode::Yolo)
+                                .set_mode(&scope, otto_core::approval::ApprovalMode::Yolo)
                                 .unwrap();
                             let automatic = service
                                 .get(&request.id, &scope.workspace, Some(&scope.session_id))
                                 .unwrap();
-                            assert_eq!(automatic.state, crate::approval::State::Approved);
+                            assert_eq!(automatic.state, otto_core::approval::State::Approved);
                             service
-                                .set_mode(&scope, crate::approval::ApprovalMode::Manual)
+                                .set_mode(&scope, otto_core::approval::ApprovalMode::Manual)
                                 .unwrap();
                             assert_eq!(
                                 service.revalidate_authorization(&automatic).unwrap().state,
-                                crate::approval::State::Pending
+                                otto_core::approval::State::Pending
                             );
                             stale
                         } else {
@@ -645,7 +645,7 @@ mod tests {
                     Some(&request.scope.session_id),
                 )
                 .unwrap();
-            assert_eq!(current.state, crate::approval::State::Pending);
+            assert_eq!(current.state, otto_core::approval::State::Pending);
             assert!(current.decision.is_none());
             assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
             release.cancel();

@@ -187,7 +187,7 @@ impl Controller {
     }
     async fn shared_approval_message(
         &self,
-        request: crate::approval::Request,
+        request: otto_core::approval::Request,
         text: &str,
         channel: Option<Channel>,
         cancel: &CancellationToken,
@@ -204,7 +204,7 @@ impl Controller {
                 Some(&request.scope.session_id),
             )
             .map_err(|e| e.to_string())?;
-        if current.state != crate::approval::State::Pending {
+        if current.state != otto_core::approval::State::Pending {
             return Err("approval already decided".into());
         }
         let runner = self.runner()?;

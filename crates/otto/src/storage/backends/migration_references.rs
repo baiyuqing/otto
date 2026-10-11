@@ -227,7 +227,7 @@ fn approval_references(
         let body: String = row.get(0).map_err(sql_error)?;
         let request = crate::storage::backends::turso::approval::decode_persisted(&body)
             .map_err(|_| invalid("invalid linked approval record"))?;
-        use crate::approval::{ApplicationState, State};
+        use otto_core::approval::{ApplicationState, State};
         if request.state != State::Pending
             && !matches!(
                 request.application,
@@ -251,7 +251,7 @@ fn approval_references(
                 })?,
             )?,
             "conversation"
-                if request.kind == crate::approval::Kind::Confirmation
+                if request.kind == otto_core::approval::Kind::Confirmation
                     && request.application == ApplicationState::NotRequired => {}
             _ => {
                 return Err(invalid(
@@ -262,7 +262,10 @@ fn approval_references(
     }
     Ok(())
 }
-fn workflow_approval(request: &crate::approval::Request, connection: &Connection) -> Result<()> {
+fn workflow_approval(
+    request: &otto_core::approval::Request,
+    connection: &Connection,
+) -> Result<()> {
     bounded_columns(connection, "workflow_requests", &["prompt"])?;
     let target=connection.query_row("SELECT q.run_id,q.prompt,q.status,r.workspace,s.kind FROM workflow_requests q JOIN workflow_runs r ON r.id=q.run_id JOIN workflow_steps s ON s.run_id=q.run_id AND s.id=q.step_id WHERE q.id=?1",[request.subject.id.as_str()],|r|Ok((r.get::<String>(0)?,r.get::<String>(1)?,r.get::<String>(2)?,r.get::<String>(3)?,r.get::<String>(4)?))).optional().map_err(sql_error)?.ok_or_else(||invalid("live workflow approval target is missing"))?;
     if target.0 != request.scope.run_id
@@ -274,13 +277,13 @@ fn workflow_approval(request: &crate::approval::Request, connection: &Connection
             "live workflow approval target identity/version differs",
         ));
     }
-    let expected = if request.state == crate::approval::State::Approved {
+    let expected = if request.state == otto_core::approval::State::Approved {
         "approved"
     } else {
         "rejected"
     };
     if target.2 != "pending"
-        && (request.state == crate::approval::State::Pending || target.2 != expected)
+        && (request.state == otto_core::approval::State::Pending || target.2 != expected)
     {
         return Err(invalid(
             "live workflow approval has a conflicting target receipt",
@@ -288,7 +291,7 @@ fn workflow_approval(request: &crate::approval::Request, connection: &Connection
     }
     Ok(())
 }
-fn memory_approval(request: &crate::approval::Request, connection: &Connection) -> Result<()> {
+fn memory_approval(request: &otto_core::approval::Request, connection: &Connection) -> Result<()> {
     use crate::storage::backends::turso::memory::candidates;
     let reference: crate::memory::CandidateRef = serde_json::from_str(&request.subject.details)
         .map_err(|_| invalid("invalid live memory approval reference"))?;
@@ -309,12 +312,12 @@ fn memory_approval(request: &crate::approval::Request, connection: &Connection) 
     let candidate=connection.query_row(&format!("SELECT {} FROM memory_candidates WHERE id=?1 AND scope_namespace=?2 AND scope_id=?3",candidates::candidate_projection()),params![reference.id,reference.scope.namespace,reference.scope.id],|r|Ok(candidates::decode_candidate_row(r))).optional().map_err(sql_error)?.ok_or_else(||invalid("live memory approval candidate is missing"))?.map_err(|_|invalid("live memory approval candidate is invalid"))?.candidate;
     use crate::memory::{CandidateAction, CandidateState};
     if candidate.state != CandidateState::Pending {
-        let expected = if request.state == crate::approval::State::Approved {
+        let expected = if request.state == otto_core::approval::State::Approved {
             CandidateState::Accepted
         } else {
             CandidateState::Rejected
         };
-        if request.state == crate::approval::State::Pending || candidate.state != expected {
+        if request.state == otto_core::approval::State::Pending || candidate.state != expected {
             return Err(invalid(
                 "live memory approval has a conflicting target receipt",
             ));
@@ -390,9 +393,9 @@ fn sql_error(_: crate::storage::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::ApprovalMode;
     use crate::storage::backends::turso::workflow::TursoWorkflowStore;
     use crate::workflow::{Definition, Step, StepKind, repository::WorkflowStore};
+    use otto_core::approval::ApprovalMode;
     #[test]
     fn linked_workflow_approval_and_transcript_require_the_actual_included_state() {
         let dir = tempfile::tempdir().unwrap();
@@ -469,8 +472,8 @@ mod tests {
             .application(
                 &request.id,
                 &request.scope,
-                crate::approval::ApplicationState::NotStarted,
-                crate::approval::ApplicationState::Applying,
+                otto_core::approval::ApplicationState::NotStarted,
+                otto_core::approval::ApplicationState::Applying,
                 "",
             )
             .unwrap();
@@ -478,14 +481,14 @@ mod tests {
             .application(
                 &request.id,
                 &request.scope,
-                crate::approval::ApplicationState::Applying,
-                crate::approval::ApplicationState::Applied,
+                otto_core::approval::ApplicationState::Applying,
+                otto_core::approval::ApplicationState::Applied,
                 "",
             )
             .unwrap();
         databases.remove("workflows");
         assert!(validate_reference_closure(&databases, &BTreeMap::new(), &BTreeMap::new()).is_ok());
-        let scope = crate::approval::Scope {
+        let scope = otto_core::approval::Scope {
             workspace: "/w".into(),
             session_id: "child".into(),
             task_id: String::new(),
@@ -494,10 +497,10 @@ mod tests {
         approvals.set_mode(&scope, ApprovalMode::Manual).unwrap();
         approvals
             .create(crate::approval::Proposal {
-                kind: crate::approval::Kind::Confirmation,
-                authority: crate::approval::Authority::Consent,
+                kind: otto_core::approval::Kind::Confirmation,
+                authority: otto_core::approval::Authority::Consent,
                 scope,
-                subject: crate::approval::Subject {
+                subject: otto_core::approval::Subject {
                     tool_call_id: String::new(),
                     source: "conversation".into(),
                     id: "review-plan".into(),

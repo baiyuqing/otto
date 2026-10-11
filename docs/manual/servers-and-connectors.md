@@ -536,7 +536,8 @@ tool call changes the [session plan](servers-and-connectors.md#session-plan), ca
 partial response as interrupted, so consumers must separate it from the next
 attempt and discard unfinished buffers. `attempt` is the
 1-based attempt about to start and `reason` is an HTTP status such as
-`HTTP 503`, `connection interrupted`, `request timeout`, or `stream read timeout`;
+`HTTP 503`, `connection interrupted`, `request timeout`, `stream read timeout`,
+or `model output idle timeout`;
 it never contains the response body.
 
 ### Errors

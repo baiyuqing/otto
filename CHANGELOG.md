@@ -17,6 +17,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Turns from a Telegram or Feishu chat and every turn of an `otto --prompt`
+  run now stop after `[agent].unattended_turn_timeout`, default `30m`,
+  counted per prompt step. Previously these turns had no time limit unless
+  `turn_timeout` was set; a cycle between different tool calls, which the
+  no-progress guard does not stop, ran until the process was killed. When both
+  are set, the earlier of `turn_timeout` and `unattended_turn_timeout` applies.
+  Set `unattended_turn_timeout = "0"` to restore the previous behavior. TUI,
+  REPL, web UI and editor ACP turns are unchanged. See
+  [configuration](docs/manual/getting-started.md#configuration).
+  (PR_LINK)
+
 - Approval `command_prefix` rules now check each command of a shell list or
   pipeline, parsed with tree-sitter-bash. An `allow` rule applies to
   `cargo fmt && cargo test` when every command starts with the prefix and the

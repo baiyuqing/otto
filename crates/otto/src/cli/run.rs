@@ -612,6 +612,11 @@ pub async fn run_with_extensions(
             memory_extension,
             sandbox_driver_override: sandbox_driver_override.clone(),
             no_session: options.no_session,
+            // serve, acp and workflow commands also keep `Frontend::Once`.
+            headless: frontend == Frontend::Once
+                && !options.serve
+                && !options.acp
+                && workflow_command.is_none(),
             overrides: overrides_from(&options),
             explicit_config: options.explicit_config,
             logger,

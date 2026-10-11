@@ -17,6 +17,7 @@ use super::{
 
 const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
+const DEFAULT_UNATTENDED_TURN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_MAX_OUTPUT_BYTES: i64 = 51200;
 const DEFAULT_COMPACTION_RESERVE: i64 = 16_384;
 const DEFAULT_COMPACTION_KEEP: i64 = 20_000;
@@ -68,6 +69,8 @@ pub struct CompactionRuntime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeadlineRuntime {
     pub turn_timeout: Option<Duration>,
+    /// Step deadline for chat and `otto --prompt` turns; `None` disables it.
+    pub unattended_turn_timeout: Option<Duration>,
     pub provider_timeout: Option<Duration>,
     pub cancellation_grace: Duration,
     pub subagent_timeout: Option<Duration>,
@@ -78,6 +81,7 @@ impl Default for DeadlineRuntime {
     fn default() -> Self {
         Self {
             turn_timeout: None,
+            unattended_turn_timeout: Some(DEFAULT_UNATTENDED_TURN_TIMEOUT),
             provider_timeout: None,
             cancellation_grace: DEFAULT_CANCELLATION_GRACE,
             subagent_timeout: None,
@@ -321,6 +325,7 @@ fn resolve_impl(
 fn resolve_resilience(agent: &super::Agent) -> Result<ResilienceRuntime, ConfigError> {
     let deadlines = DeadlineRuntime {
         turn_timeout: optional_positive_duration("turn_timeout", &agent.turn_timeout)?,
+        unattended_turn_timeout: unattended_turn_timeout(&agent.unattended_turn_timeout)?,
         provider_timeout: optional_positive_duration("provider_timeout", &agent.provider_timeout)?,
         cancellation_grace: optional_positive_duration(
             "cancellation_grace",
@@ -385,6 +390,21 @@ fn optional_positive_duration(
         )));
     }
     Ok(Some(Duration::from_nanos(nanos as u64)))
+}
+
+/// Omitted gives the default; a zero duration disables the deadline.
+fn unattended_turn_timeout(configured: &Option<String>) -> Result<Option<Duration>, ConfigError> {
+    let Some(value) = configured else {
+        return Ok(Some(DEFAULT_UNATTENDED_TURN_TIMEOUT));
+    };
+    let nanos = parse_go_duration(value)
+        .map_err(|err| ConfigError::new(format!("invalid unattended_turn_timeout: {err}")))?;
+    if nanos < 0 {
+        return Err(ConfigError::new(
+            "invalid unattended_turn_timeout: must not be negative",
+        ));
+    }
+    Ok((nanos > 0).then(|| Duration::from_nanos(nanos as u64)))
 }
 
 fn validate_thinking(thinking: &str) -> Result<(), ConfigError> {
@@ -1054,6 +1074,7 @@ mod tests {
             runtime.resilience.deadlines,
             DeadlineRuntime {
                 turn_timeout: Some(Duration::from_secs(60)),
+                unattended_turn_timeout: Some(Duration::from_secs(30 * 60)),
                 provider_timeout: Some(Duration::from_secs(10)),
                 cancellation_grace: Duration::from_millis(750),
                 subagent_timeout: Some(Duration::from_secs(2 * 60 * 60)),
@@ -1154,6 +1175,7 @@ mod tests {
             ResilienceRuntime {
                 deadlines: DeadlineRuntime {
                     turn_timeout: None,
+                    unattended_turn_timeout: Some(Duration::from_secs(30 * 60)),
                     provider_timeout: None,
                     cancellation_grace: Duration::from_secs(5),
                     subagent_timeout: None,
@@ -1161,6 +1183,40 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn resolves_unattended_turn_timeout() {
+        let resolve_with = |value: Option<&str>| {
+            let mut file =
+                file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
+            file.agent.unattended_turn_timeout = value.map(Into::into);
+            resolve(
+                &file,
+                &HashMap::new(),
+                &SessionDefaults::default(),
+                &Overrides {
+                    profile: "sub".into(),
+                    ..Default::default()
+                },
+            )
+            .map(|runtime| runtime.resilience.deadlines.unattended_turn_timeout)
+        };
+        assert_eq!(resolve_with(None).unwrap(), Some(Duration::from_secs(1800)));
+        assert_eq!(resolve_with(Some("0")).unwrap(), None);
+        assert_eq!(resolve_with(Some("0s")).unwrap(), None);
+        assert_eq!(
+            resolve_with(Some("45m")).unwrap(),
+            Some(Duration::from_secs(45 * 60))
+        );
+        for bad in ["-1s", "x"] {
+            let err = resolve_with(Some(bad)).unwrap_err();
+            assert!(
+                err.to_string().contains("unattended_turn_timeout"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

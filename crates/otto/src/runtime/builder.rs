@@ -734,6 +734,9 @@ pub struct Runner {
     pending_authorization: Mutex<Vec<String>>,
     agent: Agent<ProviderClient, Registry, SharedSession>,
     turn_timeout: Option<Duration>,
+    unattended_turn_timeout: Option<Duration>,
+    /// Set for `otto --prompt`: every turn is unattended.
+    headless: bool,
     system_prompt: String,
     definitions: Vec<ToolDefinition>,
     usage: Option<crate::usage::Collector>,
@@ -849,7 +852,31 @@ fn log_runtime_event(logger: &crate::log::Logger, session: &SharedSession, event
     }
 }
 
+/// The step deadline: for an unattended turn the earlier of the two limits,
+/// where `None` means no limit; otherwise `turn_timeout`.
+fn turn_limit(
+    turn_timeout: Option<Duration>,
+    unattended_turn_timeout: Option<Duration>,
+    unattended: bool,
+) -> Option<Duration> {
+    if !unattended {
+        return turn_timeout;
+    }
+    match (turn_timeout, unattended_turn_timeout) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 impl Runner {
+    /// A turn is unattended when this process is `otto --prompt` or the
+    /// current user turn came from a chat.
+    fn turn_deadline(&self) -> Deadline {
+        let unattended = self.headless || self.schedule_origin.get().is_some_and(|o| o.is_chat());
+        turn_limit(self.turn_timeout, self.unattended_turn_timeout, unattended)
+            .map_or_else(Deadline::unlimited, Deadline::after)
+    }
+
     /// Keep temporary output across all provider steps of one logical turn,
     /// including approval retries and queued follow-ups.
     pub(crate) fn retain_temporary_outputs(&self) -> crate::tool::bash_output::LogLease {
@@ -1029,10 +1056,7 @@ impl Runner {
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
         let _output_lease = self.output_logs.lease();
-        let control = Control::new(
-            self.turn_timeout
-                .map_or_else(Deadline::unlimited, Deadline::after),
-        );
+        let control = Control::new(self.turn_deadline());
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
         }
@@ -1067,10 +1091,7 @@ impl Runner {
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
         let _output_lease = self.output_logs.lease();
-        let control = Control::new(
-            self.turn_timeout
-                .map_or_else(Deadline::unlimited, Deadline::after),
-        );
+        let control = Control::new(self.turn_deadline());
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
         }
@@ -1116,10 +1137,7 @@ impl Runner {
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
         let _output_lease = self.output_logs.lease();
-        let control = Control::new(
-            self.turn_timeout
-                .map_or_else(Deadline::unlimited, Deadline::after),
-        );
+        let control = Control::new(self.turn_deadline());
         if cancel.is_cancelled() {
             control.stop(OperationStopReason::UserCancellation);
         }
@@ -1530,6 +1548,8 @@ impl Runner {
             review_context: tokio::sync::Mutex::new(Default::default()),
             pending_authorization: Mutex::new(Vec::new()),
             turn_timeout: None,
+            unattended_turn_timeout: None,
+            headless: false,
             system_prompt: String::new(),
             definitions,
             usage: None,
@@ -1587,6 +1607,9 @@ pub struct Shared {
     pub session_root: PathBuf,
     pub shell: String,
     pub no_session: bool,
+    /// Whether this process is `otto --prompt`; its runners treat every turn
+    /// as unattended.
+    pub headless: bool,
     pub overrides: Overrides,
     /// The host environment as captured at startup, byte for byte. Loading a
     /// second workspace's sandbox reuses this rather than re-reading the
@@ -2798,6 +2821,8 @@ impl Builder {
             )),
             agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
             turn_timeout: runtime.resilience.deadlines.turn_timeout,
+            unattended_turn_timeout: runtime.resilience.deadlines.unattended_turn_timeout,
+            headless: self.headless,
             system_prompt,
             definitions,
             usage: self.usage_collector(session, runtime),
@@ -3446,6 +3471,7 @@ mod tests {
             session_root: root.join("sessions"),
             shell: "/bin/sh".to_string(),
             no_session: true,
+            headless: false,
             host_entries: Vec::new(),
             overrides: Overrides::default(),
             sandbox_secrets_baseline: Vec::new(),
@@ -5095,5 +5121,85 @@ mod tests {
             )),
             "{events:?}"
         );
+    }
+
+    #[test]
+    fn turn_limit_takes_the_earlier_limit_only_when_unattended() {
+        let m = |n: u64| Some(Duration::from_secs(n * 60));
+        for (turn, unattended_limit) in [(m(10), m(30)), (None, m(30)), (None, None)] {
+            assert_eq!(turn_limit(turn, unattended_limit, false), turn);
+        }
+        assert_eq!(turn_limit(None, m(30), true), m(30));
+        assert_eq!(turn_limit(m(10), m(30), true), m(10));
+        assert_eq!(turn_limit(m(60), m(30), true), m(30));
+        assert_eq!(turn_limit(m(60), None, true), m(60));
+        assert_eq!(turn_limit(None, None, true), None);
+    }
+
+    /// Answers only when the turn's control stops the operation; the scripted
+    /// client bypasses `complete_with_timeout`, so it must observe the stop.
+    struct UntilStopped;
+
+    #[async_trait::async_trait]
+    impl Provider for UntilStopped {
+        async fn complete(
+            &self,
+            _request: &Request,
+            _emit: StreamSink<'_>,
+            control: &dyn OperationControl,
+        ) -> ProviderSettlement {
+            control.cancellation_token().cancelled().await;
+            provider_stop_settlement(
+                control
+                    .stop_reason()
+                    .unwrap_or(OperationStopReason::Deadline),
+            )
+        }
+    }
+
+    /// Runs one turn against a provider that never answers, advancing paused
+    /// time past the unattended deadline plus the cancellation grace.
+    async fn unattended_turn_ends(origin: crate::schedule::Origin, headless: bool) -> bool {
+        let mut runner = Runner::scripted(
+            SharedSession::memory(Header::default()),
+            Arc::new(UntilStopped),
+            Arc::new(crate::subagent::tasks::Tasks::new()),
+        );
+        runner.unattended_turn_timeout = Some(Duration::from_secs(30 * 60));
+        runner.headless = headless;
+        runner.schedule_origin.set(Some(origin));
+        let cancel = CancellationToken::new();
+        let mut emit = |_| {};
+        let run = runner.run("hello", &mut emit, &cancel);
+        tokio::pin!(run);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, &mut run)
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_secs(30 * 60)).await;
+        match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
+            Ok(result) => {
+                assert!(result.is_err(), "{result:?}");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chat_turn_ends_at_the_unattended_deadline() {
+        let origin = crate::schedule::Origin::chat("telegram", "1").unwrap();
+        assert!(unattended_turn_ends(origin, false).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_turn_ignores_the_unattended_deadline() {
+        assert!(!unattended_turn_ends(crate::schedule::Origin::terminal(), false).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn headless_terminal_turn_ends_at_the_unattended_deadline() {
+        assert!(unattended_turn_ends(crate::schedule::Origin::terminal(), true).await);
     }
 }

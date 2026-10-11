@@ -60,7 +60,7 @@ settles, at the point where it emits `Event::ProviderApiCall`
   "retries": [{
     "attempt": 1, "maxAttempts": 3, "delayMs": 2000,
     "reason": "connection interrupted", "interruptedOutput": false,
-    "atMs": 1791700001800
+    "atMs": 1800
   }],
   "disposition": "succeeded",
   "effectCertainty": "completed",
@@ -76,7 +76,8 @@ settles, at the point where it emits `Event::ProviderApiCall`
 }
 ```
 
-- `startedAt` and `retries[].atMs` are unix milliseconds. The disposition
+- `startedAt` is unix milliseconds; `retries[].atMs` is measured from
+  `startedAt`. The disposition
   fields are the flattened `OperationOutcome`; `stopReason` appears when
   the operation stopped early. `usage` uses the `Usage` field names.
 - `firstOutputMs` is measured from the start to the first decoded model
@@ -213,22 +214,24 @@ lines to `Catalog::open` whether or not a turn runs).
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ model #2 · 7.9s · attempts 2 · retry: connection interrupted, waited 2s      │
 │ ttft 4.4s · in 14.0k (cached 11.2k) · out 402 · stop tool_use                │
-│ ↑/↓ select · Enter open · ←/→ turn · Esc close                               │
+│ ↑/↓ select · Enter open · [/] turn · Esc close                               │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - Bar segments: `░` request sent, no output yet; `▒` retry wait; `◇`
   waiting for approval; `█` output arriving or tool running. Failed spans
   are red; `estimated` spans are dim.
-- The time axis spans the selected turn. `←/→` selects another turn.
+- The time axis spans the selected turn. `[` and `]` select the previous
+  and next turn; `←`/`→` already move between footer actions in every
+  panel. The other turns are collapsed rows, and `Enter` on one selects it.
 - `Enter` on a sub-agent row expands or collapses it; on any other row it
   opens that span's content in a scrollable view. `Esc` goes back, then
   closes.
 - The detail area shows the selected span's timing, attempts, retries,
   token usage and stop reason. For a provider span it also shows the
   `request` estimates and the recalled memory record ids.
-- Below 80 columns the bar column is omitted; rows show the tree and
-  durations only.
+- In a panel narrower than 80 columns, border included, the bar column is
+  omitted; rows show the tree and durations only.
 - Refresh: the presenter returns `periodic() == true`, so the existing
   feature refresh re-queries the trace every 2 s while it is the top panel.
   A running span's bar is drawn from its start to the current clock at
@@ -252,7 +255,8 @@ requests use the same path.
 - `a` pushes the oldest pending approval over the trace. Approving or
   denying closes it and shows the trace again.
 - Closing the trace pushes a pending approval immediately, using the last
-  approval snapshot.
+  approval snapshot. An approval delivered as an event rather than through
+  the snapshot is held while the trace is on top and shown when it closes.
 
 ## Limits
 

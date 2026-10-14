@@ -456,6 +456,29 @@ fn plan_command_and_line_show_the_session_plan_and_events_update_it() {
 }
 
 #[test]
+fn tasks_alias_dispatches_without_appearing_in_help() {
+    let catalog = Catalog::default();
+    let help = catalog.open("/help", &Info::default(), false).unwrap();
+    let Transition::Push(presenter) = help else {
+        panic!("help should open a document");
+    };
+    let help = presenter.view().document;
+    assert!(
+        help.contains("/task  list, inspect or cancel tasks"),
+        "{help}"
+    );
+    assert!(!help.contains("/tasks"), "{help}");
+
+    let Ok(Transition::Push(canonical)) = catalog.open("/task", &Info::default(), false) else {
+        panic!("/task should open the task-list presenter");
+    };
+    let Ok(Transition::Push(alias)) = catalog.open("/tasks", &Info::default(), false) else {
+        panic!("/tasks should remain a task-list alias");
+    };
+    assert_eq!(canonical.view().title, alias.view().title);
+}
+
+#[test]
 fn registered_commands_extend_help_completion_and_dispatch() {
     let mut catalog = Catalog::default();
     catalog

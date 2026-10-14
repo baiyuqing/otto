@@ -427,8 +427,9 @@ Shared commands:
   finished (see [Sub-agent task records](servers-and-connectors.md#sub-agent-task-records)). The REPL
   prints the latest 50 as one line each: parent session, task id, agent,
   status, created time, and the description (or the start of the prompt). The
-  TUI opens a panel; see TUI-only commands. `/tasks` and `/task` still cover
-  only the current session.
+  TUI opens a panel; see TUI-only commands. `/task` lists, inspects, or cancels
+  tasks in only the current session; `/tasks` remains accepted as a compatibility
+  alias for the list.
 - `/exit` exits when idle (REPL EOF also exits).
 
 TUI-only commands:

@@ -58,6 +58,8 @@ impl Catalog {
             .unwrap_or((line.trim(), ""));
         if name == "/tasks" && args.is_empty() {
             name = "/task";
+        } else if name == "/quit" {
+            name = "/exit";
         }
         let entry = self
             .entries
@@ -153,7 +155,6 @@ const ENTRIES: &[Entry] = &[
     entry!("/login", "authenticate a provider", true, login),
     entry!("/logout", "remove provider credentials", true, logout),
     entry!("/exit", "exit Otto", false, exit),
-    entry!("/quit", "exit Otto", false, exit),
     entry!("/task", "list, inspect or cancel tasks", true, task),
     entry!("/agents", "browse recorded agents", false, agents),
     entry!("/context", "inspect context", false, context),

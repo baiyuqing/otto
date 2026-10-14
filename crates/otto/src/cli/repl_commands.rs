@@ -50,7 +50,7 @@ pub(crate) const MEMORY_UNAVAILABLE: &str = "memory is not available";
 const SUBAGENTS_UNAVAILABLE: &str = "sub-agents are not available";
 /// The `/task` argument forms, as the README and the user manual document
 /// them. [`super::super::tui`] prints the same line for the same input.
-pub(crate) const TASK_USAGE: &str = "usage: /task <id|name> | /task cancel <id|name>";
+pub(crate) const TASK_USAGE: &str = "usage: /task [<id|name> | cancel <id|name>]";
 /// The `/timers` argument forms. Both frontends print it for anything else.
 /// What `/timers` reports when the runner registers no timer tools, in the
 /// shape [`SUBAGENTS_UNAVAILABLE`] uses for `/tasks`.
@@ -743,6 +743,10 @@ impl Repl<'_> {
     }
 
     pub(super) fn task_command(&mut self, args: &str) {
+        if args.trim().is_empty() {
+            self.tasks_command();
+            return;
+        }
         let Some(tasks) = self.controller.subagent_tasks() else {
             let _ = writeln!(self.stderr, "{SUBAGENTS_UNAVAILABLE}");
             return;
@@ -1168,14 +1172,7 @@ mod tests {
 
         let (stdout, _) = session("/help\n/exit\n", &controller).await;
 
-        for command in [
-            "/memory",
-            "/remember",
-            "/tasks",
-            "/task ",
-            "/agents",
-            "/mcp",
-        ] {
+        for command in ["/memory", "/remember", "/task ", "/agents", "/mcp"] {
             assert!(stdout.contains(command), "{command} missing from {stdout}");
         }
     }
@@ -1432,7 +1429,7 @@ mod tests {
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
 
         let (stdout, stderr) = session(
-            "/tasks\n/task\n/task cancel\n/task nope\n/exit\n",
+            "/task\n/tasks\n/task cancel\n/task nope\n/exit\n",
             &controller,
         )
         .await;
@@ -1441,9 +1438,13 @@ mod tests {
             controller.subagent_tasks().is_some(),
             "sub-agents must be wired"
         );
-        assert!(stdout.contains("no tasks in this session"), "{stdout}");
+        assert_eq!(
+            stdout.matches("no tasks in this session").count(),
+            2,
+            "the canonical command and compatibility alias must both list: {stdout}"
+        );
         assert!(
-            stderr.contains("usage: /task <id|name> | /task cancel <id|name>"),
+            stderr.contains("usage: /task [<id|name> | cancel <id|name>]"),
             "{stderr}"
         );
         assert!(stderr.contains("unknown task: nope"), "{stderr}");

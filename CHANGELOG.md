@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- `/task` now covers all current-session sub-agent task operations: a bare
+  `/task` lists tasks, `/task <id|name>` shows one, and `/task cancel
+  <id|name>` cancels one. `/tasks` remains accepted as a compatibility alias
+  for the list but is no longer shown as a separate command.
+
 - Turns from a Telegram or Feishu chat and every turn of an `otto --prompt`
   run now stop after `[agent].unattended_turn_timeout`, default `30m`,
   counted per prompt step. Previously these turns had no time limit unless

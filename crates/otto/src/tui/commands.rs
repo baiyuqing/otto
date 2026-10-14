@@ -139,6 +139,16 @@ mod tests {
     }
 
     #[test]
+    fn task_is_the_only_discovered_task_command() {
+        let names: Vec<&str> = matching_slash_commands("/task")
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["/task"]);
+        assert!(find_slash_command("/tasks").is_none());
+    }
+
+    #[test]
     fn parsing_splits_name_from_a_trimmed_argument() {
         let (command, argument) = parse_slash_command("  /task  t7  ").expect("known command");
         assert_eq!(command.name, "/task");

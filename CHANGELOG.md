@@ -19,6 +19,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 - The terminal UI now shows only `/exit` in help and slash-command completion.
   The duplicate `/quit` spelling remains accepted as a compatibility alias.
+  ([#475](https://github.com/baiyuqing/otto/pull/475))
 
 - `/task` now covers all current-session sub-agent task operations: a bare
   `/task` lists tasks, `/task <id|name>` shows one, and `/task cancel

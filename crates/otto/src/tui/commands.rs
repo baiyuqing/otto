@@ -149,6 +149,19 @@ mod tests {
     }
 
     #[test]
+    fn exit_is_the_only_discovered_exit_command() {
+        assert_eq!(
+            matching_slash_commands("/ex")
+                .iter()
+                .map(|c| c.name)
+                .collect::<Vec<_>>(),
+            ["/exit"]
+        );
+        assert!(matching_slash_commands("/qu").is_empty());
+        assert!(find_slash_command("/quit").is_none());
+    }
+
+    #[test]
     fn parsing_splits_name_from_a_trimmed_argument() {
         let (command, argument) = parse_slash_command("  /task  t7  ").expect("known command");
         assert_eq!(command.name, "/task");

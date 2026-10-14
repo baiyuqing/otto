@@ -17,6 +17,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- The terminal UI now shows only `/exit` in help and slash-command completion.
+  The duplicate `/quit` spelling remains accepted as a compatibility alias.
+
 - `/task` now covers all current-session sub-agent task operations: a bare
   `/task` lists tasks, `/task <id|name>` shows one, and `/task cancel
   <id|name>` cancels one. `/tasks` remains accepted as a compatibility alias

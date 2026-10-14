@@ -6,7 +6,7 @@ use super::choice::{Choice, ChoiceKind};
 use super::collection::Agents;
 use super::commands::Entry;
 use super::review::Reviews;
-use super::{Catalog, Document, Presenter, Transition};
+use super::{Catalog, Document, Presenter, Run, Transition};
 use crate::app::Info;
 use crate::memory::{Candidate, CandidateAction, CandidateState, Record, Scope};
 use crate::tui::app::Backend;
@@ -476,6 +476,31 @@ fn tasks_alias_dispatches_without_appearing_in_help() {
         panic!("/tasks should remain a task-list alias");
     };
     assert_eq!(canonical.view().title, alias.view().title);
+}
+
+#[test]
+fn quit_alias_exits_without_appearing_in_help() {
+    let catalog = Catalog::default();
+    let help = catalog.open("/help", &Info::default(), false).unwrap();
+    let Transition::Push(presenter) = help else {
+        panic!("help should open a document");
+    };
+    let help = presenter.view().document;
+    assert!(help.contains("/exit  exit Otto"), "{help}");
+    assert!(!help.contains("/quit"), "{help}");
+
+    assert!(matches!(
+        catalog.open("/exit", &Info::default(), false),
+        Ok(Transition::Run(Run::Exit))
+    ));
+    assert!(matches!(
+        catalog.open("/quit", &Info::default(), false),
+        Ok(Transition::Run(Run::Exit))
+    ));
+    assert_eq!(
+        catalog.open("/quit now", &Info::default(), false).err(),
+        Some("unexpected arguments".into())
+    );
 }
 
 #[test]

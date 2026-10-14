@@ -51,11 +51,14 @@ impl Catalog {
         Ok(())
     }
     pub fn open(&self, line: &str, info: &Info, attached: bool) -> Result<Transition, String> {
-        let (name, args) = line
+        let (mut name, args) = line
             .trim()
             .split_once(char::is_whitespace)
             .map(|(n, a)| (n, a.trim()))
             .unwrap_or((line.trim(), ""));
+        if name == "/tasks" && args.is_empty() {
+            name = "/task";
+        }
         let entry = self
             .entries
             .iter()
@@ -151,8 +154,7 @@ const ENTRIES: &[Entry] = &[
     entry!("/logout", "remove provider credentials", true, logout),
     entry!("/exit", "exit Otto", false, exit),
     entry!("/quit", "exit Otto", false, exit),
-    entry!("/tasks", "show current tasks", true, tasks),
-    entry!("/task", "inspect or cancel a task", true, task),
+    entry!("/task", "list, inspect or cancel tasks", true, task),
     entry!("/agents", "browse recorded agents", false, agents),
     entry!("/context", "inspect context", false, context),
     entry!("/trace", "show the turn timeline", false, trace),
@@ -430,9 +432,6 @@ fn trace(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
 fn agents(args: &str, info: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;
     push(Agents::new(info.workspace.clone()))
-}
-fn tasks(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
-    management("tasks", args)
 }
 fn task(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     management("task", args)

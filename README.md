@@ -250,10 +250,12 @@ Return a brief with sources. Do not edit files.
 Interactive task commands:
 
 ```text
-/tasks                 list tasks
-/task <id|name>        show one task
-/task cancel <id|name> cancel a queued or running task
+/task                   list tasks
+/task <id|name>         show one task
+/task cancel <id|name>  cancel a queued or running task
 ```
+
+`/tasks` remains accepted as a compatibility alias for a bare `/task`.
 
 The parent can also stop a task from the model side with the `agent_cancel`
 tool, which is the same operation as `/task cancel`. Cancellation is

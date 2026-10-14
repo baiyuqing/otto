@@ -125,7 +125,7 @@ impl Request {
             "mcp" => "usage: /mcp",
             "timers" => "usage: /timers [cancel <id>]",
             "tasks" => "usage: /tasks",
-            "task" => "usage: /task <id|name> | /task cancel <id|name>",
+            "task" => "usage: /task [<id|name> | cancel <id|name>]",
             "reflect" => "usage: /reflect list | /reflect show <id>",
             _ => return Err(format!("unknown management command: {command}")),
         };
@@ -259,6 +259,7 @@ impl Request {
                 Request::Tasks
             }
             "task" => match fields.as_slice() {
+                [] => Request::Tasks,
                 ["cancel", id] => Request::TaskCancel((*id).into()),
                 [id] if *id != "cancel" => Request::Task((*id).into()),
                 _ => return Err(invalid()),
@@ -594,6 +595,20 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::Request;
+
+    #[test]
+    fn task_parser_unifies_list_detail_and_cancel() {
+        assert!(matches!(Request::parse("task", ""), Ok(Request::Tasks)));
+        assert!(matches!(
+            Request::parse("task", "review"),
+            Ok(Request::Task(id)) if id == "review"
+        ));
+        assert!(matches!(
+            Request::parse("task", "cancel review"),
+            Ok(Request::TaskCancel(id)) if id == "review"
+        ));
+        assert!(matches!(Request::parse("tasks", ""), Ok(Request::Tasks)));
+    }
 
     #[test]
     fn remember_parser_preserves_text_and_defaults() {

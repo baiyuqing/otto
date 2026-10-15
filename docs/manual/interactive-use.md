@@ -380,8 +380,15 @@ Shared commands:
   marked.
 - `/sandbox exclude <entry>` appends one entry to `[sandbox].excluded_commands`
   and reloads. The entry is validated first, and an entry already in the list is
-  not repeated. Removing an entry has no command: edit the config file and run
-  `/sandbox reload`.
+  not repeated. In the TUI, this explicit command returns success or failure
+  inline in the transcript, without opening a result dialog or requiring dismissal.
+  Success identifies the saved rule and configuration file, confirms immediate
+  reload, and asks Otto to retry a command blocked by the sandbox; failures show
+  the validation or configuration error without asking the model to retry.
+  The rule persists across restarts; no restart is needed to apply it. Other
+  approval requirements still apply to matching commands. This command is not
+  available with `--attach`. Removing an entry has no command: edit the config
+  file and run `/sandbox reload`.
 - If any of these changes is written but the sandbox rejects it, the configuration
   file is rolled back to what it held before and the previous sandbox stays in
   place.

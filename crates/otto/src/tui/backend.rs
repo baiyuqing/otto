@@ -555,10 +555,14 @@ async fn local_command(c: Arc<Controller>, command: Command) -> Result<Reply, St
             message
         }
         Command::SandboxExclude(entry) => {
+            let summary = SandboxChange::ExcludeCommand(entry.clone()).summary();
             let (message, followup) =
                 amend_sandbox(&c, SandboxChange::ExcludeCommand(entry)).await?;
             prompt = followup;
-            message
+            format!(
+                "{message}\nSaved {summary} in {} and reloaded immediately (existing entries are not duplicated). Matching simple commands run outside the sandbox; other approval requirements still apply.",
+                c.config_path().display()
+            )
         }
         Command::DecideApproval {
             id,
@@ -1214,6 +1218,72 @@ mod tests {
         let config = std::fs::read_to_string(controller.config_path()).unwrap();
         assert!(config.contains(&canonical));
         assert!(!config.contains(&alias.to_string_lossy().into_owned()));
+    }
+
+    #[tokio::test]
+    async fn sandbox_exclude_saves_reloads_and_returns_feedback_even_when_repeated() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let (controller, _, _) =
+            crate::app::controller_with_approvals(workspace.path(), sessions.path()).await;
+        let controller = Arc::new(controller);
+        for _ in 0..2 {
+            let reply = local_command(controller.clone(), Command::SandboxExclude("gh *".into()))
+                .await
+                .unwrap();
+            let Reply::Operation {
+                message, prompt, ..
+            } = reply
+            else {
+                panic!("expected operation receipt");
+            };
+            assert!(message.contains("excluded command \"gh *\""));
+            assert!(message.contains(&controller.config_path().display().to_string()));
+            assert!(message.contains("reloaded immediately"));
+            assert!(message.contains("existing entries are not duplicated"));
+            assert!(message.contains("other approval requirements still apply"));
+            assert!(prompt.unwrap().contains("retry it now"));
+        }
+        let config = crate::config::load_required(controller.config_path()).unwrap();
+        assert_eq!(config.sandbox.excluded_commands, ["gh *"]);
+    }
+
+    #[tokio::test]
+    async fn sandbox_exclude_validation_failure_explains_recovery_without_writing() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let (controller, _, _) =
+            crate::app::controller_with_approvals(workspace.path(), sessions.path()).await;
+        let controller = Arc::new(controller);
+        let before = std::fs::read(controller.config_path()).ok();
+        let error = local_command(
+            controller.clone(),
+            Command::SandboxExclude("gh pr list; pwd".into()),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("invalid excluded command"));
+        assert!(error.contains("use one simple command, or a program name followed by ' *'"));
+        assert_eq!(std::fs::read(controller.config_path()).ok(), before);
+    }
+
+    #[tokio::test]
+    async fn sandbox_exclude_config_failure_keeps_the_file_and_has_no_retry_receipt() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let (controller, _, _) =
+            crate::app::controller_with_approvals(workspace.path(), sessions.path()).await;
+        let controller = Arc::new(controller);
+        let invalid = "[sandbox\n";
+        std::fs::write(controller.config_path(), invalid).unwrap();
+        let error = local_command(controller.clone(), Command::SandboxExclude("gh *".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error, "configuration is invalid; no changes made");
+        assert_eq!(
+            std::fs::read_to_string(controller.config_path()).unwrap(),
+            invalid
+        );
     }
 
     #[tokio::test]

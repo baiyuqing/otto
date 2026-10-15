@@ -54,7 +54,7 @@ For <summary-mode>structured</summary-mode>, output Markdown with exactly these 
 ## Key Decisions
 ## Next Steps
 ## Critical Context
-Under Observations, list what the transcript and the previous summary record as observed, one item per line, each with its source and its result: a tool call with its arguments, a command, or a user statement, and what it returned. Example: "`otto --profile work` with model `gpt-5.6` returned HTTP 400 (bash)". Record failed results as well as successful ones. Record a user correction as "user: <what the user said>". Do not record your own inferences, guesses, or unverified conclusions as observations. Carry every observation from the previous summary forward; when a later observation contradicts one, keep it and append "(superseded by: <the later observation>)" instead of deleting it.
+Under Observations, keep only observations needed to continue the task, each with its source and result: a tool call with its relevant arguments, a command, or a user statement, and what it returned. Example: "`otto --profile work` with model `gpt-5.6` returned HTTP 400 (bash)". Preserve current state, unresolved blockers, verification evidence, and corrections that affect the next action. Record a user correction as "user: <what the user said>". Do not record your own inferences, guesses, or unverified conclusions as observations. Merge duplicate observations. Replace superseded observations with the latest supported result; retain the earlier failure only when needed to explain a current constraint or avoid repeating a mistake. Keep failed results only while their cause or corrective action remains relevant. Omit resolved transient errors and obsolete intermediate attempts. Apply the same relevance rules to observations in the previous summary; do not carry them all forward automatically.
 Preserve still-relevant goals, constraints, and decisions from any previous summary, incorporate new work, move completed work to Done, update blockers, and replace stale next steps.
 
 For <summary-mode>turn-prefix</summary-mode>, output only a nonempty concise account of the original request, early progress, and context needed to understand the retained suffix. Do not use the structured headings above, and never emit any Markdown headings (## or ###)."#;
@@ -288,6 +288,26 @@ mod tests {
             listed,
             super::super::summary_validate::REQUIRED_SUMMARY_HEADINGS
         );
+    }
+
+    #[test]
+    fn summary_policy_selects_relevant_evidence_instead_of_accumulating_attempts() {
+        for rule in [
+            "keep only observations needed to continue the task",
+            "each with its source and result",
+            "Do not record your own inferences, guesses, or unverified conclusions as observations",
+            "Merge duplicate observations",
+            "Replace superseded observations with the latest supported result",
+            "Keep failed results only while their cause or corrective action remains relevant",
+            "Omit resolved transient errors and obsolete intermediate attempts",
+            "Apply the same relevance rules to observations in the previous summary",
+        ] {
+            assert!(
+                SUMMARIZATION_SYSTEM_PROMPT.contains(rule),
+                "missing rule: {rule}"
+            );
+        }
+        assert!(!SUMMARIZATION_SYSTEM_PROMPT.contains("Carry every observation"));
     }
 
     #[test]

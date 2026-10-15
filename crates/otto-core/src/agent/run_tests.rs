@@ -5279,6 +5279,95 @@ async fn a_failing_streak_stops_the_turn_with_no_progress() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn alternating_failed_edits_and_unchanged_reads_stop_without_breaking_resume() {
+    struct FailedEditAndRead;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl ToolExecutor for FailedEditAndRead {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            Vec::new()
+        }
+
+        fn retry_safety(&self, name: &str) -> crate::model::RetrySafety {
+            if name == "read" {
+                crate::model::RetrySafety::ReadOnly
+            } else {
+                crate::model::RetrySafety::NonIdempotent
+            }
+        }
+
+        async fn execute(
+            &self,
+            call: crate::tool::ToolCall<'_>,
+            _: &dyn OperationControl,
+        ) -> crate::tool::ToolExecution {
+            let failed = call.name == "edit";
+            let mut execution = crate::tool::ToolExecution::completed(if failed {
+                ToolResult::error("old_text was not found")
+            } else {
+                ToolResult {
+                    content: "unchanged file".into(),
+                    ..ToolResult::default()
+                }
+            });
+            if failed {
+                execution.outcome.effect_certainty = crate::model::EffectCertainty::NotStarted;
+            }
+            execution
+        }
+    }
+
+    for with_hooks in [false, true] {
+        let mut turns: Vec<Turn> = (0..6)
+            .map(|index| {
+                Turn::named_tool_call(
+                    if index % 2 == 0 { "edit" } else { "read" },
+                    &format!("call-{index}"),
+                    r#"{"path":"a.txt"}"#,
+                )
+            })
+            .collect();
+        turns.push(Turn::text("continued"));
+        let agent = Agent::new(
+            FakeProvider::new(turns),
+            FailedEditAndRead,
+            MemorySession::new(),
+            Options {
+                progress: ProgressPolicy {
+                    repeated_calls: 3,
+                    consecutive_failures: 12,
+                },
+                hooks: with_hooks
+                    .then(|| Arc::new(CompactionHooks::default()) as Arc<dyn super::hooks::Hooks>),
+                ..options()
+            },
+        );
+        let outcome = agent
+            .run("go", &mut |_| {}, &CancellationToken::new())
+            .await;
+        if with_hooks {
+            outcome.expect("hook effects are not covered by tool safety");
+        } else {
+            assert!(
+                matches!(outcome, Err(AgentError::NoProgress(stall)) if stall.kind == StallKind::RepeatedCycle && stall.count == 3)
+            );
+            assert_eq!(agent.provider().normal_requests().len(), 6);
+            agent
+                .run("continue", &mut |_| {}, &CancellationToken::new())
+                .await
+                .unwrap();
+        }
+        assert!(every_tool_call_has_its_result(&agent.session().messages()));
+        assert_eq!(
+            agent.session().messages().last().unwrap().text(),
+            "continued"
+        );
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn distinct_calls_never_stop_a_long_turn() {
     // More calls than either limit, all different: a long but productive turn
     // must run to its natural end.

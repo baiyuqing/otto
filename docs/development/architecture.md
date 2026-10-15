@@ -137,10 +137,16 @@ keys sorted, so two spellings of the same call match) and stops the turn with
 `AgentError::NoProgress` when the same call repeats, or when tool results keep
 failing, `[agent].no_progress_repeats` or `[agent].no_progress_failures` times
 in a row. The whole tool batch runs before the guard is read, so a stopped turn
-leaves no assistant tool call without its result. Only consecutive conditions
-are detected: an alternating cycle of distinct calls is not, and is the case
-`agent_status` plus `agent_cancel` exists for. A turn stopped this way is not a
-persistence failure, so a frontend continues the session after reporting it.
+leaves no assistant tool call without its result. The repetition limit also
+stops unchanged 2–4-call cycles containing a failure. The guard holds four
+result fingerprints and three match counters, comparing canonical calls and
+result text. Only declared read-only calls and operations whose outcome is
+`NotStarted` participate; possible mutations or unknown effects reset cycle
+tracking. With hooks configured, only consecutive checks run because hook
+effects are not covered by tool safety. Longer cycles and successful-only
+cycles remain outside this guard.
+A turn stopped this way is not a persistence failure, so a frontend continues
+the session after reporting it.
 
 Keep durable workflows separate from ad-hoc sub-agent tasks. Workflow
 definitions snapshot their referenced `AGENT.md` bodies, model choices, and

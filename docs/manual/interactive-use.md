@@ -851,12 +851,14 @@ the hidden summary-system prompt.
 What a checkpoint keeps:
 
 - The model-written summary has an `## Observations` section. The summary
-  prompt asks it to list each observed result with its source (tool call,
-  command, or user statement), including failed results, and to record user
-  corrections as `user: ...`. It asks the model to carry every observation from
-  the previous summary forward and to mark a contradicted one
-  `(superseded by: ...)` rather than delete it. A summary without the section is
-  rejected. Otto checks that the section is present, not what it contains.
+  prompt asks it to keep observations needed to continue, with their source
+  (tool call, command, or user statement) and result, and to record user
+  corrections as `user: ...`. It asks the model to merge duplicates, replace
+  superseded observations with supported current results, and omit resolved
+  transient errors and obsolete attempts, including those in a previous
+  summary. Failures remain when their cause or correction still matters.
+  The full session history remains append-only. A summary without the section
+  is rejected. Otto checks that the section is present, not semantic relevance.
 - The text of every summarized user message is appended to the summary
   verbatim, one JSON string per line, in a `<user-messages>` block. Otto builds
   this block itself, so the summary model cannot change or drop its lines. The

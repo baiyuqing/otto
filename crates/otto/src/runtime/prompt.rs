@@ -157,6 +157,9 @@ pub fn system_prompt_for(
         }
         prompt.push_str("</shell_output_policy>\n");
     }
+    if tool_names.contains(&"submit_verification") {
+        prompt.push_str("\n<verification_policy>Use submit_verification only after the relevant evidence-producing tool calls have completed. Reference prior tool_call_id values and classify each relation; do not treat accepted evidence integrity as proof that the checks are semantically sufficient. The capability validates that evidence is real, durably recorded, terminal and structurally consistent with the proposed verdict. It does not run checks, interpret command output, infer coverage, make a task-completion decision, or guarantee that later changes preserve the verdict. Report limitations and distinguish failed, blocked, not-run and inconclusive verification from passed verification.</verification_policy>\n");
+    }
     if tool_names.contains(&"otto_help") {
         prompt.push_str("\n<otto_help_policy>For questions about Otto itself, consult otto_help before answering; use its installed-version documentation and the current session capabilities. A user command or HTTP/ACP API is not automatically a model-callable tool. Never invent commands or endpoints. Use approval_pending and approval_revoke for pending requests when available; only the user can approve.\n</otto_help_policy>\n");
     }
@@ -488,6 +491,29 @@ mod tests {
         }
         let prompt = system_prompt_for(&definitions(&["bash"]), off(), "", "", "");
         assert!(!prompt.contains(".git/hooks"), "{prompt}");
+    }
+
+    #[test]
+    fn verification_policy_appears_only_with_submit_verification() {
+        let with = system_prompt_for(
+            &definitions(&["read", "submit_verification"]),
+            off(),
+            "",
+            "",
+            "",
+        );
+        for required in [
+            "<verification_policy>",
+            "prior tool_call_id values",
+            "real, durably recorded, terminal",
+            "does not run checks",
+            "do not treat accepted evidence integrity as proof",
+            "later changes preserve the verdict",
+        ] {
+            assert!(with.contains(required), "missing {required}");
+        }
+        let without = system_prompt_for(&definitions(&["read"]), off(), "", "", "");
+        assert!(!without.contains("<verification_policy>"));
     }
 
     #[test]

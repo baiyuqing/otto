@@ -42,6 +42,7 @@ const BASE_SAFETY: &[(&str, RetrySafety)] = &[
     ("schedule_list", RetrySafety::ReadOnly),
     ("schedule_cancel", RetrySafety::NonIdempotent),
     ("list_models", RetrySafety::ReadOnly),
+    ("submit_verification", RetrySafety::ReadOnly),
     // Each call replaces the whole plan, so a repeat has the same effect.
     ("update_plan", RetrySafety::Idempotent),
     ("agent", RetrySafety::NonIdempotent),
@@ -101,6 +102,7 @@ mod tests {
             "agent_status",
             "remind_status",
             "list_models",
+            "submit_verification",
         ] {
             assert!(is_replayable(name), "{name}");
         }

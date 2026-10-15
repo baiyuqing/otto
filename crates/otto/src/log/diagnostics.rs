@@ -259,6 +259,25 @@ impl Log {
             }
         }
     }
+    pub(super) fn reflection_decision(&self, fields: &[(&str, String)]) {
+        let mut event = json!({"event":"reflection_decision", "schema_version":1});
+        for (key, value) in fields {
+            if matches!(
+                *key,
+                "backend"
+                    | "trigger"
+                    | "outcome"
+                    | "reason"
+                    | "latency_ms"
+                    | "input_bytes"
+                    | "confidence"
+            ) {
+                event[*key] = Value::String(value.clone());
+            }
+        }
+        self.write(event);
+    }
+
     pub(super) fn scope(
         self: &Arc<Self>,
         session: &str,

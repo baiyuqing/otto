@@ -17,6 +17,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- When `TYPESAFE_API_KEY` is configured, automatic reflection now asks the
+  auxiliary decision backend whether to run immediately or retain evidence for
+  a later trigger. Manual and model-requested reflection bypass this scheduling
+  hint; unavailable, timed-out or invalid decisions run the original reflection
+  pipeline. Confidence never grants authority or bypasses review.
+
 - In the terminal UI, `/rename <name>` now returns directly to the composer
   after a successful rename instead of opening an empty result panel. Bare
   `/rename` still opens the rename form.

@@ -778,14 +778,14 @@ impl Builder {
             .environment
             .get("TYPESAFE_API_KEY")
             .map_or("", String::as_str);
-        let backend: Box<dyn crate::memory::advice::Backend> = if key.is_empty() {
+        let backend: Box<dyn crate::decision::Backend> = if key.is_empty() {
             Box::new(super::advice::SessionBackend::new(
                 agent,
                 model.to_owned(),
                 usage,
             ))
         } else {
-            Box::new(crate::memory::advice::jev::Jev::new(
+            Box::new(crate::decision::jev::Jev::new(
                 crate::typesafe::BASE_URL,
                 key,
             ))

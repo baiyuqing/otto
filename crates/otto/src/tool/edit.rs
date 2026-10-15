@@ -27,7 +27,7 @@ use super::read::read_validated_text_file;
 use super::result::decode_strict_json;
 use super::workspace::Workspace;
 use super::write::write_file_atomic;
-use super::{Tool, definition, empty_as_none, error_result, preflight_error, text_result};
+use super::{Tool, definition, empty_as_none, preflight_error, text_result};
 use crate::fsops::{PosixPublish, PublishOps};
 
 /// Lines of unchanged context kept on either side of a hunk.
@@ -156,21 +156,21 @@ impl<'a> EditTool<'a> {
         let path = Path::new(rel_path);
         let file = match self.workspace.open(path) {
             Ok(file) => file,
-            Err(error) => return error_result(error),
+            Err(error) => return preflight_error(error),
         };
         let text = match read_validated_text_file(file, rel_path) {
             Ok(text) => text,
-            Err(message) => return error_result(message),
+            Err(message) => return preflight_error(message),
         };
 
         let (replaced, diff, notes) = match apply_text_edits(&text, rel_path, edits) {
             Ok(applied) => applied,
-            Err(message) => return error_result(message),
+            Err(message) => return preflight_error(message),
         };
 
         let relative = match self.workspace.write_relative(path) {
             Ok(relative) => relative,
-            Err(error) => return error_result(error),
+            Err(error) => return preflight_error(error),
         };
         if let Err(error) =
             write_file_atomic(self.workspace, &relative, replaced.as_bytes(), self.publish)
@@ -210,7 +210,7 @@ pub fn edit_definition() -> ToolDefinition {
             "no exact match, a match that ignores trailing whitespace and treats curly quotes, dashes, and ",
             "non-breaking spaces as ASCII is used, and only the part of old_text that new_text changes is rewritten. ",
             "The result shows a diff and notes when new_text drops the line break that ends old_text, joining the next line. After three successful single replacements to one file in a turn, a one-time batching advisory is appended; the edit still succeeds. ",
-            "A match error writes nothing: when old_text matches more than once, it lists the line numbers of up to 5 matches ",
+            "Validation and match errors write nothing. When old_text matches more than once, the error lists the line numbers of up to 5 matches ",
             "with the line before and after each; when old_text is not found, it shows the current file lines that best align with old_text.",
         ),
         json!({
@@ -1189,6 +1189,14 @@ mod tests {
         .await;
         assert!(ambiguous.is_error);
         assert_eq!(
+            ambiguous
+                .outcome_override
+                .as_ref()
+                .unwrap()
+                .effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        assert_eq!(
             ambiguous.content,
             "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique. Lines around each match:\n\
              match 1, line 1:\n1 | same\n2 | same\n\
@@ -1201,6 +1209,10 @@ mod tests {
         )
         .await;
         assert!(absent.is_error);
+        assert_eq!(
+            absent.outcome_override.as_ref().unwrap().effect_certainty,
+            EffectCertainty::NotStarted
+        );
         assert_eq!(
             absent.content,
             "edit failed: old_text was not found in sample.txt; no line of old_text matches a line of the file, ignoring leading and trailing whitespace"

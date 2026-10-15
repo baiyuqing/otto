@@ -268,7 +268,8 @@ canonical workspace, even when `--sandbox off` is selected:
   that `new_text` changes. The result shows a diff of the change. When
   `old_text` ends with a line break that a non-empty `new_text` drops, the
   edit still applies, and the result adds a note that the next line now joins
-  the replaced text. A match error writes nothing. When `old_text` matches
+  the replaced text. Validation and match errors write nothing and are recorded
+  as not started. When `old_text` matches
   more than once, the error lists the line numbers of up to 5 matches with the
   line before and after each one; when it matches nowhere, the error shows the
   file lines that best align with `old_text`, ignoring leading and trailing
@@ -630,23 +631,32 @@ errors, would otherwise run until a deadline. Interactive turns have no
 deadline unless you configure one; chat and `--prompt` turns stop after
 [`[agent].unattended_turn_timeout`](getting-started.md#configuration)
 (default `30m`). Otto watches this itself and ends such a turn with
-the error `no progress: the same <tool> call repeated <n> times in a row`, or
-`no progress: <n> tool calls in a row failed (last: <tool>)`. This applies to
-every turn, including each sub-agent's, which inherits your limits. A turn
-that ends this way is not a persistence failure: the session continues and you
-can send the next prompt.
+the error `no progress: the same <tool> call repeated <n> times in a row`,
+`no progress: <n> tool calls in a row failed (last: <tool>)`, or
+`no progress: a tool-call cycle repeated <n> times without progress (last: <tool>)`.
+This applies to every turn, including each sub-agent's, which inherits your
+limits. A turn that ends this way is not a persistence failure: the session
+continues and you can send the next prompt.
 
 Two calls count as the same call when the tool name and the arguments are the
-same; key order and spacing in the arguments are ignored. Only *consecutive*
-conditions are detected, so a cycle that alternates between different calls is
-not stopped — use `agent_status` and `agent_cancel` when you see one. In a
-chat or `--prompt` turn, the unattended deadline ends such a cycle.
+same; key order and spacing in the arguments are ignored. Otto also detects
+repeated cycles of 2–4 calls when at least one call fails and all calls and
+result text repeat unchanged. For example, an edit rejected before writing,
+followed by a read of the same unchanged file, cannot loop indefinitely.
+Cycle tracking resets after any operation that may have changed state; only
+declared read-only tools and operations known not to have started participate.
+When extension hooks are configured, only consecutive checks run because hook
+effects are not covered by tool safety.
+Longer cycles and successful-only alternating cycles are not detected. Use
+`agent_status` and `agent_cancel` for these; chat and `--prompt` turns also
+have the unattended deadline.
 
 `[agent].no_progress_repeats` (default 8) and
-`[agent].no_progress_failures` (default 12) set the two limits. Set one to `0`
-to disable that condition; set both to `0` to disable the guard. Raise them if
-a deliberate poll loop, such as watching a long build, is being stopped
-early. Values must be between 0 and 1000.
+`[agent].no_progress_failures` (default 12) set the limits. The repetition
+limit applies to both identical consecutive calls and unchanged failed cycles.
+Set one to `0` to disable that condition; set both to `0` to disable the guard.
+Raise them if a deliberate poll loop, such as watching a long build, is being
+stopped early. Values must be between 0 and 1000.
 
 ### Interactive sandbox setup
 

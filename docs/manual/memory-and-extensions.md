@@ -274,8 +274,8 @@ never accepts, rejects or changes a candidate. By default the question goes to t
 session's own provider, model and thinking setting (token usage is recorded under
 the task id `memory-advice`); when `TYPESAFE_API_KEY` is set and non-empty it
 goes to the `jev-latest` model at `https://api.typesafe.ai`, which also gives
-percentages. `jev-latest` is an auxiliary model used only for this advice and
-for skill checks: it does not run turns or tools, and it is not a provider or
+percentages. The auxiliary model is used for this advice, automatic-reflection
+scheduling hints, and skill checks: it does not run turns or tools, and it is not a provider or
 a model you can configure. The request holds the candidate's kind, key, scope, text and
 reason, and the keys and texts of the user-scope standing records. A candidate
 that the memory service refuses is never sent. Each request has a 20 s limit; on
@@ -385,7 +385,33 @@ answer. The retrospective comes first, quoted so its Markdown cannot pose as ano
 section, and is cut at 8 KiB. Each text field is redacted like a request, and a field that
 still matches a secret rule is replaced by `(withheld: <rule>)`; a field is cut at 16 KiB. A run that is skipped
 (the cooldown or `min_turns`) or that fails before it starts writes no log. Otto does not
-remove log files. A completed run advances a per-session watermark, so the next run covers
+remove log files.
+
+When `TYPESAFE_API_KEY` is non-empty in Otto's environment, automatic reflection
+has an additional scheduling hint, enabled without a new config setting. After
+the normal trigger, cooldown, dynamic-content boundary and minimum-turn checks,
+the auxiliary backend receives the bounded, redacted session evidence (not
+standing memories or skill contents) and chooses `immediate` or `defer`.
+`defer` writes no completed run and does not advance the watermark, so later
+automatic triggers or `/reflect` can reconsider the same evidence. There is no
+background retry timer. Manual `/reflect` and model-requested `reflect` always
+bypass the hint. A timeout (20 s), unavailable backend or invalid answer runs
+the original reflection pipeline; cancellation still cancels the run. Confidence
+must be finite and in 0–1, and is observational only, never permission to accept
+memory, write skills, grant access or change standing instructions. Existing
+memory review and skill approval boundaries remain unchanged.
+
+The content-free `reflection_decision` event records fixed backend/trigger/outcome
+and reason codes, latency, input byte count and optional confidence, in the process
+log and enabled diagnostic file sink. Gate exchanges, transcript text and backend
+error text are not persisted. If an automatic run is deferred but a review is
+needed now, use `/reflect`; if the auxiliary service is unavailable, no action is
+required for reflection to continue. Removing the environment key and restarting
+Otto restores the ungated automatic path (and the existing session-model advice
+fallback). No database migration or version-specific config change is required;
+retained session evidence remains available across restart.
+
+A completed run advances a per-session watermark, so the next run covers
 only newer entries; a failed or canceled run leaves it in place and the next run covers the
 same entries again. Provider usage is recorded in the usage history under the task id
 `reflection:<run id>`. A session started with `--no-session` has no file to read and cannot

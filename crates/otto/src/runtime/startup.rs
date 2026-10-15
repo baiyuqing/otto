@@ -1029,6 +1029,18 @@ pub(crate) fn compose(
     if !home.is_empty() {
         reflector = reflector.with_log_dir(Path::new(home).join(".otto/reflection/runs"));
     }
+    if let Some(key) = environment
+        .get("TYPESAFE_API_KEY")
+        .filter(|key| !key.is_empty())
+    {
+        reflector = reflector.with_decision_backend(
+            Arc::new(crate::decision::jev::Jev::new(
+                crate::typesafe::BASE_URL,
+                key,
+            )),
+            Arc::clone(&options.logger),
+        );
+    }
     let reflector = Arc::new(reflector);
 
     let approvals = match storage

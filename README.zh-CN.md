@@ -24,7 +24,7 @@
 
 ## 从源码安装
 
-需要由 `rust-toolchain.toml` 锁定的 **Rust 1.98** 工具链
+需要由 `rust-toolchain.toml` 锁定的 **Rust 1.99** 工具链
 （`rustup toolchain install` 会自动安装）、`chat-connector/go.mod` 指定的 **Go**，
 以及受支持服务的访问权限。**macOS** 是受支持的平台：只有它有沙箱，
 也只有它跑验收门禁。Otto 同样可以在 **Linux** 上编译和运行，限制见下方

@@ -685,3 +685,12 @@ fn session_parse_rejects_anything_else() {
         );
     }
 }
+
+#[test]
+fn invalid_backend_confidence_never_becomes_advice() {
+    for probability in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+        let mut reply = answers(ALL_WORKSPACES, None, YES);
+        reply.get_mut(SCOPE).unwrap().probability = Some(probability);
+        assert!(interpret("test".into(), true, &reply).is_none());
+    }
+}

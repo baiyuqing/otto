@@ -21,6 +21,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   Use ordinary text during an active turn or `/steer` for guidance, and `Ctrl+U`
   to recall queued guidance for editing. The composer banner and HTTP guidance
   APIs are unchanged. See [interactive use](docs/manual/interactive-use.md).
+  ([#483](https://github.com/baiyuqing/otto/pull/483))
 
 - Resuming a session no longer replaces the current profile, model or reasoning
   effort with historical session settings. In-process `/resume` keeps the

@@ -39,6 +39,7 @@ mod search;
 pub mod shell;
 pub mod skill;
 pub(crate) mod task_control;
+pub mod verification;
 pub mod web;
 pub mod workspace;
 pub mod write;

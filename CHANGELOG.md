@@ -17,6 +17,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Agents can now submit `passed`, `failed`, `blocked`, `not_run` or
+  `inconclusive` verification verdicts against prior tool results. Otto checks
+  that cited evidence is durably recorded, terminal and structurally
+  consistent with the verdict without requiring a particular test, lint or
+  build command. This validates evidence integrity, not semantic coverage, and
+  does not add a universal completion gate. See
+  [verification verdicts](docs/manual/safety-and-tools.md#verification-verdicts).
+
 - The terminal UI now shows only `/exit` in help and slash-command completion.
   The duplicate `/quit` spelling remains accepted as a compatibility alias.
   ([#475](https://github.com/baiyuqing/otto/pull/475))

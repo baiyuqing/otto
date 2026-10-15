@@ -6,6 +6,7 @@
 //! and the destination is never resolved outside the workspace. An existing
 //! file's permission bits are preserved; a new file gets `0644`.
 
+use std::io::Read;
 use std::path::Path;
 
 use otto_core::model::ToolDefinition;
@@ -33,6 +34,94 @@ struct WriteArgs {
     content: String,
 }
 
+/// Avoid loading a large existing file just to show a preview of a write.
+const MAX_DIFF_INPUT_BYTES: u64 = 1 << 20;
+const MAX_DIFF_OUTPUT_BYTES: usize = 4096;
+const DIFF_CONTEXT_LINES: usize = 3;
+
+/// A compact diff between the complete old and new contents. The normal
+/// `edit` tool reports its own patch; `write` has no known changed spans, so
+/// common leading/trailing lines delimit its one replacement hunk.
+fn replacement_diff(before: Option<&str>, after: &str) -> String {
+    if before == Some(after) || (before.is_none() && after.is_empty()) {
+        return "(no textual changes)".to_owned();
+    }
+    let old: Vec<&str> = before.unwrap_or("").split_inclusive('\n').collect();
+    let new: Vec<&str> = after.split_inclusive('\n').collect();
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_change_end = old.len() - suffix;
+    let new_change_end = new.len() - suffix;
+    let context_start = prefix.saturating_sub(DIFF_CONTEXT_LINES);
+    let old_end = (old_change_end + DIFF_CONTEXT_LINES).min(old.len());
+    let new_end = (new_change_end + DIFF_CONTEXT_LINES).min(new.len());
+    let old_start_line = if old.is_empty() { 0 } else { context_start + 1 };
+    let new_start_line = if new.is_empty() { 0 } else { context_start + 1 };
+    let mut diff = format!(
+        "@@ -{old_start_line},{} +{new_start_line},{} @@\n",
+        old_end - context_start,
+        new_end - context_start
+    );
+    for (marker, lines) in [
+        (' ', &old[context_start..prefix]),
+        ('-', &old[prefix..old_change_end]),
+        ('+', &new[prefix..new_change_end]),
+        (' ', &new[new_change_end..new_end]),
+    ] {
+        for line in lines {
+            diff.push(marker);
+            diff.push_str(line.strip_suffix('\n').unwrap_or(line));
+            diff.push('\n');
+            if !line.ends_with('\n') {
+                diff.push_str("\\ No newline at end of file\n");
+            }
+        }
+    }
+    let diff = diff.trim_end_matches('\n');
+    if diff.len() <= MAX_DIFF_OUTPUT_BYTES {
+        return diff.to_owned();
+    }
+    let cut = diff.as_bytes()[..MAX_DIFF_OUTPUT_BYTES]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .unwrap_or_else(|| {
+            (0..=MAX_DIFF_OUTPUT_BYTES)
+                .rev()
+                .find(|index| diff.is_char_boundary(*index))
+                .unwrap_or(0)
+        });
+    format!("{}\n... (diff truncated)", &diff[..cut])
+}
+
+fn previous_text(workspace: &Workspace, path: &Path) -> Result<Option<String>, &'static str> {
+    let file = match workspace.open_relative(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("previous content could not be read"),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|_| "previous content could not be read")?;
+    if !metadata.is_file() || metadata.len() > MAX_DIFF_INPUT_BYTES {
+        return Err("previous content is not a small regular text file");
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_DIFF_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "previous content could not be read")?;
+    if bytes.len() as u64 > MAX_DIFF_INPUT_BYTES || bytes.contains(&0) {
+        return Err("previous content is not a small regular text file");
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "previous content is not a small regular text file")
+}
+
 /// Writes a workspace file.
 pub struct WriteTool<'a> {
     workspace: &'a Workspace,
@@ -57,7 +146,7 @@ impl<'a> WriteTool<'a> {
 pub fn write_definition() -> ToolDefinition {
     definition(
         "write",
-        "Create or replace a file in the workspace",
+        "Create or replace a file in the workspace. A successful result includes a bounded text diff when the previous content is readable; otherwise it explains why the diff is unavailable.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -95,6 +184,7 @@ impl Tool for WriteTool<'_> {
             Err(error) => return preflight_error(error),
         };
         let _guard = self.workspace.lock_path(&relative).await;
+        let before = previous_text(self.workspace, &relative);
         if let Err(error) = write_file_atomic(
             self.workspace,
             &relative,
@@ -103,11 +193,15 @@ impl Tool for WriteTool<'_> {
         ) {
             return error.into_tool_result();
         }
-        text_result(format!(
-            "wrote {} ({} bytes)",
-            args.path,
-            args.content.len()
-        ))
+        let summary = format!("wrote {} ({} bytes)", args.path, args.content.len());
+        let detail = match before {
+            Ok(text) if args.content.len() as u64 <= MAX_DIFF_INPUT_BYTES => {
+                replacement_diff(text.as_deref(), &args.content)
+            }
+            Ok(_) => "(diff unavailable: new content is too large)".to_owned(),
+            Err(reason) => format!("(diff unavailable: {reason})"),
+        };
+        text_result(format!("{summary}\n{detail}"))
     }
 }
 
@@ -209,6 +303,54 @@ mod tests {
             Trigger::Always,
             Fault::Before(FaultError::Os(libc::EIO)),
         )])
+    }
+
+    #[tokio::test]
+    async fn successful_writes_report_the_change_made() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = workspace(root.path());
+        let tool = WriteTool::new(&workspace);
+
+        let created = run(&tool, r#"{"path":"file.txt","content":"one\ntwo\n"}"#).await;
+        assert!(!created.is_error, "{created:?}");
+        assert!(created.content.contains("@@ -0,0 +1,2 @@"), "{created:?}");
+        assert!(created.content.contains("+one\n+two"), "{created:?}");
+
+        let replaced = run(&tool, r#"{"path":"file.txt","content":"one\nthree\n"}"#).await;
+        assert!(!replaced.is_error, "{replaced:?}");
+        assert!(replaced.content.contains("-two"), "{replaced:?}");
+        assert!(replaced.content.contains("+three"), "{replaced:?}");
+        assert!(!replaced.content.contains("+one"), "{replaced:?}");
+    }
+
+    #[test]
+    fn a_write_diff_distinguishes_a_missing_final_newline() {
+        let diff = replacement_diff(Some("same\n"), "same");
+        assert!(diff.contains("-same\n+same"), "{diff}");
+        assert!(diff.contains("\\ No newline at end of file"), "{diff}");
+    }
+
+    #[test]
+    fn a_write_diff_truncates_long_unicode_text_on_a_character_boundary() {
+        let diff = replacement_diff(None, &"你".repeat(2000));
+        assert!(diff.contains("... (diff truncated)"), "{diff}");
+        assert!(diff.len() < 4200, "{} bytes", diff.len());
+    }
+
+    #[tokio::test]
+    async fn binary_previous_content_does_not_prevent_a_write() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.txt"), b"old\0value").unwrap();
+        let workspace = workspace(root.path());
+
+        let result = run(
+            &WriteTool::new(&workspace),
+            r#"{"path":"file.txt","content":"new"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{result:?}");
+        assert!(result.content.contains("diff unavailable"), "{result:?}");
+        assert_eq!(std::fs::read(root.path().join("file.txt")).unwrap(), b"new");
     }
 
     #[tokio::test]

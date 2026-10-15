@@ -2646,13 +2646,13 @@ async fn open_current(
     let (session, warnings) = tokio::task::spawn_blocking(move || prepared.activate())
         .await
         .map_err(|error| format!("session activation task panicked: {error}"))?
-        .map_err(|error| builder.redact_error(&error, Some(&runtime)))?;
+        .map_err(|error| builder.redact_error(&error, Some(runtime)))?;
     let warnings = warnings
         .into_iter()
-        .map(|warning| builder.redact_error(&warning.message, Some(&runtime)))
+        .map(|warning| builder.redact_error(&warning.message, Some(runtime)))
         .collect();
     let session = SharedSession::new(session);
-    let current = attach_runner(builder, session, &runtime).await?;
+    let current = attach_runner(builder, session, runtime).await?;
     Ok((current, warnings))
 }
 

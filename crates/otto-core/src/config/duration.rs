@@ -62,13 +62,13 @@ pub fn parse_go_duration(input: &str) -> Result<i64, String> {
             _ => return Err(format!("time: unknown unit {unit:?} in duration {input:?}")),
         };
 
-        let whole = parse_bounded_u64(whole_text, limit).ok_or_else(&invalid)?;
-        let whole_nanos = whole.checked_mul(unit_nanos).ok_or_else(&invalid)?;
+        let whole = parse_bounded_u64(whole_text, limit).ok_or_else(invalid)?;
+        let whole_nanos = whole.checked_mul(unit_nanos).ok_or_else(invalid)?;
         let fraction_nanos = fractional_nanos(fraction_text, unit_nanos);
         let term = whole_nanos
             .checked_add(fraction_nanos)
-            .ok_or_else(&invalid)?;
-        total = total.checked_add(term).ok_or_else(&invalid)?;
+            .ok_or_else(invalid)?;
+        total = total.checked_add(term).ok_or_else(invalid)?;
         if total > limit {
             return Err(invalid());
         }

@@ -340,7 +340,9 @@ Shared commands:
 - `/model` shows the current profile/model and effort. In the TUI, bare
   `/model` opens a profile picker followed by a reasoning-effort picker whose
   default selection is the current effective effort; `Enter` applies it for the
-  process and `s` saves it to the profile. In the REPL, use
+  process and `s` saves it to the profile. Resuming another session keeps
+  the current selection, including reasoning effort; it does not restore that
+  session's historical model settings. In the REPL, use
   `/model PROFILE --thinking LEVEL [--save]`.
 - `/thinking [LEVEL] [--save]` shows or changes the current reasoning effort.
   Use `unset` or `default` to omit the provider reasoning-effort field.
@@ -562,6 +564,11 @@ Notes:
   workspace. Invalid files and old Otto v1 files are skipped.
 - `--resume PATH` reopens a specific valid Pi v3 session only when its recorded
   workspace matches the current `--cwd`.
+- Resuming restores conversation history, not model selection. `/resume` keeps
+  the running process's current profile, model and reasoning effort. Starting
+  Otto with `--resume` or `--continue` uses the resolved startup configuration
+  and command-line overrides, not the historical session's model settings.
+  Historical model changes remain in the append-only session for tracing.
 - Old Otto v1 files are left untouched, are not listed by `/resume`, and cannot
   be resumed.
 - `--no-session` keeps history in memory only.

@@ -2910,11 +2910,17 @@ impl Builder {
 
     /// Resolves a replacement runtime from the provenance a session carries.
     pub fn resolve_session(&self, metadata: &RuntimeMetadata) -> Result<Runtime, BuildError> {
-        resolve_initial_runtime(
+        let overrides = Overrides {
+            profile: metadata.profile.clone(),
+            provider: metadata.provider.clone(),
+            model: metadata.model.clone(),
+            ..self.overrides.clone()
+        };
+        otto_core::config::resolve::resolve(
             &self.config,
             &resume_environment(&self.environment),
-            Some(metadata),
-            &self.overrides,
+            &SessionDefaults::default(),
+            &overrides,
         )
         .map_err(|error| self.redact_error(&error.to_string(), None))
     }
@@ -3021,10 +3027,9 @@ impl Builder {
     }
 }
 
-/// The environment a session replacement resolves against. The four "pick a
-/// runtime" variables are dropped so a replacement keeps the session's own
-/// provider, profile and model instead of silently re-reading the process
-/// environment.
+/// Environment for an explicit selection change or active-runtime rebuild.
+/// Drop runtime selectors so they cannot override the selection already chosen
+/// by the caller.
 pub fn resume_environment(environment: &HashMap<String, String>) -> HashMap<String, String> {
     environment
         .iter()
@@ -3089,53 +3094,15 @@ pub(crate) fn shell_timeout(timeout: Duration) -> Duration {
     timeout
 }
 
-/// A resumed session's stored provider and model win over its profile's, unless
-/// `--profile` was given explicitly.
+/// Resolves process selection from CLI, environment and configuration.
+/// Session metadata is history, not an implicit runtime selection.
 pub fn resolve_initial_runtime(
     file: &File,
     environment: &HashMap<String, String>,
-    metadata: Option<&RuntimeMetadata>,
+    _metadata: Option<&RuntimeMetadata>,
     overrides: &Overrides,
 ) -> Result<Runtime, ConfigError> {
-    let Some(metadata) = metadata else {
-        return otto_core::config::resolve::resolve(
-            file,
-            environment,
-            &SessionDefaults::default(),
-            overrides,
-        );
-    };
-    let file = config_for_session_runtime(file, &metadata.profile, !overrides.profile.is_empty());
-    otto_core::config::resolve::resolve(
-        &file,
-        environment,
-        &SessionDefaults {
-            provider: metadata.provider.clone(),
-            model: metadata.model.clone(),
-        },
-        overrides,
-    )
-}
-
-/// Selects the stored profile and blanks its provider and model so the session
-/// defaults are what fills them in.
-fn config_for_session_runtime(file: &File, stored_profile: &str, explicit_profile: bool) -> File {
-    if explicit_profile {
-        return file.clone();
-    }
-    let mut copy = file.clone();
-    if !stored_profile.is_empty() {
-        copy.default_profile = stored_profile.to_string();
-    }
-    let selected = copy.default_profile.clone();
-    if selected.is_empty() {
-        return copy;
-    }
-    if let Some(profile) = copy.profiles.get_mut(&selected) {
-        profile.provider = String::new();
-        profile.model = String::new();
-    }
-    copy
+    otto_core::config::resolve::resolve(file, environment, &SessionDefaults::default(), overrides)
 }
 
 /// A session may be resumed in its original directory or a recorded workspace move.
@@ -4373,7 +4340,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_initial_runtime_prefers_session_metadata_over_the_profile() {
+    fn resolve_initial_runtime_ignores_session_selection() {
         let mut file = File {
             default_profile: "work".to_string(),
             ..File::default()
@@ -4395,14 +4362,16 @@ mod tests {
         assert_eq!(fresh.model, "profile-model");
 
         let metadata = RuntimeMetadata {
-            profile: "work".to_string(),
-            provider: "openai-compatible".to_string(),
+            profile: "removed-profile".to_string(),
+            provider: "removed-provider".to_string(),
             model: "session-model".to_string(),
         };
         let resumed =
             resolve_initial_runtime(&file, &environment, Some(&metadata), &Overrides::default())
                 .expect("resumed runtime");
-        assert_eq!(resumed.model, "session-model");
+        assert_eq!(resumed.model, "profile-model");
+        assert_eq!(resumed.provider, fresh.provider);
+        assert_eq!(resumed.thinking, fresh.thinking);
         assert_eq!(resumed.profile, "work");
 
         let overrides = Overrides {
@@ -4412,6 +4381,23 @@ mod tests {
         let overridden = resolve_initial_runtime(&file, &environment, Some(&metadata), &overrides)
             .expect("overridden runtime");
         assert_eq!(overridden.model, "profile-model");
+        let overrides = Overrides {
+            model: "session-model".to_string(),
+            thinking: "high".to_string(),
+            ..overrides
+        };
+        let overridden = resolve_initial_runtime(&file, &environment, Some(&metadata), &overrides)
+            .expect("explicit model and thinking");
+        assert_eq!(overridden.model, "session-model");
+        assert_eq!(overridden.thinking, "high");
+        let environment = HashMap::from([
+            ("WORK_KEY".to_string(), "sk-1".to_string()),
+            ("OTTO_MODEL".to_string(), "session-model".to_string()),
+        ]);
+        let from_environment =
+            resolve_initial_runtime(&file, &environment, Some(&metadata), &Overrides::default())
+                .expect("environment selection");
+        assert_eq!(from_environment.model, "session-model");
     }
 
     #[test]

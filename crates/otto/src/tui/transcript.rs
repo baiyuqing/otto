@@ -118,6 +118,33 @@ fn tool_outcome_label(entry: &Entry) -> Option<&'static str> {
     }
 }
 
+fn is_file_diff(entry: &Entry) -> bool {
+    !entry.tool_error
+        && matches!(entry.tool_name.as_str(), "edit" | "write")
+        && entry
+            .tool_output
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with("edited ") || line.starts_with("wrote "))
+        && entry
+            .tool_output
+            .lines()
+            .skip(1)
+            .any(|line| line.starts_with("@@ "))
+}
+
+fn diff_line_style(line: &str, fallback: Style) -> Style {
+    if line.starts_with("@@ ") {
+        Style::default().fg(Color::Cyan)
+    } else if line.starts_with('+') {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::default().fg(Color::Red)
+    } else {
+        fallback
+    }
+}
+
 fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> {
     let args = otto_core::wire::transcript::format_args_compact(
         otto_core::wire::events::tool_args_raw(&entry.tool_args).as_deref(),
@@ -155,10 +182,10 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
     let mut lines = gutter::block(&[Line::from(header)], BULLET_MARK, marker_style, width);
 
     let indent = gutter::continuation(RESULT_MARK);
-    let push_result = |lines: &mut Vec<Line<'static>>, text: String, first: bool| {
+    let push_result = |lines: &mut Vec<Line<'static>>, text: String, first: bool, style: Style| {
         let mark = if first { RESULT_MARK } else { indent.as_str() };
         lines.extend(gutter::block(
-            &[Line::from(Span::styled(text, result_style))],
+            &[Line::from(Span::styled(text, style))],
             mark,
             result_style,
             width,
@@ -168,21 +195,24 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
     if details {
         if !entry.tool_args.is_empty() {
             for line in escape_plain_text(&args).split('\n') {
-                push_result(&mut lines, line.to_string(), false);
+                push_result(&mut lines, line.to_string(), false, result_style);
             }
         }
         if entry.tool_done {
             if let Some(label) = tool_outcome_label(entry) {
-                push_result(&mut lines, label.to_string(), true);
+                push_result(&mut lines, label.to_string(), true, result_style);
             }
-            for (index, line) in escape_plain_text(&entry.tool_output)
-                .split('\n')
-                .enumerate()
-            {
+            let diff = is_file_diff(entry);
+            for (index, line) in entry.tool_output.split('\n').enumerate() {
                 push_result(
                     &mut lines,
-                    line.to_string(),
+                    escape_plain_text(line),
                     tool_outcome_label(entry).is_none() && index == 0,
+                    if diff {
+                        diff_line_style(line, result_style)
+                    } else {
+                        result_style
+                    },
                 );
             }
         }
@@ -195,14 +225,26 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
     }
     let outcome_label = tool_outcome_label(entry);
     if let Some(label) = outcome_label {
-        push_result(&mut lines, label.to_string(), true);
+        push_result(&mut lines, label.to_string(), true, result_style);
     }
     if entry.tool_output.trim().is_empty() {
         push_result(
             &mut lines,
             "(no output)".to_string(),
             outcome_label.is_none(),
+            result_style,
         );
+        return lines;
+    }
+    if is_file_diff(entry) {
+        for (index, line) in entry.tool_output.lines().enumerate() {
+            push_result(
+                &mut lines,
+                escape_plain_text(line),
+                outcome_label.is_none() && index == 0,
+                diff_line_style(line, result_style),
+            );
+        }
         return lines;
     }
     let output: Vec<&str> = entry.tool_output.lines().collect();
@@ -211,12 +253,23 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
             &mut lines,
             preview(line),
             outcome_label.is_none() && index == 0,
+            result_style,
         );
     }
     match output.len().saturating_sub(TOOL_RESULT_LINES) {
         0 => {}
-        1 => push_result(&mut lines, "+1 line (ctrl+o)".to_string(), false),
-        more => push_result(&mut lines, format!("+{more} lines (ctrl+o)"), false),
+        1 => push_result(
+            &mut lines,
+            "+1 line (ctrl+o)".to_string(),
+            false,
+            result_style,
+        ),
+        more => push_result(
+            &mut lines,
+            format!("+{more} lines (ctrl+o)"),
+            false,
+            result_style,
+        ),
     }
     lines
 }
@@ -234,6 +287,7 @@ fn preview(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use otto_core::model::{Block, BlockType, Message, Role};
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
@@ -456,6 +510,84 @@ mod tests {
         let rows = rows(&rendered);
         assert_eq!(rows[0], "⏺ bash {\"command\":\"ls\"}");
         assert_eq!(rows[1], "  ⎿ one");
+    }
+
+    #[test]
+    fn successful_file_edits_show_colored_hunks_without_expanding_all_tools() {
+        let output = "edited src/main.rs\n@@ -1,2 +1,2 @@\n old\n-before\n+after\n note";
+        let rendered = entry_lines(&tool_entry("edit", "", output), false, 80);
+        let text = rows(&rendered);
+        assert!(text.iter().any(|line| line.contains("-before")), "{text:?}");
+        assert!(text.iter().any(|line| line.contains("+after")), "{text:?}");
+        let line_style = |needle: &str| {
+            rendered
+                .iter()
+                .find(|line| row_text(line).contains(needle))
+                .unwrap()
+                .spans
+                .last()
+                .unwrap()
+                .style
+                .fg
+        };
+        assert_eq!(line_style("@@ -1"), Some(Color::Cyan));
+        assert_eq!(line_style("-before"), Some(Color::Red));
+        assert_eq!(line_style("+after"), Some(Color::Green));
+
+        let write = entry_lines(
+            &tool_entry("write", "", "wrote x (2 bytes)\n@@ -0,0 +1,1 @@\n+x"),
+            false,
+            80,
+        );
+        assert!(rows(&write).iter().any(|line| line.contains("+x")));
+    }
+
+    #[test]
+    fn a_resumed_write_keeps_its_recorded_diff() {
+        let history = [
+            Message {
+                role: Role::Assistant,
+                blocks: vec![Block {
+                    block_type: BlockType::ToolCall,
+                    tool_call_id: "call-1".into(),
+                    tool_name: "write".into(),
+                    ..Block::default()
+                }],
+                ..Message::default()
+            },
+            Message {
+                role: Role::Tool,
+                blocks: vec![Block {
+                    block_type: BlockType::ToolResult,
+                    tool_call_id: "call-1".into(),
+                    tool_name: "write".into(),
+                    text: "wrote x (2 bytes)\n@@ -0,0 +1,1 @@\n+x".into(),
+                    ..Block::default()
+                }],
+                ..Message::default()
+            },
+        ];
+        let (entries, _) = super::super::entries::entries_from_history(&history);
+        let rendered = lines(&entries, false, 80);
+        assert!(rows(&rendered).iter().any(|line| line.contains("+x")));
+    }
+
+    #[test]
+    fn failed_edits_keep_the_usual_fold_and_diff_text_escapes_controls() {
+        let mut failed = tool_entry("edit", "", "edit failed\nline 2\nline 3\nline 4");
+        failed.tool_error = true;
+        let failed_rows = rows(&entry_lines(&failed, false, 80));
+        assert!(
+            failed_rows
+                .iter()
+                .any(|line| line.contains("+1 line (ctrl+o)"))
+        );
+
+        let output = "edited x\n@@ -1,1 +1,1 @@\n-old\n+new\u{1b}[31m";
+        let rendered = entry_lines(&tool_entry("edit", "", output), false, 80);
+        let joined = rows(&rendered).join("\n");
+        assert!(joined.contains(r"\x1b"), "{joined}");
+        assert!(!joined.contains('\u{1b}'), "{joined}");
     }
 
     #[test]

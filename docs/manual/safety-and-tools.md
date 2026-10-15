@@ -249,7 +249,10 @@ canonical workspace, even when `--sandbox off` is selected:
 - `ls` lists one directory level in sorted order; directories end in `/` and
   symlinks in `@`.
 - `write` writes a complete file atomically and syncs the file and its
-  directory to disk before it reports success.
+  directory to disk before it reports success. Its result includes a bounded
+  text diff for new files and readable existing files up to 1 MiB. If the old
+  file is binary, larger, or unreadable, the write still succeeds and the
+  result explains why the diff is unavailable.
 - `edit` replaces one or more unique text matches and shares the 64 MiB size
   limit with `read`. Choose one argument form: `path`, `old_text`, and
   `new_text` for a single replacement (omit `edits`), or `path` and `edits`

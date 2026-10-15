@@ -99,6 +99,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- The terminal UI now shows colored inline diffs for successful `edit` and
+  `write` calls. `write` records a bounded diff in the tool result, so resumed
+  and attached sessions show the same change.
+  ([#481](https://github.com/baiyuqing/otto/pull/481))
+
 - `/trace` opens a panel with the timeline of a turn: provider requests,
   tool calls, compactions and sub-agents as a tree with durations and bars
   on a time axis, plus attempts, retries, time to first output, token usage

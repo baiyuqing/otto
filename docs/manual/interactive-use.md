@@ -130,6 +130,11 @@ capability.
   `+N lines (ctrl+o)` count for the rest. A call still running shows no result
   line, and one that finished with none says `(no output)`. `Ctrl+O` shows the
   call id, the arguments, and the output in full, and toggles back.
+- Successful built-in `edit` and `write` calls show their bounded text diff
+  inline, with green additions, red removals, and cyan hunk headers. The same
+  diff appears when a session is resumed or its TUI is attached to `otto serve`.
+  Other tools and failed file edits keep the usual folded preview. `Ctrl+O`
+  also shows the call arguments and full recorded result.
 - The composer keeps a prompt history: `↑`/`↓` walk back and forth through the
   lines already submitted, and `↓` past the newest one restores what was being
   typed. It starts from the prompts the session already had, so a resumed

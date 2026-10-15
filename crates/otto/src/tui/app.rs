@@ -2162,6 +2162,57 @@ mod tests {
         );
     }
     #[test]
+    fn sandbox_exclude_dispatch_and_completion_stay_inline_on_success_and_failure() {
+        for succeeds in [true, false] {
+            let (mut app, remote) = app();
+            app.attached = false;
+            app.dispatch_line(
+                "/sandbox exclude 'gh *'",
+                &Backend::Attach(&remote),
+                &CancellationToken::new(),
+            );
+            assert!(
+                !app.has_surface(),
+                "explicit exclusion must not push a modal"
+            );
+            let (ticket, request) = app.requests.last().unwrap();
+            assert_eq!(ticket.surface, 0);
+            assert!(
+                matches!(request, Request::Command(backend::Command::SandboxExclude(entry)) if entry == "gh *")
+            );
+            let ticket = ticket.clone();
+            let message = if succeeds {
+                "Saved excluded command gh * and reloaded immediately"
+            } else {
+                "configuration is invalid; no changes made"
+            };
+            let result = if succeeds {
+                Ok(Reply::Operation {
+                    message: message.into(),
+                    info: app.info.clone(),
+                    history: None,
+                    prompt: Some("retry it now".into()),
+                })
+            } else {
+                Err(message.into())
+            };
+            app.apply_completion(Completion {
+                mutation: true,
+                ticket,
+                result,
+            });
+            assert!(!app.has_surface());
+            assert!(!app.has_writes());
+            assert!(app.entries.iter().any(|entry| entry.raw == message));
+            let actions = app.drain_actions();
+            assert_eq!(
+                actions.contains(&Action::Prompt("retry it now".into())),
+                succeeds
+            );
+        }
+    }
+
+    #[test]
     fn reviewing_approval_never_opens_an_approval_surface() {
         let (mut app, _) = app();
         let mut request = approval("reviewing");

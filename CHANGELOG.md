@@ -154,6 +154,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- Explicit `/sandbox exclude <entry>` in the terminal UI now reports success
+  and errors inline instead of opening a result dialog that needs dismissal.
+  Feedback identifies the persisted rule and immediate reload; duplicate rules
+  remain deduplicated, and permission approvals are unchanged.
+
 - Turns now stop unchanged failed cycles of 2–4 tool calls under the existing
   repetition limit, including rejected edits alternating with unchanged reads.
   Changed results break a cycle, and possible mutations reset cycle tracking.

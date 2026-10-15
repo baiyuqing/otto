@@ -1070,9 +1070,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let is_error = execution.result.is_error;
         // Observed here because this is the only point that knows both the
         // arguments the model sent and whether the result failed.
-        state
-            .progress
-            .observe(&block.tool_name, arguments.get(), is_error);
+        if self.options.hooks.is_some() {
+            // Hook effects are not described by the tool's retry safety.
+            state
+                .progress
+                .observe(&block.tool_name, arguments.get(), is_error);
+        } else {
+            state.progress.observe_execution(
+                &block.tool_name,
+                arguments.get(),
+                &execution,
+                self.tools.retry_safety(&block.tool_name),
+            );
+        }
         let terminal = OperationFact::terminal(
             operation_id.clone(),
             attempt,

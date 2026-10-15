@@ -2487,13 +2487,13 @@ impl Controller {
         attach_runner(&self.builder, session, runtime).await
     }
 
-    /// The resume path: pin the named file, activate it, and build a runner
-    /// for the runtime its header records.
+    /// Resume conversation state without replacing the process's active selection.
     async fn resumed_replacement(&self, path: &Path) -> Result<(Current, Vec<String>), String> {
         if !self.dynamic_content {
             return Err(PERSISTENCE_DISABLED.to_string());
         }
-        open_current(&self.builder, path).await
+        let runtime = self.current_runtime()?;
+        open_current(&self.builder, path, &runtime).await
     }
 
     /// Installs the replacement and closes what it displaced. A close that
@@ -2538,7 +2538,8 @@ impl Controller {
     /// A controller over the session file at `path`, with the repair warnings
     /// activating it produced.
     pub async fn open(builder: Arc<Builder>, path: &Path) -> Result<(Self, Vec<String>), String> {
-        let (current, warnings) = open_current(&builder, path).await?;
+        let runtime = crate::runtime::startup::initial_runtime(&builder, None)?;
+        let (current, warnings) = open_current(&builder, path, &runtime).await?;
         Ok((Self::from_current(builder, current), warnings))
     }
 
@@ -2607,11 +2608,11 @@ async fn attach_runner(
     ))
 }
 
-/// Pins the session file at `path`, activates it, and builds a runner for the
-/// runtime its header records.
+/// Pins and activates conversation history using the caller's active runtime.
 async fn open_current(
     builder: &Arc<Builder>,
     path: &Path,
+    runtime: &Runtime,
 ) -> Result<(Current, Vec<String>), String> {
     let create_lease = builder
         .create_lease()
@@ -2637,22 +2638,9 @@ async fn open_current(
     .await
     .map_err(|error| format!("session open task panicked: {error}"))?
     .map_err(|error| builder.redact_error(&error.to_string(), None))?;
-    let info = prepared.info();
-    let metadata = RuntimeMetadata {
-        profile: info.profile.clone(),
-        provider: info.provider.clone(),
-        model: info.model.clone(),
-    };
-    let session_thinking = prepared.info().thinking.clone();
-    let mut runtime = match resolve_replacement(builder, &metadata) {
-        Ok(runtime) => runtime,
-        Err(message) => {
-            let _ = prepared.close();
-            return Err(message);
-        }
-    };
-    if !session_thinking.is_empty() {
-        runtime.thinking = session_thinking;
+    if !builder.boundary_allows_dynamic(Some(runtime)) {
+        let _ = prepared.close();
+        return Err(SESSION_OPERATION_UNAVAILABLE.to_string());
     }
     let prepared = prepared.with_replayable(crate::tool::safety::is_replayable);
     let (session, warnings) = tokio::task::spawn_blocking(move || prepared.activate())
@@ -3451,7 +3439,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resuming_a_session_keeps_the_session_thinking_level() {
+    async fn resume_keeps_process_selection_and_appends_without_rewriting_history() {
+        use crate::runtime::builder::TEST_PROVIDERS;
+        use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any};
+        struct ProviderGuard(String);
+        impl Drop for ProviderGuard {
+            fn drop(&mut self) {
+                TEST_PROVIDERS
+                    .lock()
+                    .unwrap()
+                    .retain(|(home, _)| home != &self.0);
+            }
+        }
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let home = workspace.path().to_string_lossy().into_owned();
+        TEST_PROVIDERS
+            .lock()
+            .unwrap()
+            .push((home.clone(), provider.clone()));
+        let _provider_guard = ProviderGuard(home);
+        let controller = controller(workspace.path(), sessions.path()).await;
+        controller.set_thinking("low").await.unwrap();
+        controller
+            .prompt("hello", &mut |_| {}, &CancellationToken::new())
+            .await
+            .unwrap();
+        let first = controller.info();
+        controller.new_session().await.unwrap();
+        controller.switch_profile("beta").await.unwrap();
+        controller.set_thinking("high").await.unwrap();
+        let selected = controller.info();
+        let original = std::fs::read(&first.session_path).unwrap();
+
+        controller
+            .resume_session(&first.session_path)
+            .await
+            .unwrap();
+
+        let resumed = controller.info();
+        assert_eq!(resumed.session_id, first.session_id);
+        assert_eq!(resumed.profile, selected.profile);
+        assert_eq!(resumed.provider, selected.provider);
+        assert_eq!(resumed.model, selected.model);
+        assert_eq!(resumed.thinking, selected.thinking);
+        assert_eq!(controller.history().len(), 2);
+        let appended = std::fs::read(&first.session_path).unwrap();
+        assert!(
+            appended.starts_with(&original),
+            "history must remain append-only"
+        );
+        assert!(
+            appended.len() > original.len(),
+            "active provenance is appended"
+        );
+        controller
+            .prompt("continue", &mut |_| {}, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(provider.requests().last().unwrap().model, selected.model);
+        let records = std::fs::read_to_string(&first.session_path).unwrap();
+        let records: Vec<serde_json::Value> = records
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let assistant = records
+            .iter()
+            .rev()
+            .find(|record| record["message"]["role"] == "assistant")
+            .expect("persisted assistant response");
+        assert_eq!(assistant["message"]["model"], selected.model);
+        assert_eq!(assistant["message"]["provider"], selected.provider);
+        let historical = records
+            .iter()
+            .find(|record| record["message"]["role"] == "assistant")
+            .unwrap();
+        assert_eq!(historical["message"]["model"], first.model);
+        assert_eq!(historical["message"]["provider"], first.provider);
+        let requests = provider.requests();
+        assert_eq!(requests[0].model, first.model);
+        assert_eq!(requests[0].thinking, "low");
+        assert_eq!(requests[1].thinking, "high");
+        controller.set_thinking("unset").await.unwrap();
+        controller.new_session().await.unwrap();
+        assert_eq!(controller.info().model, selected.model);
+        assert_eq!(controller.info().thinking, "");
+        controller
+            .resume_session(&first.session_path)
+            .await
+            .unwrap();
+        assert_eq!(controller.info().model, selected.model);
+        assert_eq!(controller.info().thinking, "");
+    }
+
+    #[tokio::test]
+    async fn opening_a_session_uses_config_instead_of_historical_selection() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = controller(workspace.path(), sessions.path()).await;
@@ -3461,6 +3545,7 @@ mod tests {
             .await
             .expect("append");
 
+        controller.switch_profile("beta").await.expect("switch");
         controller.set_thinking("high").await.expect("thinking");
         let path = controller.info().session_path;
         assert!(!path.is_empty());
@@ -3472,7 +3557,9 @@ mod tests {
             .expect("open");
 
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(reopened.info().thinking, "high");
+        assert_eq!(reopened.info().profile, "alpha");
+        assert_eq!(reopened.info().model, "gpt-alpha");
+        assert_eq!(reopened.info().thinking, "");
     }
 
     #[tokio::test]

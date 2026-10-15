@@ -316,7 +316,9 @@ fn rename(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     if args.is_empty() {
         push(Rename)
     } else {
-        command("Rename", Command::Rename(args.into()))
+        Ok(Transition::Request(Request::Command(Command::Rename(
+            args.into(),
+        ))))
     }
 }
 fn compact(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {

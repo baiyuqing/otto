@@ -35,7 +35,7 @@ the runtime, session history, and default memory storage.
 
 ## Install from source
 
-Requires the pinned **Rust 1.98** toolchain (`rustup toolchain install` picks
+Requires the pinned **Rust 1.99** toolchain (`rustup toolchain install` picks
 it up from `rust-toolchain.toml`), **Go** (version pinned in `chat-connector/go.mod`), and access
 to one of the two providers. **macOS** is the supported platform: it is the
 only one with a sandbox, and the only one the acceptance gate runs on. Otto

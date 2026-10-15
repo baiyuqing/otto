@@ -54,7 +54,7 @@ require the third-party arm64e support introduced in macOS 26. Select
 `/Library/Developer/CommandLineTools` with `xcode-select` so Git and Clang use
 the existing reviewed developer read root.
 
-`rust-toolchain.toml` pins the exact channel (1.98.0) and the
+`rust-toolchain.toml` pins the exact channel (1.99.0) and the
 `wasm32-unknown-unknown` target; `rustup toolchain install` in a repository
 checkout installs that toolchain without asking. Workspace dependencies in
 `Cargo.toml` are exact-pinned (`=x.y.z`), so `cargo update` never silently

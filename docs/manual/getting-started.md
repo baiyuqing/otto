@@ -7,7 +7,7 @@ Previous: — · [Documentation index](../README.md) · Next: [Interactive use](
 - macOS, the supported platform: it is the only one with a sandbox, and the
   only one the acceptance gate runs on. Otto also builds and runs on Linux;
   see [platform support](getting-started.md#platform-support).
-- The pinned Rust 1.98 toolchain and Go to build and install from source (see
+- The pinned Rust 1.99 toolchain and Go to build and install from source (see
   [Install from source](../../README.md#install-from-source)). Node and `wasm-pack`
   are needed only for optional browser/WASM development and related checks.
 - One of:

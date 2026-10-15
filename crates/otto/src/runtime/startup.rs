@@ -1096,8 +1096,8 @@ pub(crate) fn compose(
     })
 }
 
-/// The runtime the initial session uses: the resumed session's metadata when
-/// there is one, else the configured profile.
+/// The process runtime from CLI, environment and configuration, independent of
+/// the conversation history being resumed.
 pub(crate) fn initial_runtime(
     builder: &Builder,
     metadata: Option<&RuntimeMetadata>,

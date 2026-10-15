@@ -270,6 +270,36 @@ fn agent_collection_selection_tracks_the_row_id_after_refresh_reorders_rows() {
 }
 
 #[test]
+fn sandbox_exclude_runs_inline_but_read_grants_still_require_confirmation() {
+    let catalog = Catalog::default();
+    for entry in ["gh *", "'gh *'", "\"gh *\""] {
+        assert!(matches!(
+            catalog.open(&format!("/sandbox exclude {entry}"), &Info::default(), false).unwrap(),
+            Transition::Request(BackendRequest::Command(Command::SandboxExclude(value)))
+                if value == "gh *"
+        ));
+    }
+    assert!(matches!(
+        catalog
+            .open("/sandbox allow /tmp", &Info::default(), false)
+            .unwrap(),
+        Transition::Push(_)
+    ));
+    assert!(
+        catalog
+            .open("/sandbox exclude ''", &Info::default(), false)
+            .is_err()
+    );
+    assert!(
+        catalog
+            .open("/sandbox exclude 'gh *'", &Info::default(), true)
+            .err()
+            .unwrap()
+            .contains("not available with --attach")
+    );
+}
+
+#[test]
 fn rename_with_a_name_runs_without_opening_a_result_panel() {
     let catalog = Catalog::default();
     assert!(matches!(

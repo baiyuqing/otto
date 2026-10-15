@@ -236,8 +236,8 @@ Turns:
   accepts it for the next safe provider boundary without interrupting a tool or
   silently creating a later turn. The pinned banner above the composer then
   shows `◆ QUEUED FOR CURRENT TURN …`. `Ctrl+U` recalls undelivered guidance
-  into an empty composer for editing after the runtime confirms withdrawal;
-  `/inputs withdraw <id>` only withdraws it. Guidance that wins the race and is
+  into an empty composer for editing after the runtime confirms withdrawal.
+  Guidance that wins the race and is
   delivered is not restored, and a new draft is never overwritten. An
   interrupted turn that never delivered it is
   reported with the text. If the turn has just ended, the text becomes
@@ -262,7 +262,7 @@ Turns:
 Commands available while attached: `/help`, `/init`, `/session`, `/new`,
 `/clear`, `/resume` (the sessions of the workspace), `/fork`, `/plan`, `/rename`, `/compact`,
 `/image`, `/context`, `/trace`, `/agents`, `/auto [manual|auto|yolo]`, `/permissions`, `/sandbox`, `/sandbox reload`,
-`/approve [<id>]`, `/steer`, `/inputs`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
+`/approve [<id>]`, `/steer`, `/reflect list`, `/reflect show <id>`, and `/exit`. Every other command prints
 `/<command>: not available with --attach` and does nothing: `/model`,
 `/thinking`, `/archive`, `/reflect`, `/memory`, `/remember`, `/skill`,
 `/tasks`, `/task`, `/timers`, `/mcp`, `/login`, `/logout`,
@@ -454,11 +454,10 @@ TUI-only commands:
   answers `there is no active task accepting guidance`, and while an approval is
   pending it refuses. The pinned banner above the composer then shows `◆ QUEUED
   FOR CURRENT TURN …`.
-- `/inputs` shows the active run's guidance with its message id and status
-  (`queued`, `delivered`, `withdrawn`, or `discarded`); `/inputs withdraw <id>`
-  withdraws one still-queued item, and `Ctrl+U` withdraws the newest one.
-  Delivered guidance is session history and cannot be withdrawn. The same list
-  is available over HTTP (see [HTTP API](servers-and-connectors.md#http-api)) as
+  `Ctrl+U` recalls the newest still-queued guidance into an empty composer after
+  withdrawal is confirmed. Delivered guidance is session history and cannot be
+  withdrawn. Guidance state remains available over HTTP (see
+  [HTTP API](servers-and-connectors.md#http-api)) as
   `GET /v1/sessions/{id}/tasks/steer`.
 - `/context` opens a centered panel that lists what the next provider request contains:
   the system prompt parts (base, environment, workspace instructions, skills,
@@ -646,7 +645,7 @@ Notes:
   unreadable file is renamed to `<session-id>.inbox.json.corrupt-<seconds>`
   with a warning on standard error. `--no-session` keeps notifications in
   memory only.
-- **Guidance for a running turn** (steering from the TUI, `/steer`, `/inputs`,
+- **Guidance for a running turn** (steering from the TUI, `/steer`,
   `/tasks/steer`, or ACP) is also written to `<session-id>.inputs.json`
   until it is delivered. Delivery, withdrawal, and every way a turn ends
   remove it. When the Otto process stops during the turn, the turn that

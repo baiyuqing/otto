@@ -622,7 +622,8 @@ Key points:
 - `[agent].no_progress_repeats` (default `8`) and
   `[agent].no_progress_failures` (default `12`) stop a turn that makes no
   progress, for every turn including each sub-agent's. `0` disables one
-  condition and must be between `0` and `1000`. See
+  condition and values must be between `0` and `1000`. The repetition limit
+  also counts unchanged failed cycles of 2–4 calls. See
   [Stopping a turn that makes no progress](safety-and-tools.md#stopping-a-turn-that-makes-no-progress).
 - ChatGPT connection/send/body failures, HTTP 429/500/502/503/504 responses,
   a clean stream close before its terminal event, and stream errors classified

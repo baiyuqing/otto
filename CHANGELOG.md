@@ -53,9 +53,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - Turns from a Telegram or Feishu chat and every turn of an `otto --prompt`
   run now stop after `[agent].unattended_turn_timeout`, default `30m`,
   counted per prompt step. Previously these turns had no time limit unless
-  `turn_timeout` was set; a cycle between different tool calls, which the
-  no-progress guard does not stop, ran until the process was killed. When both
-  are set, the earlier of `turn_timeout` and `unattended_turn_timeout` applies.
+  `turn_timeout` was set; alternating tool-call cycles could run until the
+  process was killed. When both are set, the earlier of `turn_timeout` and
+  `unattended_turn_timeout` applies.
   Set `unattended_turn_timeout = "0"` to restore the previous behavior. TUI,
   REPL, web UI and editor ACP turns are unchanged. See
   [configuration](docs/manual/getting-started.md#configuration).
@@ -148,6 +148,14 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 
 ### Fixes
+
+- Turns now stop unchanged failed cycles of 2–4 tool calls under the existing
+  repetition limit, including rejected edits alternating with unchanged reads.
+  Changed results break a cycle, and possible mutations reset cycle tracking.
+  Compaction now asks for relevant, sourced observations and permits removing
+  duplicate, superseded and resolved transient observations while retaining
+  the full append-only session history.
+  ([#480](https://github.com/baiyuqing/otto/pull/480))
 
 - A provider stream that keeps sending bytes without model output now ends
   the attempt after 120 s on `chatgpt` and 300 s on `openai-compatible`.

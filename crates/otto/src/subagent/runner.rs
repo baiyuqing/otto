@@ -533,6 +533,14 @@ impl ToolExecutor for ChildTools {
         definitions
     }
 
+    fn retry_safety(&self, name: &str) -> otto_core::model::RetrySafety {
+        if self.permits(name) {
+            self.registry.retry_safety(name)
+        } else {
+            otto_core::model::RetrySafety::NonIdempotent
+        }
+    }
+
     fn batch_control(
         &self,
         name: &str,
@@ -2226,6 +2234,25 @@ mod tests {
             max_output_bytes: 16384,
             reports_left: Arc::new(AtomicUsize::new(budget)),
         }
+    }
+
+    #[test]
+    fn child_tools_preserve_retry_safety_only_for_allowed_registry_tools() {
+        use otto_core::model::RetrySafety;
+
+        let registry = Arc::new(Registry::new(vec![stub("read"), stub("edit")]).unwrap());
+        let mut tools = child_tools(
+            registry,
+            WritePolicy::SingleWriter,
+            Vec::new(),
+            Arc::new(Inbox::new(None)),
+        );
+        assert_eq!(tools.retry_safety("read"), RetrySafety::ReadOnly);
+        for name in ["edit", "agent_report", "missing"] {
+            assert_eq!(tools.retry_safety(name), RetrySafety::NonIdempotent);
+        }
+        tools.allowed = Some(["edit".into()].into());
+        assert_eq!(tools.retry_safety("read"), RetrySafety::NonIdempotent);
     }
 
     async fn execute_child(tools: &ChildTools, name: &str, arguments: &str) -> ToolExecution {

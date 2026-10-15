@@ -2,9 +2,9 @@
 //!
 //! A turn whose model keeps issuing the same tool call, or keeps receiving tool
 //! errors, is making no progress and would otherwise run until a deadline that
-//! may be disabled. The guard watches the previous call only, so its memory is
-//! constant for stall detection. A separate bounded advisory tracks single
-//! edits to at most 128 files per turn.
+//! may be disabled. The guard keeps at most four result fingerprints to detect
+//! short failed cycles as well as consecutive calls/errors. A separate bounded
+//! advisory tracks single edits to at most 128 files per turn.
 //!
 //! Ownership: a [`ProgressGuard`] lives in
 //! [`super::overflow::RunDispatchState`], which one `Agent::run` call owns and
@@ -12,19 +12,25 @@
 //! one, including each sub-agent's, so the parent loop and its children stop
 //! under the same rule.
 //!
-//! Limitations: the guard detects *consecutive* conditions only. An alternating
-//! cycle such as `read`, `grep`, `read`, `grep`, ... never repeats a
-//! fingerprint twice in a row and is not detected; the parent observes that
-//! case through status snapshots; dependent-only waiting uses an explicit yield.
+//! Limitations: cycles longer than four calls and successful-only cycles are
+//! not detected. Cycle tracking resets when an operation may have changed
+//! state; result changes break a match. The agent uses consecutive checks only
+//! when hooks are configured, since hook effects are not covered by tool safety.
+//! Dependent-only waiting uses an explicit yield.
 //! Unchanged counters alone do not establish that a task is stalled.
 
-use std::collections::{BTreeMap, hash_map::DefaultHasher};
+use std::collections::{BTreeMap, VecDeque, hash_map::DefaultHasher};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use serde_json::Value;
 
-/// Default number of identical consecutive tool calls that stops a turn.
+use crate::model::{EffectCertainty, RetrySafety};
+use crate::tool::ToolExecution;
+
+const MAX_CYCLE_LENGTH: usize = 4;
+
+/// Default repetitions of identical calls or unchanged failed short cycles.
 pub const DEFAULT_REPEATED_CALLS: u32 = 8;
 /// Default number of consecutive failed tool results that stops a turn.
 pub const DEFAULT_CONSECUTIVE_FAILURES: u32 = 12;
@@ -34,8 +40,8 @@ pub const DEFAULT_CONSECUTIVE_FAILURES: u32 = 12;
 /// Zero disables one condition; a policy with both at zero never stops a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressPolicy {
-    /// Identical consecutive tool calls, with identical arguments, that stop
-    /// the turn.
+    /// Identical consecutive tool calls, or unchanged failed 2–4-call cycles,
+    /// that stop the turn after this many repetitions.
     pub repeated_calls: u32,
     /// Consecutive failed tool results that stop the turn.
     pub consecutive_failures: u32,
@@ -72,6 +78,8 @@ pub enum StallKind {
     RepeatedCall,
     /// Tool results failed in a row.
     RepeatedFailure,
+    /// A short cycle with a failure and unchanged calls and results.
+    RepeatedCycle,
 }
 
 impl StallKind {
@@ -80,6 +88,7 @@ impl StallKind {
         match self {
             Self::RepeatedCall => "repeated_call",
             Self::RepeatedFailure => "repeated_failure",
+            Self::RepeatedCycle => "repeated_cycle",
         }
     }
 }
@@ -93,7 +102,7 @@ pub struct Stall {
     pub kind: StallKind,
     /// The tool of the last call.
     pub tool: String,
-    /// How many calls repeated, or how many results failed in a row.
+    /// Repeated calls, consecutive failures, or cycle repetitions.
     pub count: u32,
 }
 
@@ -110,11 +119,16 @@ impl fmt::Display for Stall {
                 "{} tool calls in a row failed (last: {})",
                 self.count, self.tool
             ),
+            StallKind::RepeatedCycle => write!(
+                formatter,
+                "a tool-call cycle repeated {} times without progress (last: {})",
+                self.count, self.tool
+            ),
         }
     }
 }
 
-/// Counts consecutive identical calls and consecutive failures.
+/// Counts consecutive identical calls, failures, and short unchanged cycles.
 #[derive(Debug, Default)]
 pub struct ProgressGuard {
     policy: ProgressPolicy,
@@ -127,6 +141,8 @@ pub struct ProgressGuard {
     /// The first stall this turn hit. A stall is not undone by a later call,
     /// because the turn ends as soon as the caller reads it.
     pending: Option<Stall>,
+    recent_results: VecDeque<(u64, bool)>,
+    cycle_matches: [u32; MAX_CYCLE_LENGTH - 1],
     edits: BTreeMap<String, EditCount>,
 }
 
@@ -188,6 +204,74 @@ impl ProgressGuard {
             self.pending = crossed.clone();
         }
         crossed
+    }
+
+    /// Also compares results for short cycles. Only read-only operations and
+    /// operations known not to have started can participate: a mutation or an
+    /// uncertain effect may represent progress even when its output repeats.
+    pub fn observe_execution(
+        &mut self,
+        tool: &str,
+        arguments: &str,
+        execution: &ToolExecution,
+        safety: RetrySafety,
+    ) -> Option<Stall> {
+        let consecutive = self.observe(tool, arguments, execution.result.is_error);
+        if self.policy.repeated_calls == 0
+            || execution.outcome.effect_certainty == EffectCertainty::Unknown
+            || (safety != RetrySafety::ReadOnly
+                && execution.outcome.effect_certainty != EffectCertainty::NotStarted)
+        {
+            self.recent_results.clear();
+            self.cycle_matches.fill(0);
+            return consecutive;
+        }
+
+        let mut hasher = DefaultHasher::new();
+        fingerprint(tool, arguments).hash(&mut hasher);
+        execution.result.content.hash(&mut hasher);
+        execution.result.is_error.hash(&mut hasher);
+        let observation = (hasher.finish(), execution.result.is_error);
+        for period in 2..=MAX_CYCLE_LENGTH {
+            let matches = &mut self.cycle_matches[period - 2];
+            let previous = self
+                .recent_results
+                .len()
+                .checked_sub(period)
+                .and_then(|index| self.recent_results.get(index));
+            *matches = if previous == Some(&observation) {
+                matches.saturating_add(1)
+            } else {
+                0
+            };
+        }
+        self.recent_results.push_back(observation);
+        if self.recent_results.len() > MAX_CYCLE_LENGTH {
+            self.recent_results.pop_front();
+        }
+        if consecutive.is_some() {
+            return consecutive;
+        }
+        for period in 2..=MAX_CYCLE_LENGTH {
+            let repetitions = self.cycle_matches[period - 2] / period as u32 + 1;
+            if repetitions >= self.policy.repeated_calls.max(2)
+                && self
+                    .recent_results
+                    .iter()
+                    .rev()
+                    .take(period)
+                    .any(|(_, is_error)| *is_error)
+            {
+                let stall = Stall {
+                    kind: StallKind::RepeatedCycle,
+                    tool: tool.into(),
+                    count: repetitions,
+                };
+                self.pending.get_or_insert_with(|| stall.clone());
+                return Some(stall);
+            }
+        }
+        None
     }
 
     /// A one-time advisory per file after three successful single replacements.
@@ -314,6 +398,128 @@ fn push_json_string(text: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn result(content: &str, is_error: bool) -> ToolExecution {
+        let mut execution = ToolExecution::completed(crate::tool::ToolResult {
+            content: content.into(),
+            is_error,
+            ..crate::tool::ToolResult::default()
+        });
+        if is_error {
+            execution.outcome.effect_certainty = EffectCertainty::NotStarted;
+        }
+        execution
+    }
+
+    #[test]
+    fn unchanged_failed_cycles_stop_after_the_configured_repetitions() {
+        for period in 2..=MAX_CYCLE_LENGTH {
+            let mut guard = ProgressGuard::new(ProgressPolicy {
+                repeated_calls: 3,
+                consecutive_failures: 12,
+            });
+            for index in 0..period * 3 {
+                let position = index % period;
+                let execution = result("unchanged", position == 0);
+                let stall = guard.observe_execution(
+                    if position == 0 { "edit" } else { "read" },
+                    &format!(r#"{{"position":{position}}}"#),
+                    &execution,
+                    if position == 0 {
+                        RetrySafety::NonIdempotent
+                    } else {
+                        RetrySafety::ReadOnly
+                    },
+                );
+                if index + 1 == period * 3 {
+                    let stall = stall.expect("the unchanged failed cycle must stop");
+                    assert_eq!(stall.kind, StallKind::RepeatedCycle);
+                    assert_eq!(stall.count, 3);
+                    assert_eq!(guard.take_stall(), Some(stall));
+                } else {
+                    assert!(stall.is_none(), "period {period}, call {index}: {stall:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changing_results_and_successful_cycles_do_not_count_as_failed_cycles() {
+        for changed_position in [Some(0), Some(1), None] {
+            let mut guard = ProgressGuard::default();
+            for index in 0..100 {
+                let position = index % 2;
+                let content = if changed_position == Some(position) {
+                    format!("revision {}", index / 2)
+                } else {
+                    "unchanged".into()
+                };
+                let execution = result(&content, changed_position.is_some() && position == 0);
+                assert!(
+                    guard
+                        .observe_execution(
+                            "read",
+                            &format!(r#"{{"position":{position}}}"#),
+                            &execution,
+                            RetrySafety::ReadOnly,
+                        )
+                        .is_none()
+                );
+                assert!(guard.recent_results.len() <= MAX_CYCLE_LENGTH);
+            }
+        }
+    }
+
+    #[test]
+    fn possible_mutations_reset_cycle_tracking() {
+        for (is_error, certainty) in [
+            (false, EffectCertainty::Completed),
+            (true, EffectCertainty::Completed),
+            (true, EffectCertainty::Unknown),
+        ] {
+            let mut guard = ProgressGuard::default();
+            for _ in 0..20 {
+                assert!(
+                    guard
+                        .observe_execution(
+                            "read",
+                            "{}",
+                            &result("same", false),
+                            RetrySafety::ReadOnly
+                        )
+                        .is_none()
+                );
+                let mut execution = result("same", is_error);
+                execution.outcome.effect_certainty = certainty;
+                assert!(
+                    guard
+                        .observe_execution("bash", "{}", &execution, RetrySafety::NonIdempotent)
+                        .is_none()
+                );
+                assert!(guard.recent_results.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cycles_respect_the_disabled_repetition_limit() {
+        let mut guard = ProgressGuard::new(ProgressPolicy {
+            repeated_calls: 0,
+            consecutive_failures: 12,
+        });
+        for index in 0..100 {
+            assert!(
+                guard
+                    .observe_execution(
+                        "read",
+                        &format!(r#"{{"position":{}}}"#, index % 2),
+                        &result("same", index % 2 == 0),
+                        RetrySafety::ReadOnly,
+                    )
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn repeated_single_edits_warn_once_without_rejecting_or_counting_failures() {

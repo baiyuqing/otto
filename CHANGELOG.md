@@ -17,6 +17,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- In the terminal UI, `/rename <name>` now returns directly to the composer
+  after a successful rename instead of opening an empty result panel. Bare
+  `/rename` still opens the rename form.
+
 - Agents can now submit `passed`, `failed`, `blocked`, `not_run` or
   `inconclusive` verification verdicts against prior tool results. Otto checks
   that cited evidence is durably recorded, terminal and structurally

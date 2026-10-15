@@ -155,6 +155,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   Compaction now asks for relevant, sourced observations and permits removing
   duplicate, superseded and resolved transient observations while retaining
   the full append-only session history.
+  ([#480](https://github.com/baiyuqing/otto/pull/480))
 
 - A provider stream that keeps sending bytes without model output now ends
   the attempt after 120 s on `chatgpt` and 300 s on `openai-compatible`.

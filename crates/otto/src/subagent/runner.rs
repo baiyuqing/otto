@@ -593,7 +593,7 @@ impl ToolExecutor for ChildTools {
             }
             if self
                 .reports_left
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_err()
             {
                 return local(

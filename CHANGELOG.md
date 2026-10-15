@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- The TUI no longer recognizes or lists `/inputs` or `/inputs withdraw <id>`.
+  Use ordinary text during an active turn or `/steer` for guidance, and `Ctrl+U`
+  to recall queued guidance for editing. The composer banner and HTTP guidance
+  APIs are unchanged. See [interactive use](docs/manual/interactive-use.md).
+
 - Resuming a session no longer replaces the current profile, model or reasoning
   effort with historical session settings. In-process `/resume` keeps the
   current selection; startup `--resume` and `--continue` use the resolved

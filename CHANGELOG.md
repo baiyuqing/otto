@@ -222,6 +222,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Build and CI
 
+- Pin local and Docker builds to Rust 1.99.0, the current stable toolchain.
+  Source-install instructions use the same version.
+  ([#482](https://github.com/baiyuqing/otto/pull/482))
+
 - `otto --version` reports the current commit when checkouts share a target
   directory. The build script ran `git` in the `CARGO_MANIFEST_DIR` captured
   when the script was compiled; Cargo reused that compiled script in other

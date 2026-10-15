@@ -17,6 +17,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Resuming a session no longer replaces the current profile, model or reasoning
+  effort with historical session settings. In-process `/resume` keeps the
+  current selection; startup `--resume` and `--continue` use the resolved
+  configuration and command-line overrides. Historical model records remain
+  available for tracing.
+
 - When `TYPESAFE_API_KEY` is configured, automatic reflection now asks the
   auxiliary decision backend whether to run immediately or retain evidence for
   a later trigger. Manual and model-requested reflection bypass this scheduling

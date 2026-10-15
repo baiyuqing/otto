@@ -54,6 +54,7 @@ Older external links to `user-manual.md#…` no longer land directly on the move
 | `#remind` | [`remind`](manual/safety-and-tools.md#remind) |
 | `#schedule` | [`schedule`](manual/safety-and-tools.md#schedule) |
 | `#web-tools` | [Web tools](manual/safety-and-tools.md#web-tools) |
+| `#verification-verdicts` | [Verification verdicts](manual/safety-and-tools.md#verification-verdicts) |
 | `#reflect` | [`reflect`](manual/safety-and-tools.md#reflect) |
 | `#listmodels` | [`list_models`](manual/safety-and-tools.md#listmodels) |
 | `#sub-agents` | [Sub-agents](manual/safety-and-tools.md#sub-agents) |

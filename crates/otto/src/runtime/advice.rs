@@ -14,7 +14,7 @@ use otto_core::agent::Agent;
 use otto_core::agent::oneshot::TextRequest;
 
 use crate::deadline::{Control, Deadline};
-use crate::memory::advice::{Answer, Backend, Exchange, Failure, Question, session};
+use crate::decision::{Answer, Backend, Exchange, Failure, Question, session};
 use crate::tool::registry::Registry;
 
 use super::builder::{ProviderClient, SharedSession};

@@ -56,6 +56,15 @@ impl Logger {
             .map(|log| log.scope(session, task, redactor))
     }
 
+    /// Content-free reflection decision measurements, also available on terminal
+    /// discard loggers. Callers supply only fixed enums and numeric strings.
+    pub(crate) fn reflection_decision(&self, fields: &[(&str, String)]) {
+        self.info("reflection_decision", fields);
+        if let Some(log) = self.diagnostics.get() {
+            log.reflection_decision(fields);
+        }
+    }
+
     pub fn info(&self, message: &str, fields: &[(&str, String)]) {
         self.write("INFO", message, fields);
     }

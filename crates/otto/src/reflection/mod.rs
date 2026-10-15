@@ -292,9 +292,12 @@ pub struct Context<'a> {
     pub skill_roots: Option<&'a skillwrite::Roots>,
 }
 
+mod gate;
+
 /// The reflection use case, built at the composition root.
 pub struct Reflector {
     config: ReflectionRuntime,
+    gate: Option<gate::Gate>,
     store: Option<Arc<dyn ReflectionStore>>,
     minimum_interval: chrono::Duration,
     /// Where each run writes its Markdown log; `None` writes none.
@@ -311,9 +314,21 @@ impl Reflector {
         Self {
             config,
             store,
+            gate: None,
             minimum_interval: chrono::Duration::seconds(AUTO_MINIMUM_INTERVAL_SECONDS),
             log_dir: None,
         }
+    }
+
+    /// Adds the auxiliary automatic-reflection decision backend. Manual and
+    /// requested reflection bypass it; it has no approval authority.
+    pub fn with_decision_backend(
+        mut self,
+        backend: Arc<dyn crate::decision::Backend>,
+        logger: Arc<crate::log::Logger>,
+    ) -> Self {
+        self.gate = Some(gate::Gate::new(backend, logger));
+        self
     }
 
     /// Sets the directory the run logs are written to.
@@ -537,6 +552,27 @@ impl Reflector {
         row.input_bytes = message.len();
         row.truncated = truncated;
         report.truncated = truncated;
+
+        if !matches!(trigger, Trigger::Manual | Trigger::Requested)
+            && let Some(gate) = &self.gate
+        {
+            // Reuse only the bounded, redacted evidence. No standing memory,
+            // skill contents or model-controlled focus is needed by this hint.
+            let state = prompt::user_message(shown, &[], None, "");
+            match gate.decide(&state, trigger.as_str(), cancel).await {
+                gate::Outcome::Defer => {
+                    return Ok(Report::skipped(
+                        "automatic reflection deferred; evidence retained",
+                    ));
+                }
+                gate::Outcome::Cancelled => {
+                    row.status = Status::Canceled;
+                    let _ = self.finish(context, row, report, "", "");
+                    return Err(Error::Cancelled);
+                }
+                gate::Outcome::Immediate => {}
+            }
+        }
 
         let request = TextRequest {
             system_prompt: &prompt::system_prompt(self.config.memories, skills_allowed),
@@ -2455,6 +2491,152 @@ mod tests {
             Path::new("/home/me/.otto/skill-history")
         );
         assert_eq!(roots.lookup_roots, vec![Path::new("/work/.otto/skills")]);
+    }
+
+    #[tokio::test]
+    async fn decision_defer_retains_evidence_and_explicit_runs_bypass_gate() {
+        let fixture = Fixture::new(Vec::new()).await;
+        fixture
+            .say(Role::User, "Remember this lasting preference")
+            .await;
+        let reflector = fixture
+            .reflector(auto_config(Auto::OnWork))
+            .with_decision_backend(
+                Arc::new(gate::tests::Fixed(Ok(("defer", Some(0.0))))),
+                Arc::new(crate::log::Logger::discard()),
+            );
+        for trigger in [Trigger::OnWork, Trigger::OnCompaction] {
+            let report = run_as(&fixture, &reflector, trigger)
+                .await
+                .expect("deferred");
+            assert!(report.is_skipped());
+            assert!(report.line().contains("deferred"));
+        }
+        assert!(fixture.provider.calls().is_empty());
+        assert!(
+            fixture
+                .store
+                .runs(&fixture.session_id())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fixture.store.watermark(&fixture.session_id()).unwrap(),
+            None
+        );
+        for trigger in [Trigger::Manual, Trigger::Requested] {
+            fixture.say(Role::User, "Another lasting preference").await;
+            push(&fixture, Reply::Text(r#"{"memories":[]}"#.into()));
+            assert!(run_as(&fixture, &reflector, trigger).await.is_ok());
+        }
+        assert_eq!(fixture.provider.calls().len(), 2);
+        let previous = fixture.store.watermark(&fixture.session_id()).unwrap();
+        assert!(previous.is_some());
+        fixture
+            .say(Role::User, "Evidence after the completed explicit run")
+            .await;
+        let deferred = reflector.with_minimum_interval(chrono::Duration::zero());
+        assert!(
+            run_as(&fixture, &deferred, Trigger::OnWork)
+                .await
+                .unwrap()
+                .is_skipped()
+        );
+        assert_eq!(
+            fixture.store.watermark(&fixture.session_id()).unwrap(),
+            previous
+        );
+        let immediate = deferred.with_decision_backend(
+            Arc::new(gate::tests::Fixed(Ok(("immediate", Some(1.0))))),
+            Arc::new(crate::log::Logger::discard()),
+        );
+        push(&fixture, Reply::Text(r#"{"memories":[]}"#.into()));
+        assert!(run_as(&fixture, &immediate, Trigger::OnWork).await.is_ok());
+        assert_ne!(
+            fixture.store.watermark(&fixture.session_id()).unwrap(),
+            previous
+        );
+        assert_eq!(fixture.provider.calls().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn decision_gate_also_defers_eligible_on_exit_reflection() {
+        let fixture = Fixture::new(Vec::new()).await;
+        fixture.say(Role::User, "A lasting preference").await;
+        let reflector = fixture
+            .reflector(ReflectionRuntime {
+                min_turns: 1,
+                ..auto_config(Auto::OnExit)
+            })
+            .with_decision_backend(
+                Arc::new(gate::tests::Fixed(Ok(("defer", None)))),
+                Arc::new(crate::log::Logger::discard()),
+            );
+        assert!(
+            run_as(&fixture, &reflector, Trigger::OnExit)
+                .await
+                .unwrap()
+                .is_skipped()
+        );
+        assert!(fixture.provider.calls().is_empty());
+        assert_eq!(
+            fixture.store.watermark(&fixture.session_id()).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_failure_runs_original_reflection_and_cancellation_retains_watermark() {
+        let fixture = Fixture::new(Vec::new()).await;
+        fixture.say(Role::User, "A lasting preference").await;
+        let reflector = fixture
+            .reflector(auto_config(Auto::OnWork))
+            .with_decision_backend(
+                Arc::new(gate::tests::Fixed(Err(crate::decision::Failure::Invalid(
+                    "invalid".into(),
+                )))),
+                Arc::new(crate::log::Logger::discard()),
+            );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let path = fixture.session.path();
+        let header = fixture.session.header();
+        let result = reflector
+            .run(
+                &Context {
+                    approvals: None,
+                    runner: &fixture.runner,
+                    session_id: &header.id,
+                    presentation_origin: None,
+                    session_path: &path,
+                    service: &fixture.service,
+                    user_scope: &fixture.user_scope,
+                    workspace_scope: &fixture.workspace_scope,
+                    skill_roots: Some(&fixture.roots),
+                },
+                Trigger::OnWork,
+                "",
+                &cancel,
+            )
+            .await;
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(
+            fixture.store.watermark(&fixture.session_id()).unwrap(),
+            None
+        );
+        push(&fixture, Reply::Text(r#"{"memories":[]}"#.into()));
+        // Canceled rows participate in the existing cooldown; remove only the
+        // test interval, not the production scheduling rule.
+        let reflector = reflector.with_minimum_interval(chrono::Duration::zero());
+        assert!(run_as(&fixture, &reflector, Trigger::OnWork).await.is_ok());
+        assert_eq!(fixture.provider.calls().len(), 1);
+        assert!(
+            fixture
+                .store
+                .watermark(&fixture.session_id())
+                .unwrap()
+                .is_some()
+        );
     }
 
     // -- automatic triggers ---------------------------------------------------

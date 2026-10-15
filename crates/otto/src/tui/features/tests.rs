@@ -364,63 +364,49 @@ fn custom_command(args: &str, _: &Info, _: &Catalog) -> Result<Transition, Strin
     })))
 }
 
-/// `/inputs` has to name each guidance item by id and state, because the id is
-/// what a withdrawal takes and only a queued item can be withdrawn.
 #[test]
-fn inputs_lists_each_guidance_item_with_its_id_and_status() {
-    use otto_core::agent::steering::{Message, Status};
-
+fn inputs_is_not_recognized_or_listed_locally_or_attached() {
     let catalog = Catalog::default();
-    let Transition::Push(mut presenter) = catalog.open("/inputs", &Info::default(), false).unwrap()
-    else {
-        panic!("/inputs should open a presenter");
-    };
-    presenter.receive(Reply::Steering(vec![
-        Message {
-            id: 1,
-            text: "run the tests first".into(),
-            status: Status::Delivered,
-            input_id: String::new(),
-        },
-        Message {
-            id: 2,
-            text: "x".repeat(200),
-            status: Status::Queued,
-            input_id: String::new(),
-        },
-    ]));
-
-    let document = presenter.view().document;
     assert!(
-        document.contains("#1 delivered run the tests first"),
-        "{document}"
+        catalog
+            .entries()
+            .iter()
+            .all(|entry| entry.name != "/inputs")
     );
-    assert!(!document.contains(&"x".repeat(200)), "{document}");
-    assert!(document.contains("#2 queued "), "{document}");
-    assert!(document.contains('…'), "{document}");
+    for attached in [false, true] {
+        for line in ["/inputs", "/inputs withdraw 12"] {
+            assert_eq!(
+                catalog.open(line, &Info::default(), attached).err(),
+                Some(format!("unknown command: {line}"))
+            );
+        }
+        let Transition::Push(help) = catalog.open("/help", &Info::default(), attached).unwrap()
+        else {
+            panic!("help should open a document");
+        };
+        assert!(!help.view().document.contains("/inputs"));
+        assert!(help.view().document.contains("/steer"));
+    }
+
+    let remote = Arc::new(Remote::offline(Vec::new()));
+    let backend = Backend::Attach(&remote);
+    let mut app = crate::tui::app::App::with_catalog(&backend, catalog);
+    app.insert_text("/in");
     assert!(
-        document.contains("/inputs withdraw <id> withdraws guidance that is still queued"),
-        "{document}"
+        app.suggestions()
+            .iter()
+            .all(|item| item.replacement != "/inputs")
+    );
+    assert!(
+        app.suggestions()
+            .iter()
+            .any(|item| item.replacement == "/init")
     );
 }
 
 #[test]
-fn inputs_withdraws_the_named_id_and_steer_never_falls_back_to_a_prompt() {
+fn steer_never_falls_back_to_a_prompt() {
     let catalog = Catalog::default();
-    let Ok(Transition::Push(mut withdraw)) =
-        catalog.open("/inputs withdraw 12", &Info::default(), false)
-    else {
-        panic!("/inputs withdraw should open a presenter");
-    };
-    assert!(matches!(
-        withdraw.start(),
-        Some(BackendRequest::Command(Command::WithdrawSteer(12)))
-    ));
-    assert!(
-        catalog
-            .open("/inputs withdraw twelve", &Info::default(), false)
-            .is_err()
-    );
     // Explicit guidance is a command: an idle result must report the runtime's
     // error rather than become the next prompt.
     let Ok(Transition::Push(mut steer)) =

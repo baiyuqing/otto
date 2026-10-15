@@ -18,6 +18,7 @@ use otto::tool::memory::{forget_definition, memory_search_definition, remember_d
 use otto::tool::models::list_models_definition;
 use otto::tool::read::read_definition;
 use otto::tool::skill::skill_definition;
+use otto::tool::verification::verification_definition;
 use otto::tool::web::{fetch_definition, search_definition};
 use otto::tool::write::write_definition;
 use otto_core::model::ToolDefinition;
@@ -72,6 +73,7 @@ fn every_tool_schema_matches_the_recorded_schema() {
         remember_definition(),
         forget_definition(),
         list_models_definition(),
+        verification_definition(),
         fetch_definition(),
         search_definition(),
     ];

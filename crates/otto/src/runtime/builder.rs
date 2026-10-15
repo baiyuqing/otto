@@ -46,7 +46,7 @@ use crate::session::Store;
 use crate::skill::Catalog;
 use crate::tool::registry::Registry;
 use crate::tool::workspace::Workspace;
-use crate::tool::{Tool, bash, edit, find, grep, ls, models, read, write};
+use crate::tool::{Tool, bash, edit, find, grep, ls, models, read, verification, write};
 
 use super::boundary::{self, BoundaryInputs, FixedText};
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
@@ -1936,6 +1936,7 @@ impl Builder {
             .chain(self.web_tools(max_output, &[], runtime).iter())
             .map(|tool| tool.definition())
             .collect();
+        definitions.push(verification::verification_definition());
         definitions.extend(self.boundary_memory_definitions(max_output));
         definitions.push(crate::tool::approval::request_definition());
         if self.planned_bash_available() {
@@ -2295,6 +2296,11 @@ impl Builder {
                 .attach_approvals(&self.approvals, &self.workspace_path, roots)?;
         }
         let mut tools = self.builtin_file_tools(max_output);
+        // Parent-only: child registries are built before their session exists,
+        // so only the parent can bind verdict evidence to authoritative history.
+        tools.push(Box::new(verification::SubmitVerification::new(
+            session.clone(),
+        )));
         tools.extend(self.web_tools(max_output, &redaction_values, Some(runtime)));
         if self.bash_configured() {
             let executor = self
@@ -3918,6 +3924,7 @@ mod tests {
                 "ls",
                 "write",
                 "edit",
+                "submit_verification",
                 "web_fetch",
                 "web_search",
                 "list_models",

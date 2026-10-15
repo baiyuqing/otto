@@ -467,6 +467,32 @@ Web content is untrusted. Results begin with a notice saying so, and
 `/reflect` never shows `web_fetch` or `web_search` results to the reflection
 model or cites them as evidence. A page can still try to steer the model.
 
+### Verification verdicts
+
+`submit_verification` validates that a proposed verdict is consistent with real,
+previously completed tool results in the current session. It does not run a
+test, lint, build or other check. Evidence can come from any tool, identified by
+its prior `tool_call_id`, so the capability does not privilege command names or
+parse command output.
+
+A submission contains a bounded claim, one of `passed`, `failed`, `blocked`,
+`not_run` or `inconclusive`, evidence references, and optional limitations.
+Each evidence reference classifies its relationship to the claim as `supports`,
+`contradicts`, `blocker` or `context`. Otto checks that every referenced result
+is durably present, has typed terminal operation metadata, is not duplicated,
+and is structurally compatible with the verdict. For example, `passed` needs
+successful completed supporting evidence and cannot include contradictory or
+blocking evidence; `not_run` cannot cite evidence. Rejected submissions return
+an actionable tool error rather than recording an accepted verdict.
+
+This is an evidence-integrity check, not a semantic proof. Otto does not decide
+whether a check adequately covers the claim, interpret a tool's text, infer
+whether an error is a product or infrastructure failure, impose a completion
+gate, or guarantee that later changes leave an accepted verdict current. The
+agent must submit only after the relevant evidence-producing calls, describe
+coverage limits, and report failed, blocked, not-run and inconclusive work
+without calling it passed.
+
 ### `reflect`
 
 `reflect` runs [reflection](memory-and-extensions.md#reflection) on the current session when you ask the agent for

@@ -270,6 +270,31 @@ fn agent_collection_selection_tracks_the_row_id_after_refresh_reorders_rows() {
 }
 
 #[test]
+fn rename_with_a_name_runs_without_opening_a_result_panel() {
+    let catalog = Catalog::default();
+    assert!(matches!(
+        catalog
+            .open("/rename release notes", &Info::default(), false)
+            .unwrap(),
+        Transition::Request(BackendRequest::Command(Command::Rename(name)))
+            if name == "release notes"
+    ));
+}
+
+#[test]
+fn rename_without_a_name_still_opens_the_form() {
+    let catalog = Catalog::default();
+    let Transition::Push(presenter) = catalog.open("/rename", &Info::default(), false).unwrap()
+    else {
+        panic!("bare /rename should open the form");
+    };
+
+    let view = presenter.view();
+    assert_eq!(view.title, "Rename session");
+    assert_eq!(view.fields[0].label, "Session name");
+}
+
+#[test]
 fn thinking_apply_and_save_use_the_same_selected_effort() {
     let mut choice = Choice::new(ChoiceKind::Thinking { profile: None }, "medium");
     let apply = choice.activate(Activation::Action {

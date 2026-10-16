@@ -82,9 +82,9 @@ pub(crate) struct App {
     pub info: Info,
     pub composer: Composer,
     pub queued_input: Option<String>,
-    /// The latest successful model or reasoning selection, kept beside the
-    /// composer instead of appended to the scrollable transcript.
-    pub composer_notice: Option<String>,
+    /// The latest successful model or reasoning selection, kept as one
+    /// single-line item per banner row instead of appended to the transcript.
+    pub composer_notices: Vec<String>,
     /// The newest guidance the active run has queued, painted only from a
     /// back-end read: the TUI never guesses what the run accepted.
     pub queued_steer: Option<otto_core::agent::steering::Message>,
@@ -171,7 +171,7 @@ impl App {
             info: backend.info(),
             composer,
             queued_input: None,
-            composer_notice: None,
+            composer_notices: Vec::new(),
             queued_steer: None,
             recalling_steer: None,
             awaiting_user_echo: None,
@@ -443,7 +443,7 @@ impl App {
         let ticket = self.ticket(surface, g);
         self.pending.insert((surface, g));
         if composer_feedback {
-            self.composer_notice = None;
+            self.composer_notices.clear();
             self.composer_feedback.insert((surface, g));
         }
         if let Some(driver) = &mut self.driver {
@@ -751,14 +751,14 @@ impl App {
         }
         if !message.is_empty() {
             if composer_feedback {
-                self.composer_notice = Some(message);
+                self.composer_notices = message.lines().map(str::to_owned).collect();
             } else {
                 self.push_system(message);
             }
         }
         if old != (self.info.workspace.clone(), self.info.session_id.clone()) {
             self.surfaces.clear();
-            self.composer_notice = None;
+            self.composer_notices.clear();
             self.pending_image = None;
             self.writes.clear();
             self.session_changes.clear();
@@ -897,7 +897,7 @@ impl App {
         _backend: &Backend<'_>,
         _cancel: &CancellationToken,
     ) -> Option<Action> {
-        self.composer_notice = None;
+        self.composer_notices.clear();
         if line.starts_with('/') {
             if !self.connected {
                 self.push_system("TUI disconnected");
@@ -2214,7 +2214,7 @@ mod tests {
         info.profile = "terra".into();
         info.model = "gpt-terra".into();
         info.thinking = "high".into();
-        let message = "Switched to profile terra (provider chatgpt, model gpt-terra).";
+        let message = "Switched to profile terra (provider chatgpt, model gpt-terra). Set as default profile.\nThinking: high";
         app.apply_completion(Completion {
             mutation: true,
             ticket: switch_ticket,
@@ -2230,7 +2230,13 @@ mod tests {
             !app.has_surface(),
             "the complete model picker flow must close"
         );
-        assert_eq!(app.composer_notice.as_deref(), Some(message));
+        assert_eq!(
+            app.composer_notices,
+            [
+                "Switched to profile terra (provider chatgpt, model gpt-terra). Set as default profile.",
+                "Thinking: high",
+            ]
+        );
         assert!(app.entries.iter().all(|entry| entry.raw != message));
     }
 
@@ -2266,7 +2272,7 @@ mod tests {
                 prompt: None,
             }),
         });
-        assert_eq!(app.composer_notice.as_deref(), Some("Applied"));
+        assert_eq!(app.composer_notices, ["Applied"]);
         assert!(app.entries.iter().all(|entry| entry.raw != "Applied"));
         assert!(!app.has_writes());
         assert_eq!(

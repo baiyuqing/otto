@@ -6,6 +6,7 @@
 //! process environment before calling in.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use url::Url;
@@ -119,6 +120,8 @@ pub struct Runtime {
     pub provider: String,
     pub base_url: String,
     pub model: String,
+    /// Models configured for child tasks on this exact provider connection.
+    pub subagent_models: Vec<String>,
     pub thinking: String,
     /// The actual secret value, resolved from `env` by `api_key_env` (or the
     /// `OTTO_API_KEY` fallback). Empty for the `chatgpt` provider.
@@ -253,6 +256,17 @@ fn resolve_impl(
         // from the credential file, not a configured base_url or API key.
         base_url = String::new();
     }
+    validate_subagent_models(&selected_profile, &profile_config.subagent_models)?;
+    let same_connection = provider == profile_config.provider
+        && (provider == super::PROVIDER_CHATGPT
+            || (api_key_env == profile_config.api_key_env
+                && normalize_base_url(&profile_config.base_url).ok().as_deref()
+                    == Some(base_url.as_str())));
+    let subagent_models = if same_connection {
+        profile_config.subagent_models.clone()
+    } else {
+        Vec::new()
+    };
 
     let mut shell_timeout = DEFAULT_SHELL_TIMEOUT;
     if !file.agent.shell_timeout.is_empty() {
@@ -307,6 +321,7 @@ fn resolve_impl(
         provider,
         base_url,
         model,
+        subagent_models,
         thinking,
         api_key,
         api_key_env,
@@ -320,6 +335,32 @@ fn resolve_impl(
         policy.runtime(&runtime)?;
     }
     Ok(runtime)
+}
+
+fn validate_subagent_models(profile: &str, models: &[String]) -> Result<(), ConfigError> {
+    if models.len() > 16 {
+        return Err(ConfigError::new(format!(
+            "profile \"{profile}\" subagent_models must contain at most 16 IDs"
+        )));
+    }
+    let mut seen = HashSet::new();
+    for model in models {
+        if model.trim() != model
+            || model.is_empty()
+            || model.len() > 256
+            || model.chars().any(char::is_control)
+        {
+            return Err(ConfigError::new(format!(
+                "profile \"{profile}\" subagent_models contains an invalid model ID"
+            )));
+        }
+        if !seen.insert(model) {
+            return Err(ConfigError::new(format!(
+                "profile \"{profile}\" subagent_models contains a duplicate model ID"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_resilience(agent: &super::Agent) -> Result<ResilienceRuntime, ConfigError> {
@@ -615,6 +656,84 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn subagent_models_follow_only_the_configured_connection() {
+        let mut selected = profile("chatgpt", "parent", "", "");
+        selected.subagent_models = vec!["cheap".into(), "strong".into()];
+        let file = file_with_profiles("selected", &[("selected", selected)]);
+        let resolve_with = |overrides: Overrides| {
+            resolve_without_credentials(
+                &file,
+                &HashMap::new(),
+                &SessionDefaults::default(),
+                &overrides,
+            )
+            .expect("resolve")
+        };
+        assert_eq!(
+            resolve_with(Overrides::default()).subagent_models,
+            ["cheap", "strong"]
+        );
+        assert!(
+            resolve_with(Overrides {
+                provider: "openai-compatible".into(),
+                base_url: "https://other.example/v1".into(),
+                ..Overrides::default()
+            })
+            .subagent_models
+            .is_empty()
+        );
+
+        let mut selected = profile(
+            "openai-compatible",
+            "parent",
+            "https://example.com/v1",
+            "KEY",
+        );
+        selected.subagent_models = vec!["cheap".into()];
+        let file = file_with_profiles("selected", &[("selected", selected)]);
+        let runtime = resolve_without_credentials(
+            &file,
+            &HashMap::new(),
+            &SessionDefaults::default(),
+            &Overrides {
+                base_url: "https://other.example/v1".into(),
+                ..Overrides::default()
+            },
+        )
+        .expect("resolve");
+        assert!(runtime.subagent_models.is_empty());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn subagent_model_list_rejects_invalid_entries() {
+        for models in [
+            vec!["".into()],
+            vec![" cheap".into()],
+            vec!["cheap".into(), "cheap".into()],
+            vec!["cheap".into(); 17],
+        ] {
+            let mut selected = profile("chatgpt", "parent", "", "");
+            selected.subagent_models = models;
+            let file = file_with_profiles("selected", &[("selected", selected)]);
+            let error = resolve_without_credentials(
+                &file,
+                &HashMap::new(),
+                &SessionDefaults::default(),
+                &Overrides::default(),
+            )
+            .expect_err("invalid list");
+            assert!(
+                error
+                    .to_string()
+                    .contains("profile \"selected\" subagent_models"),
+                "{error}"
+            );
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

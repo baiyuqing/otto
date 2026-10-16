@@ -976,6 +976,7 @@ impl Builder {
                 plugins: extensions,
                 hook_guard,
                 model: runtime.model.clone(),
+                subagent_models: runtime.subagent_models.clone(),
                 provider_name: runtime.provider.clone(),
                 thinking: runtime.thinking.clone(),
                 compaction: otto_core::agent::CompactionSettings {

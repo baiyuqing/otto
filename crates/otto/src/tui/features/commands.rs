@@ -111,7 +111,7 @@ const ENTRIES: &[Entry] = &[
     entry!("/session", "show session details", false, session),
     entry!("/plan", "show the session plan", false, plan),
     entry!("/new", "start a new session", false, new_session),
-    entry!("/clear", "start a new session", false, new_session),
+    entry!("/clear", "start a new session", false, clear_session),
     entry!("/model", "switch profiles", true, model),
     entry!("/thinking", "set reasoning effort", true, thinking),
     entry!("/resume", "resume a session", false, resume),
@@ -207,6 +207,10 @@ fn exit(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
 fn new_session(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     empty(args)?;
     command("New session", Command::NewSession)
+}
+fn clear_session(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
+    empty(args)?;
+    Ok(Transition::Request(Request::Command(Command::NewSession)))
 }
 fn permissions(args: &str, _: &Info, _: &Catalog) -> Result<Transition, String> {
     crate::app::permissions_update(args, otto_core::approval::ApprovalSettings::default())?;

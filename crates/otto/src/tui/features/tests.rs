@@ -327,6 +327,18 @@ fn rename_without_a_name_still_opens_the_form() {
 #[test]
 fn thinking_apply_and_save_use_the_same_selected_effort() {
     let mut choice = Choice::new(ChoiceKind::Thinking { profile: None }, "medium");
+    assert!(matches!(
+        choice.receive(Reply::Operation {
+            message: "Thinking: medium".into(),
+            info: Info::default(),
+            history: None,
+            prompt: None,
+        }),
+        Transition::CloseFlow
+    ));
+
+    let mut choice = Choice::new(ChoiceKind::Thinking { profile: None }, "medium");
+
     let apply = choice.activate(Activation::Action {
         id: "apply".into(),
         row: Some("xhigh".into()),

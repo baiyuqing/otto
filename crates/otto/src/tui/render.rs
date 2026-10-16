@@ -71,26 +71,26 @@ fn draw_shell(frame: &mut Frame, app: &App, area: Rect) {
     let content_area = side_margin(area);
     let panel_tasks = visible_panel_tasks(&app.tasks);
     let plan = plan_line(&app.info.plan);
-    let queued_height = queued_banner_lines(app).len() as u16;
+    let composer_banner_height = composer_banner_lines(app).len() as u16;
     let (composer_height, panel_height) = composer_and_panel_height(
         app,
         content_area.width,
         content_area.height,
         panel_row_count(panel_tasks.len()) + u16::from(plan.is_some()),
-        queued_height,
+        composer_banner_height,
     );
     let suggestions = app.suggestions();
     let suggestion_height = (suggestions.len() as u16).min(
         content_area
             .height
-            .saturating_sub(composer_height + panel_height + queued_height + 2),
+            .saturating_sub(composer_height + panel_height + composer_banner_height + 2),
     );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
             Constraint::Length(suggestion_height),
-            Constraint::Length(queued_height),
+            Constraint::Length(composer_banner_height),
             Constraint::Length(composer_height),
             Constraint::Length(panel_height),
             Constraint::Length(1),
@@ -98,7 +98,7 @@ fn draw_shell(frame: &mut Frame, app: &App, area: Rect) {
         .split(content_area);
     draw_transcript(frame, app, chunks[0]);
     draw_suggestions(frame, app, &suggestions, chunks[1]);
-    draw_queued_banner(frame, app, chunks[2]);
+    draw_composer_banner(frame, app, chunks[2]);
     draw_composer(frame, app, chunks[3]);
     let mut panel_area = chunks[4];
     if let Some(plan) = plan
@@ -175,9 +175,11 @@ fn composer_and_panel_height(
     width: u16,
     height: u16,
     panel_rows_wanted: u16,
-    queued_rows: u16,
+    composer_banner_rows: u16,
 ) -> (u16, u16) {
-    let budget = height.saturating_sub(1 /* transcript */ + queued_rows + 1 /* status line */);
+    let budget = height.saturating_sub(
+        1 /* transcript */ + composer_banner_rows + 1, /* status line */
+    );
     let natural_composer = composer_height(app, width, COMPOSER_MIN_INNER_ROWS);
     if let Some(spare) = budget.checked_sub(natural_composer) {
         return (natural_composer, panel_rows_wanted.min(spare));
@@ -356,12 +358,17 @@ pub(super) fn queued_banner_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn queued_banner_lines(app: &App) -> Vec<Line<'static>> {
+fn composer_banner_lines(app: &App) -> Vec<Line<'static>> {
     let style = queued_banner_style();
-    app.queued_input
+    app.composer_notice
         .as_ref()
-        .map(|text| ("◆ QUEUED NEXT INPUT  ", text))
+        .map(|text| ("◆ UPDATED  ", text))
         .into_iter()
+        .chain(
+            app.queued_input
+                .as_ref()
+                .map(|text| ("◆ QUEUED NEXT INPUT  ", text)),
+        )
         .chain(
             app.queued_steer
                 .as_ref()
@@ -377,14 +384,15 @@ fn queued_banner_lines(app: &App) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Draws queued text in a fixed, high-contrast band immediately above the
-/// composer. Unlike transcript entries, these rows cannot scroll out of view.
-fn draw_queued_banner(frame: &mut Frame, app: &App, area: Rect) {
+/// Draws operation feedback and queued text in a fixed, high-contrast band
+/// immediately above the composer. Unlike transcript entries, these rows cannot
+/// scroll out of view.
+fn draw_composer_banner(frame: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
     }
     frame.render_widget(
-        Paragraph::new(queued_banner_lines(app)).style(queued_banner_style()),
+        Paragraph::new(composer_banner_lines(app)).style(queued_banner_style()),
         area,
     );
 }
@@ -1014,6 +1022,44 @@ mod tests {
 
         app.attached = true;
         assert!(rendered(&app, 80, 12).contains("Enter queues the next turn"));
+    }
+
+    #[tokio::test]
+    async fn model_feedback_is_pinned_in_a_banded_row_above_the_composer() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.entries = (0..12)
+            .map(|index| Entry {
+                kind: Some(EntryKind::Assistant),
+                raw: format!("old transcript row {index}"),
+                ..Default::default()
+            })
+            .collect();
+        app.scroll = Some(0);
+        app.composer_notice = Some("Thinking: high. Saved to profile.".into());
+
+        let width = 72;
+        let height = 12;
+        let rows = screen_rows(&app, width, height);
+        let banner_row = rows
+            .iter()
+            .position(|row| row.contains("◆ UPDATED  Thinking: high. Saved to profile."))
+            .expect("model feedback row");
+        assert!(rows[banner_row + 1].contains("Otto"), "{rows:?}");
+        assert!(
+            !app.entries
+                .iter()
+                .any(|entry| entry.raw.contains("Thinking: high")),
+            "model feedback must not be a transcript entry"
+        );
+
+        let buffer = drawn(&app, width, height);
+        for x in SIDE_MARGIN..width - SIDE_MARGIN {
+            assert_eq!(
+                buffer.cell((x, banner_row as u16)).map(|cell| cell.bg),
+                Some(QUEUED_BACKGROUND),
+                "model feedback must shade the full content row at x={x}"
+            );
+        }
     }
 
     #[tokio::test]

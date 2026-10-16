@@ -360,10 +360,9 @@ pub(super) fn queued_banner_style() -> Style {
 
 fn composer_banner_lines(app: &App) -> Vec<Line<'static>> {
     let style = queued_banner_style();
-    app.composer_notice
-        .as_ref()
+    app.composer_notices
+        .iter()
         .map(|text| ("◆ UPDATED  ", text))
-        .into_iter()
         .chain(
             app.queued_input
                 .as_ref()
@@ -1035,7 +1034,7 @@ mod tests {
             })
             .collect();
         app.scroll = Some(0);
-        app.composer_notice = Some("Thinking: high. Saved to profile.".into());
+        app.composer_notices = vec!["Thinking: high. Saved to profile.".into()];
 
         let width = 72;
         let height = 12;
@@ -1060,6 +1059,24 @@ mod tests {
                 "model feedback must shade the full content row at x={x}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn multiline_model_feedback_uses_one_banded_row_per_message() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.composer_notices = vec![
+            "Switched to profile terra (provider chatgpt, model gpt-terra). Set as default profile."
+                .into(),
+            "Thinking: medium".into(),
+        ];
+
+        let rows = screen_rows(&app, 100, 12);
+        let profile_row = rows
+            .iter()
+            .position(|row| row.contains("Set as default profile."))
+            .expect("profile feedback row");
+        assert!(rows[profile_row + 1].contains("◆ UPDATED  Thinking: medium"));
+        assert!(rows.iter().all(|row| !row.contains(r"\x0a")), "{rows:?}");
     }
 
     #[tokio::test]

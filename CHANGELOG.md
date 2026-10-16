@@ -17,6 +17,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Profiles can provide ordered `subagent_models` for cost-aware child tasks.
+  An `agent` call without a model uses the first configured candidate after
+  any named agent default; profiles without the list retain parent-model
+  inheritance. See [configuration](docs/manual/getting-started.md#configuration).
+
 - The TUI no longer recognizes or lists `/inputs` or `/inputs withdraw <id>`.
   Use ordinary text during an active turn or `/steer` for guidance, and `Ctrl+U`
   to recall queued guidance for editing. The composer banner and HTTP guidance

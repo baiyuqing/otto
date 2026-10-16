@@ -517,13 +517,21 @@ the request itself, so the API key stays in the Otto process and never reaches
 `bash`. The request is made once, with no retry; a body larger than 8 MiB or
 one without a `data` list is an error.
 
-The system prompt tells the model to take model ids from `list_models`, both
-when it writes one into a reply or a configuration file and when it picks a
-`model` for a sub-agent. The `chatgpt` provider has no `list_models`; there the
-model is told not to write a model id from memory and to use an id you named or
-the session's model. Child agents do not get this tool.
+The system prompt tells the model to take model IDs from `list_models` or the
+active profile's ordered `subagent_models` list when it picks a sub-agent
+model. The `chatgpt` provider has no `list_models`; there the model is told
+to use a configured sub-agent ID, an ID you named or the session's model, not
+an ID from memory. Child agents do not get this tool.
 
 ### Sub-agents
+
+To make the parent choose a lower-cost child when the task permits, set an
+ordered `subagent_models` list on the active profile (see
+[configuration](getting-started.md#configuration)). Otto does not know prices:
+the order is your preference, and an explicit `agent.model` may select a
+different ID. When the field is omitted, model precedence is the named agent
+default, the first profile candidate, then the parent session model. The
+selected model appears in the task record and status panel.
 
 The `agent` tool starts or resumes a child task and always returns immediately
 with its task id, so a running child cannot hold the parent's agent loop open.

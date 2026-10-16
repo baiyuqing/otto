@@ -98,7 +98,7 @@ fn agent_definition() -> ToolDefinition {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Provider model id for the sub-agent. Default: this session's model. Otto does not validate it; an id the endpoint rejects fails the task with the provider's error. Overrides the definition's model."
+                    "description": "Provider model ID for the sub-agent. Overrides the definition's model. When omitted, uses the definition's model, then the first configured sub-agent model, then this session's model. Otto does not validate availability; an ID the endpoint rejects fails the task with the provider's error."
                 },
                 "agent": {
                     "type": "string",
@@ -863,6 +863,21 @@ mod tests {
                 want
             );
         }
+    }
+
+    #[tokio::test]
+    async fn agent_tool_uses_configured_model_when_omitted() {
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.template.model = "parent".into();
+        config.template.subagent_models = vec!["cheap".into(), "strong".into()];
+        let runner = runner(config);
+        let result = run(tool_named(&runner, "agent").as_ref(), r#"{"prompt":"go"}"#).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(wait_final(&tasks, "t1").await.model, "cheap");
+        assert_eq!(provider.requests()[0].model, "cheap");
     }
 
     #[tokio::test]

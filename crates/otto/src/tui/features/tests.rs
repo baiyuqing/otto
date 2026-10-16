@@ -300,6 +300,19 @@ fn sandbox_exclude_runs_inline_but_read_grants_still_require_confirmation() {
 }
 
 #[test]
+fn clear_starts_a_new_session_without_opening_a_command_panel() {
+    let catalog = Catalog::default();
+    assert!(matches!(
+        catalog.open("/clear", &Info::default(), false).unwrap(),
+        Transition::Request(BackendRequest::Command(Command::NewSession))
+    ));
+    assert!(matches!(
+        catalog.open("/new", &Info::default(), false).unwrap(),
+        Transition::Push(_)
+    ));
+}
+
+#[test]
 fn rename_with_a_name_runs_without_opening_a_result_panel() {
     let catalog = Catalog::default();
     assert!(matches!(

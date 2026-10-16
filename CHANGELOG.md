@@ -17,6 +17,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- In the terminal UI, `/clear` now starts a fresh session immediately instead
+  of opening a command panel. `/new` retains its existing panel.
+
 - The terminal model picker now keeps profile and reasoning confirmations above
   the composer without escaped line breaks. ([#488](https://github.com/baiyuqing/otto/pull/488))
 

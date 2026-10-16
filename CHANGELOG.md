@@ -17,6 +17,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Slash commands are now recognized only when `/` is the first input character;
+  leading whitespace keeps the text as an ordinary prompt. AUTO review no longer
+  reports a human-blocked state to Herdr, avoiding false attention notifications.
+
 - In the terminal UI, `/clear` now starts a fresh session immediately instead
   of opening a command panel. `/new` retains its existing panel.
 

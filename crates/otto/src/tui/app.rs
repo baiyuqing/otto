@@ -962,7 +962,7 @@ impl App {
         cancel: &CancellationToken,
     ) -> Option<Action> {
         let current = self.composer.input.iter().collect::<String>();
-        if self.queued_input.is_some() && !current.trim().starts_with('/') {
+        if self.queued_input.is_some() && !current.starts_with('/') {
             return None;
         }
         let line = self.composer.take()?;

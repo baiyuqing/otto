@@ -653,6 +653,7 @@ pub struct OptionsTemplate {
     pub plugins: Option<Arc<crate::plugin::hooks::Runtime>>,
     pub hook_guard: Option<Arc<crate::plugin::hooks::SessionGuard>>,
     pub model: String,
+    pub subagent_models: Vec<String>,
     pub provider_name: String,
     pub thinking: String,
     pub compaction: CompactionSettings,
@@ -677,6 +678,7 @@ impl Default for OptionsTemplate {
             plugins: None,
             hook_guard: None,
             model: String::new(),
+            subagent_models: Vec::new(),
             provider_name: String::new(),
             thinking: String::new(),
             compaction: CompactionSettings::default(),
@@ -1064,6 +1066,11 @@ impl Runner {
         let model = first_non_empty(&[
             request.model.trim(),
             definition.as_ref().map_or("", |d| d.model.trim()),
+            self.config
+                .template
+                .subagent_models
+                .first()
+                .map_or("", String::as_str),
             &self.config.template.model,
         ]);
         let context = first_non_empty(&[
@@ -2870,7 +2877,10 @@ mod tests {
         provider.add_route(match_any, vec![RouteStep::Fail("provider exploded".into())]);
 
         let tasks = Arc::new(Tasks::new());
-        let (runner, _) = runner(test_config(&provider, &tasks, Vec::new()));
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.template.model = "parent".into();
+        config.template.subagent_models = vec!["cheap".into()];
+        let (runner, _) = runner(config);
         runner
             .start(StartRequest {
                 prompt: "go".into(),
@@ -2886,6 +2896,9 @@ mod tests {
             "error = {:?}",
             final_task.error
         );
+        assert_eq!(final_task.model, "cheap");
+        assert_eq!(provider.requests().len(), 1);
+        assert_eq!(provider.requests()[0].model, "cheap");
     }
 
     #[tokio::test]
@@ -3443,16 +3456,20 @@ mod tests {
 
     #[tokio::test]
     async fn start_model_precedence() {
-        for (call_model, definition_model, session_model, want) in [
-            ("call-model", "def-model", "sess-model", "call-model"),
-            ("", "def-model", "sess-model", "def-model"),
-            ("", "", "sess-model", "sess-model"),
+        for (call_model, definition_model, configured, want) in [
+            ("call-model", "def-model", true, "call-model"),
+            ("", "def-model", true, "def-model"),
+            ("", "", true, "cheap-model"),
+            ("", "", false, "sess-model"),
         ] {
             let provider = FakeProvider::new();
             provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
             let tasks = Arc::new(Tasks::new());
             let mut config = test_config(&provider, &tasks, Vec::new());
-            config.template.model = session_model.into();
+            config.template.model = "sess-model".into();
+            if configured {
+                config.template.subagent_models = vec!["cheap-model".into(), "strong-model".into()];
+            }
             config.catalog = catalog(vec![Definition {
                 name: "reviewer".into(),
                 model: definition_model.into(),
@@ -3475,6 +3492,7 @@ mod tests {
                 provider.requests().first().expect("one request").model,
                 want
             );
+            assert_eq!(tasks.get("t1").expect("recorded task").model, want);
         }
     }
 

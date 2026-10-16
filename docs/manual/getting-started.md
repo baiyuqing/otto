@@ -592,12 +592,24 @@ thinking = "high"
 api_key_env = "EXAMPLE_API_KEY"
 context_window = 1050000
 compaction_window = 272000
+# Optional, ordered by your cost/capability preference for child tasks:
+# subagent_models = ["smaller-model-id", "gpt-5.6"]
 ```
 
 Key points:
 
 - `default_profile` names the profile used when no `--profile` is given and no
   session supplies one.
+- `[profiles.<name>].subagent_models` in your user configuration lists up to 16 model IDs in your preferred
+  order from lower cost to higher capability. With this profile active, Otto
+  shows the list to the parent agent and asks it to choose the first adequate
+  child model. An `agent` call that omits `model` uses the first entry, after
+  any named agent's default; without a list, it inherits the session model.
+  The child uses the same provider connection as the parent. A provider,
+  endpoint or credential-source override that changes that connection disables
+  the list for the session. An unavailable ID fails the child with the
+  provider's error; Otto does not automatically repeat its work. Restart Otto
+  after editing the list to load the new configuration.
 - `[ui].mode` sets the frontend mode (`auto`, `tui`, `repl`).
 - `[agent].shell_timeout` and `[agent].max_output_bytes` set default limits.
 - `[agent]` also accepts optional end-to-end `turn_timeout`,

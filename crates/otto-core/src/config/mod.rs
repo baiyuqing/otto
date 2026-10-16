@@ -230,6 +230,9 @@ pub struct Profile {
     pub base_url: String,
     #[serde(default)]
     pub model: String,
+    /// Sub-agent model IDs, ordered from cheapest to strongest by the user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagent_models: Vec<String>,
     #[serde(default)]
     pub thinking: String,
     #[serde(default)]
@@ -336,6 +339,7 @@ mod tests {
 [profiles.local]
 provider = "openai-compatible"
 model = "test-model"
+subagent_models = ["cheap-model", "test-model"]
 thinking = "high"
 base_url = "http://localhost:8080/v1"
 api_key_env = "TEST_KEY"
@@ -346,6 +350,7 @@ api_key_env = "TEST_KEY"
         let profile = &file.profiles["local"];
         assert_eq!(profile.provider, "openai-compatible");
         assert_eq!(profile.model, "test-model");
+        assert_eq!(profile.subagent_models, ["cheap-model", "test-model"]);
         assert_eq!(profile.thinking, "high");
     }
 

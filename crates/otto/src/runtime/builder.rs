@@ -50,7 +50,7 @@ use crate::tool::{Tool, bash, edit, find, grep, ls, models, read, verification, 
 
 use super::boundary::{self, BoundaryInputs, FixedText};
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
-use super::prompt::system_prompt_for;
+use super::prompt::{subagent_model_guidance, system_prompt_for};
 use super::sandbox_runtime::canonical_directory;
 use super::workspace_context::{layered_workspace_context, split_workspace_instructions};
 
@@ -1965,13 +1965,20 @@ impl Builder {
         let endpoint_host = runtime
             .map(|runtime| boundary::endpoint_host_for(&runtime.base_url))
             .unwrap_or_default();
-        let prompt = system_prompt_for(
+        let mut prompt = system_prompt_for(
             &definitions,
             self.planned_sandbox_info(),
             provider,
             &endpoint_host,
             model,
         );
+        if definitions
+            .iter()
+            .any(|definition| definition.name == "agent")
+            && let Some(runtime) = runtime
+        {
+            prompt.push_str(&subagent_model_guidance(&runtime.subagent_models));
+        }
         boundary::boundary_redactor(
             &self.boundary_inputs(),
             runtime,
@@ -2626,8 +2633,16 @@ impl Builder {
             &endpoint_host,
             &runtime.model,
         );
-        let system_prompt =
-            base_prompt.clone() + &prompt_tail + &parent_agent_section + "</otto_system_prompt>";
+        let model_guidance = if subagents.runner.is_some() {
+            redactor.redact_string(&subagent_model_guidance(&runtime.subagent_models))
+        } else {
+            String::new()
+        };
+        let system_prompt = base_prompt.clone()
+            + &model_guidance
+            + &prompt_tail
+            + &parent_agent_section
+            + "</otto_system_prompt>";
         let (environment, instructions) = split_workspace_instructions(&environment);
         self.approvals
             .set_policy_config(&self.workspace_path, self.config.approval.clone())
@@ -2719,6 +2734,7 @@ impl Builder {
         }
         let system_prompt_parts: Vec<(String, String)> = [
             ("Base", base_prompt),
+            ("Sub-agent models", model_guidance),
             ("Environment", redactor.redact_string(environment)),
             (
                 "Workspace instructions",
@@ -4323,6 +4339,40 @@ mod tests {
             "the parts must concatenate to the prompt, or the report falls back to one part"
         );
         assert!(parts[2].text.contains("house rules"));
+    }
+
+    #[tokio::test]
+    async fn configured_child_models_appear_only_in_the_parent_prompt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let builder = builder(dir.path());
+        let session = SharedSession::memory(Header::default());
+        let mut runtime = runtime();
+        runtime.subagent_models = vec!["cheap".into(), "strong".into()];
+        let runner = builder
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        let prompt = runner.system_prompt();
+        assert!(prompt.contains("<model id=\"cheap\"/>"));
+        assert!(prompt.contains("<model id=\"strong\"/>"));
+        let report = runner.context_report();
+        assert!(
+            report.sections[0]
+                .items
+                .iter()
+                .any(|part| part.label == "Sub-agent models")
+        );
+
+        let child_prompt = builder.child_prompt_for(&runtime, "", "")(&[]);
+        assert!(!child_prompt.contains("<subagent_models"));
+
+        runtime.subagent_models = vec!["sk-secret-value".into()];
+        let session = SharedSession::memory(Header::default());
+        let runner = builder
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        assert!(!runner.system_prompt().contains("sk-secret-value"));
     }
 
     #[test]

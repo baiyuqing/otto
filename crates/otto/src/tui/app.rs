@@ -82,6 +82,9 @@ pub(crate) struct App {
     pub info: Info,
     pub composer: Composer,
     pub queued_input: Option<String>,
+    /// The latest successful model or reasoning selection, kept beside the
+    /// composer instead of appended to the scrollable transcript.
+    pub composer_notice: Option<String>,
     /// The newest guidance the active run has queued, painted only from a
     /// back-end read: the TUI never guesses what the run accepted.
     pub queued_steer: Option<otto_core::agent::steering::Message>,
@@ -104,6 +107,8 @@ pub(crate) struct App {
     pending: HashSet<(u64, u64)>,
     writes: HashSet<(u64, u64)>,
     session_changes: HashSet<(u64, u64)>,
+    /// Request tickets whose successful receipts belong above the composer.
+    composer_feedback: HashSet<(u64, u64)>,
     requests: Vec<(Ticket, Request)>,
     actions: Vec<Action>,
     busy_since: Option<Instant>,
@@ -166,6 +171,7 @@ impl App {
             info: backend.info(),
             composer,
             queued_input: None,
+            composer_notice: None,
             queued_steer: None,
             recalling_steer: None,
             awaiting_user_echo: None,
@@ -184,6 +190,7 @@ impl App {
             pending: HashSet::new(),
             writes: HashSet::new(),
             session_changes: HashSet::new(),
+            composer_feedback: HashSet::new(),
             requests: Vec::new(),
             actions: Vec::new(),
             busy_since: None,
@@ -398,6 +405,14 @@ impl App {
                     | backend::Command::WithdrawSteer(_)
             )
         );
+        let composer_feedback = matches!(
+            &request,
+            Request::Command(
+                backend::Command::SwitchProfile(_)
+                    | backend::Command::SwitchProfileThinking { .. }
+                    | backend::Command::SetThinking { .. }
+            )
+        );
         let generation = self.generations.entry(surface).or_default();
         *generation = generation.wrapping_add(1);
         let g = *generation;
@@ -427,6 +442,10 @@ impl App {
         }
         let ticket = self.ticket(surface, g);
         self.pending.insert((surface, g));
+        if composer_feedback {
+            self.composer_notice = None;
+            self.composer_feedback.insert((surface, g));
+        }
         if let Some(driver) = &mut self.driver {
             driver.submit(ticket, request);
         } else {
@@ -513,6 +532,25 @@ impl App {
                     self.release_deferred_approvals();
                 }
             }
+            Transition::CloseFlow => {
+                let Some(flow) = self
+                    .surfaces
+                    .iter()
+                    .find(|candidate| candidate.id == surface)
+                    .map(|candidate| candidate.model.flow_key())
+                else {
+                    return;
+                };
+                let ids: Vec<_> = self
+                    .surfaces
+                    .iter()
+                    .filter(|candidate| candidate.model.flow_key() == flow)
+                    .map(|candidate| candidate.id)
+                    .collect();
+                for id in ids {
+                    self.transition(id, Transition::Close);
+                }
+            }
             Transition::Push(mut presenter) => {
                 if let Some(id) = presenter.key().strip_prefix("approval:") {
                     self.hidden_approvals.remove(id);
@@ -567,6 +605,7 @@ impl App {
     pub(crate) fn apply_completion(&mut self, completion: Completion) {
         let t = completion.ticket;
         let mutation = completion.mutation;
+        let composer_feedback = self.composer_feedback.remove(&(t.surface, t.generation));
         let unknown_session = self.session_changes.contains(&(t.surface, t.generation))
             && matches!(&completion.result,Err(error) if error.to_ascii_lowercase().contains("outcome unknown"));
         if !unknown_session {
@@ -617,7 +656,7 @@ impl App {
                 Ok(Reply::Steering(_)) => {}
                 Ok(reply) if mutation => {
                     if let Some(receipt) = operation_receipt(&reply) {
-                        self.apply_receipt(receipt)
+                        self.apply_receipt(receipt, composer_feedback)
                     }
                 }
                 Err(error) if mutation => self.push_system(error),
@@ -674,7 +713,7 @@ impl App {
             self.push_system(message);
         }
         if let Some(receipt) = receipt {
-            self.apply_receipt(receipt);
+            self.apply_receipt(receipt, composer_feedback);
         }
         if let Some(message) = error
             && (mutation || !attached)
@@ -685,7 +724,7 @@ impl App {
             self.transition(id, transition);
         }
     }
-    fn apply_receipt(&mut self, receipt: OperationReceipt) {
+    fn apply_receipt(&mut self, receipt: OperationReceipt, composer_feedback: bool) {
         let OperationReceipt {
             message,
             info,
@@ -711,10 +750,15 @@ impl App {
             self.usage = usage;
         }
         if !message.is_empty() {
-            self.push_system(message);
+            if composer_feedback {
+                self.composer_notice = Some(message);
+            } else {
+                self.push_system(message);
+            }
         }
         if old != (self.info.workspace.clone(), self.info.session_id.clone()) {
             self.surfaces.clear();
+            self.composer_notice = None;
             self.pending_image = None;
             self.writes.clear();
             self.session_changes.clear();
@@ -853,6 +897,7 @@ impl App {
         _backend: &Backend<'_>,
         _cancel: &CancellationToken,
     ) -> Option<Action> {
+        self.composer_notice = None;
         if line.starts_with('/') {
             if !self.connected {
                 self.push_system("TUI disconnected");
@@ -2124,6 +2169,72 @@ mod tests {
         );
     }
     #[test]
+    fn model_selection_closes_the_nested_picker_and_keeps_its_receipt_by_the_composer() {
+        let (mut app, remote) = app();
+        app.attached = false;
+        app.info.profile = "current".into();
+        app.dispatch_line(
+            "/model",
+            &Backend::Attach(&remote),
+            &CancellationToken::new(),
+        );
+        let profiles_ticket = app.requests.last().unwrap().0.clone();
+        app.apply_completion(Completion {
+            mutation: false,
+            ticket: profiles_ticket,
+            result: Ok(Reply::Profiles(vec![crate::app::ProfileSummary {
+                name: "terra".into(),
+                provider: "chatgpt".into(),
+                model: "gpt-terra".into(),
+                thinking: "high".into(),
+            }])),
+        });
+
+        app.handle_key(
+            enter(),
+            &Backend::Attach(&remote),
+            &CancellationToken::new(),
+        );
+        assert_eq!(app.surfaces.iter().count(), 2);
+        app.handle_key(
+            enter(),
+            &Backend::Attach(&remote),
+            &CancellationToken::new(),
+        );
+        assert!(matches!(
+            app.requests.last().map(|(_, request)| request),
+            Some(Request::Command(backend::Command::SwitchProfileThinking {
+                profile,
+                thinking,
+                save: false,
+            })) if profile == "terra" && thinking == "high"
+        ));
+        let switch_ticket = app.requests.last().unwrap().0.clone();
+        let mut info = app.info.clone();
+        info.profile = "terra".into();
+        info.model = "gpt-terra".into();
+        info.thinking = "high".into();
+        let message = "Switched to profile terra (provider chatgpt, model gpt-terra).";
+        app.apply_completion(Completion {
+            mutation: true,
+            ticket: switch_ticket,
+            result: Ok(Reply::Operation {
+                message: message.into(),
+                info,
+                history: None,
+                prompt: None,
+            }),
+        });
+
+        assert!(
+            !app.has_surface(),
+            "the complete model picker flow must close"
+        );
+        assert_eq!(app.composer_notice.as_deref(), Some(message));
+        assert!(app.entries.iter().all(|entry| entry.raw != message));
+    }
+
+    #[test]
     fn command_arguments_survive_completion_and_pending_mutation_defers_plain_input() {
         let (mut app, remote) = app();
         app.attached = false;
@@ -2155,6 +2266,8 @@ mod tests {
                 prompt: None,
             }),
         });
+        assert_eq!(app.composer_notice.as_deref(), Some("Applied"));
+        assert!(app.entries.iter().all(|entry| entry.raw != "Applied"));
         assert!(!app.has_writes());
         assert_eq!(
             app.submit_queued_input(&Backend::Attach(&remote), &CancellationToken::new()),

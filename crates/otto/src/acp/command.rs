@@ -31,7 +31,7 @@ pub(super) enum Command<'a> {
 
 /// `Some` when the whole prompt is one of the supported slash commands.
 pub(super) fn parse(text: &str) -> Option<Command<'_>> {
-    let text = text.trim();
+    let text = text.trim_end();
     if let Some(rest) = text.strip_prefix("/permissions")
         && (rest.is_empty() || rest.starts_with(char::is_whitespace))
     {
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn parse_accepts_only_whole_commands() {
         assert_eq!(parse("/context"), Some(Command::Context));
-        assert_eq!(parse("  /context \n"), Some(Command::Context));
+        assert_eq!(parse("/context \n"), Some(Command::Context));
         assert_eq!(parse("/compact"), Some(Command::Compact { focus: "" }));
         assert_eq!(
             parse("/compact  keep the API \n design "),
@@ -308,6 +308,8 @@ mod tests {
             "/contextual question",
             "/context now",
             "please /compact",
+            " /context",
+            "\t/compact",
             "/Compact",
             "/reflectx",
             "/steerx",

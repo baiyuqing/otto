@@ -17,9 +17,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
-- Selecting a model profile or reasoning effort in the terminal UI now closes
-  the complete nested picker after success and shows the confirmation directly
-  above the composer instead of adding it to the scrollable transcript.
+- The terminal model picker now keeps profile and reasoning confirmations above
+  the composer without escaped line breaks. ([#488](https://github.com/baiyuqing/otto/pull/488))
 
 - Profiles can provide ordered `subagent_models` for cost-aware child tasks.
   An `agent` call without a model uses the first configured candidate after

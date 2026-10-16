@@ -38,13 +38,29 @@ pub fn agent_guidance(
         )
     };
     let model_policy = if can_list_models {
-        "Use a model ID returned by list_models. Otto keeps no price data; pick the cheapest listed model adequate for the task, and rerun on the session model if a task fails with a model error."
+        "Use a configured sub-agent model ID or one returned by list_models. Otto keeps no price data; use the configured cost order when present, and rerun on the session model if a task fails with a model error."
     } else {
-        "Use a model ID the user named or the session model. Otto cannot list this provider's models; do not write a model ID from memory."
+        "Use a configured sub-agent model ID, a model ID the user named, or the session model. Otto cannot list this provider's models; do not write a model ID from memory."
     };
     format!(
         "<delegation_policy>\nUse the agent tool to delegate self-contained tasks (exploration, review, independent edits). For substantial research, use a fresh child context: source downloads, searches and analysis stay in the child, not the parent. Require a concise conclusion, essential evidence references, uncertainty and a report path with section index within 4 KiB. Longer findings belong in the child's assigned persistent report directory, using write when permitted; oversized final text is automatically saved when workspace storage is available. Never request raw source or logs in the handoff. Give each child a bounded file scope and ask for findings with file/line evidence. After delegation, the parent must not read the same assigned files again or duplicate that investigation; rely on the child report. Use read, when available, on the saved report/index for omitted sections; this remains possible after child completion. Send follow-up questions only to queued or running children; resume is only for interrupted tasks. It returns immediately: keep working on independent work, or finish the current response and let the runtime-owned wake turn deliver each completed child's [task-notification]. Do not poll agent_status to wait; use it to inspect progress or retrieve a saved report path. Use agent_send when the user adds constraints, priorities, facts, or direction changes, and agent_cancel when a task is stuck, repeating itself, or no longer needed.\n<subagent_runtime {identity}>\n{model_policy}\n</subagent_runtime>\n</delegation_policy>"
     )
+}
+
+/// The ordered, user-configured model choices offered only to a parent.
+pub fn subagent_model_guidance(models: &[String]) -> String {
+    if models.is_empty() {
+        return String::new();
+    }
+    let mut section =
+        String::from("\n<subagent_models order=\"lowest_cost_to_highest_capability\">\n");
+    for model in models {
+        section.push_str("<model id=\"");
+        section.push_str(&escape_xml_attribute(model));
+        section.push_str("\"/>\n");
+    }
+    section.push_str("</subagent_models>\nChoose the first adequate model for each child task and pass its ID as agent.model. If omitted, Otto uses the first listed model after any named agent default. Escalate to a stronger listed model for tasks that need it. This order is user-supplied; Otto has not verified price or availability.\n");
+    section
 }
 
 /// Builds the opening and static sections of the system prompt for
@@ -109,9 +125,9 @@ pub fn system_prompt_for(
         tool_names.join(", ")
     };
     let model_policy = if has_list_models {
-        "Take model IDs from list_models; do not write a model ID from memory."
+        "Take model IDs from list_models, or from the configured subagent_models list for child tasks; do not write a model ID from memory."
     } else {
-        "Do not write a model ID from memory; if the user has not given one, tell them to check the provider's model list."
+        "Do not write a model ID from memory; a configured subagent_models list supplies IDs for child tasks. If neither it nor the user supplies an ID, tell them to check the provider's model list."
     };
 
     // A heredoc runs the file's content through the shell and the sandbox,
@@ -600,13 +616,18 @@ mod tests {
             "gpt-test",
         );
         assert!(
-            prompt.contains("<model_selection_policy>\nTake model IDs from list_models;"),
+            prompt.contains("<model_selection_policy>\nTake model IDs from list_models,"),
             "{prompt}"
         );
-        assert!(
-            prompt.contains("Use a model ID returned by list_models."),
-            "{prompt}"
-        );
+        assert!(prompt.contains("one returned by list_models."), "{prompt}");
+    }
+
+    #[test]
+    fn configured_subagent_models_are_ordered_and_escaped() {
+        let section = subagent_model_guidance(&["cheap".into(), "strong&more".into()]);
+        assert!(section.find("cheap").unwrap() < section.find("strong&amp;more").unwrap());
+        assert!(section.contains("pass its ID as agent.model"));
+        assert_eq!(subagent_model_guidance(&[]), "");
     }
 
     #[test]

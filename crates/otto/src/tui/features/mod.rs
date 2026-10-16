@@ -19,6 +19,10 @@ use super::interaction::{Activation, View};
 
 pub(crate) trait Presenter: Send {
     fn key(&self) -> String;
+    /// Identifies nested surfaces that form one interaction and close together.
+    fn flow_key(&self) -> String {
+        self.key()
+    }
     fn view(&self) -> View;
     fn activate(&mut self, activation: Activation) -> Transition;
     fn receive(&mut self, reply: Reply) -> Transition;
@@ -49,6 +53,8 @@ pub(crate) trait Presenter: Send {
 pub(crate) enum Transition {
     Stay,
     Close,
+    /// Close every surface in the current presenter's nested interaction.
+    CloseFlow,
     Push(Box<dyn Presenter>),
     Request(Request),
     Run(Run),

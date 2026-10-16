@@ -75,6 +75,12 @@ impl Presenter for Choice {
         }
         .into()
     }
+    fn flow_key(&self) -> String {
+        match &self.kind {
+            ChoiceKind::Profiles | ChoiceKind::Thinking { .. } => "model".into(),
+            _ => self.key(),
+        }
+    }
     fn view(&self) -> View {
         let allow = matches!(self.kind, ChoiceKind::Allow(_));
         let title = match self.kind {
@@ -225,7 +231,7 @@ impl Presenter for Choice {
                 self.kind = ChoiceKind::Allow(path);
                 self.loaded = true;
             }
-            Reply::Operation { .. } | Reply::Forked { .. } => return Transition::Close,
+            Reply::Operation { .. } | Reply::Forked { .. } => return Transition::CloseFlow,
             _ => {}
         }
         Transition::Stay

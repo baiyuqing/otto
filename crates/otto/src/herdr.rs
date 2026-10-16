@@ -26,8 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use otto_core::agent::Event;
-use otto_core::approval::State as ApprovalState;
+use otto_core::{agent::Event, approval::Request as ApprovalRequest};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -198,22 +197,11 @@ impl Reporter {
                 self.report_session(session);
             }
             Event::AgentFinished => self.report_state(State::Idle, None),
-            Event::ApprovalChanged { request } => match request.state {
-                ApprovalState::Pending => {
-                    let message = request.title.trim().to_owned();
-                    self.report_state(State::Blocked, Some(message));
+            Event::ApprovalChanged { request } => {
+                if let Some((state, message)) = approval_state(request, self.reported_blocked()) {
+                    self.report_state(state, message);
                 }
-                // The decision reopens the turn the request interrupted, and
-                // the next `AgentStarted` follows immediately. Leaving
-                // `blocked` is still worth a report, but only from `blocked`:
-                // an approval decided after the turn ended must not revive
-                // `working` and strand the pane there.
-                _ => {
-                    if self.reported_blocked() {
-                        self.report_state(State::Working, None);
-                    }
-                }
-            },
+            }
             _ => {}
         }
     }
@@ -268,6 +256,18 @@ impl Reporter {
     fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+/// Projects approval lifecycle onto Herdr attention states. AUTO review
+/// transitions remain working; only a request actionable by a person blocks.
+fn approval_state(request: &ApprovalRequest, was_blocked: bool) -> Option<(State, Option<String>)> {
+    if request.is_human_pending() {
+        return Some((State::Blocked, Some(request.title.trim().to_owned())));
+    }
+    // A decision reopens the turn that the request interrupted. Leave blocked
+    // only if this request previously put the pane there; an automatic review
+    // must not manufacture a working transition after the turn already ended.
+    was_blocked.then_some((State::Working, None))
 }
 
 /// Whether `next` differs from the last state sent, recording it when it does.
@@ -486,6 +486,59 @@ mod tests {
             &(State::Blocked, Some("Run make".into()))
         ));
         assert!(state_changed(&last, &working));
+    }
+
+    #[test]
+    fn only_human_pending_approvals_block_herdr() {
+        let mut request = ApprovalRequest {
+            options: vec![],
+            schema_version: 1,
+            id: "a1".into(),
+            revision: 1,
+            kind: otto_core::approval::Kind::Authorization,
+            authority: otto_core::approval::Authority::Bounded,
+            scope: otto_core::approval::Scope {
+                workspace: "/work".into(),
+                session_id: "session".into(),
+                task_id: String::new(),
+                run_id: String::new(),
+            },
+            presentation_origin: String::new(),
+            subject: otto_core::approval::Subject {
+                tool_call_id: "call".into(),
+                source: "sandbox".into(),
+                id: "effect".into(),
+                version: "1".into(),
+                details: "details".into(),
+            },
+            title: "  Run make  ".into(),
+            reason: String::new(),
+            persistent: false,
+            blocking: true,
+            created_at: 1,
+            expires_at: None,
+            state: otto_core::approval::State::Pending,
+            decision: None,
+            application: otto_core::approval::ApplicationState::NotRequired,
+            application_error: String::new(),
+            review: Some(otto_core::approval::ReviewMetadata {
+                status: otto_core::approval::ReviewStatus::Reviewing,
+                assessment: None,
+                settings_revision: 1,
+                evidence_digest: "evidence".into(),
+                policy_digest: "policy".into(),
+            }),
+        };
+
+        assert_eq!(approval_state(&request, false), None);
+        request.review.as_mut().unwrap().status = otto_core::approval::ReviewStatus::HumanRequired;
+        assert_eq!(
+            approval_state(&request, false),
+            Some((State::Blocked, Some("Run make".into())))
+        );
+        request.state = otto_core::approval::State::Approved;
+        assert_eq!(approval_state(&request, true), Some((State::Working, None)));
+        assert_eq!(approval_state(&request, false), None);
     }
 
     #[test]

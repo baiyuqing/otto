@@ -126,8 +126,8 @@ impl<'a> Repl<'a> {
             if self.controller.pending_approval().is_none()
                 && let Some(line) = approval_queue.pop_front()
             {
-                if line.trim().starts_with('/') {
-                    if self.command(line.trim(), cancel).await? {
+                if line.starts_with('/') {
+                    if self.command(line.trim_end(), cancel).await? {
                         return Ok(());
                     }
                 } else {
@@ -228,12 +228,12 @@ impl<'a> Repl<'a> {
             };
             let Some(line) = line else { return Ok(()) };
             let line = line?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+            let line = line.trim_end();
+            if line.is_empty() {
                 continue;
             }
-            if trimmed.starts_with('/') {
-                if self.command(trimmed, cancel).await? {
+            if line.starts_with('/') {
+                if self.command(line, cancel).await? {
                     return Ok(());
                 }
                 continue;
@@ -242,7 +242,7 @@ impl<'a> Repl<'a> {
                 Ok(Some(reply)) => {
                     let _ = writeln!(self.stdout, "{}", reply.text);
                     if reply.queued {
-                        approval_queue.push_back(line);
+                        approval_queue.push_back(line.to_owned());
                     }
                     continue;
                 }
@@ -459,7 +459,7 @@ impl<'a> Repl<'a> {
                             continue;
                         }
                     };
-                    let trimmed = input.trim();
+                    let trimmed = input.trim_end();
                     if let Some(args) = trimmed.strip_prefix("/auto").filter(|args|args.is_empty() || args.starts_with(char::is_whitespace)) {
                         let line = self.controller.auto_mode_command(args).unwrap_or_else(|e|e);
                         let _ = writeln!(self.stdout,"{line}");

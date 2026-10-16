@@ -141,7 +141,7 @@ impl Composer {
     }
 
     pub(crate) fn take(&mut self) -> Option<String> {
-        let line = self.input.iter().collect::<String>().trim().to_string();
+        let line = self.input.iter().collect::<String>().trim_end().to_string();
         self.input.clear();
         self.cursor = 0;
         self.suggestion = 0;
@@ -236,13 +236,20 @@ mod tests {
     }
 
     #[test]
-    fn take_trims_remembers_and_resets_the_composer() {
+    fn take_preserves_leading_whitespace_and_resets_the_composer() {
         let mut composer = Composer::new(Vec::new());
-        composer.insert_text("  hello  ");
-        assert_eq!(composer.take().as_deref(), Some("hello"));
+        composer.insert_text("  /help  ");
+        assert_eq!(composer.take().as_deref(), Some("  /help"));
         assert!(composer.input.is_empty());
         assert_eq!(composer.cursor, 0);
         composer.edit(Edit::PreviousHistory);
-        assert_eq!(composer.input.iter().collect::<String>(), "hello");
+        assert_eq!(composer.input.iter().collect::<String>(), "  /help");
+    }
+
+    #[test]
+    fn take_rejects_whitespace_only_input() {
+        let mut composer = Composer::new(Vec::new());
+        composer.insert_text("  \n\t");
+        assert_eq!(composer.take(), None);
     }
 }

@@ -119,6 +119,25 @@ prompt is usable (see [MCP servers](memory-and-extensions.md#mcp-servers)), and
 `runner/workspace-context` includes the `git` calls the workspace header
 makes.
 
+### `warning: memory service token variable OTTO_MEM_TOKEN is unset or empty; continuing without memory`
+
+`[memory] backend = "remote"` is selected and the token variable is not in the
+environment. Export the variable named by `[memory.remote] token_env` (default
+`OTTO_MEM_TOKEN`) in the shell that starts Otto. Otto runs without memory for
+the process; with `[memory] required = true` startup fails with
+`memory service token variable OTTO_MEM_TOKEN is unset or empty`.
+See [Remote memory service](memory-and-extensions.md#remote-memory-service).
+
+### `memory service unavailable` with the remote backend
+
+A recall or write to the memory service failed: no connection, a timeout, a
+non-2xx status, a response without the `Otto-Memory-Protocol: 1.<minor>`
+header, or a recall that is not `complete` or breaks a
+[protocol rule](remote-memory-protocol.md). Otto continues the turn without
+memory. The `memory_request_failed` line on the stderr of `otto serve` or
+`otto acp` names the endpoint, status and code (see
+[Remote memory log lines](memory-and-extensions.md#remote-memory-log-lines)).
+
 ---
 
 Previous: [Memory and extensions](memory-and-extensions.md) · [Documentation index](../README.md) · Next: —

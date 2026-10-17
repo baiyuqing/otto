@@ -2988,6 +2988,14 @@ impl Builder {
     /// starting Otto and quitting without a prompt leaves nothing behind.
     pub fn create_session(&self, runtime: &Runtime) -> Result<SharedSession, BuildError> {
         let id = random_id().map_err(|error| format!("create session id: {error}"))?;
+        self.create_session_with_id(runtime, id)
+    }
+
+    pub fn create_session_with_id(
+        &self,
+        runtime: &Runtime,
+        id: String,
+    ) -> Result<SharedSession, BuildError> {
         let header = Header {
             version: CURRENT_VERSION,
             id,
@@ -3028,10 +3036,23 @@ impl Builder {
             otto_core::session::ForkError::Session(otto_core::session::PiError::other(message))
         };
         let id = random_id().map_err(|error| failed(format!("create session id: {error}")))?;
+        self.fork_session_file_with_id(reference, before, &id, None)
+    }
+
+    pub fn fork_session_file_with_id(
+        &self,
+        reference: &str,
+        before: Option<&str>,
+        id: &str,
+        request_id: Option<&str>,
+    ) -> Result<crate::session::Forked, otto_core::session::ForkError> {
+        let failed = |message: String| {
+            otto_core::session::ForkError::Session(otto_core::session::PiError::other(message))
+        };
         self.storage
             .sessions()
             .map_err(failed)?
-            .fork(reference, before, &id)
+            .fork(reference, before, id, request_id)
     }
 
     /// The places the session file `reference` can be forked, oldest first.

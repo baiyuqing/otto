@@ -66,8 +66,11 @@ request, never silently narrows the scope set. Session/turn IDs are provenance,
 not grants. The service owns membership, ACLs and provisioning; Otto does not
 implement its management surface.
 
-Organization, user, workspace and scope IDs are opaque, case-sensitive,
-1..128 printable **non-space ASCII** bytes; never paths. Scope namespace is a
+Organization, user, workspace and scope IDs are opaque and case-sensitive.
+Organization IDs (including organization scope IDs) are 1..128 printable ASCII
+bytes with at least one non-space character; ordinary spaces are allowed. User,
+workspace and other scope IDs are 1..128 printable **non-space ASCII** bytes;
+never paths. Scope namespace is a
 closed enum. A request's scope ID must equal its corresponding context coordinate.
 Workspace identity uses Otto's stable scope marker/override, with canonical-path
 SHA-256 fallback; use a shared `[memory.workspace_ids]` override across hosts.
@@ -415,7 +418,8 @@ compatible; remote embeddings must explicitly supply the new tenant coordinates.
 | --- | --- |
 | Response body / turn upload request | 1 MiB / 4 MiB |
 | Item text, remember text, recall query | 8192 UTF-8 bytes, nonblank |
-| Organization/user/workspace/scope ID | 1..128 printable non-space ASCII bytes |
+| Organization ID and organization scope ID | 1..128 printable ASCII bytes, with at least one non-space character |
+| User/workspace/other scope ID | 1..128 printable non-space ASCII bytes |
 | Item ID / required opaque revision | 1..256 printable non-space ASCII bytes |
 | Nullable key | 1..128 ASCII bytes, restricted pattern above |
 | Metadata | 32 string entries / 4 KiB |

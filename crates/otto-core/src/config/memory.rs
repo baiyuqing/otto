@@ -261,9 +261,9 @@ fn resolve_remote(remote: &MemoryRemote) -> Result<RemoteRuntime, ConfigError> {
         _ => return Err(invalid("must use https")),
     }
 
-    if !crate::memory::valid_opaque_id(&remote.organization, 128) {
+    if !crate::memory::valid_organization_id(&remote.organization) {
         return Err(ConfigError::new(
-            "invalid memory remote organization: must be 1 to 128 printable ASCII bytes",
+            "invalid memory remote organization: must be 1 to 128 printable ASCII bytes and contain a non-space character",
         ));
     }
     let user = remote.user.as_str();
@@ -461,7 +461,8 @@ busy_timeout = "10s"
         let mut file = remote_file("url='https://mem.example'\nuser='alice'\n");
         for organization in [
             "".to_string(),
-            "has space".to_string(),
+            "   ".to_string(),
+            "has\tspace".to_string(),
             "a".repeat(129),
             "非ASCII".to_string(),
         ] {
@@ -473,6 +474,8 @@ busy_timeout = "10s"
                     .contains("organization")
             );
         }
+        file.memory.remote.organization = "bai's org".into();
+        assert!(resolve_memory(&file, &env("/home/u")).is_ok());
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

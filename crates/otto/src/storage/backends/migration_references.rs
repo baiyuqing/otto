@@ -243,6 +243,9 @@ fn approval_references(
                     invalid("live workflow approval requires the workflow family")
                 })?,
             )?,
+            // Memory candidates are files under the source home's
+            // `.otto/memory`, which a transfer does not move.
+            "memory" => {}
             "conversation"
                 if request.kind == otto_core::approval::Kind::Confirmation
                     && request.application == ApplicationState::NotRequired => {}

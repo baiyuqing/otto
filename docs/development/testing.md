@@ -37,6 +37,10 @@ baseline for unchanged failures, and never weaken validation or safety checks
 to obtain a pass. Preserve unrelated behavioral assertions when migrating test
 fixtures.
 
+Memory tests open the file store (`memory/files/`) on a temporary directory
+instead of a database; a test that needs the earlier Turso database builds a
+schema version 2 database in a temporary path for the importer.
+
 ## Fault injection
 
 The `otto::faults` module holds deterministic fault seams for tests. It is

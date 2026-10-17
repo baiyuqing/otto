@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::faults::http;
-use crate::memory::turso::testsupport::open_temp;
+use crate::memory::files::testsupport::open_temp;
 use crate::memory::{Origin, Provenance, RememberRequest, decide_default_policy};
 use crate::storage::backends::turso::memory_advice::Store as TursoAuditStore;
 

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{ConfigError, duration::parse_go_duration, paths};
 
-const DEFAULT_MEMORY_BACKEND: &str = "turso";
+const DEFAULT_MEMORY_BACKEND: &str = "files";
 const DEFAULT_MEMORY_RECALL_TOKENS: i64 = 2000;
 const DEFAULT_MEMORY_MAX_RESULTS: i64 = 12;
 
@@ -57,14 +57,17 @@ pub struct MemoryRuntime {
     pub max_results: i64,
     pub require_encryption: bool,
     pub workspace_ids: HashMap<String, String>,
-    /// Absolute path.
+    /// Absolute `{home}/.otto/memory`; not configurable.
+    pub dir: String,
+    /// Absolute path of the Turso database that the first start imports.
     pub turso_path: String,
-    /// Zero when `[memory.turso].busy_timeout` is absent.
+    /// The writer lock wait. Zero when `[memory.turso].busy_timeout` is absent.
     pub turso_busy_timeout: Duration,
 }
 
-/// Resolves `[memory]`, defaulting the Turso path to
-/// `$HOME/.otto/memory/memory.db`.
+/// Resolves `[memory]`. The store directory is `$HOME/.otto/memory`; the
+/// Turso path, defaulting to `$HOME/.otto/memory/memory.db`, only locates the
+/// database that the first start imports.
 ///
 /// Add it back if a real memory override is introduced.
 pub fn resolve_memory(
@@ -78,17 +81,14 @@ pub fn resolve_memory(
     } else {
         file.memory.backend.clone()
     };
-    // Legacy configuration selects the same Turso engine; there is no SQLite backend.
-    let backend = if backend == "sqlite" {
-        "turso".to_string()
-    } else {
-        backend
-    };
-    if backend != "turso" {
+    // Earlier releases selected the Turso engine with `turso` or `sqlite`; all
+    // three values select the file store.
+    if !matches!(backend.as_str(), "files" | "turso" | "sqlite") {
         return Err(ConfigError::new(format!(
-            "unsupported memory backend \"{backend}\": must be turso"
+            "unsupported memory backend \"{backend}\": must be files"
         )));
     }
+    let backend = DEFAULT_MEMORY_BACKEND.to_string();
 
     let recall_tokens = match file.memory.recall_tokens {
         Some(value) if value <= 0 => {
@@ -120,15 +120,16 @@ pub fn resolve_memory(
         None => DEFAULT_MEMORY_MAX_RESULTS,
     };
 
+    let home = paths::home_from_env(env);
+    if home.is_empty() {
+        return Err(ConfigError::new(
+            "resolve home directory for memory directory: $HOME is not defined",
+        ));
+    }
+    let dir = paths::clean(&format!("{home}/.otto/memory"));
     let turso_path = if !file.memory.turso.path.is_empty() {
         paths::expand_tilde(&file.memory.turso.path, env, "memory turso path")?
     } else {
-        let home = paths::home_from_env(env);
-        if home.is_empty() {
-            return Err(ConfigError::new(
-                "resolve home directory for default memory turso path: $HOME is not defined",
-            ));
-        }
         paths::clean(&format!("{home}/.otto/memory/memory.db"))
     };
 
@@ -152,6 +153,7 @@ pub fn resolve_memory(
         max_results,
         require_encryption: file.memory.require_encryption,
         workspace_ids: file.memory.workspace_ids.clone(),
+        dir,
         turso_path,
         turso_busy_timeout,
     })
@@ -173,7 +175,8 @@ mod tests {
     fn resolves_defaults() {
         let runtime = resolve_memory(&File::default(), &env("/home/u")).expect("resolve");
         assert!(runtime.enabled);
-        assert_eq!(runtime.backend, "turso");
+        assert_eq!(runtime.backend, "files");
+        assert_eq!(runtime.dir, "/home/u/.otto/memory");
         assert_eq!(runtime.recall_tokens, 2000);
         assert_eq!(runtime.max_results, 12);
         assert_eq!(runtime.turso_path, "/home/u/.otto/memory/memory.db");
@@ -183,7 +186,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn legacy_configuration_resolves_to_turso() {
+    fn legacy_configuration_resolves_to_files() {
         let file: File = toml::from_str(
             r#"
 [memory]
@@ -194,8 +197,9 @@ busy_timeout = "10s"
 "#,
         )
         .expect("legacy config");
-        let runtime = resolve_memory(&file, &HashMap::new()).expect("resolve");
-        assert_eq!(runtime.backend, "turso");
+        let runtime = resolve_memory(&file, &env("/home/u")).expect("resolve");
+        assert_eq!(runtime.backend, "files");
+        assert_eq!(runtime.dir, "/home/u/.otto/memory");
         assert_eq!(runtime.turso_path, "/custom/memory.db");
         assert_eq!(runtime.turso_busy_timeout, Duration::from_secs(10));
     }
@@ -211,7 +215,18 @@ busy_timeout = "10s"
         assert_eq!(runtime.turso_path, "/home/u/.otto/memory/memory-turso.db");
 
         let err = resolve_memory(&file, &HashMap::new()).unwrap_err();
-        assert!(err.to_string().contains("memory turso path"), "{err}");
+        assert!(err.to_string().contains("home"), "{err}");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn files_turso_and_sqlite_select_the_file_store() {
+        for name in ["files", "turso", "sqlite"] {
+            let mut file = File::default();
+            file.memory.backend = name.into();
+            let runtime = resolve_memory(&file, &env("/home/u")).expect("resolve");
+            assert_eq!(runtime.backend, "files", "{name}");
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -226,7 +241,7 @@ busy_timeout = "10s"
     fn applies_toml_overrides() {
         let mut file = File::default();
         file.memory.enabled = Some(false);
-        file.memory.backend = "turso".into();
+        file.memory.backend = "files".into();
         file.memory.required = true;
         file.memory.recall_tokens = Some(500);
         file.memory.max_results = Some(3);
@@ -239,7 +254,7 @@ busy_timeout = "10s"
             busy_timeout: "10s".into(),
         };
 
-        let runtime = resolve_memory(&file, &HashMap::new()).expect("resolve");
+        let runtime = resolve_memory(&file, &env("/home/u")).expect("resolve");
         assert!(!runtime.enabled);
         assert!(runtime.required);
         assert_eq!(runtime.recall_tokens, 500);
@@ -258,8 +273,9 @@ busy_timeout = "10s"
     fn rejects_unsupported_backend() {
         let mut file = File::default();
         file.memory.backend = "postgres".into();
-        let err = resolve_memory(&file, &HashMap::new()).unwrap_err();
+        let err = resolve_memory(&file, &env("/home/u")).unwrap_err();
         assert!(err.to_string().contains("postgres"), "{err}");
+        assert!(err.to_string().contains("must be files"), "{err}");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

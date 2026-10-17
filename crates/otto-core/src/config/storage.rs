@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use super::ConfigError;
 
 pub const DOMAINS: &[&str] = &[
-    "memory",
     "approvals",
     "workflows",
     "schedule",
@@ -59,6 +58,11 @@ impl Storage {
             }
         }
         for (domain, instance) in &self.routes {
+            if domain == "memory" {
+                return Err(ConfigError::new(
+                    "storage.routes.memory is not supported; memory is stored as files under ~/.otto/memory",
+                ));
+            }
             if !DOMAINS.contains(&domain.as_str()) || !self.backends.contains_key(instance) {
                 return Err(ConfigError::new("invalid storage domain route"));
             }
@@ -115,5 +119,15 @@ mod tests {
         assert!(
             super::super::parse("[storage.backends.p]\nbackend='mysql'\ndsn='inline'\n").is_err()
         );
+    }
+
+    #[test]
+    fn memory_route_is_rejected_and_names_the_key() {
+        let file = super::super::parse(
+            "[storage.backends.p]\nbackend='sqlite'\npath='x'\n[storage.routes]\nmemory='p'\n",
+        )
+        .unwrap();
+        let error = file.storage.validate().unwrap_err();
+        assert!(error.to_string().contains("storage.routes.memory"));
     }
 }

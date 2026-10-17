@@ -1,10 +1,7 @@
--- Pinned SQLite memory schema v1 migration fixture.
--- Extracted from main:crates/otto/src/memory/sqlite/schema.rs.
 CREATE TABLE memory_meta (
     key TEXT PRIMARY KEY CHECK (length(key) BETWEEN 1 AND 64),
     value TEXT NOT NULL CHECK (length(value) <= 256)
 ) STRICT;
-
 CREATE TABLE memory_records (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 64),
     scope_namespace TEXT NOT NULL CHECK (length(scope_namespace) BETWEEN 1 AND 32),
@@ -31,20 +28,16 @@ CREATE TABLE memory_records (
          AND source_json = '{}' AND confidence = 0.0 AND expires_at IS NULL)
     )
 ) STRICT;
-
 CREATE UNIQUE INDEX memory_records_key_active
 ON memory_records(scope_namespace, scope_id, kind, semantic_key)
 WHERE state = 'active' AND semantic_key <> '';
-
 CREATE INDEX memory_records_list
 ON memory_records(scope_namespace, scope_id, state, updated_at DESC, id ASC);
-
 CREATE TABLE memory_observations (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 64),
     candidate_ids_json TEXT NOT NULL CHECK (length(CAST(candidate_ids_json AS BLOB)) <= 1024 AND json_valid(candidate_ids_json) AND json_type(candidate_ids_json) = 'array'),
     created_at TEXT NOT NULL CHECK (length(created_at) = 30)
 ) STRICT;
-
 CREATE TABLE memory_candidates (
     id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 64),
     scope_namespace TEXT NOT NULL CHECK (length(scope_namespace) BETWEEN 1 AND 32),
@@ -97,27 +90,20 @@ CREATE TABLE memory_candidates (
         )
     )
 ) STRICT;
-
 CREATE INDEX memory_candidates_list
 ON memory_candidates(scope_namespace, scope_id, state, created_at DESC, id ASC);
-
 CREATE INDEX memory_candidates_observation
 ON memory_candidates(observation_id)
 WHERE observation_id IS NOT NULL;
-
-CREATE VIRTUAL TABLE memory_records_fts USING fts5(
-    record_id UNINDEXED,
-    text_value,
-    kind,
-    semantic_key,
-    labels,
-    tokenize = 'unicode61'
-);
-
-INSERT INTO memory_meta(key,value) VALUES ('database_id','0123456789abcdef0123456789abcdef'),('user_scope_id','fedcba9876543210fedcba9876543210'),('generation','7'),('schema_fingerprint','f927b04baf82340748b4af92984d0f165f734acb4ea3e539f190e79dd54847e9');
-
-INSERT INTO memory_records VALUES ('memory-record-1','user','fedcba9876543210fedcba9876543210','preference','editor','Use the quiet editor mode for focused work','["workflow"]','{}','{"origin":"human","session_id":"","message_ids":[],"observation_id":"","decision_at":null,"decision_source":""}',0.9,1,'2026-10-01T00:00:00.000000000Z','2026-10-01T00:00:00.000000000Z',NULL,'active',NULL);
-
-INSERT INTO memory_records_fts(record_id,text_value,kind,semantic_key,labels) VALUES ('memory-record-1','Use the quiet editor mode for focused work','preference','editor','workflow');
-
-PRAGMA user_version = 1;
+CREATE TABLE memory_records_fts (
+    record_id TEXT NOT NULL,
+    text_value TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    semantic_key TEXT NOT NULL,
+    labels TEXT NOT NULL
+) STRICT;
+CREATE INDEX memory_records_search ON memory_records_fts USING fts(text_value,kind,semantic_key,labels) WITH(weights='text_value=1.0,kind=0.5,semantic_key=2.0,labels=1.0');
+INSERT INTO memory_meta(key,value) VALUES ('database_id','0123456789abcdef0123456789abcdef');
+INSERT INTO memory_meta(key,value) VALUES ('user_scope_id','fedcba9876543210fedcba9876543210');
+INSERT INTO memory_meta(key,value) VALUES ('generation','0');
+PRAGMA user_version=2;

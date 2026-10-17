@@ -200,6 +200,12 @@ with `&amp;`, `'` with `&#39;`, `<` with `&lt;`, `>` with `&gt;` and `"` with
 untrusted reference material. The rendering changes only with a new major
 version.
 
+Example: the items of
+[`recall_response.json`](../../crates/otto/src/memory/remote/fixtures/v1/recall_response.json)
+render to
+[`recall_rendered.txt`](../../crates/otto/src/memory/remote/fixtures/v1/recall_rendered.txt),
+384 bytes, so a `max_bytes` of 384 or more accepts that response.
+
 ## Errors
 
 A non-2xx response other than `404` from `/v1/get` has the body

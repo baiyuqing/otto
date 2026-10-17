@@ -154,13 +154,7 @@ impl App {
     }
     pub(crate) fn with_catalog(backend: &Backend<'_>, catalog: features::Catalog) -> Self {
         let (entries, usage) = entries::entries_from_history(&backend.history());
-        let composer = Composer::new(
-            entries
-                .iter()
-                .filter(|e| e.kind == Some(EntryKind::User))
-                .map(|e| e.raw.clone())
-                .collect(),
-        );
+        let composer = Composer::new(prompt_history(&entries));
         let cache_breakdown_complete =
             (usage.input_tokens != 0 || usage.output_tokens != 0).then_some(false);
         let mut app = Self {
@@ -302,15 +296,7 @@ impl App {
             // The run that owned the tracked guidance ended with the session.
             self.queued_steer = None;
             self.recalling_steer = None;
-            let draft = self.composer.input.iter().collect::<String>();
-            self.composer = Composer::new(
-                self.entries
-                    .iter()
-                    .filter(|e| e.kind == Some(EntryKind::User))
-                    .map(|e| e.raw.clone())
-                    .collect(),
-            );
-            self.composer.set_input(&draft);
+            self.composer.reseed(prompt_history(&self.entries));
         }
     }
     pub(crate) fn invalidate_reads(&mut self) {
@@ -766,6 +752,7 @@ impl App {
             self.queued_steer = None;
             self.recalling_steer = None;
             self.invalidate_reads();
+            self.composer.reseed(prompt_history(&self.entries));
         }
         if let Some(draft) = draft {
             self.composer.set_input(&draft);
@@ -1558,6 +1545,14 @@ fn append_stream(entries: &mut Vec<Entry>, id: &str, kind: EntryKind, text: &str
         })
     }
 }
+/// The prompts a session already had, oldest first, for the composer's recall.
+fn prompt_history(entries: &[Entry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| e.kind == Some(EntryKind::User))
+        .map(|e| e.raw.clone())
+        .collect()
+}
 struct OperationReceipt {
     message: String,
     info: Info,
@@ -2008,6 +2003,37 @@ mod tests {
             !app.drain_actions()
                 .iter()
                 .any(|action| matches!(action, Action::Prompt(_)))
+        );
+    }
+
+    #[test]
+    fn resuming_another_session_recalls_its_prompts() {
+        let (mut app, remote) = app();
+        app.composer.set_input("before");
+        app.composer.take();
+        app.composer.set_input("draft");
+        let mut info = app.info.clone();
+        info.session_id = "resumed".into();
+        app.apply_receipt(
+            OperationReceipt {
+                message: String::new(),
+                info,
+                history: Some(vec![crate::cli::testutil::user("resumed prompt")]),
+                prompt: None,
+                draft: None,
+            },
+            false,
+        );
+        assert_eq!(app.composer.input.iter().collect::<String>(), "draft");
+        press(&mut app, &remote, KeyCode::Up);
+        assert_eq!(
+            app.composer.input.iter().collect::<String>(),
+            "resumed prompt"
+        );
+        press(&mut app, &remote, KeyCode::Up);
+        assert_eq!(
+            app.composer.input.iter().collect::<String>(),
+            "resumed prompt"
         );
     }
 

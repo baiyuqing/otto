@@ -804,8 +804,14 @@ async fn transfer_registered(
         }
     }
     let routes = cutover.routes().await?;
+    // Memory is not a storage domain. A group an earlier release published
+    // with a `memory` route cannot be frozen or published without it.
+    if routes.domains.contains_key("memory") {
+        return Err(invalid(
+            "published storage routes include memory, which this version does not transfer",
+        ));
+    }
     let supported = [
-        "memory",
         "approvals",
         "workflows",
         "schedule",
@@ -839,9 +845,7 @@ async fn transfer_registered(
     .map_err(|_| invalid("source backend configuration is invalid"))?;
     let mut external_sources = Vec::new();
     for (domain, route) in &routes.domains {
-        // A published `memory` route is only the file store's import source.
-        if domain == "memory"
-            || route.backend == "posix"
+        if route.backend == "posix"
             || route.backend == "sqlite" && !route.endpoint.starts_with("instance:")
         {
             continue;
@@ -1458,6 +1462,99 @@ mod tests {
             1
         );
         assert!(!options.destination.exists());
+    }
+    #[tokio::test]
+    async fn published_memory_route_is_refused_by_name() {
+        let (directory, mut options) = fixture();
+        options.destination = directory.path().join("moved");
+        approvals(&options.home);
+        journal(&options.home.join(".otto/sessions"));
+        let control = options.home.join(".otto/storage");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&control)
+            .unwrap();
+        let route = |backend: &str, path: PathBuf| StorageRoute {
+            backend: backend.into(),
+            endpoint: endpoint(&path).unwrap(),
+            namespace_identity: None,
+        };
+        LocalCutover::open(
+            &control,
+            RouteGroup {
+                identity: identity(&options.home),
+                generation: "initial".into(),
+                writer_epoch: "initial".into(),
+                domains: BTreeMap::from([
+                    (
+                        "approvals".into(),
+                        route("sqlite", options.home.join(".otto/approvals.db")),
+                    ),
+                    (
+                        "memory".into(),
+                        route("sqlite", options.home.join("routed/memory.db")),
+                    ),
+                    (
+                        "sessions".into(),
+                        route("posix", options.home.join(".otto/sessions")),
+                    ),
+                ]),
+            },
+        )
+        .unwrap();
+        let mut stderr = Vec::new();
+        assert_eq!(run(&args(&options), &mut Vec::new(), &mut stderr).await, 1);
+        assert!(
+            String::from_utf8_lossy(&stderr).contains("published storage routes include memory"),
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(!options.destination.exists());
+    }
+    #[tokio::test]
+    async fn live_memory_approval_transfers_while_memory_stays_in_the_source_home() {
+        let (directory, mut options) = fixture();
+        options.destination = directory.path().join("moved");
+        let scope = approvals(&options.home);
+        journal(&options.home.join(".otto/sessions"));
+        let service =
+            crate::approval::Service::open(&options.home.join(".otto/approvals.db")).unwrap();
+        let request = service
+            .create(crate::approval::Proposal {
+                kind: otto_core::approval::Kind::Authorization,
+                authority: otto_core::approval::Authority::Durable,
+                scope: scope.clone(),
+                subject: otto_core::approval::Subject {
+                    tool_call_id: String::new(),
+                    source: "memory".into(),
+                    id: "user/workspace/scope/candidate".into(),
+                    version: "1".into(),
+                    details: "pending".into(),
+                },
+                title: "Review".into(),
+                reason: "test".into(),
+                persistent: false,
+                blocking: true,
+                expires_at: None,
+            })
+            .unwrap();
+        drop(service);
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run(&args(&options), &mut Vec::new(), &mut stderr).await,
+            0,
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        let moved =
+            crate::approval::Service::open(&options.destination.join("approvals.db")).unwrap();
+        assert_eq!(
+            moved
+                .get(&request.id, &scope.workspace, Some(&scope.session_id))
+                .unwrap()
+                .state,
+            otto_core::approval::State::Pending
+        );
     }
     #[tokio::test]
     async fn command_abort_restores_source_after_failed_closure_without_deleting_staging() {

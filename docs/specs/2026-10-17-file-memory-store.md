@@ -224,7 +224,10 @@ with two new ids, as the database does today.
   `storage migrate`, and the approval-to-memory reference checks in
   `storage/migration/references.rs` and
   `storage/backends/migration_references.rs`. `~/.otto/memory/` stays in the
-  source home during a transfer.
+  source home during a transfer, and a live memory approval is transferred
+  without a cross-check. A transfer whose published route group contains a
+  `memory` entry is refused by name: the cutover requires the frozen and
+  published groups to name the same domains as the exported data.
 - After the first import (`identity.json` exists), `otto memory` commands do
   not open the storage route authority, so they work while it is frozen.
   Before it, they open the authority to find a published import source.

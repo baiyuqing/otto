@@ -32,7 +32,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
   substring of text, kind, key or labels. `memory` is no longer a storage
   domain: it is not in `[storage.routes]`, `otto storage transfer` (no
   `--memory-db`), `storage init` or `storage migrate`, and `[storage.routes].memory`
-  is a configuration error. `[memory].backend` defaults to `files`;
+  is a configuration error. `otto storage transfer` leaves `~/.otto/memory/`
+  in the source home, keeps pending memory reviews, and refuses a route
+  authority that an earlier release published with a `memory` route. `[memory].backend` defaults to `files`;
   `[memory.turso].path` is only the import source and `[memory.turso].busy_timeout`
   is the writer lock wait. Upgrade steps: stop all Otto processes; if memory is
   in a legacy SQLite `memory.db`, migrate it with `otto storage migrate` from

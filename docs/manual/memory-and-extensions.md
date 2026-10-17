@@ -216,7 +216,10 @@ the destination root itself may be new. The source and destination roots must
 not overlap. Repeating the same source, destination, and migration ID resumes
 an interrupted transfer. The
 transfer covers the storage domains only; `~/.otto/memory/` stays in the
-source home and is not copied. On success, the source home's
+source home and is not copied, and pending memory reviews stay valid. A
+route authority that an Otto 0.4.8 or earlier transfer published with a
+`memory` route is refused with `published storage routes include memory`.
+On success, the source home's
 route authority points to the new root; restart Otto using the same home to use
 the transferred state. Original databases and session files stay in place.
 Keep them until the restarted Otto has opened the destination successfully;

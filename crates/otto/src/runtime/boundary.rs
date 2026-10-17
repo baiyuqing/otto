@@ -132,6 +132,11 @@ pub fn boundary_secret_values(
             return (collect.values(), false);
         }
     }
+    if let Some(name) = inputs.config.memory.credential_variable()
+        && (!collect.add(name) || !collect.add(environment_value(inputs, name)))
+    {
+        return (collect.values(), false);
+    }
     collect.add_url(inputs.overrides_base_url);
     if !collect.open {
         return (collect.values(), false);

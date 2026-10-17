@@ -11,6 +11,7 @@ This is the canonical index for Otto documentation.
 - [Servers and connectors](manual/servers-and-connectors.md)
 - [Automation](manual/automation.md)
 - [Memory and extensions](manual/memory-and-extensions.md)
+- [Remote memory protocol](manual/remote-memory-protocol.md)
 - [Troubleshooting](manual/troubleshooting.md)
 
 ## Contributing and development

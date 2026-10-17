@@ -63,8 +63,8 @@ loop, tools, and frontends must never reach a store directly: use the
 `Service`'s bound accessors or the `Controller` memory facade. Per-turn recall
 and explicit management (`memory_search`/`remember`/`forget` tools,
 `/memory`/`/remember` in the REPL, and `otto memory status|forget`) are wired
-end to end via `[memory]` TOML config. Model-originated writes always land as
-pending candidates requiring review; human `/remember` and `/memory forget`
+end to end via `[memory]` TOML config. With the files backend, model-originated
+writes always land as pending candidates requiring review; human `/remember` and `/memory forget`
 apply immediately. Recall renders two groups (`otto-core`'s
 `render_memory_context`): the standing set (active user-scope
 `preference`/`instruction` records with a key, flagged by the retriever's
@@ -93,6 +93,17 @@ service through the shared startup phase. External ReviewedChanges model tools
 are read-only; trusted Rust hosts use prepared snapshots for inspection/review.
 Delegated mutations require an explicit scope/input grant. Native-record
 management must never silently fall back to a local store for that service.
+`[memory] backend = "remote"` uses the same path: `startup::open_memory`
+installs `memory::remote::RemoteService` (the protocol 1 HTTP client in the
+[remote memory protocol](../specs/2026-10-17-remote-memory-protocol.md)) as an
+owned `MemoryExtension` with a delegated learning grant for the user and
+workspace scopes, and `startup::load_workspace` rebuilds that client per
+`otto serve` workspace with `Client::with_grant`. `MemoryWiring::turns` holds
+the `memory::remote::upload::Uploader`; `Controller` starts and finishes
+`SharedSession` recording around each prompt step and submits the recorded
+messages. Every shutdown path in `cli::run`, including `otto acp` and
+`otto serve`, and `Otto::close` in `embed` close the uploader; where the memory
+client is also closed, the uploader is closed first.
 
 Keep `crates/otto`'s `skill` module free of imports from other Otto modules
 besides `otto-core`. The skill tool's file reads stay confined to the skill

@@ -308,20 +308,38 @@ impl Controller {
         let mut context = self.memory_context(Origin::Human);
         match scope {
             "workspace" => {}
-            "user" => context.write_scope = context.scopes.first().cloned(),
+            "user" => {
+                context.write_scope = context
+                    .scopes
+                    .iter()
+                    .find(|scope| scope.namespace == "user")
+                    .cloned()
+            }
+            "organization" if context.organization_id.is_some() => {
+                context.write_scope = context
+                    .scopes
+                    .iter()
+                    .find(|scope| scope.namespace == "organization")
+                    .cloned()
+            }
             _ => {
                 return Ok(Reply::Usage(format!(
-                    "unknown scope {scope:?}, want user or workspace"
+                    "unknown scope {scope:?}, want user or workspace (organization requires a tenant-aware host)"
                 )));
             }
         }
         let mut metadata = std::collections::BTreeMap::new();
+        let authoritative_key = (!key.is_empty()).then(|| key.clone());
         for (name, value) in [("kind", kind), ("key", key)] {
             if !value.is_empty() {
                 metadata.insert(name.to_string(), value);
             }
         }
+        if context.organization_id.is_some() {
+            metadata.remove("key");
+        }
         let request = otto_core::memory::RememberRequest {
+            key: authoritative_key,
             context,
             request_id: crate::memory::new_id().map_err(|e| e.to_string())?,
             content: Content::Text(text),
@@ -334,9 +352,14 @@ impl Controller {
             return Err("memory service requires a multi-thread runtime".into());
         }
         let cancel = tokio_util::sync::CancellationToken::new();
-        let receipt =
-            tokio::task::block_in_place(|| handle.block_on(client.remember(&request, &cancel)))
-                .map_err(|e| e.to_string())?;
+        let receipt = tokio::task::block_in_place(|| {
+            if scope == "organization" {
+                handle.block_on(client.remember_organization_human(&request, &cancel))
+            } else {
+                handle.block_on(client.remember(&request, &cancel))
+            }
+        })
+        .map_err(|e| e.to_string())?;
         let pending = matches!(
             receipt.completion,
             Completion::Pending | Completion::Running
@@ -725,6 +748,7 @@ mod tests {
                 visibility: port::Visibility::Unknown,
                 items: vec![port::ItemOutcome {
                     reference: Some(port::MemoryRef {
+                        organization_id: request.context.organization_id.clone(),
                         service: "recorder".into(),
                         scope: request.context.write_scope.clone().unwrap(),
                         id: "item-1".into(),
@@ -752,7 +776,8 @@ mod tests {
                 namespace: "user".into(),
                 id: "u1".into(),
             },
-        );
+        )
+        .with_organization("acme");
         builder.shared_mut().memory = crate::runtime::wiring::MemoryWiring {
             client: Some(Arc::new(extension.client().unwrap())),
             extension: Some(extension),
@@ -780,9 +805,24 @@ mod tests {
         };
         assert_eq!(line, "remembered item-1 (scope=user/u1, state=applied)");
         assert!(matches!(run("plain text")(), Ok(Reply::Notice(_))));
+        assert!(matches!(
+            run("--scope organization --key baseline use tabs")(),
+            Ok(Reply::Notice(_))
+        ));
         assert!(matches!(run("--scope team x")(), Ok(Reply::Usage(_))));
         let requests = service.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
+        let organization = &requests[2];
+        assert_eq!(organization.key.as_deref(), Some("baseline"));
+        assert_eq!(
+            organization.context.organization_id.as_deref(),
+            Some("acme")
+        );
+        assert_eq!(organization.context.origin, port::Origin::Human);
+        assert_eq!(
+            organization.context.write_scope.as_ref().unwrap().namespace,
+            "organization"
+        );
         let user = &requests[0];
         assert_eq!(user.context.origin, port::Origin::Human);
         assert_eq!(
@@ -790,7 +830,8 @@ mod tests {
             Some(user.context.scopes[0].clone())
         );
         assert_eq!(user.metadata["kind"], "fact");
-        assert_eq!(user.metadata["key"], "name");
+        assert!(!user.metadata.contains_key("key"));
+        assert_eq!(user.key.as_deref(), Some("name"));
         assert!(matches!(&user.content, port::Content::Text(text) if text == "hello"));
         let workspace = &requests[1];
         assert_eq!(

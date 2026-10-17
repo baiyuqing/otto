@@ -17,6 +17,17 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Remote memory replaces its pre-adoption v1 bodies in place: configure required
+  `memory.remote.organization` and coordinate the external service/Otto client
+  cutover before restart (no v2, default tenant or old-wire fallback). Personal
+  memory is isolated per organization; keyed recall resolves workspace >
+  organization > user, and filtered search selects effective winners rather than
+  revealing shadowed values. Exact references are tenant-bound and remote updates/
+  forget require opaque revisions. Pending writes are not persisted; organization
+  remember is an explicit human, service-authorized operation, not a model tool.
+  See [setup and cutover](docs/manual/memory-and-extensions.md#remote-memory-service)
+  and the [canonical protocol](docs/manual/remote-memory-protocol.md).
+
 - Remote `memory_search` now treats an empty optional `id` as omitted and reports the actionable `use either id or query, not both` error when both inputs are non-empty, matching the files backend.
 
 - HTTP session creation and fork accept an optional `request_id`. Retrying after a lost response returns the original session, including after server restart. Reusing a fork request id with different arguments returns `409 request_id_conflict`; requests without an id keep their behavior.

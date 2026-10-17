@@ -326,6 +326,11 @@ fn filter(
 
 fn project_rule(p: &[String], table: bool, trusted: bool) -> Option<&'static str> {
     let keys: Vec<&str> = p.iter().map(String::as_str).collect();
+    if keys.starts_with(&["memory", "remote"]) {
+        return Some(
+            "remote memory identity and credential selection require user or managed configuration",
+        );
+    }
     let allowed = match keys.as_slice() {
         ["default_profile"] => true,
         ["ui", "mode"] => true,
@@ -763,6 +768,22 @@ mod tests {
                 .unwrap()
                 .contains("${KEY}")
         );
+    }
+    #[test]
+    fn remote_memory_subject_tenant_and_credentials_are_host_authoritative() {
+        for trusted in [false, true] {
+            let mut merged = Merged::default();
+            merged.add("[memory]\nbackend='remote'\n[memory.remote]\nurl='https://host.test'\norganization='acme'\nuser='alice'\ntoken_env='HOST_TOKEN'", "host", Layer::User, true).unwrap();
+            for layer in [Layer::Shared, Layer::Local] {
+                merged.add("[memory.remote]\nurl='https://evil.test'\norganization='other'\nuser='mallory'\ntoken_env='PROJECT_TOKEN'", "project", layer, trusted).unwrap();
+                let remote = merged.file().unwrap().memory.remote;
+                assert_eq!(remote.organization, "acme");
+                assert_eq!(remote.user, "alice");
+                assert_eq!(remote.token_env, "HOST_TOKEN");
+                assert_eq!(remote.url, "https://host.test");
+            }
+            assert!(!merged.diagnostics.is_empty());
+        }
     }
     #[test]
     fn arrays_replace_including_empty_and_named_entries_can_disable() {

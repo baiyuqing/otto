@@ -367,8 +367,13 @@ A non-2xx response other than `404` from `/v1/get` has the body
 
 Any other status, an unparseable body or an unknown code maps to
 `Unavailable`. `message` is untrusted: Otto never shows it to the model or
-the user. The local log records it, truncated to 512 bytes.
-`MemoryWarning` contains the operation, the HTTP status and the code only.
+the user. The Otto log records one `warn` line per failed request with the
+endpoint, the HTTP status, the code and `message` truncated to 512 bytes.
+`MemoryWarning` and tool errors show only the fixed text of the port
+`ErrorKind` (for example `memory service unavailable`), because
+`Client` replaces every error detail with that text
+(`safe` in `crates/otto/src/memory/client.rs`). A recall discarded for
+`coverage` or a rule violation is reported as `Unavailable`.
 
 ## Turn upload
 
@@ -473,7 +478,7 @@ size is 9,121 bytes, 10.53% are over 256 KiB and the 99th percentile is
 | Failure | Recall | Writes from tools and `/remember` | Turn upload |
 | --- | --- | --- | --- |
 | Service unreachable or timeout | no memory this turn, `MemoryWarning` | tool error, outcome unknown | discarded, logged |
-| `401` / `403` | as above, code shown | tool error | discarded, logged |
+| `401` / `403` | no memory this turn, `MemoryWarning` (`memory scope is not authorized`) | tool error | discarded, logged |
 | `coverage` not `complete` | no memory this turn, `MemoryWarning` | n/a | n/a |
 | Invalid response | no memory this turn, `MemoryWarning` | tool error | discarded, logged |
 | Token variable unset | memory disabled for the process, or startup fails with `required = true` | | |

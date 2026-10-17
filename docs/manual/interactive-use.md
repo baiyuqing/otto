@@ -138,7 +138,9 @@ capability.
 - The composer keeps a prompt history: `↑`/`↓` walk back and forth through the
   lines already submitted, and `↓` past the newest one restores what was being
   typed. It starts from the prompts the session already had, so a resumed
-  session can recall its own, and it is not persisted across runs.
+  session can recall its own, and switching sessions with `/resume`, `/fork`
+  or `/new` replaces it with the new session's prompts. It is not persisted
+  across runs.
 - The composer shows at least 3 input rows even when empty or short, and
   grows with wrapped input up to 12 rows before it scrolls instead of
   growing further.

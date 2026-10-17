@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn reconcile_makes_legacy_session_scoped_memory_approval_workspace_visible() {
-        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let (_dir, store) = crate::memory::files::testsupport::open_temp();
         let user = store.identity().unwrap().user_scope;
         let memory = Arc::new(crate::memory::Service::new(
             store,
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn human_pending_query_pages_past_non_actionable_storage_candidates() {
-        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let (_dir, store) = crate::memory::files::testsupport::open_temp();
         let user = store.identity().unwrap().user_scope;
         let memory = Arc::new(crate::memory::Service::new(
             store,
@@ -459,8 +459,8 @@ mod tests {
     }
 
     #[test]
-    fn human_pending_cursor_conflicts_after_a_decision_instead_of_skipping() {
-        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+    fn human_pending_cursor_resumes_after_a_decision_without_skipping() {
+        let (_dir, store) = crate::memory::files::testsupport::open_temp();
         let user = store.identity().unwrap().user_scope;
         let memory = Arc::new(crate::memory::Service::new(
             store,
@@ -502,25 +502,29 @@ mod tests {
             })
             .unwrap();
 
-        let stale = human_pending_candidate_page(
+        // The file store keeps no generation: the cursor is a keyset position,
+        // so a decision on an earlier candidate neither fails nor skips the next.
+        let resumed = human_pending_candidate_page(
             &memory,
             std::slice::from_ref(&user),
             &requests,
             &first.next_cursor,
             1,
         )
-        .expect_err("a decision invalidates the storage snapshot cursor");
-        assert!(stale.is(crate::memory::ErrorKind::Conflict));
+        .unwrap();
+        assert_eq!(resumed.candidates.len(), 1);
+        assert_ne!(resumed.candidates[0].id, first.candidates[0].id);
         let restarted =
             human_pending_candidate_page(&memory, std::slice::from_ref(&user), &requests, "", 1)
                 .unwrap();
         assert_eq!(restarted.candidates.len(), 1);
+        assert_eq!(restarted.candidates[0].id, resumed.candidates[0].id);
         assert!(restarted.next_cursor.is_empty());
     }
 
     #[test]
     fn unified_review_preserves_advice_without_turning_it_into_a_decision() {
-        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let (_dir, store) = crate::memory::files::testsupport::open_temp();
         let user = store.identity().unwrap().user_scope;
         let memory = Arc::new(crate::memory::Service::new(
             store,
@@ -551,7 +555,7 @@ mod tests {
     }
     #[test]
     fn one_memory_request_is_shared_across_authorized_workspaces_without_copying_text() {
-        let (_dir, store) = crate::memory::turso::testsupport::open_temp();
+        let (_dir, store) = crate::memory::files::testsupport::open_temp();
         let user = store.identity().unwrap().user_scope;
         let memory = Arc::new(crate::memory::Service::new(
             store,

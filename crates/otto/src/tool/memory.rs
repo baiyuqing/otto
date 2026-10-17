@@ -62,14 +62,14 @@ struct MemorySearchArgs {
 pub fn memory_search_definition() -> ToolDefinition {
     definition(
         "memory_search",
-        "Search remembered facts and preferences for the current user and workspace. Previous turns retain only record IDs; use id to read the current scope and revision before proposing an update or forget.",
+        "Search remembered facts and preferences for the current user and workspace. Query terms match as case-insensitive substrings of record text, kind, key and labels; an empty query lists recently updated records. Previous turns retain only record IDs; use id to read the current scope and revision before proposing an update or forget.",
         json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search terms; empty lists recently active records"
+                    "description": "Space-separated terms matched as case-insensitive substrings of text, kind, key and labels; empty lists recently updated records"
                 },
                 "id": {
                     "type": "string",
@@ -444,7 +444,7 @@ fn proposal_result(outcome: crate::memory::Result<Vec<crate::memory::Candidate>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::turso::testsupport::open_temp;
+    use crate::memory::files::testsupport::open_temp;
     use crate::memory::{
         CandidateRef, CandidateState, NAMESPACE_USER, NAMESPACE_WORKSPACE, RememberRequest,
         ReviewDecision, ReviewRequest, decide_default_policy,

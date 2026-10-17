@@ -23,29 +23,22 @@ pub struct SqlCapabilities {
     pub atomic_transactions: bool,
     pub durable_commits: bool,
     pub multiprocess_writers: bool,
-    /// Exact Turso index-method FTS SQL (`USING fts`, weighted index options,
-    /// `fts_match`/`fts_score`) and compatible backing schema/search behavior.
-    /// Generic SQLite FTS5 support does not satisfy this capability.
-    pub fts: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SqlRequirements {
     pub durable_commits: bool,
     pub multiprocess_writers: bool,
-    pub fts: bool,
 }
 
 impl SqlRequirements {
     pub const EPHEMERAL: Self = Self {
         durable_commits: false,
         multiprocess_writers: false,
-        fts: false,
     };
     pub const DURABLE: Self = Self {
         durable_commits: true,
         multiprocess_writers: true,
-        fts: false,
     };
 }
 
@@ -67,11 +60,6 @@ impl SqlCapabilities {
         if required.multiprocess_writers && !self.multiprocess_writers {
             return Err(Error::UnsupportedCapability(
                 "multiprocess writer coordination",
-            ));
-        }
-        if required.fts && !self.fts {
-            return Err(Error::UnsupportedCapability(
-                "Turso FTS index dialect and scoring",
             ));
         }
         Ok(())

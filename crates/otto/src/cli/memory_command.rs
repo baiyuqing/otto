@@ -105,6 +105,20 @@ pub(crate) fn startup_configuration(
         .map_err(|_| ())
 }
 
+/// Whether the memory directory that `config` resolves to already holds a
+/// store. Then `otto memory` needs no storage route authority: the routes only
+/// locate a database to import.
+pub(crate) fn has_store(
+    config: &otto_core::config::File,
+    lookup: &HashMap<String, String>,
+    home: &str,
+) -> bool {
+    let mut environment = super::run::config_environment_for(config, lookup);
+    environment.insert("HOME".to_string(), home.to_string());
+    resolve_memory(config, &environment)
+        .is_ok_and(|memory| crate::memory::files::has_identity(Path::new(&memory.dir)))
+}
+
 pub fn run(
     args: &[String],
     stdout: &mut (dyn Write + Send),
@@ -264,20 +278,8 @@ fn status(
     };
     let redactor = otto_core::agent::redactor::Redactor::with_completeness(secret_values, true);
     let _ = writeln!(stdout, "enabled: {}", config.enabled);
-    let _ = writeln!(
-        stdout,
-        "backend: {}",
-        storage.memory_backend(&config.backend)
-    );
-    let endpoint = storage
-        .memory_endpoint(Path::new(&config.turso_path))
-        .unwrap_or_else(|_| "unavailable".into());
-    let label = if endpoint.starts_with("instance:") {
-        "endpoint"
-    } else {
-        "path"
-    };
-    let _ = writeln!(stdout, "{label}: {}", redactor.redact_string(&endpoint));
+    let _ = writeln!(stdout, "backend: {}", config.backend);
+    let _ = writeln!(stdout, "path: {}", redactor.redact_string(&config.dir));
     let _ = writeln!(stdout, "usable: {usable}");
     if usable {
         // The scopes `/memory review` lists: the user and the current workspace.
@@ -316,7 +318,14 @@ fn status(
             }
         }
     }
-    if !String::from_utf8_lossy(&warning).trim().is_empty() {
+    let warning = String::from_utf8_lossy(&warning);
+    for skipped in warning
+        .lines()
+        .filter_map(|line| line.strip_prefix(crate::runtime::wiring::SKIPPED_FILE_PREFIX))
+    {
+        let _ = writeln!(stdout, "skipped: {}", redactor.redact_string(skipped));
+    }
+    if !usable {
         let _ = writeln!(stdout, "{STORE_UNAVAILABLE_WARNING}");
     }
     let _ = service.close();
@@ -589,15 +598,25 @@ mod tests {
     use crate::memory::RememberRequest;
     use std::collections::HashMap;
 
-    /// Writes a config file enabling memory at `db_path` and returns its path.
-    fn memory_config(directory: &Path, db_path: &str) -> String {
+    /// Writes a config file enabling memory and returns its path.
+    fn memory_config(directory: &Path) -> String {
         let path = directory.join("otto.toml");
-        std::fs::write(
-            &path,
-            format!("[memory]\nenabled = true\n[memory.turso]\npath = \"{db_path}\"\n"),
-        )
-        .expect("write config");
+        std::fs::write(&path, "[memory]\nenabled = true\n").expect("write config");
         path.to_string_lossy().into_owned()
+    }
+
+    fn store_dir(home: &Path) -> std::path::PathBuf {
+        home.join(".otto").join("memory")
+    }
+
+    /// The runtime that `memory_config` resolves to under `home`.
+    fn runtime(home: &Path) -> MemoryRuntime {
+        MemoryRuntime {
+            enabled: true,
+            backend: "files".into(),
+            dir: store_dir(home).to_string_lossy().into_owned(),
+            ..MemoryRuntime::default()
+        }
     }
 
     fn lookup(home: &Path) -> HashMap<String, String> {
@@ -621,23 +640,12 @@ mod tests {
     fn status_reports_pending_candidates_in_the_current_scopes() {
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
-        let store = tempfile::tempdir().expect("store");
-        let db_path = store
-            .path()
-            .join("memory.db")
-            .to_string_lossy()
-            .into_owned();
-        let config = memory_config(home.path(), &db_path);
+        let config = memory_config(home.path());
         let cwd = workspace.path().to_string_lossy().into_owned();
         let status = || memory(&["status", "--config", &config, "--cwd", &cwd], home.path()).1;
         assert!(status().contains("pending: 0\n"), "{}", status());
 
-        let runtime = MemoryRuntime {
-            enabled: true,
-            backend: "turso".into(),
-            turso_path: db_path,
-            ..MemoryRuntime::default()
-        };
+        let runtime = runtime(home.path());
         let (service, user, _) =
             crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                 .expect("open");
@@ -671,9 +679,7 @@ mod tests {
     fn status_reports_standing_usage_and_over_budget_records() {
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
-        let store = tempfile::tempdir().expect("store");
-        let db_path = store.path().join("memory.db");
-        let config = memory_config(home.path(), &db_path.to_string_lossy());
+        let config = memory_config(home.path());
         let cwd = workspace.path().to_string_lossy().into_owned();
         let status = || memory(&["status", "--config", &config, "--cwd", &cwd], home.path()).1;
         let empty = status();
@@ -682,7 +688,7 @@ mod tests {
             "{empty}"
         );
 
-        crate::cli::testutil::seed_over_budget_standing(&db_path);
+        crate::cli::testutil::seed_over_budget_standing(&store_dir(home.path()));
         let over = status();
         let line = over
             .lines()
@@ -699,10 +705,7 @@ mod tests {
     fn status_reports_configured_memory() {
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
-        let store = tempfile::tempdir().expect("store");
-        let db_path = store.path().join("memory").join("memory.db");
-        let db_path = db_path.to_string_lossy().into_owned();
-        let config = memory_config(home.path(), &db_path);
+        let config = memory_config(home.path());
 
         let (code, stdout, stderr) = memory(
             &[
@@ -715,80 +718,39 @@ mod tests {
             home.path(),
         );
         assert_eq!(code, 0, "stderr = {stderr}");
-        for want in ["enabled: true", "backend: turso", &db_path, "usable: true"] {
+        let path = format!("path: {}\n", store_dir(home.path()).display());
+        for want in ["enabled: true", "backend: files", &path, "usable: true"] {
             assert!(stdout.contains(want), "stdout = {stdout:?}, want {want:?}");
         }
     }
 
     #[test]
-    fn status_reports_the_selected_storage_endpoint() {
+    fn has_store_is_true_only_after_the_identity_file_exists() {
         let home = tempfile::tempdir().expect("home");
-        let workspace = tempfile::tempdir().expect("workspace");
-        let old = tempfile::tempdir().expect("old store");
-        let selected = tempfile::tempdir().expect("selected store");
-        let configured_path = old.path().join("memory.db");
-        let selected_path = selected.path().join("memory.db");
-        let config = memory_config(home.path(), &configured_path.to_string_lossy());
-        let routes = std::collections::BTreeMap::from([(
-            "memory".into(),
-            crate::storage::migration::StorageRoute {
-                backend: "sqlite".into(),
-                endpoint: selected_path.to_string_lossy().into_owned(),
-                namespace_identity: None,
-            },
-        )]);
-        let storage = crate::runtime::storage::Storage::default()
-            .with_routes(routes)
-            .expect("route");
-        let args = [
-            "status",
-            "--config",
-            &config,
-            "--cwd",
-            &workspace.path().to_string_lossy(),
-        ]
-        .map(str::to_owned);
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        assert_eq!(
-            run_with_storage(
-                &args,
-                &mut stdout,
-                &mut stderr,
-                &lookup(home.path()),
-                &storage
-            ),
-            0,
-            "{}",
-            String::from_utf8_lossy(&stderr)
-        );
-        let output = String::from_utf8_lossy(&stdout);
-        assert!(output.contains(&selected_path.to_string_lossy().to_string()));
-        assert!(!output.contains(&configured_path.to_string_lossy().to_string()));
+        let file = otto_core::config::File::default();
+        let lookup = lookup(home.path());
+        let home_text = home.path().to_string_lossy().into_owned();
+        assert!(!has_store(&file, &lookup, &home_text));
+        crate::memory::files::FileStore::open(
+            &store_dir(home.path()),
+            crate::memory::repository::MemoryOptions::default(),
+        )
+        .expect("create store");
+        assert!(has_store(&file, &lookup, &home_text));
     }
 
-    /// A captured token must not survive into the status output.
     #[test]
-    fn status_redacts_captured_chatgpt_credentials() {
+    fn status_lists_skipped_files_without_their_content() {
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
-        let store = tempfile::tempdir().expect("store");
-        // Not a credential: a fixture value placed where the status output
-        // prints it, so an uncollected token is visible in the assertion.
-        let token = "captured-chatgpt-token-fixture";
-        let auth_path = crate::auth::path_for_home(home.path());
-        std::fs::create_dir_all(auth_path.parent().expect("auth directory"))
-            .expect("create auth directory");
-        std::fs::write(&auth_path, format!(r#"{{"access_token":"{token}"}}"#))
-            .expect("write credentials");
-        let db_path = store
-            .path()
-            .join(token)
-            .join("memory.db")
-            .to_string_lossy()
-            .into_owned();
-        let config = memory_config(home.path(), &db_path);
+        let config = memory_config(home.path());
+        let dir = store_dir(home.path());
+        crate::memory::files::FileStore::open(
+            &dir,
+            crate::memory::repository::MemoryOptions::default(),
+        )
+        .expect("create store");
+        std::fs::write(dir.join("records").join("bad.md"), "body-secret-text\n").expect("bad");
 
         let (code, stdout, stderr) = memory(
             &[
@@ -800,8 +762,46 @@ mod tests {
             ],
             home.path(),
         );
+        assert_eq!(code, 0, "stderr = {stderr}");
+        let lines: Vec<&str> = stdout
+            .lines()
+            .filter(|line| line.starts_with("skipped: "))
+            .collect();
+        assert_eq!(lines.len(), 1, "stdout = {stdout:?}");
+        assert!(lines[0].contains("bad.md"), "{}", lines[0]);
+        assert!(!stdout.contains("body-secret-text"), "stdout = {stdout:?}");
+    }
+
+    /// A captured token must not survive into the status output.
+    #[test]
+    fn status_redacts_captured_chatgpt_credentials() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        // Not a credential: a fixture value placed in the home path, which the
+        // status output prints as part of the store path, so an uncollected
+        // token is visible in the assertion.
+        let token = "captured-chatgpt-token-fixture";
+        let home = root.path().join(token);
+        let auth_path = crate::auth::path_for_home(&home);
+        std::fs::create_dir_all(auth_path.parent().expect("auth directory"))
+            .expect("create auth directory");
+        std::fs::write(&auth_path, format!(r#"{{"access_token":"{token}"}}"#))
+            .expect("write credentials");
+        let config = memory_config(&home);
+
+        let (code, stdout, stderr) = memory(
+            &[
+                "status",
+                "--config",
+                &config,
+                "--cwd",
+                &workspace.path().to_string_lossy(),
+            ],
+            &home,
+        );
 
         assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(stdout.contains("path: "), "stdout = {stdout:?}");
         assert!(
             !stdout.contains(token),
             "stdout leaked the token: {stdout:?}"
@@ -814,19 +814,8 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
         let other_workspace = tempfile::tempdir().expect("other workspace");
-        let store = tempfile::tempdir().expect("store");
-        let db_path = store
-            .path()
-            .join("memory.db")
-            .to_string_lossy()
-            .into_owned();
-        let config = memory_config(home.path(), &db_path);
-        let runtime = MemoryRuntime {
-            enabled: true,
-            backend: "turso".into(),
-            turso_path: db_path,
-            ..MemoryRuntime::default()
-        };
+        let config = memory_config(home.path());
+        let runtime = runtime(home.path());
         let (service, user, usable) =
             crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                 .expect("open");
@@ -880,21 +869,9 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let workspace_path = crate::runtime::sandbox_runtime::canonical_directory(workspace.path())
             .expect("canonical workspace");
-        let store = tempfile::tempdir().expect("store");
-        let db_path = store
-            .path()
-            .join("memory")
-            .join("memory.db")
-            .to_string_lossy()
-            .into_owned();
-        let config = memory_config(home.path(), &db_path);
+        let config = memory_config(home.path());
 
-        let runtime = MemoryRuntime {
-            enabled: true,
-            backend: "turso".into(),
-            turso_path: db_path,
-            ..MemoryRuntime::default()
-        };
+        let runtime = runtime(home.path());
         let (service, _, usable) =
             crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                 .expect("open memory service");
@@ -947,7 +924,7 @@ mod tests {
     #[test]
     fn forget_without_an_id_reports_usage() {
         let home = tempfile::tempdir().expect("home");
-        let config = memory_config(home.path(), "/unused/memory.db");
+        let config = memory_config(home.path());
         let (code, _, stderr) = memory(&["forget", "--config", &config], home.path());
         assert_ne!(code, 0);
         assert!(stderr.contains("usage"), "stderr = {stderr:?}");
@@ -1013,7 +990,7 @@ mod tests {
     #[test]
     fn an_unusable_working_directory_uses_a_fixed_diagnostic() {
         let home = tempfile::tempdir().expect("home");
-        let config = memory_config(home.path(), "/unused/memory.db");
+        let config = memory_config(home.path());
         let cwd = home
             .path()
             .join("cwd-secret-does-not-exist")
@@ -1069,8 +1046,8 @@ mod tests {
         let secret = secret.to_string_lossy().into_owned();
         let runtime = MemoryRuntime {
             enabled: true,
-            backend: "turso".into(),
-            turso_path: format!("{secret}/memory.db"),
+            backend: "files".into(),
+            dir: format!("{secret}/memory"),
             ..MemoryRuntime::default()
         };
 
@@ -1092,9 +1069,9 @@ mod tests {
         );
         for want in [
             "enabled: true",
-            "backend: turso",
+            "backend: files",
             "path: ",
-            "memory.db",
+            "/memory",
             "usable: false",
             STORE_UNAVAILABLE_WARNING,
         ] {

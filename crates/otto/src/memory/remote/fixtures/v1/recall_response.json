@@ -1,0 +1,1 @@
+{"coverage":"complete","items":[{"id":"m-17","scope":{"namespace":"user","id":"local"},"revision":"4","text":"The user prefers vim.","pinned":true},{"id":"m-03","scope":{"namespace":"workspace","id":"sha256:0123456789abcdef"},"text":"The project uses tabs for indentation."}]}

@@ -40,7 +40,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   to local storage with a 0.4.8 build first; remove `[storage.routes].memory`;
   start this version, which imports the schema version 2 database once and never
   modifies it; after checking the files, delete the old database manually. See
-  [Memory](docs/manual/memory-and-extensions.md#memory). ([#PR](https://github.com/baiyuqing/otto/pull/PR))
+  [Memory](docs/manual/memory-and-extensions.md#memory). ([#491](https://github.com/baiyuqing/otto/pull/491))
 
 - Slash commands are now recognized only when `/` is the first input character;
   leading whitespace keeps the text as an ordinary prompt. AUTO review no longer

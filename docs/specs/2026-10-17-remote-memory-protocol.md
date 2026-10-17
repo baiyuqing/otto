@@ -405,7 +405,8 @@ image prompt in `crates/otto/src/app/mod.rs`. Each already ends in
 ### Conversion
 
 - Kept: `Text` blocks; `ToolCall` (`tool_call_id`, `tool_name`, `arguments`
-  as a JSON value); `ToolResult` (`tool_call_id`, `tool_name`, `text`,
+  as a JSON object; absent, unparseable or non-object arguments are sent as
+  `{}`); `ToolResult` (`tool_call_id`, `tool_name`, `text`,
   `is_error`).
 - Omitted: `Image`, `Reasoning` and `Other` blocks, and messages with role
   `Other`. A message with no kept block is omitted. A turn with no kept

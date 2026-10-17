@@ -732,6 +732,7 @@ pub async fn run_with_extensions(
     startup_trace.mark("memory/open");
     let memory_service = Arc::clone(&builder.memory.service);
     let memory_client = builder.memory.client.clone();
+    let memory_turns = builder.memory.turns.clone();
     if cancel.is_cancelled() {
         let _ = control.close().await;
         return 130;
@@ -755,6 +756,9 @@ pub async fn run_with_extensions(
             .map(|executor| executor.close())
             .transpose()
             .err();
+        if let Some(turns) = &memory_turns {
+            turns.close().await;
+        }
         let memory_error = match &memory_client {
             Some(client) => client.close(&CancellationToken::new()).await.err(),
             None => None,
@@ -1068,6 +1072,9 @@ pub async fn run_with_extensions(
         .map(|executor| executor.close())
         .transpose()
         .err();
+    if let Some(turns) = &memory_turns {
+        turns.close().await;
+    }
     let memory_error = match &memory_client {
         Some(client) => client.close(&CancellationToken::new()).await.err(),
         None => None,

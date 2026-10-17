@@ -289,10 +289,99 @@ impl Controller {
         self.current_runner()?.tasks.clone()
     }
 
+    /// `/remember` against a selected memory service. The caller is a
+    /// synchronous management thread, so the async client call is driven with
+    /// `block_in_place` as `storage::worker::blocking` does.
+    fn remember_with_service(
+        &self,
+        scope: &str,
+        kind: String,
+        key: String,
+        text: String,
+    ) -> Result<Reply, String> {
+        use otto_core::memory::{Completion, Content, ItemState, Origin};
+        let wiring = self.memory_wiring();
+        let client = match &wiring.client {
+            Some(client) if wiring.usable => Arc::clone(client),
+            _ => return Err("memory is not available".into()),
+        };
+        let mut context = self.memory_context(Origin::Human);
+        match scope {
+            "workspace" => {}
+            "user" => context.write_scope = context.scopes.first().cloned(),
+            _ => {
+                return Ok(Reply::Usage(format!(
+                    "unknown scope {scope:?}, want user or workspace"
+                )));
+            }
+        }
+        let mut metadata = std::collections::BTreeMap::new();
+        for (name, value) in [("kind", kind), ("key", key)] {
+            if !value.is_empty() {
+                metadata.insert(name.to_string(), value);
+            }
+        }
+        let request = otto_core::memory::RememberRequest {
+            context,
+            request_id: crate::memory::new_id().map_err(|e| e.to_string())?,
+            content: Content::Text(text),
+            target: None,
+            metadata,
+        };
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| "memory service requires an async runtime".to_string())?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err("memory service requires a multi-thread runtime".into());
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let receipt =
+            tokio::task::block_in_place(|| handle.block_on(client.remember(&request, &cancel)))
+                .map_err(|e| e.to_string())?;
+        let pending = matches!(
+            receipt.completion,
+            Completion::Pending | Completion::Running
+        );
+        let mut line = match receipt.items.first() {
+            Some(item) => {
+                let state = match item.state {
+                    ItemState::Applied => "applied",
+                    ItemState::NoChange => "no_change",
+                    ItemState::Skipped => "skipped",
+                    ItemState::Failed => "failed",
+                    ItemState::Unknown => "unknown",
+                };
+                match &item.reference {
+                    Some(r) => format!(
+                        "remembered {} (scope={}/{}, state={state})",
+                        r.id, r.scope.namespace, r.scope.id
+                    ),
+                    None => format!("remember request {} (state={state})", receipt.request_id),
+                }
+            }
+            None => format!(
+                "remember request {} accepted (completion={:?})",
+                receipt.request_id, receipt.completion
+            ),
+        };
+        if pending {
+            line.push_str(" pending");
+        }
+        Ok(Reply::Notice(line))
+    }
+
     pub(crate) fn management(&self, request: Request) -> Result<Reply, String> {
         use Request::*;
-        if self.memory_wiring().extension.is_some()
-            && matches!(
+        if self.memory_wiring().extension.is_some() {
+            if let Remember {
+                scope,
+                kind,
+                key,
+                text,
+            } = request
+            {
+                return self.remember_with_service(&scope, kind, key, text);
+            }
+            if matches!(
                 &request,
                 MemoryList { .. }
                     | MemoryShow { .. }
@@ -300,10 +389,9 @@ impl Controller {
                     | MemoryForget { .. }
                     | MemoryReviewList
                     | MemoryReview { .. }
-                    | Remember { .. }
-            )
-        {
-            return Err("memory operation is unsupported by the native record management interface; use the Rust memory service API".into());
+            ) {
+                return Err("memory operation is unsupported by the native record management interface; the selected memory service manages its records".into());
+            }
         }
         match request {
             MemoryList {
@@ -594,7 +682,127 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
-    use super::Request;
+    use super::{Reply, Request};
+    use otto_core::{memory as port, operation::OperationControl};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Recorder {
+        requests: Mutex<Vec<port::RememberRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl port::MemoryService for Recorder {
+        fn describe(&self) -> port::ServiceDescription {
+            let mut description = port::ServiceDescription::new("recorder".into());
+            description
+                .capabilities
+                .push(port::Capability::new(port::Operation::Recall));
+            let mut capability = port::Capability::new(port::Operation::Remember);
+            capability.supports_reviewed_changes = true;
+            capability.effects = vec![port::Effect::ChangeMemory];
+            description.capabilities.push(capability);
+            description
+        }
+        async fn recall(
+            &self,
+            _: &port::RecallRequest,
+            _: &dyn OperationControl,
+        ) -> port::Result<port::RecallResult> {
+            Err(port::Error::new(port::ErrorKind::Unsupported))
+        }
+        async fn remember(
+            &self,
+            request: &port::RememberRequest,
+            _: &dyn OperationControl,
+        ) -> port::Result<port::Receipt> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(port::Receipt {
+                request_id: request.request_id.clone(),
+                operation_ref: None,
+                admission: port::Admission::Acknowledged,
+                completion: port::Completion::Complete,
+                visibility: port::Visibility::Unknown,
+                items: vec![port::ItemOutcome {
+                    reference: Some(port::MemoryRef {
+                        service: "recorder".into(),
+                        scope: request.context.write_scope.clone().unwrap(),
+                        id: "item-1".into(),
+                        revision: None,
+                    }),
+                    state: port::ItemState::Applied,
+                    reason: None,
+                }],
+                forget_coverage: None,
+            })
+        }
+    }
+
+    async fn controller_with_service(service: Arc<Recorder>) -> crate::app::Controller {
+        let workspace = tempfile::tempdir().unwrap().keep();
+        let sessions = tempfile::tempdir().unwrap().keep();
+        let mut builder = crate::cli::testutil::builder(&workspace, &sessions);
+        builder.workspace_scope = crate::memory::Scope {
+            namespace: "workspace".into(),
+            id: "w1".into(),
+        };
+        let extension = crate::runtime::wiring::MemoryExtension::new(
+            service,
+            port::Scope {
+                namespace: "user".into(),
+                id: "u1".into(),
+            },
+        );
+        builder.shared_mut().memory = crate::runtime::wiring::MemoryWiring {
+            client: Some(Arc::new(extension.client().unwrap())),
+            extension: Some(extension),
+            usable: true,
+            ..Default::default()
+        };
+        let runtime = crate::cli::testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).unwrap();
+        let runner = builder.build_runner(&session, &runtime).await.unwrap();
+        let info = builder.runtime_info(&runtime);
+        crate::app::Controller::new(builder, true, session, runner, info)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remember_reaches_the_memory_service_and_other_memory_requests_stay_unsupported() {
+        let service = Arc::new(Recorder::default());
+        let controller = controller_with_service(service.clone()).await;
+        let run = |args: &'static str| {
+            let controller = &controller;
+            move || controller.management(Request::parse("remember", args).unwrap())
+        };
+        let line = match run("--scope user --kind fact --key name hello")() {
+            Ok(Reply::Notice(line)) => line,
+            other => panic!("expected a notice, got {:?}", other.map(|_| ())),
+        };
+        assert_eq!(line, "remembered item-1 (scope=user/u1, state=applied)");
+        assert!(matches!(run("plain text")(), Ok(Reply::Notice(_))));
+        assert!(matches!(run("--scope team x")(), Ok(Reply::Usage(_))));
+        let requests = service.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let user = &requests[0];
+        assert_eq!(user.context.origin, port::Origin::Human);
+        assert_eq!(
+            user.context.write_scope,
+            Some(user.context.scopes[0].clone())
+        );
+        assert_eq!(user.metadata["kind"], "fact");
+        assert_eq!(user.metadata["key"], "name");
+        assert!(matches!(&user.content, port::Content::Text(text) if text == "hello"));
+        let workspace = &requests[1];
+        assert_eq!(
+            workspace.context.write_scope,
+            Some(workspace.context.scopes[1].clone())
+        );
+        drop(requests);
+        let error = controller
+            .management(Request::MemoryReviewList)
+            .unwrap_err();
+        assert!(error.ends_with("the selected memory service manages its records"));
+    }
 
     #[test]
     fn task_parser_unifies_list_detail_and_cancel() {

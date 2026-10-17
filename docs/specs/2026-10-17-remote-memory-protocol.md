@@ -315,9 +315,12 @@ service's decision.
 | --- | --- | --- |
 | `applied` | stored or suppressed | acknowledged, complete, ready, applied |
 | `no_change` | already in that state | acknowledged, complete, ready, no_change |
-| `skipped` | the service declined to adopt | acknowledged, complete, not_applicable, skipped |
+| `skipped` | the service declined to adopt | acknowledged, complete (remember) or partial (forget), not_applicable, skipped |
 | `pending` | accepted, decided later | acknowledged, pending, pending, unknown |
 | `failed` | not stored | rejected, failed, not_applicable, failed |
+
+A skipped forget maps to `partial` because `Receipt::validate_forget`
+accepts `complete` only when the achieved coverage includes `suppress`.
 
 `id` is required for `applied` and `no_change`. A timeout or a transport
 error after the request was sent maps to `OutcomeUnknown`: the write may or

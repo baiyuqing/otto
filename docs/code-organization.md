@@ -89,7 +89,7 @@ contract or format and `otto` holds the implementation:
 | --- | --- | --- |
 | `session` | `Session` trait, `MemorySession`, Pi v3 codec, context, compaction and fork planning, trace building (`session::trace`) | `SessionHandle`; the JSONL `Store` in `storage/backends/posix/session/`, which `session/` re-exports |
 | `config` | configuration schema, layered merge, provenance, managed constraints, resolution, `config::edit` | source discovery, executable trust, the compare-and-swap writer |
-| `memory` | `MemoryService` open contract, scoped requests, context projections | built-in domain `Service`, validation, `client::Client`, `adapter::BuiltinAdapter`; Turso store under `storage/` |
+| `memory` | `MemoryService` open contract, scoped requests, context projections | built-in domain `Service`, validation, `client::Client`, `adapter::BuiltinAdapter`; file store in `memory/files/` |
 | `approval` | approval requests, choices, modes and lifecycle values | durable approval authority `Service`, policy, repository port; Turso store under `storage/` |
 | `provider` | `Provider` trait; wire codecs in `openaicompat` and `openairesponses` | HTTP transports in `provider/openaicompat.rs` and `provider/chatgpt.rs` |
 | `tool` | tool definitions, schema assembly, `ToolExecutor` trait | `Tool` trait, `Registry` (implements `ToolExecutor`), native tool execution, MCP tool adapter |
@@ -158,13 +158,12 @@ Turso/POSIX drivers live beside them in `storage/`. `runtime/storage.rs`
 validates routes and capabilities, opens concrete repositories, and injects
 domain ports into consumers. Portable migration record definitions live beside
 their domain owners in `migration.rs` (`skill/check_migration.rs` for skill
-audits); approval envelopes and canonical memory codecs also belong to their
-domains. Backend packages retain their physical mappings and I/O.
+audits); approval envelopes also belong to their domains. Backend packages retain their physical mappings and I/O.
 
 | State | Domain owner | Current adapter |
 | --- | --- | --- |
 | Approval authority and isolated smart review | `approval/{contracts,repository,service,reviewer}.rs`, `otto-core/src/approval/` | `storage/backends/turso/approval.rs` |
-| Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `storage/backends/turso/memory/` and `memory_advice.rs` |
+| Memory and review advice | `memory/{repository,service}.rs`, `memory/advice/audit_contracts.rs` | `memory/files/` (records, tombstones, candidates) and `storage/backends/turso/memory_advice.rs` (advice audit) |
 | Session transcripts | `otto-core/src/session/`, native `session/repository.rs` | `storage/backends/posix/session/` |
 | Schedules and workflows | `schedule/store.rs`, `workflow/{contracts,repository,service}.rs` | `storage/backends/turso/{schedule,workflow}.rs` |
 | Tasks, reflection, usage, skill checks | Their domain repository modules | `storage/backends/turso/{tasks,reflection,usage,skill_checks}.rs` |

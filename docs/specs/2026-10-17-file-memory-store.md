@@ -225,8 +225,9 @@ with two new ids, as the database does today.
   `storage/migration/references.rs` and
   `storage/backends/migration_references.rs`. `~/.otto/memory/` stays in the
   source home during a transfer.
-- `otto memory` commands no longer open the storage route authority, so they
-  work while it is frozen.
+- After the first import (`identity.json` exists), `otto memory` commands do
+  not open the storage route authority, so they work while it is frozen.
+  Before it, they open the authority to find a published import source.
 
 Unchanged: the `MemoryStore` trait (one implementation, now `FileStore`),
 `memory::Service`, the approval flow, reflection, memory advice

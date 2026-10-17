@@ -29,7 +29,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers
   - `provider`: native HTTP transports for the two provider implementations
   - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
-  - `memory`: domain contracts, validation/secret guards, conservative policy, repository ports and the `Service` implementation. Turso schemas, FTS search and advice audit SQL live under `storage/backends/turso/`. `decision` owns the native typed `Backend`, questions/answers, finite observational confidence, session prompt/parser and Jev transport, with compatibility exports under `memory::advice`. `memory::advice` owns memory-specific advisory review and orchestration (`Advisor` runs a typed audit port). `Advisor::propose` calls `Service::check_proposal` first and queues the candidate without advice on timeout (20 s), error or invalid answer; the session-model backend (`runtime::advice`) is built in `runtime::wiring`, and `TYPESAFE_API_KEY` selects the Jev backend. Advice is stored as `advice.*` candidate metadata and rendered only by `memory::advice::advice_line`
+  - `memory`: domain contracts, validation/secret guards, conservative policy, repository ports and the `Service` implementation. The file store (`memory/files/`) holds records, tombstones and candidates as files under `~/.otto/memory/`; it is not a storage domain, and `otto memory` commands open the storage route authority only while `identity.json` is absent, to find a published import source. Advice audit SQL lives under `storage/backends/turso/`. A one-time importer reads the earlier Turso memory database. `decision` owns the native typed `Backend`, questions/answers, finite observational confidence, session prompt/parser and Jev transport, with compatibility exports under `memory::advice`. `memory::advice` owns memory-specific advisory review and orchestration (`Advisor` runs a typed audit port). `Advisor::propose` calls `Service::check_proposal` first and queues the candidate without advice on timeout (20 s), error or invalid answer; the session-model backend (`runtime::advice`) is built in `runtime::wiring`, and `TYPESAFE_API_KEY` selects the Jev backend. Advice is stored as `advice.*` candidate metadata and rendered only by `memory::advice::advice_line`
   - `typesafe`: the HTTP client of the TypeSafe auxiliary model (`jev-latest`), shared by `skill::check` and `decision::jev`. `reflection::gate` uses this typed backend only for automatic scheduling when JEV is configured: strict immediate/defer answers, a 20 s outer timeout and cancellation select, fail-open on unavailable/invalid replies, and no watermark write on defer. It sends bounded redacted evidence, emits content-free `reflection_decision` measurements, and cannot bypass existing dynamic-content, memory-review or skill-approval boundaries
   - `reflection`: the `/reflect` use case, also started by the model's `reflect` tool (`tool::reflect` is the port; `app::requested_reflection` binds it to each installed runner and runs it beside the turn with trigger `requested`, sharing the background single-flight flag): it reads the part of a session no earlier run covered (from the session file, so compacted entries stay reachable), classifies entries as local or external (`taint`), builds one tool-less request (`prompt`), parses and validates the answer (`output`), verifies quoted evidence in code (`evidence`), writes a per-run Markdown log, opening with the model's retrospective and listing every proposal and its outcome, to `~/.otto/reflection/runs` (`runlog`, which also lists and reads those logs for `/reflect list|show` by matching directory entry names), and queues survivors as memory candidates through `Service::propose` with `Origin::Extractor`. `repository.rs` owns reflection records/ports; the Turso adapter owns `~/.otto/reflection.db` SQL. Skills pass `guard` (structure and the rule table), `review` (a fail-closed second-model call), and Python syntax validation in `skillwrite`, the only file that mutates skill files; it accepts only a `guard::Vetted`, versions the complete Markdown/Python file set, and publishes staged directories atomically through `fsops::publish_directory`; which only `guard::approve` builds. `crates/otto/tests/reflection_boundary.rs` fails if this module ever writes, forgets, or reviews a memory record directly, if a file other than `skillwrite.rs` mutates the filesystem (except `runlog.rs`, which creates each run log with `OpenOptions` and `create_new`), or if `Vetted` is built outside `guard.rs`. A new scan rule goes in the `RULES` table in `guard.rs` with a positive and a negative test case
   - `usage`: native collection of parent, sub-agent, and compaction token events; a typed repository port; and total/daily aggregate queries consumed by the server. Turso SQL lives in its backend adapter
@@ -68,8 +68,9 @@ pending candidates requiring review; human `/remember` and `/memory forget`
 apply immediately. Recall renders two groups (`otto-core`'s
 `render_memory_context`): the standing set (active user-scope
 `preference`/`instruction` records with a key, flagged by the retriever's
-baseline query) under `STANDING_CONTEXT_PREAMBLE`, then the query matches under
-the untrusted `MEMORY_CONTEXT_PREAMBLE`. The standing set has its own token
+baseline query) under `STANDING_CONTEXT_PREAMBLE`, then the other in-scope records
+(workspace first, newest first, within `max_results` and `recall_tokens`; the
+message text is not matched) under the untrusted `MEMORY_CONTEXT_PREAMBLE`. The standing set has its own token
 budget, `MAX_STANDING_TOKENS`; `Service::remember` and an accept in
 `Service::review` reject a write that would exceed it, and validation rejects a
 keyless user-scope `preference`/`instruction` create. On each session open
@@ -307,8 +308,8 @@ select validated domain routes through user/managed storage configuration.
 Domain services own validation, state transitions and recovery policy.
 Repositories expose typed domain operations and own atomicity, revision/claim
 checks, codecs and schemas. The shared SQL driver checks dialect, immediate
-serializable transactions, commit durability, multi-process writer behavior,
-and the memory FTS profile before a repository receives a connection. Session
+serializable transactions, commit durability and multi-process writer behavior
+before a repository receives a connection. Session
 message, compaction, operation-fact, and custom-entry writes cross async
 interfaces; the POSIX implementation retains Pi v3 encoding and append-only
 history. `otto-core` remains independent of native storage engines.
@@ -318,8 +319,9 @@ history. `otto-core` remains independent of native storage engines.
 `runtime::storage::BackendRegistry` registers external `RepositoryFactory`
 implementations before persisted routes are validated. Extension binaries call
 `cli::run::run_with_backends`; the ordinary `run` and `Storage::open_home`
-retain the existing defaults. Memory commands, including `--config`, and
-storage init/transfer commands use the same registry. Core/browser consumers
+retain the existing defaults. Storage init/transfer commands use the same
+registry; `otto memory` commands open it only before the first memory
+import. Core/browser consumers
 have no native SDK dependency.
 
 `StorageEndpoint` distinguishes an absolute local path from an opaque service
@@ -338,7 +340,7 @@ boundary and stay withheld from tools.
 The SQL compatibility driver and `SqlRepositories` remain SQLite/Turso profile
 interfaces. A MySQL/PostgreSQL extension supplies its own schemas, migrations,
 queries, error mapping and domain repository implementations. It does not
-implement fictitious SQLite PRAGMAs or reuse Turso FTS queries.
+implement fictitious SQLite PRAGMAs or reuse Turso queries.
 
 Keep existing synchronous domain ports compatible. A network adapter can own
 `storage::worker::Worker<T>` and await client futures on its real Tokio runtime.
@@ -352,7 +354,7 @@ lost commit acknowledgement into rollback or retry an external tool.
 `RepositoryFactory::prepare_import` and `export` compose external migration
 adapters with the existing coordinator. Preparation is read-only and returns
 an isolated stage's stable namespace identity. Domain-owned version-one record
-schemas, approval envelopes and canonical memory codecs are public; table/SQL
+schemas and approval envelopes are public; table/SQL
 mappings remain backend-owned. `migration::record` supplies canonical ordering
 and digests. The existing transfer encoding and legacy local routes remain
 readable. `StageImport::verification_chunk` returns actual staged logical data;
@@ -387,7 +389,7 @@ implementations live under `storage/backends/`. The generic coordinator
 sequences an offline resumable migration, reconciles receipts, verifies the
 staged snapshot, and publishes a new local route group through the route
 authority; it never executes pending tools. `otto storage transfer <source-home> <destination-root>
-<migration-id> [--memory-db <path>]` composes these ports for a stopped local
+<migration-id>` composes these ports for a stopped local
 installation. On success it publishes the destination as the active route group
 for the source home; restart Otto from that same home to use it. Repeating the
 same command and ID resumes its manifest. Use `otto storage abort <source-home>

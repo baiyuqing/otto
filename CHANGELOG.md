@@ -17,6 +17,31 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Memory records, tombstones and candidates are now plain files under
+  `~/.otto/memory/` (`records/<id>.md`, `tombstones/<id>.json`,
+  `candidates/<id>.json`, `identity.json`); the Turso memory database and its
+  full-text index are removed. Hand edits to a record file take effect at the
+  next read, invalid files are skipped and listed by `otto memory status`, and
+  `otto memory` commands open the storage route authority only before the
+  first import. Recall no
+  longer matches the message text: after the standing preferences it injects
+  the other in-scope records, workspace first and newest first, up to
+  `max_results` and `recall_tokens`, so a workspace with records adds up to
+  `recall_tokens` input tokens (default 2000) to each turn. `memory_search` and
+  `/memory search` match any whitespace-separated term as a case-insensitive
+  substring of text, kind, key or labels. `memory` is no longer a storage
+  domain: it is not in `[storage.routes]`, `otto storage transfer` (no
+  `--memory-db`), `storage init` or `storage migrate`, and `[storage.routes].memory`
+  is a configuration error. `[memory].backend` defaults to `files`;
+  `[memory.turso].path` is only the import source and `[memory.turso].busy_timeout`
+  is the writer lock wait. Upgrade steps: stop all Otto processes; if memory is
+  in a legacy SQLite `memory.db`, migrate it with `otto storage migrate` from
+  Otto 0.4.8 first; if memory is on an external backend route, transfer it back
+  to local storage with a 0.4.8 build first; remove `[storage.routes].memory`;
+  start this version, which imports the schema version 2 database once and never
+  modifies it; after checking the files, delete the old database manually. See
+  [Memory](docs/manual/memory-and-extensions.md#memory). ([#PR](https://github.com/baiyuqing/otto/pull/PR))
+
 - Slash commands are now recognized only when `/` is the first input character;
   leading whitespace keeps the text as an ordinary prompt. AUTO review no longer
   reports a human-blocked state to Herdr, avoiding false attention notifications.

@@ -807,10 +807,13 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn standalone_service() -> (tempfile::TempDir, crate::memory::Service) {
-        let (directory, store) = crate::memory::turso::testsupport::open_temp();
+        let (directory, store) = crate::memory::files::testsupport::open_temp();
         (
             directory,
-            crate::memory::Service::new(store, crate::memory::decide_default_policy),
+            crate::memory::Service::from_store(
+                std::sync::Arc::new(store),
+                crate::memory::decide_default_policy,
+            ),
         )
     }
 
@@ -875,8 +878,8 @@ mod tests {
         let mut builder = testutil::builder(workspace, sessions);
         let runtime = MemoryRuntime {
             enabled: true,
-            backend: "turso".into(),
-            turso_path: store_path.to_string_lossy().into_owned(),
+            backend: "files".into(),
+            dir: store_path.to_string_lossy().into_owned(),
             ..MemoryRuntime::default()
         };
         let (service, user_scope, usable) =
@@ -1215,7 +1218,7 @@ mod tests {
         let controller = controller_with_memory(
             workspace.path(),
             sessions.path(),
-            &store.path().join("m.db"),
+            &store.path().join("memory"),
         )
         .await;
 
@@ -1246,7 +1249,7 @@ mod tests {
         let controller = controller_with_memory(
             workspace.path(),
             sessions.path(),
-            &store.path().join("m.db"),
+            &store.path().join("memory"),
         )
         .await;
         let (service, _, workspace_scope) = controller.memory_manager().expect("memory");
@@ -1317,7 +1320,7 @@ mod tests {
         let controller = controller_with_memory(
             workspace.path(),
             sessions.path(),
-            &store.path().join("m.db"),
+            &store.path().join("memory"),
         )
         .await;
 
@@ -1389,7 +1392,7 @@ mod tests {
         let controller = controller_with_memory(
             workspace.path(),
             sessions.path(),
-            &store.path().join("m.db"),
+            &store.path().join("memory"),
         )
         .await;
         let id = propose_pending(&controller, "uses vim");

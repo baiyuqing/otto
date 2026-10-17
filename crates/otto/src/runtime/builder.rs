@@ -3611,9 +3611,9 @@ mod tests {
         let memory_runtime = otto_core::config::MemoryRuntime {
             enabled: true,
             backend: "turso".into(),
-            turso_path: directory
+            dir: directory
                 .path()
-                .join("memory.db")
+                .join("memory")
                 .to_string_lossy()
                 .into_owned(),
             ..Default::default()

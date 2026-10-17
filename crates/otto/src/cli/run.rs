@@ -297,16 +297,20 @@ pub async fn run_with_extensions(
                     );
                 }
             };
-            let storage = match crate::runtime::storage::Storage::open_home_with(
-                Path::new(&home),
-                backends,
-                &config.storage,
-                &lookup,
-            )
-            .await
-            {
-                Ok(storage) => storage,
-                Err(message) => return fail(stderr, &message),
+            let storage = if super::memory_command::has_store(&config, &lookup, &home) {
+                Default::default()
+            } else {
+                match crate::runtime::storage::Storage::open_home_with(
+                    Path::new(&home),
+                    backends,
+                    &config.storage,
+                    &lookup,
+                )
+                .await
+                {
+                    Ok(storage) => storage,
+                    Err(message) => return fail(stderr, &message),
+                }
             };
             return super::memory_command::run_with_storage(
                 &args[1..],
@@ -1247,6 +1251,44 @@ mod tests {
             .iter()
             .map(|value| value.as_bytes().to_vec())
             .collect()
+    }
+
+    /// `otto memory status` with a regular file at `.otto/storage`, where the
+    /// storage authority cannot be opened. Returns the exit code.
+    async fn memory_status(home: &std::path::Path) -> i32 {
+        let args = ["memory".to_string(), "status".to_string()];
+        let home_entry = format!("HOME={}", home.display());
+        run(
+            &args,
+            Box::new(Cursor::new(Vec::new())),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            entries(&[&home_entry]),
+            false,
+            &CancellationToken::new(),
+            &crate::cli::terminate::Terminate::new(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn memory_commands_skip_the_storage_authority_once_the_store_exists() {
+        let blocked = |home: &std::path::Path| {
+            std::fs::create_dir_all(home.join(".otto")).expect("otto dir");
+            std::fs::write(home.join(".otto").join("storage"), b"x").expect("blocker");
+        };
+        let control = tempfile::tempdir().expect("control home");
+        blocked(control.path());
+        assert_ne!(memory_status(control.path()).await, 0);
+
+        let home = tempfile::tempdir().expect("home");
+        blocked(home.path());
+        crate::memory::files::FileStore::open(
+            &home.path().join(".otto").join("memory"),
+            crate::memory::repository::MemoryOptions::default(),
+        )
+        .expect("create store");
+        assert_eq!(memory_status(home.path()).await, 0);
     }
 
     #[test]

@@ -10,6 +10,12 @@ use super::{ConfigError, duration::parse_go_duration, paths};
 const DEFAULT_MEMORY_BACKEND: &str = "files";
 const DEFAULT_MEMORY_RECALL_TOKENS: i64 = 2000;
 const DEFAULT_MEMORY_MAX_RESULTS: i64 = 12;
+const REMOTE_MEMORY_BACKEND: &str = "remote";
+const DEFAULT_REMOTE_TOKEN_ENV: &str = "OTTO_MEM_TOKEN";
+const DEFAULT_REMOTE_RECALL_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_REMOTE_RECALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// The scope id limit of `otto_core::memory::Scope`.
+const MAX_REMOTE_USER_BYTES: usize = 128;
 
 /// The recall budget and page size a request may ask for. Hardcoded rather
 /// than imported from `otto::memory` because otto-core cannot depend on the
@@ -35,6 +41,41 @@ pub struct Memory {
     #[serde(default)]
     #[serde(alias = "sqlite")]
     pub turso: MemoryTurso,
+    #[serde(default)]
+    pub remote: MemoryRemote,
+}
+
+/// The `[memory.remote]` table, read only when `backend = "remote"`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRemote {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub token_env: String,
+    #[serde(default)]
+    pub recall_timeout: String,
+}
+
+impl Memory {
+    /// The environment variable that holds the remote memory token, when
+    /// `backend = "remote"`. The token is a secret like a provider key.
+    pub fn credential_variable(&self) -> Option<&str> {
+        (self.backend == REMOTE_MEMORY_BACKEND).then(|| self.remote.token_env())
+    }
+}
+
+impl MemoryRemote {
+    /// `token_env`, or `OTTO_MEM_TOKEN` when unset.
+    pub fn token_env(&self) -> &str {
+        if self.token_env.is_empty() {
+            DEFAULT_REMOTE_TOKEN_ENV
+        } else {
+            &self.token_env
+        }
+    }
 }
 
 /// The `[memory.turso]` table.
@@ -63,6 +104,20 @@ pub struct MemoryRuntime {
     pub turso_path: String,
     /// The writer lock wait. Zero when `[memory.turso].busy_timeout` is absent.
     pub turso_busy_timeout: Duration,
+    /// Set exactly when `backend` is `remote`.
+    pub remote: Option<RemoteRuntime>,
+}
+
+/// The resolved `[memory.remote]` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteRuntime {
+    /// The service base URL without a trailing slash.
+    pub url: String,
+    /// The user scope id shared by every host of this user.
+    pub user: String,
+    /// The environment variable that holds the bearer token.
+    pub token_env: String,
+    pub recall_timeout: Duration,
 }
 
 /// Resolves `[memory]`. The store directory is `$HOME/.otto/memory`; the
@@ -83,12 +138,26 @@ pub fn resolve_memory(
     };
     // Earlier releases selected the Turso engine with `turso` or `sqlite`; all
     // three values select the file store.
-    if !matches!(backend.as_str(), "files" | "turso" | "sqlite") {
-        return Err(ConfigError::new(format!(
-            "unsupported memory backend \"{backend}\": must be files"
-        )));
+    let remote = match backend.as_str() {
+        "files" | "turso" | "sqlite" => None,
+        REMOTE_MEMORY_BACKEND => Some(resolve_remote(&file.memory.remote)?),
+        _ => {
+            return Err(ConfigError::new(format!(
+                "unsupported memory backend \"{backend}\": must be files or remote"
+            )));
+        }
+    };
+    if remote.is_some() && file.memory.require_encryption {
+        return Err(ConfigError::new(
+            "memory require_encryption cannot be verified for the remote backend",
+        ));
     }
-    let backend = DEFAULT_MEMORY_BACKEND.to_string();
+    let backend = if remote.is_some() {
+        REMOTE_MEMORY_BACKEND
+    } else {
+        DEFAULT_MEMORY_BACKEND
+    }
+    .to_string();
 
     let recall_tokens = match file.memory.recall_tokens {
         Some(value) if value <= 0 => {
@@ -102,6 +171,9 @@ pub fn resolve_memory(
             )));
         }
         Some(value) => value,
+        // Remote rendering spends up to 142 bytes of markup per item, which
+        // leaves 165 bytes of text for 12 items at 2000.
+        None if remote.is_some() => MAX_TOKEN_BUDGET,
         None => DEFAULT_MEMORY_RECALL_TOKENS,
     };
 
@@ -156,6 +228,72 @@ pub fn resolve_memory(
         dir,
         turso_path,
         turso_busy_timeout,
+        remote,
+    })
+}
+
+fn resolve_remote(remote: &MemoryRemote) -> Result<RemoteRuntime, ConfigError> {
+    let url = remote.url.trim_end_matches('/');
+    let invalid = |reason: &str| ConfigError::new(format!("invalid memory remote url: {reason}"));
+    if url.is_empty() {
+        return Err(invalid("must be set"));
+    }
+    let parsed = url::Url::parse(url).map_err(|err| invalid(&err.to_string()))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(invalid("must not contain credentials"));
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(invalid("must not have a path, query or fragment"));
+    }
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => return Err(invalid("must have a host")),
+    };
+    match parsed.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        "http" => return Err(invalid("http is allowed only for a loopback host")),
+        _ => return Err(invalid("must use https")),
+    }
+
+    let user = remote.user.as_str();
+    if user.is_empty()
+        || user.len() > MAX_REMOTE_USER_BYTES
+        || !user.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(ConfigError::new(format!(
+            "invalid memory remote user: must be 1 to {MAX_REMOTE_USER_BYTES} printable ASCII bytes"
+        )));
+    }
+
+    if !super::storage::environment_name(remote.token_env()) || remote.token_env().len() > 128 {
+        return Err(ConfigError::new(
+            "invalid memory remote token_env: must be an environment variable name",
+        ));
+    }
+
+    let recall_timeout = if remote.recall_timeout.is_empty() {
+        DEFAULT_REMOTE_RECALL_TIMEOUT
+    } else {
+        let nanos = parse_go_duration(&remote.recall_timeout).map_err(|err| {
+            ConfigError::new(format!("invalid memory remote recall_timeout: {err}"))
+        })?;
+        let timeout = Duration::from_nanos(nanos.max(0) as u64);
+        if timeout.is_zero() || timeout > MAX_REMOTE_RECALL_TIMEOUT {
+            return Err(ConfigError::new(
+                "invalid memory remote recall_timeout: must be greater than zero and at most 10s",
+            ));
+        }
+        timeout
+    };
+
+    Ok(RemoteRuntime {
+        url: url.to_string(),
+        user: user.to_string(),
+        token_env: remote.token_env().to_string(),
+        recall_timeout,
     })
 }
 
@@ -275,7 +413,104 @@ busy_timeout = "10s"
         file.memory.backend = "postgres".into();
         let err = resolve_memory(&file, &env("/home/u")).unwrap_err();
         assert!(err.to_string().contains("postgres"), "{err}");
-        assert!(err.to_string().contains("must be files"), "{err}");
+        assert!(err.to_string().contains("must be files or remote"), "{err}");
+    }
+
+    fn remote_file(remote: &str) -> File {
+        toml::from_str(&format!(
+            "[memory]\nbackend = \"remote\"\n[memory.remote]\n{remote}"
+        ))
+        .expect("remote config")
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn resolves_remote_defaults() {
+        let file = remote_file("url = \"https://mem.example:8443/\"\nuser = \"alice\"\n");
+        let runtime = resolve_memory(&file, &env("/home/u")).expect("resolve");
+        assert_eq!(runtime.backend, "remote");
+        assert_eq!(runtime.recall_tokens, MAX_TOKEN_BUDGET);
+        assert_eq!(
+            runtime.remote,
+            Some(RemoteRuntime {
+                url: "https://mem.example:8443".into(),
+                user: "alice".into(),
+                token_env: "OTTO_MEM_TOKEN".into(),
+                recall_timeout: Duration::from_secs(3),
+            })
+        );
+        assert_eq!(file.memory.credential_variable(), Some("OTTO_MEM_TOKEN"));
+        let files = resolve_memory(&File::default(), &env("/home/u")).expect("files");
+        assert_eq!(File::default().memory.credential_variable(), None);
+        assert_eq!(files.remote, None);
+        assert_eq!(files.recall_tokens, DEFAULT_MEMORY_RECALL_TOKENS);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn remote_keeps_explicit_settings() {
+        let file = remote_file(
+            "url = \"http://127.0.0.1:9000\"\nuser = \"alice\"\ntoken_env = \"MEM\"\nrecall_timeout = \"500ms\"\n",
+        );
+        let mut file = file;
+        file.memory.recall_tokens = Some(3000);
+        let runtime = resolve_memory(&file, &env("/home/u")).expect("resolve");
+        let remote = runtime.remote.expect("remote");
+        assert_eq!(remote.token_env, "MEM");
+        assert_eq!(file.memory.credential_variable(), Some("MEM"));
+        assert_eq!(remote.recall_timeout, Duration::from_millis(500));
+        assert_eq!(runtime.recall_tokens, 3000);
+        for url in ["http://localhost:9000", "http://[::1]:9000"] {
+            let file = remote_file(&format!("url = \"{url}\"\nuser = \"alice\"\n"));
+            resolve_memory(&file, &env("/home/u")).expect(url);
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn rejects_invalid_remote_settings() {
+        for (remote, expected) in [
+            ("user = \"alice\"\n", "url"),
+            (
+                "url = \"http://mem.example\"\nuser = \"alice\"\n",
+                "loopback",
+            ),
+            ("url = \"ftp://mem.example\"\nuser = \"alice\"\n", "https"),
+            (
+                "url = \"https://mem.example/v1\"\nuser = \"alice\"\n",
+                "path",
+            ),
+            (
+                "url = \"https://mem.example?a=1\"\nuser = \"alice\"\n",
+                "query",
+            ),
+            (
+                "url = \"https://u:p@mem.example\"\nuser = \"alice\"\n",
+                "credentials",
+            ),
+            ("url = \"https://mem.example\"\n", "user"),
+            ("url = \"https://mem.example\"\nuser = \"a b\"\n", "user"),
+            (
+                "url = \"https://mem.example\"\nuser = \"alice\"\nrecall_timeout = \"11s\"\n",
+                "recall_timeout",
+            ),
+            (
+                "url = \"https://mem.example\"\nuser = \"alice\"\nrecall_timeout = \"0s\"\n",
+                "recall_timeout",
+            ),
+            (
+                "url = \"https://mem.example\"\nuser = \"alice\"\ntoken_env = \"A-B\"\n",
+                "token_env",
+            ),
+        ] {
+            let err = resolve_memory(&remote_file(remote), &env("/home/u")).unwrap_err();
+            assert!(err.to_string().contains(expected), "{remote}: {err}");
+        }
+        let mut file = remote_file("url = \"https://mem.example\"\nuser = \"alice\"\n");
+        file.memory.require_encryption = true;
+        let err = resolve_memory(&file, &env("/home/u")).unwrap_err();
+        assert!(err.to_string().contains("require_encryption"), "{err}");
+        assert!(toml::from_str::<File>("[memory.remote]\nunknown = 1\n").is_err());
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

@@ -101,7 +101,8 @@ busy_timeout = "5s"
 ```
 
 `backend` defaults to `files`; `turso` and `sqlite` are accepted with the same
-meaning, and other values are rejected. `[memory.turso].path` is only the
+meaning, `remote` selects the [remote memory service](#remote-memory-service),
+and other values are rejected. `[memory.turso].path` is only the
 source of the one-time import described under
 [Importing an earlier database](#importing-an-earlier-database); a leading `~/`
 is the home directory. `[memory.turso].busy_timeout` is the writer lock wait.
@@ -115,7 +116,8 @@ A Rust host can inject an independent `otto_core::memory::MemoryService` using
 `otto::embed::MemoryExtension` and `OttoBuilder::memory_service`, or the custom
 CLI entry point `cli::run::run_with_extensions`. Implementations declare their
 capabilities; they do not implement Otto's `MemoryStore` file layout.
-The shipped CLI still uses its existing local memory configuration.
+The shipped CLI reaches a service on another host through the
+[remote backend](#remote-memory-service); it does not load Rust extensions.
 
 ```rust
 // `service` is an Arc<dyn otto_core::memory::MemoryService> supplied by the host.
@@ -154,9 +156,164 @@ reference material and cannot become a standing instruction through metadata.
 `opaque_revision` uses the service's revision when supplied; a native numeric
 revision is not substituted for it.
 
-No external transport or universal network protocol is bundled. See the
+The only bundled network transport is the
+[remote memory service](#remote-memory-service) protocol. See the
 [service contract](../specs/2026-10-07-open-memory-contract.md) for capabilities,
 prepared snapshot recovery and deletion coverage.
+
+### Remote memory service
+
+`backend = "remote"` makes Otto use a memory service on another host instead of
+`~/.otto/memory/`. The service owns the memory; Otto keeps no local copy,
+migrates no data when the backend changes, and makes no network call at
+startup. The wire format is in the
+[remote memory protocol](remote-memory-protocol.md).
+
+```toml
+[memory]
+backend = "remote"
+recall_tokens = 8192     # default for remote; 2000 for files
+max_results = 12
+
+[memory.remote]
+url = "https://mem.example.internal:8443"
+user = "alice"
+token_env = "OTTO_MEM_TOKEN"   # default
+recall_timeout = "3s"          # default
+```
+
+```sh
+export OTTO_MEM_TOKEN=<bearer token>
+```
+
+| Key | Default | Rule |
+| --- | --- | --- |
+| `url` | none, required | `https`; `http` only for `localhost`, `127.0.0.0/8` or `::1`. No credentials, path, query or fragment. A trailing `/` is removed. |
+| `user` | none, required | 1 to 128 printable ASCII bytes. It is the user scope id, so Otto hosts that use the same `user` share one user scope. |
+| `token_env` | `OTTO_MEM_TOKEN` | Name of the environment variable that holds the bearer token: letters, digits and `_`, not starting with a digit, at most 128 bytes. |
+| `recall_timeout` | `3s` | Go duration, greater than zero and at most `10s`. Write calls use a fixed 30 s timeout. |
+
+- The token is read only from the environment variable named by `token_env`.
+  Do not put it in configuration.
+- The variable name and the token value are redacted from model-visible text,
+  as provider keys are, and the variable is not passed to sandboxed commands.
+- If the variable is unset or empty, startup fails when `[memory].required =
+  true`. Otherwise memory is disabled for the process and Otto prints one
+  warning.
+- `require_encryption = true` with `backend = "remote"` fails startup, because
+  Otto cannot verify encryption at rest on another host.
+- `recall_tokens` bounds the rendered recall in bytes, at most 8192. Without
+  it, the remote default is 8192. The preamble takes 131 bytes and each item
+  71 to 142 bytes of markup, so 12 workspace items at 8192 leave about 6,357
+  bytes of text.
+- `[memory.remote]` is read only when `backend = "remote"`. An embedder that
+  injects a `MemoryExtension` and also configures `backend = "remote"` gets a
+  startup error.
+- The workspace scope is the canonical workspace path hashed into an id, or the
+  `[memory.workspace_ids]` override. Two hosts share a workspace scope only
+  through that override.
+
+What Otto sends:
+
+- Recall: before each user input that has text, a `/v1/recall` request with the
+  redacted input. The service returns matching items and its own pinned items.
+- Explicit writes: the `remember` and `forget` tools, and `/remember`
+  (origin `human`). `memory_search` calls recall or get.
+- Turn upload: one `/v1/turns` request per finished turn, in the background,
+  with the user input, assistant replies, tool calls and tool results.
+  Image and reasoning blocks are omitted. Subagent sessions are not
+  uploaded; their final result reaches the parent turn as a tool result.
+
+A turn is not uploaded when the encoded request is over 4 MiB, or when it
+contains a redaction marker, URI userinfo, a private key delimiter, a
+credential header or a credential assignment. A credential finding drops the
+whole turn. Session text is already redacted, so a turn in which the redactor
+replaced a value is not uploaded. Each skip writes one `memory_turn_dropped`
+[log line](#remote-memory-log-lines) with the reason and size.
+
+Undelivered turns are discarded. The upload worker sends one request at a time,
+holds 8 turns, does not retry, keeps no spool and does not replay. A failed
+request or a full queue discards the turn. At shutdown Otto waits at most 30 s
+for the queue to drain.
+
+Recall rules:
+
+- Otto uses a recall response only when its `coverage` is `complete` and every
+  rule of the protocol holds (scope, size, fields, `Otto-Memory-Protocol`
+  header). It never uses a valid subset.
+- A `partial` or `unknown` coverage, a rule violation, an error response, a
+  rendering over `recall_tokens` or a timeout gives no memory context for that
+  input and a memory warning. Otto continues the turn.
+- Recalled items, including pinned ones, are rendered as untrusted reference
+  material, not as instructions.
+- An image-only input gets no recall. A withdrawn pinned item stays in the
+  current turn's context until the next user input.
+
+Native features that are not available with the remote backend:
+
+- Local memory review and the advice model.
+- `otto memory` subcommands fail with `memory operation is unsupported for the
+  remote memory backend; the memory service manages its records`; they do not
+  read the local files store. The slash commands `/memory list`, `/memory
+  show`, `/memory search`, `/memory forget` and `/memory review` are
+  unsupported for the same reason. The service owns listing and review.
+- `/remember` is supported. It sends origin `human` with the workspace scope,
+  or the user scope with `--scope user`. `--kind` and `--key` are sent in
+  `metadata`. The reply is one line, for example `remembered <id>
+  (scope=<ns>/<id>, state=applied)`.
+- Reflection does not run with a memory service configured. Automatic
+  reflection (`on_work`, `on_compaction`) does not start, `auto = "on_exit"`
+  prints `reflection: memory is not available` at exit, and `/reflect`
+  reports that memory is not available.
+
+Errors:
+
+- The session shows a fixed warning or tool error text for the failure kind,
+  for example `memory service unavailable` or `memory scope is not authorized`.
+  The service's `message` is never shown to the model or the user.
+- Each failed request writes one `memory_request_failed`
+  [log line](#remote-memory-log-lines) with the endpoint, HTTP status, error
+  code and the service message truncated to 512 bytes.
+- A write that times out or fails in transport after the request was sent
+  reports an unknown outcome: the service may have applied it.
+
+#### Remote memory log lines
+
+`otto serve`, `otto acp` and workflow commands write these lines to stderr as
+`time=... level=WARN msg=<event> key="value" ...`. The embedding API writes
+them to its diagnostics writer, or to stderr when none is set. The TUI, the
+REPL and one-shot prompts do not write them.
+
+Every frontend also writes the three `memory_turn_*` events as records in the
+content-free [diagnostic files](servers-and-connectors.md#logs-metrics-and-request-correlation)
+`~/.otto/logs/diagnostic-*.jsonl`: `event` is the `msg` value, the fields
+are the same, and `time`, `pid`, `instance` and `version` are added.
+`memory_request_failed` is not written there, because `message` is text from
+the service.
+
+| `msg` | Written when | Fields |
+| --- | --- | --- |
+| `memory_request_failed` | a request got a non-2xx status, an invalid response, a timeout or a transport error | `endpoint`, `status` (`0` without a response), `code`, `message` |
+| `memory_turn_dropped` | a finished turn was not queued | `reason` (`over size limit`, the guard finding, `queue full`, `uploader closed`, `encode failed`, `id generation failed`), `turn_id`, `bytes` |
+| `memory_turn_upload_failed` | the `/v1/turns` request for a queued turn failed | `turn_id`, `kind` |
+| `memory_turn_drain_timeout` | shutdown stopped waiting for the queue after 30 s | none |
+
+A failed upload writes both `memory_request_failed` and
+`memory_turn_upload_failed`.
+
+Limitations:
+
+- One memory service per configuration.
+- Turns that are not delivered are lost; about 2.5% of turns measured on
+  2026-10-17 contained a redaction marker and were not uploaded.
+- Workspace scopes match across hosts only through `[memory.workspace_ids]`.
+- An Otto release without this feature rejects `backend = "remote"`.
+- Managed policy settings such as `allowed_provider_hosts` do not restrict
+  the memory service `url`.
+- In the TUI, the REPL and one-shot prompts, a failed or skipped turn upload
+  shows no session warning; it is recorded only in the diagnostic files. The
+  HTTP status of a failed upload is in `memory_request_failed`, which these
+  frontends do not write.
 
 ### Importing an earlier database
 

@@ -17,6 +17,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Remote memory organization ids now accept ordinary spaces, including names
+  such as `bai's org`. The memory service must accept the same organization id.
+
 - Remote memory replaces its pre-adoption v1 bodies in place: configure required
   `memory.remote.organization` and coordinate the external service/Otto client
   cutover before restart (no v2, default tenant or old-wire fallback). Personal

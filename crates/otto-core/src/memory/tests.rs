@@ -17,6 +17,24 @@ fn context() -> MemoryContext {
         origin: Origin::Model,
     }
 }
+
+#[test]
+fn organization_scope_accepts_internal_spaces_only() {
+    let mut context = context();
+    context.organization_id = Some("bai's org".into());
+    context.scopes.push(Scope {
+        namespace: "organization".into(),
+        id: "bai's org".into(),
+    });
+    assert!(context.validate().is_ok());
+    context.scopes[1].id = "bad\torg".into();
+    assert!(context.validate().is_err());
+    context.scopes[1].id = "   ".into();
+    assert!(context.validate().is_err());
+    context.scopes[1].namespace = "workspace".into();
+    context.scopes[1].id = "has space".into();
+    assert!(context.validate().is_err());
+}
 fn request() -> RecallRequest {
     RecallRequest {
         scope_filter: None,

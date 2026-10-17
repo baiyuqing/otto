@@ -85,6 +85,22 @@ fn context(origin: Origin) -> MemoryContext {
         origin,
     }
 }
+
+#[test]
+fn wire_context_accepts_spaced_organization_only() {
+    let mut context = wire::Context {
+        organization_id: "bai's org".into(),
+        user_id: "alice".into(),
+        workspace_id: None,
+        session_id: None,
+    };
+    assert!(validate_wire_context(&context).is_ok());
+    context.user_id = "bad user".into();
+    assert!(validate_wire_context(&context).is_err());
+    context.user_id = "alice".into();
+    context.organization_id = "bad\norg".into();
+    assert!(validate_wire_context(&context).is_err());
+}
 fn client(service: RemoteService) -> crate::memory::client::Client {
     crate::memory::client::Client::with_learning(
         Arc::new(service),

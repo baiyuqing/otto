@@ -117,6 +117,7 @@ fn core_scope(scope: &Scope) -> port::Scope {
 }
 fn reference(service: &str, scope: &Scope, id: String, revision: u64) -> port::MemoryRef {
     port::MemoryRef {
+        organization_id: None,
         service: service.into(),
         scope: core_scope(scope),
         id,
@@ -165,6 +166,7 @@ fn item(service: &str, record: Record, standing: bool) -> port::RecallItem {
     metadata.insert("otto.key".into(), record.key);
     metadata.insert("otto.standing".into(), standing.to_string());
     port::RecallItem {
+        remote: None,
         reference: Some(reference(
             service,
             &record.scope,
@@ -192,7 +194,10 @@ fn remember(request: &port::RememberRequest) -> port::Result<super::RememberRequ
     let kind = metadata
         .remove("otto.kind")
         .unwrap_or_else(|| "fact".into());
-    let key = metadata.remove("otto.key").unwrap_or_default();
+    let key = request
+        .key
+        .clone()
+        .unwrap_or_else(|| metadata.remove("otto.key").unwrap_or_default());
     Ok(super::RememberRequest {
         scope: native_scope(scope),
         kind,
@@ -691,6 +696,7 @@ mod tests {
         let service = Arc::new(Service::new(store, super::super::decide_default_policy));
         let scope = core_scope(&service.identity().unwrap().user_scope);
         let context = port::MemoryContext {
+            organization_id: None,
             principal: "human".into(),
             scopes: vec![scope.clone()],
             write_scope: Some(scope),
@@ -704,6 +710,7 @@ mod tests {
     }
     fn request(context: port::MemoryContext) -> port::RememberRequest {
         port::RememberRequest {
+            key: None,
             context,
             request_id: "remember-1".into(),
             content: port::Content::Text("apricot orchard".into()),
@@ -746,6 +753,7 @@ mod tests {
         let recalled = adapter
             .recall(
                 &port::RecallRequest {
+                    scope_filter: None,
                     context: context.clone(),
                     query: "apricot".into(),
                     limit: 10,

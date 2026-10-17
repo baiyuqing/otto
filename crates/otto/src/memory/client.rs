@@ -73,6 +73,7 @@ impl Client {
     pub fn with_learning(service: Arc<dyn MemoryService>, grant: LearningGrant) -> Result<Self> {
         let mut client = Self::new(service)?;
         let context = MemoryContext {
+            organization_id: None,
             principal: "host-grant-validation".into(),
             scopes: grant.scopes.clone(),
             write_scope: None,
@@ -222,6 +223,19 @@ impl Client {
         context: &MemoryContext,
         scopes: Vec<Scope>,
     ) -> Result<MemoryContext> {
+        if self.description.identity == "remote" {
+            for scope in &scopes {
+                context.validate_scope(scope)?;
+            }
+            if scopes.iter().any(|scope| {
+                self.grant
+                    .as_ref()
+                    .is_none_or(|grant| !grant.scopes.contains(scope))
+            }) {
+                return Err(err(ErrorKind::Unauthorized));
+            }
+            return Ok(context.clone());
+        }
         if self.mode == AuthorizationMode::ReviewedChanges {
             return Ok(context.clone());
         }
@@ -327,9 +341,46 @@ impl Client {
             Some(target) => target.scope.clone(),
             None => Self::write_scope(&request.context)?,
         };
-        effective.context = self.effective_context(&request.context, vec![scope])?;
+        effective.context = self.effective_context(&request.context, vec![scope.clone()])?;
         let request = &effective;
-        self.direct(&request.context, "explicit_memory", capability)?;
+        let mut admission = request.context.clone();
+        if self.description.identity == "remote" {
+            admission.scopes = vec![scope.clone()];
+        }
+        self.direct(&admission, "explicit_memory", capability)?;
+        self.guarded(request)?;
+        self.checked_receipt(
+            &request.context,
+            &request.request_id,
+            self.service
+                .remember(request, control)
+                .await
+                .map_err(safe)?,
+        )
+    }
+
+    /// Explicit human management entry point. Never exposed as a model capability.
+    /// The host selects the tenant; the service remains responsible for administrator ACLs.
+    pub(crate) async fn remember_organization_human(
+        &self,
+        request: &RememberRequest,
+        control: &dyn OperationControl,
+    ) -> Result<Receipt> {
+        request.validate(&self.description.identity).map_err(safe)?;
+        self.admit(Operation::Remember, control)?;
+        let scope = request
+            .target
+            .as_ref()
+            .map(|target| &target.scope)
+            .or(request.context.write_scope.as_ref())
+            .ok_or_else(|| err(ErrorKind::InvalidInput))?;
+        if request.context.origin != Origin::Human
+            || request.context.organization_id.is_none()
+            || scope.namespace != "organization"
+            || request.context.organization_id.as_deref() != Some(scope.id.as_str())
+        {
+            return Err(err(ErrorKind::Unauthorized));
+        }
         self.guarded(request)?;
         self.checked_receipt(
             &request.context,
@@ -359,9 +410,13 @@ impl Client {
             ForgetTarget::Source(_) => request.context.scopes.clone(),
         };
         let mut effective = request.clone();
-        effective.context = self.effective_context(&request.context, scopes)?;
+        effective.context = self.effective_context(&request.context, scopes.clone())?;
         let request = &effective;
-        self.direct(&request.context, "explicit_memory", capability)?;
+        let mut admission = request.context.clone();
+        if self.description.identity == "remote" {
+            admission.scopes = scopes;
+        }
+        self.direct(&admission, "explicit_memory", capability)?;
         self.guarded(request)?;
         let receipt = self.service.forget(request, control).await.map_err(safe)?;
         receipt
@@ -935,6 +990,7 @@ mod tests {
             id: "u1".into(),
         };
         MemoryContext {
+            organization_id: None,
             principal: "human".into(),
             scopes: vec![scope.clone()],
             write_scope: Some(scope),
@@ -946,6 +1002,7 @@ mod tests {
     }
     fn remember(origin: Origin) -> RememberRequest {
         RememberRequest {
+            key: None,
             context: context(origin),
             request_id: "r1".into(),
             content: Content::Text("use tabs".into()),
@@ -962,6 +1019,7 @@ mod tests {
     }
     fn recall_request() -> RecallRequest {
         RecallRequest {
+            scope_filter: None,
             context: context(Origin::Model),
             query: "tabs".into(),
             limit: 10,
@@ -1096,7 +1154,9 @@ mod tests {
         let mut raw = Fake::new(&[Operation::Remember]);
         raw.recall = Some(RecallResult {
             items: vec![RecallItem {
+                remote: None,
                 reference: Some(MemoryRef {
+                    organization_id: None,
                     service: "fake-service".into(),
                     scope: Scope {
                         namespace: "user".into(),
@@ -1248,6 +1308,7 @@ mod tests {
         let mut raw = Fake::new(&[]);
         raw.recall = Some(RecallResult {
             items: vec![RecallItem {
+                remote: None,
                 reference: None,
                 content: Content::Text("password=hunter2".into()),
                 sources: vec![],
@@ -1307,6 +1368,7 @@ mod tests {
         };
         let mut raw = Fake::new(&[Operation::Remember]);
         raw.remember_reference = Some(MemoryRef {
+            organization_id: None,
             service: "fake-service".into(),
             scope: context(Origin::Human).scopes[0].clone(),
             id: "user-effect".into(),

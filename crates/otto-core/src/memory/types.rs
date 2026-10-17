@@ -63,6 +63,8 @@ pub enum Origin {
 /// metadata or model arguments. A scope names authority; it does not prove it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
     pub principal: String,
     pub scopes: Vec<Scope>,
     /// Explicit destination for operations that form new memory.
@@ -75,10 +77,52 @@ pub struct MemoryContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
     pub service: String,
     pub scope: Scope,
     pub id: String,
     pub revision: Option<String>,
+}
+
+/// Closed remote namespace set, in fixed decreasing conflict authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeNamespace {
+    Organization,
+    Workspace,
+    User,
+}
+impl ScopeNamespace {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Organization => "organization",
+            Self::Workspace => "workspace",
+            Self::User => "user",
+        }
+    }
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::Workspace => 3,
+            Self::Organization => 2,
+            Self::User => 1,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryView {
+    Effective,
+    Raw,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteProjection {
+    pub organization_id: String,
+    pub revision: String,
+    pub key: Option<String>,
+    pub pinned: bool,
+    pub mandatory: bool,
+    pub view: MemoryView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +150,9 @@ pub enum Content {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecallItem {
+    /// Typed authority and rendering projection; never inferred from metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteProjection>,
     pub reference: Option<MemoryRef>,
     pub content: Content,
     pub sources: Vec<SourceRef>,
@@ -116,6 +163,8 @@ pub struct RecallItem {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecallRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_filter: Option<Vec<ScopeNamespace>>,
     pub context: MemoryContext,
     pub query: String,
     pub limit: usize,
@@ -253,6 +302,8 @@ pub struct ObserveRequest {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RememberRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub context: MemoryContext,
     pub request_id: String,
     pub content: Content,

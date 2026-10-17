@@ -1981,6 +1981,9 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let turn = &turns[0];
         assert_eq!(turn["status"], "success");
         assert_eq!(turn["context"]["session_id"], session);
+        assert_eq!(turn["context"]["organization_id"], "acme");
+        assert_eq!(turn["context"]["user_id"], "u1");
+        assert!(turn["context"].get("scopes").is_none());
         let messages = turn["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "user");
         assert!(
@@ -2003,7 +2006,7 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
         let _serial = LOCK.lock().await;
         let (url, turns) = memory_service().await;
         let config = format!(
-            "[memory]\nenabled = true\nbackend = \"remote\"\n\n[memory.remote]\nurl = \"{url}\"\nuser = \"u1\"\n"
+            "[memory]\nenabled = true\nbackend = \"remote\"\n\n[memory.remote]\norganization = \"acme\"\nurl = \"{url}\"\nuser = \"u1\"\n"
         );
         let (provider, _) = Installed::new(vec![reply("embedded answer"), reply("acp answer")]);
 

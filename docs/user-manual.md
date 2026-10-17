@@ -10,6 +10,7 @@ This stable index links to the current user documentation. The manual is split i
 - [Servers and connectors](manual/servers-and-connectors.md) — Agent server, ACP agent server, Chat connector, Logs, metrics, and request correlation.
 - [Automation](manual/automation.md) — Durable workflows, Workspace identity.
 - [Memory and extensions](manual/memory-and-extensions.md) — Memory, Skills, MCP servers, Plugin packages, Hooks and custom tools.
+- [Remote memory protocol](manual/remote-memory-protocol.md) — Wire format of the remote memory service.
 - [Troubleshooting](manual/troubleshooting.md) — Troubleshooting.
 
 ## Legacy deep-link map

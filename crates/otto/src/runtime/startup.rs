@@ -355,6 +355,7 @@ pub(crate) fn config_environment(
     let credential_variables = file.plugins.credential_variables();
     keys.extend(credential_variables.iter().map(String::as_str));
     keys.extend(file.storage.credential_variables());
+    keys.extend(file.memory.credential_variable());
     keys.extend(["PATH", "TMPDIR", "LANG", "TERM"]);
     keys.into_iter()
         .map(|key| {
@@ -381,6 +382,7 @@ pub(crate) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
     }
     names.extend(file.plugins.credential_variables());
     names.extend(file.storage.credential_variables().map(str::to_owned));
+    names.extend(file.memory.credential_variable().map(str::to_owned));
     names.into_iter().collect()
 }
 
@@ -641,10 +643,9 @@ pub(crate) async fn load_workspace(
         scoped.config = loaded.file;
         disabled.apply(&mut scoped.config);
     }
-    let shared = Arc::new(scoped);
     let workspace_path = canonical_path.to_string_lossy().into_owned();
     let memory_config =
-        resolve_memory(&shared.config, &shared.environment).map_err(|error| error.to_string())?;
+        resolve_memory(&scoped.config, &scoped.environment).map_err(|error| error.to_string())?;
     let memory_override = memory_config
         .workspace_ids
         .get(&workspace_path)
@@ -652,6 +653,18 @@ pub(crate) async fn load_workspace(
         .unwrap_or_default();
     crate::workspace::initialize(canonical_path, memory_override)
         .map_err(|error| error.to_string())?;
+    let workspace_scope =
+        crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
+    if memory_config.remote.is_some()
+        && let (Some(client), Some(extension)) = (&scoped.memory.client, &scoped.memory.extension)
+    {
+        let grant = remote_learning_grant(extension.user_scope.clone(), &workspace_scope);
+        let client = client
+            .with_grant(grant)
+            .map_err(|error| error.to_string())?;
+        scoped.memory.client = Some(Arc::new(client));
+    }
+    let shared = Arc::new(scoped);
     let workspace = leaked_workspace(canonical_path).map_err(|error| error.to_string())?;
     let mcp_config = resolve_mcp(&shared.config, &shared.environment, &workspace_path)
         .map_err(|error| error.to_string())?;
@@ -686,8 +699,7 @@ pub(crate) async fn load_workspace(
     )
     .await;
 
-    builder.workspace_scope =
-        crate::runtime::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
+    builder.workspace_scope = workspace_scope;
 
     Ok((builder, composed))
 }
@@ -1133,6 +1145,53 @@ pub(crate) fn open_memory(
     if dynamic_content && memory_config.enabled {
         builder.workspace_scope =
             crate::runtime::wiring::workspace_memory_scope(memory_config, &workspace_path)?;
+        if let Some(remote) = &memory_config.remote {
+            if builder.memory.extension.is_some() {
+                return Err(
+                    "an injected memory extension cannot be combined with backend = \"remote\""
+                        .into(),
+                );
+            }
+            let token = builder
+                .environment
+                .get(&remote.token_env)
+                .cloned()
+                .unwrap_or_default();
+            if token.is_empty() {
+                let message = format!(
+                    "memory service token variable {} is unset or empty",
+                    remote.token_env
+                );
+                if memory_config.required {
+                    return Err(message);
+                }
+                let _ = writeln!(stderr, "warning: {message}; continuing without memory");
+            } else {
+                let service = Arc::new(crate::memory::remote::RemoteService::new(
+                    crate::memory::remote::Config {
+                        url: remote.url.clone(),
+                        token,
+                        recall_timeout: remote.recall_timeout,
+                        logger: builder.logger.clone(),
+                    },
+                )?);
+                let user_scope = otto_core::memory::Scope {
+                    namespace: "user".into(),
+                    id: remote.user.clone(),
+                };
+                let grant = remote_learning_grant(user_scope.clone(), &builder.workspace_scope);
+                let turns = crate::memory::remote::upload::Uploader::new(
+                    service.clone(),
+                    builder.logger.clone(),
+                );
+                let shared = builder.shared_mut();
+                shared.memory.turns = Some(turns);
+                shared.memory.extension = Some(
+                    crate::runtime::wiring::MemoryExtension::owned(service, user_scope)
+                        .with_learning(grant),
+                );
+            }
+        }
         if let Some(extension) = builder.memory.extension.clone() {
             extension
                 .user_scope
@@ -1162,7 +1221,7 @@ pub(crate) fn open_memory(
             let shared = builder.shared_mut();
             shared.memory.client = Some(Arc::new(client));
             shared.memory.usable = true;
-        } else {
+        } else if memory_config.remote.is_none() {
             let secrets = builder.secret_values(Some(resolved));
             match crate::runtime::wiring::open_memory_service_with_storage(
                 &builder.storage,
@@ -1216,6 +1275,26 @@ pub(crate) fn open_memory(
         shared.memory.advice_audit = advice_audit;
     }
     Ok(())
+}
+
+/// The remote backend's grant: explicit writes to the user scope and one
+/// workspace scope. The client checks every request's scopes against it, so
+/// each workspace `otto serve` loads needs its own (`load_workspace`).
+fn remote_learning_grant(
+    user_scope: otto_core::memory::Scope,
+    workspace_scope: &crate::memory::Scope,
+) -> otto_core::memory::LearningGrant {
+    otto_core::memory::LearningGrant {
+        scopes: vec![
+            user_scope,
+            otto_core::memory::Scope {
+                namespace: workspace_scope.namespace.clone(),
+                id: workspace_scope.id.clone(),
+            },
+        ],
+        input_classes: vec!["explicit_memory".into()],
+        background: false,
+    }
 }
 
 // ---- straight-through start ----
@@ -1422,5 +1501,194 @@ driver = "off"
         assert_eq!(file.mcp.enabled, None);
         assert_eq!(file.memory.enabled, None);
         assert_eq!(file.plugins.enabled, None);
+    }
+
+    /// Starts `otto acp` with `backend = "remote"` at `url`. `memory` is added
+    /// to `[memory]`; `token`, when set, is the `OTTO_MEM_TOKEN` value.
+    async fn start_remote(
+        url: &str,
+        memory: &str,
+        token: Option<&str>,
+        extension: Option<super::super::wiring::MemoryExtension>,
+    ) -> (Result<Started, String>, String, tempfile::TempDir) {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = directory.path().join("home");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(home.join(".config/otto")).expect("config dir");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::write(
+            home.join(".config/otto/config.toml"),
+            format!(
+                r#"
+default_profile = "alpha"
+
+[profiles.alpha]
+provider = "openai-compatible"
+base_url = "https://example.com/v1"
+model = "gpt-test"
+api_key_env = "ALPHA_KEY"
+
+[memory]
+enabled = true
+backend = "remote"
+{memory}
+
+[memory.remote]
+url = "{url}"
+user = "u1"
+
+[sandbox]
+driver = "off"
+"#
+            ),
+        )
+        .expect("write config");
+        let mut host_entries = vec![
+            format!("HOME={}", home.to_string_lossy()).into_bytes(),
+            b"ALPHA_KEY=sk-alpha".to_vec(),
+        ];
+        if let Some(token) = token {
+            host_entries.push(format!("OTTO_MEM_TOKEN={token}").into_bytes());
+        }
+        let mut stderr = Vec::new();
+        let started = start(
+            StartOptions {
+                memory_extension: extension,
+                host_entries,
+                config_path: String::new(),
+                explicit_config: false,
+                cwd: workspace.to_string_lossy().into_owned(),
+                overrides: Overrides::default(),
+                logger: Arc::new(crate::log::Logger::discard()),
+                disabled: Disabled {
+                    mcp: true,
+                    usage: true,
+                    ..Disabled::default()
+                },
+            },
+            &CancellationToken::new(),
+            &mut stderr,
+        )
+        .await;
+        (
+            started,
+            String::from_utf8_lossy(&stderr).into_owned(),
+            directory,
+        )
+    }
+
+    #[tokio::test]
+    async fn remote_memory_without_a_token_runs_without_memory() {
+        let (started, stderr, directory) =
+            start_remote("https://mem.example.test", "", None, None).await;
+        let started = started.expect("start");
+        assert!(
+            stderr.contains("OTTO_MEM_TOKEN is unset or empty; continuing without memory"),
+            "{stderr}"
+        );
+        assert!(started.builder.memory.extension.is_none());
+        assert!(started.builder.memory.client.is_none());
+        assert!(!started.builder.memory.usable);
+        assert!(
+            !directory.path().join("home/.otto/memory").exists(),
+            "the files store is not opened"
+        );
+        started.sandbox.control.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn remote_memory_without_a_token_fails_when_required() {
+        let (started, _, _directory) =
+            start_remote("https://mem.example.test", "required = true", None, None).await;
+        let message = started.err().expect("startup fails");
+        assert!(message.contains("OTTO_MEM_TOKEN is unset"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn remote_memory_rejects_an_injected_extension() {
+        let service = crate::memory::remote::RemoteService::new(crate::memory::remote::Config {
+            url: "https://other.example.test".into(),
+            token: "t".into(),
+            recall_timeout: std::time::Duration::from_secs(1),
+            logger: Arc::new(crate::log::Logger::discard()),
+        })
+        .expect("service");
+        let extension = super::super::wiring::MemoryExtension::new(
+            Arc::new(service),
+            otto_core::memory::Scope {
+                namespace: "user".into(),
+                id: "u2".into(),
+            },
+        );
+        let (started, _, _directory) = start_remote(
+            "https://mem.example.test",
+            "",
+            Some("mem-token"),
+            Some(extension),
+        )
+        .await;
+        let message = started.err().expect("startup fails");
+        assert!(message.contains("injected memory extension"), "{message}");
+    }
+
+    /// The token is a secret like a provider key: it is redacted and its
+    /// variable is kept out of sandboxed commands. A workspace `otto serve`
+    /// loads later gets a grant for its own scope, so the client does not
+    /// refuse its writes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_memory_with_a_token_selects_the_service() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", closed.local_addr().expect("addr"));
+        drop(closed);
+        let (started, _, directory) = start_remote(&url, "", Some("mem-secret-token"), None).await;
+        let started = started.expect("start");
+        let builder = &started.builder;
+        assert!(builder.memory.usable);
+        let client = builder.memory.client.as_ref().expect("client");
+        assert_eq!(client.describe().identity, "remote");
+        assert_eq!(
+            client.mode(),
+            otto_core::memory::AuthorizationMode::DelegatedLearning
+        );
+        let secrets = builder.secret_values(Some(&started.runtime));
+        assert!(secrets.iter().any(|value| value == "mem-secret-token"));
+        assert!(secrets.iter().any(|value| value == "OTTO_MEM_TOKEN"));
+        assert!(
+            sandbox_provider_environment_names(&builder.config, "")
+                .contains(&"OTTO_MEM_TOKEN".to_string())
+        );
+
+        let second = directory.path().join("second");
+        std::fs::create_dir_all(&second).expect("second workspace");
+        let second = second.canonicalize().expect("canonical");
+        let mut stderr = Vec::new();
+        let (loaded, sandbox) = load_workspace(
+            Arc::clone(&builder.shared),
+            &second,
+            &Disabled::default(),
+            &CancellationToken::new(),
+            &mut stderr,
+        )
+        .await
+        .expect("load workspace");
+        assert_ne!(loaded.workspace_scope, builder.workspace_scope);
+        let request = otto_core::memory::RememberRequest {
+            context: loaded.memory_context(otto_core::memory::Origin::Model, None),
+            request_id: crate::memory::new_id().expect("id"),
+            content: otto_core::memory::Content::Text("fact".into()),
+            target: None,
+            metadata: Default::default(),
+        };
+        let error = loaded
+            .memory
+            .client
+            .as_ref()
+            .expect("client")
+            .remember(&request, &CancellationToken::new())
+            .await
+            .expect_err("the port is closed");
+        assert_ne!(error.kind, otto_core::memory::ErrorKind::Unauthorized);
+        sandbox.control.close().await.expect("close");
+        started.sandbox.control.close().await.expect("close");
     }
 }

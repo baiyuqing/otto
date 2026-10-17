@@ -192,6 +192,12 @@ pub fn run_with_storage(
     let Ok(memory_config) = resolve_memory(&config_file, &environment) else {
         return fail(stderr, CONFIG_UNAVAILABLE);
     };
+    if memory_config.remote.is_some() {
+        return fail(
+            stderr,
+            "memory operation is unsupported for the remote memory backend; the memory service manages its records",
+        );
+    }
 
     let (secret_values, complete) = boundary::boundary_secret_values(
         &BoundaryInputs {
@@ -634,6 +640,34 @@ mod tests {
             String::from_utf8_lossy(&stdout).into_owned(),
             String::from_utf8_lossy(&stderr).into_owned(),
         )
+    }
+
+    #[test]
+    fn remote_backend_rejects_every_subcommand_without_opening_the_store() {
+        let home = tempfile::tempdir().expect("home");
+        let config = home.path().join("otto.toml");
+        std::fs::write(
+            &config,
+            "[memory]\nenabled = true\nbackend = \"remote\"\n[memory.remote]\nurl = \"https://mem.example.test\"\nuser = \"u1\"\n",
+        )
+        .expect("write config");
+        let config = config.to_string_lossy().into_owned();
+        for args in [
+            vec!["list"],
+            vec!["status"],
+            vec!["show", "x"],
+            vec!["forget", "x"],
+        ] {
+            let mut args = args;
+            args.extend(["--config", &config]);
+            let (code, _, stderr) = memory(&args, home.path());
+            assert_ne!(code, 0, "{args:?}");
+            assert!(
+                stderr.contains("unsupported for the remote memory backend"),
+                "{args:?}: {stderr}"
+            );
+        }
+        assert!(!store_dir(home.path()).exists());
     }
 
     #[test]

@@ -229,6 +229,10 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Fixes
 
+- After `/resume`, `/fork` or `/new` in the terminal UI, `↑`/`↓` recall the
+  prompts of the session now open instead of those typed before the switch.
+  The draft being typed is kept.
+
 - Explicit `/sandbox exclude <entry>` in the terminal UI now reports success
   and errors inline instead of opening a result dialog that needs dismissal.
   Feedback identifies the persisted rule and immediate reload; duplicate rules

@@ -1169,6 +1169,33 @@ impl Factory for ServeFactory {
         Ok(self.wire(controller, &host))
     }
 
+    async fn create_with_receipt(
+        &self,
+        workspace: Option<&str>,
+        id: String,
+        request_id: &str,
+    ) -> Result<Controller, String> {
+        let host = match workspace {
+            Some(path) => self
+                .workspaces
+                .host(path)
+                .await
+                .ok_or_else(|| format!("workspace not loaded: {path}"))?,
+            None => Arc::clone(self.workspaces.startup_host()),
+        };
+        let runtime = crate::runtime::builder::resolve_initial_runtime(
+            &host.builder.config,
+            &host.builder.environment,
+            None,
+            &host.builder.overrides,
+        )
+        .map_err(|error| error.to_string())?;
+        let controller =
+            Controller::create_with_receipt(Arc::clone(&host.builder), &runtime, id, request_id)
+                .await?;
+        Ok(self.wire(controller, &host))
+    }
+
     async fn open(&self, id: &str, workspace: Option<&str>) -> Result<Controller, String> {
         let hosts = self
             .hosts_for(workspace)

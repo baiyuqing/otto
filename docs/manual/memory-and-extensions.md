@@ -282,8 +282,14 @@ Errors:
 `otto serve`, `otto acp` and workflow commands write these lines to stderr as
 `time=... level=WARN msg=<event> key="value" ...`. The embedding API writes
 them to its diagnostics writer, or to stderr when none is set. The TUI, the
-REPL and one-shot prompts do not write them. The content-free diagnostic files
-under `~/.otto/logs/` do not contain them.
+REPL and one-shot prompts do not write them.
+
+Every frontend also writes the three `memory_turn_*` events as records in the
+content-free [diagnostic files](servers-and-connectors.md#logs-metrics-and-request-correlation)
+`~/.otto/logs/diagnostic-*.jsonl`: `event` is the `msg` value, the fields
+are the same, and `time`, `pid`, `instance` and `version` are added.
+`memory_request_failed` is not written there, because `message` is text from
+the service.
 
 | `msg` | Written when | Fields |
 | --- | --- | --- |
@@ -304,10 +310,10 @@ Limitations:
 - An Otto release without this feature rejects `backend = "remote"`.
 - Managed policy settings such as `allowed_provider_hosts` do not restrict
   the memory service `url`.
-- In the TUI, the REPL and one-shot prompts, failed or skipped turn uploads
-  are not reported anywhere: these frontends write no log lines, and an upload
-  failure shows no session warning. Recall failures still show a memory
-  warning.
+- In the TUI, the REPL and one-shot prompts, a failed or skipped turn upload
+  shows no session warning; it is recorded only in the diagnostic files. The
+  HTTP status of a failed upload is in `memory_request_failed`, which these
+  frontends do not write.
 
 ### Importing an earlier database
 

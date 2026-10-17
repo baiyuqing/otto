@@ -65,6 +65,16 @@ impl Logger {
         }
     }
 
+    /// Content-free remote memory turn upload events, also available on terminal
+    /// discard loggers. Callers supply only fixed reasons and error kinds, Otto
+    /// turn ids and byte counts.
+    pub(crate) fn memory_turn(&self, event: &'static str, fields: &[(&str, String)]) {
+        self.warn(event, fields);
+        if let Some(log) = self.diagnostics.get() {
+            log.memory_turn(event, fields);
+        }
+    }
+
     pub fn info(&self, message: &str, fields: &[(&str, String)]) {
         self.write("INFO", message, fields);
     }

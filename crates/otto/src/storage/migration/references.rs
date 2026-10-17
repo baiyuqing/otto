@@ -306,6 +306,9 @@ pub fn validate_records(
                     return Err(invalid("workflow approval receipt conflicts"));
                 }
             }
+            // Memory candidates are files under the source home's
+            // `.otto/memory`, which a migration does not move.
+            "memory" => {}
             "conversation"
                 if request.kind == otto_core::approval::Kind::Confirmation
                     && request.application == ApplicationState::NotRequired => {}

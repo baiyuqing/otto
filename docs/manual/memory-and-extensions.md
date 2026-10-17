@@ -197,8 +197,6 @@ export OTTO_MEM_TOKEN=<bearer token>
   Do not put it in configuration.
 - The variable name and the token value are redacted from model-visible text,
   as provider keys are, and the variable is not passed to sandboxed commands.
-- An embedder that injects a memory extension cannot also select
-  `backend = "remote"`; startup fails.
 - If the variable is unset or empty, startup fails when `[memory].required =
   true`. Otherwise memory is disabled for the process and Otto prints one
   warning.
@@ -230,8 +228,8 @@ A turn is not uploaded when the encoded request is over 4 MiB, or when it
 contains a redaction marker, URI userinfo, a private key delimiter, a
 credential header or a credential assignment. A credential finding drops the
 whole turn. Session text is already redacted, so a turn in which the redactor
-replaced a value is not uploaded. Each skip is logged with the reason and
-size.
+replaced a value is not uploaded. Each skip writes one `memory_turn_dropped`
+[log line](#remote-memory-log-lines) with the reason and size.
 
 Undelivered turns are discarded. The upload worker sends one request at a time,
 holds 8 turns, does not retry, keeps no spool and does not replay. A failed
@@ -273,10 +271,29 @@ Errors:
 - The session shows a fixed warning or tool error text for the failure kind,
   for example `memory service unavailable` or `memory scope is not authorized`.
   The service's `message` is never shown to the model or the user.
-- The Otto log records one `warn` line per failed request with the endpoint,
-  HTTP status, error code and the message truncated to 512 bytes.
+- Each failed request writes one `memory_request_failed`
+  [log line](#remote-memory-log-lines) with the endpoint, HTTP status, error
+  code and the service message truncated to 512 bytes.
 - A write that times out or fails in transport after the request was sent
   reports an unknown outcome: the service may have applied it.
+
+#### Remote memory log lines
+
+`otto serve`, `otto acp` and workflow commands write these lines to stderr as
+`time=... level=WARN msg=<event> key="value" ...`. The embedding API writes
+them to its diagnostics writer, or to stderr when none is set. The TUI, the
+REPL and one-shot prompts do not write them. The content-free diagnostic files
+under `~/.otto/logs/` do not contain them.
+
+| `msg` | Written when | Fields |
+| --- | --- | --- |
+| `memory_request_failed` | a request got a non-2xx status, an invalid response, a timeout or a transport error | `endpoint`, `status` (`0` without a response), `code`, `message` |
+| `memory_turn_dropped` | a finished turn was not queued | `reason` (`over size limit`, the guard finding, `queue full`, `uploader closed`, `encode failed`, `id generation failed`), `turn_id`, `bytes` |
+| `memory_turn_upload_failed` | the `/v1/turns` request for a queued turn failed | `turn_id`, `kind` |
+| `memory_turn_drain_timeout` | shutdown stopped waiting for the queue after 30 s | none |
+
+A failed upload writes both `memory_request_failed` and
+`memory_turn_upload_failed`.
 
 Limitations:
 
@@ -287,6 +304,10 @@ Limitations:
 - An Otto release without this feature rejects `backend = "remote"`.
 - Managed policy settings such as `allowed_provider_hosts` do not restrict
   the memory service `url`.
+- In the TUI, the REPL and one-shot prompts, failed or skipped turn uploads
+  are not reported anywhere: these frontends write no log lines, and an upload
+  failure shows no session warning. Recall failures still show a memory
+  warning.
 
 ### Importing an earlier database
 

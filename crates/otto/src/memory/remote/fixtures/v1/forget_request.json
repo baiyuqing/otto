@@ -1,1 +1,16 @@
-{"context":{"scopes":[{"namespace":"user","id":"local"},{"namespace":"workspace","id":"sha256:0123456789abcdef"}],"session_id":"s-1"},"request_id":"fedcba9876543210fedcba9876543210","origin":"human","scope":{"namespace":"user","id":"local"},"id":"m-17","revision":"4"}
+{
+  "context": {
+    "organization_id": "acme",
+    "user_id": "alice",
+    "workspace_id": "project-a",
+    "session_id": "s-1"
+  },
+  "request_id": "fedcba9876543210fedcba9876543210",
+  "origin": "model",
+  "scope": {
+    "namespace": "user",
+    "id": "alice"
+  },
+  "id": "m-user",
+  "revision": "r7"
+}

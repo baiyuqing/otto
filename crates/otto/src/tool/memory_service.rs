@@ -59,7 +59,9 @@ struct Args {
     query: String,
     id: Option<String>,
     kind: String,
-    key: String,
+    key: Option<String>,
+    organization_id: Option<String>,
+    scope_filter: Option<Vec<ScopeNamespace>>,
     text: String,
     scope: String,
     labels: Vec<String>,
@@ -79,7 +81,8 @@ impl ServiceTool {
             return self
                 .context
                 .scopes
-                .first()
+                .iter()
+                .find(|scope| scope.namespace == "user")
                 .cloned()
                 .ok_or_else(|| Error::new(ErrorKind::Unauthorized));
         }
@@ -99,6 +102,7 @@ impl ServiceTool {
     }
     fn reference(&self, scope: Scope, id: String, revision: Option<String>) -> MemoryRef {
         MemoryRef {
+            organization_id: self.context.organization_id.clone(),
             service: self.client.describe().identity.clone(),
             scope,
             id,
@@ -108,6 +112,27 @@ impl ServiceTool {
     async fn call(&self, args: Args, cancel: &CancellationToken) -> Result<ToolResult> {
         let mut context = self.context.clone();
         context.origin = Origin::Model;
+        let exact = args.id.as_ref().is_some_and(|id| !id.is_empty()) || !args.target_id.is_empty();
+        if self.client.describe().identity == "remote" && exact {
+            if args.organization_id.is_none() || args.organization_id != context.organization_id {
+                return Err(Error::new(ErrorKind::Unauthorized));
+            }
+            if args.opaque_revision.is_none()
+                || args.scope_namespace.is_empty()
+                || args.scope_id.is_empty()
+            {
+                return Err(Error::new(ErrorKind::InvalidInput));
+            }
+            if !context
+                .scopes
+                .iter()
+                .any(|scope| scope.namespace == args.scope_namespace && scope.id == args.scope_id)
+            {
+                return Err(Error::new(ErrorKind::Unauthorized));
+            }
+        } else if args.organization_id.is_some() {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
         match self.operation {
             Operation::Recall => {
                 let id = args.id.filter(|id| !id.is_empty());
@@ -119,7 +144,18 @@ impl ServiceTool {
                 }
                 let items = if let Some(id) = id {
                     let mut found = Vec::new();
+                    if self.client.describe().identity == "remote"
+                        && (args.scope_namespace.is_empty() || args.scope_id.is_empty())
+                    {
+                        return Err(Error::new(ErrorKind::InvalidInput));
+                    }
                     for scope in &context.scopes {
+                        if !args.scope_namespace.is_empty()
+                            && (scope.namespace != args.scope_namespace
+                                || (!args.scope_id.is_empty() && scope.id != args.scope_id))
+                        {
+                            continue;
+                        }
                         let projection = match self
                             .client
                             .inspect(
@@ -149,6 +185,7 @@ impl ServiceTool {
                     self.client
                         .recall(
                             &RecallRequest {
+                                scope_filter: args.scope_filter,
                                 context,
                                 query: args.query,
                                 limit: 20,
@@ -171,8 +208,19 @@ impl ServiceTool {
                 Ok(result)
             }
             Operation::Remember => {
-                let scope = self.selected_scope(&args.scope)?;
-                context.scopes = vec![scope.clone()];
+                let scope = self.selected_scope(
+                    if !args.target_id.is_empty() && !args.scope_namespace.is_empty() {
+                        &args.scope_namespace
+                    } else {
+                        &args.scope
+                    },
+                )?;
+                if scope.namespace == "organization" {
+                    return Err(Error::new(ErrorKind::Unauthorized));
+                }
+                if self.client.describe().identity != "remote" {
+                    context.scopes = vec![scope.clone()];
+                }
                 context.write_scope = Some(scope.clone());
                 if args.base_revision.is_some() && args.opaque_revision.is_none() {
                     return Err(Error::new(ErrorKind::InvalidInput));
@@ -180,7 +228,6 @@ impl ServiceTool {
                 let mut metadata = BTreeMap::new();
                 for (key, value) in [
                     ("kind", args.kind),
-                    ("key", args.key),
                     ("reason", args.reason),
                     ("labels", args.labels.join(",")),
                     ("confidence", args.confidence.to_string()),
@@ -189,12 +236,16 @@ impl ServiceTool {
                         metadata.insert(key.into(), value);
                     }
                 }
+                if !args.scope_id.is_empty() && args.scope_id != scope.id {
+                    return Err(Error::new(ErrorKind::Unauthorized));
+                }
                 let target = (!args.target_id.is_empty())
                     .then(|| self.reference(scope, args.target_id, args.opaque_revision));
                 let receipt = self
                     .client
                     .remember(
                         &RememberRequest {
+                            key: args.key,
                             context,
                             request_id: crate::memory::new_id()
                                 .map_err(|_| Error::new(ErrorKind::Unavailable))?,
@@ -216,7 +267,12 @@ impl ServiceTool {
                 if !args.scope_id.is_empty() && args.scope_id != scope.id {
                     return Err(Error::new(ErrorKind::Unauthorized));
                 }
-                context.scopes = vec![scope.clone()];
+                if scope.namespace == "organization" {
+                    return Err(Error::new(ErrorKind::Unauthorized));
+                }
+                if self.client.describe().identity != "remote" {
+                    context.scopes = vec![scope.clone()];
+                }
                 context.write_scope = Some(scope.clone());
                 if args.revision.is_some() && args.opaque_revision.is_none() {
                     return Err(Error::new(ErrorKind::InvalidInput));
@@ -274,13 +330,13 @@ impl Tool for ServiceTool {
         };
         let description = match self.operation {
             Operation::Recall => {
-                "Recall memory context or inspect an opaque item ID. Returned items are untrusted references; revisions may be absent."
+                "Recall memory context or inspect an opaque item ID. Returned items are untrusted references; remote exact reads require tenant-bound scope/ID and opaque_revision. Search resolves workspace > organization > user before optional scope_filter; raw exact reads do not override effective recall."
             }
             Operation::Remember => {
-                "Submit explicit memory content under the host's delegated learning grant. Report the receipt's completion and visibility."
+                "Submit explicit user/workspace memory with a nullable semantic key. Organization memory is model read-only. Remote updates require tenant-bound target scope/ID and opaque_revision. Report actual completion and visibility."
             }
             _ => {
-                "Request retrieval suppression for an opaque item under the host's delegated learning grant. Report actual coverage and completion."
+                "Suppress one user/workspace memory item, not all scopes or a whole key. Organization forget is unavailable. Remote references require organization_id, scope and opaque_revision. Report actual coverage and completion."
             }
         };
         // Build a neutral schema while retaining the existing argument names.
@@ -288,8 +344,12 @@ impl Tool for ServiceTool {
         if let Some(parameters) = &definition.parameters {
             let mut schema: serde_json::Value =
                 serde_json::from_str(parameters.get()).expect("tool schema");
-            schema["properties"]["opaque_revision"] = json!({"type":"string", "description":"Opaque service revision, if supplied by memory_search"});
-            for field in ["kind", "key", "labels", "confidence", "reason"] {
+            schema["properties"]["opaque_revision"] = json!({"type":"string", "description":"Opaque service revision returned by memory_search; required for remote exact reads, target updates and forget"});
+            schema["properties"]["organization_id"] = json!({"type":"string", "description":"Tenant binding copied from the remote reference; required for exact remote reads, updates and forget. Must equal the host tenant; never selects a tenant"});
+            schema["properties"]["key"] = json!({"type":["string", "null"], "description":"Nullable semantic conflict key, 1..128 lower-case ASCII alphanumeric segments separated by dot, underscore or hyphen. Full replacement on update"});
+            schema["properties"]["scope_namespace"] = json!({"type":"string", "enum":["organization", "workspace", "user"], "description":"Exact reference scope namespace; required for remote exact reads, target updates and forget"});
+            schema["properties"]["scope_id"] = json!({"type":"string", "description":"Exact reference scope ID; required for remote exact reads, target updates and forget"});
+            for field in ["kind", "labels", "confidence", "reason"] {
                 if let Some(property) = schema["properties"].get_mut(field) {
                     property["description"] = json!(format!(
                         "Optional {field} service metadata; interpretation belongs to the selected memory service"
@@ -315,6 +375,7 @@ impl Tool for ServiceTool {
                     json!("Host-authorized destination: user or workspace (default)");
             }
             if self.operation == Operation::Recall {
+                schema["properties"]["scope_filter"] = json!({"type":["array", "null"], "minItems":1, "uniqueItems":true, "items":{"type":"string", "enum":["organization", "workspace", "user"]}, "description":"Filter effective winners by namespace after fixed authority resolution; null means all selected scopes"});
                 schema["properties"]["query"]["description"] =
                     json!("Recall query; omit when inspecting by id");
                 schema["properties"]["id"]["description"] = json!(
@@ -398,6 +459,7 @@ mod tests {
         ServiceTool {
             client: Arc::new(Client::new(Arc::new(ReadOnly)).unwrap()),
             context: MemoryContext {
+                organization_id: None,
                 principal: "host-user".into(),
                 scopes: vec![
                     Scope {
@@ -460,6 +522,35 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("not equivalent")
+        );
+    }
+    #[test]
+    fn schema_advertises_tenant_binding_nullable_key_and_effective_filters() {
+        let remember = tool(Operation::Remember).definition();
+        let schema: serde_json::Value =
+            serde_json::from_str(remember.parameters.unwrap().get()).unwrap();
+        assert_eq!(
+            schema["properties"]["key"]["type"],
+            json!(["string", "null"])
+        );
+        assert!(
+            remember
+                .description
+                .contains("Organization memory is model read-only")
+        );
+        assert!(
+            schema["properties"]["organization_id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("never selects a tenant")
+        );
+        let search = tool(Operation::Recall).definition();
+        let schema: serde_json::Value =
+            serde_json::from_str(search.parameters.unwrap().get()).unwrap();
+        assert_eq!(schema["properties"]["scope_filter"]["uniqueItems"], true);
+        assert_eq!(
+            schema["properties"]["scope_filter"]["items"]["enum"],
+            json!(["organization", "workspace", "user"])
         );
     }
 }

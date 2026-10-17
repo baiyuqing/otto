@@ -97,7 +97,9 @@ impl MemoryService for External {
         }
         Ok(RecallResult {
             items: vec![RecallItem {
+                remote: None,
                 reference: Some(MemoryRef {
+                    organization_id: None,
                     service: self.description.identity.clone(),
                     scope,
                     id: "external-item".into(),
@@ -185,6 +187,7 @@ fn context() -> MemoryContext {
         id: "alice".into(),
     };
     MemoryContext {
+        organization_id: None,
         principal: "alice".into(),
         scopes: vec![scope.clone()],
         write_scope: Some(scope),
@@ -196,6 +199,7 @@ fn context() -> MemoryContext {
 }
 fn reference(context: &MemoryContext) -> MemoryRef {
     MemoryRef {
+        organization_id: None,
         service: "independent-service".into(),
         scope: context.scopes[0].clone(),
         id: "external-item".into(),
@@ -204,6 +208,7 @@ fn reference(context: &MemoryContext) -> MemoryRef {
 }
 fn remember() -> RememberRequest {
     RememberRequest {
+        key: None,
         context: context(),
         request_id: "remember-1".into(),
         content: Content::Text("a durable fact".into()),
@@ -244,6 +249,7 @@ async fn recall_only_admits_reads_and_never_submits_unsupported_writes() {
     let result = client
         .recall(
             &RecallRequest {
+                scope_filter: None,
                 context: context(),
                 query: "context".into(),
                 limit: 3,
@@ -273,6 +279,7 @@ async fn recall_only_admits_reads_and_never_submits_unsupported_writes() {
         client
             .recall(
                 &RecallRequest {
+                    scope_filter: None,
                     context: context(),
                     query: "context".into(),
                     limit: 3,
@@ -549,6 +556,7 @@ async fn host_close_is_once_and_rejects_new_requests_without_forgetting() {
         client
             .recall(
                 &RecallRequest {
+                    scope_filter: None,
                     context: context(),
                     query: "context".into(),
                     limit: 3,
@@ -659,6 +667,7 @@ async fn embedding_conformance() {
     selected
         .recall(
             &RecallRequest {
+                scope_filter: None,
                 context: second_context.clone(),
                 query: "context".into(),
                 limit: 3,
@@ -679,6 +688,7 @@ async fn embedding_conformance() {
         selected
             .recall(
                 &RecallRequest {
+                    scope_filter: None,
                     context: context(),
                     query: "after close".into(),
                     limit: 3,

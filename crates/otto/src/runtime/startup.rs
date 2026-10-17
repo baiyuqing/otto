@@ -1188,6 +1188,7 @@ pub(crate) fn open_memory(
                 shared.memory.turns = Some(turns);
                 shared.memory.extension = Some(
                     crate::runtime::wiring::MemoryExtension::owned(service, user_scope)
+                        .with_organization(remote.organization.clone())
                         .with_learning(grant),
                 );
             }
@@ -1534,6 +1535,7 @@ backend = "remote"
 {memory}
 
 [memory.remote]
+organization = "acme"
 url = "{url}"
 user = "u1"
 
@@ -1673,6 +1675,7 @@ driver = "off"
         .expect("load workspace");
         assert_ne!(loaded.workspace_scope, builder.workspace_scope);
         let request = otto_core::memory::RememberRequest {
+            key: None,
             context: loaded.memory_context(otto_core::memory::Origin::Model, None),
             request_id: crate::memory::new_id().expect("id"),
             content: otto_core::memory::Content::Text("fact".into()),

@@ -42,7 +42,7 @@ impl Uploader {
         let worker = tokio::spawn(async move {
             while let Some(turn) = receiver.recv().await {
                 if let Err(error) = service.upload_turn(&turn).await {
-                    worker_logger.warn(
+                    worker_logger.memory_turn(
                         "memory_turn_upload_failed",
                         &[
                             ("turn_id", turn.turn_id.clone()),
@@ -121,12 +121,12 @@ impl Uploader {
                 .is_err()
         {
             worker.abort();
-            self.logger.warn("memory_turn_drain_timeout", &[]);
+            self.logger.memory_turn("memory_turn_drain_timeout", &[]);
         }
     }
 
     fn drop_turn(&self, reason: &str, turn_id: &str, bytes: usize) {
-        self.logger.warn(
+        self.logger.memory_turn(
             "memory_turn_dropped",
             &[
                 ("reason", reason.to_string()),
@@ -265,7 +265,10 @@ mod tests {
     }
 
     fn uploader(url: &str, drain: Duration) -> Arc<Uploader> {
-        let logger = Arc::new(Logger::discard());
+        logged_uploader(url, drain, Arc::new(Logger::discard()))
+    }
+
+    fn logged_uploader(url: &str, drain: Duration, logger: Arc<Logger>) -> Arc<Uploader> {
         let service = RemoteService::new(Config {
             url: url.into(),
             token: "test-token".into(),
@@ -398,20 +401,45 @@ mod tests {
         assert_eq!(seen[1]["messages"][0]["blocks"][0]["text"], "two");
     }
 
+    /// The skip is also recorded in the diagnostic file of a terminal frontend,
+    /// whose logger discards ordinary lines, without the turn text.
     #[tokio::test]
     async fn turn_with_redaction_marker_is_not_sent() {
         let (url, seen) = serve(200, None).await;
-        let up = uploader(&url, Duration::from_secs(5));
+        let home = tempfile::tempdir().unwrap();
+        let logger = Arc::new(Logger::discard());
+        logger.enable_diagnostics(home.path()).unwrap();
+        let up = logged_uploader(&url, Duration::from_secs(5), logger);
         up.submit(
             &context(),
             wire::TurnStatus::Success,
             vec![
                 text_message(Role::User, "hi"),
-                message(Role::Tool, vec![tool_result("value [REDACTED]")]),
+                message(Role::Tool, vec![tool_result("private-output [REDACTED]")]),
             ],
         );
         up.close().await;
         assert!(seen.lock().unwrap().is_empty());
+        let mut text = String::new();
+        for entry in std::fs::read_dir(home.path().join(".otto/logs")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "jsonl") {
+                text.push_str(&std::fs::read_to_string(path).unwrap());
+            }
+        }
+        let dropped: Value = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|record| record["event"] == "memory_turn_dropped")
+            .unwrap_or_else(|| panic!("no memory_turn_dropped record: {text}"));
+        assert!(
+            dropped["reason"]
+                .as_str()
+                .unwrap()
+                .contains("redaction marker")
+        );
+        assert!(!dropped["turn_id"].as_str().unwrap().is_empty());
+        assert!(!text.contains("private-output"), "{text}");
     }
 
     #[tokio::test]

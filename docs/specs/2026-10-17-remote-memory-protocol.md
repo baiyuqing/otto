@@ -157,12 +157,16 @@ forget, each with `supports_delegated_learning = true` and effects
 New code outside the adapter:
 
 - The turn recorder and upload worker ([Turn upload](#turn-upload)).
-- `/remember` routing in `app/management.rs`: with the remote backend,
-  `Remember` sends `/v1/remember` with origin `human` and the workspace
-  scope. The other native commands (`MemoryList`, `MemoryShow`,
-  `MemorySearch`, `MemoryForget`, `MemoryReviewList`, `MemoryReview`) keep
-  their current unsupported error, because the service owns listing and
-  review.
+- `/remember` routing in `app/management.rs`: with any memory service
+  extension, including the remote backend, `Remember` goes through
+  `Client::remember` with origin `human`; for the remote backend that is
+  `/v1/remember`. The scope is the workspace scope, or the user scope for
+  `--scope user`; `--kind` and `--key` go into `metadata`, as the model's
+  `remember` tool does. The other native commands (`MemoryList`,
+  `MemoryShow`, `MemorySearch`, `MemoryForget`, `MemoryReviewList`,
+  `MemoryReview`) keep returning an unsupported error, because the service
+  owns listing and review. `otto memory` subcommands fail with the remote
+  backend instead of reading the unused local files store.
 - The advice model (Jev memory review) is not started for the remote backend.
   Requested reflection already writes no memory candidates when an extension
   is set (`Controller::memory_manager` returns `None`,
@@ -410,9 +414,11 @@ A turn is not sent, and the log records one line with the reason and the
 byte size, when:
 
 1. the encoded request is over 4 MiB; or
-2. `DefaultGuard` (`crates/otto/src/memory/guard.rs:43`) finds a redaction
-   marker, URI userinfo, a private key delimiter, a credential header or a
-   credential assignment in any string of the request.
+2. the `DefaultGuard` rules (`crates/otto/src/memory/guard.rs:43`) find a
+   redaction marker, URI userinfo, a private key delimiter, a credential
+   header or a credential assignment in any string of the request. The rules
+   run on each string directly; `DefaultGuard::check` itself rejects input
+   over 64 KiB or 512 fields, and 10.53% of measured turns are over 256 KiB.
 
 Session text is already redacted, so filter 2 rejects every turn in which the
 redactor replaced a value. In the local sessions measured on 2026-10-17,

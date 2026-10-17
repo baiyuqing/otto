@@ -1655,7 +1655,7 @@ pub struct Shared {
     /// `build_subagents` wires no checker in and delegation is unaffected.
     pub skill_checker: Option<Arc<crate::skill::check::Checker>>,
     /// The process-wide memory service, its user scope, and the recall
-    /// limits: one Turso/FTS store for the whole process, shared by every
+    /// limits: one file store for the whole process, shared by every
     /// loaded workspace. Each workspace's `Builder` keeps only its own
     /// `workspace_scope`.
     pub memory: super::wiring::MemoryWiring,

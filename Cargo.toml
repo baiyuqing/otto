@@ -62,7 +62,8 @@ axum = "=0.8.9"
 # Dev-only: `ServiceExt::oneshot` drives the router in-process, so the route
 # contract tests need no listening socket.
 tower = { version = "=0.5.3", features = ["util"] }
-# Native-only embedded Rust database, including full-text search.
+# Native-only embedded Rust database. The "fts" feature lets the memory
+# importer open v2 memory databases, which contain a `USING fts` index.
 turso = { version = "=0.8.1", default-features = false, features = ["fts"] }
 otto-core = { path = "crates/otto-core" }
 

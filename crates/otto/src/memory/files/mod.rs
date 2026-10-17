@@ -44,8 +44,7 @@ use crate::memory::{
     Record, Result, Scope, StoreIdentity, Tombstone,
 };
 
-#[allow(unused_imports)]
-// consumed by the service and approval modules once they switch stores
+#[cfg(test)]
 pub(crate) use self::retrieve::record_cost;
 
 const SCHEMA_VERSION: i64 = 1;
@@ -337,7 +336,6 @@ impl FileStore {
             database_id: self.database_id.clone(),
             user_scope: self.user_scope.clone(),
             schema_version: SCHEMA_VERSION,
-            generation: 0,
         })
     }
 

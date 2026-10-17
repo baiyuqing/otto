@@ -39,20 +39,13 @@ struct Options {
     home: PathBuf,
     destination: PathBuf,
     id: String,
-    memory_db: Option<PathBuf>,
 }
 impl Options {
     fn parse(args: &[String]) -> Result<Self> {
-        let (home, destination, id, memory_db) = match args {
-            [home, destination, id] => (home, destination, id, None),
-            [home, destination, id, flag, path] if flag == "--memory-db" => {
-                (home, destination, id, Some(path))
-            }
-            _ => {
-                return Err(invalid(
-                    "usage: otto storage transfer <source-home> <destination-root> <migration-id> [--memory-db <path>]",
-                ));
-            }
+        let [home, destination, id] = args else {
+            return Err(invalid(
+                "usage: otto storage transfer <source-home> <destination-root> <migration-id>",
+            ));
         };
         validate_id(id)?;
         let home = absolute(Path::new(home))?;
@@ -64,9 +57,6 @@ impl Options {
             home,
             destination,
             id: id.clone(),
-            memory_db: memory_db
-                .map(|path| absolute(Path::new(path)))
-                .transpose()?,
         })
     }
 }
@@ -199,14 +189,7 @@ pub async fn initialize(
                 "storage initialization requires explicit domain routes",
             ));
         }
-        let memory = memory_path(&Options {
-            home: home.clone(),
-            destination: PathBuf::new(),
-            id: String::new(),
-            memory_db: None,
-        })?;
         let empty = Arc::new(EmptyInstallation(vec![
-            memory,
             home.join(".otto/approvals.db"),
             home.join(".otto/workflows.db"),
             home.join(".otto/schedule.db"),
@@ -539,43 +522,8 @@ fn destination(options: &Options, source_identity: &str) -> Result<fsops::Dir> {
     Ok(root)
 }
 
-fn memory_path(options: &Options) -> Result<PathBuf> {
-    if let Some(path) = &options.memory_db {
-        return Ok(path.clone());
-    }
-    let path = options.home.join(".config/otto/config.toml");
-    let config = match open_file(&path, libc::O_RDONLY) {
-        Ok(file) => {
-            if file.metadata().map_err(unavailable)?.len() > MAX_CONFIG {
-                return Err(invalid("source config exceeds migration read limit"));
-            }
-            let mut text = String::new();
-            file.take(MAX_CONFIG + 1)
-                .read_to_string(&mut text)
-                .map_err(unavailable)?;
-            if text.len() as u64 > MAX_CONFIG {
-                return Err(invalid("source config exceeds migration read limit"));
-            }
-            otto_core::config::parse(&text).map_err(|_| invalid("source configuration is invalid; supply --memory-db to resolve state explicitly"))?
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            otto_core::config::File::default()
-        }
-        Err(error) => return Err(unavailable(error)),
-    };
-    let env = HashMap::from([("HOME".into(), endpoint(&options.home)?)]);
-    let resolved = otto_core::config::resolve_memory(&config, &env).map_err(|_| invalid("source memory configuration is unsupported; supply --memory-db to resolve state explicitly"))?;
-    if !Path::new(&resolved.turso_path).is_absolute() {
-        return Err(invalid(
-            "relative source memory path requires explicit --memory-db",
-        ));
-    }
-    absolute(Path::new(&resolved.turso_path))
-}
-
 fn codec(domain: &str) -> Result<Arc<dyn SqlDomainCodec>> {
     Ok(match domain {
-        "memory" => Arc::new(sql::memory::MemoryCodec),
         "approvals" => Arc::new(sql::ApprovalCodec),
         "workflows" => Arc::new(sql::workflow::WorkflowCodec),
         "schedule" => Arc::new(sql::schedule::ScheduleCodec),
@@ -594,7 +542,6 @@ struct Database {
 }
 fn databases(options: &Options, routes: &BTreeMap<String, StorageRoute>) -> Result<Vec<Database>> {
     let defaults: Vec<(PathBuf, Arc<dyn SqlDomainCodec>)> = vec![
-        (memory_path(options)?, Arc::new(sql::memory::MemoryCodec)),
         (
             options.home.join(".otto/approvals.db"),
             Arc::new(sql::ApprovalCodec),
@@ -892,7 +839,9 @@ async fn transfer_registered(
     .map_err(|_| invalid("source backend configuration is invalid"))?;
     let mut external_sources = Vec::new();
     for (domain, route) in &routes.domains {
-        if route.backend == "posix"
+        // A published `memory` route is only the file store's import source.
+        if domain == "memory"
+            || route.backend == "posix"
             || route.backend == "sqlite" && !route.endpoint.starts_with("instance:")
         {
             continue;
@@ -1313,7 +1262,6 @@ mod tests {
                 home,
                 destination: PathBuf::new(),
                 id: "move-1".into(),
-                memory_db: None,
             },
         )
     }
@@ -1357,13 +1305,9 @@ mod tests {
         options.destination = directory.path().join("stage");
         let scope = approvals(&options.home);
         let backend = &options.home.join(".otto");
-        let memory = crate::storage::backends::turso::memory::Store::open(
-            &backend.join("memory/memory.db"),
-            Default::default(),
-        )
-        .unwrap();
-        let original_identity = memory.identity().unwrap();
-        memory.close().unwrap();
+        let memory = backend.join("memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        std::fs::write(memory.join("identity.json"), b"{}").unwrap();
         drop(
             crate::storage::backends::turso::workflow::TursoWorkflowStore::open(
                 &backend.join("workflows.db"),
@@ -1410,7 +1354,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&stderr)
         );
-        assert!(String::from_utf8_lossy(&stdout).contains("transferred 10 domains"));
+        assert!(String::from_utf8_lossy(&stdout).contains("transferred 9 domains"));
         assert_eq!(
             std::fs::read(options.destination.join("sessions/workspace/parent.jsonl")).unwrap(),
             bytes
@@ -1419,13 +1363,8 @@ mod tests {
             std::fs::read(backend.join("sessions/workspace/parent.jsonl")).unwrap(),
             bytes
         );
-        let migrated = crate::storage::backends::turso::memory::Store::open(
-            &options.destination.join("memory.db"),
-            Default::default(),
-        )
-        .unwrap();
-        assert_eq!(migrated.identity().unwrap(), original_identity);
-        migrated.close().unwrap();
+        assert!(!options.destination.join("memory.db").exists());
+        assert_eq!(std::fs::read(memory.join("identity.json")).unwrap(), b"{}");
         let runtime = crate::runtime::storage::Storage::open_home(&options.home)
             .await
             .unwrap();

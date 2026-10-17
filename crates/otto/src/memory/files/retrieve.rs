@@ -15,7 +15,7 @@ use crate::memory::guard::guard_record;
 use crate::memory::json::encode_string;
 use crate::memory::validate::validate_retrieval_request;
 use crate::memory::{
-    Error, ErrorKind, MAX_FTS_TERM_BYTES, MAX_FTS_TERMS, MAX_RETRIEVAL_CANDIDATES,
+    Error, ErrorKind, MAX_QUERY_TERM_BYTES, MAX_QUERY_TERMS, MAX_RETRIEVAL_CANDIDATES,
     MAX_STANDING_TOKENS, NAMESPACE_USER, NAMESPACE_WORKSPACE, Record, Result, RetrievalMatch,
     RetrievalRequest, RetrievalResult, STANDING_ROW_GUARD, Scope, TokenEstimator, invalid_request,
 };
@@ -107,12 +107,12 @@ fn sort_candidates(candidates: &mut [RetrievalCandidate]) {
 fn query_terms(query: &str) -> Result<Vec<String>> {
     let mut terms: Vec<String> = Vec::new();
     for term in query.split_whitespace() {
-        if term.len() > MAX_FTS_TERM_BYTES {
+        if term.len() > MAX_QUERY_TERM_BYTES {
             return Err(invalid_request("query term bounds"));
         }
         let term = term.to_lowercase();
         if !terms.contains(&term) {
-            if terms.len() >= MAX_FTS_TERMS {
+            if terms.len() >= MAX_QUERY_TERMS {
                 return Err(invalid_request("query term count"));
             }
             terms.push(term);

@@ -161,13 +161,6 @@ fn import(reader: impl BufRead, connection: &mut Connection) -> Result<(), ()> {
         return Err(());
     };
     let allowed: &[&str] = match family.as_str() {
-        "memory" if version == 1 => &[
-            "memory_meta",
-            "memory_records",
-            "memory_candidates",
-            "memory_observations",
-            "memory_records_fts",
-        ],
         "usage" if version == 0 => &["usage_events"],
         "tasks" if version == 1 => &["tasks"],
         "workflow" if version == 0 => &[
@@ -191,26 +184,20 @@ fn import(reader: impl BufRead, connection: &mut Connection) -> Result<(), ()> {
         return Err(());
     }
     let transaction = connection.transaction().map_err(|_| ())?;
-    if family == "memory" {
-        for sql in crate::memory::turso::schema::SCHEMA_STATEMENTS {
-            transaction.execute_batch(sql).map_err(|_| ())?;
+    for sql in schema {
+        // The exporter emits individual CREATE TABLE/INDEX statements.
+        // execute prepares one statement, never a script from the input.
+        if !sql.starts_with("CREATE TABLE ")
+            && !sql.starts_with("CREATE INDEX ")
+            && !sql.starts_with("CREATE UNIQUE INDEX ")
+        {
+            return Err(());
         }
-    } else {
-        for sql in schema {
-            // The exporter emits individual CREATE TABLE/INDEX statements.
-            // execute prepares one statement, never a script from the input.
-            if !sql.starts_with("CREATE TABLE ")
-                && !sql.starts_with("CREATE INDEX ")
-                && !sql.starts_with("CREATE UNIQUE INDEX ")
-            {
-                return Err(());
-            }
-            transaction.execute(&sql, ()).map_err(|_| ())?;
-        }
-        transaction
-            .pragma_update("user_version", version)
-            .map_err(|_| ())?;
+        transaction.execute(&sql, ()).map_err(|_| ())?;
     }
+    transaction
+        .pragma_update("user_version", version)
+        .map_err(|_| ())?;
     for line in lines {
         let line = line.map_err(|_| ())?;
         let Export::Row { table, values } = serde_json::from_str(&line).map_err(|_| ())? else {
@@ -236,9 +223,6 @@ fn import(reader: impl BufRead, connection: &mut Connection) -> Result<(), ()> {
         if actual != expected {
             return Err(());
         }
-    }
-    if family == "memory" {
-        crate::memory::turso::schema::finalize_legacy_import(&transaction).map_err(|_| ())?;
     }
     transaction.commit().map_err(|_| ())
 }

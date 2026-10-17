@@ -88,7 +88,7 @@ fn optional_timestamp(
 
 /// A decoded `memory_records` row.
 enum RecordRow {
-    Active(Record),
+    Active(Box<Record>),
     Tombstone(Tombstone),
 }
 
@@ -139,7 +139,7 @@ fn decode_record_row(row: &Row) -> std::result::Result<RecordRow, &'static str> 
     if !valid_stored_float(record.confidence) || validate_record(&record).is_err() {
         return Err("record is invalid");
     }
-    Ok(RecordRow::Active(record))
+    Ok(RecordRow::Active(Box::new(record)))
 }
 
 fn decode_candidate_row(row: &Row) -> std::result::Result<Candidate, &'static str> {
@@ -252,7 +252,7 @@ pub(crate) fn import_turso(source: &Path) -> Result<ImportSet> {
     let mut tombstones = Vec::new();
     for row in read_table(&connection, "memory_records", RECORD_SQL, decode_record_row)? {
         match row {
-            RecordRow::Active(record) => records.push(record),
+            RecordRow::Active(record) => records.push(*record),
             RecordRow::Tombstone(tombstone) => tombstones.push(tombstone),
         }
     }

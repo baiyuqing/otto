@@ -265,8 +265,9 @@ for each item:
 `J(s)` is the JSON string encoding of `s`, quotes included. `E(s)` replaces
 `&` with `&amp;`, `'` with `&#39;`, `<` with `&lt;`, `>` with `&gt;` and `"`
 with `&#34;`. No items render as the empty string. This rendering is part of
-protocol 1.x and changes only with a new major version. The golden fixtures
-include a rendered example.
+protocol 1.x and changes only with a new major version. The golden fixture
+`fixtures/v1/recall_rendered.txt` is the rendering of
+`fixtures/v1/recall_response.json` (384 bytes).
 
 ### `POST /v1/get`
 

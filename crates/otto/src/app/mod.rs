@@ -4353,7 +4353,7 @@ mod tests {
         let controller = crate::cli::testutil::controller_with_memory(
             workspace.path(),
             sessions.path(),
-            &store.path().join("m.db"),
+            &store.path().join("memory"),
         )
         .await;
         assert!(controller.take_notices().is_empty(), "nothing is pending");
@@ -4391,7 +4391,7 @@ mod tests {
         let reopened = crate::cli::testutil::controller_with_memory(
             workspace.path(),
             sessions.path(),
-            &store.path().join("m.db"),
+            &store.path().join("memory"),
         )
         .await;
         assert_eq!(reopened.take_notices().len(), 1);
@@ -4402,7 +4402,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let store = tempfile::tempdir().expect("store");
-        let path = store.path().join("m.db");
+        let path = store.path().join("memory");
         crate::cli::testutil::seed_over_budget_standing(&path);
         let controller =
             crate::cli::testutil::controller_with_memory(workspace.path(), sessions.path(), &path)

@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 fn context() -> MemoryContext {
     MemoryContext {
+        organization_id: None,
         principal: "user-1".into(),
         scopes: vec![Scope {
             namespace: "user".into(),
@@ -18,6 +19,7 @@ fn context() -> MemoryContext {
 }
 fn request() -> RecallRequest {
     RecallRequest {
+        scope_filter: None,
         context: context(),
         query: "project context".into(),
         limit: 3,
@@ -26,6 +28,7 @@ fn request() -> RecallRequest {
 }
 fn reference() -> MemoryRef {
     MemoryRef {
+        organization_id: None,
         service: "test-service".into(),
         scope: context().scopes[0].clone(),
         id: "item-1".into(),
@@ -34,6 +37,7 @@ fn reference() -> MemoryRef {
 }
 fn item() -> RecallItem {
     RecallItem {
+        remote: None,
         reference: Some(reference()),
         content: Content::Text("reference material".into()),
         sources: vec![],
@@ -78,6 +82,7 @@ async fn recall_only_service_works_and_optional_write_is_unsupported() {
     let result = service.recall(&request, &control).await.unwrap();
     result.validate(&request, "test-service").unwrap();
     let remember = RememberRequest {
+        key: None,
         context: context(),
         request_id: "req-1".into(),
         content: Content::Text("hello".into()),
@@ -185,6 +190,7 @@ fn output_metadata_has_room_for_bounded_semantic_projections() {
         .collect();
     item.validate(&context(), "test-service").unwrap();
     let request = RememberRequest {
+        key: None,
         context: context(),
         request_id: "req-1".into(),
         content: Content::Text("hello".into()),
@@ -197,6 +203,7 @@ fn output_metadata_has_room_for_bounded_semantic_projections() {
 #[test]
 fn newly_formed_memory_requires_an_explicit_admitted_destination() {
     let mut remember = RememberRequest {
+        key: None,
         context: context(),
         request_id: "req-1".into(),
         content: Content::Text("hello".into()),
@@ -219,6 +226,7 @@ fn prepared_changes_bind_context_targets_and_metadata() {
     context.write_scope = Some(context.scopes[0].clone());
     let request = PrepareRequest {
         operation: MutatingRequest::Remember(RememberRequest {
+            key: None,
             context: context.clone(),
             request_id: "req-1".into(),
             content: Content::Text("new fact".into()),
@@ -414,4 +422,61 @@ fn inspection_can_return_current_revision_without_a_requested_revision() {
         reference.revision = Some("revision-1".into());
     }
     assert!(result.validate(&request, "test-service").is_err());
+}
+
+#[test]
+fn organization_references_are_bound_not_rebound_and_local_json_stays_readable() {
+    let legacy = r#"{"service":"test-service","scope":{"namespace":"user","id":"user-1"},"id":"item-1","revision":null}"#;
+    let local: MemoryRef = serde_json::from_str(legacy).unwrap();
+    assert!(local.validate(&context(), "test-service").is_ok());
+    assert!(
+        !serde_json::to_string(&local)
+            .unwrap()
+            .contains("organization_id")
+    );
+    let mut context = context();
+    context.organization_id = Some("acme".into());
+    let mut reference = reference();
+    reference.service = "remote".into();
+    reference.revision = Some("opaque-r4".into());
+    assert!(reference.validate(&context, "remote").is_err());
+    reference.organization_id = Some("other".into());
+    assert_eq!(
+        reference.validate(&context, "remote").unwrap_err().kind,
+        ErrorKind::Unauthorized
+    );
+    reference.organization_id = Some("acme".into());
+    assert!(reference.validate(&context, "remote").is_ok());
+    reference.revision = None;
+    assert!(reference.validate(&context, "remote").is_err());
+}
+#[test]
+fn semantic_key_and_effective_scope_filter_have_closed_contracts() {
+    for key in ["a", "response.language", "editor_default-2", "123"] {
+        assert!(valid_memory_key(key), "{key}");
+    }
+    for key in [
+        "",
+        "Upper",
+        ".leading",
+        "trailing-",
+        "two..dots",
+        "a b",
+        "中文",
+    ] {
+        assert!(!valid_memory_key(key), "{key}");
+    }
+    assert!(!valid_memory_key(&"a".repeat(129)));
+    let mut request = request();
+    request.scope_filter = Some(vec![ScopeNamespace::User]);
+    assert!(request.validate().is_ok());
+    for filter in [
+        vec![],
+        vec![ScopeNamespace::User, ScopeNamespace::User],
+        vec![ScopeNamespace::Workspace],
+    ] {
+        request.scope_filter = Some(filter);
+        assert!(request.validate().is_err());
+    }
+    assert!(serde_json::from_str::<ScopeNamespace>("\"global\"").is_err());
 }

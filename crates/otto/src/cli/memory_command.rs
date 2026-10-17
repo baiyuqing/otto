@@ -648,7 +648,7 @@ mod tests {
         let config = home.path().join("otto.toml");
         std::fs::write(
             &config,
-            "[memory]\nenabled = true\nbackend = \"remote\"\n[memory.remote]\nurl = \"https://mem.example.test\"\nuser = \"u1\"\n",
+            "[memory]\nenabled = true\nbackend = \"remote\"\n[memory.remote]\norganization = \"acme\"\nurl = \"https://mem.example.test\"\nuser = \"u1\"\n",
         )
         .expect("write config");
         let config = config.to_string_lossy().into_owned();

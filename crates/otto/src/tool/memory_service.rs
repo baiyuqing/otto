@@ -110,10 +110,14 @@ impl ServiceTool {
         context.origin = Origin::Model;
         match self.operation {
             Operation::Recall => {
-                if args.id.is_some() && !args.query.is_empty() {
-                    return Err(Error::new(ErrorKind::InvalidInput));
+                let id = args.id.filter(|id| !id.is_empty());
+                if id.is_some() && !args.query.is_empty() {
+                    return Err(Error {
+                        kind: ErrorKind::InvalidInput,
+                        detail: "use either id or query, not both",
+                    });
                 }
-                let items = if let Some(id) = args.id {
+                let items = if let Some(id) = id {
                     let mut found = Vec::new();
                     for scope in &context.scopes {
                         let projection = match self
@@ -313,6 +317,9 @@ impl Tool for ServiceTool {
             if self.operation == Operation::Recall {
                 schema["properties"]["query"]["description"] =
                     json!("Recall query; omit when inspecting by id");
+                schema["properties"]["id"]["description"] = json!(
+                    "Opaque item ID to inspect; omit when querying. An empty string is treated as omitted"
+                );
             }
             if self.operation == Operation::Forget {
                 schema["required"] = json!(["id"]);
@@ -375,7 +382,11 @@ mod tests {
             _: &RecallRequest,
             _: &dyn OperationControl,
         ) -> Result<RecallResult> {
-            panic!("ambiguous query must be rejected before contacting the service")
+            Ok(RecallResult {
+                items: Vec::new(),
+                used_tokens: Some(0),
+                coverage: Coverage::Complete,
+            })
         }
     }
 
@@ -407,13 +418,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_rejects_both_id_and_query_before_service_call() {
+    async fn search_rejects_both_id_and_query_with_actionable_error() {
         let arguments = RawValue::from_string(r#"{"id":"item","query":"query"}"#.into()).unwrap();
         let result = tool(Operation::Recall)
             .execute(&arguments, &CancellationToken::new())
             .await;
         assert!(result.is_error);
-        assert_eq!(result.content, "invalid memory input");
+        assert_eq!(result.content, "use either id or query, not both");
+    }
+
+    #[tokio::test]
+    async fn search_treats_empty_id_as_omitted() {
+        let arguments = RawValue::from_string(r#"{"id":"","query":"query"}"#.into()).unwrap();
+        let result = tool(Operation::Recall)
+            .execute(&arguments, &CancellationToken::new())
+            .await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "[]");
     }
 
     #[test]

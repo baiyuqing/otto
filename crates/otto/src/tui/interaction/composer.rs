@@ -151,6 +151,12 @@ impl Composer {
         (!line.is_empty()).then_some(line)
     }
 
+    /// Replaces the recall history with another session's prompts, keeping
+    /// the draft being typed.
+    pub(crate) fn reseed(&mut self, lines: Vec<String>) {
+        self.history = History::seeded(lines);
+    }
+
     pub(crate) fn remember(&mut self, line: &str) {
         self.history.remember(line);
     }

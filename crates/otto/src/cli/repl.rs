@@ -238,7 +238,7 @@ impl<'a> Repl<'a> {
                 }
                 continue;
             }
-            match self.controller.approval_message(&line, cancel).await {
+            match self.controller.approval_message(line, cancel).await {
                 Ok(Some(reply)) => {
                     let _ = writeln!(self.stdout, "{}", reply.text);
                     if reply.queued {
@@ -253,7 +253,7 @@ impl<'a> Repl<'a> {
                 }
             }
             match self
-                .interactive_prompt(&line, cancel, &mut lines, &mut approval_queue)
+                .interactive_prompt(line, cancel, &mut lines, &mut approval_queue)
                 .await
             {
                 Ok(()) => {}

@@ -1914,6 +1914,15 @@ impl Controller {
     /// turn the user message `before` opens, or at the last turn boundary
     /// without `before`. The current session is unchanged and stays open.
     pub fn fork_file(&self, before: Option<&str>) -> Result<crate::session::Forked, ForkFailure> {
+        self.fork_file_with_id(before, None, None)
+    }
+
+    pub fn fork_file_with_id(
+        &self,
+        before: Option<&str>,
+        id: Option<&str>,
+        request_id: Option<&str>,
+    ) -> Result<crate::session::Forked, ForkFailure> {
         let path = {
             let state = self.lock();
             if state.closed {
@@ -1931,16 +1940,20 @@ impl Controller {
         if path.is_empty() {
             return Err(ForkFailure::Failed(NOTHING_TO_FORK.to_string()));
         }
-        self.builder
-            .fork_session_file(&path, before)
-            .map_err(|error| match error {
-                otto_core::session::ForkError::InvalidPoint(_) => {
-                    ForkFailure::InvalidPoint(error.to_string())
-                }
-                otto_core::session::ForkError::Session(error) => {
-                    ForkFailure::Failed(self.builder.redact_error(&error.to_string(), None))
-                }
-            })
+        (if let Some(id) = id {
+            self.builder
+                .fork_session_file_with_id(&path, before, id, request_id)
+        } else {
+            self.builder.fork_session_file(&path, before)
+        })
+        .map_err(|error| match error {
+            otto_core::session::ForkError::InvalidPoint(_) => {
+                ForkFailure::InvalidPoint(error.to_string())
+            }
+            otto_core::session::ForkError::Session(error) => {
+                ForkFailure::Failed(self.builder.redact_error(&error.to_string(), None))
+            }
+        })
     }
 
     /// Forks the current session (see [`Controller::fork_file`]) and switches
@@ -2535,6 +2548,46 @@ impl Controller {
         Ok(Self::from_current(builder, current))
     }
 
+    pub async fn create_with_receipt(
+        builder: Arc<Builder>,
+        runtime: &Runtime,
+        id: String,
+        request_id: &str,
+    ) -> Result<Self, String> {
+        let session = builder.create_session_with_id(runtime, id)?;
+        otto_core::session::Session::append_custom(
+            &session,
+            "otto.session_command",
+            &serde_json::json!({"schemaVersion":1,"command":"create","requestId":request_id})
+                .to_string(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let current = attach_runner(&builder, session, runtime).await?;
+        Ok(Self::from_current(builder, current))
+    }
+
+    pub fn session_custom_data(&self, kind: &str) -> Option<String> {
+        self.lock()
+            .current
+            .as_ref()?
+            .session
+            .handle()
+            .custom_data(kind)
+    }
+
+    pub async fn write_session_command_receipt(&self, request_id: &str) -> Result<(), String> {
+        let session = self.lock().current.as_ref().ok_or(CLOSED)?.session.clone();
+        otto_core::session::Session::append_custom(
+            &session,
+            "otto.session_command",
+            &serde_json::json!({"schemaVersion":1,"command":"create","requestId":request_id})
+                .to_string(),
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
     /// A controller over the session file at `path`, with the repair warnings
     /// activating it produced.
     pub async fn open(builder: Arc<Builder>, path: &Path) -> Result<(Self, Vec<String>), String> {
@@ -2764,6 +2817,43 @@ mod tests {
     };
     use crate::runtime::info::SandboxNetwork;
     use crate::runtime::sandbox_config::SandboxChange;
+
+    #[tokio::test]
+    async fn idempotent_create_persists_its_receipt_before_acknowledgement() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let builder = Arc::new(builder(workspace.path(), sessions.path()));
+        let runtime = initial_runtime(&builder);
+        let id = "0123456789abcdef0123456789abcdef".to_string();
+        let controller = Controller::create_with_receipt(
+            Arc::clone(&builder),
+            &runtime,
+            id.clone(),
+            "create-real",
+        )
+        .await
+        .expect("create");
+        let path = controller.current_session().path();
+        assert!(std::path::Path::new(&path).is_file());
+        assert!(
+            controller
+                .session_custom_data("otto.session_command")
+                .unwrap()
+                .contains("create-real")
+        );
+        controller.close().expect("close");
+
+        let (reopened, _) = Controller::open(builder, std::path::Path::new(&path))
+            .await
+            .expect("open");
+        assert_eq!(reopened.info().session_id, id);
+        assert!(
+            reopened
+                .session_custom_data("otto.session_command")
+                .unwrap()
+                .contains("create-real")
+        );
+    }
 
     #[tokio::test]
     async fn permissions_controls_preserve_sandbox_and_report_disabled_reviewer() {

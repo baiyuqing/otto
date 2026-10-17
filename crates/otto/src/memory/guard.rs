@@ -46,28 +46,34 @@ impl ContentGuard for DefaultGuard {
     fn check(&self, input: &GuardInput) -> Result<()> {
         validate_guard_input(input)?;
         for field in &input.fields {
-            let value = field.value.as_str();
-            if value.contains("[REDACTED]") {
-                return Err(sensitive("redaction marker"));
-            }
-            if has_uri_userinfo(value) {
-                return Err(sensitive("URI userinfo"));
-            }
-            if field.opaque {
-                continue;
-            }
-            if PRIVATE_KEY_PATTERN.is_match(value) {
-                return Err(sensitive("private key delimiter"));
-            }
-            if has_sensitive_header(value) {
-                return Err(sensitive("credential header"));
-            }
-            if CREDENTIAL_ASSIGNMENT_PATTERN.is_match(value) {
-                return Err(sensitive("credential assignment"));
-            }
+            check_value(&field.value, field.opaque)?;
         }
         Ok(())
     }
+}
+
+/// The per-field rules of [`DefaultGuard`], without the field-count and
+/// byte limits of `GuardInput`.
+pub(crate) fn check_value(value: &str, opaque: bool) -> Result<()> {
+    if value.contains("[REDACTED]") {
+        return Err(sensitive("redaction marker"));
+    }
+    if has_uri_userinfo(value) {
+        return Err(sensitive("URI userinfo"));
+    }
+    if opaque {
+        return Ok(());
+    }
+    if PRIVATE_KEY_PATTERN.is_match(value) {
+        return Err(sensitive("private key delimiter"));
+    }
+    if has_sensitive_header(value) {
+        return Err(sensitive("credential header"));
+    }
+    if CREDENTIAL_ASSIGNMENT_PATTERN.is_match(value) {
+        return Err(sensitive("credential assignment"));
+    }
+    Ok(())
 }
 
 fn validate_guard_input(input: &GuardInput) -> Result<()> {

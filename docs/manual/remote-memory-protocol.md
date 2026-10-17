@@ -155,6 +155,8 @@ schedule; the response carries no result.
   UTC.
 - Block types are `text`, `tool_call` and `tool_result`. Image and reasoning
   blocks are not sent.
+- `arguments` is always a JSON object. Otto sends `{}` when the model's
+  arguments are absent, are not valid JSON or are not an object.
 - The request body is at most 4 MiB. Otto does not send a larger turn, nor a
   turn that contains a redaction marker or a credential shape.
 - Otto sends turns of one session in order, one request at a time, and does not

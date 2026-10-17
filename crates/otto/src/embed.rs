@@ -743,6 +743,9 @@ impl Otto {
         {
             failure.get_or_insert("sandbox runtime close failed".to_string());
         }
+        if let Some(turns) = &inner.builder.memory.turns {
+            turns.close().await;
+        }
         if let Some(client) = &inner.builder.memory.client
             && let Err(error) = client.close(&CancellationToken::new()).await
         {

@@ -1167,20 +1167,27 @@ pub(crate) fn open_memory(
                 }
                 let _ = writeln!(stderr, "warning: {message}; continuing without memory");
             } else {
-                let service =
-                    crate::memory::remote::RemoteService::new(crate::memory::remote::Config {
+                let service = Arc::new(crate::memory::remote::RemoteService::new(
+                    crate::memory::remote::Config {
                         url: remote.url.clone(),
                         token,
                         recall_timeout: remote.recall_timeout,
                         logger: builder.logger.clone(),
-                    })?;
+                    },
+                )?);
                 let user_scope = otto_core::memory::Scope {
                     namespace: "user".into(),
                     id: remote.user.clone(),
                 };
                 let grant = remote_learning_grant(user_scope.clone(), &builder.workspace_scope);
-                builder.shared_mut().memory.extension = Some(
-                    crate::runtime::wiring::MemoryExtension::owned(Arc::new(service), user_scope)
+                let turns = crate::memory::remote::upload::Uploader::new(
+                    service.clone(),
+                    builder.logger.clone(),
+                );
+                let shared = builder.shared_mut();
+                shared.memory.turns = Some(turns);
+                shared.memory.extension = Some(
+                    crate::runtime::wiring::MemoryExtension::owned(service, user_scope)
                         .with_learning(grant),
                 );
             }

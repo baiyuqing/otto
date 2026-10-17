@@ -4262,6 +4262,7 @@ fn fork_failing_at(
         &source,
         None,
         FORK_ID,
+        None,
         &crate::faults::publish::FaultyPublishOps::new(plan.clone()),
     )
     .map(|_| ())
@@ -4316,6 +4317,7 @@ fn a_crash_after_the_fork_rename_leaves_a_complete_fork_and_no_temporary_file() 
                 Path::new(&store.path()),
                 None,
                 FORK_ID,
+                None,
                 &crate::faults::publish::FaultyPublishOps::new(plan),
             );
         }

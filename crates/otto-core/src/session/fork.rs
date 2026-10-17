@@ -43,6 +43,9 @@ pub struct ForkRecord {
     /// The text of that message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// Present when an HTTP fork command supplied a stable retry identity.
+    #[serde(rename = "requestId", default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// Encodes a record as `otto.fork` data.
@@ -486,6 +489,7 @@ mod tests {
             source_session_id: "abc".into(),
             source_entry_id: Some("0000000a".into()),
             prompt: Some("hi".into()),
+            request_id: None,
         };
         let encoded = encode_fork_record(&record);
         assert_eq!(

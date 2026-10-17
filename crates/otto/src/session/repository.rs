@@ -139,6 +139,7 @@ pub trait SessionRepository: Send + Sync {
         reference: &str,
         before: Option<&str>,
         new_id: &str,
+        request_id: Option<&str>,
     ) -> Result<Forked, ForkError>;
     /// The places `reference` can be forked, oldest first.
     fn fork_points(&self, reference: &str) -> Result<Vec<ForkPoint>, String>;

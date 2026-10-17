@@ -133,8 +133,15 @@ impl SessionRepository for PosixSessionRepository {
         reference: &str,
         before: Option<&str>,
         new_id: &str,
+        request_id: Option<&str>,
     ) -> Result<Forked, otto_core::session::ForkError> {
-        fork::fork(self.driver.as_ref(), Path::new(reference), before, new_id)
+        fork::fork_with_request(
+            self.driver.as_ref(),
+            Path::new(reference),
+            before,
+            new_id,
+            request_id,
+        )
     }
 
     fn fork_points(&self, reference: &str) -> Result<Vec<otto_core::session::ForkPoint>, String> {

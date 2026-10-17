@@ -1361,6 +1361,9 @@ paths:
                 workspace:
                   type: string
                   description: An admitted workspace path to create or resume in. Defaults to the startup workspace; loaded if not already.
+                request_id:
+                  type: string
+                  description: Stable retry id for creating a session, scoped to the workspace. Cannot accompany resume.
       responses:
         "201":
           description: New session created
@@ -1369,7 +1372,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Session"
         "200":
-          description: An already-open session, resumed or already tracked
+          description: An already-open or resumed session, including a retried creation
           content:
             application/json:
               schema:
@@ -1388,6 +1391,12 @@ paths:
                 $ref: "#/components/schemas/Error"
         "404":
           description: resume id not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: request_id_conflict when the retry id identifies a different session command
           content:
             application/json:
               schema:
@@ -1521,9 +1530,18 @@ paths:
                 before:
                   type: string
                   description: A fork point's `entry_id`.
+                request_id:
+                  type: string
+                  description: Stable retry id for a fork, scoped to the workspace.
       responses:
         "201":
           description: The new session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForkedSession"
+        "200":
+          description: The original fork returned for a repeated request_id
           content:
             application/json:
               schema:
@@ -1543,7 +1561,8 @@ paths:
         "409":
           description: >-
             `invalid_fork_point`: `before` is not a user message that starts a
-            turn on this session's history, or the session has no history yet
+            turn on this session's history, or the session has no history yet;
+            `request_id_conflict`: the retry id identifies another fork command
           content:
             application/json:
               schema:

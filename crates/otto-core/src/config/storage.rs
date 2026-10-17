@@ -85,7 +85,7 @@ fn identifier(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-fn environment_name(value: &str) -> bool {
+pub(crate) fn environment_name(value: &str) -> bool {
     value
         .as_bytes()
         .first()

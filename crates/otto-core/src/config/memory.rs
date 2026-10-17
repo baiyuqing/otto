@@ -59,6 +59,25 @@ pub struct MemoryRemote {
     pub recall_timeout: String,
 }
 
+impl Memory {
+    /// The environment variable that holds the remote memory token, when
+    /// `backend = "remote"`. The token is a secret like a provider key.
+    pub fn credential_variable(&self) -> Option<&str> {
+        (self.backend == REMOTE_MEMORY_BACKEND).then(|| self.remote.token_env())
+    }
+}
+
+impl MemoryRemote {
+    /// `token_env`, or `OTTO_MEM_TOKEN` when unset.
+    pub fn token_env(&self) -> &str {
+        if self.token_env.is_empty() {
+            DEFAULT_REMOTE_TOKEN_ENV
+        } else {
+            &self.token_env
+        }
+    }
+}
+
 /// The `[memory.turso]` table.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,6 +268,12 @@ fn resolve_remote(remote: &MemoryRemote) -> Result<RemoteRuntime, ConfigError> {
         )));
     }
 
+    if !super::storage::environment_name(remote.token_env()) || remote.token_env().len() > 128 {
+        return Err(ConfigError::new(
+            "invalid memory remote token_env: must be an environment variable name",
+        ));
+    }
+
     let recall_timeout = if remote.recall_timeout.is_empty() {
         DEFAULT_REMOTE_RECALL_TIMEOUT
     } else {
@@ -267,11 +292,7 @@ fn resolve_remote(remote: &MemoryRemote) -> Result<RemoteRuntime, ConfigError> {
     Ok(RemoteRuntime {
         url: url.to_string(),
         user: user.to_string(),
-        token_env: if remote.token_env.is_empty() {
-            DEFAULT_REMOTE_TOKEN_ENV.to_string()
-        } else {
-            remote.token_env.clone()
-        },
+        token_env: remote.token_env().to_string(),
         recall_timeout,
     })
 }
@@ -418,7 +439,9 @@ busy_timeout = "10s"
                 recall_timeout: Duration::from_secs(3),
             })
         );
+        assert_eq!(file.memory.credential_variable(), Some("OTTO_MEM_TOKEN"));
         let files = resolve_memory(&File::default(), &env("/home/u")).expect("files");
+        assert_eq!(File::default().memory.credential_variable(), None);
         assert_eq!(files.remote, None);
         assert_eq!(files.recall_tokens, DEFAULT_MEMORY_RECALL_TOKENS);
     }
@@ -434,6 +457,7 @@ busy_timeout = "10s"
         let runtime = resolve_memory(&file, &env("/home/u")).expect("resolve");
         let remote = runtime.remote.expect("remote");
         assert_eq!(remote.token_env, "MEM");
+        assert_eq!(file.memory.credential_variable(), Some("MEM"));
         assert_eq!(remote.recall_timeout, Duration::from_millis(500));
         assert_eq!(runtime.recall_tokens, 3000);
         for url in ["http://localhost:9000", "http://[::1]:9000"] {
@@ -473,6 +497,10 @@ busy_timeout = "10s"
             (
                 "url = \"https://mem.example\"\nuser = \"alice\"\nrecall_timeout = \"0s\"\n",
                 "recall_timeout",
+            ),
+            (
+                "url = \"https://mem.example\"\nuser = \"alice\"\ntoken_env = \"A-B\"\n",
+                "token_env",
             ),
         ] {
             let err = resolve_memory(&remote_file(remote), &env("/home/u")).unwrap_err();

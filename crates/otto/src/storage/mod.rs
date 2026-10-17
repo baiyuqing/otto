@@ -275,7 +275,6 @@ mod tests {
             atomic_transactions: true,
             durable_commits: false,
             multiprocess_writers: false,
-            fts: false,
         }
     }
     impl SqlDriver for EchoDriver {
@@ -412,14 +411,6 @@ mod tests {
         ] {
             assert!(invalid.validate(SqlRequirements::EPHEMERAL).is_err());
         }
-        assert!(
-            capabilities()
-                .validate(SqlRequirements {
-                    fts: true,
-                    ..SqlRequirements::EPHEMERAL
-                })
-                .is_err()
-        );
         assert!(
             capabilities()
                 .validate(SqlRequirements {

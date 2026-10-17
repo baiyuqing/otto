@@ -1,5 +1,4 @@
 //! Native isolated SQL staging. Domain codecs export logical records, never SQL dumps.
-pub mod memory;
 pub mod memory_advice;
 mod named;
 pub mod reflection;
@@ -17,6 +16,31 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+
+/// Normalizes one statement: trim, drop one trailing semicolon, remove
+/// whitespace outside single-quoted values.
+fn normalize_schema_sql(statement: &str) -> String {
+    // Turso serializes parsed SQL: keyword identifiers gain quotes, <> becomes
+    // !=, and punctuation spacing changes. Preserve every quoted value.
+    statement
+        .trim()
+        .trim_end_matches(';')
+        .split('\'')
+        .enumerate()
+        .map(|(index, part)| {
+            if index % 2 == 1 {
+                return part.to_string();
+            }
+            part.replace("\"key\"", "key")
+                .replace("\"action\"", "action")
+                .replace("<>", "!=")
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect()
+        })
+        .collect::<Vec<_>>()
+        .join("'")
+}
 
 const SCAN_LIMIT: usize = 64 * 1024 * 1024;
 
@@ -250,65 +274,8 @@ impl Stage {
         Ok(())
     }
 }
-const STAGE_TABLE: &str = "CREATE TABLE otto_migration_stage (singleton INTEGER PRIMARY KEY CHECK(singleton=1), migration_id TEXT NOT NULL, identity TEXT NOT NULL, source TEXT NOT NULL, max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes>0), sealed INTEGER NOT NULL CHECK(sealed IN (0,1))) STRICT";
-const CHUNKS_TABLE: &str = "CREATE TABLE otto_migration_chunks (migration_id TEXT NOT NULL, domain TEXT NOT NULL, cursor TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(migration_id,domain,cursor)) STRICT";
 const STAGE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS otto_migration_stage (singleton INTEGER PRIMARY KEY CHECK(singleton=1), migration_id TEXT NOT NULL, identity TEXT NOT NULL, source TEXT NOT NULL, max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes>0), sealed INTEGER NOT NULL CHECK(sealed IN (0,1))) STRICT;
 CREATE TABLE IF NOT EXISTS otto_migration_chunks (migration_id TEXT NOT NULL, domain TEXT NOT NULL, cursor TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(migration_id,domain,cursor)) STRICT;";
-
-/// Closed physical bookkeeping allowance for repositories with exact schemas.
-/// Every object is checked, including the implicit composite-key index.
-pub(super) fn verified_schema_objects(
-    connection: &Connection,
-    normalize: fn(&str) -> String,
-) -> crate::storage::Result<Vec<String>> {
-    let mut statement=connection.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name IN ('otto_migration_stage','otto_migration_chunks','sqlite_autoindex_otto_migration_chunks_1')")?;
-    let objects = statement
-        .query_map((), |r| {
-            Ok((
-                r.get::<String>(0)?,
-                r.get::<String>(1)?,
-                r.get::<String>(2)?,
-                r.get::<Option<String>>(3)?,
-            ))
-        })?
-        .collect::<crate::storage::Result<Vec<_>>>()?;
-    if objects.is_empty() {
-        return Ok(vec![]);
-    }
-    if objects.len() != 3 {
-        return Err(crate::storage::Error::Corrupt(
-            "incomplete migration bookkeeping schema".into(),
-        ));
-    }
-    for (kind, name, table, sql) in &objects {
-        let valid = match name.as_str() {
-            "otto_migration_stage" => {
-                kind == "table"
-                    && table == name
-                    && sql
-                        .as_ref()
-                        .is_some_and(|sql| normalize(sql) == normalize(STAGE_TABLE))
-            }
-            "otto_migration_chunks" => {
-                kind == "table"
-                    && table == name
-                    && sql
-                        .as_ref()
-                        .is_some_and(|sql| normalize(sql) == normalize(CHUNKS_TABLE))
-            }
-            "sqlite_autoindex_otto_migration_chunks_1" => {
-                kind == "index" && table == "otto_migration_chunks" && sql.is_none()
-            }
-            _ => false,
-        };
-        if !valid {
-            return Err(crate::storage::Error::Corrupt(
-                "incompatible migration bookkeeping object".into(),
-            ));
-        }
-    }
-    Ok(objects.into_iter().map(|(_, name, _, _)| name).collect())
-}
 
 #[async_trait]
 impl StageImport for Stage {
@@ -1141,8 +1108,7 @@ impl SqlDomainCodec for ApprovalCodec {
         let sequence_schema:Option<String>=connection.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='__turso_internal_seq___turso_internal_autoincrement_approval_events' AND length(sql)<=4096",(),|row|row.get(0)).optional().map_err(sql_error)?;
         if let Some(actual) = sequence_schema {
             let expected = "CREATE TABLE \"__turso_internal_seq___turso_internal_autoincrement_approval_events\"(value INTEGER PRIMARY KEY,is_called INTEGER,start INTEGER,inc INTEGER,min INTEGER,max INTEGER,cycle INTEGER)";
-            let normalize = super::memory::schema::normalize_schema_sql;
-            if normalize(&actual) != normalize(expected) {
+            if normalize_schema_sql(&actual) != normalize_schema_sql(expected) {
                 return Err(Error::Invalid(
                     "unsupported approval event sequence schema".into(),
                 ));

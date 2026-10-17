@@ -5,7 +5,6 @@ fn auto_startup_reviews_and_persists_requested_memory_without_a_human_card() {
     use otto::faults::http;
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let database = home.path().join("review-memory.db");
     let reviews = Arc::new(AtomicUsize::new(0));
     let reviewer_calls = reviews.clone();
     let main_calls = Arc::new(AtomicUsize::new(0));
@@ -36,16 +35,6 @@ fn auto_startup_reviews_and_persists_requested_memory_without_a_human_card() {
         });
     });
     configure(home.path(), &url_receiver.recv().unwrap());
-    let config = home.path().join(".config/otto/config.toml");
-    let text = std::fs::read_to_string(&config).unwrap();
-    std::fs::write(
-        &config,
-        format!(
-            "{text}\n[memory.turso]\npath = {:?}\n",
-            database.to_str().unwrap()
-        ),
-    )
-    .unwrap();
     let mut client = Client::spawn(home.path(), workspace.path(), "off");
     client.initialize();
     let session_id = client.new_session(workspace.path());
@@ -86,7 +75,8 @@ fn auto_startup_reviews_and_persists_requested_memory_without_a_human_card() {
     assert_eq!(reviews.load(Ordering::SeqCst), 1);
     assert_eq!(client.close(), Some(0));
     let memory = otto::memory::Service::new(
-        otto::memory::turso::Store::open(&database, Default::default()).unwrap(),
+        otto::memory::files::FileStore::open(&home.path().join(".otto/memory"), Default::default())
+            .unwrap(),
         otto::memory::decide_default_policy,
     );
     let scope =

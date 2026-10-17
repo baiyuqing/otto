@@ -869,7 +869,7 @@ mod tests {
         }
     }
 
-    /// A controller whose builder carries a usable Turso memory service.
+    /// A controller whose builder carries a usable file-backed memory service.
     async fn controller_with_memory(
         workspace: &Path,
         sessions: &Path,

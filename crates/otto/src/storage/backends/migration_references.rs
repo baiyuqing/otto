@@ -1,7 +1,7 @@
 //! Cross-domain migration references. Only verified journal aliases admit paths.
 use crate::storage::backends::posix::journal_migration::JournalStage;
 use crate::storage::migration::{contracts::*, group::ReferenceClosure};
-use crate::storage::{Connection, OptionalExtension, params};
+use crate::storage::{Connection, OptionalExtension};
 use async_trait::async_trait;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -72,7 +72,6 @@ pub fn validate_reference_closure(
         if !matches!(
             domain.as_str(),
             "approvals"
-                | "memory"
                 | "workflows"
                 | "schedule"
                 | "usage"
@@ -238,12 +237,6 @@ fn approval_references(
         }
         session_reference(&request.scope.session_id, sessions)?;
         match request.subject.source.as_str() {
-            "memory" => memory_approval(
-                &request,
-                databases
-                    .get("memory")
-                    .ok_or_else(|| invalid("live memory approval requires the memory family"))?,
-            )?,
             "workflow" => workflow_approval(
                 &request,
                 databases.get("workflows").ok_or_else(|| {
@@ -288,61 +281,6 @@ fn workflow_approval(
         return Err(invalid(
             "live workflow approval has a conflicting target receipt",
         ));
-    }
-    Ok(())
-}
-fn memory_approval(request: &otto_core::approval::Request, connection: &Connection) -> Result<()> {
-    use crate::storage::backends::turso::memory::candidates;
-    let reference: crate::memory::CandidateRef = serde_json::from_str(&request.subject.details)
-        .map_err(|_| invalid("invalid live memory approval reference"))?;
-    let user_scope: String = connection
-        .query_row(
-            "SELECT value FROM memory_meta WHERE key='user_scope_id'",
-            (),
-            |row| row.get(0),
-        )
-        .map_err(sql_error)?;
-    let expected = format!(
-        "{}/{}/{}/{}",
-        user_scope, reference.scope.namespace, reference.scope.id, reference.id
-    );
-    if request.subject.id != expected {
-        return Err(invalid("memory approval subject identity differs"));
-    }
-    let candidate=connection.query_row(&format!("SELECT {} FROM memory_candidates WHERE id=?1 AND scope_namespace=?2 AND scope_id=?3",candidates::candidate_projection()),params![reference.id,reference.scope.namespace,reference.scope.id],|r|Ok(candidates::decode_candidate_row(r))).optional().map_err(sql_error)?.ok_or_else(||invalid("live memory approval candidate is missing"))?.map_err(|_|invalid("live memory approval candidate is invalid"))?.candidate;
-    use crate::memory::{CandidateAction, CandidateState};
-    if candidate.state != CandidateState::Pending {
-        let expected = if request.state == otto_core::approval::State::Approved {
-            CandidateState::Accepted
-        } else {
-            CandidateState::Rejected
-        };
-        if request.state == otto_core::approval::State::Pending || candidate.state != expected {
-            return Err(invalid(
-                "live memory approval has a conflicting target receipt",
-            ));
-        }
-        return Ok(()); // A committed domain receipt needs no repeat application.
-    }
-    if crate::approval::digest(&format!(
-        "{}:{}:{:?}",
-        candidate.created_at, candidate.base_revision, candidate.proposed
-    )) != request.subject.version
-    {
-        return Err(invalid("live memory approval candidate version differs"));
-    }
-    if matches!(
-        candidate.action,
-        CandidateAction::Update | CandidateAction::Forget
-    ) {
-        let revision:Option<i64>=connection.query_row("SELECT revision FROM memory_records WHERE id=?1 AND scope_namespace=?2 AND scope_id=?3 AND state='active'",params![candidate.target_id,reference.scope.namespace,reference.scope.id],|r|r.get(0)).optional().map_err(sql_error)?;
-        if revision.and_then(|revision| u64::try_from(revision).ok())
-            != Some(candidate.base_revision)
-        {
-            return Err(invalid(
-                "live memory approval target revision is stale or missing",
-            ));
-        }
     }
     Ok(())
 }

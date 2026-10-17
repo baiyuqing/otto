@@ -51,7 +51,6 @@ impl SqlDriver for TursoDriver {
             atomic_transactions: true,
             durable_commits: path != Path::new(":memory:"),
             multiprocess_writers: path != Path::new(":memory:"),
-            fts: true,
         }
     }
     fn open(&self, path: &Path, options: OpenOptions) -> Result<Box<dyn SqlConnection>> {

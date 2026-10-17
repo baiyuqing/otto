@@ -279,10 +279,10 @@ async fn withdrawing_an_inflight_review_cannot_be_overwritten_by_its_allow() {
 async fn auto_memory_review_applies_exact_content_once_and_retains_the_domain_receipt() {
     use otto::memory::{self, CandidateRef, CandidateState, ProposeRequest, RecordKey};
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("memory.db");
+    let path = temp.path().join("memory");
     let memory_scope = memory::Scope::new("workspace", "review-fixture");
     let memory = Arc::new(memory::Service::new(
-        memory::turso::Store::open(&path, Default::default()).unwrap(),
+        memory::files::FileStore::open(&path, Default::default()).unwrap(),
         memory::decide_default_policy,
     ));
     let (service, reviewer) = configured();
@@ -376,7 +376,7 @@ async fn auto_memory_review_applies_exact_content_once_and_retains_the_domain_re
     drop(service);
     drop(memory);
     let reopened = memory::Service::new(
-        memory::turso::Store::open(&path, Default::default()).unwrap(),
+        memory::files::FileStore::open(&path, Default::default()).unwrap(),
         memory::decide_default_policy,
     );
     assert_eq!(reopened.get_by_key(&key).unwrap(), written);

@@ -404,6 +404,22 @@ fn supported_protocol(value: &str) -> bool {
         .is_some_and(|minor| !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// The record Otto renders for one recalled item; `ServiceBinding::recall`
+/// in `runtime/wiring.rs` builds the same record from the port item.
+fn record(item: &wire::Item) -> Record {
+    Record {
+        id: item.id.clone(),
+        scope: agent::Scope {
+            namespace: item.scope.namespace.clone(),
+            id: item.scope.id.clone(),
+        },
+        kind: "reference".into(),
+        key: String::new(),
+        text: item.text.clone(),
+        standing: false,
+    }
+}
+
 fn truncate(text: &str, max: usize) -> &str {
     let mut end = max.min(text.len());
     while !text.is_char_boundary(end) {
@@ -465,17 +481,7 @@ impl MemoryService for RemoteService {
         let mut items = Vec::with_capacity(response.items.len());
         let mut records = Vec::with_capacity(response.items.len());
         for item in response.items {
-            let record = Record {
-                id: item.id.clone(),
-                scope: agent::Scope {
-                    namespace: item.scope.namespace.clone(),
-                    id: item.scope.id.clone(),
-                },
-                kind: "reference".into(),
-                key: String::new(),
-                text: item.text.clone(),
-                standing: false,
-            };
+            let record = record(&item);
             let item = Self::item(item, &request.context.scopes)
                 .ok_or_else(|| rejected("item violates the protocol rules"))?;
             records.push(record);
@@ -867,6 +873,32 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// `recall_rendered.txt` is the protocol 1 rendering of
+    /// `recall_response.json`; its byte length is what `max_bytes` bounds.
+    #[tokio::test]
+    async fn recall_response_fixture_renders_to_the_golden_text() {
+        let fixture = include_str!("fixtures/v1/recall_response.json");
+        let rendered = include_str!("fixtures/v1/recall_rendered.txt");
+        let response: wire::RecallResponse = serde_json::from_str(fixture).unwrap();
+        let records: Vec<_> = response.items.iter().map(record).collect();
+        assert_eq!(render_memory_context(&records), rendered);
+        let (url, _) = serve(move |_| Reply {
+            status: 200,
+            protocol: Some("1.0"),
+            body: fixture.as_bytes().to_vec(),
+            delay: Duration::ZERO,
+        })
+        .await;
+        let result = client(service(&url, Duration::from_secs(5)))
+            .recall(
+                &recall_request(12, rendered.len()),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("recall at exactly the rendered size");
+        assert_eq!(result.used_tokens, Some(rendered.len()));
     }
 
     #[tokio::test]

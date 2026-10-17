@@ -141,7 +141,7 @@ mod advice_tests {
     use crate::memory::advice::testing::{LINE, candidate};
 
     fn service() -> (tempfile::TempDir, crate::memory::Service) {
-        let (directory, store) = crate::memory::turso::testsupport::open_temp();
+        let (directory, store) = crate::memory::files::testsupport::open_temp();
         (
             directory,
             crate::memory::Service::new(store, crate::memory::decide_default_policy),

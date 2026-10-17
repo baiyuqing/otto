@@ -971,6 +971,7 @@ api_key_env = "ALPHA_KEY"
                 fixture.home.to_string_lossy().into_owned(),
             ),
             ("ALPHA_KEY".to_string(), "sk-alpha".to_string()),
+            ("OTTO_MEM_TOKEN".to_string(), "mem-test-token".to_string()),
         ]
     }
 
@@ -1941,6 +1942,98 @@ args = ["-c", "/usr/bin/touch '{ROOT}/spawned'"]
             tree(&cli, &cli_session),
             tree(&embedded, &otto_session),
             "files under the home"
+        );
+    }
+
+    /// A remote memory service stub. `/v1/turns` waits 200 ms, records the
+    /// body and answers `202`; every other endpoint answers `503`.
+    async fn memory_service() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let turns = Arc::new(Mutex::new(Vec::new()));
+        let seen = turns.clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/turns",
+                axum::routing::post(move |body: axum::body::Bytes| {
+                    let seen = seen.clone();
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        seen.lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&body).unwrap());
+                        axum::response::Response::builder()
+                            .status(202)
+                            .header("Otto-Memory-Protocol", "1.0")
+                            .body(axum::body::Body::from("{}"))
+                            .unwrap()
+                    }
+                }),
+            )
+            .fallback(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (url, turns)
+    }
+
+    /// Checks the one uploaded turn of a prompt `asked` answered by `answer`.
+    fn assert_uploaded(turns: &[serde_json::Value], session: &str, asked: &str, answer: &str) {
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        let turn = &turns[0];
+        assert_eq!(turn["status"], "success");
+        assert_eq!(turn["context"]["session_id"], session);
+        let messages = turn["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "user");
+        assert!(
+            messages[0]["blocks"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(asked),
+            "{turn}"
+        );
+        let last = messages.last().unwrap();
+        assert_eq!(last["role"], "assistant");
+        assert_eq!(last["blocks"][0]["text"], answer);
+    }
+
+    /// A finished prompt reaches the remote memory service as one `/v1/turns`
+    /// request, and shutdown returns only after that request was answered:
+    /// through `Otto::close` and through `otto acp` reaching end of input.
+    #[tokio::test]
+    async fn finished_prompts_are_uploaded_to_the_remote_memory_service_before_shutdown() {
+        let _serial = LOCK.lock().await;
+        let (url, turns) = memory_service().await;
+        let config = format!(
+            "[memory]\nenabled = true\nbackend = \"remote\"\n\n[memory.remote]\nurl = \"{url}\"\nuser = \"u1\"\n"
+        );
+        let (provider, _) = Installed::new(vec![reply("embedded answer"), reply("acp answer")]);
+
+        let embedded = fixture(&config);
+        provider.serve(&embedded);
+        let otto = builder(&embedded).build().await.unwrap();
+        let session = otto.new_session(None).await.unwrap();
+        say(&session, "upload this embedded turn").await;
+        let session_id = session.id().to_string();
+        drop(session);
+        otto.close().await.unwrap();
+        assert_uploaded(
+            &std::mem::take(&mut *turns.lock().unwrap()),
+            &session_id,
+            "upload this embedded turn",
+            "embedded answer",
+        );
+
+        let cli = fixture(&config);
+        provider.serve(&cli);
+        let mut acp = Acp::start(&cli);
+        let session_id = acp.session(&cli).await;
+        acp.prompt(&session_id, "upload this acp turn").await;
+        let (code, stderr) = acp.finish().await;
+        assert_eq!(code, 0, "{stderr}");
+        assert_uploaded(
+            &turns.lock().unwrap(),
+            &session_id,
+            "upload this acp turn",
+            "acp answer",
         );
     }
 }

@@ -796,6 +796,9 @@ pub async fn run_with_extensions(
             cancel,
         )
         .await;
+        if let Some(turns) = &memory_turns {
+            turns.close().await;
+        }
         if approval_executor
             .as_ref()
             .is_some_and(|executor| executor.close().is_err())
@@ -847,6 +850,9 @@ pub async fn run_with_extensions(
             cancel,
         )
         .await;
+        if let Some(turns) = &memory_turns {
+            turns.close().await;
+        }
         if approval_executor
             .as_ref()
             .is_some_and(|executor| executor.close().is_err())

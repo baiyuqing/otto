@@ -101,8 +101,9 @@ workspace scopes, and `startup::load_workspace` rebuilds that client per
 `otto serve` workspace with `Client::with_grant`. `MemoryWiring::turns` holds
 the `memory::remote::upload::Uploader`; `Controller` starts and finishes
 `SharedSession` recording around each prompt step and submits the recorded
-messages, and the shutdown paths in `cli::run` and `embed` close the uploader
-before the memory client.
+messages. Every shutdown path in `cli::run`, including `otto acp` and
+`otto serve`, and `Otto::close` in `embed` close the uploader; where the memory
+client is also closed, the uploader is closed first.
 
 Keep `crates/otto`'s `skill` module free of imports from other Otto modules
 besides `otto-core`. The skill tool's file reads stay confined to the skill

@@ -687,7 +687,7 @@ mod tests {
         BuiltinAdapter,
         port::MemoryContext,
     ) {
-        let (directory, store) = super::super::turso::testsupport::open_temp();
+        let (directory, store) = super::super::files::testsupport::open_temp();
         let service = Arc::new(Service::new(store, super::super::decide_default_policy));
         let scope = core_scope(&service.identity().unwrap().user_scope);
         let context = port::MemoryContext {

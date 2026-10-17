@@ -1,6 +1,5 @@
 //! Repositories for the SQLite/Turso capability profile.
 pub mod approval;
-pub mod memory;
 pub mod memory_advice;
 pub mod migration;
 pub mod reflection;

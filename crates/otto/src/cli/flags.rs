@@ -291,7 +291,7 @@ const USAGE: &str = r"Usage: otto [options]
        otto --attach [--socket PATH] [--resume ID | --continue]   terminal UI on a running otto serve
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
-       otto storage transfer <source-home> <destination-root> <migration-id> [--memory-db <path>]
+       otto storage transfer <source-home> <destination-root> <migration-id>
        otto storage abort <source-home> <migration-id>
        otto storage migrate <legacy.db> <new.db>
        otto storage window-peaks <usage.db> <session-id>

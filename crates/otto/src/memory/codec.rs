@@ -159,14 +159,6 @@ pub fn parse_timestamp(value: &str) -> Result<DateTime<Utc>> {
     Ok(parsed)
 }
 
-/// The FTS `labels` column: the labels sorted and joined with newlines, so a
-/// label is one token sequence and the order does not affect the index.
-pub fn fts_labels(labels: &[String]) -> String {
-    let mut sorted: Vec<&str> = labels.iter().map(String::as_str).collect();
-    sorted.sort_unstable();
-    sorted.join("\n")
-}
-
 /// A valid stored float: finite and inside `[0, 1]`.
 pub fn valid_stored_float(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
@@ -232,12 +224,6 @@ mod tests {
         assert!(decode_provenance(r#"{"origin":"human"}"#).is_err());
         assert!(decode_labels(r#"[ "a" ]"#).is_err());
         assert!(decode_metadata(r#"{"b":"2","a":"1"}"#).is_err());
-    }
-
-    #[test]
-    fn fts_labels_sort_and_join_with_newlines() {
-        assert_eq!(fts_labels(&["b".into(), "a".into()]), "a\nb");
-        assert_eq!(fts_labels(&[]), "");
     }
 
     #[test]

@@ -21,7 +21,6 @@ fn invalid(message: &str) -> Error {
 
 pub fn schemas(domain: &str) -> Result<&'static [RecordSchema]> {
     Ok(match domain {
-        "memory" => crate::memory::migration::RECORDS,
         "workflows" => crate::workflow::migration::RECORDS,
         "schedule" => crate::schedule::migration::RECORDS,
         "usage" => crate::usage::migration::RECORDS,
@@ -307,72 +306,9 @@ pub fn validate_records(
                     return Err(invalid("workflow approval receipt conflicts"));
                 }
             }
-            "memory" => {
-                let reference: crate::memory::CandidateRef =
-                    serde_json::from_str(&request.subject.details)
-                        .map_err(|_| invalid("invalid memory approval reference"))?;
-                let scope = lookup(
-                    &logical,
-                    "memory_identity_metadata",
-                    &[json!("user_scope_id")],
-                )?;
-                let subject = format!(
-                    "{}/{}/{}/{}",
-                    text(scope, "value")?,
-                    reference.scope.namespace,
-                    reference.scope.id,
-                    reference.id
-                );
-                if request.subject.id != subject {
-                    return Err(invalid("memory approval subject differs"));
-                }
-                let candidate =
-                    lookup(&logical, "memory_review_candidate", &[json!(reference.id)])?;
-                if text(candidate, "scope_namespace")? != reference.scope.namespace
-                    || text(candidate, "scope_id")? != reference.scope.id
-                {
-                    return Err(invalid("memory candidate scope differs"));
-                }
-                let state = text(candidate, "state")?;
-                if state != "pending" {
-                    let expected = if request.state == State::Approved {
-                        "accepted"
-                    } else {
-                        "rejected"
-                    };
-                    if request.state == State::Pending || state != expected {
-                        return Err(invalid("memory approval receipt conflicts"));
-                    }
-                    continue;
-                }
-                let proposed = crate::memory::proposed::decode_proposed_record(text(
-                    candidate,
-                    "proposed_json",
-                )?)
-                .map_err(|_| invalid("invalid proposed memory record"))?;
-                let at = crate::memory::codec::parse_timestamp(text(candidate, "created_at")?)
-                    .map_err(|_| invalid("invalid memory candidate timestamp"))?;
-                let base = integer(candidate, "base_revision")?;
-                if crate::approval::digest(&format!("{at}:{base}:{proposed:?}"))
-                    != request.subject.version
-                {
-                    return Err(invalid("memory approval version differs"));
-                }
-                if matches!(text(candidate, "action")?, "update" | "forget") {
-                    let target = lookup(
-                        &logical,
-                        "memory_record",
-                        &[field(candidate, "target_id")?.clone()],
-                    )?;
-                    if text(target, "scope_namespace")? != reference.scope.namespace
-                        || text(target, "scope_id")? != reference.scope.id
-                        || text(target, "state")? != "active"
-                        || integer(target, "revision")? != base
-                    {
-                        return Err(invalid("memory approval revision is stale or missing"));
-                    }
-                }
-            }
+            // Memory candidates are files under the source home's
+            // `.otto/memory`, which a migration does not move.
+            "memory" => {}
             "conversation"
                 if request.kind == otto_core::approval::Kind::Confirmation
                     && request.application == ApplicationState::NotRequired => {}

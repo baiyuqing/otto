@@ -103,32 +103,6 @@ mod tests {
         let independent = JsonBackend::new(temp.path().join("independent.json"), "probe:contract");
         conformance::approvals(independent.store.as_ref(), "contract", &expected, &next).unwrap();
         let now = chrono::Utc::now();
-        let memory = native
-            .memory(&temp.path().join("memory.db"), Default::default())
-            .unwrap();
-        let record = conformance::memory(
-            memory.as_ref(),
-            &otto::memory::UpsertRequest {
-                record: otto::memory::Record {
-                    id: "record".into(),
-                    created_at: now,
-                    updated_at: now,
-                    source: otto::memory::Provenance {
-                        origin: Some(otto::memory::Origin::Human),
-                        ..Default::default()
-                    },
-                    scope: otto::memory::Scope::new("workspace", "contract"),
-                    kind: "fact".into(),
-                    key: "key".into(),
-                    text: "contract record".into(),
-                    confidence: 1.0,
-                    ..Default::default()
-                },
-                expected_revision: None,
-            },
-        )
-        .expect("memory contract");
-        conformance::memory_queries(memory.as_ref(), &record, "contract").unwrap();
         let first = native.approvals(&temp.path().join("race.db")).unwrap();
         let second = native.approvals(&temp.path().join("race.db")).unwrap();
         conformance::approval_race(first, second, &expected, &next).unwrap();

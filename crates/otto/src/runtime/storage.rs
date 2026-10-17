@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use crate::approval::repository::ApprovalStore;
 use crate::memory::advice::audit::AuditStore;
-use crate::memory::repository::{MemoryOptions, MemoryStore};
 use crate::reflection::repository::ReflectionStore;
 use crate::schedule::ScheduleStore;
 use crate::session::SessionRepository;
@@ -100,15 +99,6 @@ pub trait RepositoryFactory: Send + Sync {
             "backend does not support logical export".into(),
         ))
     }
-    fn memory(
-        &self,
-        _endpoint: Endpoint<'_>,
-        _options: MemoryOptions,
-    ) -> crate::memory::Result<Arc<dyn MemoryStore>> {
-        Err(crate::memory::Error::new(
-            crate::memory::ErrorKind::Unavailable,
-        ))
-    }
     fn approvals(
         &self,
         _endpoint: Endpoint<'_>,
@@ -163,16 +153,12 @@ impl SqlRepositories {
     fn connection(
         &self,
         endpoint: Endpoint<'_>,
-        fts: bool,
         codec: &dyn crate::storage::backends::turso::migration::SqlDomainCodec,
     ) -> crate::storage::Result<Connection> {
-        let requirements = SqlRequirements {
-            fts,
-            ..if endpoint.address == ":memory:" {
-                SqlRequirements::EPHEMERAL
-            } else {
-                SqlRequirements::DURABLE
-            }
+        let requirements = if endpoint.address == ":memory:" {
+            SqlRequirements::EPHEMERAL
+        } else {
+            SqlRequirements::DURABLE
         };
         let connection = Connection::open_with_driver(
             self.driver.as_ref(),
@@ -193,27 +179,10 @@ impl SqlRepositories {
 }
 
 impl RepositoryFactory for SqlRepositories {
-    fn memory(
-        &self,
-        endpoint: Endpoint<'_>,
-        options: MemoryOptions,
-    ) -> crate::memory::Result<Arc<dyn MemoryStore>> {
-        let connection = self
-            .connection(
-                endpoint,
-                true,
-                &crate::storage::backends::turso::migration::memory::MemoryCodec,
-            )
-            .map_err(|_| crate::memory::Error::new(crate::memory::ErrorKind::Unavailable))?;
-        Ok(Arc::new(
-            crate::storage::backends::turso::memory::Store::from_connection(connection, options)?,
-        ))
-    }
     fn approvals(&self, endpoint: Endpoint<'_>) -> crate::approval::Result<Arc<dyn ApprovalStore>> {
         let connection = self
             .connection(
                 endpoint,
-                false,
                 &crate::storage::backends::turso::migration::ApprovalCodec,
             )
             .map_err(|_| crate::approval::Error::Unavailable)?;
@@ -225,7 +194,6 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                false,
                 &crate::storage::backends::turso::migration::schedule::ScheduleCodec,
             )
             .map_err(|_| crate::schedule::Error)?;
@@ -239,7 +207,6 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                false,
                 &crate::storage::backends::turso::migration::workflow::WorkflowCodec,
             )
             .map_err(|_| "workflow storage is unavailable".to_owned())?;
@@ -253,7 +220,6 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                false,
                 &crate::storage::backends::turso::migration::usage::UsageCodec,
             )
             .map_err(|_| crate::usage::Error)?;
@@ -268,7 +234,6 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                false,
                 &crate::storage::backends::turso::migration::tasks::TaskCodec,
             )
             .map_err(|_| crate::subagent::record::Error)?;
@@ -283,7 +248,6 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                false,
                 &crate::storage::backends::turso::migration::reflection::ReflectionCodec,
             )
             .map_err(|_| crate::reflection::store::Error::Io)?;
@@ -298,7 +262,6 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                false,
                 &crate::storage::backends::turso::migration::skill_checks::SkillChecksCodec,
             )
             .map_err(|_| crate::skill::check_repository::StoreError::Io)?;
@@ -313,7 +276,6 @@ impl RepositoryFactory for SqlRepositories {
         let connection = self
             .connection(
                 endpoint,
-                false,
                 &crate::storage::backends::turso::migration::memory_advice::MemoryAdviceCodec,
             )
             .map_err(|_| crate::memory::advice::audit::Error::Io)?;
@@ -453,6 +415,9 @@ impl Storage {
 
     async fn validate_configured(&self) -> Result<(), String> {
         for (domain, route) in &self.routes {
+            if domain == "memory" {
+                continue;
+            }
             let Some(instance) = route.endpoint.strip_prefix("instance:") else {
                 if !matches!(route.backend.as_str(), "sqlite" | "posix") {
                     return Err(
@@ -504,7 +469,11 @@ impl Storage {
 
     pub fn with_routes(mut self, routes: BTreeMap<String, StorageRoute>) -> Result<Self, String> {
         for (domain, route) in &routes {
-            let supported = if domain == "sessions" {
+            // A `memory` route is only the import source for the file store, so
+            // its backend needs no registered factory.
+            let supported = if domain == "memory" {
+                true
+            } else if domain == "sessions" {
                 self.session_backends.contains_key(&route.backend)
             } else {
                 self.factories.contains_key(&route.backend)
@@ -604,17 +573,6 @@ impl Storage {
         ))
     }
 
-    pub fn memory(
-        &self,
-        default: &Path,
-        options: MemoryOptions,
-    ) -> crate::memory::Result<Arc<dyn MemoryStore>> {
-        let (factory, endpoint) = self
-            .route("memory", default)
-            .map_err(|_| crate::memory::Error::new(crate::memory::ErrorKind::Unavailable))?;
-        factory.memory(endpoint, options)
-    }
-
     pub fn memory_endpoint(&self, default: &Path) -> Result<String, String> {
         match self.routes.get("memory") {
             Some(route) => Ok(route.endpoint.clone()),
@@ -707,14 +665,6 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
     impl RepositoryFactory for RegisteredFactory {
-        fn memory(
-            &self,
-            endpoint: Endpoint<'_>,
-            options: MemoryOptions,
-        ) -> crate::memory::Result<Arc<dyn MemoryStore>> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            self.inner.memory(endpoint, options)
-        }
         fn approvals(
             &self,
             endpoint: Endpoint<'_>,
@@ -781,6 +731,30 @@ mod tests {
                 namespace_identity: None,
             },
         )])
+    }
+
+    #[test]
+    fn memory_route_is_accepted_without_a_registered_backend() {
+        let directory = tempfile::tempdir().unwrap();
+        let approvals = directory.path().join("approvals.db");
+        drop(Storage::default().approvals(&approvals).unwrap());
+        let mut routes = route("sqlite", approvals.to_str().unwrap());
+        routes.insert(
+            "memory".into(),
+            StorageRoute {
+                backend: "unregistered".into(),
+                endpoint: "legacy-memory-source".into(),
+                namespace_identity: None,
+            },
+        );
+        let storage = Storage::default().with_routes(routes.clone()).unwrap();
+        assert!(storage.approvals(Path::new("ignored-default")).is_ok());
+        assert_eq!(
+            storage.memory_endpoint(Path::new("default")).unwrap(),
+            "legacy-memory-source"
+        );
+        routes.get_mut("memory").unwrap().endpoint = " ".into();
+        assert!(Storage::default().with_routes(routes).is_err());
     }
 
     #[test]
@@ -945,7 +919,6 @@ mod tests {
                 atomic_transactions: true,
                 durable_commits: false,
                 multiprocess_writers: false,
-                fts: false,
             }
         }
         fn open(&self, _: &Path, _: OpenOptions) -> crate::storage::Result<Box<dyn SqlConnection>> {
@@ -967,7 +940,6 @@ mod tests {
                     address: endpoint.to_str().unwrap(),
                     policy: OpenPolicy::CreateIfMissing
                 },
-                false,
                 &crate::storage::backends::turso::migration::ApprovalCodec
             ),
             Err(crate::storage::Error::UnsupportedCapability(
@@ -982,17 +954,6 @@ mod tests {
                 })
                 .is_err()
         );
-        assert!(matches!(
-            factory.connection(
-                Endpoint {
-                    address: ":memory:",
-                    policy: OpenPolicy::CreateIfMissing
-                },
-                true,
-                &crate::storage::backends::turso::migration::memory::MemoryCodec
-            ),
-            Err(crate::storage::Error::UnsupportedCapability(_))
-        ));
         assert_eq!(opens.load(Ordering::Relaxed), 0);
         assert!(!endpoint.parent().unwrap().exists());
     }
@@ -1114,7 +1075,6 @@ mod tests {
                 atomic_transactions: true,
                 durable_commits: true,
                 multiprocess_writers: true,
-                fts: false,
             }
         }
         fn open(

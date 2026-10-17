@@ -20,7 +20,6 @@ use otto::storage::{Connection, OpenPolicy};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     Written,
-    Busy,
     Unknown,
     /// A typed domain error that is neither busy nor unknown.
     Unavailable,
@@ -143,43 +142,6 @@ fn approvals(factory: &SqlRepositories, address: &str) -> Option<Handle> {
         list: Some(Box::new(move || {
             listed.pending().ok().map(|rows| rows.len())
         })),
-    })
-}
-
-fn memory(factory: &SqlRepositories, address: &str) -> Option<Handle> {
-    use otto::memory::{ErrorKind, Origin, Provenance, Record, Scope, UpsertRequest};
-    let store = factory.memory(endpoint(address), Default::default()).ok()?;
-    Some(Handle {
-        write: Box::new(move |n| {
-            let now = chrono::Utc::now();
-            let request = UpsertRequest {
-                record: Record {
-                    id: format!("record-{n}"),
-                    created_at: now,
-                    updated_at: now,
-                    source: Provenance {
-                        origin: Some(Origin::Human),
-                        ..Default::default()
-                    },
-                    scope: Scope::new("workspace", "contract"),
-                    kind: "fact".into(),
-                    key: format!("key-{n}"),
-                    text: "contract record".into(),
-                    confidence: 1.0,
-                    ..Default::default()
-                },
-                expected_revision: None,
-            };
-            match store.upsert_within_standing_budget(&request) {
-                Ok(_) => Outcome::Written,
-                Err(error) => match error.kind {
-                    ErrorKind::Busy => Outcome::Busy,
-                    ErrorKind::CommitUnknown => Outcome::Unknown,
-                    _ => Outcome::Unavailable,
-                },
-            }
-        }),
-        list: None,
     })
 }
 
@@ -388,7 +350,7 @@ fn memory_advice(factory: &SqlRepositories, address: &str) -> Option<Handle> {
 }
 
 fn repos() -> Vec<Repo> {
-    use Outcome::{Busy, Opaque, Unavailable, Unknown, Written};
+    use Outcome::{Opaque, Unavailable, Unknown, Written};
     #[allow(clippy::too_many_arguments)]
     fn repo(
         name: &'static str,
@@ -424,7 +386,6 @@ fn repos() -> Vec<Repo> {
             Unknown,
             approvals_sql,
         ),
-        repo("memory", memory, "memory_records", TX, 0, Busy, Unknown, ""),
         repo(
             "schedule",
             schedule,

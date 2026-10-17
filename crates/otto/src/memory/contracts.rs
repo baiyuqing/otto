@@ -2,8 +2,8 @@
 //! error kinds and the ID rules.
 //!
 //! The types stay value-only so the store, the service, and the tools can all
-//! agree on one shape. The Turso store depends on the size ceilings to build
-//! its defensive projections, so they must not drift.
+//! agree on one shape. The file store validates every record against the size ceilings, so they
+//! must not drift.
 
 use std::fmt;
 
@@ -27,8 +27,10 @@ pub const MAX_METADATA_BYTES: usize = 4 * 1024;
 pub const MAX_REASON_BYTES: usize = 2 * 1024;
 pub const MAX_PROVENANCE_MESSAGE_IDS: usize = 32;
 pub const MAX_QUERY_BYTES: usize = 8 * 1024;
-pub const MAX_FTS_TERMS: usize = 64;
-pub const MAX_FTS_TERM_BYTES: usize = 256;
+/// Bounds the whitespace-separated terms of a retrieval query.
+pub const MAX_QUERY_TERMS: usize = 64;
+/// Bounds the bytes of one query term.
+pub const MAX_QUERY_TERM_BYTES: usize = 256;
 /// The token budget of the standing set: active, unexpired, user-scope
 /// `preference` and `instruction` records with a key. Recall injects the whole
 /// set outside the per-turn limit and budget, and a write that would push the
@@ -39,7 +41,6 @@ pub const MAX_STANDING_TOKENS: usize = 2000;
 /// can reach it, and [`StandingUsage::omitted`] counts what it cuts.
 pub const STANDING_ROW_GUARD: usize = 128;
 pub const MAX_RETRIEVAL_CANDIDATES: usize = 256;
-pub const MAX_CANDIDATE_SCAN: usize = 500;
 pub const MAX_REQUEST_SCOPES: usize = 16;
 pub const MAX_REQUEST_KINDS: usize = 16;
 pub const MAX_REQUEST_LABELS: usize = 16;
@@ -445,7 +446,6 @@ pub struct StoreIdentity {
     pub database_id: String,
     pub user_scope: Scope,
     pub schema_version: i64,
-    pub generation: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -765,8 +765,7 @@ pub fn decide_default_policy(request: &PolicyRequest) -> PolicyDecision {
     }
 }
 
-/// 16 random bytes, lowercase hex. The Turso bootstrap rejects anything else
-/// for the database and user scope IDs.
+/// 16 random bytes, lowercase hex, used for the database and user scope IDs.
 pub fn new_id() -> Result<String> {
     let mut raw = [0u8; 16];
     getrandom(&mut raw)?;

@@ -4,15 +4,89 @@ Previous: [Automation](automation.md) · [Documentation index](../README.md) · 
 
 ## Memory
 
-Otto has a local, per-workspace/per-user memory store backed by Turso/FTS
-(`crates/otto`'s `memory` module). It is enabled by default.
+Otto has a local, per-workspace/per-user memory store (`crates/otto`'s
+`memory` module). It is enabled by default.
+
+### Memory files
+
+Records, tombstones and candidates are plain files under `~/.otto/memory/`
+(mode 0700, files mode 0600). The location is not configurable and does not
+follow storage routes. The files are the source of truth; there is no database
+and no full-text index.
+
+```text
+identity.json          database and user scope ids
+records/<id>.md        one active record
+tombstones/<id>.json   one forgotten record, without its text
+candidates/<id>.json   one pending or decided candidate
+.lock                  writer lock
+```
+
+A record file has a frontmatter block of `name: <JSON value>` lines followed
+by the record text:
+
+```markdown
+---
+scope: {"namespace":"workspace","id":"sha256:60ef1..."}
+kind: "preference"
+key: "reply-language"
+labels: []
+confidence: 1.0
+revision: 3
+created_at: "2026-10-03T10:08:00.123456789Z"
+updated_at: "2026-10-16T10:25:41.052684000Z"
+expires_at: null
+source: {"origin":"human"}
+metadata: {}
+---
+Reply to technical questions in Chinese.
+```
+
+All eleven names are required once each; an unknown name is an error. The
+record text is one line; a body with a second line is invalid. Workspace
+scope ids are `sha256:` digests and do not contain the workspace path.
+
+Reads take no lock. Hand edits to a record file take effect at the next read,
+normally the next turn's recall; Otto does not require a change to `revision`
+or `updated_at`. Deleting a record file removes the record without a
+tombstone. A file that fails parsing, validation or the secret guard is
+skipped; memory open writes one `warning: memory file skipped: <path>: <reason>`
+line to stderr per skipped file, and `otto memory status` lists each skipped
+file with its reason. When two active records share scope, kind and a
+non-empty key, the one with the later `updated_at` is used and the other is
+skipped and reported. A record whose id has a tombstone is treated as
+forgotten. Write new records with `/remember`; a hand-written file must be
+complete and valid. The `bash` sandbox cannot write `~/.otto`, and the file
+tools reject paths outside the workspace, so the model cannot edit these files
+unless the sandbox is `off`.
+
+Every write holds an exclusive lock on `.lock`, waiting up to
+`[memory.turso].busy_timeout` (default 5 s) before returning a busy error. The
+write re-checks the revision and key constraints under the lock, then writes
+each file through a temporary file in the same directory and renames it into
+place. A revision check compares revision numbers only, so a model update
+that was read before a hand edit that did not change `revision` overwrites
+that edit.
+
+Limits:
+
+- Writes that touch two files are not atomic. A crash between creating the
+  record and marking its candidate decided leaves the candidate pending;
+  accepting it again writes a second record with the same text, and recall
+  de-duplicates identical text. A crash between writing a tombstone and
+  removing the record file leaves the file; reads treat it as forgotten and
+  opening the store removes it. A crash during a reflection proposal batch can
+  leave part of the batch.
+- Each recall reads every file in `records/`. Record text is at most 8192
+  bytes. There is no index.
+- Files are not encrypted at rest.
 
 Config (`[memory]` in TOML; all keys optional):
 
 ```toml
 [memory]
 enabled = true
-backend = "turso"
+backend = "files"
 required = false
 recall_tokens = 2000
 max_results = 12
@@ -26,18 +100,21 @@ busy_timeout = "5s"
 "/canonical/path/to/workspace" = "stable-id"
 ```
 
-A leading `~/` in `[memory.turso].path` is the home directory. There are no
-`--memory-*` CLI flags. Legacy `backend = "sqlite"` and
-`[memory.sqlite]` configuration are accepted as aliases for Turso; they do
-not select a SQLite engine. Turso uses a different full-text tokenizer and
-BM25 implementation, so search ordering can change.
+`backend` defaults to `files`; `turso` and `sqlite` are accepted with the same
+meaning, and other values are rejected. `[memory.turso].path` is only the
+source of the one-time import described under
+[Importing an earlier database](#importing-an-earlier-database); a leading `~/`
+is the home directory. `[memory.turso].busy_timeout` is the writer lock wait.
+`require_encryption = true` fails startup because the files are not encrypted.
+`[storage.routes].memory` is a configuration error that names the key. There
+are no `--memory-*` CLI flags.
 
 ### Rust memory service extensions
 
 A Rust host can inject an independent `otto_core::memory::MemoryService` using
 `otto::embed::MemoryExtension` and `OttoBuilder::memory_service`, or the custom
 CLI entry point `cli::run::run_with_extensions`. Implementations declare their
-capabilities; they do not implement Otto's Turso schema or `MemoryStore`.
+capabilities; they do not implement Otto's `MemoryStore` file layout.
 The shipped CLI still uses its existing local memory configuration.
 
 ```rust
@@ -81,24 +158,48 @@ No external transport or universal network protocol is bundled. See the
 [service contract](../specs/2026-10-07-open-memory-contract.md) for capabilities,
 prepared snapshot recovery and deletion coverage.
 
-### Migrating an existing database
+### Importing an earlier database
+
+Earlier releases kept memory in a Turso database: `[memory.turso].path`
+(default `~/.otto/memory/memory.db`), or the endpoint of a published local
+`memory` storage route. When `~/.otto/memory/identity.json` is absent and that
+database exists, the first start of this version imports it once:
+
+- Stop every Otto process before the first start. Writes that an older process
+  makes to the database after the import are not in the files.
+- The database must have memory schema version 2. A legacy SQLite `memory.db`
+  from before 2026-10-03 must first be migrated with `otto storage migrate`
+  from Otto 0.4.8.
+- A published `memory` route to an external backend fails the open. Transfer
+  memory back to local storage with a 0.4.8 build first.
+- Active records, tombstones, candidates and the identity ids are copied with
+  their ids, revisions and timestamps. Pending approvals stay attached to their
+  candidates. Every row is validated before any file is written; a failing row
+  fails the import with its id and writes no file. `[memory].required`
+  decides whether that stops startup or disables memory.
+- `identity.json` is written last, so an interrupted import repeats at the
+  next start.
+- The database file is never modified. Otto does not read it again after the
+  import. After checking the files, delete it manually.
+
+With no database and no `identity.json`, Otto creates `identity.json` with new
+ids.
+
+### Migrating other legacy databases
 
 Stop every Otto process using the database, then run:
 
 ```bash
-otto storage migrate ~/.otto/memory/memory.db ~/.otto/memory/memory-turso.db
+otto storage migrate ~/.otto/usage.db ~/.otto/usage-turso.db
 ```
 
 The destination must be a new path in an existing directory. The command
 requires Python 3 for a read-only export of the legacy SQLite file, imports
 into a temporary Turso database, checks row counts, and preserves the source.
-Memory migration also preserves database/user identity and generations and
-rebuilds the search index. Set `[memory.turso].path` to the destination after
-success. Otto does not automatically migrate a legacy FTS5 memory database.
-
-The same command supports `usage.db`, `tasks.db`, `reflection.db`,
-`skill-checks.db`, `memory-advice.db`, and workspace workflow databases. Their
-recognized legacy tables import into local Turso databases. For stores with
+It supports `usage.db`, `tasks.db`, `reflection.db`, `skill-checks.db`,
+`memory-advice.db`, and workspace workflow databases; their recognized legacy
+tables import into local Turso databases. Memory is not a storage domain and
+`otto storage migrate` does not accept a memory database. For stores with
 fixed paths, keep the old file as a backup and move the migrated file into
 place while Otto is stopped. Do not let an older SQLite-backed Otto and this
 version access a database at the same time.
@@ -113,9 +214,12 @@ otto storage transfer "$HOME" /Volumes/otto-state-new migration-20261006
 Use an existing destination parent on a local volume outside the source home;
 the destination root itself may be new. The source and destination roots must
 not overlap. Repeating the same source, destination, and migration ID resumes
-an interrupted transfer. If the source
-memory database is outside the path resolved from its configuration, provide
-`--memory-db <path>` after the migration ID. On success, the source home's
+an interrupted transfer. The
+transfer covers the storage domains only; `~/.otto/memory/` stays in the
+source home and is not copied, and pending memory reviews stay valid. A
+route authority that an Otto 0.4.8 or earlier transfer published with a
+`memory` route is refused with `published storage routes include memory`.
+On success, the source home's
 route authority points to the new root; restart Otto using the same home to use
 the transferred state. Original databases and session files stay in place.
 Keep them until the restarted Otto has opened the destination successfully;
@@ -154,7 +258,6 @@ backend = "postgres"
 endpoint_env = "OTTO_POSTGRES_DSN"
 
 [storage.routes]
-memory = "primary"
 approvals = "primary"
 workflows = "primary"
 schedule = "primary"
@@ -218,9 +321,14 @@ What's wired:
     current request says otherwise. They are recalled on every turn whatever
     the message says, and do not count against `max_results` or
     `recall_tokens`. See [Standing preferences](memory-and-extensions.md#standing-preferences).
-  - Other records that match the message text, under a header that marks them
-    untrusted reference material, limited by `max_results` and
-    `recall_tokens`.
+  - All other active, unexpired records in the session's user and workspace
+    scopes, under a header that marks them untrusted reference material. A
+    workspace record replaces a user record with the same kind and key, and
+    identical text is listed once. Workspace records come first, then newest
+    `updated_at` first, until `max_results` or `recall_tokens` is reached. The
+    message text is not matched, so a workspace with records adds up to
+    `recall_tokens` input tokens (default 2000) to every turn; lower
+    `recall_tokens` to reduce the cost.
 - Agent tools: `memory_search`, `remember`, `forget`.
 - Human commands in both frontends: `/memory list`, `/memory show`, `/memory search`, `/memory forget`,
   `/memory review`, `/memory review <id> accept|reject`, and `/remember`.
@@ -230,7 +338,11 @@ What's wired:
 - Standalone CLI: `otto memory status`, `otto memory list`, `otto memory show <id>`, and
   `otto memory forget <id>`.
 
-`memory_search` accepts `query` for text search (empty lists recent records), or
+`memory_search` and `/memory search` accept `query`: it is split on whitespace
+(at most 64 terms), and a record matches when any term is a case-insensitive
+substring of its text, kind, key or one of its labels. Matches list workspace
+records first, then by the number of matching terms, then newest `updated_at`
+first. An empty query lists recent records. `memory_search` also accepts
 `id` for an exact record lookup within the current session's user and workspace
 scopes. Before proposing a deletion by ID, the agent can use
 `memory_search({"id":"<record-id>"})` to read the current scope and revision,
@@ -296,8 +408,8 @@ first prompt, and a local `otto acp` session sends it as a notice for that
 session. `GET /v1/sessions/{id}/notices` returns it, but the Web UI and ACP
 connections through `otto serve` (`otto acp --attach` and ACP TCP) start at the
 current notice cursor and do not show it; the chat connector shows pending
-candidates after each turn instead. `otto memory status` prints the number of
-storage-level pending candidates in the same scopes; this diagnostic count can
+candidates after each turn instead. `otto memory status` lists each memory file that was skipped as invalid, with
+its reason, and prints the number of storage-level pending candidates in the same scopes; this diagnostic count can
 include a candidate whose approval is no longer awaiting human review. A
 candidate stays pending until you decide it; it does not expire, and its
 one-shot review remains visible after the session that proposed it ends.

@@ -50,6 +50,8 @@ pub struct Memory {
 #[serde(deny_unknown_fields)]
 pub struct MemoryRemote {
     #[serde(default)]
+    pub organization: String,
+    #[serde(default)]
     pub url: String,
     #[serde(default)]
     pub user: String,
@@ -111,6 +113,7 @@ pub struct MemoryRuntime {
 /// The resolved `[memory.remote]` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteRuntime {
+    pub organization: String,
     /// The service base URL without a trailing slash.
     pub url: String,
     /// The user scope id shared by every host of this user.
@@ -258,6 +261,11 @@ fn resolve_remote(remote: &MemoryRemote) -> Result<RemoteRuntime, ConfigError> {
         _ => return Err(invalid("must use https")),
     }
 
+    if !crate::memory::valid_opaque_id(&remote.organization, 128) {
+        return Err(ConfigError::new(
+            "invalid memory remote organization: must be 1 to 128 printable ASCII bytes",
+        ));
+    }
     let user = remote.user.as_str();
     if user.is_empty()
         || user.len() > MAX_REMOTE_USER_BYTES
@@ -290,6 +298,7 @@ fn resolve_remote(remote: &MemoryRemote) -> Result<RemoteRuntime, ConfigError> {
     };
 
     Ok(RemoteRuntime {
+        organization: remote.organization.clone(),
         url: url.to_string(),
         user: user.to_string(),
         token_env: remote.token_env().to_string(),
@@ -418,7 +427,7 @@ busy_timeout = "10s"
 
     fn remote_file(remote: &str) -> File {
         toml::from_str(&format!(
-            "[memory]\nbackend = \"remote\"\n[memory.remote]\n{remote}"
+            "[memory]\nbackend = \"remote\"\n[memory.remote]\norganization = \"acme\"\n{remote}"
         ))
         .expect("remote config")
     }
@@ -433,6 +442,7 @@ busy_timeout = "10s"
         assert_eq!(
             runtime.remote,
             Some(RemoteRuntime {
+                organization: "acme".into(),
                 url: "https://mem.example:8443".into(),
                 user: "alice".into(),
                 token_env: "OTTO_MEM_TOKEN".into(),
@@ -444,6 +454,25 @@ busy_timeout = "10s"
         assert_eq!(File::default().memory.credential_variable(), None);
         assert_eq!(files.remote, None);
         assert_eq!(files.recall_tokens, DEFAULT_MEMORY_RECALL_TOKENS);
+    }
+
+    #[test]
+    fn remote_requires_a_bounded_explicit_organization() {
+        let mut file = remote_file("url='https://mem.example'\nuser='alice'\n");
+        for organization in [
+            "".to_string(),
+            "has space".to_string(),
+            "a".repeat(129),
+            "非ASCII".to_string(),
+        ] {
+            file.memory.remote.organization = organization;
+            assert!(
+                resolve_memory(&file, &env("/home/u"))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("organization")
+            );
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

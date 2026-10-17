@@ -1,1 +1,15 @@
-{"item":{"id":"m-17","scope":{"namespace":"user","id":"local"},"revision":"4","text":"The user prefers vim."}}
+{
+  "view": "raw",
+  "organization_id": "acme",
+  "item": {
+    "id": "m-user",
+    "scope": {
+      "namespace": "user",
+      "id": "alice"
+    },
+    "revision": "r7",
+    "key": null,
+    "text": "Prefer concise answers.",
+    "pinned": false
+  }
+}

@@ -1,1 +1,20 @@
-{"context":{"scopes":[{"namespace":"user","id":"local"},{"namespace":"workspace","id":"sha256:0123456789abcdef"}],"session_id":"s-1"},"request_id":"0123456789abcdef0123456789abcdef","origin":"model","scope":{"namespace":"user","id":"local"},"text":"The user prefers vim.","target":{"id":"m-17","revision":"4"},"metadata":{"kind":"preference","key":"editor"}}
+{
+  "context": {
+    "organization_id": "acme",
+    "user_id": "alice",
+    "workspace_id": "project-a",
+    "session_id": "s-1"
+  },
+  "request_id": "0123456789abcdef0123456789abcdef",
+  "origin": "model",
+  "scope": {
+    "namespace": "user",
+    "id": "alice"
+  },
+  "target": null,
+  "key": "response.language",
+  "text": "Prefer Chinese.",
+  "metadata": {
+    "reason": "explicit preference"
+  }
+}

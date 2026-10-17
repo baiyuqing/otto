@@ -100,6 +100,12 @@ impl Client {
         self.guarded(&self.description)?;
         Ok(self)
     }
+    /// A client over the same service and guard with another learning grant.
+    /// It does not own provider shutdown.
+    pub(crate) fn with_grant(&self, grant: LearningGrant) -> Result<Self> {
+        Self::with_learning(self.service.clone(), grant)?.with_guard(self.guard.clone())
+    }
+
     /// Transfer provider shutdown responsibility to this client explicitly.
     /// The host must assign a single owner for a shared provider instance.
     pub fn with_provider_shutdown(mut self, owned: bool) -> Self {

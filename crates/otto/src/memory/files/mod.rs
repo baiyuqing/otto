@@ -15,6 +15,7 @@
 mod candidates;
 mod cursor;
 mod format;
+pub(crate) mod import;
 mod records;
 mod retrieve;
 #[cfg(test)]
@@ -59,7 +60,6 @@ pub struct InvalidFile {
 }
 
 /// Everything a logical import writes into an empty store.
-#[allow(dead_code)] // consumed by the legacy-database migration in phase 2
 pub(crate) struct ImportSet {
     pub database_id: String,
     pub user_scope_id: String,
@@ -189,7 +189,6 @@ fn check_identity_ids(
 /// written (`Ok(false)`). Otherwise every file is written and
 /// `identity.json` last, so an interrupted import leaves no identity and can
 /// be repeated.
-#[allow(dead_code)] // consumed by the legacy-database migration in phase 2
 pub(crate) fn write_import(root: &Path, set: &ImportSet, busy_timeout: Duration) -> Result<bool> {
     ensure_layout(root)?;
     let _lock = acquire(root, busy_timeout)?;

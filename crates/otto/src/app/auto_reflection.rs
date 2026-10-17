@@ -762,12 +762,8 @@ mod tests {
         let memory = tempfile::tempdir().expect("memory");
         let runtime_config = MemoryRuntime {
             enabled: true,
-            backend: "turso".into(),
-            turso_path: memory
-                .path()
-                .join("memory.db")
-                .to_string_lossy()
-                .into_owned(),
+            backend: "files".into(),
+            dir: memory.path().join("memory").to_string_lossy().into_owned(),
             ..MemoryRuntime::default()
         };
         let (service, user_scope, usable) =

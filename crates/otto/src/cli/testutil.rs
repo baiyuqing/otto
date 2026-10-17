@@ -208,7 +208,7 @@ pub async fn controller(workspace_root: &Path, session_root: &Path) -> Controlle
     Controller::new(builder, true, session, runner, info)
 }
 
-/// A controller whose builder carries a usable Turso memory service.
+/// A controller whose builder carries a usable file-backed memory service.
 /// Shared with `tui::app`'s tests, which need the same fixture to exercise
 /// `/memory`/`/remember` dispatch; `repl_commands.rs`'s own memory tests
 /// keep their private copy since it predates this one.
@@ -220,8 +220,8 @@ pub async fn controller_with_memory(
     let mut builder = builder(workspace, session_root);
     let runtime = MemoryRuntime {
         enabled: true,
-        backend: "turso".into(),
-        turso_path: store_path.to_string_lossy().into_owned(),
+        backend: "files".into(),
+        dir: store_path.to_string_lossy().into_owned(),
         ..MemoryRuntime::default()
     };
     let (service, user_scope, usable) =
@@ -252,20 +252,21 @@ pub async fn controller_with_memory(
 }
 
 /// Writes three user-scope records of about 600 tokens each straight into the
-/// store at `store_path`, past the 2000-token standing budget, as data written
+/// store directory `store_path`, past the 2000-token standing budget, as data written
 /// before the budget existed would be.
 pub fn seed_over_budget_standing(store_path: &Path) {
-    use crate::memory::turso::{Options, Store};
+    use crate::memory::files::FileStore;
+    use crate::memory::repository::MemoryOptions;
     let runtime = MemoryRuntime {
         enabled: true,
-        backend: "turso".into(),
-        turso_path: store_path.to_string_lossy().into_owned(),
+        backend: "files".into(),
+        dir: store_path.to_string_lossy().into_owned(),
         ..MemoryRuntime::default()
     };
     let (service, user_scope, _) =
         crate::runtime::wiring::open_memory_service(&runtime, &[], &mut Vec::new()).expect("open");
     service.close().expect("close");
-    let store = Store::open(store_path, Options::default()).expect("open store");
+    let store = FileStore::open(store_path, MemoryOptions::default()).expect("open store");
     for id in ["a", "b", "c"] {
         let now = chrono::Utc::now();
         store

@@ -35,6 +35,8 @@ use super::builder::{BuildError, Builder, ProviderClient, SharedSession};
 use super::info::SandboxMode;
 use crate::failover;
 use crate::mcp;
+use crate::memory::files::import::import_turso;
+use crate::memory::files::{FileStore, has_identity, write_import};
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};
 use crate::memory::repository::MemoryOptions as StoreOptions;
 use crate::memory::scope::new_workspace_scope;
@@ -440,6 +442,60 @@ pub fn open_memory_service(
     )
 }
 
+/// The line `open_memory_service_with_storage` writes for each file the store
+/// skipped; `otto memory status` lists the same files from these lines.
+pub const SKIPPED_FILE_PREFIX: &str = "warning: memory file skipped: ";
+
+/// The Turso database that the previous release would open, when the store
+/// has no `identity.json` yet.
+fn import_source(
+    storage: &super::storage::Storage,
+    config: &MemoryRuntime,
+) -> crate::memory::Result<PathBuf> {
+    let default = Path::new(&config.turso_path);
+    let endpoint = storage
+        .memory_endpoint(default)
+        .map_err(|error| crate::memory::Error::detailed(ErrorKind::Unavailable, error))?;
+    if endpoint.starts_with("instance:")
+        || !matches!(storage.memory_backend("sqlite"), "sqlite" | "turso")
+    {
+        return Err(crate::memory::Error::detailed(
+            ErrorKind::Unavailable,
+            "memory is routed to an external storage backend; transfer it back to local \
+             storage with Otto 0.4.8 before upgrading",
+        ));
+    }
+    Ok(PathBuf::from(endpoint))
+}
+
+/// Opens the file store at `config.dir`, importing the previous Turso database
+/// first when the directory has no identity, and reports skipped files.
+fn open_file_store(
+    storage: &super::storage::Storage,
+    config: &MemoryRuntime,
+    options: StoreOptions,
+    stderr: &mut dyn Write,
+) -> crate::memory::Result<Arc<dyn crate::memory::MemoryStore>> {
+    let root = Path::new(&config.dir);
+    if !has_identity(root) {
+        let source = import_source(storage, config)?;
+        if source.exists() {
+            let set = import_turso(&source)?;
+            write_import(root, &set, options.busy_timeout)?;
+        }
+    }
+    let store = FileStore::open(root, options)?;
+    for file in store.invalid_files()? {
+        let _ = writeln!(
+            stderr,
+            "{SKIPPED_FILE_PREFIX}{}: {}",
+            file.path.display(),
+            file.reason
+        );
+    }
+    Ok(Arc::new(store))
+}
+
 pub fn open_memory_service_with_storage(
     storage: &super::storage::Storage,
     config: &MemoryRuntime,
@@ -474,7 +530,7 @@ pub fn open_memory_service_with_storage(
             Box::new(exact),
         ])),
     };
-    let store = match storage.memory(std::path::Path::new(&config.turso_path), options) {
+    let store = match open_file_store(storage, config, options, stderr) {
         Ok(store) => store,
         Err(error) => {
             if config.required {
@@ -2314,24 +2370,19 @@ mod tests {
     fn unopenable_path(directory: &std::path::Path) -> String {
         let blocker = directory.join("blocker-file");
         std::fs::write(&blocker, b"not a directory").expect("write blocker");
-        blocker.join("memory.db").to_string_lossy().into_owned()
+        blocker.join("memory").to_string_lossy().into_owned()
     }
 
-    /// A store path one level below the temporary directory, so the store
-    /// creates the parent itself at 0700: it rejects a group-readable parent.
+    /// A store directory below the temporary directory.
     fn store_path(directory: &std::path::Path) -> String {
-        directory
-            .join("memory")
-            .join("memory.db")
-            .to_string_lossy()
-            .into_owned()
+        directory.join("memory").to_string_lossy().into_owned()
     }
 
     fn enabled(path: String) -> MemoryRuntime {
         MemoryRuntime {
             enabled: true,
-            backend: "turso".into(),
-            turso_path: path,
+            backend: "files".into(),
+            dir: path,
             ..MemoryRuntime::default()
         }
     }
@@ -2379,6 +2430,35 @@ mod tests {
 
         config.required = true;
         assert!(open_memory_service(&config, &[], &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn an_invalid_record_file_is_reported_once_and_the_service_stays_usable() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = store_path(directory.path());
+        let config = enabled(path.clone());
+        let (service, _, usable) =
+            open_memory_service(&config, &[], &mut Vec::new()).expect("open");
+        assert!(usable);
+        service.close().expect("close");
+        std::fs::write(
+            std::path::Path::new(&path).join("records").join("bad.md"),
+            "not a record\n",
+        )
+        .expect("write bad record");
+
+        let mut stderr = Vec::new();
+        let (service, _, usable) = open_memory_service(&config, &[], &mut stderr).expect("reopen");
+        assert!(usable);
+        let stderr = String::from_utf8_lossy(&stderr);
+        let lines: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.starts_with(SKIPPED_FILE_PREFIX))
+            .collect();
+        assert_eq!(lines.len(), 1, "{stderr:?}");
+        assert!(lines[0].contains("bad.md"), "{}", lines[0]);
+        assert!(!stderr.contains("not a record"), "{stderr:?}");
+        service.close().expect("close");
     }
 
     #[test]
@@ -3262,8 +3342,7 @@ mod catalog_tests {
 #[cfg(test)]
 mod workspace_identity_tests {
     use super::*;
-    use crate::memory::turso::records::testsupport::sample_record;
-    use crate::memory::turso::testsupport::open_temp;
+    use crate::memory::files::testsupport::{open_temp, sample_record};
     use crate::memory::{RecordKey, UpsertRequest};
 
     #[test]

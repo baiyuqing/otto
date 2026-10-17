@@ -148,7 +148,7 @@ pub(super) fn parse_record(id: &str, content: &str) -> std::result::Result<Recor
         }
         let (name, value) = line.split_once(": ").ok_or("malformed frontmatter line")?;
         if !NAMES.contains(&name) {
-            return Err(format!("unknown frontmatter name {name:.32}"));
+            return Err("unknown frontmatter name".into());
         }
         if fields.insert(name, value).is_some() {
             return Err(format!("duplicate frontmatter name {name}"));

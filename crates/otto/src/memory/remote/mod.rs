@@ -343,19 +343,19 @@ impl RemoteService {
         }
     }
 
-    /// Maps a wire receipt to a port receipt. `forget` selects the forget
-    /// coverage the port requires for a completed forget.
+    /// Maps a wire receipt to a port receipt. The `forget` endpoint selects
+    /// the forget coverage the port requires for a completed forget.
     fn receipt(
         &self,
         endpoint: &str,
         request_id: &str,
         scope: &Scope,
         wire: wire::Receipt,
-        forget: bool,
         context: &MemoryContext,
         target: Option<&MemoryRef>,
     ) -> Result<Receipt> {
         use wire::ReceiptState::*;
+        let forget = endpoint == "forget";
         let invalid = || {
             self.warn(endpoint, 200, "invalid_response", "invalid receipt");
             err(ErrorKind::OutcomeUnknown)
@@ -776,7 +776,6 @@ impl MemoryService for RemoteService {
             &request.request_id,
             &scope,
             receipt,
-            false,
             &request.context,
             request.target.as_ref(),
         )
@@ -818,7 +817,6 @@ impl MemoryService for RemoteService {
             &request.request_id,
             &target.scope,
             receipt,
-            true,
             &request.context,
             Some(target),
         )

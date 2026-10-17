@@ -501,7 +501,8 @@ substring of its text, kind, key or one of its labels. Matches list workspace
 records first, then by the number of matching terms, then newest `updated_at`
 first. An empty query lists recent records. `memory_search` also accepts
 `id` for an exact record lookup within the current session's user and workspace
-scopes. Before proposing a deletion by ID, the agent can use
+scopes; `id` and a non-empty `query` are mutually exclusive, and an empty `id`
+is treated as omitted. Before proposing a deletion by ID, the agent can use
 `memory_search({"id":"<record-id>"})` to read the current scope and revision,
 then call `forget`. Search results stored in session history retain only IDs;
 the full record is available to the model during the search turn. In Telegram

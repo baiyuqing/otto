@@ -588,13 +588,14 @@ impl Binding {
         let Some(store) = self.service.store.as_deref() else {
             return Ok(RecallResult::default());
         };
-        let query = normalize_query(&request.query);
         validate_recall_request(&RecallRequest {
-            query: query.clone(),
+            query: normalize_query(&request.query),
             ..request.clone()
         })?;
+        // Recall does not match on the message text; the store lists every
+        // in-scope record, workspace first and newest first, within the budget.
         let result = store.retrieve(&RetrievalRequest {
-            query,
+            query: String::new(),
             scopes: self.scopes.clone(),
             kinds: request.kinds.clone(),
             labels: Vec::new(),
@@ -698,7 +699,7 @@ pub fn human_provenance(session_id: &str) -> Provenance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::turso::testsupport::open_temp;
+    use crate::memory::files::testsupport::open_temp;
     use crate::memory::{CandidateRef, NAMESPACE_USER, NAMESPACE_WORKSPACE};
 
     fn service() -> (tempfile::TempDir, Arc<Service>) {
@@ -709,7 +710,7 @@ mod tests {
         )
     }
 
-    struct AlternateStore(crate::memory::turso::Store);
+    struct AlternateStore(crate::memory::files::FileStore);
 
     fn unsupported<T>() -> Result<T> {
         Err(Error::new(ErrorKind::Unsupported))
@@ -1179,6 +1180,41 @@ mod tests {
         assert_eq!(through_agent.records[0].scope.namespace, NAMESPACE_USER);
     }
 
+    #[test]
+    fn recall_ignores_the_message_text_and_puts_workspace_records_first() {
+        let (_directory, service) = service();
+        let user = user_scope();
+        let workspace = Scope::new(NAMESPACE_WORKSPACE, "workspace-1");
+        let fact = |scope: &Scope, key: &str, text: &str| RememberRequest {
+            kind: "fact".into(),
+            ..remember(scope, key, text)
+        };
+        let user_fact = service
+            .remember(&fact(&user, "editor", "prefers vim for editing code"))
+            .expect("user fact");
+        let workspace_fact = service
+            .remember(&fact(&workspace, "build", "run make before committing"))
+            .expect("workspace fact");
+        let binding = service
+            .bind(BindOptions {
+                scopes: vec![user, workspace.clone()],
+                default_write_scope: workspace,
+                ..BindOptions::default()
+            })
+            .expect("bind");
+
+        let result = binding
+            .recall(&RecallRequest {
+                query: "unrelated question about weather".into(),
+                limit: 10,
+                token_budget: 1000,
+                ..RecallRequest::default()
+            })
+            .expect("recall");
+        let ids: Vec<&str> = result.records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, [workspace_fact.id.as_str(), user_fact.id.as_str()]);
+    }
+
     #[tokio::test]
     async fn recall_marks_only_the_baseline_records_as_standing() {
         let (_directory, service) = service();
@@ -1369,7 +1405,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_over_budget_data_is_injected_oldest_first_and_counted_as_omitted() {
-        use crate::memory::turso::records::testsupport::{at, sample_record};
+        use crate::memory::files::testsupport::{at, sample_record};
         let (_directory, store) = open_temp();
         let store = Arc::new(store);
         let service = Arc::new(Service::from_store(store.clone(), decide_default_policy));
@@ -1380,7 +1416,7 @@ mod tests {
             let mut record = sample_record(id, &scope, id, &id.repeat(2400));
             record.created_at = at(second);
             record.updated_at = at(second);
-            costs.push(crate::memory::turso::retriever::record_cost(None, &record));
+            costs.push(crate::memory::files::record_cost(None, &record));
             store
                 .upsert(&UpsertRequest {
                     record,

@@ -195,6 +195,10 @@ export OTTO_MEM_TOKEN=<bearer token>
 
 - The token is read only from the environment variable named by `token_env`.
   Do not put it in configuration.
+- The variable name and the token value are redacted from model-visible text,
+  as provider keys are, and the variable is not passed to sandboxed commands.
+- An embedder that injects a memory extension cannot also select
+  `backend = "remote"`; startup fails.
 - If the variable is unset or empty, startup fails when `[memory].required =
   true`. Otherwise memory is disabled for the process and Otto prints one
   warning.

@@ -35,8 +35,8 @@ use super::validate::{
 };
 use super::{
     BindOptions, Candidate, CandidateAction, CandidateListRequest, CandidateState, Error,
-    ErrorKind, ForgetRequest, ForgetResult, ListRequest, MAX_FTS_TERM_BYTES, MAX_FTS_TERMS,
-    MAX_QUERY_BYTES, Origin, PolicyDecision, PolicyRequest, ProposeRequest, Provenance,
+    ErrorKind, ForgetRequest, ForgetResult, ListRequest, MAX_QUERY_BYTES, MAX_QUERY_TERM_BYTES,
+    MAX_QUERY_TERMS, Origin, PolicyDecision, PolicyRequest, ProposeRequest, Provenance,
     RecallRequest, RecallResult, Record, RecordKey, RecordRef, RememberRequest, Result,
     RetrievalRequest, ReviewDecision, ReviewRequest, ReviewResult, Scope, SearchRequest,
     SearchResult, StandingUsage, StoreForgetRequest, StoreReviewRequest, TokenEstimator, Tombstone,
@@ -56,16 +56,16 @@ pub type Policy = fn(&PolicyRequest) -> PolicyDecision;
 /// The caller's text is whatever the user typed: multiple lines, leading and
 /// trailing space, and no length bound, while a query must be trimmed,
 /// control-character free, at most [`MAX_QUERY_BYTES`] and at most
-/// [`MAX_FTS_TERMS`] terms of [`MAX_FTS_TERM_BYTES`]. Recall is best effort,
+/// [`MAX_QUERY_TERMS`] terms of [`MAX_QUERY_TERM_BYTES`]. Recall is best effort,
 /// so the surplus is dropped rather than failing the turn. Terms are counted
-/// the way `build_fts_literal_expression` splits them, and a term over the
+/// the way retrieval splits them (on whitespace), and a term over the
 /// byte bound is dropped whole because truncating it would match nothing.
 fn normalize_query(query: &str) -> String {
     let mut normalized = String::new();
     for term in query
         .split(|character: char| character.is_whitespace() || character.is_control())
-        .filter(|term| !term.is_empty() && term.len() <= MAX_FTS_TERM_BYTES)
-        .take(MAX_FTS_TERMS)
+        .filter(|term| !term.is_empty() && term.len() <= MAX_QUERY_TERM_BYTES)
+        .take(MAX_QUERY_TERMS)
     {
         let separator = usize::from(!normalized.is_empty());
         if normalized.len() + separator + term.len() > MAX_QUERY_BYTES {

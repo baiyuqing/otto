@@ -527,7 +527,7 @@ fn empty_object(bytes: &[u8]) -> bool {
         .is_ok_and(|value| value.as_object().is_some_and(|object| object.is_empty()))
 }
 fn validate_wire_context(context: &wire::Context) -> Result<()> {
-    if !valid_opaque_id(&context.organization_id, 128)
+    if !valid_organization_id(&context.organization_id)
         || !valid_opaque_id(&context.user_id, 128)
         || context
             .workspace_id

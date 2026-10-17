@@ -28,6 +28,13 @@ fn require(condition: bool) -> Result<()> {
 pub fn valid_opaque_id(value: &str, max_bytes: usize) -> bool {
     !value.is_empty() && value.len() <= max_bytes && value.bytes().all(|b| b.is_ascii_graphic())
 }
+/// Organization ids also allow ordinary spaces within the name.
+pub fn valid_organization_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().any(|b| b != b' ')
+        && value.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
+}
 fn id(value: &str) -> Result<()> {
     require(valid_opaque_id(value, MAX_ID_BYTES))
 }
@@ -94,14 +101,18 @@ fn observations(values: &[Observation]) -> Result<()> {
 impl Scope {
     pub fn validate(&self) -> Result<()> {
         require(valid_opaque_id(&self.namespace, 32))?;
-        require(valid_opaque_id(&self.id, 128))
+        require(if self.namespace == "organization" {
+            valid_organization_id(&self.id)
+        } else {
+            valid_opaque_id(&self.id, 128)
+        })
     }
 }
 impl MemoryContext {
     pub fn validate(&self) -> Result<()> {
         id(&self.principal)?;
         if let Some(organization) = &self.organization_id {
-            require(valid_opaque_id(organization, 128))?;
+            require(valid_organization_id(organization))?;
         }
         require(!self.scopes.is_empty() && self.scopes.len() <= MAX_SCOPES)?;
         unique(&self.scopes)?;

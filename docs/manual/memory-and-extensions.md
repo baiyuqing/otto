@@ -209,7 +209,7 @@ Startup is not a service readiness check.
 | Key | Default | Rule |
 | --- | --- | --- |
 | `url` | none, required | HTTPS; HTTP only for loopback (`localhost`, `127.0.0.0/8`, `::1`). No credentials, non-root path, query or fragment. A trailing `/` is removed; no redirects. |
-| `organization` | none, required | 1..128 printable non-space ASCII bytes; tenant boundary, never inferred from paths or model input. |
+| `organization` | none, required | 1..128 printable ASCII bytes, including ordinary spaces, with at least one non-space character; tenant boundary, never inferred from paths or model input. |
 | `user` | none, required | 1..128 printable non-space ASCII bytes; selected subject within the organization. |
 | `token_env` | explicitly chosen above | Environment-variable name: letters, digits and `_`, not starting with a digit, at most 128 bytes. |
 | `recall_timeout` | `3s` | Go duration, greater than zero and at most `10s`; recall/get only. Writes and turn uploads use 30 s. |

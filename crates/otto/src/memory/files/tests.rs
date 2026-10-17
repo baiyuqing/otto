@@ -447,13 +447,7 @@ fn retrieval_pages_by_cursor_and_rejects_a_cursor_for_another_query() {
 fn the_baseline_leads_and_an_oversized_record_is_skipped() {
     let (_dir, store) = open_temp();
     let scope = user(&store);
-    put(
-        &store,
-        "rec-1",
-        &scope,
-        "tone",
-        &"terse ".repeat(200).trim(),
-    );
+    put(&store, "rec-1", &scope, "tone", "terse ".repeat(200).trim());
     put(&store, "rec-2", &scope, "editor", "terse is best");
     let mut input = request(vec![scope.clone()], "terse");
     input.token_budget = 120;

@@ -232,6 +232,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - After `/resume`, `/fork` or `/new` in the terminal UI, `↑`/`↓` recall the
   prompts of the session now open instead of those typed before the switch.
   The draft being typed is kept.
+  ([#497](https://github.com/baiyuqing/otto/pull/497))
 
 - Explicit `/sandbox exclude <entry>` in the terminal UI now reports success
   and errors inline instead of opening a result dialog that needs dismissal.

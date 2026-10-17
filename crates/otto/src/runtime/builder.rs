@@ -290,17 +290,49 @@ impl SessionHandle for MemoryHandle {
 /// Both need `&self` access to the same transcript for the whole run, which
 /// is what `Arc` buys; every [`SessionHandle`] method already takes `&self`.
 #[derive(Clone)]
-pub struct SharedSession(Arc<dyn SessionHandle>, Arc<otto_core::agent::hooks::State>);
+pub struct SharedSession(
+    Arc<dyn SessionHandle>,
+    Arc<otto_core::agent::hooks::State>,
+    Recorder,
+);
+
+/// Conversation messages appended while recording is on; `None` when off.
+/// Shared by clones, so the frontend and the agent see one recorder.
+type Recorder = Arc<std::sync::Mutex<Option<Vec<Message>>>>;
 
 impl SharedSession {
     pub fn new(handle: Arc<dyn SessionHandle>) -> Self {
         crate::failover::ownership::register_writer_session(&handle);
-        Self(handle, Arc::default())
+        Self(handle, Arc::default(), Arc::default())
     }
 
     /// A `--no-session` transcript.
     pub fn memory(header: Header) -> Self {
-        Self(Arc::new(MemoryHandle::new(header)), Arc::default())
+        Self(
+            Arc::new(MemoryHandle::new(header)),
+            Arc::default(),
+            Arc::default(),
+        )
+    }
+
+    /// Starts collecting appended conversation messages for a turn upload.
+    pub fn start_recording(&self) {
+        *self.2.lock().unwrap_or_else(|p| p.into_inner()) = Some(Vec::new());
+    }
+
+    /// Stops recording and returns what was collected.
+    pub fn finish_recording(&self) -> Vec<Message> {
+        self.2
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .unwrap_or_default()
+    }
+
+    fn record(&self, message: &Message) {
+        if let Some(recorded) = self.2.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+            recorded.push(message.clone());
+        }
     }
 
     pub fn handle(&self) -> &Arc<dyn SessionHandle> {
@@ -376,7 +408,9 @@ impl Session for SharedSession {
     }
 
     async fn append(&self, message: Message) -> Result<(), SessionError> {
-        self.0.append(message).await
+        self.0.append(message.clone()).await?;
+        self.record(&message);
+        Ok(())
     }
 
     fn latest_compaction(&self) -> Option<CompactionMetadata> {
@@ -437,7 +471,14 @@ impl Session for SharedSession {
         input_id: &str,
         message: otto_core::model::Message,
     ) -> Result<otto_core::session::AppendOutcome, SessionError> {
-        self.0.append_input_if_absent(input_id, message).await
+        let outcome = self
+            .0
+            .append_input_if_absent(input_id, message.clone())
+            .await?;
+        if matches!(outcome, otto_core::session::AppendOutcome::Appended) {
+            self.record(&message);
+        }
+        Ok(outcome)
     }
 
     fn has_input(&self, input_id: &str) -> bool {
@@ -3201,6 +3242,28 @@ mod tests {
     use otto_core::provider::ProviderSettlement;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn recording_captures_appended_messages_until_finished() {
+        let session = SharedSession::memory(Header::default());
+        let message = |text: &str| Message {
+            id: text.into(),
+            role: otto_core::model::Role::User,
+            blocks: vec![Block::text(text)],
+            ..Message::default()
+        };
+        session.append(message("before")).await.unwrap();
+        assert!(session.finish_recording().is_empty());
+
+        session.start_recording();
+        session.clone().append(message("during")).await.unwrap();
+        let recorded = session.finish_recording();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].text(), "during");
+
+        session.append(message("after")).await.unwrap();
+        assert!(session.finish_recording().is_empty());
+    }
 
     struct PendingProvider {
         polls: Arc<AtomicUsize>,

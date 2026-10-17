@@ -1258,6 +1258,7 @@ impl Controller {
             },
         };
         let mut observed = auto_reflection::observing_prompt(&mut *emit, &observation);
+        self.start_turn_recording(runner);
         let result = runner
             .run_with_system_context(
                 text,
@@ -1266,6 +1267,7 @@ impl Controller {
                 cancel,
             )
             .await;
+        self.upload_turn(runner, result.is_ok(), cancel);
         self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
         result
     }
@@ -1450,6 +1452,7 @@ impl Controller {
             text: "\n\n".into(),
         });
         let observation = auto_reflection::RunObservation::default();
+        self.start_turn_recording(runner);
         let result = runner
             .run_followup_with_system_context(
                 text,
@@ -1458,6 +1461,7 @@ impl Controller {
                 cancel,
             )
             .await;
+        self.upload_turn(runner, result.is_ok(), cancel);
         self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
         result
     }
@@ -1500,6 +1504,7 @@ impl Controller {
         self.record_unrun_followups(&runner, task_run.discarded(), &mut *emit)
             .await?;
         let observation = auto_reflection::RunObservation::default();
+        self.start_turn_recording(&runner);
         let result = runner
             .run_with_image_system_context(
                 text,
@@ -1509,6 +1514,7 @@ impl Controller {
                 cancel,
             )
             .await;
+        self.upload_turn(&runner, result.is_ok(), cancel);
         self.after_prompt(&observation, result.is_ok() && !cancel.is_cancelled());
         result?;
         self.run_followups_held(&runner, &task_run, system_context, &mut *emit, cancel)
@@ -1541,6 +1547,35 @@ impl Controller {
         if compacted.load(std::sync::atomic::Ordering::SeqCst) {
             self.start_auto_reflection(crate::reflection::Trigger::OnCompaction);
         }
+    }
+
+    /// Starts collecting the messages of one prompt step for the remote
+    /// memory service. Does nothing for other memory backends.
+    fn start_turn_recording(&self, runner: &Runner) {
+        if self.builder.memory.turns.is_some() && self.builder.memory.usable {
+            runner.session().start_recording();
+        }
+    }
+
+    /// Hands the messages recorded since [`Self::start_turn_recording`] to
+    /// the upload worker.
+    fn upload_turn(&self, runner: &Runner, succeeded: bool, cancel: &CancellationToken) {
+        let Some(turns) = &self.builder.memory.turns else {
+            return;
+        };
+        let messages = runner.session().finish_recording();
+        let status = if cancel.is_cancelled() {
+            crate::memory::remote::wire::TurnStatus::Cancelled
+        } else if succeeded {
+            crate::memory::remote::wire::TurnStatus::Success
+        } else {
+            crate::memory::remote::wire::TurnStatus::Error
+        };
+        let context = self.builder.memory_context(
+            otto_core::memory::Origin::Model,
+            Some(runner.session().header().id),
+        );
+        turns.submit(&context, status, messages);
     }
 
     /// Runs compaction reflection as before, then considers a task-end run

@@ -779,6 +779,7 @@ mod tests {
             recall_limit: 8,
             recall_token_budget: 1000,
             advice_audit: None,
+            turns: None,
         };
         builder.workspace_scope =
             workspace_memory_scope(&runtime_config, &workspace.path().to_string_lossy())

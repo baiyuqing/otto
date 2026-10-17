@@ -146,6 +146,9 @@ pub struct MemoryWiring {
     pub recall_token_budget: i64,
     /// The append-only advice audit log, absent when it could not be opened.
     pub advice_audit: Option<Arc<dyn crate::memory::advice::audit::AuditStore>>,
+    /// Uploads finished turns to the remote memory service; absent for every
+    /// other backend.
+    pub turns: Option<Arc<crate::memory::remote::upload::Uploader>>,
 }
 
 fn neutral_scope(scope: &Scope) -> otto_core::memory::Scope {
@@ -423,6 +426,7 @@ impl Default for MemoryWiring {
             recall_limit: 0,
             recall_token_budget: 0,
             advice_audit: None,
+            turns: None,
         }
     }
 }

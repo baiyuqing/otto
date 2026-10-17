@@ -4,6 +4,7 @@
 //! the whole result. Port errors carry only fixed text; server messages go to
 //! the log only.
 
+pub mod upload;
 pub mod wire;
 
 use std::{sync::Arc, time::Duration};
@@ -20,7 +21,7 @@ use crate::log::Logger;
 const IDENTITY: &str = "remote";
 const PROTOCOL_REQUEST: &str = "1.0";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-const MAX_TURN_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_TURN_BYTES: usize = 4 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LOGGED_MESSAGE_BYTES: usize = 512;

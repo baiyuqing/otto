@@ -156,7 +156,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   gives no memory context and the turn continues. The bearer token comes from
   `OTTO_MEM_TOKEN` (or `token_env`). See
   [Remote memory service](docs/manual/memory-and-extensions.md#remote-memory-service)
-  and the [protocol](docs/manual/remote-memory-protocol.md). (#PR)
+  and the [protocol](docs/manual/remote-memory-protocol.md). ([#493](https://github.com/baiyuqing/otto/pull/493))
 
 - The terminal UI now shows colored inline diffs for successful `edit` and
   `write` calls. `write` records a bounded diff in the tool result, so resumed

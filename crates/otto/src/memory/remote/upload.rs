@@ -1,6 +1,6 @@
 //! Turn capture for the remote memory service: converts the messages of one
 //! prompt step, filters them, and sends them from one background worker.
-//! See "Turn upload" in `docs/specs/2026-10-17-remote-memory-protocol.md`.
+//! See "Turn upload" in `docs/specs/2026-10-17-remote-memory-scope-redesign.md`.
 
 use std::{
     sync::{Arc, Mutex},
@@ -76,11 +76,11 @@ impl Uploader {
             Ok(id) => id,
             Err(_) => return self.drop_turn("id generation failed", "", 0),
         };
+        let Ok(context) = RemoteService::context(context) else {
+            return self.drop_turn("invalid context", "", 0);
+        };
         let request = wire::TurnRequest {
-            context: wire::Context {
-                scopes: context.scopes.clone(),
-                session_id: context.session_id.clone(),
-            },
+            context,
             turn_id,
             status,
             messages,
@@ -281,11 +281,18 @@ mod tests {
 
     fn context() -> MemoryContext {
         MemoryContext {
+            organization_id: Some("acme".into()),
             principal: "local".into(),
-            scopes: vec![Scope {
-                namespace: "user".into(),
-                id: "local".into(),
-            }],
+            scopes: vec![
+                Scope {
+                    namespace: "organization".into(),
+                    id: "acme".into(),
+                },
+                Scope {
+                    namespace: "user".into(),
+                    id: "local".into(),
+                },
+            ],
             write_scope: None,
             workspace_id: None,
             session_id: Some("s-1".into()),

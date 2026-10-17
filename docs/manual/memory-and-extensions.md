@@ -163,119 +163,212 @@ prepared snapshot recovery and deletion coverage.
 
 ### Remote memory service
 
-`backend = "remote"` makes Otto use a memory service on another host instead of
+`backend = "remote"` selects an external memory service instead of
 `~/.otto/memory/`. The service owns the memory; Otto keeps no local copy,
-migrates no data when the backend changes, and makes no network call at
-startup. The wire format is in the
-[remote memory protocol](remote-memory-protocol.md).
+imports no data when switching backends and makes no startup network call.
+This repository implements the client, **not** the service or its management
+interface. Support ships with the normal
+[Otto installation](../../README.md#install-from-source); no extra plugin or
+daemon is needed. Local files remain the default backend. Once remote is selected,
+recall and best-effort turn uploads need no further opt-in. Use the configured
+runtime model; no special model selection is needed.
+
+The [remote memory protocol](remote-memory-protocol.md) owns the exact API,
+resolution and rendering contract. This section covers configuration and use.
+
+#### Configure and start
+
+Provision the external service, memberships and ACLs first. Put the following in
+host user configuration (normally `~/.config/otto/config.toml`), not an untrusted
+project overlay:
 
 ```toml
 [memory]
 backend = "remote"
-recall_tokens = 8192     # default for remote; 2000 for files
-max_results = 12
+recall_tokens = 8192     # remote default; rendered UTF-8 byte cap, not tokens
+max_results = 12        # default
 
 [memory.remote]
-url = "https://mem.example.internal:8443"
+url = "https://memory.example.internal"
+organization = "acme"
 user = "alice"
-token_env = "OTTO_MEM_TOKEN"   # default
-recall_timeout = "3s"          # default
+token_env = "MEMORY_SERVICE_TOKEN"  # custom example name, not a default claim
+recall_timeout = "3s"               # default
+
+[memory.workspace_ids]
+"/canonical/path/to/project" = "project-a"
 ```
 
-```sh
-export OTTO_MEM_TOKEN=<bearer token>
-```
+Set the chosen variable privately in the environment that starts Otto; never put
+its value in TOML, prompts, source files or shell history. The example explicitly
+chooses `MEMORY_SERVICE_TOKEN`, not the built-in token variable name. For
+`otto serve`/ACP, set it in that process's environment, not merely in the attaching
+terminal. Restart affected runtimes after configuration or token changes.
+Startup is not a service readiness check.
 
 | Key | Default | Rule |
 | --- | --- | --- |
-| `url` | none, required | `https`; `http` only for `localhost`, `127.0.0.0/8` or `::1`. No credentials, path, query or fragment. A trailing `/` is removed. |
-| `user` | none, required | 1 to 128 printable ASCII bytes. It is the user scope id, so Otto hosts that use the same `user` share one user scope. |
-| `token_env` | `OTTO_MEM_TOKEN` | Name of the environment variable that holds the bearer token: letters, digits and `_`, not starting with a digit, at most 128 bytes. |
-| `recall_timeout` | `3s` | Go duration, greater than zero and at most `10s`. Write calls use a fixed 30 s timeout. |
+| `url` | none, required | HTTPS; HTTP only for loopback (`localhost`, `127.0.0.0/8`, `::1`). No credentials, non-root path, query or fragment. A trailing `/` is removed; no redirects. |
+| `organization` | none, required | 1..128 printable non-space ASCII bytes; tenant boundary, never inferred from paths or model input. |
+| `user` | none, required | 1..128 printable non-space ASCII bytes; selected subject within the organization. |
+| `token_env` | explicitly chosen above | Environment-variable name: letters, digits and `_`, not starting with a digit, at most 128 bytes. |
+| `recall_timeout` | `3s` | Go duration, greater than zero and at most `10s`; recall/get only. Writes and turn uploads use 30 s. |
 
-- The token is read only from the environment variable named by `token_env`.
-  Do not put it in configuration.
-- The variable name and the token value are redacted from model-visible text,
-  as provider keys are, and the variable is not passed to sandboxed commands.
-- If the variable is unset or empty, startup fails when `[memory].required =
-  true`. Otherwise memory is disabled for the process and Otto prints one
-  warning.
-- `require_encryption = true` with `backend = "remote"` fails startup, because
-  Otto cannot verify encryption at rest on another host.
-- `recall_tokens` bounds the rendered recall in bytes, at most 8192. Without
-  it, the remote default is 8192. The preamble takes 131 bytes and each item
-  71 to 142 bytes of markup, so 12 workspace items at 8192 leave about 6,357
-  bytes of text.
-- `[memory.remote]` is read only when `backend = "remote"`. An embedder that
-  injects a `MemoryExtension` and also configures `backend = "remote"` gets a
-  startup error.
-- The workspace scope is the canonical workspace path hashed into an id, or the
-  `[memory.workspace_ids]` override. Two hosts share a workspace scope only
-  through that override.
+Organization, selected user, token and host grants are host-authoritative:
+project overlays or model arguments cannot select another subject or enlarge
+permission. The service independently checks principal/subject delegation,
+organization membership and project/write ACLs. Supplying IDs alone grants
+nothing; a rejected selected scope fails the whole request.
 
-What Otto sends:
+- Only the named environment variable supplies the token. Its name/value are
+  redacted from model-visible text and not passed to the bash sandbox.
+- An unset/empty token disables memory for the process with one warning, unless
+  `[memory].required = true`, which fails startup. Structural configuration
+  errors always fail startup. No startup probe checks credentials or reachability.
+- `require_encryption = true` fails for remote: Otto cannot verify service-side
+  encryption at rest. Injecting a `MemoryExtension` while selecting remote also
+  fails startup. `[memory.remote]` is otherwise read only for remote.
+- `recall_tokens` is a rendered-byte bound, at most 8192 (the remote default),
+  including the exact preamble, escaped attributes/text and newlines. Old
+  markup-size estimates do not apply. `max_results` includes mandatory winners.
+- Project scope uses the stable workspace memory identity/override, with a
+  canonical-path SHA-256 fallback. Use a shared `[memory.workspace_ids]` override
+  across hosts; organization remains part of identity. Without a project the
+  context explicitly selects `workspace_id: null`.
 
-- Recall: before each user input that has text, a `/v1/recall` request with the
-  redacted input. The service returns matching items and its own pinned items.
-- Explicit writes: the `remember` and `forget` tools, and `/remember`
-  (origin `human`). `memory_search` calls recall or get.
-- Turn upload: one `/v1/turns` request per finished turn, in the background,
-  with the user input, assistant replies, tool calls and tool results.
-  Image and reasoning blocks are omitted. Subagent sessions are not
-  uploaded; their final result reaches the parent turn as a tool result.
+#### Scopes, search and writes
 
-A turn is not uploaded when the encoded request is over 4 MiB, or when it
-contains a redaction marker, URI userinfo, a private key delimiter, a
-credential header or a credential assignment. A credential finding drops the
-whole turn. Session text is already redacted, so a turn in which the redactor
-replaced a value is not uploaded. Each skip writes one `memory_turn_dropped`
-[log line](#remote-memory-log-lines) with the reason and size.
+Each request selects exactly one organization, one user and at most one workspace.
+Organization memory is global to its organization; project memory requires project
+membership. Personal memory is private to the selected user **within that
+organization**, shared across their projects there, never implicitly across
+organizations. Provisioning, membership management and service storage remain external.
 
-Undelivered turns are discarded. The upload worker sends one request at a time,
-holds 8 turns, does not retry, keeps no spool and does not replay. A failed
-request or a full queue discards the turn. At shutdown Otto waits at most 30 s
-for the queue to drain.
+For keyed conflicts, **workspace > organization > user**; without a project,
+**organization > user**. Explicit keys identify semantic slots; free-text/null-key
+contradictions cannot be guaranteed to resolve algorithmically. Pinning requires
+inclusion, not higher authority: a lower pinned value makes its effective winner
+mandatory. If mandatory winners cannot fit, all recall is discarded. Memory never
+overrides host security, system rules or actual user authorization.
 
-Recall rules:
+- `memory_search` accepts `query` **or** exact `id`, not both, and supports
+  nullable `scope_filter`, a nonempty unique array of `organization`, `workspace`,
+  `user`. It filters winning namespaces **after**
+  resolution: a user-only view cannot expose a shadowed user value. Workspace
+  filters require a selected project. Automatic recall always uses no filter.
+- Exact-item `memory_search` (with `id`) is explicitly labeled **raw**. It may
+  inspect a shadowed item, but is not effective lookup or automatically injected
+  context. Remote references carry organization, scope, ID and opaque revision.
+  Exact remote search additionally requires `organization_id`, `scope_namespace`,
+  `scope_id` and `opaque_revision` from the reference. The organization must
+  match the host-selected tenant and cannot change request context. Missing/
+  mismatched tenants are rejected before dispatch, including old tenantless
+  remote references. Wire get sends the exact scope/ID; it returns the current
+  stored revision, not a historical revision lookup.
+- `remember` takes `text`, nullable `key` and destination `scope` (`user` or
+  `workspace` for model writes). Create uses the host-selected tenant and never
+  silently upserts an active duplicate key. Remote update additionally requires
+  `target_id`, `opaque_revision` and `organization_id`; `scope_id` validates
+  a supplied reference's scope. Updated key and text are full replacements.
+  Generic metadata cannot set identity, authority or pinning; pin management
+  is external service-admin functionality.
+- Remote `forget` takes `id`, `organization_id`, `opaque_revision` and
+  `scope_namespace`/`scope_id` (or `scope`). Legacy numeric `revision`/
+  `base_revision` inputs remain for neutral/local compatibility, **not** as
+  substitutes for remote `opaque_revision`. Organization inputs bind references,
+  never select another tenant. On the wire opaque revisions use the field
+  `revision`; they are never numerically compared.
+- `forget` suppresses one user/workspace item, not its key across scopes or a
+  physical-erasure promise. Suppressing a workspace override intentionally
+  restores any still-active organization/user baseline.
+- Ordinary model tools cannot organization-write even with admin credentials.
+  Writes default to workspace when selected, otherwise user, never organization.
+  Explicit human `/remember --scope organization` may request organization
+  remember, still subject to service ACLs; human origin is not a privilege upgrade.
+  Organization forget is out of scope; use the external service administration.
 
-- Otto uses a recall response only when its `coverage` is `complete` and every
-  rule of the protocol holds (scope, size, fields, `Otto-Memory-Protocol`
-  header). It never uses a valid subset.
-- A `partial` or `unknown` coverage, a rule violation, an error response, a
-  rendering over `recall_tokens` or a timeout gives no memory context for that
-  input and a memory warning. Otto continues the turn.
-- Recalled items, including pinned ones, are rendered as untrusted reference
-  material, not as instructions.
-- An image-only input gets no recall. A withdrawn pinned item stays in the
-  current turn's context until the next user input.
+Restart with the configured environment, use an ordinary prompt to smoke-test
+recall, then explicitly remember a harmless preference and ask Otto to search it:
 
-Native features that are not available with the remote backend:
+```text
+/remember --scope user --key response.language Prefer Chinese answers.
+```
 
-- Local memory review and the advice model.
-- `otto memory` subcommands fail with `memory operation is unsupported for the
-  remote memory backend; the memory service manages its records`; they do not
-  read the local files store. The slash commands `/memory list`, `/memory
-  show`, `/memory search`, `/memory forget` and `/memory review` are
-  unsupported for the same reason. The service owns listing and review.
-- `/remember` is supported. It sends origin `human` with the workspace scope,
-  or the user scope with `--scope user`. `--kind` and `--key` are sent in
-  `metadata`. The reply is one line, for example `remembered <id>
-  (scope=<ns>/<id>, state=applied)`.
-- Reflection does not run with a memory service configured. Automatic
-  reflection (`on_work`, `on_compaction`) does not start, `auto = "on_exit"`
-  prints `reflection: memory is not available` at exit, and `/reflect`
-  reports that memory is not available.
+Inspect the receipt, not just acceptance: only applied/no-change establishes a
+completed write; pending/unknown is not persisted. There is no Otto completion
+polling endpoint; use the service's review/status interface.
 
-Errors:
+#### Requests, uploads and failures
 
-- The session shows a fixed warning or tool error text for the failure kind,
-  for example `memory service unavailable` or `memory scope is not authorized`.
-  The service's `message` is never shown to the model or the user.
-- Each failed request writes one `memory_request_failed`
-  [log line](#remote-memory-log-lines) with the endpoint, HTTP status, error
-  code and the service message truncated to 512 bytes.
-- A write that times out or fails in transport after the request was sent
-  reports an unknown outcome: the service may have applied it.
+Before each textual user input Otto recalls with redacted input. It accepts only
+complete, fully valid responses and injects escaped untrusted reference data.
+Errors, partial/unknown coverage, invalid scope/order/fields/header or rendered
+budget violations discard the **whole** result. The task continues without
+memory, never an incomplete subset, another tenant or local-files fallback.
+Organization memory is reference data, not outage-proof policy enforcement:
+required organization rules need a separate authenticated host-policy channel.
+Image-only inputs get no recall. Suppressed memory can remain in the current
+turn's context until the next user input.
+
+Explicit `remember`, `forget` and human `/remember` return receipts. Pending
+means accepted for later decision, not completion. A write timeout, cancellation
+or malformed response after possible delivery reports unknown outcome: the
+service may already have applied it. There is no automatic retry or durable
+local write outbox. Re-read exact state or use service status before a new write.
+An explicit replay must reuse identical request ID/body within retention:
+while it could commit and at least 24 hours after terminal resolution. Deferred
+commits recheck ACLs, revisions and key uniqueness; revoked membership cannot
+be bypassed by replaying a pending request.
+
+Finished parent turns upload in the background: user text, assistant replies,
+tool calls/results; no images/reasoning or separate subagent sessions. Subagent
+final reports may appear in the parent's tool results. The service may extract
+only authorized project or selected personal memory, never organization memory.
+Acceptance is not extraction completion. Drop whole turns over 4 MiB or on
+redaction markers/credential shapes (URI userinfo, private key delimiters,
+credential headers/assignments). One worker, queue 8, nonblocking enqueue,
+per-session order, no retry/spool/replay; failed/full-queue turns are lost.
+Shutdown drains for at most 30 s; restart does not recover discarded work.
+
+Local review/advice and `otto memory` subcommands remain unsupported for remote,
+as do `/memory list`, `/memory show`, `/memory search`, `/memory forget` and
+`/memory review`; they point to service management and never read the local files
+store. `/remember` is supported with origin `human`: default destination as above,
+`--scope user` for personal memory, or explicitly human `--scope organization`.
+`--key` supplies authoritative key, not metadata; `--kind` remains non-authoritative
+metadata. Automatic reflection does not run; `/reflect` and `auto = "on_exit"`
+report memory unavailable.
+
+The session shows fixed warnings/tool errors, never the service's untrusted
+message. Each failed request logs endpoint/status/code and at most 512 bytes
+of diagnostic message; logs omit token, queries, memory text and uploaded bodies.
+See [Remote memory log lines](#remote-memory-log-lines).
+
+| Failure | Actionable recovery |
+| --- | --- |
+| Missing token | Set the chosen variable in the runtime's environment and restart. |
+| Unauthorized (401) | Check token validity and service principal/subject mapping. |
+| Forbidden (403) | Check organization membership, delegation and project/write ACLs. |
+| Conflict (409) | Re-read exact item/revision; resolve duplicate key or request identity, never blindly overwrite. |
+| Invalid input/version (400) | Correct configuration/input or coordinate client/service schema deployment. |
+| Too large (413) | Reduce explicit input; oversized turns are dropped. |
+| Rate limited/unavailable/timeout | Check service/connectivity; continue without recall, explicitly try later if appropriate. Possible delivered writes remain unknown. |
+
+#### Coordinated v1 cutover
+
+This is an incompatible **in-place v1 replacement**, not a v2 or dual protocol.
+Stop old clients, deploy the external service with the new schema/ACLs, update
+Otto through its normal installation path, configure required
+`memory.remote.organization`, restart and smoke-test recall/remember/search.
+The unchanged `/v1/` path and `1.0` header do not imply old-body compatibility.
+There is no default organization, automatic import/migration or old-wire fallback.
+Old tenantless references fail safely; obtain new references in the selected
+tenant. Session-history loading and public embedding constructors remain
+compatible; remote embeddings must explicitly supply tenant coordinates.
+The repository does not implement or migrate remote service storage.
+Configuration changes take effect on runtime restart; local and remote backends
+never synchronize each other's memory. Startup, turn acceptance and pending
+receipts are not successful readiness/persistence checks.
 
 #### Remote memory log lines
 

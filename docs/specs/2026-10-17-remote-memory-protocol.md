@@ -1,6 +1,11 @@
 # Remote memory service protocol
 
-Status: approved 2026-10-17.
+Status: superseded by the approved
+[organization/workspace/personal scope redesign](2026-10-17-remote-memory-scope-redesign.md)
+on 2026-10-17. Historical rationale only; the
+[protocol manual](../manual/remote-memory-protocol.md) owns the current in-place
+v1 contract. The unchanged `/v1/` path does not imply compatibility with this
+original design.
 
 ## Problem
 

@@ -1,1 +1,13 @@
-{"state":"applied","id":"m-17","revision":"5"}
+{
+  "request_id": "0123456789abcdef0123456789abcdef",
+  "state": "applied",
+  "item": {
+    "organization_id": "acme",
+    "scope": {
+      "namespace": "user",
+      "id": "alice"
+    },
+    "id": "m-user",
+    "revision": "r8"
+  }
+}

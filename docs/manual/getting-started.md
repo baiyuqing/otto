@@ -404,6 +404,12 @@ managed organization policy, workspace-local, workspace-shared, user-global,
 and built-in defaults. `--config PATH` selects the user source; it does not
 remove project discovery or managed policy. Review explicitly selected user
 sources: they can supply credentials, sandbox grants and executable settings.
+For [remote memory](memory-and-extensions.md#remote-memory-service), configure
+required `memory.remote.organization`, selected user and token binding in the
+host user source. Organization/user/token authority cannot come from project
+overlays or model arguments. The token value comes only from the configured
+environment variable. Restart the affected runtime after configuration changes;
+startup does not probe the external memory service.
 
 | Source | Path |
 | --- | --- |

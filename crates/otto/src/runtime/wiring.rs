@@ -73,6 +73,7 @@ const SECRETS_EXCEED_REDACTION_LIMITS: &str =
 /// operation answers without touching a store.
 #[derive(Clone)]
 pub struct MemoryExtension {
+    pub organization_id: Option<String>,
     pub service: Arc<dyn otto_core::memory::MemoryService>,
     pub user_scope: otto_core::memory::Scope,
     pub mode: otto_core::memory::AuthorizationMode,
@@ -88,6 +89,7 @@ impl MemoryExtension {
         user_scope: otto_core::memory::Scope,
     ) -> Self {
         Self {
+            organization_id: None,
             service,
             user_scope,
             mode: otto_core::memory::AuthorizationMode::ReviewedChanges,
@@ -107,6 +109,12 @@ impl MemoryExtension {
         }
     }
 
+    /// Selects a host-authoritative tenant without breaking existing embedding constructors.
+    pub fn with_organization(mut self, organization_id: impl Into<String>) -> Self {
+        self.organization_id = Some(organization_id.into());
+        self
+    }
+
     pub fn with_learning(mut self, grant: otto_core::memory::LearningGrant) -> Self {
         self.mode = otto_core::memory::AuthorizationMode::DelegatedLearning;
         self.learning_grant = Some(grant);
@@ -115,6 +123,15 @@ impl MemoryExtension {
 
     pub fn validate(&self) -> otto_core::memory::Result<()> {
         self.user_scope.validate()?;
+        if self
+            .organization_id
+            .as_deref()
+            .is_some_and(|id| !otto_core::memory::valid_opaque_id(id, 128))
+        {
+            return Err(otto_core::memory::Error::new(
+                otto_core::memory::ErrorKind::InvalidInput,
+            ));
+        }
         self.client().map(|_| ())
     }
 
@@ -191,7 +208,9 @@ mod selected_memory_tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(port::RecallResult {
                 items: vec![port::RecallItem {
+                    remote: None,
                     reference: Some(port::MemoryRef {
+                        organization_id: None,
                         service: "independent-service".into(),
                         scope: request.context.scopes[0].clone(),
                         id: "opaque-item".into(),
@@ -218,6 +237,7 @@ mod selected_memory_tests {
             id: "host-workspace".into(),
         };
         port::MemoryContext {
+            organization_id: None,
             principal: "host-user".into(),
             scopes: vec![user, workspace.clone()],
             write_scope: Some(workspace),
@@ -347,6 +367,7 @@ impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
             .client
             .recall(
                 &port::RecallRequest {
+                    scope_filter: None,
                     context: self.context.clone(),
                     query: request.query.clone(),
                     limit: usize::try_from(request.limit)
@@ -386,12 +407,14 @@ impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
                             format!("Resource reference ({media_type}): {uri}")
                         }
                     },
+                    remote: item.remote,
                     standing: false,
                 }
             })
             .collect();
         // Provider token counts are advisory. Bound the complete rendered host
         // projection independently, using bytes as a conservative token bound.
+        let remote = records.iter().any(|record| record.remote.is_some());
         let mut admitted = Vec::new();
         let budget = usize::try_from(request.token_budget)
             .unwrap_or(0)
@@ -399,6 +422,11 @@ impl otto_core::agent::memory::MemoryRecall for ServiceBinding {
         for record in records {
             admitted.push(record);
             if agent::render_memory_context(&admitted).len() > budget {
+                if remote {
+                    return Err(agent::MemoryError(
+                        "remote memory rendering exceeds budget".into(),
+                    ));
+                }
                 admitted.pop();
             }
         }
@@ -767,9 +795,22 @@ impl Builder {
             .map(|extension| extension.user_scope.clone())
             .unwrap_or_else(|| neutral_scope(&self.memory.user_scope));
         let workspace = neutral_scope(&self.workspace_scope);
+        let organization_id = self
+            .memory
+            .extension
+            .as_ref()
+            .and_then(|extension| extension.organization_id.clone());
+        let mut scopes = vec![user.clone(), workspace.clone()];
+        if let Some(id) = &organization_id {
+            scopes.push(otto_core::memory::Scope {
+                namespace: "organization".into(),
+                id: id.clone(),
+            });
+        }
         otto_core::memory::MemoryContext {
+            organization_id,
             principal: user.id.clone(),
-            scopes: vec![user, workspace.clone()],
+            scopes,
             write_scope: Some(workspace.clone()),
             workspace_id: Some(workspace.id),
             session_id,

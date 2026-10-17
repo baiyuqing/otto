@@ -100,6 +100,9 @@ impl Scope {
 impl MemoryContext {
     pub fn validate(&self) -> Result<()> {
         id(&self.principal)?;
+        if let Some(organization) = &self.organization_id {
+            require(valid_opaque_id(organization, 128))?;
+        }
         require(!self.scopes.is_empty() && self.scopes.len() <= MAX_SCOPES)?;
         unique(&self.scopes)?;
         for scope in &self.scopes {
@@ -129,6 +132,12 @@ impl MemoryRef {
         id(&self.id)?;
         optional_id(&self.revision)?;
         require(self.service == service)?;
+        if self.organization_id != context.organization_id {
+            return Err(Error::new(ErrorKind::Unauthorized));
+        }
+        if service == "remote" && (self.organization_id.is_none() || self.revision.is_none()) {
+            return Err(invalid());
+        }
         context.validate_scope(&self.scope)
     }
 }
@@ -162,6 +171,15 @@ impl RecallItem {
             reference.validate(context, service)?;
         }
         self.content.validate()?;
+        if let Some(remote) = &self.remote {
+            let reference = self.reference.as_ref().ok_or_else(invalid)?;
+            require(reference.organization_id.as_deref() == Some(remote.organization_id.as_str()))?;
+            require(reference.revision.as_deref() == Some(remote.revision.as_str()))?;
+            require(remote.key.as_deref().is_none_or(valid_memory_key))?;
+            if remote.view == MemoryView::Effective {
+                require(!remote.pinned || remote.mandatory)?;
+            }
+        }
         sources(&self.sources)?;
         projection_metadata(&self.metadata)
     }
@@ -178,6 +196,18 @@ fn items(values: &[RecallItem], context: &MemoryContext, service: &str) -> Resul
 impl RecallRequest {
     pub fn validate(&self) -> Result<()> {
         self.context.validate()?;
+        if let Some(filter) = &self.scope_filter {
+            require(!filter.is_empty())?;
+            unique(filter)?;
+            for namespace in filter {
+                require(
+                    self.context
+                        .scopes
+                        .iter()
+                        .any(|scope| scope.namespace == namespace.as_str()),
+                )?;
+            }
+        }
         text(&self.query, MAX_QUERY_BYTES, true)?;
         require(self.limit > 0 && self.limit <= MAX_ITEMS)?;
         require(self.token_budget > 0 && self.token_budget <= MAX_TOKEN_BUDGET)
@@ -278,6 +308,7 @@ impl ObserveRequest {
 }
 impl RememberRequest {
     pub fn validate(&self, service: &str) -> Result<()> {
+        require(self.key.as_deref().is_none_or(valid_memory_key))?;
         request(&self.context, &self.request_id)?;
         self.content.validate()?;
         if let Some(target) = &self.target {
@@ -535,4 +566,16 @@ impl Receipt {
         }
         Ok(())
     }
+}
+
+/// Stable semantic slot; punctuation separates nonempty lower-case alphanumeric segments.
+pub fn valid_memory_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key.split(['.', '_', '-']).all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }

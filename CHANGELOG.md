@@ -17,6 +17,8 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Remote `memory_search` now treats an empty optional `id` as omitted and reports the actionable `use either id or query, not both` error when both inputs are non-empty, matching the files backend.
+
 - HTTP session creation and fork accept an optional `request_id`. Retrying after a lost response returns the original session, including after server restart. Reusing a fork request id with different arguments returns `409 request_id_conflict`; requests without an id keep their behavior.
 
 - Memory records, tombstones and candidates are now plain files under

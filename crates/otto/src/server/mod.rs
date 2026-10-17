@@ -47,6 +47,7 @@ use otto_core::model::{Block, MAX_IMAGE_BYTES, Message, Usage};
 use otto_core::session::ListResult;
 use otto_core::wire::sse::format_frame;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -112,6 +113,15 @@ pub trait Factory: Send + Sync {
     /// A brand new session. `workspace` is the canonical path of an already
     /// admitted-and-loaded workspace; `None` means the startup workspace.
     async fn create(&self, workspace: Option<&str>) -> Result<Controller, String>;
+    /// Create a session with a durable command receipt before acknowledging it.
+    async fn create_with_receipt(
+        &self,
+        _workspace: Option<&str>,
+        _id: String,
+        _request_id: &str,
+    ) -> Result<Controller, String> {
+        Err("idempotent session creation is unavailable".into())
+    }
     /// An existing session by id. [`SESSION_NOT_FOUND`] means 404.
     /// `workspace` searches just that workspace; `None` searches every
     /// loaded workspace.
@@ -2266,6 +2276,25 @@ struct CreateBody {
     /// every loaded workspace when absent.
     #[serde(default)]
     workspace: Option<String>,
+    /// Stable identity for retries of a new-session command.
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+fn command_session_id(kind: &str, workspace: &str, request_id: &str) -> String {
+    let mut hash = Sha256::new();
+    for part in ["otto.session-command.v1", kind, workspace, request_id] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    hash.finalize()[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn valid_command_id(id: &str) -> bool {
+    otto_core::model::is_input_id(id)
 }
 
 async fn create_session(State(server): State<Arc<Server>>, body: Bytes) -> Response {
@@ -2286,6 +2315,73 @@ async fn create_session(State(server): State<Arc<Server>>, body: Bytes) -> Respo
         },
         None => None,
     };
+
+    if let Some(request_id) = parsed.request_id.as_deref() {
+        if !valid_command_id(request_id) {
+            return bad_request(
+                "request_id must be 1 to 128 ASCII letters, digits, '.', '_', ':' or '-'",
+            );
+        }
+        if !parsed.resume.is_empty() {
+            return bad_request("request_id is only valid when creating a session");
+        }
+        let path = workspace.as_deref().unwrap_or(&server.info.workspace);
+        let id = command_session_id("create", path, request_id);
+        let _gate = server.open_gate.lock().await;
+        let existing = match server.lookup(&id) {
+            Some(session) => Some(session),
+            None => match server.factory.open(&id, Some(path)).await {
+                Ok(ctrl) => Some(server.register(ctrl)),
+                Err(error) if error == SESSION_NOT_FOUND => None,
+                Err(error) => return internal_error(&server.log, &error),
+            },
+        };
+        if let Some(session) = existing {
+            let receipt = session.ctrl.session_custom_data("otto.session_command");
+            if receipt.is_none()
+                && session.ctrl.history().is_empty()
+                && session
+                    .ctrl
+                    .session_custom_data(otto_core::session::FORK_CUSTOM_TYPE)
+                    .is_none()
+            {
+                // A crash after the header write but before the receipt can
+                // leave an otherwise empty deterministic session file.
+                return match session.ctrl.write_session_command_receipt(request_id).await {
+                    Ok(()) => json_response(StatusCode::OK, &server.session_wire(&session)),
+                    Err(error) => internal_error(&server.log, &error),
+                };
+            }
+            let matches = receipt
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .is_some_and(|value| {
+                    value["command"] == "create"
+                        && value["requestId"] == request_id
+                        && session.ctrl.workspace() == path
+                });
+            return if matches {
+                json_response(StatusCode::OK, &server.session_wire(&session))
+            } else {
+                error_response(
+                    StatusCode::CONFLICT,
+                    "request_id_conflict",
+                    "request_id belongs to a different session command",
+                )
+            };
+        }
+        return match server
+            .factory
+            .create_with_receipt(Some(path), id, request_id)
+            .await
+        {
+            Ok(ctrl) => json_response(
+                StatusCode::CREATED,
+                &server.session_wire(&server.register(ctrl)),
+            ),
+            Err(error) => internal_error(&server.log, &error),
+        };
+    }
 
     match server
         .resume_or_create(&parsed.resume, workspace.as_deref())
@@ -2444,6 +2540,8 @@ struct ForkBody {
     /// history up to the last turn boundary.
     #[serde(default)]
     before: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2462,9 +2560,6 @@ async fn fork_session(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Response {
-    let Some(session) = server.lookup(&id) else {
-        return not_found("session not found");
-    };
     let parsed: ForkBody = if body.iter().all(u8::is_ascii_whitespace) {
         ForkBody::default()
     } else {
@@ -2473,6 +2568,86 @@ async fn fork_session(
             Err(_) => return bad_request("invalid JSON body"),
         }
     };
+    let session = if parsed.request_id.is_some() {
+        match server.resume_or_create(&id, None).await {
+            Ok((session, _)) => session,
+            Err(error) if error == SESSION_NOT_FOUND => return not_found("session not found"),
+            Err(error) => return internal_error(&server.log, &error),
+        }
+    } else {
+        let Some(session) = server.lookup(&id) else {
+            return not_found("session not found");
+        };
+        session
+    };
+    if let Some(request_id) = parsed.request_id.as_deref() {
+        if !valid_command_id(request_id) {
+            return bad_request(
+                "request_id must be 1 to 128 ASCII letters, digits, '.', '_', ':' or '-'",
+            );
+        }
+        let workspace = session.ctrl.info().workspace;
+        let fork_id = command_session_id("fork", &workspace, request_id);
+        let _gate = server.open_gate.lock().await;
+        let existing = match server.lookup(&fork_id) {
+            Some(open) => Some(open),
+            None => match server.factory.open(&fork_id, Some(&workspace)).await {
+                Ok(ctrl) => Some(server.register(ctrl)),
+                Err(error) if error == SESSION_NOT_FOUND => None,
+                Err(error) => return internal_error(&server.log, &error),
+            },
+        };
+        if let Some(open) = existing {
+            let record = open
+                .ctrl
+                .session_custom_data(otto_core::session::FORK_CUSTOM_TYPE)
+                .and_then(|raw| otto_core::session::decode_fork_record(&raw));
+            return match record {
+                Some(record)
+                    if record.request_id.as_deref() == Some(request_id)
+                        && record.source_session_id == id
+                        && record.source_entry_id.as_deref() == parsed.before.as_deref() =>
+                {
+                    json_response(
+                        StatusCode::OK,
+                        &ForkedWire {
+                            session: server.session_wire(&open),
+                            prompt: record.prompt,
+                        },
+                    )
+                }
+                _ => error_response(
+                    StatusCode::CONFLICT,
+                    "request_id_conflict",
+                    "request_id belongs to a different fork command",
+                ),
+            };
+        }
+        let forked = match session.ctrl.fork_file_with_id(
+            parsed.before.as_deref(),
+            Some(&fork_id),
+            Some(request_id),
+        ) {
+            Ok(forked) => forked,
+            Err(app::ForkFailure::InvalidPoint(message)) => {
+                return error_response(StatusCode::CONFLICT, "invalid_fork_point", &message);
+            }
+            Err(app::ForkFailure::Failed(message)) if message == app::NOTHING_TO_FORK => {
+                return error_response(StatusCode::CONFLICT, "invalid_fork_point", &message);
+            }
+            Err(app::ForkFailure::Failed(message)) => return internal_error(&server.log, &message),
+        };
+        return match server.factory.open(&forked.id, Some(&workspace)).await {
+            Ok(ctrl) => json_response(
+                StatusCode::CREATED,
+                &ForkedWire {
+                    session: server.session_wire(&server.register(ctrl)),
+                    prompt: forked.point.map(|point| point.prompt),
+                },
+            ),
+            Err(error) => internal_error(&server.log, &error),
+        };
+    }
     let forked = match session.ctrl.fork_file(parsed.before.as_deref()) {
         Ok(forked) => forked,
         Err(app::ForkFailure::InvalidPoint(message)) => {
@@ -3589,6 +3764,18 @@ mod tests {
             Ok(self.controller_for(&id, workspace))
         }
 
+        async fn create_with_receipt(
+            &self,
+            workspace: Option<&str>,
+            id: String,
+            request_id: &str,
+        ) -> Result<Controller, String> {
+            self.create_calls.fetch_add(1, Ordering::SeqCst);
+            let ctrl = self.controller_for(&id, workspace);
+            ctrl.write_session_command_receipt(request_id).await?;
+            Ok(ctrl)
+        }
+
         async fn open(&self, id: &str, workspace: Option<&str>) -> Result<Controller, String> {
             self.open_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(gate) = &self.open_gate {
@@ -3596,6 +3783,17 @@ mod tests {
             }
             if let Some(error) = &self.open_error {
                 return Err(error.clone());
+            }
+            if self.persistent {
+                let path = crate::session::session_directory(
+                    std::path::Path::new(&self.builder.session_root),
+                    workspace.unwrap_or(&self.builder.workspace_path),
+                )
+                .map_err(|error| error.to_string())?
+                .join(format!("{id}.jsonl"));
+                if !path.is_file() {
+                    return Err(SESSION_NOT_FOUND.into());
+                }
             }
             Ok(self.controller_for(id, workspace))
         }
@@ -3875,6 +4073,26 @@ mod tests {
     impl Harness {
         fn new() -> Self {
             Self::with(HarnessOptions::default())
+        }
+
+        async fn restart(&mut self) {
+            self.server.close().await.expect("close server");
+            let server = Server::new(Options {
+                factory: Arc::clone(&self.factory) as Arc<dyn Factory>,
+                info: Info {
+                    workspace: self.factory.builder.workspace_path.clone(),
+                    ..Info::default()
+                },
+                config_path: self.factory.builder.shared.config_path.clone(),
+                token: String::new(),
+                logger: Some(Arc::new(Logger::discard())),
+                workflows: None,
+                schedule: None,
+                session_idle_timeout: None,
+                max_open_sessions: None,
+            });
+            self.router = server.router();
+            self.server = server;
         }
 
         fn with(options: HarnessOptions) -> Self {
@@ -4693,6 +4911,185 @@ mod tests {
             .await;
         assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
         assert_eq!(reply.json()["error"]["code"], "invalid_fork_point");
+    }
+
+    #[tokio::test]
+    async fn session_create_retry_returns_the_original_after_restart() {
+        let mut harness = Harness::with(HarnessOptions {
+            persistent: true,
+            ..HarnessOptions::default()
+        });
+        let body = r#"{"request_id":"create-1"}"#;
+        let first = harness.send("POST", "/v1/sessions", Some(body)).await;
+        assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+        let id = first.json()["id"].as_str().unwrap().to_string();
+        let file = crate::session::session_directory(
+            std::path::Path::new(&harness.factory.builder.session_root),
+            &harness.factory.builder.workspace_path,
+        )
+        .unwrap()
+        .join(format!("{id}.jsonl"));
+        assert!(
+            file.is_file(),
+            "the acknowledgement requires a durable receipt"
+        );
+        let retry = harness.send("POST", "/v1/sessions", Some(body)).await;
+        assert_eq!(retry.status, StatusCode::OK);
+        assert_eq!(retry.json()["id"], id);
+        assert_eq!(harness.factory.create_calls.load(Ordering::SeqCst), 1);
+
+        harness.restart().await;
+        let retry = harness.send("POST", "/v1/sessions", Some(body)).await;
+        assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+        assert_eq!(retry.json()["id"], id);
+        assert_eq!(harness.factory.create_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_session_create_retries_create_once() {
+        let harness = Harness::with(HarnessOptions {
+            persistent: true,
+            ..HarnessOptions::default()
+        });
+        let body = r#"{"request_id":"create-concurrent"}"#;
+        let (a, b) = tokio::join!(
+            harness.send("POST", "/v1/sessions", Some(body)),
+            harness.send("POST", "/v1/sessions", Some(body)),
+        );
+        assert_eq!(
+            [a.status, b.status]
+                .into_iter()
+                .filter(|status| *status == StatusCode::CREATED)
+                .count(),
+            1
+        );
+        assert_eq!(a.json()["id"], b.json()["id"]);
+        assert_eq!(harness.factory.create_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn create_retry_repairs_a_header_written_before_its_receipt() {
+        let harness = Harness::with(HarnessOptions {
+            persistent: true,
+            ..HarnessOptions::default()
+        });
+        let id = command_session_id(
+            "create",
+            &harness.factory.builder.workspace_path,
+            "partial-1",
+        );
+        let header = Header {
+            version: CURRENT_VERSION,
+            id: id.clone(),
+            workspace: harness.factory.builder.workspace_path.clone(),
+            provider: "openai-compatible".into(),
+            profile: "alpha".into(),
+            model: "test-model".into(),
+            created_at: chrono::Utc::now(),
+        };
+        crate::session::Store::create(&harness.factory.builder.session_root, header)
+            .expect("header written")
+            .close()
+            .expect("close partial file");
+        let response = harness
+            .send(
+                "POST",
+                "/v1/sessions",
+                Some(r#"{"request_id":"partial-1"}"#),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+        assert_eq!(response.json()["id"], id);
+        assert!(
+            harness
+                .server
+                .lookup(&id)
+                .unwrap()
+                .ctrl
+                .session_custom_data("otto.session_command")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_fork_retries_publish_one_copy() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["answer".into()],
+                ..Script::default()
+            },
+            persistent: true,
+            ..HarnessOptions::default()
+        });
+        let source = harness.create().await;
+        complete_turn(&harness, &source, "first").await;
+        let path = format!("/v1/sessions/{source}/fork");
+        let body = r#"{"request_id":"fork-concurrent"}"#;
+        let (a, b) = tokio::join!(
+            harness.send("POST", &path, Some(body)),
+            harness.send("POST", &path, Some(body)),
+        );
+        assert_eq!(
+            [a.status, b.status]
+                .into_iter()
+                .filter(|status| *status == StatusCode::CREATED)
+                .count(),
+            1
+        );
+        assert_eq!(a.json()["id"], b.json()["id"]);
+    }
+
+    #[tokio::test]
+    async fn fork_retry_returns_one_copy_and_rejects_changed_arguments() {
+        let mut harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["answer".into()],
+                ..Script::default()
+            },
+            persistent: true,
+            ..HarnessOptions::default()
+        });
+        let source = harness.create().await;
+        complete_turn(&harness, &source, "first").await;
+        complete_turn(&harness, &source, "second").await;
+        let points = harness
+            .send("GET", &format!("/v1/sessions/{source}/fork-points"), None)
+            .await
+            .json();
+        let before = points["fork_points"][1]["entry_id"].as_str().unwrap();
+        let body = serde_json::json!({"before":before,"request_id":"fork-1"}).to_string();
+        let path = format!("/v1/sessions/{source}/fork");
+        let first = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+        let fork_id = first.json()["id"].as_str().unwrap().to_string();
+        let retry = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+        assert_eq!(retry.json()["id"], fork_id);
+        assert_eq!(retry.json()["prompt"], "second");
+        complete_turn(&harness, &source, "third").await;
+        let retry_after_source_changed = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(retry_after_source_changed.status, StatusCode::OK);
+        assert_eq!(retry_after_source_changed.json()["id"], fork_id);
+        let changed = serde_json::json!({"request_id":"fork-1"}).to_string();
+        let conflict = harness.send("POST", &path, Some(&changed)).await;
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(conflict.json()["error"]["code"], "request_id_conflict");
+        let other_source = harness.create().await;
+        complete_turn(&harness, &other_source, "other").await;
+        let wrong_source = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{other_source}/fork"),
+                Some(&changed),
+            )
+            .await;
+        assert_eq!(wrong_source.status, StatusCode::CONFLICT);
+        assert_eq!(wrong_source.json()["error"]["code"], "request_id_conflict");
+
+        harness.restart().await;
+        let retry = harness.send("POST", &path, Some(&body)).await;
+        assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+        assert_eq!(retry.json()["id"], fork_id);
     }
 
     #[tokio::test]

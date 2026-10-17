@@ -35,13 +35,24 @@ pub struct Forked {
 /// Writes a fork of the session at `source` as `<new_id>.jsonl` in the same
 /// directory. `before` names the turn-opening user message to stop before;
 /// `None` keeps everything up to the last turn boundary.
+#[cfg(test)]
 pub fn fork(
     driver: &dyn FileDriver,
     source: &Path,
     before: Option<&str>,
     new_id: &str,
 ) -> Result<Forked, ForkError> {
-    fork_with(driver, source, before, new_id, &PosixPublish)
+    fork_with_request(driver, source, before, new_id, None)
+}
+
+pub fn fork_with_request(
+    driver: &dyn FileDriver,
+    source: &Path,
+    before: Option<&str>,
+    new_id: &str,
+    request_id: Option<&str>,
+) -> Result<Forked, ForkError> {
+    fork_with(driver, source, before, new_id, request_id, &PosixPublish)
 }
 
 /// [`fork`] with the publish system calls supplied, so tests can fail one.
@@ -50,6 +61,7 @@ pub(crate) fn fork_with(
     source: &Path,
     before: Option<&str>,
     new_id: &str,
+    request_id: Option<&str>,
     publish: &dyn PublishOps,
 ) -> Result<Forked, ForkError> {
     let mut file = open_path_journal(driver, source, JournalOpen::ReadOnly)?;
@@ -103,6 +115,7 @@ pub(crate) fn fork_with(
         source_session_id: decoded.header.id.clone(),
         source_entry_id: plan.point.as_ref().map(|point| point.entry_id.clone()),
         prompt: plan.point.as_ref().map(|point| point.prompt.clone()),
+        request_id: request_id.map(str::to_owned),
     };
     let id = fsops::new_pi_entry_id(&seen)?;
     let mut entry = PiEntry::new("custom", &id, parent, &timestamp);

@@ -24,24 +24,3 @@ pub trait TaskRegistry {
     /// twice is allowed and does nothing the second time.
     fn close(&self);
 }
-
-/// A registry that holds no tasks. It is what an agent gets when subagents
-/// are not configured, so the shutdown path needs no null check.
-#[derive(Debug, Default)]
-pub struct NoTasks;
-
-impl TaskRegistry for NoTasks {
-    fn close(&self) {}
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn closing_the_empty_registry_twice_is_allowed() {
-        let tasks = NoTasks;
-        tasks.close();
-        tasks.close();
-    }
-}

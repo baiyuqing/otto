@@ -248,17 +248,6 @@ impl Catalog {
     }
 }
 
-/// The directories agent definitions are discovered in, in precedence order:
-/// the user's home directory first, then the workspace.
-pub fn roots(home: Option<&Path>, workspace: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::with_capacity(2);
-    if let Some(home) = home {
-        roots.push(home.join(".otto").join("agents"));
-    }
-    roots.push(workspace.join(".otto").join("agents"));
-    roots
-}
-
 /// Reads `AGENT.md` below `root_fs`.
 ///
 /// `Ok(None)` means "not a definition": the file is missing, is not regular,
@@ -796,22 +785,6 @@ mod tests {
         assert_eq!(names, ["alpha", "mid", "zebra"]);
         assert!(catalog.lookup("alpha").is_some());
         assert!(catalog.lookup("missing").is_none());
-    }
-
-    /// The discovery roots, in the precedence order the runner relies on.
-    #[test]
-    fn roots_put_the_home_directory_before_the_workspace() {
-        assert_eq!(
-            roots(Some(Path::new("/home/u")), Path::new("/w")),
-            vec![
-                PathBuf::from("/home/u/.otto/agents"),
-                PathBuf::from("/w/.otto/agents"),
-            ]
-        );
-        assert_eq!(
-            roots(None, Path::new("/w")),
-            vec![PathBuf::from("/w/.otto/agents")]
-        );
     }
 }
 

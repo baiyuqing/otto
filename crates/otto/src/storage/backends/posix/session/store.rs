@@ -512,10 +512,6 @@ impl Store {
         state.owns_lease = false;
     }
 
-    pub fn set_writer_ownership_check(&self, ownership: Arc<dyn crate::session::WriterOwnership>) {
-        self.set_lease_check(ownership);
-    }
-
     pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, StoreState>, PiError> {
         self.state
             .lock()
@@ -594,12 +590,6 @@ impl Store {
             .expect("session mutex")
             .latest_compaction
             .clone()
-    }
-
-    /// The model thinking effort recorded on this session, empty for the
-    /// provider default.
-    pub fn thinking_level(&self) -> String {
-        self.lock().expect("session mutex").thinking_level.clone()
     }
 
     /// Records the thinking effort for this session. A no-op when unchanged;

@@ -33,7 +33,6 @@ fn memory_error(failure: &crate::memory::Error) -> super::Error {
         | ErrorKind::Unavailable
         | ErrorKind::Closed
         | ErrorKind::PersistenceDisabled
-        | ErrorKind::MemoryInUse
         | ErrorKind::Busy => MEMORY_UNAVAILABLE,
         ErrorKind::Conflict => MEMORY_CONFLICT,
         ErrorKind::NotFound => RESOURCE_NOT_FOUND,

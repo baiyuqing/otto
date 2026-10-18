@@ -266,16 +266,6 @@ pub fn parse(text: &str) -> Result<File, ConfigError> {
     }
 }
 
-/// One line per unknown `[experimental]` key, for a caller to print as a
-/// startup warning. Empty when the table has none.
-pub fn experimental_warnings(file: &File) -> Vec<String> {
-    file.experimental
-        .unknown
-        .keys()
-        .map(|key| format!("unknown [experimental] key: {key}"))
-        .collect()
-}
-
 /// Sets the top-level `default_profile` of `content` to `profile`, changing
 /// only that value; see [`edit::set_value`] for the layout and errors.
 pub fn set_default_profile(content: &str, profile: &str) -> Result<String, ConfigError> {
@@ -553,7 +543,6 @@ model = "gpt-5-codex"
         let file = parse("").expect("parse");
         assert_eq!(file.experimental.typesafe_skill_check, None);
         assert_eq!(file.skills.typesafe_skill_check, None);
-        assert!(experimental_warnings(&file).is_empty());
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -565,7 +554,7 @@ model = "gpt-5-codex"
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn experimental_unknown_key_parses_and_warns() {
+    fn experimental_unknown_key_parses() {
         let file = parse(
             r#"[experimental]
 typesafe_skill_check = true
@@ -574,9 +563,5 @@ future_thing = "x"
         )
         .expect("parse");
         assert_eq!(file.experimental.typesafe_skill_check, Some(true));
-        assert_eq!(
-            experimental_warnings(&file),
-            vec!["unknown [experimental] key: future_thing".to_string()]
-        );
     }
 }

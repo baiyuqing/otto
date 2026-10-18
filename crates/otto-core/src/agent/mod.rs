@@ -406,18 +406,6 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             .await
     }
 
-    /// Runs one turn with an optional image under operation-wide control.
-    pub async fn run_with_image_control(
-        &self,
-        user_text: &str,
-        image: Option<Block>,
-        emit: EventSink<'_>,
-        control: &dyn OperationControl,
-    ) -> Result<(), AgentError> {
-        self.run_with_image_system_context_control(user_text, image, "", emit, control)
-            .await
-    }
-
     pub async fn run_with_image_system_context_control(
         &self,
         user_text: &str,

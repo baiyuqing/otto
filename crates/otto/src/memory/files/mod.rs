@@ -40,8 +40,8 @@ use crate::fsops::{self, PosixPublish, Publish, PublishMode};
 use crate::memory::guard::{ContentGuard, guard_candidate, guard_record};
 use crate::memory::repository::MemoryOptions;
 use crate::memory::{
-    Candidate, Error, ErrorKind, GuardField, GuardInput, MAX_DUPLICATE_ID_RETRIES, MAX_ID_BYTES,
-    Record, Result, Scope, StoreIdentity, Tombstone,
+    Candidate, Error, ErrorKind, GuardField, GuardInput, MAX_ID_BYTES, Record, Result, Scope,
+    StoreIdentity, Tombstone,
 };
 
 #[cfg(test)]
@@ -266,7 +266,6 @@ impl Snapshot {
 pub struct FileStore {
     root: PathBuf,
     guard: Box<dyn ContentGuard>,
-    new_id: Box<dyn Fn() -> Result<String> + Send + Sync>,
     busy_timeout: Duration,
     database_id: String,
     user_scope: Scope,
@@ -307,7 +306,6 @@ impl FileStore {
         let store = Self {
             root: root.to_path_buf(),
             guard: options.guard,
-            new_id: options.new_id,
             busy_timeout: options.busy_timeout,
             database_id: identity.database_id,
             user_scope: Scope::new(crate::memory::NAMESPACE_USER, identity.user_scope_id),
@@ -341,17 +339,6 @@ impl FileStore {
 
     pub fn guard(&self) -> &dyn ContentGuard {
         self.guard.as_ref()
-    }
-
-    /// Mints an ID that is not already in `taken`.
-    pub fn mint_id(&self, taken: &[String]) -> Result<String> {
-        for _ in 0..=MAX_DUPLICATE_ID_RETRIES {
-            let id = (self.new_id)()?;
-            if !taken.contains(&id) {
-                return Ok(id);
-            }
-        }
-        Err(Error::new(ErrorKind::Unavailable))
     }
 
     pub fn close(&self) -> Result<()> {

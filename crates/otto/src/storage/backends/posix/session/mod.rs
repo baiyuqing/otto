@@ -55,9 +55,6 @@ impl SessionHandle for Store {
     fn rename(&self, name: &str) -> Result<(), String> {
         Store::rename(self, name).map_err(|error| error.to_string())
     }
-    fn thinking_level(&self) -> String {
-        Store::thinking_level(self)
-    }
     fn update_thinking_level(&self, value: &str) -> Result<(), String> {
         Store::update_thinking_level(self, value).map_err(|error| error.to_string())
     }

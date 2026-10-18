@@ -7,16 +7,8 @@
 use sha2::{Digest, Sha256};
 
 use super::contracts::{
-    Error, MAX_SCOPE_ID_BYTES, NAMESPACE_USER, NAMESPACE_WORKSPACE, Result, Scope, invalid_request,
-    valid_opaque_id,
+    Error, MAX_SCOPE_ID_BYTES, NAMESPACE_WORKSPACE, Result, Scope, invalid_request, valid_opaque_id,
 };
-
-pub fn new_user_scope(installation_id: &str) -> Result<Scope> {
-    if !valid_opaque_id(installation_id, MAX_SCOPE_ID_BYTES) {
-        return Err(invalid_request("installation ID"));
-    }
-    Ok(Scope::new(NAMESPACE_USER, installation_id))
-}
 
 /// `stable_override` wins when set. Otherwise the path is made absolute, its
 /// symlinks are resolved, and the SHA-256 of the result becomes the ID.
@@ -50,16 +42,6 @@ fn contains_path_control(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn user_scope_requires_an_opaque_installation_id() {
-        assert_eq!(
-            new_user_scope("install-1").expect("scope"),
-            Scope::new(NAMESPACE_USER, "install-1")
-        );
-        assert!(new_user_scope("").is_err());
-        assert!(new_user_scope("has space").is_err());
-    }
 
     #[test]
     fn workspace_scope_prefers_the_stable_override() {

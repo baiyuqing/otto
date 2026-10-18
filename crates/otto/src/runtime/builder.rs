@@ -107,7 +107,6 @@ pub struct MemoryHandle {
 struct MemoryState {
     header: Header,
     name: String,
-    thinking_level: String,
     custom_data: HashMap<String, String>,
 }
 
@@ -119,7 +118,6 @@ impl MemoryHandle {
             state: Mutex::new(MemoryState {
                 header,
                 name: String::new(),
-                thinking_level: String::new(),
                 custom_data: HashMap::new(),
             }),
             writer_ownership: None,
@@ -251,17 +249,12 @@ impl SessionHandle for MemoryHandle {
         Ok(())
     }
 
-    fn thinking_level(&self) -> String {
-        self.state().thinking_level.clone()
-    }
-
     fn update_thinking_level(&self, thinking: &str) -> Result<(), String> {
         if !matches!(thinking, "" | "low" | "medium" | "high" | "xhigh" | "max") {
             return Err(
                 "invalid thinking: must be one of low, medium, high, xhigh, max".to_string(),
             );
         }
-        self.state().thinking_level = thinking.to_string();
         Ok(())
     }
 
@@ -353,10 +346,6 @@ impl SharedSession {
 
     pub fn rename(&self, name: &str) -> Result<(), String> {
         self.0.rename(name)
-    }
-
-    pub fn thinking_level(&self) -> String {
-        self.0.thinking_level()
     }
 
     pub fn update_thinking_level(&self, thinking: &str) -> Result<(), String> {
@@ -1156,17 +1145,6 @@ impl Runner {
             .await;
         self.report_lost_steering(&mut *emit).await;
         result
-    }
-
-    pub async fn run_with_image(
-        &self,
-        user_text: &str,
-        image: Block,
-        emit: EventSink<'_>,
-        cancel: &CancellationToken,
-    ) -> Result<(), AgentError> {
-        self.run_with_image_system_context(user_text, image, "", emit, cancel)
-            .await
     }
 
     pub async fn run_with_image_system_context(
@@ -4763,10 +4741,6 @@ mod tests {
 
         fn rename(&self, _name: &str) -> Result<(), String> {
             Ok(())
-        }
-
-        fn thinking_level(&self) -> String {
-            String::new()
         }
 
         fn update_thinking_level(&self, _thinking: &str) -> Result<(), String> {

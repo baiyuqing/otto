@@ -68,7 +68,6 @@ pub enum ErrorKind {
     Conflict,
     SensitiveMemory,
     Unsupported,
-    MemoryInUse,
     PersistenceDisabled,
     Busy,
     CommitUnknown,
@@ -79,7 +78,6 @@ pub enum ErrorKind {
     NotFound,
     Closed,
     InvalidCursor,
-    IncompleteForget,
     Canceled,
     /// It carries the decision as its detail.
     PolicyDecision,
@@ -93,7 +91,6 @@ impl ErrorKind {
             ErrorKind::Conflict => "memory revision conflict",
             ErrorKind::SensitiveMemory => "memory contains sensitive data",
             ErrorKind::Unsupported => "memory operation is unsupported",
-            ErrorKind::MemoryInUse => "memory is in use",
             ErrorKind::PersistenceDisabled => "memory persistence is disabled",
             ErrorKind::Busy => "memory store is busy",
             ErrorKind::CommitUnknown => "memory commit outcome is unknown",
@@ -104,9 +101,6 @@ impl ErrorKind {
             ErrorKind::NotFound => "memory entity not found",
             ErrorKind::Closed => "memory is closed",
             ErrorKind::InvalidCursor => "invalid memory cursor",
-            ErrorKind::IncompleteForget => {
-                "memory was forgotten but tombstone recording is incomplete"
-            }
             ErrorKind::Canceled => "context canceled",
             ErrorKind::PolicyDecision => "memory proposal was not queued for review",
         }
@@ -548,7 +542,6 @@ pub struct StandingUsage {
 #[derive(Debug, Clone)]
 pub struct RetrievalMatch {
     pub record: Record,
-    pub rank: usize,
     /// True when the record is in the standing set, including a workspace
     /// record that replaced its user-scope twin by key.
     pub standing: bool,

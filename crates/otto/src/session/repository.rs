@@ -23,7 +23,6 @@ pub trait SessionHandle: Session + Send + Sync {
     fn name(&self) -> String;
     fn path(&self) -> String;
     fn rename(&self, name: &str) -> Result<(), String>;
-    fn thinking_level(&self) -> String;
     fn update_thinking_level(&self, thinking: &str) -> Result<(), String>;
     fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String>;
     fn close(&self) -> Result<(), String>;

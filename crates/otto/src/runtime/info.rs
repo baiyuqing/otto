@@ -127,15 +127,6 @@ impl SandboxInfo {
         }
     }
 
-    /// The short badge a status bar shows.
-    pub fn badge(&self) -> &'static str {
-        match (self.mode, self.bash_available) {
-            (SandboxMode::Seatbelt, true) => "sb",
-            (SandboxMode::Off, true) => "unsafe",
-            _ => "no-bash",
-        }
-    }
-
     /// The machine-readable reason, empty unless the sandbox is unavailable.
     pub fn reason_code(&self) -> &'static str {
         if self.mode != SandboxMode::Unavailable {
@@ -175,7 +166,6 @@ mod tests {
             "seatbelt · workspace-write · network allowed"
         );
         assert_eq!(seatbelt_allowed.status_summary(), "sb · write · net");
-        assert_eq!(seatbelt_allowed.badge(), "sb");
         assert_eq!(seatbelt_allowed.reason_code(), "");
 
         let denied = SandboxInfo {
@@ -199,7 +189,6 @@ mod tests {
             off.status_summary(),
             "sandbox off · WARNING: bash is unsandboxed"
         );
-        assert_eq!(off.badge(), "unsafe");
 
         let unavailable = SandboxInfo::unavailable(SandboxReason::SelfTestFailed);
         assert_eq!(unavailable.summary(), "bash disabled · sandbox unavailable");
@@ -207,7 +196,6 @@ mod tests {
             unavailable.status_summary(),
             "bash disabled · sandbox unavailable"
         );
-        assert_eq!(unavailable.badge(), "no-bash");
         assert_eq!(unavailable.reason_code(), "self-test-failed");
     }
 

@@ -242,6 +242,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `otto serve` stopped, for example after a crash, is now reported as
   `unknown` after restart, as documented, instead of `running` indefinitely.
   It is not resumed.
+  ([#504](https://github.com/baiyuqing/otto/pull/504))
 
 - After `/resume`, `/fork` or `/new` in the terminal UI, `↑`/`↓` recall the
   prompts of the session now open instead of those typed before the switch.

@@ -1050,6 +1050,7 @@ impl Builder {
         let session_for_lease = session_for_children.clone();
         let session_for_recovery = session_for_children.clone();
         let session_for_inbox = session_for_children.clone();
+        let session_for_fork = session_for_children.clone();
         let session = session.clone();
         let (runner, warnings) = SubagentRunner::new(RunnerConfig {
             approval: Some((
@@ -1103,6 +1104,16 @@ impl Builder {
             parent_session: Some(Arc::new(move || {
                 otto_core::session::Session::messages(&session)
             })),
+            parent_fork: (!self.no_session).then(|| {
+                let storage = Arc::clone(&self.storage);
+                Arc::new(move |prompt: &str| {
+                    let path = session_for_fork.path();
+                    if path.is_empty() {
+                        return Err("needs a saved session".to_owned());
+                    }
+                    storage.sessions()?.fork_context(&path, prompt)
+                }) as subagent::runner::ParentFork
+            }),
             max_parallel: catalogs.agents.max_parallel.max(0) as usize,
             max_output_bytes: runtime.max_output_bytes.max(0) as usize,
             usage,

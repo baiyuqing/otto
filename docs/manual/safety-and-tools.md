@@ -544,6 +544,22 @@ contract revisions must be coordinated before dependent edits continue. These
 are coordination instructions, not new filesystem permissions or file locks;
 existing named-agent `write_policy` and `write_paths` still apply.
 
+A child starts with `context: "fresh"` (only its prompt) unless the call or
+its named agent definition sets `context: "inherit"`. With `inherit`, the
+child's transcript starts with a copy of the parent conversation up to the
+`agent` call. To start from an earlier point, the parent sets `fork_before`
+to the text of an earlier user prompt that started a turn, either the full
+text or its first line. The child then receives the parent conversation as
+it was just before that prompt's turn, the same history `/fork` would keep at
+that point, read from the parent's session file. Turns that compaction has
+since summarized are included in their original form. `fork_before` implies
+`inherit`; it is rejected with `context: "fresh"`, with `resume`, and in
+sessions without a saved file (`--no-session`). Exactly one prompt must
+match; otherwise the error lists the prompts that can be used (first line,
+newest first, at most 20). Steering text and prompts that opened wake turns
+are not fork points, and a prompt whose text appears more than once cannot
+be selected. The parent session is only read.
+
 Assign bounded file scopes and request findings with file/line evidence. After
 delegation, the parent relies on the child report and reads its saved report
 sections rather than repeating source inspection. Follow-up questions can be

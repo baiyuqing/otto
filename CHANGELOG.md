@@ -17,6 +17,9 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Remote `remember` accepts empty optional reference fields on a new memory,
+  as some model calls supply them instead of omitting them.
+
 - Remote memory organization ids now accept ordinary spaces, including names
   such as `bai's org`. The memory service must accept the same organization id.
 

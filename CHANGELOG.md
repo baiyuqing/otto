@@ -309,6 +309,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
   child exits. Failed `resume` calls now explain how to inspect completed tasks.
   ([#445](https://github.com/baiyuqing/otto/pull/445))
 
+### Security
+
+- The provider HTTPS client now uses `rustls` 0.23.46 instead of 0.23.44,
+  which fixes RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted across
+  encryption levels) and RUSTSEC-2026-0346 to 0349.
+- `otto-connect` now uses `github.com/gorilla/websocket` v1.5.3 instead of
+  v1.5.0 for the Feishu connection, which fixes GO-2026-6278 (WebSocket mask
+  keys generated with a weak random number generator).
+
 ### Performance
 
 - Implementation guidance settles shared interfaces and file responsibility

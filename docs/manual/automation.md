@@ -139,10 +139,27 @@ Git so new clones and independently created Git worktrees get new identities.
 
 Stop Otto before moving the directory. Moving it with its marker keeps its
 session and memory ownership.
-On first initialization, Otto adopts the existing path-derived session key
-and memory scope, including a configured `[memory.workspace_ids]` override.
-Existing transcripts and memory records are not rewritten. Later conflicting
-memory overrides fail startup rather than silently switch to another scope.
+On first initialization, Otto adopts the existing path-derived session key.
+The memory scope is a configured `[memory.workspace_ids]` override, or else the
+directory name followed by the first 12 hex digits of the SHA-256 of the
+canonical path, such as `otto-60ef11ccec92`. A marker written before this
+format holds `sha256:<64 hex>` and keeps it. Existing transcripts and memory
+records are not rewritten. Later conflicting memory overrides fail startup
+rather than silently switch to another scope.
+
+Deleting the marker makes the next start derive the memory scope again. A
+directory whose deleted marker held `sha256:<64 hex>`, or that was last used
+by an Otto release without markers, then gets the new format, and its earlier
+workspace memory records are not found. To keep them, print the old ID in the
+workspace directory:
+
+```bash
+printf 'sha256:%s\n' "$(printf %s "$(pwd -P)" | shasum -a 256 | cut -d' ' -f1)"
+```
+
+Map the canonical path to that ID under `[memory.workspace_ids]`. If Otto
+already wrote a new marker, stop Otto and delete `.otto/workspace.json` before
+the next start so the override is adopted.
 
 ```bash
 otto workspace status --cwd /path/to/workspace
@@ -155,7 +172,8 @@ independent, stop Otto processes using the copy, then run:
 otto workspace fork --cwd /path/to/copy
 ```
 
-This assigns a new UUID, session key, and workspace memory scope. Old sessions
+This assigns a new UUID, session key, and workspace memory scope
+(`<directory name>-<first 12 hex digits of the new UUID>`). Old sessions
 and memory remain in storage; user-scope memory remains shared. Remove any
 `[memory.workspace_ids]` override for the copy before starting it with the new
 identity. Status is read-only and does not initialize a marker.

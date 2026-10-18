@@ -137,6 +137,8 @@ pub(crate) struct TaskSpecData {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) model: String,
+    #[serde(default)]
+    pub(crate) model_source: super::tasks::ModelSource,
     pub(crate) context: String,
     #[serde(default)]
     pub(crate) prompt: String,
@@ -1056,16 +1058,27 @@ impl Runner {
             )
         };
 
-        let model = first_non_empty(&[
-            request.model.trim(),
-            definition.as_ref().map_or("", |d| d.model.trim()),
-            self.config
-                .template
-                .subagent_models
-                .first()
-                .map_or("", String::as_str),
-            &self.config.template.model,
-        ]);
+        use super::tasks::ModelSource;
+        let (model, model_source) = [
+            (request.model.trim(), ModelSource::Explicit),
+            (
+                definition.as_ref().map_or("", |d| d.model.trim()),
+                ModelSource::Definition,
+            ),
+            (
+                self.config
+                    .template
+                    .subagent_models
+                    .first()
+                    .map_or("", |s| s.trim()),
+                ModelSource::ConfiguredFirst,
+            ),
+            (self.config.template.model.trim(), ModelSource::Parent),
+        ]
+        .into_iter()
+        .find(|(model, _)| !model.is_empty())
+        .map(|(model, source)| (model.to_owned(), source))
+        .unwrap_or_else(|| (String::new(), ModelSource::Parent));
         let mut context = first_non_empty(&[
             request.context.trim(),
             definition.as_ref().map_or("", |d| d.context.trim()),
@@ -1101,6 +1114,7 @@ impl Runner {
             definition,
             description,
             model,
+            model_source,
             context,
             now,
             snapshot,
@@ -1175,6 +1189,7 @@ impl Runner {
             definition,
             description,
             record.model.clone(),
+            record.model_source,
             record.context.clone(),
             now,
             Vec::new(),
@@ -1252,6 +1267,7 @@ impl Runner {
         definition: Option<Definition>,
         description: String,
         model: String,
+        model_source: super::tasks::ModelSource,
         context: String,
         now: DateTime<Utc>,
         snapshot: Vec<Message>,
@@ -1273,6 +1289,7 @@ impl Runner {
             prompt: request.prompt.clone(),
             context,
             model: model.clone(),
+            model_source,
             created_at: Some(now),
             ..Task::default()
         };
@@ -1351,6 +1368,7 @@ impl Runner {
                 name: task.name.clone(),
                 description: task.description.clone(),
                 model: task.model.clone(),
+                model_source: task.model_source,
                 context: task.context.clone(),
                 prompt: task.prompt.clone(),
                 definition: definition.as_ref().map(|definition| TaskSpecDefinition {
@@ -2948,6 +2966,7 @@ mod tests {
             assert_eq!(data["name"], task.name);
             assert_eq!(data["description"], task.description);
             assert_eq!(data["model"], task.model);
+            assert_eq!(data["model_source"], task.model_source.as_str());
             assert_eq!(data["context"], task.context);
             assert_eq!(data["prompt"], task.prompt);
             if want_definition {
@@ -3429,11 +3448,11 @@ mod tests {
 
     #[tokio::test]
     async fn start_model_precedence() {
-        for (call_model, definition_model, configured, want) in [
-            ("call-model", "def-model", true, "call-model"),
-            ("", "def-model", true, "def-model"),
-            ("", "", true, "cheap-model"),
-            ("", "", false, "sess-model"),
+        for (call_model, definition_model, configured, want, source) in [
+            ("call-model", "def-model", true, "call-model", "explicit"),
+            ("", "def-model", true, "def-model", "definition"),
+            ("", "", true, "cheap-model", "configured_first"),
+            ("", "", false, "sess-model", "parent"),
         ] {
             let provider = FakeProvider::new();
             provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
@@ -3465,7 +3484,9 @@ mod tests {
                 provider.requests().first().expect("one request").model,
                 want
             );
-            assert_eq!(tasks.get("t1").expect("recorded task").model, want);
+            let task = tasks.get("t1").expect("recorded task");
+            assert_eq!(task.model, want);
+            assert_eq!(task.model_source.as_str(), source);
         }
     }
 
@@ -4307,6 +4328,7 @@ mod tests {
             name: String::new(),
             description: String::new(),
             model: "test-model".to_string(),
+            model_source: super::super::tasks::ModelSource::Unknown,
             context: "fresh".to_string(),
             prompt: prompt.to_string(),
             definition,
@@ -4363,6 +4385,62 @@ mod tests {
         let mut config = test_config(provider, tasks, Vec::new());
         config.children_dir = Some(Arc::new(move || Some(dir.clone())));
         config
+    }
+
+    #[tokio::test]
+    async fn restart_preserves_recorded_model_source_without_rewriting_history() {
+        use super::super::tasks::ModelSource;
+        for source in [
+            None,
+            Some(ModelSource::Explicit),
+            Some(ModelSource::Definition),
+            Some(ModelSource::ConfiguredFirst),
+            Some(ModelSource::Parent),
+        ] {
+            let dir = tempfile::tempdir().expect("dir");
+            let parent = dir.path().join("parent.jsonl");
+            let path = interrupted_fixture(
+                &parent,
+                "t1",
+                "original",
+                None,
+                true,
+                true,
+                interrupted::INTERRUPTED_STATUS,
+            );
+            // Simulate both actual legacy JSON (field absent) and a current spec.
+            // This fixture preparation precedes the production read/append path.
+            let text = std::fs::read_to_string(&path).expect("transcript");
+            let text = match source {
+                None => text.replace(",\"model_source\":\"unknown\"", ""),
+                Some(source) => text.replace(
+                    "\"model_source\":\"unknown\"",
+                    &format!("\"model_source\":\"{}\"", source.as_str()),
+                ),
+            };
+            std::fs::write(&path, &text).expect("fixture");
+            let expected = source.unwrap_or_default();
+            let records = interrupted::scan(&parent.with_extension(""));
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].model_source, expected);
+            let provider = FakeProvider::new();
+            provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+            let tasks = Arc::new(Tasks::new());
+            let mut config = config_with_children_dir(&provider, &tasks, parent.with_extension(""));
+            config.template.model = "different-parent".into();
+            config.template.subagent_models = vec!["different-candidate".into()];
+            let (runner, _) = runner(config);
+            runner
+                .resume("t1", "continue".into())
+                .await
+                .expect("resume");
+            let task = wait_final(&tasks, "t1").await;
+            assert_eq!(task.model_source, expected);
+            assert_eq!(task.model, "test-model");
+            let after = std::fs::read_to_string(&path).expect("resumed transcript");
+            assert!(after.starts_with(&text), "resume must only append history");
+            assert_eq!(after.matches("otto.task_spec").count(), 1);
+        }
     }
 
     #[tokio::test]
@@ -4880,6 +4958,7 @@ mod tests {
             name: String::new(),
             description: String::new(),
             model: "test-model".to_string(),
+            model_source: super::super::tasks::ModelSource::Unknown,
             context: "fresh".to_string(),
             prompt: "look at this".to_string(),
             definition: None,

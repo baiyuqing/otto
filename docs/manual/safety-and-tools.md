@@ -531,7 +531,25 @@ ordered `subagent_models` list on the active profile (see
 the order is your preference, and an explicit `agent.model` may select a
 different ID. When the field is omitted, model precedence is the named agent
 default, the first profile candidate, then the parent session model. The
-selected model appears in the task record and status panel.
+selected model appears in the task record and status panel. Setup offers the
+optional list; leaving it empty keeps the parent-model fallback. The parent is
+instructed to prefer lower-cost candidates for narrow searches, extraction,
+formatting and routine checks, and stronger candidates for demanding reasoning;
+this is model judgment, not an automatic runtime classifier.
+
+`agent_status` also reports `model_source`: `explicit` for the call's model,
+`definition` for a named agent's default, `configured_first` for the first
+profile candidate, or `parent` for session inheritance. An older task whose
+provenance was not recorded reports `unknown`. The source records how the model
+was selected, not whether it was the cheapest adequate choice. New task records
+preserve this source across restart; changing the candidate list does not
+rewrite an existing task's model or provenance.
+
+If an override changes the provider connection, Otto disables the list and
+reports how to recover; select the intended profile or remove the conflicting
+override, then restart. If a provider rejects a model ID, check its availability
+and inspect any partial work before retrying. Otto does not automatically repeat
+failed child work or assume prices from model names.
 
 The `agent` tool starts or resumes a child task and always returns immediately
 with its task id, so a running child cannot hold the parent's agent loop open.

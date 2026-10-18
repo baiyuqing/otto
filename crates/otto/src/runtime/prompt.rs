@@ -38,7 +38,7 @@ pub fn agent_guidance(
         )
     };
     let model_policy = if can_list_models {
-        "Use a configured sub-agent model ID or one returned by list_models. Otto keeps no price data; use the configured cost order when present, and rerun on the session model if a task fails with a model error."
+        "Use a configured sub-agent model ID or one returned by list_models. Otto keeps no price data; prefer the first adequate configured candidate. If a model fails, report the error and inspect partial work and possible side effects before deciding whether a retry is safe; do not automatically repeat the task."
     } else {
         "Use a configured sub-agent model ID, a model ID the user named, or the session model. Otto cannot list this provider's models; do not write a model ID from memory."
     };
@@ -59,7 +59,7 @@ pub fn subagent_model_guidance(models: &[String]) -> String {
         section.push_str(&escape_xml_attribute(model));
         section.push_str("\"/>\n");
     }
-    section.push_str("</subagent_models>\nChoose the first adequate model for each child task and pass its ID as agent.model. If omitted, Otto uses the first listed model after any named agent default. Escalate to a stronger listed model for tasks that need it. This order is user-supplied; Otto has not verified price or availability.\n");
+    section.push_str("</subagent_models>\nChoose the first adequate model for each child task and pass its ID as agent.model. Prefer earlier, lower-cost candidates for narrow searches, extraction, formatting, and routine checks. Choose a stronger listed candidate when architecture, ambiguous debugging, security-sensitive review, or demanding reasoning requires it; do not use the session model merely because it is the parent's model. Respect an explicit user model choice or a named agent's model default instead of overriding it for cost. If omitted, Otto uses the first listed model after any named agent default. This order is user-supplied; Otto has not verified price or availability. An inadequate result may justify escalation, but inspect partial work and possible side effects before retrying; do not automatically repeat the task.\n");
     section
 }
 
@@ -627,7 +627,20 @@ mod tests {
         let section = subagent_model_guidance(&["cheap".into(), "strong&more".into()]);
         assert!(section.find("cheap").unwrap() < section.find("strong&amp;more").unwrap());
         assert!(section.contains("pass its ID as agent.model"));
+        assert!(section.contains("lower-cost candidates for narrow searches"));
+        assert!(section.contains("demanding reasoning requires it"));
+        assert!(section.contains("Respect an explicit user model choice"));
+        assert!(section.contains("named agent's model default"));
+        assert!(section.contains("do not automatically repeat the task"));
         assert_eq!(subagent_model_guidance(&[]), "");
+    }
+
+    #[test]
+    fn model_failure_guidance_does_not_blindly_retry_work() {
+        let guidance = agent_guidance("openai-compatible", "example.invalid", "parent", true);
+        assert!(guidance.contains("inspect partial work and possible side effects"));
+        assert!(guidance.contains("do not automatically repeat the task"));
+        assert!(!guidance.contains("rerun on the session model"));
     }
 
     #[test]

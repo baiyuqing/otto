@@ -134,6 +134,31 @@ pub struct Runtime {
     pub progress: ProgressRuntime,
 }
 
+/// Explains connection-scoped child model fallback without exposing configured values.
+/// Call with the runtime resolved from `file`; an empty configured list is not a fallback.
+pub fn subagent_model_diagnostic(
+    file: &File,
+    runtime: &Runtime,
+) -> Option<super::layered::Diagnostic> {
+    let profile = file.profiles.get(&runtime.profile)?;
+    if profile.subagent_models.is_empty() || !runtime.subagent_models.is_empty() {
+        return None;
+    }
+    let same_connection = runtime.provider == profile.provider
+        && (runtime.provider == super::PROVIDER_CHATGPT
+            || (runtime.api_key_env == profile.api_key_env
+                && normalize_base_url(&profile.base_url).ok().as_deref()
+                    == Some(runtime.base_url.as_str())));
+    if same_connection {
+        return None;
+    }
+    Some(super::layered::Diagnostic {
+        key: "subagent_models".into(),
+        source: "runtime".into(),
+        reason: "Configured subagent_models are disabled because the provider connection changed. Child tasks inherit the active parent model. Select the original profile/connection or configure subagent_models for the active connection; failed model requests are not automatically retried.".into(),
+    })
+}
+
 fn env_value(env: &HashMap<String, String>, key: &str) -> String {
     env.get(key).cloned().unwrap_or_default()
 }
@@ -706,6 +731,91 @@ mod tests {
         )
         .expect("resolve");
         assert!(runtime.subagent_models.is_empty());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn subagent_model_fallback_diagnostic_is_connection_specific_and_safe() {
+        let mut selected = profile(
+            "openai-compatible",
+            "private-parent",
+            "https://private.example/v1",
+            "PRIVATE_KEY",
+        );
+        selected.subagent_models = vec!["private-child".into()];
+        let file = file_with_profiles("selected", &[("selected", selected)]);
+        let resolved = |overrides: Overrides| {
+            resolve_without_credentials(
+                &file,
+                &HashMap::new(),
+                &SessionDefaults::default(),
+                &overrides,
+            )
+            .unwrap()
+        };
+        let same = resolved(Overrides::default());
+        assert!(subagent_model_diagnostic(&file, &same).is_none());
+        let model_only = resolved(Overrides {
+            model: "other-parent".into(),
+            ..Overrides::default()
+        });
+        assert!(subagent_model_diagnostic(&file, &model_only).is_none());
+        let normalized = resolved(Overrides {
+            base_url: "https://private.example/v1/".into(),
+            ..Overrides::default()
+        });
+        assert!(subagent_model_diagnostic(&file, &normalized).is_none());
+        let mut emptied = same.clone();
+        emptied.subagent_models.clear();
+        assert!(subagent_model_diagnostic(&file, &emptied).is_none());
+        for overrides in [
+            Overrides {
+                base_url: "https://changed.example/v1".into(),
+                ..Overrides::default()
+            },
+            Overrides {
+                provider: "chatgpt".into(),
+                ..Overrides::default()
+            },
+        ] {
+            let runtime = resolved(overrides);
+            let diagnostic =
+                subagent_model_diagnostic(&file, &runtime).expect("fallback diagnostic");
+            assert_eq!(diagnostic.key, "subagent_models");
+            assert_eq!(diagnostic.source, "runtime");
+            assert!(
+                diagnostic
+                    .reason
+                    .contains("inherit the active parent model")
+            );
+            assert!(diagnostic.reason.contains("configure subagent_models"));
+            assert!(diagnostic.reason.contains("not automatically retried"));
+            let displayed = format!(
+                "{} {} {}",
+                diagnostic.key, diagnostic.source, diagnostic.reason
+            );
+            for private in ["private", "PRIVATE_KEY", "changed.example", "selected"] {
+                assert!(!displayed.contains(private), "{displayed}");
+            }
+        }
+        let mut no_list = file.clone();
+        no_list
+            .profiles
+            .get_mut("selected")
+            .unwrap()
+            .subagent_models
+            .clear();
+        let runtime = resolve_without_credentials(
+            &no_list,
+            &HashMap::new(),
+            &SessionDefaults::default(),
+            &Overrides {
+                provider: "chatgpt".into(),
+                ..Overrides::default()
+            },
+        )
+        .unwrap();
+        assert!(subagent_model_diagnostic(&no_list, &runtime).is_none());
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

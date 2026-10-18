@@ -3,7 +3,7 @@ use crate::storage::migration::record::RecordSchema;
 
 pub const DOMAIN: &str = "tasks";
 pub const FAMILY: &str = "otto.tasks";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const RECORDS: &[RecordSchema] = &[RecordSchema {
     name: "subagent_task",
     fields: &[
@@ -15,6 +15,7 @@ pub const RECORDS: &[RecordSchema] = &[RecordSchema {
         "agent",
         "description",
         "model",
+        "model_source",
         "context",
         "prompt",
         "status",

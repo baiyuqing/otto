@@ -1997,6 +1997,14 @@ impl Builder {
             && let Some(runtime) = runtime
         {
             prompt.push_str(&subagent_model_guidance(&runtime.subagent_models));
+            if let Some(diagnostic) =
+                otto_core::config::resolve::subagent_model_diagnostic(&self.config, runtime)
+            {
+                prompt.push_str(&format!(
+                    "\n<subagent_model_diagnostic>\n{}\n</subagent_model_diagnostic>\n",
+                    diagnostic.reason
+                ));
+            }
         }
         boundary::boundary_redactor(
             &self.boundary_inputs(),
@@ -2360,6 +2368,14 @@ impl Builder {
             tools.push(Box::new(tool));
         }
         let redactor = self.boundary_redactor(Some(runtime));
+        let model_diagnostic =
+            otto_core::config::resolve::subagent_model_diagnostic(&self.config, runtime)
+                .map(|diagnostic| redactor.redact_string(&diagnostic.reason));
+        if let Some(reason) = &model_diagnostic
+            && redactor.allows_dynamic_content()
+        {
+            let _ = writeln!(warnings, "warning: {reason}");
+        }
         let client = self.provider_client(runtime)?;
         let advisor = if self.memory_usable()
             && self.memory.extension.is_none()
@@ -2652,11 +2668,19 @@ impl Builder {
             &endpoint_host,
             &runtime.model,
         );
-        let model_guidance = if subagents.runner.is_some() {
+        let mut model_guidance = if subagents.runner.is_some() {
             redactor.redact_string(&subagent_model_guidance(&runtime.subagent_models))
         } else {
             String::new()
         };
+        if subagents.runner.is_some()
+            && redactor.allows_dynamic_content()
+            && let Some(reason) = model_diagnostic
+        {
+            model_guidance.push_str(&redactor.redact_string(&format!(
+                "\n<subagent_model_diagnostic>\n{reason}\n</subagent_model_diagnostic>\n"
+            )));
+        }
         let system_prompt = base_prompt.clone()
             + &model_guidance
             + &prompt_tail
@@ -4401,6 +4425,39 @@ mod tests {
             "the parts must concatenate to the prompt, or the report falls back to one part"
         );
         assert!(parts[2].text.contains("house rules"));
+    }
+
+    #[tokio::test]
+    async fn disabled_child_models_report_safe_warning_and_parent_context() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut shared = shared(dir.path());
+        Arc::get_mut(&mut shared).unwrap().config.profiles.insert(
+            "default".into(),
+            otto_core::config::Profile {
+                provider: "openai-compatible".into(),
+                base_url: "https://configured.invalid/v1".into(),
+                subagent_models: vec!["private-candidate".into()],
+                ..Default::default()
+            },
+        );
+        let builder = builder_for(shared, dir.path());
+        let session = SharedSession::memory(Header::default());
+        let mut warnings = Vec::new();
+        let runner = builder
+            .build_runner_with_warnings(&session, &runtime(), &mut warnings)
+            .await
+            .expect("runner");
+        let warnings = String::from_utf8(warnings).unwrap();
+        assert!(warnings.contains("subagent_models"), "{warnings}");
+        assert!(
+            runner
+                .system_prompt()
+                .contains("<subagent_model_diagnostic>")
+        );
+        for private in ["configured.invalid", "private-candidate"] {
+            assert!(!warnings.contains(private), "{warnings}");
+            assert!(!runner.system_prompt().contains(private));
+        }
     }
 
     #[tokio::test]

@@ -13,11 +13,11 @@ use crate::subagent::record::{
     Error, ListQuery, ListResult, MAX_TEXT_BYTES, Recorder, Result, TaskContext, TaskReader,
     TaskRepository, TaskRow, interrupted,
 };
-use crate::subagent::tasks::Task;
+use crate::subagent::tasks::{ModelSource, Task};
 use chrono::{DateTime, SecondsFormat, Utc};
 
 /// The schema version this build writes and expects to read.
-pub(super) const SCHEMA_VERSION: i64 = 1;
+pub(super) const SCHEMA_VERSION: i64 = 2;
 
 pub(super) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     session_path TEXT NOT NULL,
     pid INTEGER NOT NULL,
     process_started_at TEXT NOT NULL,
+    model_source TEXT NOT NULL DEFAULT 'unknown',
     PRIMARY KEY (parent_session, task_id)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS tasks_created_at ON tasks(created_at);
@@ -55,7 +56,7 @@ CREATE INDEX IF NOT EXISTS tasks_workspace ON tasks(workspace, created_at);
 const COLUMNS: &str = "parent_session, task_id, workspace, parent_session_path, name, agent, \
 description, model, context, prompt, status, created_at, started_at, finished_at, steps, \
 tool_calls, last_tool, input_tokens, output_tokens, cached_tokens, result, error, session_path, \
-pid, process_started_at";
+pid, process_started_at, model_source";
 
 /// One row exactly as stored, before liveness is applied.
 struct Row {
@@ -67,6 +68,7 @@ struct Row {
     agent: String,
     description: String,
     model: String,
+    model_source: ModelSource,
     context: String,
     prompt: String,
     status: String,
@@ -97,6 +99,13 @@ impl Row {
             agent: row.get(5)?,
             description: row.get(6)?,
             model: row.get(7)?,
+            model_source: match row.get::<String>(25)?.as_str() {
+                "explicit" => ModelSource::Explicit,
+                "definition" => ModelSource::Definition,
+                "configured_first" => ModelSource::ConfiguredFirst,
+                "parent" => ModelSource::Parent,
+                _ => ModelSource::Unknown,
+            },
             context: row.get(8)?,
             prompt: row.get(9)?,
             status: row.get(10)?,
@@ -140,6 +149,7 @@ impl Row {
             agent: self.agent,
             description: self.description,
             model: self.model,
+            model_source: self.model_source,
             context: self.context,
             prompt: self.prompt,
             status,
@@ -236,6 +246,11 @@ impl Store {
                     .pragma_update("user_version", SCHEMA_VERSION)
                     .map_err(|_| Error)?;
             }
+            1 => {
+                connection.execute_batch(
+                    "BEGIN IMMEDIATE; ALTER TABLE tasks ADD COLUMN model_source TEXT NOT NULL DEFAULT 'unknown'; PRAGMA user_version = 2; COMMIT;"
+                ).map_err(|_| Error)?;
+            }
             version if version == SCHEMA_VERSION => {}
             _ => return Err(Error),
         }
@@ -270,7 +285,7 @@ impl Store {
                 &format!(
                     "INSERT INTO tasks ({COLUMNS}) VALUES (\
                         ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,\
-                        ?21,?22,?23,?24,?25\
+                        ?21,?22,?23,?24,?25,?26\
                      )
                      ON CONFLICT(parent_session, task_id) DO UPDATE SET
                         workspace = excluded.workspace,
@@ -279,6 +294,7 @@ impl Store {
                         agent = excluded.agent,
                         description = excluded.description,
                         model = excluded.model,
+                        model_source = excluded.model_source,
                         context = excluded.context,
                         prompt = excluded.prompt,
                         status = excluded.status,
@@ -323,6 +339,7 @@ impl Store {
                     task.session_path,
                     context.pid,
                     context.process_started_at,
+                    task.model_source.as_str(),
                 ],
             )
             .map_err(|_| Error)?;
@@ -452,3 +469,83 @@ impl TaskReader for Store {
 }
 
 impl TaskRepository for Store {}
+
+#[cfg(test)]
+mod model_source_tests {
+    use super::*;
+
+    #[test]
+    fn model_source_survives_reopen_for_all_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let context = TaskContext {
+            parent_session: "parent".into(),
+            ..Default::default()
+        };
+        let sources = [
+            ModelSource::Explicit,
+            ModelSource::Definition,
+            ModelSource::ConfiguredFirst,
+            ModelSource::Parent,
+            ModelSource::Unknown,
+        ];
+        {
+            let store = Store::open(&path).unwrap();
+            for (index, source) in sources.iter().enumerate() {
+                store.upsert(
+                    &context,
+                    &Task {
+                        id: format!("t{index}"),
+                        model: "same-model".into(),
+                        model_source: *source,
+                        ..Default::default()
+                    },
+                );
+            }
+            assert!(!store.is_disabled());
+        }
+        let store = Store::open(&path).unwrap();
+        for (index, source) in sources.iter().enumerate() {
+            let row = store.get("parent", &format!("t{index}")).unwrap().unwrap();
+            assert_eq!(row.model_source, *source);
+            assert_eq!(
+                serde_json::to_value(row).unwrap()["model_source"],
+                source.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn version_one_database_migrates_old_rows_to_unknown() {
+        let connection = Connection::open_in_memory().unwrap();
+        let old_schema = SCHEMA.replace("    model_source TEXT NOT NULL DEFAULT 'unknown',\n", "");
+        connection.execute_batch(&old_schema).unwrap();
+        connection.pragma_update("user_version", 1).unwrap();
+        let old_columns = COLUMNS.strip_suffix(", model_source").unwrap();
+        let values = old_columns
+            .split(',')
+            .map(|column| match column.trim() {
+                "pid" | "steps" | "tool_calls" | "input_tokens" | "output_tokens"
+                | "cached_tokens" => "0",
+                _ => "'legacy'",
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO tasks ({old_columns}) VALUES ({values})"
+            ))
+            .unwrap();
+        let store = Store::from_connection(connection).unwrap();
+        let row = store.get("legacy", "legacy").unwrap().unwrap();
+        assert_eq!(row.model, "legacy");
+        assert_eq!(row.model_source, ModelSource::Unknown);
+        let version: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA user_version", (), |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+}

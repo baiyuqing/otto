@@ -69,6 +69,7 @@ pub struct TaskRow {
     pub agent: String,
     pub description: String,
     pub model: String,
+    pub model_source: super::tasks::ModelSource,
     pub context: String,
     pub prompt: String,
     pub status: String,

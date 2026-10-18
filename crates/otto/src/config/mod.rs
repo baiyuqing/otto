@@ -368,8 +368,16 @@ pub(crate) fn create_initial_profile(
     model: &str,
     base_url: &str,
     api_key_env: &str,
+    subagent_models: &[String],
 ) -> Result<(), String> {
-    let content = initial_profile_content(profile, provider, model, base_url, api_key_env)?;
+    let content = initial_profile_content(
+        profile,
+        provider,
+        model,
+        base_url,
+        api_key_env,
+        subagent_models,
+    )?;
     create_bytes_if_absent(path, content.as_bytes()).map_err(str::to_string)
 }
 
@@ -381,6 +389,7 @@ pub(crate) fn initial_profile_content(
     model: &str,
     base_url: &str,
     api_key_env: &str,
+    subagent_models: &[String],
 ) -> Result<String, String> {
     if !matches!(provider, PROVIDER_CHATGPT | PROVIDER_OPENAI_COMPATIBLE) {
         return Err("unsupported provider; no changes made".to_string());
@@ -391,6 +400,18 @@ pub(crate) fn initial_profile_content(
         toml::Value::String(provider.to_string()),
     );
     profile_table.insert("model".to_string(), toml::Value::String(model.to_string()));
+    if !subagent_models.is_empty() {
+        profile_table.insert(
+            "subagent_models".to_string(),
+            toml::Value::Array(
+                subagent_models
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
+        );
+    }
     if provider == PROVIDER_OPENAI_COMPATIBLE {
         profile_table.insert(
             "base_url".to_string(),
@@ -931,8 +952,9 @@ mod tests {
         let path = directory.path().join("config.toml");
         fs::write(&path, b"").expect("empty config");
 
-        let error = create_initial_profile(&path, "default", PROVIDER_CHATGPT, "my-model", "", "")
-            .expect_err("must not replace an existing config");
+        let error =
+            create_initial_profile(&path, "default", PROVIDER_CHATGPT, "my-model", "", "", &[])
+                .expect_err("must not replace an existing config");
 
         assert_eq!(error, "configuration already exists; no changes made");
         assert_eq!(fs::read(&path).expect("read"), b"");
@@ -951,6 +973,7 @@ mod tests {
             "cheap-model",
             "https://api.example/v1",
             "EXAMPLE_KEY",
+            &["first-child".into(), "second-child".into()],
         )
         .expect("create");
 
@@ -960,6 +983,11 @@ mod tests {
             "{content}"
         );
         assert!(!content.contains("configured"), "{content}");
+        let parsed = otto_core::config::parse(&content).expect("parse");
+        assert_eq!(
+            parsed.profiles["default"].subagent_models,
+            ["first-child", "second-child"]
+        );
         assert!(backups(directory.path()).is_empty());
     }
 

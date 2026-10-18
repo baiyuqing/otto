@@ -85,6 +85,30 @@ impl std::fmt::Display for TaskStatus {
     }
 }
 
+/// Why a task selected its model. Legacy records have no reliable provenance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSource {
+    Explicit,
+    Definition,
+    ConfiguredFirst,
+    Parent,
+    #[default]
+    Unknown,
+}
+
+impl ModelSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Definition => "definition",
+            Self::ConfiguredFirst => "configured_first",
+            Self::Parent => "parent",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// One sub-agent task record, as shown by `agent_status` and the frontends.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Task {
@@ -96,6 +120,7 @@ pub struct Task {
     pub prompt: String,
     pub context: String,
     pub model: String,
+    pub model_source: ModelSource,
     pub status: TaskStatus,
     pub created_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,

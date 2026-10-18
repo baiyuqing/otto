@@ -27,7 +27,7 @@ by the record text:
 
 ```markdown
 ---
-scope: {"namespace":"workspace","id":"sha256:60ef1..."}
+scope: {"namespace":"workspace","id":"otto-60ef11ccec92"}
 kind: "preference"
 key: "reply-language"
 labels: []
@@ -43,8 +43,11 @@ Reply to technical questions in Chinese.
 ```
 
 All eleven names are required once each; an unknown name is an error. The
-record text is one line; a body with a second line is invalid. Workspace
-scope ids are `sha256:` digests and do not contain the workspace path.
+record text is one line; a body with a second line is invalid. A workspace
+scope id is the workspace directory name followed by the first 12 hex digits
+of the SHA-256 of its canonical path, such as `otto-60ef11ccec92`; it does not
+contain the rest of the path. A workspace initialized before this format keeps
+its `sha256:<64 hex>` id; see [workspace identity](automation.md#workspace-identity).
 
 Reads take no lock. Hand edits to a record file take effect at the next read,
 normally the next turn's recall; Otto does not require a change to `revision`
@@ -232,8 +235,10 @@ nothing; a rejected selected scope fails the whole request.
   including the exact preamble, escaped attributes/text and newlines. Old
   markup-size estimates do not apply. `max_results` includes mandatory winners.
 - Project scope uses the stable workspace memory identity/override, with a
-  canonical-path SHA-256 fallback. Use a shared `[memory.workspace_ids]` override
-  across hosts; organization remains part of identity. Without a project the
+  `<directory name>-<12 hex of the canonical-path SHA-256>` fallback; the
+  service receives the directory name, not the path. Use a shared
+  `[memory.workspace_ids]` override across hosts; organization remains part of
+  identity. Without a project the
   context explicitly selects `workspace_id: null`.
 
 #### Scopes, search and writes

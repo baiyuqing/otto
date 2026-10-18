@@ -1,7 +1,9 @@
 //! Persistent workspace ownership, independent of runtime processes and paths.
 //!
 //! The local marker travels with a workspace. Legacy session keys and memory
-//! scopes are adopted without rewriting state. Writes are serialized by a
+//! scopes (including `sha256:<64 hex>` IDs) are adopted without rewriting
+//! state. A new marker's memory scope is `<dir name>-<12 hex>` of the path
+//! digest, or of the new UUID for a fork. Writes are serialized by a
 //! directory lock and atomically published through pinned, no-follow handles.
 //! Recorded paths identify historical transcripts, never execution authority.
 
@@ -185,9 +187,9 @@ fn update(workspace: &Path, memory_override: &str, fork: bool) -> Result<Identit
             legacy_session_key(&path)
         };
         let memory_scope = if fork {
-            id.clone()
+            crate::memory::scope::named_workspace_id(&path, &session_key)
         } else if memory_override.is_empty() {
-            format!("sha256:{:x}", Sha256::digest(path.as_bytes()))
+            crate::memory::scope::workspace_id(&path)
         } else {
             memory_override.to_owned()
         };
@@ -352,6 +354,35 @@ mod tests {
         let independent = dir.path().join("worktree");
         fs::create_dir(&independent).unwrap();
         assert_ne!(initialize(&independent, "").unwrap().id, identity.id);
+    }
+
+    #[test]
+    fn default_memory_scope_is_named_stable_and_adopts_legacy() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("my project");
+        fs::create_dir(&dir).unwrap();
+        let canonical = fs::canonicalize(&dir).unwrap();
+        let expected = crate::memory::scope::workspace_id(canonical.to_str().unwrap());
+        let identity = initialize(&dir, "").unwrap();
+        assert_eq!(identity.memory_scope, expected);
+        assert!(expected.starts_with("my-project-"));
+
+        fs::remove_file(dir.join(MARKER)).unwrap();
+        assert_eq!(initialize(&dir, "").unwrap().memory_scope, expected);
+
+        let forked = fork(&dir).unwrap();
+        assert!(forked.memory_scope.starts_with("my-project-"));
+        assert_eq!(
+            forked.memory_scope,
+            format!("my-project-{}", &forked.session_key[..12])
+        );
+        assert_ne!(forked.memory_scope, expected);
+
+        let legacy_dir = root.path().join("legacy");
+        fs::create_dir(&legacy_dir).unwrap();
+        let legacy = format!("sha256:{}", "ab".repeat(32));
+        initialize(&legacy_dir, &legacy).unwrap();
+        assert_eq!(initialize(&legacy_dir, "").unwrap().memory_scope, legacy);
     }
 
     #[test]

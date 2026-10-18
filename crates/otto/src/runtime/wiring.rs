@@ -2605,7 +2605,11 @@ mod tests {
         )
         .expect("scope");
         assert_eq!(scope.namespace, NAMESPACE_WORKSPACE);
-        assert!(scope.id.starts_with("sha256:"), "{}", scope.id);
+        let canonical = std::fs::canonicalize(directory.path()).expect("canonical");
+        assert_eq!(
+            scope.id,
+            crate::memory::scope::workspace_id(canonical.to_str().expect("utf-8"))
+        );
     }
 
     // -----------------------------------------------------------------

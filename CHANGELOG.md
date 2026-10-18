@@ -17,6 +17,18 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- A workspace initialized for the first time gets a readable memory scope ID,
+  `<directory name>-<first 12 hex digits of the SHA-256 of its canonical path>`
+  (for example `otto-60ef11ccec92`), instead of `sha256:<64 hex>`. The remote
+  memory service receives this value as `workspace_id`. Existing
+  `.otto/workspace.json` markers keep their `sha256:` ID. If such a marker is
+  deleted, or the directory was last used by an Otto release without markers,
+  the next start derives the new ID; map the path to the old ID under
+  `[memory.workspace_ids]` to keep its records reachable. `otto workspace fork`
+  assigns `<directory name>-<12 hex>` instead of a bare UUID. See
+  [workspace identity](docs/manual/automation.md#workspace-identity).
+  ([#507](https://github.com/baiyuqing/otto/pull/507))
+
 - Remote `remember` accepts empty optional reference fields on a new memory,
   as some model calls supply them instead of omitting them.
 

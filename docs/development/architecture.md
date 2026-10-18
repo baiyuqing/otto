@@ -283,7 +283,8 @@ server or OAuth round-trip.
 `crates/otto::workspace` owns the local versioned identity marker. CLI startup
 initializes it before session discovery, including workspaces opened through
 `otto serve`. Session lookup and workspace memory binding read its adopted
-keys. Missing markers in read-only lookups retain legacy path-derived behavior.
+keys. A read-only lookup without a marker derives the session key and memory
+scope that initialization would write (`crates/otto::memory::scope`).
 Configured memory IDs are adopted once; conflicts are errors.
 
 Marker reads and writes reuse `crates/otto::fsops` pinned directory descriptors

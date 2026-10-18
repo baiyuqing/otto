@@ -142,13 +142,6 @@ pub fn saturating_add(total: i64, delta: i64) -> i64 {
     total.saturating_add(delta)
 }
 
-/// Sums [`estimate_message`] over a slice, saturating.
-pub fn estimate_messages(messages: &[Message]) -> i64 {
-    messages.iter().fold(0, |total, message| {
-        saturating_add(total, estimate_message(message))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

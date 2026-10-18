@@ -3,8 +3,8 @@
 //! `main.rs` owns the process signal registration; this module owns the
 //! decision. The first `SIGTERM` this process ever receives is turned into
 //! [`Action::Migrate`] when the process holds at least one session lease
-//! (see [`crate::failover::lease::holds_lease`]), so `run.rs`/`serve.rs` can
-//! run the migration in [the spec's
+//! (see [`crate::failover::ownership::holds_writer_ownership`]), so
+//! `run.rs`/`serve.rs` can run the migration in [the spec's
 //! order](../../../docs/specs/2026-09-28-session-failover.md) after their
 //! frontend returns, instead of exiting immediately. A process with no
 //! lease keeps today's behavior: `otto serve` cancels its listen loop and
@@ -39,7 +39,7 @@ const MIGRATING: u8 = 1;
 const CANCELED: u8 = 2;
 
 /// Tracks the outcome of the first `SIGTERM` this process receives, so every
-/// later one is decided from that outcome alone, never from `holds_lease`
+/// later one is decided from that outcome alone, never from `holds_ownership`
 /// again (a migration may have released the lease by the time a second
 /// signal arrives).
 #[derive(Debug, Default)]
@@ -64,11 +64,12 @@ impl Terminate {
         self.serve.store(true, Ordering::Release);
     }
 
-    /// Decides what this `SIGTERM` delivery should do. `holds_lease` is the
-    /// caller's current read of [`crate::failover::lease::holds_lease`],
-    /// taken fresh for every signal.
-    pub fn on_signal(&self, holds_lease: bool) -> Action {
-        let first = if holds_lease { MIGRATING } else { CANCELED };
+    /// Decides what this `SIGTERM` delivery should do. `holds_ownership` is
+    /// the caller's current read of
+    /// [`crate::failover::ownership::holds_writer_ownership`], taken fresh for
+    /// every signal.
+    pub fn on_signal(&self, holds_ownership: bool) -> Action {
+        let first = if holds_ownership { MIGRATING } else { CANCELED };
         let previous = self
             .state
             .compare_exchange(UNSET, first, Ordering::AcqRel, Ordering::Acquire)

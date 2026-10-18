@@ -327,10 +327,10 @@ fn load_config(
     Ok((path.to_string_lossy().into_owned(), loaded.file))
 }
 
-/// Unlike `crate::config::resolution_environment`, every fixed key is always
-/// present, even when the process has no such variable: the empty string is
-/// inserted, and resolution distinguishes "absent" from "empty" nowhere. The
-/// map also holds each profile's `api_key_env` and the `web_search` key names.
+/// Every fixed key is always present, even when the process has no such
+/// variable: the empty string is inserted, and resolution distinguishes
+/// "absent" from "empty" nowhere. The map also holds each profile's
+/// `api_key_env` and the `web_search` key names.
 pub(crate) fn config_environment(
     file: &File,
     lookup: &EnvironmentLookup,

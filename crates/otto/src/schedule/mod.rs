@@ -176,12 +176,6 @@ stored_enum!(
     }
 );
 
-impl State {
-    pub fn is_active(self) -> bool {
-        matches!(self, Self::Waiting | Self::Ready)
-    }
-}
-
 /// The result of one scheduled prompt run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunOutcome {

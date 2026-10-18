@@ -234,7 +234,7 @@ fn context_command_answers_with_counts_and_sends_no_provider_request() {
         .to_string();
     assert!(system.len() > 40, "system prompt: {system:?}");
 
-    let (frames, response) = client.call("session/prompt", prompt(&session_id, " /context "));
+    let (frames, response) = client.call("session/prompt", prompt(&session_id, "/context "));
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     let text = message_text(&frames);
     assert!(text.contains("Estimated next request: "), "{text}");

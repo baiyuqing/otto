@@ -27,6 +27,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
   `[memory.workspace_ids]` to keep its records reachable. `otto workspace fork`
   assigns `<directory name>-<12 hex>` instead of a bare UUID. See
   [workspace identity](docs/manual/automation.md#workspace-identity).
+  ([#507](https://github.com/baiyuqing/otto/pull/507))
 
 - Remote `remember` accepts empty optional reference fields on a new memory,
   as some model calls supply them instead of omitting them.

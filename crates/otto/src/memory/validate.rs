@@ -907,28 +907,6 @@ pub fn validate_store_review_request(
     Ok(())
 }
 
-pub fn validate_review_request(request: &ReviewRequest) -> Result<()> {
-    validate_candidate_ref(&request.reference)?;
-    if request.decision == ReviewDecision::Reject
-        && (request.edited.is_some() || request.target_revision.is_some())
-    {
-        return Err(invalid_request("rejected review fields"));
-    }
-    if request
-        .target_revision
-        .is_some_and(|revision| !valid_revision(revision))
-    {
-        return Err(invalid_request("target revision"));
-    }
-    if let Some(edited) = &request.edited {
-        if edited.scope != request.reference.scope {
-            return Err(invalid_request("review edit scope"));
-        }
-        validate_proposed_record(edited, CandidateAction::Update)?;
-    }
-    Ok(())
-}
-
 pub fn validate_tombstone(tombstone: &Tombstone) -> Result<()> {
     if !valid_opaque_id(&tombstone.id, MAX_ID_BYTES) {
         return Err(invalid_record("tombstone ID"));

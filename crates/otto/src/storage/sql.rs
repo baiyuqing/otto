@@ -110,22 +110,6 @@ impl<T: Into<Value>> From<Option<T>> for Value {
         value.map(Into::into).unwrap_or(Self::Null)
     }
 }
-impl Value {
-    pub fn as_text(&self) -> Option<&String> {
-        if let Self::Text(value) = self {
-            Some(value)
-        } else {
-            None
-        }
-    }
-    pub fn as_integer(&self) -> Option<&i64> {
-        if let Self::Integer(value) = self {
-            Some(value)
-        } else {
-            None
-        }
-    }
-}
 
 /// Parameters own their data and conversion failures; no engine SDK escapes.
 #[derive(Clone, Debug, PartialEq)]

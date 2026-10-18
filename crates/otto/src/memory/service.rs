@@ -36,11 +36,11 @@ use super::validate::{
 use super::{
     BindOptions, Candidate, CandidateAction, CandidateListRequest, CandidateState, Error,
     ErrorKind, ForgetRequest, ForgetResult, ListRequest, MAX_QUERY_BYTES, MAX_QUERY_TERM_BYTES,
-    MAX_QUERY_TERMS, Origin, PolicyDecision, PolicyRequest, ProposeRequest, Provenance,
-    RecallRequest, RecallResult, Record, RecordKey, RecordRef, RememberRequest, Result,
-    RetrievalRequest, ReviewDecision, ReviewRequest, ReviewResult, Scope, SearchRequest,
-    SearchResult, StandingUsage, StoreForgetRequest, StoreReviewRequest, TokenEstimator, Tombstone,
-    UpsertRequest, decide_default_policy, new_id,
+    MAX_QUERY_TERMS, Origin, PolicyDecision, PolicyRequest, ProposeRequest, RecallRequest,
+    RecallResult, Record, RecordKey, RecordRef, RememberRequest, Result, RetrievalRequest,
+    ReviewDecision, ReviewRequest, ReviewResult, Scope, SearchRequest, SearchResult, StandingUsage,
+    StoreForgetRequest, StoreReviewRequest, TokenEstimator, Tombstone, UpsertRequest,
+    decide_default_policy, new_id,
 };
 
 fn now_utc() -> DateTime<Utc> {
@@ -688,20 +688,11 @@ fn core_record(record: Record, standing: bool) -> core_memory::Record {
     }
 }
 
-/// A provenance that names a human author, the default for a `/remember`.
-pub fn human_provenance(session_id: &str) -> Provenance {
-    Provenance {
-        origin: Some(Origin::Human),
-        session_id: session_id.to_string(),
-        ..Provenance::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memory::files::testsupport::open_temp;
-    use crate::memory::{CandidateRef, NAMESPACE_USER, NAMESPACE_WORKSPACE};
+    use crate::memory::{CandidateRef, NAMESPACE_USER, NAMESPACE_WORKSPACE, Provenance};
 
     fn service() -> (tempfile::TempDir, Arc<Service>) {
         let (directory, store) = open_temp();

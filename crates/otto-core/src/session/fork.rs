@@ -131,6 +131,84 @@ pub fn fork_points(entries: &[PiEntry], leaf_id: &str) -> Result<Vec<ForkPoint>,
     Ok(scan(&path(entries, leaf_id)?)?.points)
 }
 
+/// No fork point, or more than one, matches a prompt text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkPromptError {
+    /// How many fork points matched.
+    pub matches: usize,
+    /// The prompts that can be used, newest first.
+    pub listing: String,
+}
+
+impl std::fmt::Display for ForkPromptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.matches == 0 {
+            write!(f, "no user prompt matches")?;
+        } else {
+            write!(f, "{} user prompts match", self.matches)?;
+        }
+        write!(
+            f,
+            "; prompts that can be used, newest first:\n{}",
+            self.listing
+        )
+    }
+}
+
+impl std::error::Error for ForkPromptError {}
+
+const LISTING_LINES: usize = 20;
+const LISTING_LINE_CHARS: usize = 120;
+
+/// The one fork point whose prompt equals `text` or its first line, both
+/// trimmed. `points` are oldest first, as `fork_points` returns them.
+pub fn fork_point_by_prompt<'a>(
+    points: &'a [ForkPoint],
+    text: &str,
+) -> Result<&'a ForkPoint, ForkPromptError> {
+    let text = text.trim();
+    let matching: Vec<&ForkPoint> = points
+        .iter()
+        .filter(|point| {
+            let prompt = point.prompt.trim();
+            prompt == text || first_line(prompt) == text
+        })
+        .collect();
+    match matching.as_slice() {
+        [point] => Ok(point),
+        _ => Err(prompt_error(points, matching.len())),
+    }
+}
+
+fn first_line(prompt: &str) -> &str {
+    prompt.lines().next().unwrap_or_default().trim()
+}
+
+fn prompt_error(points: &[ForkPoint], matches: usize) -> ForkPromptError {
+    let mut lines: Vec<String> = points
+        .iter()
+        .rev()
+        .take(LISTING_LINES)
+        .map(|point| {
+            let line = first_line(point.prompt.trim());
+            match line.char_indices().nth(LISTING_LINE_CHARS) {
+                Some((end, _)) => format!("- {}…", &line[..end]),
+                None => format!("- {line}"),
+            }
+        })
+        .collect();
+    if points.len() > LISTING_LINES {
+        lines.push(format!("and {} more", points.len() - LISTING_LINES));
+    }
+    if lines.is_empty() {
+        lines.push("(none)".to_owned());
+    }
+    ForkPromptError {
+        matches,
+        listing: lines.join("\n"),
+    }
+}
+
 /// What a fork before `before` keeps; with no `before`, everything up to the
 /// last turn boundary, so a running or interrupted turn is left out.
 pub fn plan_fork(
@@ -507,5 +585,74 @@ mod tests {
         assert_eq!(fork_origin(&b.entries), None);
         b.custom(FORK_CUSTOM_TYPE, &encoded);
         assert_eq!(fork_origin(&b.entries), Some(record));
+    }
+
+    #[test]
+    fn a_prompt_text_selects_one_fork_point() {
+        let mut b = Builder::new();
+        b.turn("t1", "first\nmore detail");
+        b.turn("t2", "second");
+        b.start("t3", TurnTrigger::User);
+        b.user("steered");
+        b.user("steer text");
+        b.reply();
+        b.end("t3");
+        b.start("t4", TurnTrigger::Wake);
+        b.user("wake text");
+        b.reply();
+        b.end("t4");
+        let points = fork_points(&b.entries, b.leaf()).unwrap();
+
+        for text in ["first\nmore detail", "first", "  first \n", "\tsecond\n"] {
+            assert!(fork_point_by_prompt(&points, text).is_ok(), "{text:?}");
+        }
+        assert_eq!(
+            fork_point_by_prompt(&points, "second").unwrap().prompt,
+            "second"
+        );
+        for text in ["steer text", "wake text", "more detail", ""] {
+            assert_eq!(fork_point_by_prompt(&points, text).unwrap_err().matches, 0);
+        }
+    }
+
+    #[test]
+    fn equal_prompts_are_ambiguous_and_errors_list_newest_first() {
+        let mut b = Builder::new();
+        b.turn("t1", "same");
+        b.turn("t2", "other");
+        b.turn("t3", "same");
+        let points = fork_points(&b.entries, b.leaf()).unwrap();
+
+        let error = fork_point_by_prompt(&points, "same").unwrap_err();
+        assert_eq!(error.matches, 2);
+        assert_eq!(
+            error.to_string(),
+            "2 user prompts match; prompts that can be used, newest first:\n- same\n- other\n- same"
+        );
+        let error = fork_point_by_prompt(&points, "nope").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "no user prompt matches; prompts that can be used, newest first:\n- same\n- other\n- same"
+        );
+    }
+
+    #[test]
+    fn the_listing_is_capped_cut_and_never_empty() {
+        let mut b = Builder::new();
+        for n in 0..23 {
+            b.turn(&format!("t{n}"), &format!("prompt {n}"));
+        }
+        b.turn("long", &"é".repeat(130));
+        let points = fork_points(&b.entries, b.leaf()).unwrap();
+        let listing = fork_point_by_prompt(&points, "nope").unwrap_err().listing;
+        let lines: Vec<&str> = listing.lines().collect();
+        assert_eq!(lines.len(), 21);
+        assert_eq!(lines[0], format!("- {}…", "é".repeat(120)));
+        assert_eq!(lines[1], "- prompt 22");
+        assert_eq!(lines[19], "- prompt 4");
+        assert_eq!(lines[20], "and 4 more");
+
+        let error = fork_point_by_prompt(&[], "x").unwrap_err();
+        assert_eq!(error.listing, "(none)");
     }
 }

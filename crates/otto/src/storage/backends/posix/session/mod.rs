@@ -153,6 +153,14 @@ impl SessionRepository for PosixSessionRepository {
         otto_core::session::fork_points(&entries, leaf).map_err(|error| error.to_string())
     }
 
+    fn fork_context(
+        &self,
+        reference: &str,
+        prompt: &str,
+    ) -> Result<Vec<otto_core::model::Message>, String> {
+        fork::fork_context(reference, prompt)
+    }
+
     fn validate_existing_root(&self, root: &Path) -> Result<(), String> {
         let root_handle = self
             .driver

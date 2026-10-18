@@ -323,6 +323,7 @@ pub(crate) fn test_config(
         tasks: Arc::clone(tasks),
         catalog: super::Catalog::default(),
         parent_session: None,
+        parent_fork: None,
         max_parallel: 4,
         max_output_bytes: 16384,
         usage: None,

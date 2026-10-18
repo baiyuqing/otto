@@ -4159,6 +4159,77 @@ fn a_fork_keeps_a_compaction_before_the_cut() {
 }
 
 #[test]
+fn fork_context_is_what_a_fork_before_the_prompt_opens_with() {
+    use otto_core::session::{build_context, fork_points, plan_fork};
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "first");
+    let after_first = store.messages();
+    let second = completed_turn(&store, "t2", "second");
+    completed_turn(&store, "t3", "third");
+    let source = PathBuf::from(store.path());
+    let before = fs::read(&source).expect("read source");
+
+    let (entries, _) = Store::read_entries(&source).expect("entries");
+    let leaf = entries.last().expect("leaf").id.clone();
+    let points = fork_points(&entries, &leaf).expect("points");
+    assert_eq!(points[1].entry_id, second);
+    let plan = plan_fork(&entries, &leaf, Some(&second)).expect("plan");
+    let kept_leaf = plan.entries.last().expect("kept").id.clone();
+    let expected = build_context(&plan.entries, &kept_leaf)
+        .expect("context")
+        .0
+        .messages;
+
+    let reference = source.to_string_lossy();
+    let context = super::fork::fork_context(&reference, " second\n").expect("context");
+    assert_eq!(context, expected);
+    assert_eq!(context, after_first);
+    assert_eq!(
+        super::fork::fork_context(&reference, "first").expect("first"),
+        Vec::new()
+    );
+    let error = super::fork::fork_context(&reference, "missing").expect_err("no match");
+    assert!(error.starts_with("no user prompt matches;"), "{error}");
+    assert_eq!(fs::read(&source).expect("read source"), before);
+    store.close().expect("close");
+}
+
+#[test]
+fn fork_context_ignores_a_compaction_after_the_prompt_and_keeps_one_before() {
+    use otto_core::model::Role;
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    completed_turn(&store, "t1", "one");
+    let after_one = store.messages();
+    let anchor = completed_turn(&store, "t2", "two");
+    let after_two = store.messages();
+    store
+        .append_compaction(&checkpoint(&anchor))
+        .expect("compact");
+    completed_turn(&store, "t3", "three");
+    let reference = store.path();
+
+    // The checkpoint came after "two": the original messages come back.
+    let context = super::fork::fork_context(&reference, "two").expect("context");
+    assert_eq!(context, after_one);
+    assert!(
+        context
+            .iter()
+            .all(|message| message.context_type.is_empty() && !message.text().contains("summary"))
+    );
+
+    // The checkpoint came before "three": its summary replaces "one".
+    let context = super::fork::fork_context(&reference, "three").expect("context");
+    assert_eq!(context.len(), 3);
+    assert_eq!(context[0].role, Role::Context);
+    assert!(context[0].text().contains("summary"), "{:?}", context[0]);
+    assert_eq!(context[1..], after_two[2..]);
+    assert!(!context.iter().any(|message| message.text() == "one"));
+    store.close().expect("close");
+}
+
+#[test]
 fn a_whole_fork_leaves_out_an_interrupted_turn() {
     use otto_core::session::{Session, TurnRecord, TurnTrigger};
     let temp = TempDir::new();

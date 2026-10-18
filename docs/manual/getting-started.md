@@ -609,13 +609,25 @@ Key points:
 - `[profiles.<name>].subagent_models` in your user configuration lists up to 16 model IDs in your preferred
   order from lower cost to higher capability. With this profile active, Otto
   shows the list to the parent agent and asks it to choose the first adequate
-  child model. An `agent` call that omits `model` uses the first entry, after
+  child model: prefer earlier choices for narrow searches, extraction,
+  formatting and routine checks, and stronger choices for demanding reasoning.
+  Explicit user choices and named-agent model defaults take precedence over
+  cost preferences. This is parent-agent judgment, not a runtime complexity
+  classifier or a price comparison. `otto setup` offers an optional ordered
+  list; supply exact IDs available through the profile's provider, or leave
+  it empty to retain the existing fallback. Configure this in user configuration,
+  not a project's `.otto/config.toml`.
+  An `agent` call that omits `model` uses the first entry, after
   any named agent's default; without a list, it inherits the session model.
   The child uses the same provider connection as the parent. A provider,
   endpoint or credential-source override that changes that connection disables
-  the list for the session. An unavailable ID fails the child with the
-  provider's error; Otto does not automatically repeat its work. Restart Otto
-  after editing the list to load the new configuration.
+  the list for the session. Otto reports a diagnostic when a connection change
+  disables configured candidates; select the intended profile or remove the
+  conflicting override, then restart. An unavailable ID fails the child with the
+  provider's error; correct the ID or choose another available model. Inspect
+  partial work and possible side effects before retrying: Otto does not
+  automatically repeat the task. Restart Otto after editing the list to load
+  the new configuration; already-recorded tasks retain their selected model.
 - `[ui].mode` sets the frontend mode (`auto`, `tui`, `repl`).
 - `[agent].shell_timeout` and `[agent].max_output_bytes` set default limits.
 - `[agent]` also accepts optional end-to-end `turn_timeout`,

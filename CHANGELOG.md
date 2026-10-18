@@ -17,6 +17,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
+- Sub-agent model configuration is easier to discover: setup offers an optional
+  ordered candidate list, parent guidance prefers lower-cost candidates for
+  routine tasks, and a diagnostic explains when a connection override disables
+  the list. Task status records the model-selection source; older task records
+  remain readable without inventing provenance. Explicit model choices and
+  named-agent defaults retain precedence. No model IDs or prices are built in,
+  and failed child work is not automatically repeated. See
+  [sub-agents](docs/manual/safety-and-tools.md#sub-agents).
+
 - A workspace initialized for the first time gets a readable memory scope ID,
   `<directory name>-<first 12 hex digits of the SHA-256 of its canonical path>`
   (for example `otto-60ef11ccec92`), instead of `sha256:<64 hex>`. The remote

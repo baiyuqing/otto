@@ -702,6 +702,10 @@ pub type PromptFor = Arc<dyn Fn(&[ToolDefinition]) -> String + Send + Sync>;
 /// Returns the parent's current message list.
 pub type ParentSession = Arc<dyn Fn() -> Vec<Message> + Send + Sync>;
 
+/// Returns the parent's messages as they were before the turn that the quoted
+/// user prompt opened, read from the parent's session file.
+pub type ParentFork = Arc<dyn Fn(&str) -> Result<Vec<Message>, String> + Send + Sync>;
+
 /// Everything a [`Runner`] needs from the parent runtime.
 pub struct Config {
     pub approval: Option<(Arc<crate::approval::Service>, otto_core::approval::Scope)>,
@@ -726,6 +730,10 @@ pub struct Config {
     /// view it would send on its next request. `None` disables
     /// `context: inherit`.
     pub parent_session: Option<ParentSession>,
+    /// Returns the parent's messages before the turn the quoted prompt opens.
+    /// `None` when the parent has no session file, which makes `fork_before`
+    /// fail.
+    pub parent_fork: Option<ParentFork>,
     /// Caps concurrent children; zero means four.
     pub max_parallel: usize,
     /// Caps the report text inside notification and wait text; zero means
@@ -774,6 +782,10 @@ pub struct StartRequest {
     /// `"fresh"` or `"inherit"`. Empty falls back to the definition's setting,
     /// then `"fresh"`.
     pub context: String,
+    /// The text of an earlier user prompt of the parent: the child starts with
+    /// the parent's messages before the turn that prompt opened, and `context`
+    /// is `"inherit"`. Empty means none.
+    pub fork_before: String,
     /// The parent session's tool call that starts the task, recorded in the
     /// child's `otto.task_spec`. Empty when no tool call started it.
     pub parent_tool_call_id: String,
@@ -1073,7 +1085,7 @@ impl Runner {
                 .map_or("", String::as_str),
             &self.config.template.model,
         ]);
-        let context = first_non_empty(&[
+        let mut context = first_non_empty(&[
             request.context.trim(),
             definition.as_ref().map_or("", |d| d.context.trim()),
             "fresh",
@@ -1081,26 +1093,24 @@ impl Runner {
         if context != "fresh" && context != "inherit" {
             return Err(StartError::InvalidContext);
         }
-        let Some(parent_session) = self.config.parent_session.as_ref() else {
-            if context == "inherit" {
-                return Err(StartError::InheritUnavailable);
+        let fork_before = request.fork_before.trim();
+        let snapshot = if !fork_before.is_empty() {
+            if request.context.trim() == "fresh" {
+                return Err(StartError::ForkNeedsInherit);
             }
-            return self
-                .spawn(
-                    request,
-                    definition,
-                    description,
-                    model,
-                    context,
-                    now,
-                    Vec::new(),
-                    transcript.map(|transcript| (transcript, String::new())),
-                    None,
-                    self.task_deadline(parent_deadline),
-                )
-                .await;
-        };
-        let snapshot = if context == "inherit" {
+            let parent_fork = self
+                .config
+                .parent_fork
+                .as_ref()
+                .ok_or_else(|| StartError::Fork("needs a saved session".into()))?;
+            context = "inherit".to_owned();
+            parent_fork(fork_before).map_err(StartError::Fork)?
+        } else if context == "inherit" {
+            let parent_session = self
+                .config
+                .parent_session
+                .as_ref()
+                .ok_or(StartError::InheritUnavailable)?;
             inherit_snapshot(&parent_session()).unwrap_or_default()
         } else {
             Vec::new()
@@ -1176,6 +1186,7 @@ impl Runner {
             model: record.model.clone(),
             agent: record.agent.clone(),
             context: record.context.clone(),
+            fork_before: String::new(),
             parent_tool_call_id: String::new(),
         };
         self.spawn(
@@ -1816,6 +1827,10 @@ pub enum StartError {
     InvalidContext,
     #[error("context inherit is not available in this session")]
     InheritUnavailable,
+    #[error(r#"fork_before requires context "inherit""#)]
+    ForkNeedsInherit,
+    #[error("fork_before: {0}")]
+    Fork(String),
     #[error("{0}")]
     Registry(#[from] TaskError),
     #[error("resume needs a saved session")]
@@ -3971,6 +3986,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_fork_before_gives_the_child_the_forked_messages_as_inherit() {
+        let forked = vec![user_message("u1", "first"), assistant_message("a1", "one")];
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, vec![stub("write")]);
+        let quoted = Arc::new(std::sync::Mutex::new(String::new()));
+        let (source, seen) = (forked.clone(), Arc::clone(&quoted));
+        config.parent_fork = Some(Arc::new(move |prompt| {
+            *seen.lock().unwrap() = prompt.to_owned();
+            Ok(source.clone())
+        }));
+        let (runner, _) = runner(config);
+
+        let task = runner
+            .start(StartRequest {
+                prompt: "delegated task".into(),
+                fork_before: "  second\n".into(),
+                ..StartRequest::default()
+            })
+            .await
+            .expect("start succeeds");
+        assert_eq!(task.context, "inherit");
+        wait_final(&tasks, &task.id).await;
+
+        assert_eq!(*quoted.lock().unwrap(), "second");
+        let messages = provider.requests()[0].messages.clone();
+        assert_eq!(&messages[..forked.len()], forked.as_slice());
+    }
+
+    #[tokio::test]
+    async fn start_fork_before_errors_create_no_task() {
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.parent_fork = Some(Arc::new(|_| Err("2 user prompts match".into())));
+        let (forking, _) = runner(config);
+        for (context, want) in [
+            ("fresh", r#"fork_before requires context "inherit""#),
+            ("", "fork_before: 2 user prompts match"),
+        ] {
+            let error = forking
+                .start(StartRequest {
+                    prompt: "go".into(),
+                    context: context.into(),
+                    fork_before: "x".into(),
+                    ..StartRequest::default()
+                })
+                .await
+                .expect_err("fork_before fails");
+            assert_eq!(error.to_string(), want);
+        }
+
+        let (runner, _) = runner(test_config(&provider, &tasks, Vec::new()));
+        let error = runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                fork_before: "x".into(),
+                ..StartRequest::default()
+            })
+            .await
+            .expect_err("no saved session");
+        assert_eq!(error.to_string(), "fork_before: needs a saved session");
+        assert!(tasks.list().is_empty());
+    }
+
+    #[tokio::test]
     async fn start_invalid_context_errors() {
         let provider = FakeProvider::new();
         let tasks = Arc::new(Tasks::new());
@@ -4737,6 +4819,40 @@ mod tests {
             .await;
         assert!(result.is_error);
         assert!(result.content.contains("context"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn agent_tool_rejects_resume_with_fork_before() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        interrupted_fixture(
+            &parent_path,
+            "t1",
+            "go",
+            None,
+            true,
+            false,
+            interrupted::INTERRUPTED_STATUS,
+        );
+
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+        let tools = crate::subagent::tools::tools(&runner);
+        let agent_tool = tools
+            .iter()
+            .find(|tool| tool.definition().name == "agent")
+            .expect("the agent tool is registered");
+
+        let result = agent_tool
+            .execute(
+                &raw(r#"{"resume":"t1","prompt":"continue","fork_before":"go"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_error);
+        assert_eq!(result.content, "resume does not accept fork_before");
     }
 
     #[tokio::test]

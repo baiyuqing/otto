@@ -39,8 +39,9 @@ pub use context::{
     index_context_entries, is_pi_entry_id, new_context_message,
 };
 pub use fork::{
-    FORK_CUSTOM_TYPE, FORK_SCHEMA_VERSION, ForkError, ForkPlan, ForkPoint, ForkRecord,
-    decode_fork_record, encode_fork_record, fork_origin, fork_points, plan_fork,
+    FORK_CUSTOM_TYPE, FORK_SCHEMA_VERSION, ForkError, ForkPlan, ForkPoint, ForkPromptError,
+    ForkRecord, decode_fork_record, encode_fork_record, fork_origin, fork_point_by_prompt,
+    fork_points, plan_fork,
 };
 pub use operation::{
     DecodedOperationFact, OPERATION_CUSTOM_TYPE, OPERATION_SCHEMA_VERSION, OperationFact,

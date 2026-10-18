@@ -13,10 +13,13 @@ use otto_core::session::context::format_persisted_timestamp;
 use otto_core::session::pi::{PI_SESSION_VERSION, PiCustom, PiHeader, PiSessionInfo};
 use otto_core::session::{
     FORK_CUSTOM_TYPE, FORK_SCHEMA_VERSION, ForkError, ForkPoint, ForkRecord, PiEntry, PiError,
-    PiRecord, encode_fork_record, encode_pi_record, plan_fork,
+    PiRecord, build_context, encode_fork_record, encode_pi_record, fork_point_by_prompt,
+    fork_points, plan_fork,
 };
 
-use super::store::{decode_pi_file_read_only, open_path_journal, reject_oversized_session_file};
+use super::store::{
+    Store, decode_pi_file_read_only, open_path_journal, reject_oversized_session_file,
+};
 use crate::fsops::{
     PosixPublish, Publish, PublishMode, PublishOps, PublishStep, open_dir_no_follow, publish_file,
 };
@@ -30,6 +33,30 @@ pub struct Forked {
     pub id: String,
     /// The fork point the copy stops before; `None` for a whole fork.
     pub point: Option<ForkPoint>,
+}
+
+/// The messages the session file `reference` held before the turn that the
+/// user prompt `prompt` opens: what a fork there would open with. The file is
+/// only read.
+pub(crate) fn fork_context(
+    reference: &str,
+    prompt: &str,
+) -> Result<Vec<otto_core::model::Message>, String> {
+    let (entries, _) = Store::read_entries(reference).map_err(|error| error.to_string())?;
+    let leaf = entries
+        .last()
+        .map(|entry| entry.id.as_str())
+        .unwrap_or_default();
+    let points = fork_points(&entries, leaf).map_err(|error| error.to_string())?;
+    let point = fork_point_by_prompt(&points, prompt).map_err(|error| error.to_string())?;
+    let plan =
+        plan_fork(&entries, leaf, Some(&point.entry_id)).map_err(|error| error.to_string())?;
+    let Some(last) = plan.entries.last() else {
+        return Ok(Vec::new());
+    };
+    let (resolved, _) =
+        build_context(&plan.entries, &last.id).map_err(|error| error.to_string())?;
+    Ok(resolved.messages)
 }
 
 /// Writes a fork of the session at `source` as `<new_id>.jsonl` in the same

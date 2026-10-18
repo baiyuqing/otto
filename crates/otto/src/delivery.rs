@@ -8,9 +8,8 @@
 //! file-tool root.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use otto_core::model::ToolDefinition;
@@ -32,7 +31,6 @@ const MAX_SOURCE_REFS: usize = 32;
 const MAX_SOURCE_REF_BYTES: usize = 4 * 1024;
 
 pub const HANDOFF_MAX_BYTES: usize = 64 * 1024;
-const GIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
@@ -67,47 +65,6 @@ pub struct Handoff {
 
 fn invalid(message: &str) -> String {
     format!("invalid delivery target: {message}")
-}
-
-/// Canonicalizes a primary Git checkout and records its common directory.
-/// Linked worktrees are refused so delivery never nests one managed worktree
-/// under another.
-pub fn target(path: &Path) -> Result<Target, String> {
-    if !path.is_absolute() {
-        return Err(invalid("target must be an absolute path"));
-    }
-    let repository = crate::runtime::sandbox_runtime::canonical_directory(path)
-        .map_err(|_| invalid("target must be an existing directory"))?;
-    let top = canonical_line(
-        &git(&repository, ["rev-parse", "--show-toplevel"])?,
-        "Git did not report a repository root",
-    )?;
-    if top != repository {
-        return Err(invalid("target must be the Git repository root"));
-    }
-    let common_dir = canonical_line(
-        &git(
-            &repository,
-            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?,
-        "Git did not report its common directory",
-    )?;
-    let git_dir = canonical_line(
-        &git(
-            &repository,
-            ["rev-parse", "--path-format=absolute", "--git-dir"],
-        )?,
-        "Git did not report its git directory",
-    )?;
-    if git_dir != common_dir {
-        return Err(invalid(
-            "target must be a primary checkout, not a linked worktree",
-        ));
-    }
-    Ok(Target {
-        repository,
-        common_dir,
-    })
 }
 
 /// Derives a new branch name when none was requested. The generated form is
@@ -882,53 +839,6 @@ fn canonical_line(output: &str, message: &str) -> Result<PathBuf, String> {
     std::fs::canonicalize(line).map_err(|_| invalid(message))
 }
 
-fn git<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String, String> {
-    let mut command = Command::new("git");
-    command
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "protocol.ext.allow=never",
-        ])
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_CONFIG_COUNT")
-        .env_remove("GIT_CONFIG_PARAMETERS")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .stdout(Stdio::piped());
-    let mut child = command.spawn().map_err(|_| invalid("cannot start Git"))?;
-    let start = Instant::now();
-    while child
-        .try_wait()
-        .map_err(|_| invalid("cannot wait for Git"))?
-        .is_none()
-    {
-        if start.elapsed() > GIT_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(invalid("Git inspection timed out"));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|_| invalid("cannot finish Git"))?;
-    if !output.status.success() {
-        return Err(invalid("target is not a usable Git repository"));
-    }
-    String::from_utf8(output.stdout).map_err(|_| invalid("Git returned invalid text"))
-}
-
 fn hash(value: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(value.as_bytes());
@@ -1137,11 +1047,11 @@ pub struct AdmissionPolicy {
 
 /// A read-only delivery preview backed by the target workspace's sandbox.
 ///
-/// This is deliberately separate from [`NativeService`]: approval rendering
-/// and revalidation need only admission plus fixed `git rev-parse` requests,
-/// whereas a delivery effect additionally needs a receipt store and the
-/// constrained worktree executor. A CLI/serve composition factory may retain
-/// this value without exposing either target capability to a source runner.
+/// Approval rendering and revalidation need only admission plus fixed
+/// `git rev-parse` requests, whereas a delivery effect additionally needs a
+/// receipt store and the constrained worktree executor. A CLI/serve
+/// composition factory may retain this value without exposing either target
+/// capability to a source runner.
 #[derive(Clone)]
 pub struct SandboxPreflight {
     policy: AdmissionPolicy,
@@ -1199,107 +1109,6 @@ impl Preflight for SandboxPreflight {
         cancel: &CancellationToken,
     ) -> Result<Preview, String> {
         self.preview_inner(source_workspace, request, cancel).await
-    }
-}
-
-/// Native delivery orchestration. It remains deliberately unwired until the
-/// serve-owned broker can retain a target host, constrained worktree executor,
-/// durable receipt path, and isolated target runner with the correct lifetimes.
-pub struct NativeService {
-    receipts: Arc<ReceiptStore>,
-    executor: WorktreeExecutor,
-}
-
-impl NativeService {
-    pub fn new(receipts: Arc<ReceiptStore>, executor: WorktreeExecutor) -> Self {
-        Self { receipts, executor }
-    }
-
-    fn binding(&self, approval_id: &str, preview: &Preview) -> ReceiptBinding {
-        ReceiptBinding {
-            approval_id: approval_id.into(),
-            source_workspace: preview.source_workspace.clone(),
-            target_repository: preview
-                .plan
-                .target
-                .repository
-                .to_string_lossy()
-                .into_owned(),
-            target_common_dir: preview
-                .plan
-                .target
-                .common_dir
-                .to_string_lossy()
-                .into_owned(),
-            worktree: preview.plan.path.to_string_lossy().into_owned(),
-            branch: preview.plan.branch.clone(),
-            base: preview.base.clone(),
-            handoff_digest: preview.handoff.digest.clone(),
-        }
-    }
-}
-
-#[async_trait]
-impl Service for NativeService {
-    async fn prepare(&self, approval_id: &str, preview: &Preview) -> Result<Receipt, String> {
-        let stored = self.receipts.prepare(self.binding(approval_id, preview))?;
-        if stored.state == ReceiptState::Unknown {
-            return Err(
-                "delivery receipt outcome is unknown; inspect the worktree before retrying".into(),
-            );
-        }
-        Ok(Receipt {
-            id: approval_id.into(),
-            preview: preview.clone(),
-            base: stored.binding.base,
-        })
-    }
-
-    async fn start(&self, receipt: &Receipt, cancel: &CancellationToken) -> Result<String, String> {
-        let stored = self.receipts.begin(&receipt.id)?;
-        if stored.binding != self.binding(&receipt.id, &receipt.preview)
-            || stored.binding.base != receipt.base
-        {
-            let _ = self.receipts.unknown(&receipt.id);
-            return Err("delivery receipt binding changed before worktree setup".into());
-        }
-        match self
-            .executor
-            .add(&receipt.preview.plan, &receipt.base, cancel)
-            .await
-        {
-            Ok(()) => {
-                self.receipts.started(&receipt.id)?;
-                Ok(format!(
-                    "delivery worktree prepared: {}",
-                    receipt.preview.plan.path.display()
-                ))
-            }
-            Err(error) => {
-                let _ = self.receipts.unknown(&receipt.id);
-                Err(error)
-            }
-        }
-    }
-}
-
-/// The wired default until the approval-scoped constrained Git executor and
-/// target runner are implemented. It can safely preview an authorization but
-/// refuses to create a worktree or claim a delivery task has started.
-pub struct UnavailableService;
-
-#[async_trait]
-impl Service for UnavailableService {
-    async fn prepare(&self, _approval_id: &str, _preview: &Preview) -> Result<Receipt, String> {
-        Err("delivery worktree execution is not available yet; no worktree was created".into())
-    }
-
-    async fn start(
-        &self,
-        _receipt: &Receipt,
-        _cancel: &CancellationToken,
-    ) -> Result<String, String> {
-        Err("delivery worktree execution is not available yet; no delivery task was started".into())
     }
 }
 
@@ -1569,13 +1378,6 @@ mod tests {
         }
     }
 
-    fn native_service(
-        executor: Arc<RecordingExecutor>,
-        receipts: Arc<ReceiptStore>,
-    ) -> NativeService {
-        NativeService::new(receipts, WorktreeExecutor::new(executor, Vec::new()))
-    }
-
     struct FakePreflight {
         previews: Mutex<usize>,
     }
@@ -1758,31 +1560,6 @@ mod tests {
             .is_err()
         );
         assert_eq!(*preflight.previews.lock().unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn unavailable_service_never_claims_a_worktree_was_created() {
-        let error = UnavailableService
-            .prepare(
-                "a1",
-                &Preview {
-                    source_workspace: "/source".into(),
-                    plan: WorktreePlan {
-                        target: Target {
-                            repository: "/target".into(),
-                            common_dir: "/git".into(),
-                        },
-                        delivery_id: "pending".into(),
-                        branch: "agent/test".into(),
-                        path: "/target/.otto/delivery-worktrees/pending".into(),
-                    },
-                    base: "a".repeat(40),
-                    handoff: handoff("x", []).unwrap(),
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(error.contains("no worktree was created"));
     }
 
     #[test]
@@ -2040,51 +1817,6 @@ mod tests {
                 .path
                 .ends_with(".otto/delivery-worktrees/".to_string() + &preview.plan.delivery_id)
         );
-    }
-
-    #[tokio::test]
-    async fn native_service_commits_receipt_before_fixed_executor_and_marks_started() {
-        let target = tempfile::tempdir().unwrap();
-        let executor = RecordingExecutor::new(vec![(ExitStatus::default(), Ok(()))]);
-        let receipts = Arc::new(ReceiptStore::in_memory());
-        let service = native_service(executor.clone(), receipts.clone());
-        let preview = Preview {
-            source_workspace: "/source".into(),
-            plan: WorktreePlan {
-                target: Target {
-                    repository: target.path().into(),
-                    common_dir: target.path().join(".git"),
-                },
-                delivery_id: "delivery-1".into(),
-                branch: "agent/ship-diagram".into(),
-                path: target.path().join(".otto/delivery-worktrees/delivery-1"),
-            },
-            base: "a".repeat(40),
-            handoff: handoff(
-                "ship diagram",
-                [("source-ref-1".into(), "message:1".into())],
-            )
-            .unwrap(),
-        };
-        assert!(executor.requests.lock().unwrap().is_empty());
-        let receipt = service.prepare("approval-1", &preview).await.unwrap();
-        assert_eq!(
-            receipts.get("approval-1").unwrap().unwrap().state,
-            ReceiptState::Prepared
-        );
-        let result = service
-            .start(&receipt, &CancellationToken::new())
-            .await
-            .unwrap();
-        assert!(result.contains("delivery worktree prepared"));
-        assert_eq!(
-            receipts.get("approval-1").unwrap().unwrap().state,
-            ReceiptState::Started
-        );
-        let requests = executor.requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].dir, target.path());
-        assert_eq!(requests[0].argv.last().unwrap(), &"a".repeat(40));
     }
 
     #[test]
@@ -2350,12 +2082,6 @@ mod tests {
         assert!(worktree_add_argv(&prepared, "HEAD;rm -rf /").is_err());
         std::fs::create_dir_all(&prepared.path).unwrap();
         assert!(worktree_add_argv(&prepared, &base).is_err());
-    }
-
-    #[test]
-    fn target_requires_a_primary_git_checkout() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(target(dir.path()).is_err());
     }
 
     #[test]

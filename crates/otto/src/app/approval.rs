@@ -94,7 +94,7 @@ impl Drop for PendingApprovalCleanup {
 impl Controller {
     /// Runs `first` and every approval retry to its end. `emit` receives every
     /// event of every step. An error is the failing step's error, or the
-    /// (already redacted) text `approve_bash` returned.
+    /// (already redacted) text `approve_tool` returned.
     pub async fn run_with_approvals<F, Fut>(
         &self,
         first: Step<'_>,

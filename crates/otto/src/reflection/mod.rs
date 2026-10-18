@@ -177,12 +177,6 @@ impl Report {
         self.status == Status::Noop && !self.note.is_empty()
     }
 
-    /// Whether the run did anything a user needs to hear about: it queued a
-    /// candidate or wrote a skill.
-    pub fn changed_something(&self) -> bool {
-        !self.candidates.is_empty() || !self.skills.is_empty() || !self.skill_approvals.is_empty()
-    }
-
     /// What `/reflect` shows: [`Self::line`], then the retrospective when
     /// the run has one.
     pub fn summary(&self) -> String {

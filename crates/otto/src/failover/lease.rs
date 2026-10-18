@@ -38,9 +38,3 @@ impl Lease {
         lease::Lease::acquire_with_keeper(path, &keeper)
     }
 }
-
-/// Compatibility query for callers that still need to inspect POSIX leases.
-/// Signal handling uses the generic session ownership registry.
-pub fn holds_lease() -> bool {
-    crate::failover::ownership::holds_writer_ownership()
-}

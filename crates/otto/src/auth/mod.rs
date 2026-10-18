@@ -260,12 +260,6 @@ pub(crate) fn random_bytes<const N: usize>() -> std::io::Result<[u8; N]> {
     Ok(bytes)
 }
 
-/// The default path: `~/.otto/auth/chatgpt.json`.
-pub fn default_path() -> Result<PathBuf, AuthError> {
-    let home = std::env::var_os("HOME").ok_or(AuthError::CredentialsUnavailable)?;
-    Ok(path_for_home(Path::new(&home)))
-}
-
 pub fn path_for_home(home: &Path) -> PathBuf {
     home.join(".otto").join("auth").join("chatgpt.json")
 }

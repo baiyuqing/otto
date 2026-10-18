@@ -104,30 +104,6 @@ impl From<RejectedEnvironment> for Error {
     }
 }
 
-/// Parses `NAME=VALUE` entries into a map, last duplicate winning.
-///
-/// Rejects any entry that is not valid UTF-8, holds a NUL byte, lacks `=`, or
-/// carries a name that is not a POSIX-ish identifier.
-pub fn parse_environment(entries: &[Vec<u8>]) -> Result<BTreeMap<String, String>, Error> {
-    let mut environment = BTreeMap::new();
-    for entry in entries {
-        let Ok(entry) = std::str::from_utf8(entry) else {
-            return Err(Error::EnvironmentUnsafe);
-        };
-        if entry.contains('\0') {
-            return Err(Error::EnvironmentUnsafe);
-        }
-        let Some((name, value)) = entry.split_once('=') else {
-            return Err(Error::EnvironmentUnsafe);
-        };
-        if !super::valid_environment_name(name) {
-            return Err(Error::EnvironmentUnsafe);
-        }
-        environment.insert(name.to_owned(), value.to_owned());
-    }
-    Ok(environment)
-}
-
 /// Decides the child's environment and the redaction set for it.
 ///
 /// A name is *ordinary* (passed through), *automatic* (withheld unless
@@ -672,37 +648,6 @@ mod tests {
                 .iter()
                 .any(|value| value == "test-listener-secret")
         );
-    }
-
-    #[test]
-    fn parse_environment_is_deterministic_and_the_last_duplicate_wins() {
-        let input = entries(&["ZETA=first", "ALPHA=alpha", "ZETA=last", "EMPTY="]);
-        let want = BTreeMap::from([
-            ("ALPHA".to_owned(), "alpha".to_owned()),
-            ("EMPTY".to_owned(), String::new()),
-            ("ZETA".to_owned(), "last".to_owned()),
-        ]);
-        assert_eq!(parse_environment(&input).unwrap(), want);
-        assert_eq!(parse_environment(&input).unwrap(), want);
-    }
-
-    #[test]
-    fn parse_environment_rejects_malformed_entries() {
-        let cases: [&[u8]; 8] = [
-            b"MALFORMED",
-            b"=value",
-            b"1INVALID=value",
-            b"INVALID-NAME=value",
-            b"INVALID\0NAME=value",
-            b"VALID=unsafe\0value",
-            b"N\xff=x",
-            b"VALUE=\xff",
-        ];
-        for case in cases {
-            let error = parse_environment(&[case.to_vec()]).expect_err("malformed entry");
-            assert_eq!(error, Error::EnvironmentUnsafe);
-            assert_eq!(error.to_string(), "sandbox environment is unsafe");
-        }
     }
 
     #[test]

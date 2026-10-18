@@ -1,6 +1,6 @@
 //! Model facade for neutral memory services. Authority is supplied by the host.
 use super::{
-    Tool, error_result,
+    Tool, empty_as_none, error_result,
     result::{capped_text_result, decode_strict_json},
     text_result,
 };
@@ -61,6 +61,7 @@ struct Args {
     kind: String,
     key: Option<String>,
     organization_id: Option<String>,
+    #[serde(default, deserialize_with = "empty_as_none")]
     scope_filter: Option<Vec<ScopeNamespace>>,
     text: String,
     scope: String,

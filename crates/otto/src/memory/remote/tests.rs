@@ -853,6 +853,7 @@ async fn model_tools_bind_references_and_nullable_key_without_tenant_selection()
         json!({"text":"update","target_id":"m-17","scope_namespace":"workspace","scope_id":"project-a","opaque_revision":"r4"}),
         json!({"text":"update","target_id":"m-17","organization_id":"acme","scope_namespace":"workspace","scope_id":"project-a"}),
         json!({"text":"update","target_id":"m-17","organization_id":"other","scope_namespace":"workspace","scope_id":"project-a","opaque_revision":"r4"}),
+        json!({"text":"create","base_revision":1}),
     ] {
         assert!(
             remember
@@ -880,4 +881,14 @@ async fn model_tools_bind_references_and_nullable_key_without_tenant_selection()
     assert!(!result.is_error, "{}", result.content);
     let sent: Value = serde_json::from_slice(&seen.lock().unwrap()[1].2).unwrap();
     assert!(sent["key"].is_null());
+    let result = remember
+        .execute(
+            &call(json!({"text":"new preference","base_revision":0})),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+    let sent: Value = serde_json::from_slice(&seen.lock().unwrap()[2].2).unwrap();
+    assert_eq!(sent["text"], "new preference");
+    assert!(sent["target"].is_null());
 }

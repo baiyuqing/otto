@@ -326,7 +326,7 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - The wasm32 test run in `make check` now also runs the two otto-core tests
   for replaying tool calls after a session takeover. They lacked the
   `wasm_bindgen_test` attribute, so wasm32 compiled them out and reported four
-  dead-code warnings.
+  dead-code warnings ([#505](https://github.com/baiyuqing/otto/pull/505)).
 
 - Pin local and Docker builds to Rust 1.99.0, the current stable toolchain.
   Source-install instructions use the same version.

@@ -316,7 +316,6 @@ impl FileStore {
                 standing_used += estimate;
                 result.matches.push(RetrievalMatch {
                     record: candidate.record.clone(),
-                    rank: index + 1,
                     standing: true,
                 });
                 continue;
@@ -342,7 +341,6 @@ impl FileStore {
             }
             result.matches.push(RetrievalMatch {
                 record: candidate.record.clone(),
-                rank: index + 1,
                 standing: false,
             });
             plain += 1;

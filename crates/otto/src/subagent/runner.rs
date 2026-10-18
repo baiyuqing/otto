@@ -124,7 +124,7 @@ pub(crate) const TASK_RESULT_CUSTOM_TYPE: &str = "otto.task_result";
 
 /// The JSON `data` of an `otto.task_spec` custom entry: the task as created,
 /// and the agent definition as resolved at start (the same snapshot
-/// [`Runner::run_with_definition`] uses), so a queued task's transcript
+/// [`Runner::run_with_definition_control`] uses), so a queued task's transcript
 /// already records what it was asked to do before it starts.
 ///
 /// `pub(crate)` and `Deserialize` so [`crate::subagent::interrupted::scan`]
@@ -158,7 +158,7 @@ pub(crate) struct TaskSpecDefinition {
     pub(crate) body: String,
     /// The definition's own tool allowlist, `None` for every child tool.
     /// Unresolved against the live registry, matching what
-    /// [`Runner::run_with_definition`] snapshots.
+    /// [`Runner::run_with_definition_control`] snapshots.
     #[serde(default)]
     pub(crate) tools: Option<Vec<String>>,
     #[serde(rename = "writePolicy")]
@@ -1024,26 +1024,7 @@ impl Runner {
     /// name, an invalid context, or `inherit` with no parent session is
     /// rejected before any task is created.
     pub async fn start(self: &Arc<Self>, request: StartRequest) -> Result<Task, StartError> {
-        self.start_resolved(request, None, None).await
-    }
-
-    /// Starts one child with a caller-owned session. Durable workflows use
-    /// this path so the child transcript survives the process.
-    pub async fn start_with_session(
-        self: &Arc<Self>,
-        request: StartRequest,
-        transcript: Transcript,
-    ) -> Result<Task, StartError> {
-        self.start_resolved(request, Some(transcript), None).await
-    }
-
-    async fn start_resolved(
-        self: &Arc<Self>,
-        request: StartRequest,
-        transcript: Option<Transcript>,
-        inline_definition: Option<Definition>,
-    ) -> Result<Task, StartError> {
-        self.start_resolved_with_deadline(request, transcript, inline_definition, None)
+        self.start_resolved_with_deadline(request, None, None, None)
             .await
     }
 
@@ -1204,33 +1185,10 @@ impl Runner {
         .await
     }
 
-    /// Runs one child to a terminal state using `transcript` and returns its
-    /// final task record. Cancellation stops the child, not only the wait.
-    pub async fn run_with_session(
-        self: &Arc<Self>,
-        request: StartRequest,
-        transcript: Transcript,
-        cancel: &CancellationToken,
-    ) -> Result<Task, String> {
-        self.run_resolved(request, transcript, None, cancel, None)
-            .await
-    }
-
     /// Runs using a definition snapshot captured when a durable workflow was
-    /// created, so editing `AGENT.md` cannot change a resumed run.
-    pub async fn run_with_definition(
-        self: &Arc<Self>,
-        request: StartRequest,
-        transcript: Transcript,
-        definition: Definition,
-        cancel: &CancellationToken,
-    ) -> Result<Task, String> {
-        self.run_resolved(request, transcript, Some(definition), cancel, None)
-            .await
-    }
-
-    /// Runs from a durable definition while inheriting the caller's absolute
-    /// deadline. The child's local task timeout may only shorten that budget.
+    /// created, so editing `AGENT.md` cannot change a resumed run, while
+    /// inheriting the caller's absolute deadline. The child's local task
+    /// timeout may only shorten that budget.
     pub async fn run_with_definition_control(
         self: &Arc<Self>,
         request: StartRequest,

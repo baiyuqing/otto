@@ -100,7 +100,7 @@ fn domain_error(native_error: super::Error) -> port::Error {
         Native::Unsupported => port::ErrorKind::Unsupported,
         Native::InvalidRequest | Native::InvalidRecord => port::ErrorKind::InvalidInput,
         Native::SensitiveMemory | Native::PolicyDecision => port::ErrorKind::Rejected,
-        Native::CommitUnknown | Native::IncompleteForget => port::ErrorKind::OutcomeUnknown,
+        Native::CommitUnknown => port::ErrorKind::OutcomeUnknown,
         Native::Canceled => port::ErrorKind::Canceled,
         Native::Closed => port::ErrorKind::Closed,
         _ => port::ErrorKind::Unavailable,

@@ -45,7 +45,6 @@ fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
 
 /// One loaded workspace: its composition root, its own `/sandbox reload`
 /// state, and, when the workflow lock was acquired, its workflow controller.
-#[allow(dead_code)] // Used only when the delivery lifecycle is fully installed.
 struct DeliverySetupCapability {
     executor: Arc<crate::sandbox::Executor>,
     environment: Vec<String>,
@@ -526,7 +525,6 @@ trait DeliveryRun: Send {
 
 /// Server-owned resources for one started delivery. None of these values cross
 /// the delivery service boundary into a source session/tool.
-#[allow(dead_code)] // Retained only by the not-yet-installed delivery service.
 struct DeliveryRuntime {
     _primary_host: Arc<WorkspaceHost>,
     worktree_sandbox: crate::runtime::startup::WorkspaceSandbox,
@@ -570,17 +568,14 @@ impl DeliveryRun for DeliveryRuntime {
     }
 }
 
-#[allow(dead_code)] // Held only by the not-yet-installed delivery service.
 struct PreparedDelivery {
     primary_host: Arc<WorkspaceHost>,
     executor: crate::delivery::WorktreeExecutor,
 }
 
-/// Receipt-owned delivery effect service. It is intentionally private and
-/// uninstalled until task execution/status wiring exists. Its only mutable Git
-/// operation is `WorktreeExecutor::add`; every target runner is built after
-/// that operation around the newly-created worktree root.
-#[allow(dead_code)] // Installed only after delivery task/status wiring is complete.
+/// Receipt-owned delivery effect service, private to `otto serve`. Its only
+/// mutable Git operation is `WorktreeExecutor::add`; every target runner is
+/// built after that operation around the newly-created worktree root.
 struct DeliveryService {
     broker: DeliveryBroker,
     receipts: Arc<crate::delivery::ReceiptStore>,

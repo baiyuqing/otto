@@ -92,23 +92,6 @@ pub trait MemoryRecall {
     }
 }
 
-/// A binding that recalls nothing. It is what an agent gets when the caller
-/// configured no memory, and it keeps the recall path exercised in tests.
-#[derive(Debug, Default)]
-pub struct NoMemory;
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl MemoryRecall for NoMemory {
-    async fn recall(
-        &self,
-        _request: &RecallRequest,
-        _cancel: &CancellationToken,
-    ) -> Result<RecallResult, MemoryError> {
-        Ok(RecallResult::default())
-    }
-}
-
 /// Renders recalled records into the text of one request-local message.
 ///
 /// Returns the empty string for no records, which tells the agent to skip the
@@ -264,16 +247,5 @@ mod tests {
                 "{MEMORY_CONTEXT_PREAMBLE}<memory id=\"rec-1\" scope=\"user/u1\" kind=\"fact\" key=\"k\">note</memory>\n"
             )
         );
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn the_no_op_binding_recalls_nothing() {
-        let result = NoMemory
-            .recall(&RecallRequest::default(), &CancellationToken::new())
-            .await
-            .expect("no-op recall never fails");
-        assert_eq!(result, RecallResult::default());
-        assert!(NoMemory.close().is_ok());
     }
 }

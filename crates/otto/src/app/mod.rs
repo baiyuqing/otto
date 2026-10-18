@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
-use otto_core::agent::inbox::{Notification, NotificationKind};
+use otto_core::agent::inbox::NotificationKind;
 use otto_core::agent::{AgentError, CompactionResult, EventSink};
 use otto_core::config::resolve::Runtime;
 use otto_core::model::{Block, Message, Usage};
@@ -69,7 +69,6 @@ pub const SESSION_OPERATION_UNAVAILABLE: &str = "session operation is unavailabl
 pub const PROMPT_ACTIVE: &str = "a prompt is already active";
 pub const NOTHING_TO_FORK: &str = "the session has no history to fork yet";
 pub const CLOSED: &str = "controller is closed";
-pub const SESSION_RENAME_UNAVAILABLE: &str = "session rename is unavailable";
 pub const INVALID_SESSION_NAME: &str = "session is invalid: session name is required";
 
 /// The deterministic result of submitting ordinary human text while a session
@@ -1173,29 +1172,6 @@ impl Controller {
             .snapshot(&scope.workspace, Some(&scope.session_id))
     }
 
-    pub fn decide_shared_approval(
-        &self,
-        id: &str,
-        allow: bool,
-        feedback: &str,
-        transport: &str,
-    ) -> Result<otto_core::approval::Request, crate::approval::Error> {
-        let scope = self.approval_scope();
-        let request = self
-            .approval_service()
-            .get(id, &scope.workspace, Some(&scope.session_id))?;
-        let decided = self.approval_service().decide(
-            id,
-            &request.scope,
-            request.revision,
-            allow,
-            feedback,
-            &crate::approval::Actor::local(transport),
-        )?;
-        self.approval_service().apply_available(&scope.workspace)?;
-        Ok(decided)
-    }
-
     // ---- turns ----
 
     pub async fn prompt(
@@ -2263,48 +2239,6 @@ impl Controller {
         Ok(Some(WakeOperation::new(self, admission)))
     }
 
-    /// Queues user input for the active turn's next safe checkpoint.
-    pub fn queue_user_message(&self, text: &str) -> bool {
-        let text = text.trim();
-        if text.is_empty() {
-            return false;
-        }
-        let runner = {
-            let state = self.lock();
-            if state.closed || !state.busy {
-                return false;
-            }
-            let Some(current) = state.current.as_ref() else {
-                return false;
-            };
-            Arc::clone(&current.runner)
-        };
-        if runner.queue_user_authorization(text).is_err() {
-            return false;
-        }
-        runner.mailbox().push(Notification {
-            kind: Some(NotificationKind::UserMessage),
-            text: text.to_string(),
-            ..Notification::default()
-        });
-        true
-    }
-
-    /// Withdraws the TUI's one pending in-turn user message, if still queued.
-    pub fn withdraw_user_message(&self) -> bool {
-        let runner = {
-            let state = self.lock();
-            let Some(current) = state.current.as_ref() else {
-                return false;
-            };
-            Arc::clone(&current.runner)
-        };
-        runner
-            .mailbox()
-            .remove("", NotificationKind::UserMessage)
-            .is_some()
-    }
-
     pub async fn reload_sandbox(&self) -> Result<SandboxInfo, String> {
         let control = {
             let state = self.lock();
@@ -2439,13 +2373,6 @@ impl Controller {
     pub(crate) fn deny_tool_for_session(&self, session_id: &str, id: &str) -> Result<(), String> {
         self.bash_approvals()?.discard(session_id, id);
         Ok(())
-    }
-
-    /// Grants one pending elevated Bash command for the current session.
-    pub fn approve_bash(&self, id: &str) -> Result<String, String> {
-        let _admission = self.begin_operation()?;
-        let session_id = self.admitted_session_id()?;
-        self.approve_bash_for_session(&session_id, id)
     }
 
     fn approve_bash_for_session(&self, session_id: &str, id: &str) -> Result<String, String> {
@@ -3123,22 +3050,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_approval_fails_closed_when_unavailable_or_busy() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let sessions = tempfile::tempdir().expect("sessions");
-        let controller = controller(workspace.path(), sessions.path()).await;
-        assert_eq!(
-            controller.approve_bash("approval-1"),
-            Err("temporary elevation is unavailable".to_string())
-        );
-        let _admission = controller.begin_operation().expect("admit turn");
-        assert_eq!(
-            controller.approve_bash("approval-1"),
-            Err(PROMPT_ACTIVE.to_string())
-        );
-    }
-
-    #[tokio::test]
     async fn read_approval_persists_reloads_and_denial_invalidates_the_request() {
         let workspace = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
@@ -3154,7 +3065,6 @@ mod tests {
             controller_with_approvals(workspace.path(), sessions.path()).await;
         let session = controller.info().session_id;
         let id = approvals.request_read_path(&session, "cat fixture", &path);
-        assert!(controller.approve_bash(&id).is_err());
         assert!(!controller.config_path().exists());
         controller.deny_tool(&id).unwrap();
         assert!(controller.approve_tool(&id).await.is_err());
@@ -4393,9 +4303,13 @@ mod tests {
 
         assert!(controller.tasks().is_none());
         assert!(controller.prepare_wake().expect("prepare").is_none());
-        let operation = controller.begin_operation().expect("admit");
-        assert!(controller.queue_user_message("change course"));
-        drop(operation);
+        controller.runner().expect("runner").mailbox().push(
+            otto_core::agent::inbox::Notification {
+                kind: Some(NotificationKind::UserMessage),
+                text: "change course".to_string(),
+                ..Default::default()
+            },
+        );
         controller
             .prepare_wake()
             .expect("prepare")

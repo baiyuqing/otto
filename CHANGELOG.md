@@ -314,9 +314,11 @@ limitations are documented in the [user manual](docs/user-manual.md).
 - The provider HTTPS client now uses `rustls` 0.23.46 instead of 0.23.44,
   which fixes RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted across
   encryption levels) and RUSTSEC-2026-0346 to 0349.
+  ([#506](https://github.com/baiyuqing/otto/pull/506))
 - `otto-connect` now uses `github.com/gorilla/websocket` v1.5.3 instead of
   v1.5.0 for the Feishu connection, which fixes GO-2026-6278 (WebSocket mask
   keys generated with a weak random number generator).
+  ([#506](https://github.com/baiyuqing/otto/pull/506))
 
 ### Performance
 

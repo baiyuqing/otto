@@ -72,8 +72,10 @@ bytes with at least one non-space character; ordinary spaces are allowed. User,
 workspace and other scope IDs are 1..128 printable **non-space ASCII** bytes;
 never paths. Scope namespace is a
 closed enum. A request's scope ID must equal its corresponding context coordinate.
-Workspace identity uses Otto's stable scope marker/override, with canonical-path
-SHA-256 fallback; use a shared `[memory.workspace_ids]` override across hosts.
+Workspace identity uses Otto's stable scope marker/override, with a
+`<directory name>-<12 hex of the canonical-path SHA-256>` fallback such as
+`otto-60ef11ccec92`; markers written before this format hold `sha256:<64 hex>`.
+Use a shared `[memory.workspace_ids]` override across hosts.
 Without a project the context explicitly has `workspace_id: null`.
 
 The host, not model arguments or project overlays, selects organization, user,

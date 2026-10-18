@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use otto_core::model::Message;
 use otto_core::session::{
     ForkError, ForkPoint, ForkRecord, Header, ListResult, RuntimeMetadata, Session, SessionInfo,
     Snapshot, Warning,
@@ -143,4 +144,8 @@ pub trait SessionRepository: Send + Sync {
     ) -> Result<Forked, ForkError>;
     /// The places `reference` can be forked, oldest first.
     fn fork_points(&self, reference: &str) -> Result<Vec<ForkPoint>, String>;
+    /// The messages `reference` held before the turn that the user prompt
+    /// named by `prompt` opens (see `fork_point_by_prompt`). `reference` is
+    /// only read.
+    fn fork_context(&self, reference: &str, prompt: &str) -> Result<Vec<Message>, String>;
 }

@@ -169,6 +169,12 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Features
 
+- The `agent` tool accepts `fork_before`, the text of an earlier user prompt.
+  The sub-agent then starts with the parent conversation as it was before
+  that prompt's turn, read from the session file, including turns compaction
+  has since summarized. See
+  [Sub-agents](docs/manual/safety-and-tools.md#sub-agents). ([#502](https://github.com/baiyuqing/otto/pull/502))
+
 - `[memory] backend = "remote"` connects Otto to a memory service on another host
   over HTTP. Otto recalls per user input, sends explicit writes and `/remember`
   to the service, and uploads each finished turn; an incomplete or failed recall

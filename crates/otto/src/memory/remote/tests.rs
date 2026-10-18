@@ -816,7 +816,7 @@ async fn model_tools_bind_references_and_nullable_key_without_tenant_selection()
                 let mut result = receipt(
                     "applied",
                     if path == "/v1/remember" {
-                        "workspace"
+                        request["scope"]["namespace"].as_str().unwrap()
                     } else {
                         "user"
                     },
@@ -890,5 +890,25 @@ async fn model_tools_bind_references_and_nullable_key_without_tenant_selection()
     assert!(!result.is_error, "{}", result.content);
     let sent: Value = serde_json::from_slice(&seen.lock().unwrap()[2].2).unwrap();
     assert_eq!(sent["text"], "new preference");
+    assert!(sent["target"].is_null());
+    let result = remember
+        .execute(
+            &call(json!({
+                "base_revision": 0,
+                "confidence": 1,
+                "key": "verify-uncertainty-with-web-search",
+                "kind": "preference",
+                "opaque_revision": "",
+                "organization_id": "",
+                "scope": "user",
+                "scope_namespace": "user",
+                "text": "Search the web when uncertain"
+            })),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+    let sent: Value = serde_json::from_slice(&seen.lock().unwrap()[3].2).unwrap();
+    assert_eq!(sent["scope"]["namespace"], "user");
     assert!(sent["target"].is_null());
 }

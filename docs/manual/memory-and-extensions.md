@@ -269,7 +269,8 @@ overrides host security, system rules or actual user authorization.
   `workspace` for model writes). Create uses the host-selected tenant and never
   silently upserts an active duplicate key. Remote update additionally requires
   `target_id`, `opaque_revision` and `organization_id`; `scope_id` validates
-  a supplied reference's scope. Updated key and text are full replacements.
+  a supplied reference's scope. A create may include `base_revision = 0`;
+  a nonzero value requires `opaque_revision`. Updated key and text are full replacements.
   Generic metadata cannot set identity, authority or pinning; pin management
   is external service-admin functionality.
 - Remote `forget` takes `id`, `organization_id`, `opaque_revision` and

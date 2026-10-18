@@ -223,7 +223,9 @@ impl ServiceTool {
                     context.scopes = vec![scope.clone()];
                 }
                 context.write_scope = Some(scope.clone());
-                if args.base_revision.is_some() && args.opaque_revision.is_none() {
+                if args.base_revision.is_some_and(|revision| revision != 0)
+                    && args.opaque_revision.is_none()
+                {
                     return Err(Error::new(ErrorKind::InvalidInput));
                 }
                 let mut metadata = BTreeMap::new();
@@ -363,12 +365,15 @@ impl Tool for ServiceTool {
                         json!("Opaque item ID returned by the selected memory service");
                 }
             }
-            for field in ["revision", "base_revision"] {
-                if let Some(property) = schema["properties"].get_mut(field) {
-                    property["description"] = json!(
-                        "Legacy numeric revision; not equivalent to a service revision. If supplied, also supply the service-returned opaque_revision"
-                    );
-                }
+            if let Some(property) = schema["properties"].get_mut("revision") {
+                property["description"] = json!(
+                    "Legacy numeric revision; not equivalent to a service revision. If supplied, also supply the service-returned opaque_revision"
+                );
+            }
+            if let Some(property) = schema["properties"].get_mut("base_revision") {
+                property["description"] = json!(
+                    "Legacy numeric revision; not equivalent to a service revision. Zero is allowed on create; a nonzero value also requires the service-returned opaque_revision"
+                );
             }
             if self.operation == Operation::Remember {
                 schema["required"] = json!(["text"]);

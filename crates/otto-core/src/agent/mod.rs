@@ -2283,6 +2283,7 @@ mod tests {
         session
     }
 
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn run_replays_a_replayable_call_a_takeover_left_unanswered() {
         let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);
@@ -2342,6 +2343,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn run_does_not_replay_a_call_whose_tool_is_not_replayable() {
         let provider = ScriptedProvider::new(vec![(Vec::new(), assistant_text())]);

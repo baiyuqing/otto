@@ -6,7 +6,7 @@ use super::{
 };
 use crate::memory::client::Client;
 use otto_core::{memory::*, model::ToolDefinition, tool::ToolResult};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, value::RawValue};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -60,6 +60,7 @@ struct Args {
     id: Option<String>,
     kind: String,
     key: Option<String>,
+    #[serde(deserialize_with = "empty_string_as_none")]
     organization_id: Option<String>,
     #[serde(default, deserialize_with = "empty_as_none")]
     scope_filter: Option<Vec<ScopeNamespace>>,
@@ -71,9 +72,16 @@ struct Args {
     target_id: String,
     base_revision: Option<u64>,
     revision: Option<u64>,
+    #[serde(deserialize_with = "empty_string_as_none")]
     opaque_revision: Option<String>,
     scope_namespace: String,
     scope_id: String,
+}
+
+fn empty_string_as_none<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|value| !value.is_empty()))
 }
 
 impl ServiceTool {

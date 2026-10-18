@@ -82,11 +82,6 @@ pub trait ApprovalStore: Send + Sync {
     ) -> Result<Request>;
 }
 
-/// Compatibility predicate for older custom stores. Smart-review stores use
-/// canonical settings and exact review/context snapshots instead.
-pub fn automatic_decision_allowed(mode: ApprovalMode, request: &Request) -> bool {
-    mode.decides(request)
-}
 /// Nullable legacy metadata and review-status-only updates do not create a
 /// synthetic operation revision. A changed authority basis does.
 pub fn pending_basis_changed(expected: &Request, next: &Request) -> bool {

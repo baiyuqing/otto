@@ -894,39 +894,6 @@ fn validate_field(field: ProfileField, value: &str, provider: &str) -> Result<()
     }
 }
 
-/// The environment `otto_core::config::resolve` and `resolve_memory` may
-/// consult for `file`: a fixed set of `OTTO_*` overrides plus `HOME`, and
-/// each profile's `api_key_env`. Exactly these names are read, never the whole
-/// process environment, so that resolution can never be influenced by an
-/// unrelated or oversized environment, and so a key value never has to be
-/// logged or matched against a name pattern to redact it.
-pub fn resolution_environment(file: &File) -> HashMap<String, String> {
-    const FIXED_KEYS: [&str; 7] = [
-        "HOME",
-        "OTTO_PROVIDER",
-        "OTTO_PROFILE",
-        "OTTO_MODEL",
-        "OTTO_API_KEY",
-        "OTTO_UI",
-        "OTTO_TRACE",
-    ];
-    let mut environment = HashMap::with_capacity(FIXED_KEYS.len() + file.profiles.len());
-    for key in FIXED_KEYS {
-        if let Ok(value) = std::env::var(key) {
-            environment.insert(key.to_string(), value);
-        }
-    }
-    for profile in file.profiles.values() {
-        if profile.api_key_env.is_empty() || environment.contains_key(&profile.api_key_env) {
-            continue;
-        }
-        if let Ok(value) = std::env::var(&profile.api_key_env) {
-            environment.insert(profile.api_key_env.clone(), value);
-        }
-    }
-    environment
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -1646,22 +1613,5 @@ mod tests {
         )
         .expect_err("default profile");
         assert!(default_profile.to_string().contains("default profile"));
-    }
-
-    #[test]
-    fn resolution_environment_reads_only_known_keys_present_in_process_env() {
-        let mut file = File::default();
-        file.profiles.insert(
-            "local".into(),
-            otto_core::config::Profile {
-                api_key_env: "OTTO_TEST_NONEXISTENT_KEY_XYZ".into(),
-                ..Default::default()
-            },
-        );
-        let environment = resolution_environment(&file);
-        // The fixed keys and the profile's api_key_env are looked up, but
-        // nothing is inserted for a name that isn't actually set in this
-        // process's environment.
-        assert!(!environment.contains_key("OTTO_TEST_NONEXISTENT_KEY_XYZ"));
     }
 }

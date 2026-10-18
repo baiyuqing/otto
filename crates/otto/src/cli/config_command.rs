@@ -55,8 +55,17 @@ fn execute(
     let loaded = crate::config::layered::load(&home, &user, explicit, &cwd)?;
     match args[0].as_str() {
         "explain" if words.is_empty() && scope.is_none() => {
-            let public_env = HashMap::from([("HOME".to_string(), home.display().to_string())]);
-            let effective = otto_core::config::resolve::resolve_without_credentials(&loaded.file, &public_env, &Default::default(), &Default::default()).ok().map(|r| serde_json::json!({"profile":r.profile,"provider":r.provider,"model":r.model,"thinking":r.thinking,"max_output_bytes":r.max_output_bytes,"shell_timeout_seconds":r.shell_timeout.as_secs(),"compaction":{"auto":r.compaction.auto,"reserve_tokens":r.compaction.reserve_tokens,"keep_recent_tokens":r.compaction.keep_recent_tokens}}));
+            let mut public_env = HashMap::from([("HOME".to_string(), home.display().to_string())]);
+            // Only selection inputs, never credential bindings or arbitrary environment values.
+            for key in ["OTTO_PROFILE", "OTTO_PROVIDER", "OTTO_MODEL"] {
+                if let Some(value) = lookup.get(key) {
+                    public_env.insert(key.to_string(), value.clone());
+                }
+            }
+            let effective = otto_core::config::resolve::resolve_without_credentials(&loaded.file, &public_env, &Default::default(), &Default::default()).ok().map(|r| {
+                let diagnostics: Vec<_> = otto_core::config::resolve::subagent_model_diagnostic(&loaded.file, &r).into_iter().collect();
+                serde_json::json!({"profile":r.profile,"provider":r.provider,"model":r.model,"thinking":r.thinking,"subagent_models":r.subagent_models,"diagnostics":diagnostics,"max_output_bytes":r.max_output_bytes,"shell_timeout_seconds":r.shell_timeout.as_secs(),"compaction":{"auto":r.compaction.auto,"reserve_tokens":r.compaction.reserve_tokens,"keep_recent_tokens":r.compaction.keep_recent_tokens}})
+            });
             let report = serde_json::json!({"workspace_boundary":loaded.boundary, "project_sources":loaded.sources, "project_executables_trusted":loaded.trusted, "configuration":loaded.merged.explained(), "managed_policy": loaded.file.policy.as_ref().map(|p| serde_json::json!({"require_sandbox":p.require_sandbox,"allow_project_executables":p.allow_project_executables,"ceilings":p.ceilings})), "defaults":"Unspecified values use built-in runtime defaults; environment credentials are never resolved by explain."});
             let mut report = report;
             report["effective_runtime"] = effective.unwrap_or(serde_json::Value::Null);
@@ -210,6 +219,51 @@ mod tests {
         assert!(!output.contains("secret-marker"));
         assert!(output.contains("redacted"));
     }
+    #[test]
+    fn explain_displays_safe_child_model_fallback_without_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".config/otto");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), "default_profile='work'\n[profiles.work]\nprovider='openai-compatible'\nmodel='parent'\nbase_url='https://example.test/v1'\napi_key_env='PRIVATE_KEY'\nsubagent_models=['child']\n").unwrap();
+        let args = [
+            "explain",
+            "--json",
+            "--cwd",
+            workspace.path().to_str().unwrap(),
+        ]
+        .map(str::to_string);
+        let lookup = HashMap::from([
+            ("HOME".into(), home.path().display().to_string()),
+            ("OTTO_PROVIDER".into(), "chatgpt".into()),
+            ("PRIVATE_KEY".into(), "credential-marker".into()),
+            ("UNRELATED".into(), "unrelated-marker".into()),
+        ]);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(run(&args, &mut out, &mut err, &lookup), 0);
+        let output = String::from_utf8(out).unwrap();
+        assert!(!output.contains("credential-marker"));
+        assert!(!output.contains("unrelated-marker"));
+        let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let runtime = &report["effective_runtime"];
+        assert_eq!(runtime["provider"], "chatgpt");
+        assert_eq!(runtime["subagent_models"], serde_json::json!([]));
+        let diagnostics = runtime["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = diagnostics[0].to_string();
+        assert!(diagnostic.contains("configure subagent_models"));
+        assert!(diagnostic.contains("not automatically retried"));
+        for private in [
+            "PRIVATE_KEY",
+            "example.test",
+            "child\"",
+            "credential-marker",
+        ] {
+            assert!(!diagnostic.contains(private), "{diagnostic}");
+        }
+    }
+
     #[test]
     fn writing_local_configuration_leaves_global_untouched() {
         let home = tempfile::tempdir().unwrap();

@@ -36,6 +36,7 @@ pub struct ChildRecord {
     pub description: String,
     pub prompt: String,
     pub model: String,
+    pub model_source: super::tasks::ModelSource,
     pub context: String,
     /// `pub(crate)`: [`TaskSpecDefinition`] itself is `pub(crate)`, and
     /// nothing outside the `otto` crate reads this field.
@@ -139,6 +140,7 @@ fn scan_one(path: &Path) -> Option<ChildRecord> {
         description: spec.description,
         prompt: spec.prompt,
         model: spec.model,
+        model_source: spec.model_source,
         context: spec.context,
         definition: spec.definition,
         started,

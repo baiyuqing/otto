@@ -30,7 +30,7 @@ const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and 
 
 const AGENT_YIELD_DESCRIPTION: &str = "Yield this parent turn when only child dependencies remain and there is no independent work to do. Returns immediately and requests a safe-boundary stop of model calls after this tool batch settles; child messages/completion or user input resume the parent through the runtime. Does not wait in the tool, poll, or cancel children. Takes no arguments. Returns an error without yielding if no child is queued or running. Pending input, tool errors and approval replanning take precedence.";
 
-const AGENT_STATUS_DESCRIPTION: &str = "Show task status and a bounded final conclusion (at most 4 KiB plus truncation and report-file metadata). Recent research steps are omitted by default; set include_history only when explicitly needed. For a truncated final answer, returns its persistent report path when storage succeeds; use read on that file to retrieve sections without restarting the child. Omit task_id to list tasks. When only child dependencies remain, call agent_yield instead of polling. Live detail distinguishes tool, provider/runtime and approval phases; unchanged last-tool counters do not establish a stall.";
+const AGENT_STATUS_DESCRIPTION: &str = "Show task status and a bounded final conclusion (at most 4 KiB plus truncation and report-file metadata). Recent research steps are omitted by default; set include_history only when explicitly needed. For a truncated final answer, returns its persistent report path when storage succeeds; use read on that file to retrieve sections without restarting the child. Pass task_id for detail including model and model_source (explicit, definition, configured_first, parent, or unknown for legacy records). Omit task_id to list tasks. When only child dependencies remain, call agent_yield instead of polling. Live detail distinguishes tool, provider/runtime and approval phases; unchanged last-tool counters do not establish a stall.";
 
 const AGENT_SEND_DESCRIPTION: &str = "Send a task update to a queued or running sub-agent. Use this when the user adds constraints, clarifies priorities, provides new facts, or asks the child to adjust direction. You can also ask the child a question; the answer arrives later as a [task-report] notification. The child reads updates at the next safe checkpoint; this does not interrupt an in-flight provider or tool call. It cannot be sent to a finished task. Returns an error, and the child does not receive the update, when it cannot be saved to the child's pending-message file. Updates not yet read survive a restart and reach the child when it is resumed. To check progress instead, use agent_status, which reads the task registry and does not run the child model.";
 
@@ -469,6 +469,7 @@ impl Tool for AgentStatusTool {
         if !task.model.is_empty() {
             lines.push(format!("model: {}", task.model));
         }
+        lines.push(format!("model_source: {}", task.model_source.as_str()));
         if !task.is_final() {
             lines.push(format!(
                 "activity: {} (last tool is historical; unchanged counters do not prove a stall)",
@@ -1227,6 +1228,35 @@ mod tests {
         let lines: Vec<&str> = result.content.split('\n').collect();
         assert!(lines.len() >= 2, "{}", result.content);
         assert_eq!(lines[1], "model: gpt-test-model", "{}", result.content);
+        assert_eq!(lines[2], "model_source: explicit", "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn agent_status_detail_shows_unknown_for_legacy_task() {
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+        tasks
+            .add(
+                super::super::tasks::Task {
+                    model: "legacy-model".into(),
+                    ..Default::default()
+                },
+                None,
+                None,
+            )
+            .expect("task");
+        let result = run(
+            tool_named(&runner, "agent_status").as_ref(),
+            r#"{"task_id":"t1"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(
+            result.content.contains("model_source: unknown"),
+            "{}",
+            result.content
+        );
     }
 
     #[tokio::test]

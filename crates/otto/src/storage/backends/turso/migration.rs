@@ -50,6 +50,20 @@ pub trait SqlDomainCodec: Send + Sync {
     fn domain(&self) -> &'static str;
     fn family(&self) -> &'static str;
     fn version(&self) -> u32;
+    /// Older portable descriptors are admitted only by their owning domain.
+    fn supports_version(&self, version: u32) -> bool {
+        version == self.version()
+    }
+    /// Reconstruct the source representation for end-to-end digest verification.
+    /// Physical staging always uses the current schema.
+    fn verification_record(&self, record: Record, version: u32) -> Result<Record> {
+        if version != self.version() {
+            return Err(Error::Invalid(
+                "unsupported verification codec version".into(),
+            ));
+        }
+        Ok(record)
+    }
     fn committed_cursor(&self, connection: &Connection) -> Result<String>;
     fn initialize(&self, connection: &mut Connection) -> Result<()>;
     /// Check encoded size before materializing a record. Cursor ordering is stable.
@@ -254,7 +268,7 @@ impl Stage {
             .get(self.codec.domain())
             .ok_or_else(|| Error::Invalid("unsupported SQL domain".into()))?;
         if domain.schema_family != self.codec.family()
-            || domain.schema_version != self.codec.version()
+            || !self.codec.supports_version(domain.schema_version)
         {
             return Err(Error::Invalid("unsupported domain codec version".into()));
         }
@@ -512,7 +526,11 @@ impl StageImport for Stage {
         self.ensure_open(&mut connection)?;
         let connection = connection.as_ref().unwrap();
         self.codec.validate(connection)?;
-        let (digest, _) = scan(connection, self.codec.as_ref())?;
+        let (digest, _) = scan_version(
+            connection,
+            self.codec.as_ref(),
+            manifest.source.domains[self.codec.domain()].schema_version,
+        )?;
         let progress = manifest
             .progress
             .get(self.codec.domain())
@@ -576,6 +594,13 @@ fn receipt_from(
     connection.query_row("SELECT body FROM otto_migration_chunks WHERE migration_id=?1 AND domain=?2 AND cursor=?3", params![id,domain,cursor], |r| r.get::<String>(0)).optional().map_err(sql_error)?.map(|body| serde_json::from_str(&body).map_err(json_error)).transpose()
 }
 fn scan(connection: &Connection, codec: &dyn SqlDomainCodec) -> Result<(DomainDigest, String)> {
+    scan_version(connection, codec, codec.version())
+}
+fn scan_version(
+    connection: &Connection,
+    codec: &dyn SqlDomainCodec,
+    version: u32,
+) -> Result<(DomainDigest, String)> {
     let mut hash = Sha256::new();
     let mut cursor = String::new();
     let mut records = 0;
@@ -583,6 +608,7 @@ fn scan(connection: &Connection, codec: &dyn SqlDomainCodec) -> Result<(DomainDi
         if next == cursor {
             return Err(Error::Invalid("non-progressing codec cursor".into()));
         }
+        let record = codec.verification_record(record, version)?;
         let bytes = serde_json::to_vec(&record).map_err(json_error)?;
         hash.update((bytes.len() as u64).to_be_bytes());
         hash.update(bytes);

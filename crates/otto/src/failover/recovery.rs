@@ -354,6 +354,7 @@ mod tests {
             description: "review the change".to_string(),
             prompt: "x".repeat(600),
             model: "test-model".to_string(),
+            model_source: crate::subagent::tasks::ModelSource::Unknown,
             context: "fresh".to_string(),
             definition: None,
             started: true,

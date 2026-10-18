@@ -598,6 +598,8 @@ impl DeliveryService {
         // A process crash after `begin` has unknown external Git outcome.
         // Never infer success or replay it on construction.
         receipts.mark_interrupted_unknown()?;
+        // A target run still `running` here was interrupted with the process.
+        receipts.mark_running_tasks_unknown()?;
         Ok(Self {
             broker,
             receipts,
@@ -2681,6 +2683,23 @@ mod tests {
         );
         assert!(home.path().join(".otto/delivery-receipts.db").is_file());
         manager.shutdown().await;
+        drop(manager);
+
+        // A restarted server reports the interrupted target run as unknown.
+        let restarted = DeliveryManager::open(
+            &home.path().to_string_lossy(),
+            &shared,
+            crate::cli::testutil::initial_runtime(&workspaces.startup_host.builder),
+            CancellationToken::new(),
+        )
+        .expect("restarted manager");
+        let status = restarted
+            .status("source-session", "approval-1")
+            .expect("status")
+            .expect("task");
+        assert_eq!(status.state, crate::delivery::TaskState::Unknown);
+        assert_eq!(status.error, "delivery runner interrupted");
+        restarted.shutdown().await;
     }
 
     #[tokio::test]

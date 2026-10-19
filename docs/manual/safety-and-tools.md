@@ -530,6 +530,16 @@ result within the current connection, refreshing when that connection changes.
 Explicit user choices, named-agent defaults and the optional deprecated profile
 override do not require catalog selection.
 
+ChatGPT catalog requests use a separately maintained Codex catalog compatibility
+version, not Otto's release version. Successful nonempty results are saved to
+`~/.otto/cache/chatgpt-models.json` for three days, so later sessions can reuse
+them without a request. The cache is scoped to the endpoint, signed-in account
+and compatibility version; a change to any of these requires a fresh request.
+An empty result or request error is not saved. A ChatGPT model request rejected
+with HTTP 400 or 404 invalidates the cache for the next discovery; it does not
+automatically rerun that request or a child task. Configured profile models are
+defaults, not a catalog allowlist.
+
 If discovery fails, returns an empty catalog, or does not establish suitability,
 the parent uses the session model fallback without blind discovery retries. To
 recover discovery, check the selected profile and endpoint, export its configured

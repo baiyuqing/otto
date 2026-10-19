@@ -2,10 +2,9 @@
 
 Protocol `1.0` between Otto and an **external** memory service. This page owns
 current wire behavior; [Remote memory service](memory-and-extensions.md#remote-memory-service)
-owns installation and operation. The approved
-[scope redesign](../specs/2026-10-17-remote-memory-scope-redesign.md) records the
-rationale. This replaces the original v1 bodies in place, not with a v2 protocol.
-Old and new peers are incompatible despite the unchanged path and header.
+owns installation and operation. Tenant-aware bodies are required even though
+the path/header remain v1/1.0; old bodies are incompatible. The
+[scope redesign](../specs/2026-10-17-remote-memory-scope-redesign.md) explains why.
 
 ## Transport and headers
 
@@ -409,14 +408,12 @@ Unknown fields may be ignored, but unknown enums remain invalid. Future additive
 minor changes may add optional fields; future semantic breaks require a major
 version. This in-place pre-adoption v1 replacement is a one-time exception.
 
-Stop old clients, update the external service and Otto together, provision tenant
-memberships, configure `memory.remote.organization`, restart and smoke-test
-ordinary recall plus explicit remember/search. There is no v2, dual decoder,
-implicit default organization, old-wire fallback or automatic data import.
-The repository does not implement or migrate remote service storage. Old remote
-references without organization identity are rejected, not silently rebound.
-Session-history deserialization and existing public embedding constructors remain
-compatible; remote embeddings must explicitly supply the new tenant coordinates.
+Coordinate client/service deployment, provision memberships, configure required
+organization and restart; smoke-test recall and explicit remember/search.
+There is no default tenant, old-wire fallback or automatic service import.
+Tenantless references are rejected, never rebound. Session-history loading
+remains compatible; remote embeddings must supply tenant coordinates. See
+[deployment and recovery](memory-and-extensions.md#remote-memory-service).
 
 ## Limits
 

@@ -139,22 +139,14 @@ requests and decisions, including review metadata. Advanced clients use
 The response includes `policy`, `reviewer`, `revision`, legacy `mode` and
 `automatic` labels, and `reviewer_active` (false under `never`).
 ACP exposes `_otto/approval_policy/get|set` with `sessionId`, and the setter
-requires `expectedRevision`, `policy` and `reviewer`. Updates reject a stale
-revision; refresh the settings before retrying. See the
-[smart approval contract](../specs/2026-10-08-smart-approval.md).
+requires `expectedRevision`, `policy` and `reviewer`. Updates reject stale revisions; refresh settings before retrying.
 
-Stop all old Otto processes, `otto serve` and connectors before the first
-database upgrade; mixed old/new writers are unsupported, and a startup version
-check does not close an already running old connection. Install the new binary
-with `make install`, then start those processes to use the updated prompt and
-reviewer. The first open migrates `approvals.db` from version 3 to 4 after making
-a consistent backup beside the database, named
-`approvals.db.pre-v4-<UTC timestamp>.db`. Existing pending requests remain
-human-required. To disable smart review, choose `/auto manual`; this needs no
-data restoration. To downgrade
-the binary, stop all writers and restore the pre-migration database backup first:
-older binaries reject version 4. Keep the migrated database separately if you
-need its newer journal entries; restoring a backup returns to the backup's state.
+Before database upgrades, stop all Otto/server/connector writers, install with
+`make install`, then restart. Mixed-version writers are unsupported. Approval
+schema upgrades back up the database beside the source; old pending requests
+remain human-required. Downgrades need a compatible pre-migration backup with
+all writers stopped. Preserve the newer journal separately: restoring a backup
+loses later decisions. `/auto manual` disables automatic review without a restore.
 
 
 Otto uses one approval service for tool permissions, memory review, workflow
@@ -188,9 +180,6 @@ The same request closes on all connected surfaces after a decision. Old
 buttons cannot approve a new request. Ordinary messages while a foreground
 request waits use a restricted discussion; they do not silently approve it.
 Memory/workflow reviews remain independent of the foreground turn.
-
-See the [authority boundary contract](../specs/2026-10-07-auto-mode-authority-boundaries.md)
-for which request classes each mode decides.
 
 Generated skills still pass the rule scan and configured model review, then
 wait for human approval: YOLO decides the review, and the rule scan, the
@@ -571,52 +560,25 @@ possible side effects before deciding whether retrying the child is safe.
 
 ### Sub-agents
 
-No manual model list is required. Unless an explicit user choice, named-agent
-model default or legacy override applies, the parent discovers the catalog and
-chooses an economical adequate model explicitly through `agent.model`. It
-includes a short reason in the existing task description (at most 80 characters),
-not a new field. Routine searches, extraction, formatting and checks favor
-cheaper adequate models; architecture, ambiguous debugging, security-sensitive
-review and demanding reasoning can justify stronger ones. This is parent-model
-judgment, not a runtime classifier or a verified price comparison. A named
-agent's model default must not be overridden by passing a catalog choice.
+The parent normally uses [`list_models`](#list_models) to choose an adequate
+model, putting its short reason in the task description. Explicit user choices
+and named-agent defaults take precedence; unavailable/uncertain discovery falls
+back to the session model, not an invented ID. No manual list is required.
+Without an explicit call model, precedence is named-agent default, optional
+deprecated profile `subagent_models` first entry, then session model. Changing
+the provider connection disables that profile list; select the intended profile
+or remove conflicting overrides and restart. Check rejected model IDs and
+partial work before retrying: failed child work is not automatically repeated.
 
-The optional deprecated `subagent_models` profile override retains its existing
-order and fallback semantics (see [configuration](getting-started.md#configuration)).
-When `agent.model` is omitted, model precedence remains the named agent default,
-the first profile candidate, then the parent session model. The selected model
-appears in the task record and status panel. If discovery is unavailable, fails,
-is empty or leaves suitability unknown, ordinary delegation falls back to the
-session model rather than an invented ID. Existing explicit choices and legacy
-configuration still apply.
+`agent_status.model_source` is `explicit`, `definition`, `configured_first`,
+`parent`, or `unknown` for older records. It describes selection provenance,
+not price or suitability. Persisted tasks keep their model/source across restart.
 
-`agent_status` also reports `model_source`: `explicit` for the call's model,
-`definition` for a named agent's default, `configured_first` for the first
-profile candidate, or `parent` for session inheritance. An older task whose
-provenance was not recorded reports `unknown`. The source records how the model
-was selected, not whether it was the cheapest adequate choice. New task records
-preserve this source across restart; changing the candidate list does not
-rewrite an existing task's model or provenance.
-
-If an override changes the provider connection, Otto disables the list and
-reports how to recover; select the intended profile or remove the conflicting
-override, then restart. If a provider rejects a model ID, check its availability
-and inspect any partial work before retrying. Otto does not automatically repeat
-failed child work or assume prices from model names. After upgrading with
-`make install`, restart Otto and any running `otto serve` to load the updated
-policy and tools. Remove a legacy list and restart to opt into catalog-first
-selection; existing task records keep their original model and provenance.
-
-The `agent` tool starts or resumes a child task and always returns immediately
-with its task id, so a running child cannot hold the parent's agent loop open.
-Before parallel implementation, settle shared types, field meanings and interfaces.
-Assign each writable file to one owner and keep tightly coupled cross-file changes
-in one implementation task, including required call-site adaptations. While a
-child owns its task, the parent does independent work; after delivery it reviews
-change summaries, interface changes and necessary diffs for integration. Shared
-contract revisions must be coordinated before dependent edits continue. These
-are coordination instructions, not new filesystem permissions or file locks;
-existing named-agent `write_policy` and `write_paths` still apply.
+`agent` starts/resumes a child and returns its task ID immediately. Settle shared
+interfaces and assign each writable file one owner before parallel work. Keep
+coupled changes together; coordinate contract changes before dependent edits.
+The parent integrates and verifies results. Ownership instructions are not
+filesystem locks or grants; tool allowlists/write policies remain authoritative.
 
 A child starts with `context: "fresh"` (only its prompt) unless the call or
 its named agent definition sets `context: "inherit"`. With `inherit`, the

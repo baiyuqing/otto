@@ -4153,7 +4153,7 @@ mod tests {
                     Vec::new(),
                 )));
             }
-            builder.shared.config.skills.enabled = options.skills_enabled;
+            builder.shared_mut().config.skills.enabled = options.skills_enabled;
             if let Some(config_text) = &options.config_text {
                 std::fs::write(&builder.shared.config_path, config_text)
                     .expect("write config fixture");

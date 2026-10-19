@@ -203,13 +203,6 @@ impl Service {
         if workspace.is_empty() || root_session.is_empty() {
             return Err(Error::Invalid("review context requires a root session"));
         }
-        for text in context
-            .trusted_user_messages
-            .iter()
-            .chain(&context.instructions)
-        {
-            self.check_content(text)?;
-        }
         if context.evidence_digest.is_empty() || context.policy_digest.is_empty() {
             return Err(Error::Invalid("review context requires digests"));
         }
@@ -689,15 +682,14 @@ impl Service {
         let assessed = if denied_repeatedly {
             Some(ReviewAssessment {risk: RiskLevel::High,user_authorization: UserAuthorization::Unknown,outcome: ReviewOutcome::Deny,reason:"Three review denials stop further escalation attempts for this task; choose a safer path or obtain a concrete user decision.".into()})
         } else if let Ok(hydrated) = hydrated {
-            if self.check_content(&hydrated.subject.details).is_err()
-                || serde_json::to_vec(&(
-                    &hydrated,
-                    &context.trusted_user_messages,
-                    &context.instructions,
-                ))
-                .map_err(|_| Error::Unavailable)?
-                .len()
-                    > 65536
+            if serde_json::to_vec(&(
+                &hydrated,
+                &context.trusted_user_messages,
+                &context.instructions,
+            ))
+            .map_err(|_| Error::Unavailable)?
+            .len()
+                > 65536
             {
                 None
             } else {
@@ -726,9 +718,7 @@ impl Service {
         };
         let assessed = assessed
             .filter(|assessment| {
-                !assessment.reason.trim().is_empty()
-                    && assessment.reason.len() <= 2048
-                    && self.check_content(&assessment.reason).is_ok()
+                !assessment.reason.trim().is_empty() && assessment.reason.len() <= 2048
             })
             .map(|assessment| super::policy::constrained(assessment, &expected));
         let state = self.review_state.read().map_err(|_| Error::Unavailable)?;

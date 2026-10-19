@@ -106,18 +106,25 @@ pub(crate) fn format_management_reply(reply: &crate::app::management::Reply) -> 
             record.id, record.scope.namespace, record.scope.id, record.kind
         ),
         Reply::SkillManager(inventory) => {
-            let rows = inventory.skills.iter().map(|row| {
-                format!(
-                    "{} [preference: {}] {}",
-                    row.skill.name,
-                    if row.enabled { "enabled" } else { "disabled" },
-                    row.skill.description
-                )
-            }).collect::<Vec<_>>().join("\n");
+            let rows = inventory
+                .skills
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{} [preference: {}] {}",
+                        row.skill.name,
+                        if row.enabled { "enabled" } else { "disabled" },
+                        row.skill.description
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             if inventory.global_enabled {
                 rows
             } else {
-                format!("Skills globally disabled. Set [skills].enabled = true in Otto config and restart Otto; restarting alone will not enable skills.\n{rows}")
+                format!(
+                    "Skills globally disabled. Set [skills].enabled = true in Otto config and restart Otto; restarting alone will not enable skills.\n{rows}"
+                )
             }
         }
         Reply::SkillInfo(info) => format!(

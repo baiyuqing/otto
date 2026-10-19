@@ -121,10 +121,10 @@ impl Presenter for Skills {
                 self.loaded = true;
             }
             Reply::Management(ManagementReply::SkillSet(message)) => {
-                if let Some((name, enabled)) = self.saving.take() {
-                    if let Some(row) = self.rows.iter_mut().find(|row| row.skill.name == name) {
-                        row.enabled = enabled;
-                    }
+                if let Some((name, enabled)) = self.saving.take()
+                    && let Some(row) = self.rows.iter_mut().find(|row| row.skill.name == name)
+                {
+                    row.enabled = enabled;
                 }
                 self.notice = Some(message);
                 return Transition::Request(Request::Management(Management::SkillManager));

@@ -863,7 +863,7 @@ mod tests {
         let wide = screen_rows(&app, 120, 35).join("\n");
         assert!(wide.contains("Preview description 0"), "{wide}");
         assert!(wide.contains("[disabled]"), "{wide}");
-        assert!(wide.contains("Configured: disabled"), "{wide}");
+        assert!(wide.contains("Per-skill preference: disabled"), "{wide}");
         app.surfaces
             .top_mut()
             .unwrap()

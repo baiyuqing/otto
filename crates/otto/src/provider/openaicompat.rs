@@ -188,6 +188,30 @@ impl Client {
             .map_err(|error| self.safe_error(error))
     }
 
+    /// On-demand bounded catalog; unlike the legacy ID API, never exposes error bodies.
+    pub async fn catalog(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<super::catalog::ModelCatalog, ProviderError> {
+        super::catalog::controlled(cancel, async {
+            let ready = self
+                .state
+                .as_ref()
+                .map_err(|_| super::catalog::failure("model catalog client unavailable"))?;
+            let http = super::catalog::http()?;
+            let bytes = super::catalog::read(
+                http.get(format!("{}/models", ready.base_url))
+                    .bearer_auth(&self.api_key)
+                    .header("Accept", "application/json"),
+            )
+            .await?;
+            let mut catalog = super::catalog::parse(&bytes, false)?;
+            super::catalog::sanitize(&mut catalog, &[&self.api_key]);
+            Ok(catalog)
+        })
+        .await
+    }
+
     async fn fetch_models(
         &self,
         ready: &Ready,
@@ -1594,6 +1618,20 @@ mod tests {
         let decoded: serde_json::Value = serde_json::from_slice(&body).expect("the body is JSON");
         assert_eq!(decoded["model"], "model");
         assert_eq!(decoded["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn catalog_preserves_compat_metadata_and_auth_without_required_metadata() {
+        let server = crate::faults::http::spawn(|_| crate::faults::http::json_response(r#"{"data":[{"id":"fixture-a","display_name":"Provider name","description":"catalog-compat-secret"},{"id":"fixture-b"}]}"#)).await;
+        let client = Client::new(&server.url, "catalog-compat-secret");
+        let catalog = client.catalog(&CancellationToken::new()).await.unwrap();
+        assert_eq!(catalog.models.len(), 2);
+        assert_eq!(catalog.models[0].metadata["description"], "[REDACTED]");
+        assert!(catalog.models[1].metadata.is_empty());
+        assert_eq!(
+            server.requests()[0].header("authorization"),
+            "Bearer catalog-compat-secret"
+        );
     }
 
     #[tokio::test]

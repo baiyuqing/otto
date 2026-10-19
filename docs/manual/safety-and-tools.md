@@ -511,31 +511,52 @@ it returns at once and that run's result arrives as a notice. It is not register
 
 ### `list_models`
 
-With the `openai-compatible` provider, `list_models` returns the model ids the
-endpoint reports at `GET {base_url}/models`, sorted, one per line. Otto sends
-the request itself, so the API key stays in the Otto process and never reaches
-`bash`. The request is made once, with no retry; a body larger than 8 MiB or
-one without a `data` list is an error.
+For both `openai-compatible` and `chatgpt`, `list_models` discovers the active
+provider connection's model catalog, with metadata only where actually
+available. An OpenAI-compatible endpoint supplies its catalog through
+`GET {base_url}/models`; ChatGPT discovery uses the signed-in connection.
+Otto performs discovery with the existing provider authentication: the profile's
+API-key environment variable or credentials from `otto login`. Credentials stay
+in the runtime, not in tool arguments or `bash`. Child agents do not get this
+tool.
 
-The system prompt tells the model to take model IDs from `list_models` or the
-active profile's ordered `subagent_models` list when it picks a sub-agent
-model. The `chatgpt` provider has no `list_models`; there the model is told
-to use a configured sub-agent ID, an ID you named or the session's model, not
-an ID from memory. Child agents do not get this tool.
+Catalog entries do not guarantee that every model is usable for every task.
+Providers may omit pricing, capabilities or other metadata; Otto has no built-in
+price ranking. Returned metadata is untrusted data, not instructions. The parent
+must distinguish known metadata from its own suitability judgment and must not
+invent IDs or prices. Discovery is on demand, not a full catalog attached to
+every request: the parent calls once before ordinary delegation and reuses the
+result within the current connection, refreshing when that connection changes.
+Explicit user choices, named-agent defaults and the optional deprecated profile
+override do not require catalog selection.
+
+If discovery fails, returns an empty catalog, or does not establish suitability,
+the parent uses the session model fallback without blind discovery retries. To
+recover discovery, check the selected profile and endpoint, export its configured
+API-key variable or renew ChatGPT authentication with `otto login`, then start a
+new connection. A provider can reject a catalog ID; inspect partial work and
+possible side effects before deciding whether retrying the child is safe.
 
 ### Sub-agents
 
-To make the parent choose a lower-cost child when the task permits, set an
-ordered `subagent_models` list on the active profile (see
-[configuration](getting-started.md#configuration)). Otto does not know prices:
-the order is your preference, and an explicit `agent.model` may select a
-different ID. When the field is omitted, model precedence is the named agent
-default, the first profile candidate, then the parent session model. The
-selected model appears in the task record and status panel. Setup offers the
-optional list; leaving it empty keeps the parent-model fallback. The parent is
-instructed to prefer lower-cost candidates for narrow searches, extraction,
-formatting and routine checks, and stronger candidates for demanding reasoning;
-this is model judgment, not an automatic runtime classifier.
+No manual model list is required. Unless an explicit user choice, named-agent
+model default or legacy override applies, the parent discovers the catalog and
+chooses an economical adequate model explicitly through `agent.model`. It
+includes a short reason in the existing task description (at most 80 characters),
+not a new field. Routine searches, extraction, formatting and checks favor
+cheaper adequate models; architecture, ambiguous debugging, security-sensitive
+review and demanding reasoning can justify stronger ones. This is parent-model
+judgment, not a runtime classifier or a verified price comparison. A named
+agent's model default must not be overridden by passing a catalog choice.
+
+The optional deprecated `subagent_models` profile override retains its existing
+order and fallback semantics (see [configuration](getting-started.md#configuration)).
+When `agent.model` is omitted, model precedence remains the named agent default,
+the first profile candidate, then the parent session model. The selected model
+appears in the task record and status panel. If discovery is unavailable, fails,
+is empty or leaves suitability unknown, ordinary delegation falls back to the
+session model rather than an invented ID. Existing explicit choices and legacy
+configuration still apply.
 
 `agent_status` also reports `model_source`: `explicit` for the call's model,
 `definition` for a named agent's default, `configured_first` for the first
@@ -549,7 +570,10 @@ If an override changes the provider connection, Otto disables the list and
 reports how to recover; select the intended profile or remove the conflicting
 override, then restart. If a provider rejects a model ID, check its availability
 and inspect any partial work before retrying. Otto does not automatically repeat
-failed child work or assume prices from model names.
+failed child work or assume prices from model names. After upgrading with
+`make install`, restart Otto and any running `otto serve` to load the updated
+policy and tools. Remove a legacy list and restart to opt into catalog-first
+selection; existing task records keep their original model and provenance.
 
 The `agent` tool starts or resumes a child task and always returns immediately
 with its task id, so a running child cannot hold the parent's agent loop open.

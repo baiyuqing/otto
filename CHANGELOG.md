@@ -17,14 +17,15 @@ limitations are documented in the [user manual](docs/user-manual.md).
 
 ### Usage and compatibility
 
-- Sub-agent model configuration is easier to discover: setup offers an optional
-  ordered candidate list, parent guidance prefers lower-cost candidates for
-  routine tasks, and a diagnostic explains when a connection override disables
-  the list. Task status records the model-selection source; older task records
-  remain readable without inventing provenance. Explicit model choices and
-  named-agent defaults retain precedence. No model IDs or prices are built in,
-  and failed child work is not automatically repeated. See
-  [sub-agents](docs/manual/safety-and-tools.md#sub-agents).
+- Sub-agent selection discovers the active provider's model catalog on demand
+  for both ChatGPT and OpenAI-compatible connections, reusing it until the
+  connection changes. The parent chooses an economical adequate model and gives
+  a short reason; no manual list or built-in price ranking is required. Explicit
+  choices and named-agent defaults retain precedence; the optional deprecated
+  `subagent_models` override preserves its existing semantics. Failed discovery
+  or unknown suitability uses the session model without blind retries. Task
+  status preserves model-selection provenance, including compatibility with
+  older tasks. See [sub-agents](docs/manual/safety-and-tools.md#sub-agents).
 
 - A workspace initialized for the first time gets a readable memory scope ID,
   `<directory name>-<first 12 hex digits of the SHA-256 of its canonical path>`

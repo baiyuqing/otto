@@ -605,9 +605,6 @@ impl MemoryService for RemoteService {
         control: &dyn OperationControl,
     ) -> Result<RecallResult> {
         request.validate()?;
-        if request.query.trim().is_empty() {
-            return Err(err(ErrorKind::InvalidInput));
-        }
         let context = Self::context(&request.context)?;
         let body = wire::RecallBody {
             context: context.clone(),

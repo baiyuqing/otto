@@ -598,7 +598,7 @@ thinking = "high"
 api_key_env = "EXAMPLE_API_KEY"
 context_window = 1050000
 compaction_window = 272000
-# Optional, ordered by your cost/capability preference for child tasks:
+# Optional deprecated override; catalog discovery needs no manual list:
 # subagent_models = ["smaller-model-id", "gpt-5.6"]
 ```
 
@@ -606,17 +606,29 @@ Key points:
 
 - `default_profile` names the profile used when no `--profile` is given and no
   session supplies one.
-- `[profiles.<name>].subagent_models` in your user configuration lists up to 16 model IDs in your preferred
-  order from lower cost to higher capability. With this profile active, Otto
-  shows the list to the parent agent and asks it to choose the first adequate
-  child model: prefer earlier choices for narrow searches, extraction,
-  formatting and routine checks, and stronger choices for demanding reasoning.
-  Explicit user choices and named-agent model defaults take precedence over
-  cost preferences. This is parent-agent judgment, not a runtime complexity
-  classifier or a price comparison. `otto setup` offers an optional ordered
-  list; supply exact IDs available through the profile's provider, or leave
-  it empty to retain the existing fallback. Configure this in user configuration,
-  not a project's `.otto/config.toml`.
+- Sub-agent selection works by default without a manual model list. For both
+  `chatgpt` and `openai-compatible`, the parent calls `list_models` before
+  ordinary delegation, unless you explicitly chose a model, a named agent has a
+  model default, or the legacy override below applies. Discovery uses the active
+  connection's authentication: `otto login` for ChatGPT, or the profile's API-key
+  environment variable for an OpenAI-compatible endpoint. No extra credentials
+  or discovery setup are required. The parent reuses the catalog within the
+  current connection and refreshes after a connection change; a full catalog is
+  not injected into every request. It selects an economical adequate model via
+  `agent.model` and puts a brief reason in the existing task description. Routine
+  searches, extraction, formatting and checks favor cheaper adequate models;
+  demanding reasoning can justify stronger ones. Suitability is the parent
+  model's judgment, not a built-in price ranking or runtime classifier. Metadata
+  is only available where the provider supplies it; missing prices or capability
+  details are not inferred as facts. If discovery fails, returns no models, or
+  suitability is unknown, the parent uses the session model instead of guessing
+  IDs or blindly retrying. See [discovery and recovery](safety-and-tools.md#list_models).
+- `[profiles.<name>].subagent_models` is an optional deprecated compatibility
+  override in user configuration, not a project's `.otto/config.toml`. It lists
+  up to 16 exact model IDs in your preferred lower-cost-to-higher-capability
+  order, taking precedence over catalog selection. The parent chooses the first
+  adequate candidate, while explicit user choices and named-agent defaults
+  still take precedence. Otto has not verified this order's prices or availability.
   An `agent` call that omits `model` uses the first entry, after
   any named agent's default; without a list, it inherits the session model.
   The child uses the same provider connection as the parent. A provider,
@@ -628,6 +640,11 @@ Key points:
   partial work and possible side effects before retrying: Otto does not
   automatically repeat the task. Restart Otto after editing the list to load
   the new configuration; already-recorded tasks retain their selected model.
+  On upgrade, existing lists keep these semantics; remove the override to use
+  catalog-first selection. Install the updated binary with `make install` and
+  restart Otto (including a running `otto serve`) to load the new policy and
+  tool registration. Existing task records and their model provenance remain
+  readable and are not rewritten.
 - `[ui].mode` sets the frontend mode (`auto`, `tui`, `repl`).
 - `[agent].shell_timeout` and `[agent].max_output_bytes` set default limits.
 - `[agent]` also accepts optional end-to-end `turn_timeout`,
